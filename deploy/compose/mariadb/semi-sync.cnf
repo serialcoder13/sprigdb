@@ -1,0 +1,12 @@
+# Primary + replicas: semi-synchronous replication that waits AFTER_SYNC, so
+# a failover never loses an acknowledged commit (chapter 27).
+#
+# Every node can acknowledge (slave side). The master side is switched on
+# only on the primary, with --rpl-semi-sync-master-enabled in compose.yaml:
+# with it on, a replica that has no replicas of its own makes its SQL thread
+# wait rpl_semi_sync_master_timeout for an acknowledgement nobody sends. A
+# promoted replica gets it with SET GLOBAL (chapter 25).
+[mariadbd]
+rpl_semi_sync_slave_enabled     = ON
+rpl_semi_sync_master_wait_point = AFTER_SYNC
+rpl_semi_sync_master_timeout    = 10000

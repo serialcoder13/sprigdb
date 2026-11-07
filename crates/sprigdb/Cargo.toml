@@ -1,0 +1,23 @@
+[package]
+name = "sprigdb"
+description = "SprigDB: the server binary; the role is a subcommand"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+sprig-agent.workspace = true
+sprig-common.workspace = true
+sprig-controller.workspace = true
+sprig-gateway.workspace = true
+sprig-operator.workspace = true
+sprig-worker.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

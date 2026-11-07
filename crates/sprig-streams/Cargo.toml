@@ -1,0 +1,12 @@
+[package]
+name = "sprig-streams"
+description = "SprigDB: Event streams: storage, retention, change topics, consumer groups and offsets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

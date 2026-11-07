@@ -1,0 +1,33 @@
+[package]
+name = "sprig-meta"
+description = "SprigDB: MetaStore trait, in-memory and etcd stores, keys, versioned records, sessions and election"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# The MetaStore conformance suite as a library module, so other crates
+# (sprig-testkit) can run it against their own stores.
+conformance = ["tokio/test-util"]
+
+[dependencies]
+async-trait.workspace = true
+etcd-client = { workspace = true, features = ["tls"] }
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-common.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

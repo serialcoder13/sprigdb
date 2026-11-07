@@ -1,0 +1,16 @@
+[package]
+name = "sprig-agent"
+description = "SprigDB: the agent role"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sprig-common.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "sprig-api"
+description = "SprigDB: Protobuf (sprig.v1, sprig.admin.v1), tonic services and REST transcoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

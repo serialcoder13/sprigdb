@@ -1,0 +1,359 @@
+//! The one error type, [`SprigError`], and how each error shows up in every
+//! protocol (chapter 03, "Errors"; codes in Appendix E).
+//!
+//! Front ends never invent their own codes: they call [`SprigError::protocol`]
+//! and send what it returns.
+
+use std::fmt;
+
+/// The result type used across SprigDB.
+pub type Result<T, E = SprigError> = std::result::Result<T, E>;
+
+/// Every SprigDB error.
+///
+/// `message` is always client-safe: physical names are already translated.
+/// Internal detail goes into `source`, which is logged, never sent.
+#[derive(Debug, thiserror::Error)]
+#[error("{kind}: {message}")]
+pub struct SprigError {
+    /// What went wrong, as a code every protocol can render.
+    pub kind: ErrorKind,
+    /// Client-safe text.
+    pub message: String,
+    /// Safe for the client to retry the transaction.
+    pub retryable: bool,
+    /// Internal detail, logged only.
+    #[source]
+    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+/// The kind of an error: from MariaDB, from SprigDB, or a standard error
+/// SprigDB raises itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// An error MariaDB returned, passed through after name translation.
+    Backend {
+        /// MariaDB error number.
+        errno: u16,
+        /// SQLSTATE as five ASCII bytes.
+        sqlstate: [u8; 5],
+    },
+    /// A SprigDB error, numbered 39000-39999.
+    Sprig(SprigCode),
+    /// A standard error SprigDB raises itself, such as 1213 (deadlock)
+    /// when a cutover rolls back a transaction.
+    Standard {
+        /// MySQL error number.
+        errno: u16,
+        /// SQLSTATE as five ASCII bytes.
+        sqlstate: [u8; 5],
+    },
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorKind::Backend { errno, sqlstate } | ErrorKind::Standard { errno, sqlstate } => {
+                write!(f, "{errno} ({})", String::from_utf8_lossy(sqlstate))
+            }
+            ErrorKind::Sprig(code) => write!(f, "{} {}", code.number(), code.name()),
+        }
+    }
+}
+
+/// How an error is rendered in each protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolError {
+    /// MySQL and MariaDB error number.
+    pub mysql_errno: u16,
+    /// SQLSTATE.
+    pub sqlstate: [u8; 5],
+    /// MongoDB error code.
+    pub mongo_code: i32,
+    /// MongoDB `codeName`.
+    pub mongo_code_name: &'static str,
+    /// MongoDB error labels that hold whatever the session state, such as
+    /// `RetryableWriteError`. Labels that depend on the session (for example
+    /// `TransientTransactionError` inside a transaction) are added by the
+    /// MongoDB front end (chapter 30).
+    pub mongo_labels: &'static [&'static str],
+    /// gRPC status code.
+    pub grpc_status: tonic::Code,
+    /// HTTP status for REST.
+    pub http_status: u16,
+}
+
+const SQLSTATE_GENERAL: [u8; 5] = *b"HY000";
+const SQLSTATE_RETRY: [u8; 5] = *b"40001";
+const SQLSTATE_CONNECTION: [u8; 5] = *b"08S01";
+
+macro_rules! sprig_codes {
+    ($(
+        $(#[$doc:meta])*
+        $variant:ident = $num:literal, $name:literal, $mongo:literal, $sqlstate:expr, $retryable:literal;
+    )*) => {
+        /// SprigDB's own error codes (Appendix E). Only codes that code in
+        /// this workspace raises are listed; each chapter adds its own as it
+        /// is implemented.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
+        pub enum SprigCode {
+            $( $(#[$doc])* $variant, )*
+        }
+
+        impl SprigCode {
+            /// Every code, for tests and generated documentation.
+            pub const ALL: &'static [SprigCode] = &[$(SprigCode::$variant),*];
+
+            /// The number, 39000-39999.
+            #[must_use]
+            pub const fn number(self) -> u16 {
+                match self { $(SprigCode::$variant => $num,)* }
+            }
+
+            /// The MySQL name, `ER_SPRIG_<NAME>`.
+            #[must_use]
+            pub const fn name(self) -> &'static str {
+                match self { $(SprigCode::$variant => $name,)* }
+            }
+
+            /// The MongoDB `codeName`, `Sprig<CamelCase>`.
+            #[must_use]
+            pub const fn mongo_code_name(self) -> &'static str {
+                match self { $(SprigCode::$variant => $mongo,)* }
+            }
+
+            /// The SQLSTATE sent with this code.
+            #[must_use]
+            pub const fn sqlstate(self) -> [u8; 5] {
+                match self { $(SprigCode::$variant => $sqlstate,)* }
+            }
+
+            /// Whether the error is safe to retry by default.
+            #[must_use]
+            pub const fn retryable(self) -> bool {
+                match self { $(SprigCode::$variant => $retryable,)* }
+            }
+        }
+    };
+}
+
+sprig_codes! {
+    /// The gateway is draining (chapter 04).
+    GatewayDraining = 39000, "ER_SPRIG_GATEWAY_DRAINING", "SprigGatewayDraining", SQLSTATE_CONNECTION, true;
+    /// A setting value lies outside the bounds in force (chapter 08).
+    SettingOutOfBounds = 39080, "ER_SPRIG_SETTING_OUT_OF_BOUNDS", "SprigSettingOutOfBounds", SQLSTATE_GENERAL, false;
+    /// The setting key is not in the registry (chapter 08).
+    SettingUnknown = 39081, "ER_SPRIG_SETTING_UNKNOWN", "SprigSettingUnknown", SQLSTATE_GENERAL, false;
+    /// The key can't be set at this scope (chapter 08).
+    SettingScopeNotAllowed = 39082, "ER_SPRIG_SETTING_SCOPE_NOT_ALLOWED", "SprigSettingScopeNotAllowed", SQLSTATE_GENERAL, false;
+    /// A wider scope locked the key (chapter 08).
+    SettingLocked = 39083, "ER_SPRIG_SETTING_LOCKED", "SprigSettingLocked", SQLSTATE_GENERAL, false;
+    /// The value doesn't parse as the key's type (chapter 08).
+    SettingBadValue = 39084, "ER_SPRIG_SETTING_BAD_VALUE", "SprigSettingBadValue", SQLSTATE_GENERAL, false;
+    /// The control plane's store is unreachable (chapter 23).
+    MetaUnavailable = 39500, "ER_SPRIG_META_UNAVAILABLE", "SprigMetaUnavailable", SQLSTATE_CONNECTION, true;
+    /// `sprigdb.toml` or its environment overrides are invalid. Raised only at
+    /// process start; never reaches a client. Not yet in Appendix E.
+    ConfigInvalid = 39998, "ER_SPRIG_CONFIG_INVALID", "SprigConfigInvalid", SQLSTATE_GENERAL, false;
+    /// An internal invariant failed: a bug. Logged at error level with a
+    /// trace id. Not yet in Appendix E.
+    Internal = 39999, "ER_SPRIG_INTERNAL", "SprigInternal", SQLSTATE_GENERAL, false;
+}
+
+impl SprigError {
+    /// A SprigDB error with the code's default retryability.
+    pub fn new(code: SprigCode, message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Sprig(code),
+            message: message.into(),
+            retryable: code.retryable(),
+            source: None,
+        }
+    }
+
+    /// An internal-invariant error (`SprigCode::Internal`).
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(SprigCode::Internal, message)
+    }
+
+    /// An error MariaDB returned. 1213 and 1205 are retryable.
+    pub fn backend(errno: u16, sqlstate: [u8; 5], message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Backend { errno, sqlstate },
+            message: message.into(),
+            retryable: is_retryable_errno(errno),
+            source: None,
+        }
+    }
+
+    /// A standard MySQL error raised by SprigDB itself.
+    pub fn standard(errno: u16, sqlstate: [u8; 5], message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Standard { errno, sqlstate },
+            message: message.into(),
+            retryable: is_retryable_errno(errno),
+            source: None,
+        }
+    }
+
+    /// Attaches internal detail, which is logged and never sent to clients.
+    #[must_use]
+    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    /// The SprigDB code, if this is a SprigDB error.
+    #[must_use]
+    pub fn code(&self) -> Option<SprigCode> {
+        match self.kind {
+            ErrorKind::Sprig(code) => Some(code),
+            _ => None,
+        }
+    }
+
+    /// How this error shows up in each protocol (chapters 03, 30 and 37).
+    #[must_use]
+    pub fn protocol(&self) -> ProtocolError {
+        match self.kind {
+            ErrorKind::Sprig(code) => sprig_protocol(code),
+            ErrorKind::Backend { errno, sqlstate } | ErrorKind::Standard { errno, sqlstate } => {
+                mysql_protocol(errno, sqlstate)
+            }
+        }
+    }
+}
+
+const fn is_retryable_errno(errno: u16) -> bool {
+    matches!(errno, 1205 | 1213)
+}
+
+fn sprig_protocol(code: SprigCode) -> ProtocolError {
+    use tonic::Code;
+    // Errors with a standard MongoDB equivalent use it (chapter 30).
+    let (mongo_code, mongo_code_name, mongo_labels): (i32, &'static str, &'static [&str]) =
+        match code {
+            SprigCode::GatewayDraining => (91, "ShutdownInProgress", &["RetryableWriteError"]),
+            _ => (i32::from(code.number()), code.mongo_code_name(), &[]),
+        };
+    // gRPC and HTTP follow chapter 37's table.
+    let (grpc_status, http_status) = match code {
+        SprigCode::SettingOutOfBounds
+        | SprigCode::SettingUnknown
+        | SprigCode::SettingScopeNotAllowed
+        | SprigCode::SettingBadValue => (Code::InvalidArgument, 400),
+        SprigCode::SettingLocked => (Code::FailedPrecondition, 400),
+        SprigCode::GatewayDraining | SprigCode::MetaUnavailable => (Code::Unavailable, 503),
+        SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
+    };
+    ProtocolError {
+        mysql_errno: code.number(),
+        sqlstate: code.sqlstate(),
+        mongo_code,
+        mongo_code_name,
+        mongo_labels,
+        grpc_status,
+        http_status,
+    }
+}
+
+fn mysql_protocol(errno: u16, sqlstate: [u8; 5]) -> ProtocolError {
+    use tonic::Code;
+    // MongoDB codes from chapter 30, gRPC and HTTP from chapter 37. Other
+    // MariaDB errors map to MongoDB's generic `UnknownError` (code 8) until
+    // chapter 30's front end refines them.
+    let (mongo_code, mongo_code_name, mongo_labels): (i32, &'static str, &'static [&str]) =
+        match errno {
+            1062 => (11000, "DuplicateKey", &[]),
+            1205 | 1213 => (112, "WriteConflict", &[]),
+            _ => (8, "UnknownError", &[]),
+        };
+    let (grpc_status, http_status) = match errno {
+        1205 | 1213 => (Code::Aborted, 409),
+        1062 => (Code::AlreadyExists, 409),
+        1049 | 1146 => (Code::NotFound, 404),
+        1044 | 1142 | 1143 => (Code::PermissionDenied, 403),
+        1045 => (Code::Unauthenticated, 401),
+        1064 => (Code::InvalidArgument, 400),
+        _ if sqlstate == SQLSTATE_RETRY => (Code::Aborted, 409),
+        _ if sqlstate.starts_with(b"08") => (Code::Unavailable, 503),
+        _ => (Code::Unknown, 500),
+    };
+    ProtocolError {
+        mysql_errno: errno,
+        sqlstate,
+        mongo_code,
+        mongo_code_name,
+        mongo_labels,
+        grpc_status,
+        http_status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codes_are_in_range_unique_and_well_named() {
+        let mut seen = std::collections::HashSet::new();
+        for &code in SprigCode::ALL {
+            assert!((39000..=39999).contains(&code.number()), "{code:?}");
+            assert!(seen.insert(code.number()), "duplicate number {code:?}");
+            assert!(code.name().starts_with("ER_SPRIG_"), "{code:?}");
+            assert!(code.mongo_code_name().starts_with("Sprig"), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn setting_error_renders_everywhere() {
+        let e = SprigError::new(
+            SprigCode::SettingOutOfBounds,
+            "auth.failed_login_attempts: 12 > 10",
+        );
+        let p = e.protocol();
+        assert_eq!(p.mysql_errno, 39080);
+        assert_eq!(&p.sqlstate, b"HY000");
+        assert_eq!(p.mongo_code, 39080);
+        assert_eq!(p.mongo_code_name, "SprigSettingOutOfBounds");
+        assert_eq!(p.grpc_status, tonic::Code::InvalidArgument);
+        assert_eq!(p.http_status, 400);
+        assert!(!e.retryable);
+        assert_eq!(
+            e.to_string(),
+            "39080 ER_SPRIG_SETTING_OUT_OF_BOUNDS: auth.failed_login_attempts: 12 > 10"
+        );
+    }
+
+    #[test]
+    fn deadlock_reuses_standard_retry_signals() {
+        let e = SprigError::standard(
+            1213,
+            *b"40001",
+            "Deadlock found; try restarting transaction",
+        );
+        assert!(e.retryable);
+        let p = e.protocol();
+        assert_eq!(p.mysql_errno, 1213);
+        assert_eq!(p.mongo_code, 112);
+        assert_eq!(p.grpc_status, tonic::Code::Aborted);
+        assert_eq!(p.http_status, 409);
+    }
+
+    #[test]
+    fn draining_maps_to_mongo_shutdown_in_progress() {
+        let p = SprigError::new(SprigCode::GatewayDraining, "draining").protocol();
+        assert_eq!(p.mongo_code, 91);
+        assert_eq!(p.mongo_labels, &["RetryableWriteError"]);
+        assert_eq!(&p.sqlstate, b"08S01");
+    }
+
+    #[test]
+    fn source_is_kept_but_not_displayed() {
+        let io = std::io::Error::other("t42_d1_g3_s17 missing");
+        let e = SprigError::internal("table missing").with_source(io);
+        assert!(!e.to_string().contains("t42_"));
+        assert!(std::error::Error::source(&e).is_some());
+    }
+}

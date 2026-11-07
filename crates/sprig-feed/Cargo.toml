@@ -1,0 +1,12 @@
+[package]
+name = "sprig-feed"
+description = "SprigDB: The change feed: change events decoded from the binlog, merging, resume tokens and subscriptions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

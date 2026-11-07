@@ -1,0 +1,52 @@
+# cargo-deny: licences, advisories, bans and sources (chapter 03, "Licences").
+# Run with `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# The allow-list is policy; not every licence on it is in use yet.
+unused-allowed-license = "allow"
+# Apache-2.0-compatible licences only. GPL-only crates are refused.
+# MPL-2.0 is file-level copyleft: allowed for crates used unmodified.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+
+# webpki-roots is Mozilla's root-certificate bundle, published as data under the
+# permissive CDLA-Permissive-2.0 licence. Allowed for this crate only.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+[licenses.private]
+# Workspace crates are Apache-2.0 and never published from here.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# OpenSSL is not used: TLS goes through rustls (chapter 03).
+deny = [
+    { crate = "openssl", reason = "TLS uses rustls only (chapter 03)" },
+    { crate = "openssl-sys", reason = "TLS uses rustls only (chapter 03)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

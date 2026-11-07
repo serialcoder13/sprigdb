@@ -1,0 +1,73 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/serialcoder13/sprigdb"
+publish = false
+
+[workspace.dependencies]
+# Workspace crates.
+sprig-common = { path = "crates/sprig-common" }
+sprig-settings = { path = "crates/sprig-settings" }
+sprig-meta = { path = "crates/sprig-meta" }
+sprig-gateway = { path = "crates/sprig-gateway" }
+sprig-controller = { path = "crates/sprig-controller" }
+sprig-worker = { path = "crates/sprig-worker" }
+sprig-agent = { path = "crates/sprig-agent" }
+sprig-operator = { path = "crates/sprig-operator" }
+sprig-cluster = { path = "crates/sprig-cluster" }
+sprig-testkit = { path = "crates/sprig-testkit" }
+
+# Third-party crates. Every licence must be on deny.toml's allow-list (chapter 03).
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+futures = "0.3"
+gethostname = "1.1"
+linkme = "0.3"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.54", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+toml = "1.2"
+tonic = { version = "0.14", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.29", features = ["v7", "serde"] }
+
+# Added for the next M0.1 steps (control plane, clusters, listeners).
+etcd-client = "0.21"
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2.2"
+rcgen = "0.14"
+
+[workspace.lints.rust]
+# `deny`, not `forbid`, so vetted spots can opt out with a `SAFETY:` comment
+# (chapter 03). The only one so far: linkme's link sections in sprig-settings.
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Holding a std lock across an .await is an error (chapter 03, Concurrency).
+await_holding_lock = "deny"
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

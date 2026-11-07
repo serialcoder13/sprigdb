@@ -1,0 +1,180 @@
+# SprigDB development environment (chapter 27, "Development setup"; chapter
+# 46, "Integration with Docker Compose").
+#
+# This first version runs one simulated data center: a single-member etcd
+# (single-etcd mode, chapter 23) and MariaDB in three topologies, one profile
+# each. Start one topology at a time:
+#
+#   docker compose --profile single up -d        # etcd + one node
+#   docker compose --profile replication up -d   # etcd + primary + 2 replicas, semi-sync AFTER_SYNC
+#   docker compose --profile galera up -d        # etcd + 3-node Galera
+#   docker compose --profile all up -d           # everything
+#   docker compose --profile all down -v         # stop and delete the data
+#
+# Per-node identity follows chapter 27: server_id = cluster_number * 100 +
+# index, gtid_domain_id = cluster_number. Cluster numbers: single 1,
+# replication 2, galera 3. Galera nodes share wsrep_gtid_domain_id 3 and keep
+# distinct node-local domains (301-303).
+#
+# Ports are bound to 127.0.0.1 only and kept away from 3306/3307, which the
+# SprigDB gateway uses.
+
+name: ${COMPOSE_PROJECT_NAME:-sprigdb-dev}
+
+x-mariadb: &mariadb
+  image: ${MARIADB_IMAGE:-mariadb:11.8}
+  environment: &mariadb-env
+    MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+  networks: [dc-a]
+  ulimits:
+    nofile: { soft: 65536, hard: 65536 }
+  healthcheck: &mariadb-health
+    test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+    start_period: 30s
+
+x-galera-health: &galera-health
+  # Synced (wsrep_local_state 4). Uses root: after SST a joiner holds the
+  # donor's users, so the image's own healthcheck account isn't reliable.
+  test:
+    - CMD-SHELL
+    - >-
+      mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD" -Nse
+      "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS
+      WHERE VARIABLE_NAME = 'wsrep_local_state'" | grep -qx 4
+  interval: 5s
+  timeout: 5s
+  retries: 60
+  start_period: 30s
+
+services:
+  etcd:
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.6.5}
+    command:
+      - etcd
+      - --name=etcd-0
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd-0=http://etcd:2380
+    networks: [dc-a]
+    ports: ["127.0.0.1:2379:2379"]
+    volumes: [etcd-data:/etcd-data]
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # --- single node: cluster 1 -------------------------------------------
+  single:
+    <<: *mariadb
+    profiles: [single, all]
+    hostname: single
+    command: [--server-id=101, --gtid-domain-id=1]
+    ports: ["127.0.0.1:13301:3306"]
+    volumes:
+      - ./mariadb/binlog.cnf:/etc/mysql/conf.d/10-binlog.cnf:ro
+
+  # --- primary + 2 replicas, semi-sync AFTER_SYNC: cluster 2 -------------
+  primary:
+    <<: *mariadb
+    profiles: [replication, all]
+    hostname: primary
+    command: [--server-id=201, --gtid-domain-id=2, --rpl-semi-sync-master-enabled=ON]
+    environment:
+      <<: *mariadb-env
+      MARIADB_REPLICATION_USER: sprig_repl
+      MARIADB_REPLICATION_PASSWORD: ${MARIADB_REPLICATION_PASSWORD:-sprig-dev-repl}
+    ports: ["127.0.0.1:13311:3306"]
+    volumes: &replication-conf
+      - ./mariadb/binlog.cnf:/etc/mysql/conf.d/10-binlog.cnf:ro
+      - ./mariadb/semi-sync.cnf:/etc/mysql/conf.d/20-semi-sync.cnf:ro
+
+  replica-1: &replica
+    <<: *mariadb
+    profiles: [replication, all]
+    hostname: replica-1
+    command: [--server-id=202, --gtid-domain-id=2]
+    environment: &replica-env
+      <<: *mariadb-env
+      MARIADB_MASTER_HOST: primary
+      MARIADB_REPLICATION_USER: sprig_repl
+      MARIADB_REPLICATION_PASSWORD: ${MARIADB_REPLICATION_PASSWORD:-sprig-dev-repl}
+      MARIADB_HEALTHCHECK_GRANTS: REPLICA MONITOR
+    healthcheck:
+      <<: *mariadb-health
+      test: ["CMD", "healthcheck.sh", "--connect", "--replication_io", "--replication_sql", "--replication"]
+    depends_on:
+      primary: { condition: service_healthy }
+    ports: ["127.0.0.1:13312:3306"]
+    volumes: *replication-conf
+
+  replica-2:
+    <<: *replica
+    hostname: replica-2
+    command: [--server-id=203, --gtid-domain-id=2]
+    ports: ["127.0.0.1:13313:3306"]
+
+  # --- 3-node Galera: cluster 3 -------------------------------------------
+  galera-1:
+    <<: *mariadb
+    profiles: [galera, all]
+    hostname: galera-1
+    # Bootstraps a new cluster. After `down` without -v, galera-1 may refuse
+    # to bootstrap (safe_to_bootstrap: 0); reset with `down -v`.
+    command:
+      - --wsrep-new-cluster
+      - --server-id=301
+      - --gtid-domain-id=301
+      - --wsrep-gtid-domain-id=3
+      - --wsrep-node-address=galera-1
+      - --wsrep-sst-auth=root:${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+    healthcheck: *galera-health
+    ports: ["127.0.0.1:13321:3306"]
+    volumes: &galera-conf
+      - ./mariadb/binlog.cnf:/etc/mysql/conf.d/10-binlog.cnf:ro
+      - ./mariadb/galera.cnf:/etc/mysql/conf.d/20-galera.cnf:ro
+
+  galera-2:
+    <<: *mariadb
+    profiles: [galera, all]
+    hostname: galera-2
+    command:
+      - --server-id=302
+      - --gtid-domain-id=302
+      - --wsrep-gtid-domain-id=3
+      - --wsrep-node-address=galera-2
+      - --wsrep-sst-auth=root:${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+    healthcheck: *galera-health
+    depends_on:
+      galera-1: { condition: service_healthy }
+    ports: ["127.0.0.1:13322:3306"]
+    volumes: *galera-conf
+
+  galera-3:
+    <<: *mariadb
+    profiles: [galera, all]
+    hostname: galera-3
+    command:
+      - --server-id=303
+      - --gtid-domain-id=303
+      - --wsrep-gtid-domain-id=3
+      - --wsrep-node-address=galera-3
+      - --wsrep-sst-auth=root:${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+    healthcheck: *galera-health
+    depends_on:
+      galera-2: { condition: service_healthy }
+    ports: ["127.0.0.1:13323:3306"]
+    volumes: *galera-conf
+
+networks:
+  dc-a: {}
+
+# MariaDB data lives in each container's anonymous volume: `down -v` resets it.
+volumes:
+  etcd-data: {}

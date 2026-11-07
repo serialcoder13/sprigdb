@@ -1,0 +1,4 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+# Product names that the doc_markdown lint would otherwise want in backticks.
+doc-valid-idents = ["SprigDB", "MariaDB", "MongoDB", "MySQL", "PostgreSQL", "SQLSTATE", "DataFusion", "QuickJS", "KIRun", "PackStream", "OpenTelemetry", "PL/SQL", "..", "GeoJSON", "sqlparser-rs", "UUIDv7"]

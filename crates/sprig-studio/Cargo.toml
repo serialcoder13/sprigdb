@@ -1,0 +1,12 @@
+[package]
+name = "sprig-studio"
+description = "SprigDB: Studio: the web UI's build, embedded assets and serving. The UI source lives in studio/"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

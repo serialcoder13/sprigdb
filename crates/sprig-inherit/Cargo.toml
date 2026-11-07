@@ -1,0 +1,12 @@
+[package]
+name = "sprig-inherit"
+description = "SprigDB: Spaces, shares, layers, merged views and materialization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

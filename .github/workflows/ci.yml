@@ -1,0 +1,212 @@
+# CI stages of chapter 46 ("Flows"):
+#
+#   S0  every push and pull request   rustfmt, clippy, unit tests, cargo deny,
+#                                     Compose files validated
+#   S1  pull requests, main           integration tests against Compose (all
+#                                     single-DC profiles), SPRIG_TEST_* set
+#   S2  nightly and on demand         the three-DC layout with netem latency;
+#                                     the same suites against it, on MariaDB
+#                                     11.8 and 12.3
+#
+# Integration tests skip themselves when their SPRIG_TEST_* variable is
+# unset (sprig-testkit's `require_env!`). S1 and S2 set SPRIG_TEST_STRICT=1,
+# which turns a skip into a failure, so a suite can't silently stop running.
+# Later stages (S3 nightly suites, S4 release candidates) come with the
+# suites they run.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *" # S2, nightly
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ---------------------------------------------------------------- S0 ----
+  fmt:
+    name: S0 rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup reads rust-toolchain.toml and installs the pinned toolchain.
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: S0 clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: S0 unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - run: cargo build --workspace --locked
+      # No SPRIG_TEST_* variables: integration tests skip themselves.
+      - run: cargo nextest run --workspace --locked --no-tests=pass
+      - run: cargo test --workspace --locked --doc
+
+  deny:
+    name: S0 cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  compose:
+    name: S0 compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate every profile and the three-DC layout
+        working-directory: deploy/compose
+        run: |
+          for p in single replication galera all; do
+            docker compose --profile "$p" config --quiet
+          done
+          ./3dc.sh config --quiet
+
+  # ---------------------------------------------------------------- S1 ----
+  integration:
+    name: S1 integration (Compose, one DC)
+    needs: [fmt, clippy, test, compose]
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      SPRIG_TEST_STRICT: "1"
+      SPRIG_TEST_DOCKER: "1"
+      SPRIG_TEST_LOG_DIR: ${{ github.workspace }}/target/test-logs
+      SPRIG_TEST_ETCD: http://127.0.0.1:2379
+      SPRIG_TEST_MARIADB_SINGLE: mysql://root:sprig-dev-root@127.0.0.1:13301
+      SPRIG_TEST_MARIADB_REPLICATION: mysql://root:sprig-dev-root@127.0.0.1:13311,mysql://root:sprig-dev-root@127.0.0.1:13312,mysql://root:sprig-dev-root@127.0.0.1:13313
+      SPRIG_TEST_MARIADB_GALERA: mysql://root:sprig-dev-root@127.0.0.1:13321,mysql://root:sprig-dev-root@127.0.0.1:13322,mysql://root:sprig-dev-root@127.0.0.1:13323
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # Build while Compose starts.
+      - name: Start Compose (all profiles)
+        working-directory: deploy/compose
+        run: docker compose --profile all up -d
+      - run: cargo build --workspace --all-targets --locked
+      - name: Wait for every service to be healthy
+        working-directory: deploy/compose
+        run: docker compose --profile all up -d --wait --wait-timeout 300
+      - run: cargo nextest run --workspace --locked --no-fail-fast --no-tests=pass
+      - name: Collect Compose logs
+        if: failure()
+        working-directory: deploy/compose
+        run: |
+          mkdir -p "$SPRIG_TEST_LOG_DIR"
+          docker compose --profile all ps --all > "$SPRIG_TEST_LOG_DIR/compose-ps.txt"
+          docker compose --profile all logs --no-color --timestamps > "$SPRIG_TEST_LOG_DIR/compose.log"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: s1-logs
+          path: target/test-logs
+          if-no-files-found: ignore
+      - name: Stop Compose
+        if: always()
+        working-directory: deploy/compose
+        run: docker compose --profile all down -v --timeout 10
+
+  # ---------------------------------------------------------------- S2 ----
+  three-dc:
+    name: S2 three DCs (${{ matrix.mariadb }})
+    needs: [integration]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        mariadb: ["mariadb:11.8", "mariadb:12.3"]
+    env:
+      MARIADB_IMAGE: ${{ matrix.mariadb }}
+      SPRIG_TEST_STRICT: "1"
+      SPRIG_TEST_DOCKER: "1"
+      SPRIG_TEST_LOG_DIR: ${{ github.workspace }}/target/test-logs
+      SPRIG_TEST_ENV_FILE: deploy/compose/env.3dc.toml
+      # The single-DC variables, pointed at the three-DC layout, so every
+      # suite also runs there: mum1's DC etcd, iad1 single, mum1 primary +
+      # replicas, fra1 Galera.
+      SPRIG_TEST_ETCD: http://127.0.0.1:34179
+      SPRIG_TEST_MARIADB_SINGLE: mysql://root:sprig-dev-root@127.0.0.1:34306
+      SPRIG_TEST_MARIADB_REPLICATION: mysql://root:sprig-dev-root@127.0.0.1:34106,mysql://root:sprig-dev-root@127.0.0.1:34107,mysql://root:sprig-dev-root@127.0.0.1:34108
+      SPRIG_TEST_MARIADB_GALERA: mysql://root:sprig-dev-root@127.0.0.1:34206,mysql://root:sprig-dev-root@127.0.0.1:34207,mysql://root:sprig-dev-root@127.0.0.1:34208
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load the netem qdisc module
+        run: |
+          sudo modprobe sch_netem || {
+            sudo apt-get update && sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe sch_netem
+          }
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Start the three-DC layout
+        run: deploy/compose/3dc.sh up -d --build
+      - run: cargo build --workspace --all-targets --locked
+      - name: Wait for every service to be healthy
+        run: deploy/compose/3dc.sh up -d --wait --wait-timeout 600
+      - name: Check inter-DC latency
+        run: |
+          deploy/compose/3dc.sh latency | tee target-latency.txt
+          # Each added round trip must show up: at least 95% of it, at most
+          # 50 ms over (shared runners are noisy).
+          awk 'NR > 1 && $2 > 0 {
+                 if ($4 == "?" || $4 < $2 * 0.95 || $4 > $2 + 50) {
+                   print "latency out of range: " $0; bad = 1 } }
+               END { exit bad }' target-latency.txt
+      - run: cargo nextest run --workspace --locked --no-fail-fast --no-tests=pass
+      - name: Collect Compose logs
+        if: failure()
+        run: |
+          mkdir -p "$SPRIG_TEST_LOG_DIR"
+          deploy/compose/3dc.sh ps --all > "$SPRIG_TEST_LOG_DIR/3dc-ps.txt"
+          deploy/compose/3dc.sh logs --no-color --timestamps > "$SPRIG_TEST_LOG_DIR/3dc.log"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: s2-logs-${{ strategy.job-index }}
+          path: target/test-logs
+          if-no-files-found: ignore
+      - name: Stop the three-DC layout
+        if: always()
+        run: deploy/compose/3dc.sh down -v --timeout 10

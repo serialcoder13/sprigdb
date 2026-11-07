@@ -1,0 +1,5 @@
+# Pinned stable toolchain; updated each release (chapter 03).
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

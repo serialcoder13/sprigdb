@@ -1,0 +1,12 @@
+# Three-node Galera cluster (chapter 27). wsrep_node_address,
+# wsrep_gtid_domain_id and the SST credentials are per node: see compose.yaml.
+[mariadbd]
+wsrep_on                 = ON
+wsrep_provider           = /usr/lib/galera/libgalera_smm.so
+wsrep_cluster_name       = sprig-dev-galera
+wsrep_cluster_address    = gcomm://galera-1,galera-2,galera-3
+wsrep_sst_method         = mariabackup
+wsrep_gtid_mode          = ON
+# chapter 27 uses gcache.size=2G; 128M keeps the dev environment small.
+wsrep_provider_options   = "gcache.size=128M"
+innodb_autoinc_lock_mode = 2

@@ -1,0 +1,327 @@
+# SprigDB three-data-center development layout (chapter 27, "Development
+# setup"; chapter 46, "Integration with Docker Compose").
+#
+# Always run it through ./3dc.sh, or pass `-p sprigdb-3dc` yourself: the
+# `.env` next to this file sets COMPOSE_PROJECT_NAME=sprigdb-dev for
+# compose.yaml, and without -p Compose would use that name for this file too.
+#
+#   ./3dc.sh up -d --build --wait     # start (first run builds the netem image)
+#   ./3dc.sh latency                  # ping matrix between the DCs
+#   ./3dc.sh ps
+#   ./3dc.sh down -v                  # stop and delete the data
+#
+# Three simulated DCs share one bridge network, 10.10.0.0/16, with one /24
+# per DC. Each DC has its own etcd (the DC tier, one member here) and one
+# MariaDB cluster in a different topology; one global etcd member per DC
+# forms the global tier.
+#
+# | DC   | Subnet       | MariaDB cluster                                   |
+# |------|--------------|---------------------------------------------------|
+# | mum1 | 10.10.1.0/24 | mum1-c1: primary + 2 replicas, semi-sync AFTER_SYNC |
+# | fra1 | 10.10.2.0/24 | fra1-c1: 3-node Galera                            |
+# | iad1 | 10.10.3.0/24 | iad1-c1: single node                              |
+#
+# The netem service adds one-way delays between DC subnets with tc netem
+# (netem/netem.sh): mum1-fra1 30 ms, mum1-iad1 80 ms, fra1-iad1 60 ms, the
+# values of chapter 46, so a ping between DCs shows 60, 160 and 120 ms.
+# Override with SPRIG3DC_DELAY_MUM1_FRA1_MS and friends; SPRIG3DC_JITTER_MS
+# adds jitter.
+#
+# Host ports (127.0.0.1 only) are 34<dc><nn>: dc 1 mum1, 2 fra1, 3 iad1; nn
+# 79 DC etcd, 80 global etcd, 06-08 MariaDB nodes. deploy/compose/env.3dc.toml
+# describes the same layout for sprig-testkit (Env::three_dc).
+#
+# Per-node identity follows chapter 27: server_id = cluster_number * 100 +
+# index, gtid_domain_id = cluster_number; clusters mum1-c1 = 1, fra1-c1 = 2,
+# iad1-c1 = 3. The MariaDB config files are shared with compose.yaml.
+#
+# Only one copy can run per Docker host: the bridge name and subnet are fixed.
+
+name: sprigdb-3dc
+
+x-mariadb: &mariadb
+  image: ${MARIADB_IMAGE:-mariadb:11.8}
+  environment: &mariadb-env
+    MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+  ulimits:
+    nofile: { soft: 65536, hard: 65536 }
+  healthcheck: &mariadb-health
+    test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+    start_period: 30s
+
+x-galera-health: &galera-health
+  # Synced (wsrep_local_state 4), as in compose.yaml.
+  test:
+    - CMD-SHELL
+    - >-
+      mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD" -Nse
+      "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS
+      WHERE VARIABLE_NAME = 'wsrep_local_state'" | grep -qx 4
+  interval: 5s
+  timeout: 5s
+  retries: 60
+  start_period: 30s
+
+x-etcd: &etcd
+  image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.6.5}
+  healthcheck:
+    test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+
+x-mariadb-small: &mariadb-small
+  # Small buffer pools: seven nodes share a laptop. Not on the Galera nodes:
+  # SST hands mysqld's arguments to mariadb-backup, which rejects this one.
+  --innodb-buffer-pool-size=64M
+
+services:
+  # --- inter-DC latency ---------------------------------------------------
+  netem:
+    build: ./netem
+    image: sprigdb-netem:dev
+    network_mode: host
+    cap_add: [NET_ADMIN]
+    environment:
+      BRIDGE: sprig3dc0
+      DELAY_MUM1_FRA1_MS: ${SPRIG3DC_DELAY_MUM1_FRA1_MS:-30}
+      DELAY_MUM1_IAD1_MS: ${SPRIG3DC_DELAY_MUM1_IAD1_MS:-80}
+      DELAY_FRA1_IAD1_MS: ${SPRIG3DC_DELAY_FRA1_IAD1_MS:-60}
+      JITTER_MS: ${SPRIG3DC_JITTER_MS:-0}
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/netem-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    stop_grace_period: 5s
+
+  # --- mum1: DC etcd, global etcd voter, primary + 2 replicas (cluster 1) --
+  mum1-etcd:
+    <<: *etcd
+    hostname: mum1-etcd
+    command:
+      - etcd
+      - --name=mum1-etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://mum1-etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://mum1-etcd:2380
+      - --initial-cluster=mum1-etcd=http://mum1-etcd:2380
+    networks: { wan: { ipv4_address: 10.10.1.10 } }
+    ports: ["127.0.0.1:34179:2379"]
+
+  # The global tier spans DCs, so its timings allow for the WAN round trip
+  # (up to 160 ms here): etcd's tuning guide puts the heartbeat near the
+  # round-trip time and the election timeout at ten times the heartbeat.
+  etcd-g-mum1:
+    <<: *etcd
+    hostname: etcd-g-mum1
+    command:
+      - etcd
+      - --name=etcd-g-mum1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-g-mum1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-g-mum1:2380
+      - --heartbeat-interval=200
+      - --election-timeout=2000
+      - --initial-cluster=etcd-g-mum1=http://etcd-g-mum1:2380,etcd-g-fra1=http://etcd-g-fra1:2380,etcd-g-iad1=http://etcd-g-iad1:2380
+      - --initial-cluster-token=sprig-3dc-global
+      - --initial-cluster-state=new
+    networks: { wan: { ipv4_address: 10.10.1.11 } }
+    ports: ["127.0.0.1:34180:2379"]
+
+  mum1-db-1:
+    <<: *mariadb
+    hostname: mum1-db-1
+    command: [--server-id=101, --gtid-domain-id=1, --rpl-semi-sync-master-enabled=ON, *mariadb-small]
+    environment:
+      <<: *mariadb-env
+      MARIADB_REPLICATION_USER: sprig_repl
+      MARIADB_REPLICATION_PASSWORD: ${MARIADB_REPLICATION_PASSWORD:-sprig-dev-repl}
+    networks: { wan: { ipv4_address: 10.10.1.21 } }
+    ports: ["127.0.0.1:34106:3306"]
+    volumes: &replication-conf
+      - ./mariadb/binlog.cnf:/etc/mysql/conf.d/10-binlog.cnf:ro
+      - ./mariadb/semi-sync.cnf:/etc/mysql/conf.d/20-semi-sync.cnf:ro
+
+  mum1-db-2: &mum1-replica
+    <<: *mariadb
+    hostname: mum1-db-2
+    command: [--server-id=102, --gtid-domain-id=1, *mariadb-small]
+    environment:
+      <<: *mariadb-env
+      MARIADB_MASTER_HOST: mum1-db-1
+      MARIADB_REPLICATION_USER: sprig_repl
+      MARIADB_REPLICATION_PASSWORD: ${MARIADB_REPLICATION_PASSWORD:-sprig-dev-repl}
+      MARIADB_HEALTHCHECK_GRANTS: REPLICA MONITOR
+    healthcheck:
+      <<: *mariadb-health
+      test: ["CMD", "healthcheck.sh", "--connect", "--replication_io", "--replication_sql", "--replication"]
+    depends_on:
+      mum1-db-1: { condition: service_healthy }
+    networks: { wan: { ipv4_address: 10.10.1.22 } }
+    ports: ["127.0.0.1:34107:3306"]
+    volumes: *replication-conf
+
+  mum1-db-3:
+    <<: *mum1-replica
+    hostname: mum1-db-3
+    command: [--server-id=103, --gtid-domain-id=1, *mariadb-small]
+    networks: { wan: { ipv4_address: 10.10.1.23 } }
+    ports: ["127.0.0.1:34108:3306"]
+
+  # --- fra1: DC etcd, global etcd voter, 3-node Galera (cluster 2) ---------
+  fra1-etcd:
+    <<: *etcd
+    hostname: fra1-etcd
+    command:
+      - etcd
+      - --name=fra1-etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://fra1-etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://fra1-etcd:2380
+      - --initial-cluster=fra1-etcd=http://fra1-etcd:2380
+    networks: { wan: { ipv4_address: 10.10.2.10 } }
+    ports: ["127.0.0.1:34279:2379"]
+
+  etcd-g-fra1:
+    <<: *etcd
+    hostname: etcd-g-fra1
+    command:
+      - etcd
+      - --name=etcd-g-fra1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-g-fra1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-g-fra1:2380
+      - --heartbeat-interval=200
+      - --election-timeout=2000
+      - --initial-cluster=etcd-g-mum1=http://etcd-g-mum1:2380,etcd-g-fra1=http://etcd-g-fra1:2380,etcd-g-iad1=http://etcd-g-iad1:2380
+      - --initial-cluster-token=sprig-3dc-global
+      - --initial-cluster-state=new
+    networks: { wan: { ipv4_address: 10.10.2.11 } }
+    ports: ["127.0.0.1:34280:2379"]
+
+  fra1-db-1:
+    <<: *mariadb
+    hostname: fra1-db-1
+    # Bootstraps the cluster; after `down` without -v it may refuse
+    # (safe_to_bootstrap: 0): reset with `down -v`.
+    command:
+      - --wsrep-new-cluster
+      - --server-id=201
+      - --gtid-domain-id=201
+      - --wsrep-gtid-domain-id=2
+      - --wsrep-cluster-name=sprig-3dc-fra1-c1
+      - --wsrep-cluster-address=gcomm://fra1-db-1,fra1-db-2,fra1-db-3
+      - --wsrep-node-address=fra1-db-1
+      - --wsrep-sst-auth=root:${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+    healthcheck: *galera-health
+    networks: { wan: { ipv4_address: 10.10.2.21 } }
+    ports: ["127.0.0.1:34206:3306"]
+    volumes: &galera-conf
+      - ./mariadb/binlog.cnf:/etc/mysql/conf.d/10-binlog.cnf:ro
+      - ./mariadb/galera.cnf:/etc/mysql/conf.d/20-galera.cnf:ro
+
+  fra1-db-2:
+    <<: *mariadb
+    hostname: fra1-db-2
+    command:
+      - --server-id=202
+      - --gtid-domain-id=202
+      - --wsrep-gtid-domain-id=2
+      - --wsrep-cluster-name=sprig-3dc-fra1-c1
+      - --wsrep-cluster-address=gcomm://fra1-db-1,fra1-db-2,fra1-db-3
+      - --wsrep-node-address=fra1-db-2
+      - --wsrep-sst-auth=root:${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+    healthcheck: *galera-health
+    depends_on:
+      fra1-db-1: { condition: service_healthy }
+    networks: { wan: { ipv4_address: 10.10.2.22 } }
+    ports: ["127.0.0.1:34207:3306"]
+    volumes: *galera-conf
+
+  fra1-db-3:
+    <<: *mariadb
+    hostname: fra1-db-3
+    command:
+      - --server-id=203
+      - --gtid-domain-id=203
+      - --wsrep-gtid-domain-id=2
+      - --wsrep-cluster-name=sprig-3dc-fra1-c1
+      - --wsrep-cluster-address=gcomm://fra1-db-1,fra1-db-2,fra1-db-3
+      - --wsrep-node-address=fra1-db-3
+      - --wsrep-sst-auth=root:${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+    healthcheck: *galera-health
+    depends_on:
+      fra1-db-2: { condition: service_healthy }
+    networks: { wan: { ipv4_address: 10.10.2.23 } }
+    ports: ["127.0.0.1:34208:3306"]
+    volumes: *galera-conf
+
+  # --- iad1: DC etcd, global etcd voter, single node (cluster 3) -----------
+  iad1-etcd:
+    <<: *etcd
+    hostname: iad1-etcd
+    command:
+      - etcd
+      - --name=iad1-etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://iad1-etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://iad1-etcd:2380
+      - --initial-cluster=iad1-etcd=http://iad1-etcd:2380
+    networks: { wan: { ipv4_address: 10.10.3.10 } }
+    ports: ["127.0.0.1:34379:2379"]
+
+  etcd-g-iad1:
+    <<: *etcd
+    hostname: etcd-g-iad1
+    command:
+      - etcd
+      - --name=etcd-g-iad1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-g-iad1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-g-iad1:2380
+      - --heartbeat-interval=200
+      - --election-timeout=2000
+      - --initial-cluster=etcd-g-mum1=http://etcd-g-mum1:2380,etcd-g-fra1=http://etcd-g-fra1:2380,etcd-g-iad1=http://etcd-g-iad1:2380
+      - --initial-cluster-token=sprig-3dc-global
+      - --initial-cluster-state=new
+    networks: { wan: { ipv4_address: 10.10.3.11 } }
+    ports: ["127.0.0.1:34380:2379"]
+
+  iad1-db-1:
+    <<: *mariadb
+    hostname: iad1-db-1
+    command: [--server-id=301, --gtid-domain-id=3, *mariadb-small]
+    networks: { wan: { ipv4_address: 10.10.3.21 } }
+    ports: ["127.0.0.1:34306:3306"]
+    volumes:
+      - ./mariadb/binlog.cnf:/etc/mysql/conf.d/10-binlog.cnf:ro
+
+networks:
+  wan:
+    driver: bridge
+    driver_opts:
+      # A fixed name, so netem.sh can find the bridge's veths.
+      com.docker.network.bridge.name: sprig3dc0
+    ipam:
+      config:
+        - subnet: 10.10.0.0/16
+          gateway: 10.10.0.1
+
+# Data lives in anonymous volumes (MariaDB) or the container layer (etcd):
+# `down -v` resets everything.

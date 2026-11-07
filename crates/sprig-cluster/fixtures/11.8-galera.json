@@ -1,0 +1,71 @@
+{
+  "variables": {
+    "binlog_alter_two_phase": "OFF",
+    "binlog_checksum": "CRC32",
+    "binlog_expire_logs_seconds": "604800",
+    "binlog_format": "ROW",
+    "binlog_row_image": "FULL",
+    "binlog_row_metadata": "FULL",
+    "default_storage_engine": "InnoDB",
+    "gtid_binlog_pos": "3-301-42",
+    "gtid_current_pos": "",
+    "gtid_domain_id": "302",
+    "gtid_strict_mode": "ON",
+    "innodb_open_files": "2000",
+    "log_bin": "ON",
+    "log_slave_updates": "ON",
+    "lower_case_table_names": "0",
+    "max_connections": "151",
+    "max_sp_recursion_depth": "0",
+    "max_statement_time": "0.000000",
+    "open_files_limit": "32198",
+    "performance_schema": "OFF",
+    "read_only": "OFF",
+    "rpl_semi_sync_master_enabled": "OFF",
+    "rpl_semi_sync_master_timeout": "10000",
+    "rpl_semi_sync_master_wait_point": "AFTER_COMMIT",
+    "rpl_semi_sync_slave_enabled": "OFF",
+    "server_id": "302",
+    "stored_program_cache": "256",
+    "table_definition_cache": "400",
+    "table_open_cache": "2000",
+    "version": "11.8.9-MariaDB-ubu2404-log",
+    "wsrep_gtid_domain_id": "3",
+    "wsrep_gtid_mode": "ON",
+    "wsrep_on": "ON",
+    "wsrep_osu_method": "TOI",
+    "wsrep_sync_wait": "0"
+  },
+  "status": {
+    "memory_used": "471122976",
+    "open_tables": "19",
+    "opened_tables": "38",
+    "rpl_semi_sync_master_clients": "0",
+    "rpl_semi_sync_master_status": "OFF",
+    "rpl_semi_sync_slave_status": "OFF",
+    "table_open_cache_hits": "96",
+    "table_open_cache_misses": "39",
+    "threads_running": "1",
+    "wsrep_cluster_conf_id": "3",
+    "wsrep_cluster_size": "3",
+    "wsrep_cluster_status": "Primary",
+    "wsrep_connected": "ON",
+    "wsrep_flow_control_paused": "0",
+    "wsrep_local_state": "4",
+    "wsrep_ready": "ON"
+  },
+  "channels": [],
+  "binary_logs": [
+    [
+      "mariadb-bin.000001",
+      8697
+    ]
+  ],
+  "horizon": "",
+  "grants": [
+    "GRANT ALL PRIVILEGES ON *.* TO `root`@`%` WITH GRANT OPTION",
+    "GRANT PROXY ON ``@`%` TO `root`@`%` WITH GRANT OPTION"
+  ],
+  "clock_skew_ms": 0,
+  "heartbeats": []
+}

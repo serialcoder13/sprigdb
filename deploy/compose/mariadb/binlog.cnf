@@ -1,0 +1,20 @@
+# Binlog and durability settings every SprigDB-managed node starts with
+# (chapter 27, "Settings on clusters SprigDB manages"), plus the annotate
+# settings the change feed needs (chapter 38, "Binlog requirements").
+# server_id and gtid_domain_id are per node: see compose.yaml.
+[mariadbd]
+log_bin                        = mariadb-bin
+binlog_format                  = ROW
+binlog_row_image               = FULL
+binlog_row_metadata            = FULL
+binlog_annotate_row_events     = ON
+replicate_annotate_row_events  = ON
+binlog_expire_logs_seconds     = 604800   # feed.retention_hours (168) x 3600
+sync_binlog                    = 1
+innodb_flush_log_at_trx_commit = 1
+gtid_strict_mode               = ON
+log_slave_updates              = ON
+skip_name_resolve              = ON
+# Development only: chapter 27 also sets read_only = ON (fenced boot, the
+# agent unfences) and require_secure_transport = ON. Neither the agent nor
+# TLS exists yet, so this environment leaves both off.

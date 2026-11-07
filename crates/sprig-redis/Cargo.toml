@@ -1,0 +1,12 @@
+[package]
+name = "sprig-redis"
+description = "SprigDB: Redis command execution over the data layer, and pub/sub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

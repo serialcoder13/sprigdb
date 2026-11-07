@@ -1,0 +1,421 @@
+//! Bounds, resolution and an in-memory store of setting rows (chapter 08,
+//! "Setting resolution" and "Setting a value").
+//!
+//! [`MemSettings`] keeps every scope's rows in memory. The etcd mirror
+//! (global, dc, cluster) and the catalog snapshot (tenant, database, object,
+//! ancestor) will feed the same resolver later (chapter 23 step 8).
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use sprig_common::{Result, SprigCode, SprigError};
+
+use crate::registry::{AnySetting, HardBounds, Registry, Setting};
+use crate::scope::{Level, Scope, ScopeKind, SettingCtx};
+use crate::value::{SettingValue, Value};
+
+/// Bounds a scope sets on narrower scopes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Bounds {
+    /// Smallest numeric value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    /// Largest numeric value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// The only values accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed: Option<Vec<Value>>,
+    /// Narrower scopes can't set the key.
+    #[serde(default)]
+    pub locked: bool,
+}
+
+impl Bounds {
+    /// At most `max`.
+    #[must_use]
+    pub fn max(max: f64) -> Self {
+        Self {
+            max: Some(max),
+            ..Self::default()
+        }
+    }
+
+    /// Only the listed values.
+    #[must_use]
+    pub fn allowed(values: impl IntoIterator<Item = Value>) -> Self {
+        Self {
+            allowed: Some(values.into_iter().collect()),
+            ..Self::default()
+        }
+    }
+
+    /// Narrower scopes can't set the key.
+    #[must_use]
+    pub fn locked() -> Self {
+        Self {
+            locked: true,
+            ..Self::default()
+        }
+    }
+
+    /// `self ∩ other`: the larger minimum, the smaller maximum, the common
+    /// allowed values; locked if either is.
+    #[must_use]
+    pub fn intersect(&self, other: &Bounds) -> Bounds {
+        let pick = |a: Option<f64>, b: Option<f64>, f: fn(f64, f64) -> f64| match (a, b) {
+            (Some(a), Some(b)) => Some(f(a, b)),
+            (a, b) => a.or(b),
+        };
+        let allowed = match (&self.allowed, &other.allowed) {
+            (Some(a), Some(b)) => Some(a.iter().filter(|v| b.contains(v)).cloned().collect()),
+            (a, b) => a.clone().or_else(|| b.clone()),
+        };
+        Bounds {
+            min: pick(self.min, other.min, f64::max),
+            max: pick(self.max, other.max, f64::min),
+            allowed,
+            locked: self.locked || other.locked,
+        }
+    }
+
+    /// Whether `v` is inside these bounds.
+    #[must_use]
+    pub fn admits(&self, v: &Value) -> bool {
+        self.allowed_contains(v) && self.clamp(v) == *v
+    }
+
+    fn allowed_contains(&self, v: &Value) -> bool {
+        self.allowed.as_ref().is_none_or(|a| a.contains(v))
+    }
+
+    /// `v` moved into `[min, max]`; non-numeric values are returned as is.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)] // f64 bounds clamp i64 values (chapter 08)
+    pub fn clamp(&self, v: &Value) -> Value {
+        let lo = self.min.unwrap_or(f64::NEG_INFINITY);
+        let hi = self.max.unwrap_or(f64::INFINITY);
+        match v {
+            Value::Int(i) => {
+                let x = v.as_f64().unwrap_or_default();
+                if x < lo {
+                    Value::Int(lo.ceil() as i64)
+                } else if x > hi {
+                    Value::Int(hi.floor() as i64)
+                } else {
+                    Value::Int(*i)
+                }
+            }
+            Value::Float(f) => Value::Float(f.clamp(lo, hi.max(lo))),
+            other => other.clone(),
+        }
+    }
+}
+
+impl From<HardBounds> for Bounds {
+    fn from(h: HardBounds) -> Self {
+        Bounds {
+            min: h.min,
+            max: h.max,
+            allowed: h
+                .allowed
+                .map(|a| a.iter().map(|&s| Value::from(s)).collect()),
+            locked: false,
+        }
+    }
+}
+
+/// One scope's row for one key: a value, bounds on narrower scopes, or both.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Entry {
+    /// The value set at this scope.
+    pub value: Option<Value>,
+    /// Bounds this scope sets on narrower scopes.
+    pub bounds: Option<Bounds>,
+}
+
+/// Why a stored value was not used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ignored {
+    /// A wider scope locked the key.
+    Locked,
+    /// Not in a wider scope's allowed list.
+    NotAllowed,
+    /// The stored value doesn't fit the key's type (written by another
+    /// binary version).
+    WrongType,
+}
+
+/// A resolved key, with where its value came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resolved {
+    /// The effective value.
+    pub value: Value,
+    /// The scope that supplied it.
+    pub source: ScopeKind,
+    /// The bounds in force after every scope of the context.
+    pub bounds: Bounds,
+    /// The value was moved into the bounds in force at its scope.
+    pub clamped: bool,
+    /// Values that were skipped, and why.
+    pub ignored: Vec<(ScopeKind, Ignored)>,
+}
+
+/// Setting rows of every scope, in memory.
+#[derive(Debug)]
+pub struct MemSettings<'r> {
+    registry: &'r Registry,
+    rows: HashMap<(Scope, &'static str), Entry>,
+}
+
+impl<'r> MemSettings<'r> {
+    /// An empty store over `registry`.
+    #[must_use]
+    pub fn new(registry: &'r Registry) -> Self {
+        Self {
+            registry,
+            rows: HashMap::new(),
+        }
+    }
+
+    /// Resolves `key` in `ctx`, following chapter 08's algorithm: walk the
+    /// chain from the widest scope to the narrowest, so the nearest value
+    /// wins and the bounds of every wider scope apply to it.
+    ///
+    /// # Errors
+    /// 39081 if the key is unknown.
+    pub fn resolve(&self, key: &str, ctx: &SettingCtx<'_>) -> Result<Resolved> {
+        let def = self.def(key)?;
+        let mut r = Resolved {
+            value: def.default_value(),
+            source: ScopeKind::Default,
+            bounds: def.hard().into(),
+            clamped: false,
+            ignored: Vec::new(),
+        };
+        for (kind, scope) in chain(def, ctx) {
+            let Some(e) = self.rows.get(&(scope, def.key())) else {
+                continue;
+            };
+            if r.bounds.locked {
+                if e.value.is_some() {
+                    r.ignored.push((kind, Ignored::Locked));
+                }
+                continue;
+            }
+            if let Some(v) = &e.value {
+                match def.normalize(v) {
+                    None => r.ignored.push((kind, Ignored::WrongType)),
+                    Some(v) if !r.bounds.allowed_contains(&v) => {
+                        r.ignored.push((kind, Ignored::NotAllowed));
+                    }
+                    Some(v) => {
+                        let c = r.bounds.clamp(&v);
+                        r.clamped = c != v;
+                        r.value = c;
+                        r.source = kind;
+                    }
+                }
+            }
+            if let Some(b) = &e.bounds {
+                r.bounds = r.bounds.intersect(b);
+            }
+        }
+        // A built-in default that falls outside bounds tightened by some scope
+        // is clamped like any other value (chapter 08).
+        if r.source == ScopeKind::Default {
+            let c = r.bounds.clamp(&r.value);
+            r.clamped = c != r.value;
+            r.value = c;
+        }
+        Ok(r)
+    }
+
+    /// The typed value of `setting` in `ctx`, or its default if resolution
+    /// fails (a key missing from this registry).
+    #[must_use]
+    pub fn get<T: SettingValue>(&self, setting: &Setting<T>, ctx: &SettingCtx<'_>) -> T {
+        self.resolve(setting.key, ctx)
+            .ok()
+            .and_then(|r| T::from_value(&r.value))
+            .unwrap_or_else(|| setting.default.clone())
+    }
+
+    /// Sets `key` to `value` at `level` of `ctx`.
+    ///
+    /// # Errors
+    /// 39081 unknown key, 39082 scope not accepted, 39084 wrong type,
+    /// 39083 locked by a wider scope, 39080 outside the bounds in force.
+    pub fn set_value(
+        &mut self,
+        level: Level,
+        ctx: &SettingCtx<'_>,
+        key: &str,
+        value: &Value,
+    ) -> Result<()> {
+        let (def, scope) = self.target(level, ctx, key)?;
+        let v = def.normalize(value).ok_or_else(|| {
+            SprigError::new(
+                SprigCode::SettingBadValue,
+                format!("{key}: {value:?} is not a {:?}", def.kind()),
+            )
+        })?;
+        let wider = self.wider_bounds(def, ctx, level);
+        if wider.locked {
+            return Err(locked(key));
+        }
+        if !wider.admits(&v) {
+            return Err(SprigError::new(
+                SprigCode::SettingOutOfBounds,
+                format!("{key}: {v:?} is outside the bounds in force {wider:?}"),
+            ));
+        }
+        self.rows.entry((scope, def.key())).or_default().value = Some(v);
+        Ok(())
+    }
+
+    /// Sets bounds on `key` for scopes narrower than `level`.
+    ///
+    /// # Errors
+    /// 39081, 39082 and 39083 as for [`set_value`](Self::set_value); 39084
+    /// if an allowed value doesn't fit the key's type.
+    pub fn set_bounds(
+        &mut self,
+        level: Level,
+        ctx: &SettingCtx<'_>,
+        key: &str,
+        bounds: Bounds,
+    ) -> Result<()> {
+        let (def, scope) = self.target(level, ctx, key)?;
+        if [bounds.min, bounds.max]
+            .iter()
+            .flatten()
+            .any(|x| x.is_nan())
+        {
+            return Err(SprigError::new(
+                SprigCode::SettingBadValue,
+                format!("{key}: NaN bound"),
+            ));
+        }
+        if let Some(bad) = bounds
+            .allowed
+            .iter()
+            .flatten()
+            .find(|v| def.normalize(v).is_none())
+        {
+            return Err(SprigError::new(
+                SprigCode::SettingBadValue,
+                format!("{key}: allowed value {bad:?} is not a {:?}", def.kind()),
+            ));
+        }
+        if self.wider_bounds(def, ctx, level).locked {
+            return Err(locked(key));
+        }
+        self.rows.entry((scope, def.key())).or_default().bounds = Some(bounds);
+        Ok(())
+    }
+
+    /// Clears the value at `level` (`RESET`). An empty row is deleted.
+    ///
+    /// # Errors
+    /// 39081 and 39082 as for [`set_value`](Self::set_value).
+    pub fn reset_value(&mut self, level: Level, ctx: &SettingCtx<'_>, key: &str) -> Result<()> {
+        self.clear(level, ctx, key, |e| e.value = None)
+    }
+
+    /// Clears the bounds at `level` (`RESET BOUNDS`). An empty row is deleted.
+    ///
+    /// # Errors
+    /// 39081 and 39082 as for [`set_value`](Self::set_value).
+    pub fn reset_bounds(&mut self, level: Level, ctx: &SettingCtx<'_>, key: &str) -> Result<()> {
+        self.clear(level, ctx, key, |e| e.bounds = None)
+    }
+
+    fn clear(
+        &mut self,
+        level: Level,
+        ctx: &SettingCtx<'_>,
+        key: &str,
+        f: fn(&mut Entry),
+    ) -> Result<()> {
+        let (def, scope) = self.target(level, ctx, key)?;
+        let k = (scope, def.key());
+        if let Some(e) = self.rows.get_mut(&k) {
+            f(e);
+            if *e == Entry::default() {
+                self.rows.remove(&k);
+            }
+        }
+        Ok(())
+    }
+
+    fn def(&self, key: &str) -> Result<&'static dyn AnySetting> {
+        self.registry
+            .get(key)
+            .filter(|_| !key.starts_with("sprig."))
+            .ok_or_else(|| {
+                SprigError::new(SprigCode::SettingUnknown, format!("unknown setting {key}"))
+            })
+    }
+
+    /// Checks the key and the level, and returns the row address.
+    fn target(
+        &self,
+        level: Level,
+        ctx: &SettingCtx<'_>,
+        key: &str,
+    ) -> Result<(&'static dyn AnySetting, Scope)> {
+        let def = self.def(key)?;
+        let not_allowed = || {
+            SprigError::new(
+                SprigCode::SettingScopeNotAllowed,
+                format!("{key} can't be set at {} scope", level.kind()),
+            )
+        };
+        if !def.scopes().contains(level.kind()) {
+            return Err(not_allowed());
+        }
+        let scope = ctx
+            .chain()
+            .into_iter()
+            .find(|(k, _)| *k == level.kind())
+            .map(|(_, s)| s)
+            .ok_or_else(not_allowed)?;
+        Ok((def, scope))
+    }
+
+    /// The bounds of every scope wider than `level` in `ctx`, hard bounds
+    /// included.
+    fn wider_bounds(&self, def: &dyn AnySetting, ctx: &SettingCtx<'_>, level: Level) -> Bounds {
+        let mut b: Bounds = def.hard().into();
+        for (kind, scope) in chain(def, ctx) {
+            if kind == level.kind() {
+                break;
+            }
+            if let Some(eb) = self
+                .rows
+                .get(&(scope, def.key()))
+                .and_then(|e| e.bounds.as_ref())
+            {
+                b = b.intersect(eb);
+            }
+        }
+        b
+    }
+}
+
+/// The chain of `ctx`, keeping the scopes `def` accepts.
+fn chain(def: &dyn AnySetting, ctx: &SettingCtx<'_>) -> Vec<(ScopeKind, Scope)> {
+    let scopes = def.scopes();
+    ctx.chain()
+        .into_iter()
+        .filter(|(k, _)| scopes.contains(*k))
+        .collect()
+}
+
+fn locked(key: &str) -> SprigError {
+    SprigError::new(
+        SprigCode::SettingLocked,
+        format!("{key} is locked by a wider scope"),
+    )
+}
