@@ -486,10 +486,9 @@ impl PassSession {
         let (user, host) = (ts.principal.user.clone(), ts.principal.host.clone());
 
         // Own password change (allowed in sandbox mode).
-        if let Some(pc) = password::parse(text, &lex, &user, &host) {
-            if pc.other_account {
-                return self.fail(out, &account_refused()).await;
-            }
+        if let Some(pc) = password::parse(text, &lex, &user, &host)
+            && !pc.other_account
+        {
             let (Some(tenant), Some(uid)) = (ts.principal.tenant, ts.principal.user_id) else {
                 return self.fail(out, &account_refused()).await;
             };
@@ -571,6 +570,60 @@ impl PassSession {
             });
         }
 
+        // Account statements (chapter 29).
+        if let Some(parsed) = sprig_sql::account_stmt::parse(text, &lex) {
+            if sandbox {
+                return self.fail(out, &must_reset()).await;
+            }
+            let stmt = match parsed {
+                Ok(s) => s,
+                Err(e) => return self.fail(out, &e).await,
+            };
+            let current = self.current_logical();
+            let persona = self.persona;
+            let Some(ts) = self.tenant.as_deref_mut() else {
+                return Err(SprigError::internal("no tenant"));
+            };
+            let cat = match ts.refresh().await {
+                Ok(c) => c,
+                Err(e) => return self.fail(out, &e).await,
+            };
+            let r = crate::tenant::authz::account_statement(
+                ts,
+                &cat,
+                &stmt,
+                persona,
+                current.as_deref(),
+                charset,
+            )
+            .await;
+            let s = status(self.status());
+            return match r {
+                Ok(crate::tenant::authz::AccountAnswer::Ok(warnings)) => {
+                    let mut ok = OkPacket::new(s);
+                    ok.warnings = u16::try_from(warnings.len()).unwrap_or(u16::MAX);
+                    if let Some(ts) = self.tenant.as_deref_mut()
+                        && !warnings.is_empty()
+                    {
+                        ts.warnings = Some(warnings);
+                    }
+                    out.ok(ok).await?;
+                    Ok(Step {
+                        errored: false,
+                        status: Some(s),
+                    })
+                }
+                Ok(crate::tenant::authz::AccountAnswer::Rows(ans)) => {
+                    send_local(out, &ans, format, s).await?;
+                    Ok(Step {
+                        errored: false,
+                        status: Some(s),
+                    })
+                }
+                Err(e) => self.fail(out, &e).await,
+            };
+        }
+
         // Settings statements.
         if let Some(parsed) = settings_stmt::parse(text, &lex) {
             if sandbox {
@@ -637,6 +690,17 @@ impl PassSession {
             }
             Some(Err(e)) => return self.fail(out, &e).await,
         };
+        // 3306: MySQL-only executable comments whose body MariaDB
+        // understands (chapter 28 step 1).
+        let expanded;
+        let text: &Bytes =
+            match sprig_sql::lex::versioned::expand_text_for_mariadb(text, &lex, BACKEND_VERSION) {
+                Some(t) => {
+                    expanded = Bytes::from(t);
+                    &expanded
+                }
+                None => text,
+            };
         let attr_owned = attr_pairs(attrs);
         let mut retried = false;
         let planned = loop {
@@ -721,6 +785,26 @@ impl PassSession {
         if p.statements.len() > 1 {
             if sandbox {
                 return self.fail(out, &must_reset()).await;
+            }
+            // Chapter 29: every statement of the piece is checked.
+            {
+                let current = self.current_logical();
+                let persona = self.persona;
+                if let Some(ts) = self.tenant.as_deref() {
+                    for st in &p.statements {
+                        let orig = text.get(st.info.range.clone()).unwrap_or(&[]);
+                        if let Err(e) = crate::tenant::authz::check_session(
+                            ts,
+                            persona,
+                            st,
+                            orig,
+                            &lex,
+                            current.as_deref(),
+                        ) {
+                            return self.fail(out, &e).await;
+                        }
+                    }
+                }
             }
             let routable = p.statements.iter().all(|s| {
                 matches!(s.action, Action::Forward { .. })
@@ -837,6 +921,24 @@ impl PassSession {
         if sp.info.kind == StmtKind::Account {
             return Ok(Route::Done(self.fail(out, &account_refused()).await?));
         }
+        // Chapter 29: the session's privileges.
+        {
+            let current = self.current_logical();
+            let (lex, _) = self.lex_opts();
+            let persona = self.persona;
+            if let Some(ts) = self.tenant.as_deref()
+                && let Err(e) = crate::tenant::authz::check_session(
+                    ts,
+                    persona,
+                    &sp,
+                    original,
+                    &lex,
+                    current.as_deref(),
+                )
+            {
+                return Ok(Route::Done(self.fail(out, &e).await?));
+            }
+        }
         if let Some(target) = &sp.info.ddl {
             return self.ddl(cx, &sp, target, original, s, out).await;
         }
@@ -852,6 +954,14 @@ impl PassSession {
             }
             Action::Forward { sql, mapper } => Ok(Route::Forward(sql, mapper)),
             Action::Local(mut ans) => {
+                if sp
+                    .show
+                    .as_ref()
+                    .is_some_and(|i| i.kind == ShowKind::Databases)
+                    && let Some(ts) = self.tenant.as_deref()
+                {
+                    crate::tenant::authz::filter_session_databases(ts, &mut ans);
+                }
                 ans.set_text_charset(charset);
                 send_local(out, &ans, format, s).await?;
                 Ok(Route::Done(Step {
@@ -1142,8 +1252,7 @@ impl PassSession {
             }
         }
         let info = StmtInfo::classify(&piece);
-        let conn_status =
-            split::is_session_status(&piece).then(|| super::relay::ConnStatus::of(cx.proto));
+        let conn_status = self.conn_status_for(&piece, cx.proto);
         let backend_caps = self.backend_caps(cx);
         let mysql = self.persona == Persona::MySql84;
         self.tenant_bs(cx);
@@ -1272,6 +1381,15 @@ impl PassSession {
         let mut keep: Option<Vec<ColumnDef>> = None;
         if password::parse(&sql, &lex, &ts.principal.user, &ts.principal.host).is_some() {
             keep = deferred(Vec::new())?;
+        } else if let Some(parsed) = sprig_sql::account_stmt::parse(&sql, &lex) {
+            // Chapter 29: run at execute time, as text.
+            let cols = match parsed? {
+                sprig_auth::authz::stmt::AccountStmt::ShowGrants { .. } => {
+                    vec![crate::pipeline::text_column("Grants", charset)]
+                }
+                _ => Vec::new(),
+            };
+            keep = deferred(cols)?;
         } else if let Some(parsed) = settings_stmt::parse(&sql, &lex) {
             if sandbox {
                 return Err(must_reset());
@@ -1325,6 +1443,14 @@ impl PassSession {
         if sp.info.kind == StmtKind::Account {
             return Err(account_refused());
         }
+        crate::tenant::authz::check_session(
+            ts,
+            self.persona,
+            sp,
+            sql.get(sp.info.range.clone()).unwrap_or(&[]),
+            &lex,
+            current.as_deref(),
+        )?;
         let ddl_here = sp.info.ddl.as_ref().is_some_and(DdlTarget::is_catalog)
             && !temp_candidates(sp.info.ddl.as_ref().unwrap_or(&DdlTarget::Truncate {
                 name: DdlName::unqualified("", None),

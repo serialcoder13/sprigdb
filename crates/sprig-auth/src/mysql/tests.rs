@@ -24,7 +24,7 @@ use crate::store::{Slot, UserRow, VerifierKind, VerifierRow};
 use crate::verifier::{caching_sha2_scramble, native_scramble};
 
 const NONCE: [u8; NONCE_LEN] = [b'n'; NONCE_LEN];
-const ACME: TenantId = TenantId(42);
+pub(crate) const ACME: TenantId = TenantId(42);
 const SUSP: TenantId = TenantId(43);
 
 fn registry() -> &'static Registry {
@@ -40,7 +40,11 @@ fn registry() -> &'static Registry {
     })
 }
 
-pub(crate) fn snapshot(tenant: TenantId, auth: TenantAuth, auth_version: u64) -> Arc<TenantCatalog> {
+pub(crate) fn snapshot(
+    tenant: TenantId,
+    auth: TenantAuth,
+    auth_version: u64,
+) -> Arc<TenantCatalog> {
     let loaded = Loaded {
         snapshot: Snapshot {
             versions: Versions {
@@ -59,9 +63,9 @@ pub(crate) fn snapshot(tenant: TenantId, auth: TenantAuth, auth_version: u64) ->
 }
 
 #[derive(Default)]
-struct Catalogs {
-    map: Mutex<HashMap<TenantId, Arc<TenantCatalog>>>,
-    fail: AtomicBool,
+pub(crate) struct Catalogs {
+    pub(crate) map: Mutex<HashMap<TenantId, Arc<TenantCatalog>>>,
+    pub(crate) fail: AtomicBool,
 }
 
 #[async_trait]
@@ -118,12 +122,12 @@ fn backend() -> BackendTarget {
     }
 }
 
-struct World {
-    svc: Arc<LoginService>,
-    catalogs: Arc<Catalogs>,
-    clock: Arc<ManualClock>,
-    state: Arc<crate::policy::MemLoginState>,
-    audit: Arc<crate::audit::MemoryAudit>,
+pub(crate) struct World {
+    pub(crate) svc: Arc<LoginService>,
+    pub(crate) catalogs: Arc<Catalogs>,
+    pub(crate) clock: Arc<ManualClock>,
+    pub(crate) state: Arc<crate::policy::MemLoginState>,
+    pub(crate) audit: Arc<crate::audit::MemoryAudit>,
 }
 
 /// Tenant `acme` (42) with:
@@ -138,7 +142,7 @@ struct World {
 /// 9 nat@% native only "npw"
 /// 10 svc@% "pw", `api_key` only
 /// and tenant `susp` (43, suspended) with 1 carol@% "pw".
-fn world(mut policy: FixedPolicy) -> World {
+pub(crate) fn world(mut policy: FixedPolicy) -> World {
     // Rate limits off unless a test asks: they'd slow the timing tests.
     for key in [
         crate::settings::DELAY_AFTER_FAILURES.key,
@@ -799,7 +803,10 @@ async fn failed_logins_lock_the_account() {
     }
     assert!(w.state.row(ACME, UserId(1)).unwrap().locked_until.is_none());
     let ev = w.audit.events();
-    let unlocked = ev.iter().find(|e| e.event == "auth.account_unlocked").unwrap();
+    let unlocked = ev
+        .iter()
+        .find(|e| e.event == "auth.account_unlocked")
+        .unwrap();
     assert_eq!(unlocked.reason, Some("lock_expired"));
     assert!(ev.iter().any(|e| e.event == "auth.login_succeeded"));
 }
@@ -853,7 +860,10 @@ async fn repeated_failures_are_delayed() {
     };
     let t = run(&w.svc, other, b"wrong").await.took;
     assert!(t < first + Duration::from_millis(250), "{t:?}");
-    assert_eq!(run(&w.svc, req("acme.alice"), b"pw").await.verdict, AuthVerdict::Accept);
+    assert_eq!(
+        run(&w.svc, req("acme.alice"), b"pw").await.verdict,
+        AuthVerdict::Accept
+    );
     let t = run(&w.svc, req("acme.alice"), b"wrong").await.took;
     assert!(t < first + Duration::from_millis(250), "{t:?}");
 }

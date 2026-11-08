@@ -15,6 +15,8 @@
 
 use std::ops::Range;
 
+use sprig_proto_mysql::packets::Persona;
+
 use super::NameError;
 use super::hide::Visibility;
 use super::infoschema::{
@@ -187,7 +189,10 @@ pub fn plan(sql: &[u8], ctx: &PlanCtx<'_>) -> Result<Plan, NameError> {
         let r = map_offset(&rewritten.edits, info.range.start)
             ..map_offset(&rewritten.edits, info.range.end);
         let text = rewritten.sql.get(r).unwrap_or_default().to_vec();
-        let (show, action) = plan_statement(text, info, current.as_deref(), ctx)?;
+        let (show, mut action) = plan_statement(text, info, current.as_deref(), ctx)?;
+        if let Action::Forward { mapper, .. } = &mut action {
+            mapper.set_persona(ctx.rewrite.lex.persona);
+        }
         match &info.use_target {
             Some(UseTarget::Database { logical, .. }) => current = Some(logical.clone()),
             Some(UseTarget::System(s)) => current = Some(s.as_str().to_owned()),
@@ -235,6 +240,20 @@ fn plan_statement(
             // DESCRIBE t is SHOW COLUMNS; EXPLAIN FOR CONNECTION and the
             // like are scrubbed.
             let word = first_word(&tokens, &text);
+            // 3306: over the MySQL-shaped COLUMNS provider (chapter 28).
+            if lex_opts.persona == Persona::MySql84
+                && !in_is
+                && let Some(sql) = crate::compat::schema::describe_rewrite(
+                    &text,
+                    &tokens,
+                    lex_opts.no_backslash_escapes,
+                    current,
+                    ctx.rewrite.map,
+                    &|v| sql_string(v, lex_opts.no_backslash_escapes),
+                )
+            {
+                return Ok((None, forward(sql, ResultMapper::show(ShowKind::Columns, ctx.vis))));
+            }
             let mapper = if matches!(word.as_str(), "DESCRIBE" | "DESC" | "EXPLAIN") && !in_is {
                 ResultMapper::show(ShowKind::Columns, ctx.vis)
             } else {
@@ -433,6 +452,20 @@ fn plan_show(
             ) && let Some(f) = info.filter.clone()
             {
                 text = schemas_in_where(text, f, ctx);
+            }
+            // 3306: SHOW [FULL] COLUMNS over the MySQL-shaped COLUMNS
+            // provider (chapter 28).
+            if kind == ShowKind::Columns
+                && persona == Persona::MySql84
+                && let Some(sql) = crate::compat::schema::show_columns_rewrite(
+                    &info,
+                    &text,
+                    current,
+                    ctx.rewrite.map,
+                    &|v| sql_string(v, nbe),
+                )
+            {
+                text = sql;
             }
             forward(text, ResultMapper::show(kind, ctx.vis))
         }

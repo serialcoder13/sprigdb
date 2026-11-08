@@ -174,6 +174,12 @@ impl GatewayLocator {
             .cloned()
     }
 
+    /// Retires the pooled backend connections of `account` (chapter 29:
+    /// its grants changed).
+    pub fn retire_account(&self, account: &str) {
+        self.backends.pools().retire_account(account);
+    }
+
     /// Closes every pool (shutdown).
     pub async fn close(&self) {
         let pools: Vec<Pool> = self

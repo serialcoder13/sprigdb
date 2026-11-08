@@ -105,6 +105,10 @@ pub trait SourceIo: Send + Sync {
     ) -> Result<Vec<RowDigest>>;
     /// Rows with keys in `(after, last]`.
     async fn read_range(&self, t: &TableMeta, after: Option<&Row>, last: &Row) -> Result<Vec<Row>>;
+    /// The receipt a fence would return, recorded before fencing so any
+    /// worker can undo a fence whose worker crashed before recording the
+    /// real receipt (undoing a planned receipt skips what isn't fenced).
+    async fn plan_fence(&self) -> Result<serde_json::Value>;
     /// Fences the schemas against writes (chapter 09), by `deadline` from
     /// now.
     async fn fence(&self, deadline: Duration) -> Result<Fenced>;
@@ -210,26 +214,41 @@ pub struct MapState {
     pub cluster: ClusterId,
     /// The epoch.
     pub epoch: u64,
-    /// The job holding it, if held.
-    pub held_by: Option<String>,
-    /// The job that last moved it.
-    pub moved_by: Option<String>,
+    /// The job and owner token holding it, if held.
+    pub held_by: Option<(JobId, u64)>,
+    /// The job (and its owner's token) that last moved it.
+    pub moved_by: Option<(JobId, u64)>,
+}
+
+/// What [`MapIo::release`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Released {
+    /// The job's hold (by this owner or an older one) is cleared.
+    Ours,
+    /// The map wasn't held by the job.
+    NotHeld,
+    /// A newer owner of the job holds it: this worker lost the job.
+    Newer,
+    /// The job's cutover committed.
+    Committed,
 }
 
 /// The shard map side of a cutover: the hold, the single commit point
-/// (chapter 10's `CutoverCommit`), and the release.
+/// (chapter 10's `CutoverCommit`), and the release. Holds name the job and
+/// its owner's fencing token, so a worker that lost the job can't clear or
+/// commit its successor's hold.
 #[async_trait::async_trait]
 pub trait MapIo: Send + Sync {
-    /// Holds the tenant's map for `job` until `until_ms` (wall-clock ms).
-    /// Returns the epoch `E` held.
-    async fn hold(&self, job: JobId, until_ms: u64) -> Result<u64>;
-    /// Clears `job`'s hold, if it still has one.
-    async fn release(&self, job: JobId) -> Result<()>;
-    /// Points the map at `to` with epoch `E + 1`, if `job` still holds it.
-    async fn commit(&self, job: JobId, to: &ClusterId) -> Result<CommitOutcome>;
+    /// Holds the tenant's map for `job` (owner `token`) until `until_ms`
+    /// (wall-clock ms). Returns the epoch `E` held.
+    async fn hold(&self, job: JobId, token: u64, until_ms: u64) -> Result<u64>;
+    /// Clears the job's hold if it was made by `token` or an older owner.
+    async fn release(&self, job: JobId, token: u64) -> Result<Released>;
+    /// Points the map at `to` with epoch `E + 1`, if `job`/`token` holds it.
+    async fn commit(&self, job: JobId, token: u64, to: &ClusterId) -> Result<CommitOutcome>;
     /// Raises the epoch without moving (copy-and-swap: gateways refresh
-    /// table metadata), if `job` holds the map.
-    async fn bump(&self, job: JobId) -> Result<CommitOutcome>;
+    /// table metadata), if `job`/`token` holds the map.
+    async fn bump(&self, job: JobId, token: u64) -> Result<CommitOutcome>;
     /// The map now.
     async fn read(&self) -> Result<MapState>;
 }

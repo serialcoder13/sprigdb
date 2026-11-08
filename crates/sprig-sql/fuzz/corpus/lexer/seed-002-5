@@ -1,0 +1,1 @@
+USE crm; SELECT DATABASE(), CURRENT_USER(), @@version, VERSION()

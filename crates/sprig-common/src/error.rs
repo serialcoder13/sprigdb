@@ -451,7 +451,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::LongDataLimit
         | SprigCode::ReservedName
         | SprigCode::NameRewriteUnsupported
-        | SprigCode::MetadataTooLarge => (Code::FailedPrecondition, 400),
+        | SprigCode::MetadataTooLarge
+        | SprigCode::ResultTooLarge => (Code::FailedPrecondition, 400),
         SprigCode::GatewayDraining
         | SprigCode::ListenerRetired
         | SprigCode::MetaUnavailable
@@ -463,8 +464,12 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::BackendPoolTimeout
         | SprigCode::BackendLost
         | SprigCode::CatalogUnavailable
-        | SprigCode::AuthUnavailable => (Code::Unavailable, 503),
-        SprigCode::CatalogConflict | SprigCode::TenantTreeBusy => (Code::Aborted, 409),
+        | SprigCode::AuthUnavailable
+        | SprigCode::ForwardFailed => (Code::Unavailable, 503),
+        SprigCode::CatalogConflict
+        | SprigCode::TenantTreeBusy
+        | SprigCode::TxnHandleUnknown
+        | SprigCode::TxnHandleExpired => (Code::Aborted, 409),
         SprigCode::CatalogFormatTooNew => (Code::FailedPrecondition, 500),
         SprigCode::BinlogCorrupt => (Code::DataLoss, 500),
         SprigCode::ShardMoved | SprigCode::ShardLocked | SprigCode::MoveCutoverAborted => {
@@ -489,23 +494,19 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::TenantNotReady
         | SprigCode::TenantHasChildren
         | SprigCode::TenantDepthExceeded => (Code::FailedPrecondition, 409),
-        SprigCode::TenantSuspended | SprigCode::RemoteAccessDenied => {
-            (Code::PermissionDenied, 403)
-        }
-        SprigCode::LoginRateLimited => (Code::ResourceExhausted, 429),
-        SprigCode::SessionRevoked => (Code::Unauthenticated, 401),
-        SprigCode::PlacementUnavailable => (Code::ResourceExhausted, 503),
-        SprigCode::TenantConnectionLimit
+        SprigCode::TenantSuspended
+        | SprigCode::RemoteAccessDenied
+        | SprigCode::TxnHandleForbidden => (Code::PermissionDenied, 403),
+        SprigCode::LoginRateLimited
+        | SprigCode::TenantConnectionLimit
         | SprigCode::AdmissionTimeout
         | SprigCode::MemoryLimit => (Code::ResourceExhausted, 429),
-        SprigCode::TxnHandleUnknown | SprigCode::TxnHandleExpired => (Code::Aborted, 409),
-        SprigCode::TxnHandleForbidden => (Code::PermissionDenied, 403),
-        SprigCode::ResultTooLarge => (Code::FailedPrecondition, 400),
-        SprigCode::TenantAmbiguous => (Code::Unauthenticated, 401),
+        SprigCode::PlacementUnavailable => (Code::ResourceExhausted, 503),
         SprigCode::RequestTooLarge => (Code::InvalidArgument, 413),
-        SprigCode::ForwardFailed => (Code::Unavailable, 503),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
-        SprigCode::AdminUnauthenticated => (Code::Unauthenticated, 401),
+        SprigCode::AdminUnauthenticated | SprigCode::SessionRevoked | SprigCode::TenantAmbiguous => {
+            (Code::Unauthenticated, 401)
+        }
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
     };
     ProtocolError {

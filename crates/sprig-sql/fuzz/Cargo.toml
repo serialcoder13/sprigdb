@@ -1,0 +1,54 @@
+# cargo-fuzz targets for sprig-sql (chapter 46 step 4): the lexer, the name
+# rewriter and the translator's R0 rewrites. Not a workspace member: it has
+# its own [workspace] below and its own Cargo.lock, needs nightly, and is
+# never shipped. See README.md, and ../../sprig-proto-mysql/fuzz for the
+# wire codec's targets.
+
+[package]
+name = "sprig-sql-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# libfuzzer-sys is MIT/Apache-2.0; it bundles LLVM's libFuzzer
+# (Apache-2.0 WITH LLVM-exception). Fuzzing only; see README.md.
+libfuzzer-sys = "0.4"
+bytes = "1.12"
+sprig-common = { path = "../../sprig-common" }
+sprig-proto-mysql = { path = "../../sprig-proto-mysql" }
+sprig-sql = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "lexer"
+path = "fuzz_targets/lexer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rewriter"
+path = "fuzz_targets/rewriter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compat"
+path = "fuzz_targets/compat.rs"
+test = false
+doc = false
+bench = false

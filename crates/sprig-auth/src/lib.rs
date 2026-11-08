@@ -28,15 +28,24 @@
 //!   `mysql_native_password` verifiers, scramble checks and the decoy;
 //! - [`fast_cache`]: the `caching_sha2_password` fast cache;
 //! - [`settings`]: the `auth.*` keys read so far;
+//! - [`policy`]: step 5's lockout (failure counters, temporary locks,
+//!   automatic unlock), password rules (strength, history, reuse,
+//!   `REQUIRE CURRENT`) and account clauses within the tree's bounds;
+//! - [`admin::AccountOps`]: step 6's audited account changes on behalf of
+//!   an actor, possibly of an ancestor tenant;
+//! - [`ratelimit`]: step 7's per-address limit and failure delays;
+//! - [`revoke`]: step 8's auth change feed (revocation, session closing);
+//! - [`handoff`]: step 9's residency handoff, as a library;
+//! - [`audit`]: step 10's audit events;
+//! - [`http`] and [`apikey`]: step 11's HTTP Basic and API keys, as a
+//!   library for the HTTP front end;
 //! - [`accounts`]: the interim M0.2 account source (decision D1), kept
 //!   behind [`LoginMode`] until the gateway is rewired;
 //! - `testing` (feature `testing`): helpers for other crates' tests.
 //!
-//! Not yet: SCRAM verifiers and `SASLprep` (step 2's other half), lockout
-//! counting and automatic unlock, password policies and history checks
-//! (step 5), management from ancestors (6), rate limits (7), revocation and
-//! session closing (8), residency handoff (9), audit (10), HTTP, tokens,
-//! second factors and the other protocols (11-19), and all of chapter 29.
+//! Not yet: SCRAM verifiers and `SASLprep` (step 2's other half), the
+//! 7403 transport of handoffs, tokens, second factors and the other
+//! protocols (12-19).
 
 pub mod account;
 pub mod accounts;
@@ -47,6 +56,8 @@ pub mod authz;
 pub mod cache;
 mod crypt;
 pub mod fast_cache;
+pub mod handoff;
+pub mod http;
 pub mod mysql;
 pub mod policy;
 pub mod ratelimit;

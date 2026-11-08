@@ -160,6 +160,11 @@ pub struct GatewayConfig {
     /// baseline of the overhead measurement.
     #[serde(default)]
     pub workload_capture_off: bool,
+    /// The host other gateways, load balancers and `sprigctl` reach this
+    /// gateway at, published in its registration record (chapter 04,
+    /// "Registration records"). Unset: the hostname.
+    #[serde(default)]
+    pub advertise_addr: Option<String>,
 }
 
 /// `[gateway] login_mode`.

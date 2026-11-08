@@ -75,6 +75,7 @@ pub mod clock;
 pub mod faults;
 pub mod mariadb;
 pub mod meta;
+pub mod mover;
 pub mod net;
 pub mod rng;
 pub mod trace;

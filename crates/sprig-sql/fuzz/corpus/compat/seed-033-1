@@ -1,0 +1,1 @@
+CREATE VIEW billing.v AS SELECT * FROM crm.c

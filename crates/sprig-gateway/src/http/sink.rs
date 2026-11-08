@@ -15,7 +15,9 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use prost_types::ListValue;
-use sprig_api::proto::v1::{Column, QueryResponse, ResultEnd, ResultHeader, RowBatch, query_response};
+use sprig_api::proto::v1::{
+    Column, QueryResponse, ResultEnd, ResultHeader, RowBatch, query_response,
+};
 use sprig_api::results::{cell, is_binary, type_name};
 use sprig_common::{Result, SprigError};
 use sprig_proto_mysql::packets::OkPacket;
@@ -107,7 +109,8 @@ impl ChannelSink {
     }
 
     async fn part(&self, part: query_response::Part) -> Result<()> {
-        self.send(Item::Part(QueryResponse { part: Some(part) })).await
+        self.send(Item::Part(QueryResponse { part: Some(part) }))
+            .await
     }
 
     async fn flush_batch(&mut self) -> Result<()> {
@@ -116,7 +119,8 @@ impl ChannelSink {
         }
         let rows = std::mem::take(&mut self.batch);
         self.batch_bytes = 0;
-        self.part(query_response::Part::Rows(RowBatch { rows })).await
+        self.part(query_response::Part::Rows(RowBatch { rows }))
+            .await
     }
 
     async fn push_row(&mut self, cells: Vec<prost_types::Value>, bytes: usize) -> Result<()> {

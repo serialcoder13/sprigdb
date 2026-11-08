@@ -12,8 +12,15 @@ publish.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 mysql_async.workspace = true
+# The fleet simulator (chapter 11 step 8) drives the real planner and scheduler.
+sprig-balancer.workspace = true
+sprig-binlog.workspace = true
+sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
+# The mover's simulation (chapter 10 build step 9).
+sprig-mover.workspace = true
+sprig-shard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # rt + test-util: the simulation runs on a current-thread runtime with paused

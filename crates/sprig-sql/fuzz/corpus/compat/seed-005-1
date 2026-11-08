@@ -1,0 +1,1 @@
+DELETE t1 FROM billing.t1 JOIN crm.t2 USING (id)

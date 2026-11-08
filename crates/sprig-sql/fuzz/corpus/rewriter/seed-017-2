@@ -1,0 +1,1 @@
+SELECT * FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA = 'sharded'

@@ -69,6 +69,8 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
             "/admin/v1/tenants/{name}/queries/{fingerprint}",
             get(explain_query),
         )
+        .route("/admin/v1/jobs", get(list_jobs))
+        .route("/admin/v1/jobs/{id}", get(get_job).post(job_method))
         .route("/admin/v1/settings", get(list_setting_keys))
         .route(
             "/admin/v1/settings/{key}",
@@ -272,6 +274,53 @@ async fn cluster_method(
         Some((id, "drain")) => respond(app.svc.drain_cluster(id).await),
         _ => error_response(&invalid(format!(
             "POST /admin/v1/clusters/{name}: expected {{cluster_id}}:probe or {{cluster_id}}:drain"
+        ))),
+    }
+}
+
+/// `GET /admin/v1/jobs?state=&kind=`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct JobsQuery {
+    state: Option<String>,
+    kind: Option<String>,
+}
+
+async fn list_jobs(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let q: JobsQuery = query(&uri)?;
+        app.svc
+            .list_jobs(q.state.as_deref(), q.kind.as_deref())
+            .await
+    };
+    respond(r.await)
+}
+
+async fn get_job(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.get_job(&id).await
+    };
+    respond(r.await)
+}
+
+/// `{job_id}:cancel`.
+async fn job_method(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    if let Err(e) = authorize(&app, &headers) {
+        return error_response(&e);
+    }
+    match name.rsplit_once(':') {
+        Some((id, "cancel")) => respond(app.svc.cancel_job(id).await),
+        _ => error_response(&invalid(format!(
+            "POST /admin/v1/jobs/{name}: expected {{job_id}}:cancel"
         ))),
     }
 }

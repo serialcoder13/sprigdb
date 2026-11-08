@@ -183,6 +183,21 @@ pub fn expand_for_mariadb(src: &[u8], tokens: &[Token], backend_version: u32) ->
     Some(out)
 }
 
+/// [`expand_for_mariadb`] on statement text, lexed with `opts`; only the
+/// MySQL persona expands. `None` when nothing changes.
+#[must_use]
+pub fn expand_text_for_mariadb(
+    src: &[u8],
+    opts: &super::LexOptions,
+    backend_version: u32,
+) -> Option<Vec<u8>> {
+    if opts.persona != Persona::MySql84 || !src.windows(3).any(|w| w == b"/*!") {
+        return None;
+    }
+    let tokens = super::lex(src, opts).ok()?;
+    expand_for_mariadb(src, &tokens, backend_version)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

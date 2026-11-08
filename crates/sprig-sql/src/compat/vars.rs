@@ -7,7 +7,7 @@
 //! | Variable | MySQL persona | MariaDB persona |
 //! |---|---|---|
 //! | `version`, `VERSION()` | `gateway.mysql_server_version` | `gateway.mariadb_server_version` |
-//! | `version_comment` | `SprigDB (MySQL 8.4 compatible)` | `SprigDB (MariaDB compatible)` |
+//! | `version_comment` | `SprigDB <release>` | the same |
 //! | `gtid_mode` | `OFF` | (MariaDB's own: no such variable) |
 //! | `enforce_gtid_consistency` | `OFF` | (none) |
 //!
@@ -32,13 +32,12 @@ pub const MYSQL84_SQL_MODE: &str = "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZE
 pub const MARIADB_SQL_MODE: &str =
     "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION";
 
-/// The persona's `version_comment`.
+/// The persona's `version_comment`: `SprigDB` and the release, on both
+/// ports (the gateway's local answer to `SELECT @@version_comment` says
+/// the same).
 #[must_use]
-pub const fn version_comment(persona: Persona) -> &'static str {
-    match persona {
-        Persona::MySql84 => "SprigDB (MySQL 8.4 compatible)",
-        Persona::MariaDb => "SprigDB (MariaDB compatible)",
-    }
+pub const fn version_comment(_persona: Persona) -> &'static str {
+    concat!("SprigDB ", env!("CARGO_PKG_VERSION"))
 }
 
 /// A version string as a number, `Mmmrr` or `MMmmrr`: 80408 for
@@ -246,8 +245,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             sql,
-            "SELECT '8.4.8-SprigDB', '8.4.8-SprigDB' AS v, '8.4.8-SprigDB', \
-             'SprigDB (MySQL 8.4 compatible)', 'OFF', @@sql_mode, '@@version', x.version()"
+            format!(
+                "SELECT '8.4.8-SprigDB', '8.4.8-SprigDB' AS v, '8.4.8-SprigDB', \
+                 '{}', 'OFF', @@sql_mode, '@@version', x.version()",
+                version_comment(Persona::MySql84)
+            )
         );
         assert_eq!(r[0].column, "8.4.8-SprigDB");
         assert_eq!(r[0].written, "@@version");
@@ -263,7 +265,7 @@ mod tests {
         let ma = PersonaVars::new(Persona::MariaDb, "11.8.3-MariaDB-SprigDB");
         let (sql, _) = rw("SELECT version(), @@gtid_mode", &ma).unwrap();
         assert_eq!(sql, "SELECT '11.8.3-MariaDB-SprigDB', @@gtid_mode");
-        assert_eq!(ma.show_rows()[1].1, "SprigDB (MariaDB compatible)");
+        assert_eq!(ma.show_rows()[1].1, version_comment(Persona::MariaDb));
     }
 
     #[test]

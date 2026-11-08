@@ -1,0 +1,1 @@
+SELECT @@session.gtid_mode, @@sql_mode, @@version_comment LIMIT 1

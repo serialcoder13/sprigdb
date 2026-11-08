@@ -28,20 +28,69 @@ macro_rules! key {
     };
 }
 
-key!(TXN_IDLE_TIMEOUT_MS, "api.txn.idle_timeout_ms", 10_000, Scopes::TREE, 100, 3_600_000,
-    "Idle time before a transaction handle expires");
-key!(TXN_MAX_LIFETIME_MS, "api.txn.max_lifetime_ms", 60_000, Scopes::TREE, 100, 86_400_000,
-    "Longest life of a transaction handle");
-key!(TXN_MAX_OPEN_PER_TENANT, "api.txn.max_open_per_tenant", 256, Scopes::TREE, 0, 1_000_000,
-    "Open transaction handles per tenant per gateway");
-key!(STREAM_BATCH_ROWS, "api.stream_batch_rows", 500, Scopes::PROCESS, 1, 1_000_000,
-    "Rows per streamed batch");
-key!(REST_MAX_BUFFERED_BYTES, "api.rest.max_buffered_bytes", 16 << 20, Scopes::PROCESS, 1024, 1 << 30,
-    "Largest non-streamed REST result");
-key!(MAX_REQUEST_BYTES, "api.max_request_bytes", 16 << 20, Scopes::PROCESS, 1024, 1 << 30,
-    "Largest request body");
-key!(MAX_CONCURRENT_STREAMS, "api.max_concurrent_streams", 100, Scopes::PROCESS, 1, 10_000,
-    "HTTP/2 streams per connection");
+key!(
+    TXN_IDLE_TIMEOUT_MS,
+    "api.txn.idle_timeout_ms",
+    10_000,
+    Scopes::TREE,
+    100,
+    3_600_000,
+    "Idle time before a transaction handle expires"
+);
+key!(
+    TXN_MAX_LIFETIME_MS,
+    "api.txn.max_lifetime_ms",
+    60_000,
+    Scopes::TREE,
+    100,
+    86_400_000,
+    "Longest life of a transaction handle"
+);
+key!(
+    TXN_MAX_OPEN_PER_TENANT,
+    "api.txn.max_open_per_tenant",
+    256,
+    Scopes::TREE,
+    0,
+    1_000_000,
+    "Open transaction handles per tenant per gateway"
+);
+key!(
+    STREAM_BATCH_ROWS,
+    "api.stream_batch_rows",
+    500,
+    Scopes::PROCESS,
+    1,
+    1_000_000,
+    "Rows per streamed batch"
+);
+key!(
+    REST_MAX_BUFFERED_BYTES,
+    "api.rest.max_buffered_bytes",
+    16 << 20,
+    Scopes::PROCESS,
+    1024,
+    1 << 30,
+    "Largest non-streamed REST result"
+);
+key!(
+    MAX_REQUEST_BYTES,
+    "api.max_request_bytes",
+    16 << 20,
+    Scopes::PROCESS,
+    1024,
+    1 << 30,
+    "Largest request body"
+);
+key!(
+    MAX_CONCURRENT_STREAMS,
+    "api.max_concurrent_streams",
+    100,
+    Scopes::PROCESS,
+    1,
+    10_000,
+    "HTTP/2 streams per connection"
+);
 
 /// The values one request uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +144,10 @@ impl std::fmt::Debug for ApiSettingsSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Fixed(s) => f.debug_tuple("Fixed").field(s).finish(),
-            Self::Live { dc, .. } => f.debug_struct("Live").field("dc", dc).finish_non_exhaustive(),
+            Self::Live { dc, .. } => f
+                .debug_struct("Live")
+                .field("dc", dc)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -109,7 +161,8 @@ impl ApiSettingsSource {
             Self::Live { live, dc } => {
                 let snap = live.snapshot();
                 let ctx = SettingCtx::process(dc);
-                let us = |s: &Setting<u64>| usize::try_from(snap.get(s, &ctx)).unwrap_or(usize::MAX);
+                let us =
+                    |s: &Setting<u64>| usize::try_from(snap.get(s, &ctx)).unwrap_or(usize::MAX);
                 ApiSettings {
                     txn_idle: Duration::from_millis(snap.get(&TXN_IDLE_TIMEOUT_MS, &ctx)),
                     txn_lifetime: Duration::from_millis(snap.get(&TXN_MAX_LIFETIME_MS, &ctx)),

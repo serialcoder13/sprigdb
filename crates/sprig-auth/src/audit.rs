@@ -291,7 +291,14 @@ mod tests {
     fn memory_sink_keeps_order() {
         let m = MemoryAudit::new();
         m.emit(&AuditEvent::new(events::LOGIN_FAILED, "mysql", UNIX_EPOCH));
-        m.emit(&AuditEvent::new(events::LOGIN_SUCCEEDED, "mysql", UNIX_EPOCH));
-        assert_eq!(m.names(), vec![events::LOGIN_FAILED, events::LOGIN_SUCCEEDED]);
+        m.emit(&AuditEvent::new(
+            events::LOGIN_SUCCEEDED,
+            "mysql",
+            UNIX_EPOCH,
+        ));
+        assert_eq!(
+            m.names(),
+            vec![events::LOGIN_FAILED, events::LOGIN_SUCCEEDED]
+        );
     }
 }

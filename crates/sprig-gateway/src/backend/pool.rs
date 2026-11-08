@@ -154,6 +154,9 @@ struct Inner {
     pools: HashMap<PoolKey, Pool>,
     nodes: HashMap<NodeKey, NodeCount>,
     seq: u64,
+    /// Accounts whose grants changed (chapter 29): connections opened
+    /// before the instant are closed instead of reused.
+    retired: HashMap<String, Instant>,
 }
 
 pub(crate) struct Shared {
@@ -420,13 +423,20 @@ impl BackendPools {
         };
         let key = lease.key.clone();
         let node_key = key.node_key();
-        let reusable = how == Release::Reuse
+        let mut reusable = how == Release::Reuse
             && conn.client.is_idle()
             && !conn.client.in_transaction()
             && conn.age() < limits.max_lifetime;
         let mut close = None;
         {
             let mut g = self.shared.lock();
+            if let Some(at) = g.retired.get(&key.account)
+                && Instant::now()
+                    .checked_sub(conn.age())
+                    .is_none_or(|opened| opened < *at)
+            {
+                reusable = false;
+            }
             let inner = &mut *g;
             inner.seq += 1;
             let seq = inner.seq;
@@ -488,6 +498,34 @@ impl BackendPools {
         if !closed.is_empty() {
             self.shared.freed.notify_waiters();
         }
+        close_all(closed);
+    }
+
+    /// Retires the connections of backend `account` (chapter 29: its
+    /// grants changed, and MariaDB keeps a connection's database
+    /// privileges until its next `USE`): idle ones close now, leased ones
+    /// on release.
+    pub fn retire_account(&self, account: &str) {
+        let mut closed = Vec::new();
+        {
+            let mut g = self.shared.lock();
+            let inner = &mut *g;
+            inner.retired.insert(account.to_owned(), Instant::now());
+            for (key, pool) in &mut inner.pools {
+                if key.account != account {
+                    continue;
+                }
+                let node = inner.nodes.entry(key.node_key()).or_default();
+                for (_, b) in pool.idle.drain() {
+                    for c in b {
+                        pool.open = pool.open.saturating_sub(1);
+                        node.open = node.open.saturating_sub(1);
+                        closed.push(c.conn);
+                    }
+                }
+            }
+        }
+        self.shared.freed.notify_waiters();
         close_all(closed);
     }
 

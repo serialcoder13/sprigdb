@@ -86,6 +86,7 @@ async fn live_storage_scan_reads_innodb_table_stats() {
     let schema = format!("placement_scan_{}", std::process::id());
     conn.query_drop(format!("DROP DATABASE IF EXISTS {schema}")).await.unwrap();
     conn.query_drop(format!("CREATE DATABASE {schema}")).await.unwrap();
+    conn.query_drop(format!("USE {schema}")).await.unwrap();
     for t in ["a", "b"] {
         conn.query_drop(format!(
             "CREATE TABLE {schema}.{t} (id INT PRIMARY KEY, v VARCHAR(200), KEY kv (v)) ENGINE=InnoDB"

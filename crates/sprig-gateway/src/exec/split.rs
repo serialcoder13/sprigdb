@@ -377,6 +377,21 @@ pub fn is_session_status(stmt: &[u8]) -> bool {
     )
 }
 
+/// Whether `stmt` is `SHOW [GLOBAL | SESSION | LOCAL] VARIABLES ...`, whose
+/// version rows the relay rewrites with the persona's (chapter 28).
+#[must_use]
+pub fn is_show_variables(stmt: &[u8]) -> bool {
+    let Some(start) = first_word_at(stmt, 0) else {
+        return false;
+    };
+    let w = words(stmt, start, 3);
+    let w: Vec<&str> = w.iter().map(String::as_str).collect();
+    matches!(
+        w.as_slice(),
+        ["SHOW", "VARIABLES", ..] | ["SHOW", "GLOBAL" | "SESSION" | "LOCAL", "VARIABLES"]
+    )
+}
+
 /// For `LOAD DATA [LOW_PRIORITY | CONCURRENT] LOCAL INFILE 'name'` (and
 /// `LOAD XML ... LOCAL INFILE`): the file name, unescaped as the server
 /// will send it back in its request. `None` for any other statement.
@@ -585,6 +600,11 @@ mod tests {
         assert!(is_session_status(b"SHOW LOCAL STATUS"));
         assert!(!is_session_status(b"SHOW GLOBAL STATUS LIKE 'Ssl_cipher'"));
         assert!(!is_session_status(b"SHOW VARIABLES LIKE 'x'"));
+        assert!(is_show_variables(b"SHOW VARIABLES LIKE 'version%'"));
+        assert!(is_show_variables(
+            b"show global variables where Variable_name = 'version'"
+        ));
+        assert!(!is_show_variables(b"SHOW STATUS"));
     }
 
     #[test]

@@ -1,0 +1,1 @@
+CREATE PROCEDURE billing.p() BEGIN SELECT * FROM crm.c; END

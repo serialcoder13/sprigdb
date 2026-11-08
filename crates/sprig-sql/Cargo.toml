@@ -10,12 +10,16 @@ publish.workspace = true
 
 [dependencies]
 bytes.workspace = true
+# Chapter 29's account statement AST and actions (sprig-auth is the data
+# layer below; it never depends on sprig-sql).
+sprig-auth.workspace = true
 sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-proto-mysql.workspace = true
 sprig-settings.workspace = true
 sqlparser.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

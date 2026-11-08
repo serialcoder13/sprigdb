@@ -155,10 +155,13 @@ impl std::fmt::Debug for PassSession {
 const MARIADB_PASS_CAPS: Caps =
     Caps::MARIADB_CLIENT_EXTENDED_METADATA.union(Caps::MARIADB_CLIENT_STMT_BULK_OPERATIONS);
 
+/// A 3306 session's backend connections ask for extended metadata too:
+/// it marks JSON values, which the relay turns into MySQL's type 245
+/// (chapter 28; the block itself never reaches a MySQL client).
 fn mariadb_caps(persona: Persona, client: Caps) -> Caps {
     match persona {
         Persona::MariaDb => client & MARIADB_PASS_CAPS,
-        Persona::MySql84 => Caps::empty(),
+        Persona::MySql84 => Caps::MARIADB_CLIENT_EXTENDED_METADATA,
     }
 }
 
@@ -315,8 +318,7 @@ impl PassSession {
                 }
             }
             let info = StmtInfo::classify(&piece);
-            let conn_status =
-                split::is_session_status(&piece).then(|| relay::ConnStatus::of(cx.proto));
+            let conn_status = self.conn_status_for(&piece, cx.proto);
             let bs = self.bs(cx);
             bs.query(&info, &piece).await?;
             let r = Relay {
@@ -347,10 +349,13 @@ impl PassSession {
         let (sql, renames) = self.session_rewrites(sql, cx.session.id.0);
         let info = StmtInfo::classify(&sql);
         let prepared = self.bs(cx).prepare(&info, &sql).await?;
-        let meta_params = prepared.param_defs.clone();
+        let mut meta_params = prepared.param_defs.clone();
         let mut meta_columns = prepared.columns.clone();
-        for c in &mut meta_columns {
-            relay::rename(c, &renames);
+        relay::rename_all(&mut meta_columns, &renames);
+        if self.persona == Persona::MySql84 {
+            for c in meta_columns.iter_mut().chain(meta_params.iter_mut()) {
+                sprig_sql::compat::meta::mysql_column(c);
+            }
         }
         let mut st = Stmt::new(sql, info, &prepared);
         st.renames = renames;
@@ -825,11 +830,51 @@ impl SessionExec for PassSession {
 }
 
 impl PassSession {
+    /// The variables the persona answers (chapter 28): its version
+    /// string, `version_comment`, and on 3306 `gtid_mode`.
+    fn persona_vars(&self) -> sprig_sql::compat::vars::PersonaVars {
+        sprig_sql::compat::vars::PersonaVars::new(
+            self.persona,
+            self.settings.persona_version(self.persona),
+        )
+    }
+
+    /// The rows of `SHOW [SESSION] STATUS` (the client's TLS and
+    /// compression) or `SHOW VARIABLES` (the persona's version strings)
+    /// the relay rewrites; `None` for other statements.
+    fn conn_status_for(
+        &self,
+        piece: &[u8],
+        proto: &sprig_proto_mysql::state::ProtoState,
+    ) -> Option<relay::ConnStatus> {
+        if split::is_session_status(piece) {
+            Some(relay::ConnStatus::of(proto))
+        } else if split::is_show_variables(piece) {
+            Some(relay::ConnStatus::from_rows(
+                self.persona_vars().show_rows(),
+            ))
+        } else {
+            None
+        }
+    }
+
     /// The gateway's rewrites of a statement's text for this session: the
-    /// client's own values of gateway-owned variables, and
+    /// client's own values of gateway-owned variables, the persona's
+    /// variables (`@@version`, `VERSION()`, chapter 28) and
     /// `CONNECTION_ID()`. The renames give the columns back their names.
     fn session_rewrites(&self, sql: Bytes, conn_id: u32) -> (Bytes, Vec<split::Renamed>) {
         let mut renames = Vec::new();
+        let (lex, _) = self.lex_opts();
+        let sql = match sprig_sql::compat::vars::rewrite_reads(&sql, &lex, &self.persona_vars()) {
+            Some((s, r)) => {
+                renames.extend(r.into_iter().map(|r| split::Renamed {
+                    from: Bytes::from(r.column),
+                    to: Bytes::from(r.written),
+                }));
+                Bytes::from(s)
+            }
+            None => sql,
+        };
         let sql = match self
             .bs
             .as_ref()

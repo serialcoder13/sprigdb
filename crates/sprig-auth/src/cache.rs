@@ -368,7 +368,8 @@ impl CatalogExtension for AuthExtension {
                 store.verifiers_of(conn, &ids).await?
             };
             let keys = crate::apikey::keys_since(&store, conn, Some(since)).await?;
-            prev.apply(users, &verifiers, locks).with_api_keys(keys, false)
+            prev.apply(users, &verifiers, locks)
+                .with_api_keys(keys, false)
         } else {
             let users = store.users_since(conn, None).await?;
             let verifiers = store.all_verifiers(conn).await?;

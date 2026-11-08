@@ -70,6 +70,8 @@ pub struct TenantSession {
     /// shown in `SHOW INDEX`, `SHOW CREATE TABLE` and `STATISTICS`, and
     /// droppable. Kept by the gateway, never sent to MariaDB.
     pub show_auto_indexes: bool,
+    /// Chapter 29: active roles and the compiled privileges.
+    pub authz: super::authz::SessionAuthz,
     long_data_max: Arc<AtomicU64>,
     watch: Option<JoinHandle<()>>,
 }
@@ -115,6 +117,7 @@ impl TenantSession {
             warnings: None,
             current: None,
             show_auto_indexes: false,
+            authz: super::authz::SessionAuthz::default(),
             long_data_max: Arc::new(AtomicU64::new(LONG_DATA_MAX_BYTES.default)),
             watch: None,
         })
@@ -148,6 +151,16 @@ impl TenantSession {
         }
         let cat = self.svc.cache.get(self.tenant, fresh).await?;
         self.install(&cat);
+        // Chapter 29: the tenant's per-user backend accounts follow the
+        // snapshot before this session uses them.
+        if let Err(e) = self
+            .svc
+            .authz
+            .ensure(&self.svc, &cat, &self.principal.backend.cluster)
+            .await
+        {
+            tracing::warn!(tenant = %self.tenant, error = %e, "backend grants not reconciled");
+        }
         Ok(cat)
     }
 
@@ -172,6 +185,14 @@ impl TenantSession {
         let same = self.cat.as_ref().is_some_and(|c| c.version == cat.version);
         if !same {
             self.map = Arc::new(name_map(cat));
+        }
+        // An auth change (chapter 29) moves only the auth version.
+        if !same
+            || self
+                .cat
+                .as_ref()
+                .is_some_and(|c| c.auth_version != cat.auth_version)
+        {
             self.cat = Some(Arc::clone(cat));
         }
         if self.watch.is_none() {

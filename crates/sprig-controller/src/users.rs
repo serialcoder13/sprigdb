@@ -40,7 +40,11 @@ impl BootstrapHooks for AuthHooks {
     fn modules(&self) -> Vec<Module> {
         // Chapter 12's workload tables too: gateways write them from a
         // tenant's first statement.
-        vec![AUTH_MODULE, sprig_workload::store::WORKLOAD_MODULE]
+        vec![
+            AUTH_MODULE,
+            sprig_auth::authz::AUTHZ_MODULE,
+            sprig_workload::store::WORKLOAD_MODULE,
+        ]
     }
 }
 
@@ -157,7 +161,7 @@ impl TenantUsers {
         let mut conn = ep.pool.get_conn().await.map_err(|err| {
             SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(err)
         })?;
-        Migrator::new(&[AUTH_MODULE])?
+        Migrator::new(&[AUTH_MODULE, sprig_auth::authz::AUTHZ_MODULE])?
             .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
             .await?;
         drop(conn);
@@ -167,7 +171,12 @@ impl TenantUsers {
         }
         new.source = sprig_auth::store::UserSource::Api;
         new.hashing.native = req.native;
-        let changed = admin::create_user(&self.catalog, id, &new, &*self.clock).await?;
+        let mut changed = admin::create_user(&self.catalog, id, &new, &*self.clock).await?;
+        // Chapter 29: an operator-made user administers its tenant, as the
+        // bootstrap admin does (ALL and SPRIG_TENANT_ADMIN on *.*).
+        changed.auth_version =
+            sprig_auth::authz::account_sql::grant_tenant_admin(&self.catalog, id, changed.user_id)
+                .await?;
         tracing::info!(event = "auth.user_created", tenant, user = %req.user, host = %new.host, user_id = %changed.user_id, "user created");
         Ok(CreateUserResponse {
             tenant: tenant.to_owned(),

@@ -43,7 +43,10 @@ fn strength_levels_follow_validate_password() {
     assert!(!ok(Strength::Medium, "longenough"));
     assert!(!ok(Strength::Medium, "Longenough1"), "no special character");
     assert!(ok(Strength::Medium, "Longenough1!"));
-    assert!(ok(Strength::Medium, "Alice-pw-2026"), "medium allows the name inside");
+    assert!(
+        ok(Strength::Medium, "Alice-pw-2026"),
+        "medium allows the name inside"
+    );
     assert!(!ok(Strength::Strong, "Alice-pw-2026"), "strong doesn't");
     assert!(ok(Strength::Strong, "Correct-Horse-9"));
     assert_eq!(Strength::parse("MEDIUM"), Strength::Medium);
@@ -72,8 +75,7 @@ fn lockout_comes_from_the_account_else_the_settings() {
     let mut p = Policy::default();
     let r = row(1, "alice", "%", 1);
     assert!(!LockoutPolicy::of(&r, &p, &c).tracking(), "off by default");
-    p.values
-        .insert(FAILED_LOGIN_ATTEMPTS.key, Value::Int(3));
+    p.values.insert(FAILED_LOGIN_ATTEMPTS.key, Value::Int(3));
     assert!(
         !LockoutPolicy::of(&r, &p, &c).tracking(),
         "needs a lock time too"
@@ -160,7 +162,12 @@ fn history_and_reuse_interval() {
     let mut v = Vec::new();
     // Generations 1 (oldest) .. 4 (current), one a day before `now`.
     for (g, pw) in [(1, "one"), (2, "two"), (3, "three"), (4, "four")] {
-        let mut r = sha2(g, 1, if g == 4 { Slot::Primary } else { Slot::History }, pw.as_bytes());
+        let mut r = sha2(
+            g,
+            1,
+            if g == 4 { Slot::Primary } else { Slot::History },
+            pw.as_bytes(),
+        );
         r.generation = g;
         r.created_at = now - Duration::from_secs((5 - g) * 86_400);
         v.push(r);
@@ -171,7 +178,10 @@ fn history_and_reuse_interval() {
         ..PasswordRules::default()
     };
     assert!(!rules(0, 0).reused(b"four", &v, now), "no rules, no check");
-    assert!(rules(1, 0).reused(b"four", &v, now), "history 1: the current");
+    assert!(
+        rules(1, 0).reused(b"four", &v, now),
+        "history 1: the current"
+    );
     assert!(!rules(1, 0).reused(b"three", &v, now));
     assert!(rules(2, 0).reused(b"three", &v, now));
     assert!(!rules(3, 0).reused(b"one", &v, now));
@@ -222,8 +232,14 @@ fn persona_errors() {
     assert_eq!(code(PasswordProblem::Weak.error(my, "a", "%")), 1819);
     assert_eq!(code(PasswordProblem::Reused.error(my, "a", "%")), 3638);
     assert_eq!(code(PasswordProblem::Reused.error(maria, "a", "%")), 1819);
-    assert_eq!(code(PasswordProblem::CurrentMissing.error(my, "a", "%")), 3892);
-    assert_eq!(code(PasswordProblem::CurrentWrong.error(my, "a", "%")), 3891);
+    assert_eq!(
+        code(PasswordProblem::CurrentMissing.error(my, "a", "%")),
+        3892
+    );
+    assert_eq!(
+        code(PasswordProblem::CurrentWrong.error(my, "a", "%")),
+        3891
+    );
     assert_eq!(
         PasswordProblem::Reused.error(my, "alice", "%").message,
         "Cannot use these credentials for 'alice@%' because they contradict the password history policy"
@@ -241,19 +257,20 @@ async fn new_password_checks_in_order() {
         reuse_days: 0,
         require_current: true,
     };
-    let change = |pw: &'static [u8], current: Option<&'static [u8]>, actor: Option<Actor>| {
-        PasswordChange {
+    let change =
+        |pw: &'static [u8], current: Option<&'static [u8]>, actor: Option<Actor>| PasswordChange {
             password: pw,
             current,
             retain_current: false,
             discard_old: false,
             actor,
             persona: Persona::MySql84,
-        }
-    };
-    let check =
-        async |c: PasswordChange<'_>| check_new_password(&rules, &r, &v, &c, now).await;
-    assert_eq!(check(change(b"weak", None, None)).await, Some(PasswordProblem::Weak));
+        };
+    let check = async |c: PasswordChange<'_>| check_new_password(&rules, &r, &v, &c, now).await;
+    assert_eq!(
+        check(change(b"weak", None, None)).await,
+        Some(PasswordProblem::Weak)
+    );
     assert_eq!(
         check(change(b"New-Pw-2026", None, None)).await,
         Some(PasswordProblem::CurrentMissing)
@@ -309,8 +326,7 @@ fn account_clauses_stay_within_the_tree_bounds() {
     .validate(&p, &c)
     .unwrap();
     // A locked key: only the resolved value.
-    p.bounds
-        .insert(PASSWORD_HISTORY.key, Bounds::locked());
+    p.bounds.insert(PASSWORD_HISTORY.key, Bounds::locked());
     p.values.insert(PASSWORD_HISTORY.key, Value::Int(5));
     let five = AccountClauses {
         password_history: Some(Some(5)),

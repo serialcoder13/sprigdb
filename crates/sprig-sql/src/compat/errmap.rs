@@ -19,6 +19,9 @@
 //! MySQL's templates, and 3140's parser detail and position (MariaDB
 //! doesn't say why the text isn't JSON).
 
+use sprig_common::{ErrorKind, SprigError};
+use sprig_proto_mysql::packets::Persona;
+
 /// An error as the wire carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireError {
@@ -40,6 +43,23 @@ impl WireError {
             message: message.into(),
         }
     }
+}
+
+/// The error a client of `persona` gets for `e`, when it differs: on 3306,
+/// a backend (MariaDB) error mapped by [`to_mysql`]; SprigDB's own and
+/// standard errors are already MySQL's. `None`: send `e` as it is.
+#[must_use]
+pub fn for_persona(persona: Persona, e: &SprigError) -> Option<SprigError> {
+    let ErrorKind::Backend { errno, sqlstate } = e.kind else {
+        return None;
+    };
+    if persona != Persona::MySql84 {
+        return None;
+    }
+    let m = to_mysql(&WireError::new(errno, sqlstate, e.message.clone()))?;
+    let mut out = SprigError::backend(m.code, m.sqlstate, m.message);
+    out.retryable = e.retryable;
+    Some(out)
 }
 
 /// The first backquoted name in `s`, unescaped.
@@ -161,6 +181,16 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn only_backend_errors_on_3306_change() {
+        let e = SprigError::backend(1969, *b"70100", "Query execution was interrupted");
+        let m = for_persona(Persona::MySql84, &e).unwrap();
+        assert_eq!(m.protocol().mysql_errno, 3024);
+        assert!(for_persona(Persona::MariaDb, &e).is_none());
+        let s = SprigError::standard(1969, *b"70100", "x");
+        assert!(for_persona(Persona::MySql84, &s).is_none());
     }
 
     #[test]

@@ -109,7 +109,10 @@ pub fn from_status(s: &tonic::Status) -> SprigError {
         .get("mysql_errno")
         .and_then(|n| n.parse().ok())
         .unwrap_or(0);
-    let state = info.metadata.get("sqlstate").map_or("HY000", String::as_str);
+    let state = info
+        .metadata
+        .get("sqlstate")
+        .map_or("HY000", String::as_str);
     build(errno, info.reason.as_str(), state, s.message())
 }
 
@@ -237,6 +240,11 @@ mod tests {
         assert_eq!(s.code(), tonic::Code::Aborted);
         let st = rpc::Status::decode(s.details()).unwrap();
         assert!(st.details.iter().any(|a| a.type_url == RETRY_INFO_URL));
-        assert_eq!(to_rest(&SprigError::new(SprigCode::ReservedName, "r")).1.name, "ER_SPRIG_RESERVED_NAME");
+        assert_eq!(
+            to_rest(&SprigError::new(SprigCode::ReservedName, "r"))
+                .1
+                .name,
+            "ER_SPRIG_RESERVED_NAME"
+        );
     }
 }

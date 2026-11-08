@@ -161,6 +161,31 @@ pub enum SecretSource {
     File(PathBuf),
     /// An environment variable.
     Env(String),
+    /// A credential already in memory: the per-user backend accounts'
+    /// derived passwords (chapter 29). Never printed.
+    Resolved(ResolvedSecret),
+}
+
+/// A credential held in memory ([`SecretSource::Resolved`]). `Debug` and
+/// `Display` show only the user.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedSecret(pub std::sync::Arc<Credential>);
+
+impl fmt::Debug for ResolvedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ResolvedSecret({})", self.0.user)
+    }
+}
+
+impl SecretRef {
+    /// A reference to a credential already in memory.
+    #[must_use]
+    pub fn resolved(c: Credential) -> Self {
+        Self {
+            source: SecretSource::Resolved(ResolvedSecret(std::sync::Arc::new(c))),
+            section: None,
+        }
+    }
 }
 
 /// A parsed secret reference: `file:<path>[#section]` or
@@ -201,6 +226,7 @@ impl fmt::Display for SecretRef {
         match &self.source {
             SecretSource::File(p) => write!(f, "file:{}", p.display())?,
             SecretSource::Env(v) => write!(f, "env:{v}")?,
+            SecretSource::Resolved(r) => write!(f, "resolved:{}", r.0.user)?,
         }
         if let Some(s) = &self.section {
             write!(f, "#{s}")?;
@@ -222,6 +248,13 @@ impl SecretRef {
                 .map_err(|e| invalid(format!("secret {self}: can't read the file: {e}")))?,
             SecretSource::Env(v) => std::env::var(v)
                 .map_err(|_| invalid(format!("secret {self}: the variable isn't set")))?,
+            SecretSource::Resolved(r) => {
+                let mut c = (*r.0).clone();
+                if c.user.is_empty() {
+                    default_user.clone_into(&mut c.user);
+                }
+                return Ok(c);
+            }
         };
         parse_credential(&text, self.section.as_deref(), default_user)
             .map_err(|why| invalid(format!("secret {self}: {why}")))

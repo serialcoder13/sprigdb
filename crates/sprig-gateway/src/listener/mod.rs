@@ -393,7 +393,8 @@ impl ListenerManager {
             (_, TlsMode::Off) => None,
             (None, _) => return Err("TLS mode needs a certificate bundle".into()),
             (Some(cert), _) => {
-                let mut cfg = tls::server_config(cert.clone(), spec.min_tls).map_err(|e| e.message)?;
+                let mut cfg =
+                    tls::server_config(cert.clone(), spec.min_tls).map_err(|e| e.message)?;
                 if spec.protocol == Protocol::Http {
                     // ALPN: h2 first, then HTTP/1.1 (chapter 37).
                     let c = Arc::make_mut(&mut cfg);

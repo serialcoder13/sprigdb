@@ -53,7 +53,10 @@ async fn gateways_get_distinct_slots_and_records() {
     assert_eq!(all.len(), 3);
     let b = get(store.as_ref(), "gw-b").await.unwrap().unwrap();
     assert_eq!(b.slot, tables[1].slot());
-    let holder = slot_holder(store.as_ref(), tables[2].slot()).await.unwrap().unwrap();
+    let holder = slot_holder(store.as_ref(), tables[2].slot())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(holder.gateway_id, "gw-c");
     stop.cancel();
     for t in tasks {
@@ -71,7 +74,13 @@ async fn state_changes_are_written_at_once() {
     let r = Registrar::new(record("gw-a"));
     let sessions = Arc::new(SessionTable::new(clock.clone()));
     let task = r
-        .start(store.clone(), clock, sessions, || Duration::from_secs(5), stop.clone())
+        .start(
+            store.clone(),
+            clock,
+            sessions,
+            || Duration::from_secs(5),
+            stop.clone(),
+        )
         .await;
     r.set_state(GatewayState::Draining);
     let mut seen = None;

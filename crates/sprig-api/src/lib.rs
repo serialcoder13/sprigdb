@@ -12,7 +12,7 @@
 //!   workspace build needs no `protoc`.
 //! - [`rest`]: the REST face. Every RPC's `google.api.http` rule is in one
 //!   route table ([`rest::ROUTES`], checked against the protos by a test),
-//!   with a path-template matcher and the OpenAPI v3 document built from
+//!   with a path-template matcher and the `OpenAPI` v3 document built from
 //!   the table.
 //! - [`status`]: error mapping. A [`SprigError`](sprig_common::SprigError)
 //!   becomes a gRPC `Status` carrying `google.rpc.Status` with `ErrorInfo`

@@ -1,0 +1,1 @@
+/*M!100100 SET sql_mode = 'ORACLE' */ SELECT 1

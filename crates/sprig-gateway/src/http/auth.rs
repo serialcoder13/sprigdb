@@ -167,7 +167,11 @@ impl HttpAuthenticator for BasicLogins {
             }
             AuthVerdict::Refuse(e) => {
                 metrics::counter!("sprig_auth_http_requests_total", "scheme" => "basic", "outcome" => "refused").increment(1);
-                Err(sprig_api::status::from_parts(e.code, &e.sqlstate, &e.message))
+                Err(sprig_api::status::from_parts(
+                    e.code,
+                    &e.sqlstate,
+                    &e.message,
+                ))
             }
         }
     }

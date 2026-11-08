@@ -22,6 +22,7 @@
 //! executor's session (see [`crate::exec`]).
 
 pub mod aliases;
+pub mod authz;
 pub mod autoindex;
 pub mod backends;
 pub mod ddl;
@@ -89,6 +90,8 @@ pub struct TenantServices {
     /// Chapter 14's auth change feed (revocation), over the cache's load
     /// feed; chapter 29's privilege cache can follow it too.
     pub auth_changes: Arc<AuthChanges>,
+    /// Chapter 29: per-user backend accounts and their reconcile state.
+    pub authz: authz::AuthzServices,
     _follow: Registration,
 }
 
@@ -125,7 +128,10 @@ impl TenantServices {
             backends,
         ));
         let dyn_locator: Arc<dyn CatalogLocator> = locator.clone();
-        let extensions: Vec<Arc<dyn CatalogExtension>> = vec![Arc::new(AuthExtension)];
+        let extensions: Vec<Arc<dyn CatalogExtension>> = vec![
+            Arc::new(AuthExtension),
+            Arc::new(sprig_auth::authz::AuthzExtension),
+        ];
         let source = MariaSource::new(Arc::clone(&dyn_locator), extensions)?;
         let feed = DirectoryWatch::start(Arc::clone(&global))?;
         let settings = Settings::new(live.clone());
@@ -170,6 +176,7 @@ impl TenantServices {
             global,
             clock,
             auth_changes,
+            authz: authz::AuthzServices::default(),
             _follow: follow,
         }))
     }
@@ -202,7 +209,11 @@ fn close_revoked_sessions(
             }
             let ancestry: Vec<_> = change.catalog.ancestry.iter().map(|a| a.id).collect();
             let ctx = sprig_settings::SettingCtx::process(&dc).for_tenant(change.tenant, &ancestry);
-            if !settings.get(&CLOSE_SESSIONS_ON_REVOKE, &ctx, Some(&change.catalog.settings)) {
+            if !settings.get(
+                &CLOSE_SESSIONS_ON_REVOKE,
+                &ctx,
+                Some(&change.catalog.settings),
+            ) {
                 continue;
             }
             for r in change.revoked.iter().filter(|r| r.reason.closes_sessions()) {

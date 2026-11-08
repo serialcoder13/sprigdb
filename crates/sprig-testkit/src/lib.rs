@@ -19,7 +19,9 @@
 //!   conformance scenarios ([`sim::mariadb`]);
 //! - [`faults`]: the [`faults::Faults`] trait, toxiproxy and `faultd` for
 //!   Compose, throwaway `sprig-sim-*` containers, operation histories and
-//!   `elle-cli`.
+//!   `elle-cli`;
+//! - [`fleet`]: the fleet simulator of chapter 11 (placement and
+//!   rebalancing over months of synthetic load, with a fake mover).
 //!
 //! Differential testing and the other suites of chapter 46 come in its
 //! later build steps.
@@ -43,6 +45,7 @@ pub mod compose;
 pub mod connectors;
 pub mod env;
 pub mod faults;
+pub mod fleet;
 pub mod sim;
 pub mod skip;
 pub mod util;

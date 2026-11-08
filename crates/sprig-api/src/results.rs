@@ -30,7 +30,7 @@ pub const BINARY_CHARSET: u32 = 63;
 #[must_use]
 pub fn type_name(mysql_type: u32) -> &'static str {
     match mysql_type {
-        0 => "DECIMAL",
+        0 | 246 => "DECIMAL",
         1 => "TINYINT",
         2 => "SMALLINT",
         3 => "INT",
@@ -44,17 +44,15 @@ pub fn type_name(mysql_type: u32) -> &'static str {
         11 => "TIME",
         12 => "DATETIME",
         13 => "YEAR",
-        15 => "VARCHAR",
+        15 | 253 => "VARCHAR",
         16 => "BIT",
         245 => "JSON",
-        246 => "DECIMAL",
         247 => "ENUM",
         248 => "SET",
         249 => "TINYBLOB",
         250 => "MEDIUMBLOB",
         251 => "LONGBLOB",
         252 => "BLOB",
-        253 => "VARCHAR",
         254 => "CHAR",
         255 => "GEOMETRY",
         _ => "UNKNOWN",
@@ -367,7 +365,10 @@ pub fn collect(parts: impl IntoIterator<Item = QueryResponse>) -> ExecuteRespons
                 });
             }
             Some(query_response::Part::Rows(b)) => {
-                current.get_or_insert_with(SqlResult::default).rows.extend(b.rows);
+                current
+                    .get_or_insert_with(SqlResult::default)
+                    .rows
+                    .extend(b.rows);
             }
             Some(query_response::Part::End(e)) => {
                 let mut r = current.take().unwrap_or_default();
@@ -455,7 +456,10 @@ mod tests {
         assert_eq!(j["results"][0]["rows"][0][0], "1");
         let back = execute_from_json(&j).unwrap();
         assert_eq!(back, r);
-        assert_eq!(cell_bytes(&back.results[0].rows[0].values[1], true).unwrap(), vec![0, 255, 7]);
+        assert_eq!(
+            cell_bytes(&back.results[0].rows[0].values[1], true).unwrap(),
+            vec![0, 255, 7]
+        );
     }
 
     #[test]
@@ -469,7 +473,9 @@ mod tests {
                 })),
             },
             QueryResponse {
-                part: Some(query_response::Part::Rows(RowBatch { rows: r.rows.clone() })),
+                part: Some(query_response::Part::Rows(RowBatch {
+                    rows: r.rows.clone(),
+                })),
             },
             QueryResponse {
                 part: Some(query_response::Part::End(ResultEnd {

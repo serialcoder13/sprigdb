@@ -23,6 +23,7 @@
 //! | `Tenants.GetTenant` | `GET /admin/v1/tenants/{name}` |
 //! | `Tenants.DeleteTenant` | `DELETE /admin/v1/tenants/{name}` |
 //! | `Users.CreateUser` (interim) | `POST /admin/v1/tenants/{name}/users` ([`crate::users`]) |
+//! | `Jobs.ListJobs`, `GetJob`, `CancelJob` | `/admin/v1/jobs[/{job_id}[:cancel]]` ([`jobs`]) |
 //! | `Settings.*` | `/admin/v1/settings[/{key}]`, `/admin/v1/tenants/{name}/settings` ([`crate::settings_admin`]) |
 //! | `Indexes.*`, `Explain.ExplainQuery` | `/admin/v1/tenants/{name}/indexes[/{index}[:action]]`, `.../recommendations`, `.../queries/{fingerprint}:explain` ([`crate::autoindex_admin`]) |
 //!
@@ -43,6 +44,7 @@
 //! an optional bearer token (`[controller] admin_token_file`).
 
 pub mod http;
+pub mod jobs;
 pub mod types;
 
 use std::sync::Arc;

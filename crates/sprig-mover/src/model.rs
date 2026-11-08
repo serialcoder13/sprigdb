@@ -244,6 +244,19 @@ pub struct SourceTxn {
     pub watermarks: Vec<Watermark>,
     /// DDL touching the job's schemas.
     pub ddl: Option<SourceDdl>,
+    /// An XA phase: the changes of a `Prepare` group wait for its commit.
+    pub xa: Option<XaPhase>,
+}
+
+/// Where an XA transaction is (chapter 10, "The applier", XA).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XaPhase {
+    /// `XA PREPARE`: the group's changes, held until the outcome.
+    Prepare(String),
+    /// `XA COMMIT`: apply the held changes.
+    Commit(String),
+    /// `XA ROLLBACK`: drop them.
+    Rollback(String),
 }
 
 /// What a stream yields.

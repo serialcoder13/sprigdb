@@ -48,10 +48,14 @@
 pub mod backend;
 pub mod exec;
 pub mod frontend;
+pub mod http;
+pub mod lifecycle;
 pub mod listener;
 pub mod mysql;
+pub mod peer;
 pub mod pipeline;
 pub mod reads;
+pub mod registry;
 pub mod session;
 pub mod tenant;
 pub mod tls;
@@ -71,14 +75,15 @@ use crate::listener::{Frontends, ListenerManager};
 use crate::session::SessionTable;
 use crate::tls::CertStore;
 
-/// Runs the gateway role until `ctx.shutdown` is cancelled.
+/// Runs the gateway role until `ctx.shutdown` is cancelled or a drain is
+/// asked for through the Admin API.
 ///
 /// The `sprigdb` binary has already bound the telemetry port, so
 /// `/healthz` answers and `/readyz` reports `starting` until this marks the
-/// process ready. Startup follows chapter 04 steps 5 and 6: load the
-/// settings mirrors, apply the listeners, then report ready; listener
-/// settings then apply live. Shutdown closes the listeners and waits up to
-/// `gateway.drain_timeout_seconds` for open connections.
+/// process ready. Startup follows chapter 04: load the settings mirrors,
+/// register (lease, slot, record in state `starting`), apply the listeners,
+/// then report ready; listener settings then apply live. Drain follows
+/// chapter 04's five steps ([`lifecycle`]).
 ///
 /// # Errors
 /// `Internal` if the setting registry is invalid (a bug); 39998 for
@@ -90,6 +95,16 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let registry = Registry::global()?;
     let dc = ctx.config.node.dc.clone();
     let sctx = SettingCtx::process(&dc);
+    let gateway_id = ctx.config.node.id();
+    // Components stop on this token: SIGTERM, or the end of a drain asked
+    // for through the Admin API.
+    let stop = ctx.shutdown.child_token();
+    let rctx = RoleContext {
+        config: ctx.config.clone(),
+        health: ctx.health.clone(),
+        shutdown: stop.clone(),
+    };
+    let lifecycle = lifecycle::Lifecycle::new();
 
     let live = LiveSettings::start(registry, settings_stores(&ctx).await?)?;
     tokio::select! {
@@ -99,7 +114,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
 
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let certs = Arc::new(CertStore::new(clock.clone()));
-    let watcher = certs.spawn_watcher(tls::POLL_INTERVAL, ctx.shutdown.clone());
+    let watcher = certs.spawn_watcher(tls::POLL_INTERVAL, stop.clone());
     // Backend pools and read routing (chapter 06): clusters from the DC
     // tier's registry, settings from the live mirror.
     let stores = live.stores();
@@ -116,10 +131,54 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     );
     let _reaper = backends.start();
     let sessions = Arc::new(SessionTable::new(clock.clone()));
+
+    // Registration (chapter 04 step 6): the slot first, so connection ids
+    // carry it from the first session on.
+    let registrar = registry::Registrar::new(registry::GatewayRecord {
+        gateway_id: gateway_id.clone(),
+        slot: 0,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        addr: ctx
+            .config
+            .gateway
+            .advertise_addr
+            .clone()
+            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned()),
+        listeners: std::collections::BTreeMap::new(),
+        state: registry::GatewayState::Starting,
+        catalog_formats: Vec::new(),
+        load: registry::Load::default(),
+    });
+    let lease_live = live.clone();
+    let lease_dc = dc.clone();
+    let registration = registrar
+        .start(
+            Arc::clone(&stores.dc),
+            clock.clone(),
+            Arc::clone(&sessions),
+            move || {
+                Duration::from_secs(lease_live.get(
+                    &registry::LEASE_TTL_SECONDS,
+                    &SettingCtx::process(&lease_dc),
+                ))
+            },
+            stop.clone(),
+        )
+        .await;
+
+    // The peer service (chapter 04 step 10).
+    let peer_tls = ctx
+        .config
+        .tls
+        .as_ref()
+        .map(peer::PeerTls::from_config)
+        .transpose()?;
+    let peers = Arc::new(peer::Peers::new(Arc::clone(&stores.dc), peer_tls.clone()));
+
     // Logins (chapter 14) and, for catalog logins, the tenant services
     // (chapters 07 and 08).
     let (login, tenants, login_tasks) = logins(
-        &ctx,
+        &rctx,
         &live,
         Arc::clone(&backends),
         Arc::clone(&sessions),
@@ -137,32 +196,87 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     }
     // Workload capture (chapter 12, M0.4): the hook and its flusher.
     let (workload, flusher) = workload::start(
-        &ctx.config,
+        &rctx.config,
         &live,
         tenants.as_ref(),
         clock.clone(),
-        ctx.shutdown.clone(),
+        stop.clone(),
     )?;
-    // The MySQL and MariaDB front ends (chapter 05): requests pass the
-    // workload hook (chapter 12) into the executor.
+    // Every front end's requests pass the workload hook (chapter 12) into
+    // the one executor.
+    let shared_exec = pipeline::with_workload(Arc::new(executor), workload);
+    // The MySQL and MariaDB front ends (chapter 05).
     let mysql = mysql::MySqlStack::start(
         mysql::StackConfig {
-            login,
+            login: Arc::clone(&login),
             live: live.clone(),
             dc: dc.clone(),
             hostname: ctx.config.node.id(),
             clock: clock.clone(),
-            executor: pipeline::with_workload(Arc::new(executor), workload),
+            executor: Arc::clone(&shared_exec),
         },
-        ctx.shutdown.clone(),
+        stop.clone(),
     )?;
+    // HTTP on 8080 and 8443 (chapter 04 step 4, chapter 37).
+    let engine = Arc::new(http::sql::SqlEngine {
+        executor: Arc::clone(&shared_exec),
+        sessions: Arc::clone(&sessions),
+        api: http::settings::ApiSettingsSource::Live {
+            live: live.clone(),
+            dc: dc.clone(),
+        },
+        frontend: mysql::settings::SettingsSource::Live {
+            live: live.clone(),
+            dc: dc.clone(),
+        },
+        hostname: ctx.config.node.id(),
+        dc: dc.to_string(),
+        gateway_id: gateway_id.clone(),
+        peers: Some(Arc::clone(&peers)),
+        txns: http::sql::TxnRegistry::default(),
+        draining: lifecycle.flag(),
+    });
+    let txn_reaper = tokio::spawn(Arc::clone(&engine).reap(stop.clone()));
+    let drain_lc = lifecycle.clone();
+    let core = Arc::new(http::Core {
+        engine: Arc::clone(&engine),
+        auth: Arc::new(http::auth::BasicLogins::new(Arc::clone(&login))),
+        admin: Arc::new(http::admin::AdminApi::new(
+            Arc::clone(&stores.dc),
+            gateway_id.clone(),
+            Some(Arc::clone(&peers)),
+            Arc::new(move |reason: &str| drain_lc.request_drain(reason)),
+        )),
+    });
+    let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
+    let peer_host = Arc::new(PeerHost {
+        core: Arc::clone(&core),
+        sessions: Arc::clone(&sessions),
+        gateway_id: gateway_id.clone(),
+        lifecycle: lifecycle.clone(),
+    });
     let binds = bind_overrides(&ctx)?;
+    let peer_bind = match binds.get("peer") {
+        Some(a) => *a,
+        None => live.get(&peer::PEER_BIND, &sctx).parse().map_err(|e| {
+            SprigError::new(
+                sprig_common::SprigCode::ConfigInvalid,
+                format!("listener.peer.bind: {e}"),
+            )
+        })?,
+    };
+    let peer_server = peer::serve(peer_bind, peer_tls, peer_host, stop.clone()).await?;
+    let peer_port = peer_server.as_ref().map(|(a, _)| a.port());
+
     let listeners = Arc::new(
         ListenerManager::new(
-            mysql.register(Frontends::new()),
+            mysql
+                .register(Frontends::new())
+                .with(http_fe as Arc<dyn frontend::Frontend>),
             Arc::new(
-                GatewayContext::with_sessions(clock.clone(), sessions)
-                    .with_backends(Arc::clone(&backends)),
+                GatewayContext::with_sessions(clock.clone(), Arc::clone(&sessions))
+                    .with_backends(Arc::clone(&backends))
+                    .with_peers(Arc::clone(&peers)),
             ),
         )
         .with_bind_overrides(binds),
@@ -178,35 +292,147 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         Arc::clone(&listeners),
         changes,
         listener::live::rejections(&report),
-        ctx.shutdown.clone(),
+        stop.clone(),
     ));
+    // The record's listener ports and load, kept current.
+    let reporter = tokio::spawn(report_load(
+        registrar.clone(),
+        Arc::clone(&listeners),
+        Arc::clone(&sessions),
+        peer_port,
+        stop.clone(),
+    ));
+    registrar.set_listeners(listener_ports(&listeners, peer_port).await);
+    registrar.set_state(registry::GatewayState::Ready);
 
     metrics::gauge!("sprig_gateway_draining").set(0.0);
     ctx.health.set_ready();
-    tracing::info!(%role, "ready");
+    tracing::info!(%role, gateway = %gateway_id, slot = sessions.slot(), "ready");
 
-    ctx.shutdown.cancelled().await;
+    tokio::select! {
+        () = ctx.shutdown.cancelled() => {}
+        () = lifecycle.requested() => {}
+    }
 
+    // Drain (chapter 04, "Drain").
+    // 1. Draining: readiness off, the record says so; give load balancers
+    //    time to notice.
+    lifecycle.mark_draining();
     ctx.health.set_draining();
+    registrar.set_state(registry::GatewayState::Draining);
     metrics::gauge!("sprig_gateway_draining").set(1.0);
     let drain = Duration::from_secs(live.get(&listener::settings::DRAIN_TIMEOUT_SECONDS, &sctx));
-    tracing::info!(%role, timeout_s = drain.as_secs(), "draining: closing listeners");
+    let lb_delay = Duration::from_secs(live.get(&lifecycle::DRAIN_LB_DELAY_SECONDS, &sctx));
+    tracing::info!(event = "gateway.drain_started", %role, lb_delay_s = lb_delay.as_secs(), timeout_s = drain.as_secs(), "draining");
+    tokio::time::sleep(lb_delay).await;
+    // 2-4. Close the listeners; idle sessions close now, busy ones at their
+    //    next safe point; open transaction handles get the same time.
+    let marked = sessions.close_all_at_safe_point();
+    tracing::info!(
+        sessions = marked,
+        "draining: listeners closed, sessions closing at safe points"
+    );
+    tokio::join!(listeners.shutdown(drain), engine.txns.wait_empty(drain));
+    // 5. Stop everything; the registration lease is revoked as the
+    //    registrar stops.
+    stop.cancel();
     let _ = follower.await;
-    listeners.shutdown(drain).await;
+    let _ = reporter.await;
+    let _ = txn_reaper.await;
     backends.shutdown();
     let _ = watcher.await;
     mysql.join().await;
     for t in login_tasks {
         let _ = t.await;
     }
-    // Drain step 5: the flusher's last flush, before the catalog pools close.
+    // The flusher's last flush, before the catalog pools close.
     if let Some(f) = flusher {
         let _ = f.await;
     }
     if let Some(t) = tenants {
         t.locator.close().await;
     }
+    if let Some((_, t)) = peer_server {
+        let _ = t.await;
+    }
+    let _ = registration.await;
+    tracing::info!(%role, "drained");
     Ok(())
+}
+
+/// The port of every running listener, and the peer service's.
+async fn listener_ports(
+    listeners: &ListenerManager,
+    peer: Option<u16>,
+) -> std::collections::BTreeMap<String, u16> {
+    let mut out = std::collections::BTreeMap::new();
+    for keys in &listener::LISTENERS {
+        if let Some(a) = listeners.local_addr(keys.name).await {
+            out.insert(keys.name.to_owned(), a.port());
+        }
+    }
+    if let Some(p) = peer {
+        out.insert("peer".to_owned(), p);
+    }
+    out
+}
+
+/// Keeps the registration record's ports and load current.
+async fn report_load(
+    registrar: registry::Registrar,
+    listeners: Arc<ListenerManager>,
+    sessions: Arc<SessionTable>,
+    peer: Option<u16>,
+    stop: sprig_common::CancellationToken,
+) {
+    let mut tick = tokio::time::interval(registry::LOAD_PERIOD);
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            _ = tick.tick() => {}
+        }
+        let rows = sessions.list();
+        let active = rows.iter().filter(|r| r.command != "Sleep").count();
+        registrar.set_load(registry::Load {
+            connections: rows.len() as u64,
+            active: active as u64,
+            cpu_pct: None,
+        });
+        let ports = listener_ports(&listeners, peer).await;
+        if ports != registrar.record().listeners {
+            registrar.set_listeners(ports);
+        }
+    }
+}
+
+/// The gateway's side of the peer service.
+struct PeerHost {
+    core: Arc<http::Core>,
+    sessions: Arc<SessionTable>,
+    gateway_id: String,
+    lifecycle: lifecycle::Lifecycle,
+}
+
+#[async_trait::async_trait]
+impl peer::PeerHost for PeerHost {
+    fn sessions(&self) -> &Arc<SessionTable> {
+        &self.sessions
+    }
+
+    fn gateway_id(&self) -> String {
+        self.gateway_id.clone()
+    }
+
+    fn drain(&self, reason: &str) -> bool {
+        self.lifecycle.request_drain(reason)
+    }
+
+    async fn forwarded(
+        &self,
+        req: sprig_api::proto::internal::ForwardRequest,
+    ) -> sprig_api::proto::internal::ForwardReply {
+        http::rest::forwarded(&self.core, req).await
+    }
 }
 
 /// `[gateway] listen_override`: this process's own listener addresses.
@@ -284,6 +510,8 @@ fn logins(
                 );
                 tenant::backends::TenantBackends::none(Arc::clone(&tenants.locator))
             };
+            // Chapter 29: per-user backend accounts, when configured.
+            tenants.authz.configure(resolver.per_user());
             let catalogs = CatalogLogins::new(
                 Arc::new(MetaTenants::new(
                     Arc::clone(&tenants.global),

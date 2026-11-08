@@ -33,7 +33,7 @@ use sprig_proto_mysql::resultset::{
     decode_binary_row, decode_text_row, encode_binary_row, encode_text_row,
 };
 use sprig_proto_mysql::state::ProtoState;
-use sprig_proto_mysql::{Caps, ColumnDef, ErrPacket, StatusFlags, Value};
+use sprig_proto_mysql::{Caps, ColumnDef, ErrPacket, Persona, StatusFlags, Value};
 
 use sprig_sql::names::{OutputCtx, ResultMapper, map_bytes, map_message};
 
@@ -119,6 +119,12 @@ impl ConnStatus {
             .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))?;
         *vals.get_mut(1)? = Value::Bytes(Bytes::from(v.clone()));
         encode_binary_row(&vals, &cols).ok()
+    }
+
+    /// Rows to rewrite by variable name (`SHOW VARIABLES`: the persona's
+    /// version strings).
+    pub(crate) fn from_rows(vars: Vec<(&'static str, String)>) -> Self {
+        Self { vars }
     }
 
     /// The row for a status variable, rewritten if it is one of these.
@@ -306,18 +312,34 @@ impl Relay<'_> {
 fn decode_defs(defs: &[Bytes], caps: Caps, renames: &[Renamed]) -> Result<Vec<ColumnDef>> {
     let mut out = Vec::with_capacity(defs.len());
     for d in defs {
-        let mut c = ColumnDef::decode(d, caps)?;
-        rename(&mut c, renames);
-        out.push(c);
+        out.push(ColumnDef::decode(d, caps)?);
     }
+    rename_all(&mut out, renames);
     Ok(out)
 }
 
-/// Gives a column the name the client's text gave it, if the gateway
-/// rewrote that expression.
-pub(crate) fn rename(c: &mut ColumnDef, renames: &[Renamed]) {
-    if let Some(r) = renames.iter().find(|r| r.from == c.name) {
-        c.name = r.to.clone();
+/// Column definitions as a MySQL 8.4 client gets them: JSON as type 245
+/// (chapter 28, [`sprig_sql::compat::meta`]).
+fn mysql_defs(cols: &mut [ColumnDef]) {
+    for c in cols {
+        sprig_sql::compat::meta::mysql_column(c);
+    }
+}
+
+/// Gives each column the name the client's text gave it, if the gateway
+/// rewrote that expression. Each rename is used once, in order, so two
+/// expressions the gateway replaced with the same literal (`VERSION()`
+/// and `@@version`) keep their own names.
+pub(crate) fn rename_all(cols: &mut [ColumnDef], renames: &[Renamed]) {
+    if renames.is_empty() {
+        return;
+    }
+    let mut used = vec![false; renames.len()];
+    for c in cols {
+        if let Some(i) = (0..renames.len()).find(|&i| !used[i] && renames[i].from == c.name) {
+            used[i] = true;
+            c.name = renames[i].to.clone();
+        }
     }
 }
 
@@ -414,7 +436,13 @@ pub(crate) async fn relay(
                                 .row_packet(&p.payload, cols.len(), &n.ctx, &mut rows)
                                 .map_err(|e| protocol_error(&format!("text row: {e}")))?;
                             for row in rows {
-                                out.raw_row(n.alias_text(row, cols.len())).await?;
+                                let row = n.alias_text(row, cols.len());
+                                let row = r
+                                    .conn_status
+                                    .filter(|_| want == 2)
+                                    .and_then(|cs| cs.rewrite(&row))
+                                    .unwrap_or(row);
+                                out.raw_row(row).await?;
                             }
                         }
                         RowFormat::Binary => match n.scrub_binary(&p.payload, &cols) {
@@ -534,8 +562,12 @@ async fn begin(
     names: Option<&mut NamesOut<'_>>,
     cols: &mut Vec<ColumnDef>,
 ) -> Result<()> {
+    let mysql = out.wire().persona == Persona::MySql84;
     if let Some(n) = names {
         *cols = n.defs(defs, r.backend_caps, r.renames)?;
+        if mysql {
+            mysql_defs(cols);
+        }
         return out.begin_rows(cols, r.format).await;
     }
     if r.raw_defs(client) && r.renames.is_empty() {
@@ -543,7 +575,10 @@ async fn begin(
     } else {
         metrics::counter!("sprig_mysql_rewritten_packets_total", "kind" => "column_def")
             .increment(defs.len() as u64);
-        let cols = decode_defs(defs, r.backend_caps, r.renames)?;
+        let mut cols = decode_defs(defs, r.backend_caps, r.renames)?;
+        if mysql {
+            mysql_defs(&mut cols);
+        }
         out.begin_rows(&cols, r.format).await
     }
 }
@@ -556,10 +591,13 @@ async fn cursor_opened(
     res: &mut Relayed,
     names: Option<&mut NamesOut<'_>>,
 ) -> Result<()> {
-    let cols = match names {
+    let mut cols = match names {
         Some(n) => n.defs(defs, r.backend_caps, r.renames)?,
         None => decode_defs(defs, r.backend_caps, r.renames)?,
     };
+    if out.wire().persona == Persona::MySql84 {
+        mysql_defs(&mut cols);
+    }
     let mut status = r.status(status);
     status.remove(StatusFlags::SESSION_STATE_CHANGED);
     out.cursor_opened(

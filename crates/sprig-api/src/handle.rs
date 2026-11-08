@@ -112,7 +112,13 @@ mod tests {
 
     #[test]
     fn junk_is_unknown() {
-        for bad in ["", "transactions/", "transactions/!!", "tx/abc", "transactions/AAAA"] {
+        for bad in [
+            "",
+            "transactions/",
+            "transactions/!!",
+            "tx/abc",
+            "transactions/AAAA",
+        ] {
             let e = TxnHandle::parse(bad).unwrap_err();
             assert_eq!(e.code(), Some(SprigCode::TxnHandleUnknown), "{bad}");
         }

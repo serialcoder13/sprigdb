@@ -714,8 +714,14 @@ impl Planner {
                 *blocked_counts.entry("size_limit").or_default() += 1;
                 continue;
             }
+            // Only moves worth making compete on value: otherwise a tiny
+            // shard (high gain per GB, gain below balancer.min_gain_pct)
+            // would hide a bigger one that clears it.
+            let worth = gain + 1e-9 >= s.min_gain;
+            let best_worth = best.as_ref().is_some_and(|b| b.gain + 1e-9 >= s.min_gain);
             let better = match &best {
                 None => true,
+                Some(_) if worth != best_worth => worth,
                 Some(b) => {
                     value > b.value + 1e-12
                         || ((value - b.value).abs() <= 1e-12 && gain > b.gain + 1e-12)

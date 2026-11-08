@@ -482,7 +482,8 @@ async fn login_phase(
             db: None,
         };
         if let Err(e) = exec.init_db(&mut cx, schema).await {
-            let p = ErrPacket::from_error(persona, &e);
+            let mapped = sprig_sql::compat::errmap::for_persona(persona, &e);
+            let p = ErrPacket::from_error(persona, mapped.as_ref().unwrap_or(&e));
             let _ = write_packet(&mut conn.stream, &mut seq, &p.encode(caps)).await;
             exec.close().await;
             return Ok(None);

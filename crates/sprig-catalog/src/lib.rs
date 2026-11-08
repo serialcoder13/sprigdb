@@ -71,9 +71,8 @@ pub mod version;
 pub use ancestry::{AncestorRows, AncestryReport, AncestryState};
 pub use cache::{
     CacheConfig, CatalogExtension, CatalogLoaded, CatalogSource, DirectoryFeed, DirectoryWatch,
-    ExtState,
-    ExtensionStates, Freshness, MariaSource, Node, SnapshotTx, TenantCache, TenantCatalog,
-    TenantPin, TenantRef,
+    ExtState, ExtensionStates, Freshness, MariaSource, Node, SnapshotTx, TenantCache,
+    TenantCatalog, TenantPin, TenantRef,
 };
 pub use migrate::{FormatState, Migration, Migrator, Module, ModuleFormat, Phase};
 pub use rows::{SettingsBackend, SettingsTx, TenantScopeRows};

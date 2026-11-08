@@ -272,7 +272,10 @@ impl Registrar {
                     break;
                 }
                 metrics::counter!("sprig_gateway_lease_lost_total").increment(1);
-                tracing::warn!(event = "gateway.lease_lost", "registration lease lost; registering again");
+                tracing::warn!(
+                    event = "gateway.lease_lost",
+                    "registration lease lost; registering again"
+                );
             }
         });
         let _ = first_rx.await;
@@ -287,7 +290,8 @@ impl Registrar {
         sessions: &SessionTable,
         ttl: Duration,
     ) -> Result<Session> {
-        let session = Session::open(Arc::clone(store), Arc::clone(clock), SessionOpts::new(ttl)).await?;
+        let session =
+            Session::open(Arc::clone(store), Arc::clone(clock), SessionOpts::new(ttl)).await?;
         let id = self.record().gateway_id;
         let preferred = sessions.slot();
         let slot = match claim_slot(store.as_ref(), &session, &id, preferred).await {
@@ -344,18 +348,29 @@ impl Registrar {
 
 /// Claims a free slot for `id` under the session's lease: `preferred`
 /// first when it is not 0, then the lowest free one.
-async fn claim_slot(store: &dyn MetaStore, session: &Session, id: &str, preferred: u16) -> Result<u16> {
+async fn claim_slot(
+    store: &dyn MetaStore,
+    session: &Session,
+    id: &str,
+    preferred: u16,
+) -> Result<u16> {
     let prefix = store.tier().key("gateway-slots/")?;
     let mut taken = std::collections::HashSet::new();
     let mut opts = ListOpts::default();
     loop {
         let page = store.list(&prefix, opts.clone()).await?;
         for kv in &page.kvs {
-            if let Some(n) = kv.key.as_str().rsplit('/').next().and_then(|s| s.parse::<u16>().ok()) {
+            if let Some(n) = kv
+                .key
+                .as_str()
+                .rsplit('/')
+                .next()
+                .and_then(|s| s.parse::<u16>().ok())
+            {
                 // A slot this gateway still holds from an older lease can be
                 // taken over.
-                let mine = Record::<SlotRecord>::decode(&kv.value)
-                    .is_ok_and(|r| r.body.gateway_id == id);
+                let mine =
+                    Record::<SlotRecord>::decode(&kv.value).is_ok_and(|r| r.body.gateway_id == id);
                 if !mine {
                     taken.insert(n);
                 }
@@ -381,8 +396,8 @@ async fn claim_slot(store: &dyn MetaStore, session: &Session, id: &str, preferre
         let when = match &current {
             None => vec![Cmp::Missing(key.clone())],
             Some(kv) => {
-                let mine = Record::<SlotRecord>::decode(&kv.value)
-                    .is_ok_and(|r| r.body.gateway_id == id);
+                let mine =
+                    Record::<SlotRecord>::decode(&kv.value).is_ok_and(|r| r.body.gateway_id == id);
                 if !mine {
                     continue;
                 }

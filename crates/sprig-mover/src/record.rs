@@ -407,6 +407,7 @@ impl JobStore {
             .ok_or_else(|| lease_lost(&rec.job_id))?;
         Ok(Some(Claim {
             store: self.clone(),
+            session: None,
             owner_key: okey,
             owner_rev: kv.create_revision,
             lease,
@@ -490,6 +491,7 @@ impl JobStore {
 #[derive(Clone)]
 pub struct Claim {
     store: JobStore,
+    session: Option<sprig_meta::Session>,
     owner_key: Key,
     owner_rev: Revision,
     lease: LeaseId,
@@ -507,6 +509,28 @@ impl std::fmt::Debug for Claim {
 }
 
 impl Claim {
+    /// Ties the claim to the worker's session, so [`Self::check_lease`]
+    /// knows when the lease is lost (by its conservative local deadline,
+    /// before etcd can give the job to another worker).
+    #[must_use]
+    pub fn with_session(mut self, session: sprig_meta::Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Fails with 39133 once the worker's lease is lost. The engine calls
+    /// it before every step outside MariaDB's token check: hold, fence,
+    /// unfence, commit.
+    ///
+    /// # Errors
+    /// 39133.
+    pub fn check_lease(&self) -> Result<()> {
+        if self.session.as_ref().is_some_and(sprig_meta::Session::is_lost) {
+            return Err(lease_lost(&self.rec.job_id));
+        }
+        Ok(())
+    }
+
     /// The fencing token.
     #[must_use]
     pub fn token(&self) -> u64 {

@@ -104,7 +104,9 @@ impl IpLimiter {
             s.failures.pop_front();
         }
         s.failures.push_back(now);
-        let cap = usize::try_from(per_minute).unwrap_or(usize::MAX).saturating_add(1);
+        let cap = usize::try_from(per_minute)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
         while s.failures.len() > cap {
             s.failures.pop_front();
         }
@@ -375,10 +377,16 @@ mod tests {
             ip: ip(n),
         };
         assert_eq!(d.on_failure(k("alice", 1), rule), Duration::ZERO);
-        assert_eq!(d.on_failure(k("alice", 1), rule), Duration::from_millis(100));
+        assert_eq!(
+            d.on_failure(k("alice", 1), rule),
+            Duration::from_millis(100)
+        );
         // The victim, from elsewhere, isn't slowed.
         assert_eq!(d.on_failure(k("alice", 2), rule), Duration::ZERO);
-        assert_eq!(d.on_failure(k("alice", 1), rule), Duration::from_millis(200));
+        assert_eq!(
+            d.on_failure(k("alice", 1), rule),
+            Duration::from_millis(200)
+        );
         d.on_success(&k("alice", 1));
         assert_eq!(d.on_failure(k("alice", 1), rule), Duration::ZERO);
         clock.advance(DELAY_IDLE);

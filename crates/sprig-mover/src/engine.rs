@@ -26,10 +26,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::api::{CutoverMode, JobKind, JobState, VerifyMode};
-use crate::io::{ChangeStream, CommitOutcome, JobEnv};
+use crate::io::{ChangeStream, CommitOutcome, JobEnv, Released};
 use crate::model::{
-    ApplyOp, CopyState, KeyBytes, KeyPart, PosRow, Row, SourceTxn, StreamItem, TableCopy,
-    TableId, TableMeta, Watermark, WmKind,
+    ApplyOp, CopyState, KeyBytes, KeyPart, PosRow, Row, RowChange, SourceTxn, StreamItem,
+    TableCopy, TableId, TableMeta, Watermark, WmKind, XaPhase,
 };
 use crate::record::{Claim, CutoverStep, wall_ms};
 use crate::settings::MoverSettings;
@@ -108,7 +108,9 @@ pub struct Engine {
     pending_since: Option<Instant>,
     window: Option<Window>,
     /// The last sequence read per watermark kind.
-    seen: [u64; 3],
+    /// The last sequence read per watermark kind, with the position just
+    /// after it: a watermark counts as applied once that position is.
+    seen: [(u64, GtidPos); 3],
     seq: u64,
     ticks: VecDeque<(u64, Instant)>,
     last_tick: Option<Instant>,
@@ -118,6 +120,10 @@ pub struct Engine {
     last_save: Instant,
     failures: u32,
     copied_since: (Instant, u64),
+    /// Prepared XA groups waiting for their outcome, oldest first, with the
+    /// position just before each: while any waits, the persisted position
+    /// stays at the oldest one's, so a restart reads the group again.
+    xa_open: Vec<(String, GtidPos, Vec<RowChange>)>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -185,7 +191,7 @@ impl Engine {
             pending_rows: 0,
             pending_since: None,
             window: None,
-            seen: [0; 3],
+            seen: Default::default(),
             seq,
             ticks: VecDeque::new(),
             last_tick: None,
@@ -195,6 +201,7 @@ impl Engine {
             last_save: now,
             failures: 0,
             copied_since: (now, 0),
+            xa_open: Vec::new(),
         }
     }
 
@@ -288,6 +295,7 @@ impl Engine {
 
     fn drop_stream(&mut self) {
         self.reader = None;
+        self.xa_open.clear();
         self.pending.clear();
         self.pending_keys.clear();
         self.pending_rows = 0;
@@ -373,6 +381,9 @@ impl Engine {
         self.read = row.gtid_pos;
         self.copy = row.copy;
         let tables = Arc::new(self.tables.clone());
+        // The stream replays from the persisted position: held XA groups
+        // come again.
+        self.xa_open.clear();
         let stream = self.env.source.open_stream(&self.applied, tables).await?;
         self.reader = Some(spawn_reader(stream));
         self.last_tick = None;
@@ -522,7 +533,7 @@ impl Engine {
         };
         self.env
             .target
-            .apply(self.job, self.token, &ops, &self.applied, &self.copy)
+            .apply(self.job, self.token, &ops, &self.persist_pos(&self.applied.clone()), &self.copy)
             .await?;
         metrics::counter!("sprig_mover_copy_rows_total").increment(copied);
         self.claim.rec.progress.rows_copied += copied;
@@ -539,8 +550,12 @@ impl Engine {
 
     fn reached(&self, until: &Until, started: Instant) -> bool {
         match until {
-            Until::Wm(k, seq) => self.seen[kind_idx(*k)] >= *seq && self.pending.is_empty(),
-            Until::Pos(p) => self.applied.reached(p),
+            Until::Wm(k, seq) => {
+                let (s, p) = &self.seen[kind_idx(*k)];
+                *s >= *seq && self.applied.reached(p)
+            }
+            // A prepared XA transaction postpones the cutover.
+            Until::Pos(p) => self.applied.reached(p) && self.xa_open.is_empty(),
             Until::For(d) => self.clock.now().saturating_duration_since(started) >= *d,
         }
     }
@@ -551,12 +566,15 @@ impl Engine {
     async fn pump(&mut self, until: Until, deadline: Option<Instant>) -> Result<bool> {
         self.attach().await?;
         let started = self.clock.now();
+        let mut recoveries = 0u32;
         loop {
             if let Until::Pos(p) = &until
                 && self.read.reached(p)
                 && !self.applied.reached(p)
+                && let Err(e) = self.flush(true).await
             {
-                self.flush(true).await?;
+                self.recover(e, &mut recoveries).await?;
+                continue;
             }
             if self.reached(&until, started) {
                 return Ok(true);
@@ -598,29 +616,86 @@ impl Engine {
             };
             match item {
                 Ok(Some(Ok(StreamItem::Txn(txn)))) => {
-                    let wm_hit = self.ingest(txn).await?;
-                    let full = self.pending_rows >= self.settings.apply_batch_rows;
-                    if wm_hit || full {
-                        self.flush(false).await?;
+                    let r = async {
+                        let wm_hit = self.ingest(txn).await?;
+                        let full = self.pending_rows >= self.settings.apply_batch_rows;
+                        if wm_hit || full {
+                            self.flush(false).await?;
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(e) = r {
+                        self.recover(e, &mut recoveries).await?;
+                        continue;
                     }
                 }
-                Ok(Some(Ok(StreamItem::Idle))) => self.flush(false).await?,
-                Ok(Some(Err(e))) => return Err(e),
+                Ok(Some(Ok(StreamItem::Idle))) => {
+                    if let Err(e) = self.flush(false).await {
+                        self.recover(e, &mut recoveries).await?;
+                        continue;
+                    }
+                }
+                Ok(Some(Err(e))) => {
+                    self.recover(e, &mut recoveries).await?;
+                    continue;
+                }
                 Ok(None) => {
-                    return Err(SprigError::new(
-                        SprigCode::BinlogDisconnected,
-                        "the stream ended",
-                    ));
+                    let e = SprigError::new(SprigCode::BinlogDisconnected, "the stream ended");
+                    self.recover(e, &mut recoveries).await?;
+                    continue;
                 }
                 Err(_) => {}
             }
             if self.pending_since.is_some_and(|s| {
                 self.clock.now().saturating_duration_since(s) >= self.settings.apply_batch
-            }) {
-                self.flush(false).await?;
+            }) && let Err(e) = self.flush(false).await
+            {
+                self.recover(e, &mut recoveries).await?;
+                continue;
             }
+            recoveries = 0;
             self.check_cancel(false).await?;
         }
+    }
+
+    /// A stream or apply failure inside a pump: reopen from what the
+    /// target committed and go on, keeping the open window (its keys only
+    /// grow, which is safe). Fatal errors, and too many failures in a row,
+    /// return.
+    async fn recover(&mut self, e: SprigError, count: &mut u32) -> Result<()> {
+        let c = code(&e);
+        if matches!(
+            c,
+            Some(
+                SprigCode::JobLeaseLost
+                    | SprigCode::MoveSourceDiverged
+                    | SprigCode::MoveUnsupported
+                    | SprigCode::BinlogCorrupt
+            )
+        ) || *count >= 10
+        {
+            return Err(e);
+        }
+        *count += 1;
+        tracing::debug!(job = %self.job.0, error = %e, "stream or apply failed; reopening");
+        metrics::counter!("sprig_binlog_reconnects_total").increment(1);
+        self.reader = None;
+        self.xa_open.clear();
+        self.pending.clear();
+        self.pending_keys.clear();
+        self.pending_rows = 0;
+        self.pending_since = None;
+        tokio::time::sleep(Duration::from_millis(10 * u64::from(*count))).await;
+        self.attach().await
+    }
+
+    /// The position to commit with `pos`: the oldest open XA group's
+    /// floor while one waits.
+    fn persist_pos(&self, pos: &GtidPos) -> GtidPos {
+        self.xa_open
+            .first()
+            .map_or_else(|| pos.clone(), |(_, floor, _)| floor.clone())
     }
 
     /// Takes one source transaction into the batch. Returns whether it
@@ -642,7 +717,7 @@ impl Engine {
             let pos = self.read.clone();
             self.env
                 .target
-                .apply_ddl(self.job, self.token, &ddl.db, &ddl.sql, &pos, &self.copy)
+                .apply_ddl(self.job, self.token, &ddl.db, &ddl.sql, &self.persist_pos(&pos), &self.copy)
                 .await?;
             self.applied = pos;
             self.refresh_tables().await?;
@@ -651,8 +726,22 @@ impl Engine {
             self.attach().await?;
             return Ok(true);
         }
+        let mut changes = txn.changes;
+        match txn.xa {
+            Some(XaPhase::Prepare(xid)) => {
+                self.xa_open.push((xid, prev, std::mem::take(&mut changes)));
+            }
+            Some(XaPhase::Commit(xid)) => {
+                if let Some(i) = self.xa_open.iter().position(|(x, _, _)| *x == xid) {
+                    let (_, _, held) = self.xa_open.remove(i);
+                    changes.splice(0..0, held);
+                }
+            }
+            Some(XaPhase::Rollback(xid)) => self.xa_open.retain(|(x, _, _)| *x != xid),
+            None => {}
+        }
         let mut wm = false;
-        for ch in txn.changes {
+        for ch in changes {
             let t = ch.table.clone();
             let before_key = ch.before.as_ref().map(|r| t.key_of(r));
             let after_key = ch.after.as_ref().map(|r| t.key_of(r));
@@ -686,7 +775,9 @@ impl Engine {
         for w in &txn.watermarks {
             if w.job == self.job && w.stream == STREAM {
                 let i = kind_idx(w.kind);
-                self.seen[i] = self.seen[i].max(w.seq);
+                if w.seq >= self.seen[i].0 {
+                    self.seen[i] = (w.seq, self.read.clone());
+                }
                 if w.kind != WmKind::Tick {
                     wm = true;
                 }
@@ -750,9 +841,10 @@ impl Engine {
         self.pending_keys.clear();
         self.pending_rows = 0;
         self.pending_since = None;
+        let persist = self.persist_pos(&pos);
         self.env
             .target
-            .apply(self.job, self.token, &ops, &pos, &self.copy)
+            .apply(self.job, self.token, &ops, &persist, &self.copy)
             .await?;
         metrics::counter!("sprig_mover_apply_rows_total").increment(rows as u64);
         self.applied = pos;
@@ -763,7 +855,7 @@ impl Engine {
     /// Ticks read up to now are applied (the batch committed): measure lag.
     fn note_ticks(&mut self) {
         let now = self.clock.now();
-        let seen = self.seen[kind_idx(WmKind::Tick)];
+        let seen = self.seen[kind_idx(WmKind::Tick)].0;
         while let Some(&(seq, at)) = self.ticks.front() {
             if seq > seen || !self.pending.is_empty() {
                 break;
@@ -1041,7 +1133,7 @@ impl Engine {
         }];
         self.env
             .target
-            .apply(self.job, self.token, &ops, &self.applied, &self.copy)
+            .apply(self.job, self.token, &ops, &self.persist_pos(&self.applied.clone()), &self.copy)
             .await
     }
 
@@ -1112,17 +1204,23 @@ impl Engine {
         let triggers = self.env.source.triggers().await?;
         let r: Result<CommitOutcome> = async {
             // 1. Hold.
-            self.env.maps.hold(self.job, until_ms).await?;
+            self.claim.check_lease()?;
+            self.env.maps.hold(self.job, self.token, until_ms).await?;
             // 2. Gateways drain open transactions; keep applying meanwhile.
             self.pump(Until::For(s.txn_grace), Some(reserve_at)).await?;
             // 3. Fence the source.
+            let planned = self.env.source.plan_fence().await?;
             self.claim
-                .save(|r| r.cutover_step = Some(CutoverStep::Fencing))
+                .save(|r| {
+                    r.cutover_step = Some(CutoverStep::Fencing);
+                    r.receipts = vec![planned];
+                })
                 .await?;
             let left = reserve_at.saturating_duration_since(self.clock.now());
             if left.is_zero() {
                 return Err(aborted("no time left to fence"));
             }
+            self.claim.check_lease()?;
             let fenced = self.env.source.fence(left).await?;
             let receipt = fenced.receipt.clone();
             self.claim
@@ -1161,10 +1259,11 @@ impl Engine {
                 // The swap is the commit point; the map then raises the
                 // epoch so gateways refresh table metadata.
                 self.env.target.finalize(&triggers).await?;
-                self.env.maps.bump(self.job).await?;
+                self.env.maps.bump(self.job, self.token).await?;
                 return Ok(CommitOutcome::Committed);
             }
-            let mut o = self.env.maps.commit(self.job, &to).await?;
+            self.claim.check_lease()?;
+            let mut o = self.env.maps.commit(self.job, self.token, &to).await?;
             while o == CommitOutcome::Unknown {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 o = self.settle_unknown().await?;
@@ -1204,14 +1303,14 @@ impl Engine {
     /// After an `Unknown` commit: read the map until the outcome is known.
     async fn settle_unknown(&mut self) -> Result<CommitOutcome> {
         let m = self.env.maps.read().await?;
-        let me = self.job.0.to_string();
-        if m.held_by.is_none() && m.moved_by.as_deref() == Some(me.as_str()) {
+        if m.held_by.is_none() && m.moved_by.as_ref().is_some_and(|(j, _)| *j == self.job) {
             return Ok(CommitOutcome::Committed);
         }
-        if m.held_by.as_deref() == Some(me.as_str()) {
+        if m.held_by == Some((self.job, self.token)) {
             // Still held by us: the commit didn't land; try it again.
+            self.claim.check_lease()?;
             let to = self.claim.rec.spec.targets[0].cluster.clone();
-            return self.env.maps.commit(self.job, &to).await;
+            return self.env.maps.commit(self.job, self.token, &to).await;
         }
         Ok(CommitOutcome::Rejected)
     }
@@ -1255,10 +1354,14 @@ impl Engine {
 
     /// Clears the hold, then undoes fences and target finalization. Returns
     /// `true` if the map shows the cutover committed after all.
+    ///
+    /// Only an owner whose lease holds may unfence, and only after its
+    /// release proved no newer owner of the job holds the map: a worker that
+    /// lost the job must never undo its successor's fence.
     async fn undo_cutover(&mut self, triggers: &[String]) -> Result<bool> {
-        let me = self.job.0.to_string();
+        self.claim.check_lease()?;
         let m = self.env.maps.read().await?;
-        if m.held_by.is_none() && m.moved_by.as_deref() == Some(me.as_str()) {
+        if m.held_by.is_none() && m.moved_by.as_ref().is_some_and(|(j, _)| *j == self.job) {
             let swap = self.claim.rec.kind == JobKind::CopySwapDdl;
             let to = &self.claim.rec.spec.targets[0].cluster;
             if swap || &m.cluster == to {
@@ -1266,12 +1369,22 @@ impl Engine {
             }
         }
         if self.claim.rec.kind == JobKind::CopySwapDdl && self.env.target.swapped().await? {
-            self.env.maps.bump(self.job).await?;
+            self.env.maps.bump(self.job, self.token).await?;
             return Ok(true);
         }
-        self.env.maps.release(self.job).await?;
+        match self.env.maps.release(self.job, self.token).await? {
+            Released::Committed => return Ok(true),
+            Released::Newer => {
+                return Err(SprigError::new(
+                    SprigCode::JobLeaseLost,
+                    "a newer owner of the job holds the map",
+                ));
+            }
+            Released::Ours | Released::NotHeld => {}
+        }
         // Released: a commit can no longer land. Now the sources may
         // accept writes again.
+        self.claim.check_lease()?;
         let _ = self.env.target.unfinalize(triggers).await;
         let receipts = self.claim.rec.receipts.clone();
         if receipts.is_empty() && self.claim.rec.cutover_step == Some(CutoverStep::Fencing) {

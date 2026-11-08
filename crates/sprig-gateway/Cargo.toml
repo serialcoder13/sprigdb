@@ -17,9 +17,10 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
+gethostname.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["server", "http1", "http2"] }
-hyper-util = { workspace = true, features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2", "client-legacy"] }
 prost.workspace = true
 prost-types.workspace = true
 sprig-api.workspace = true

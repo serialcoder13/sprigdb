@@ -1,0 +1,1 @@
+SHOW TABLES FROM crm WHERE Tables_in_crm LIKE 'a%'

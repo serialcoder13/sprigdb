@@ -48,6 +48,7 @@ fn with_option(set: ActionSet) -> &'static str {
 
 /// The lines of `SHOW GRANTS FOR acc [USING extra]`.
 #[must_use]
+#[allow(clippy::too_many_lines)] // the levels in rendering order
 pub fn render(
     state: &AuthzState,
     cat: &TenantCatalog,
@@ -62,8 +63,8 @@ pub fn render(
     let mut dbs: BTreeMap<String, ActionSet> = BTreeMap::new();
     let mut objects: BTreeMap<ObjectId, ActionSet> = BTreeMap::new();
     let mut columns: BTreeMap<ObjectId, BTreeMap<String, ActionSet>> = BTreeMap::new();
-    let grantees = std::iter::once(grantee)
-        .chain(state.closure(extra).into_iter().map(Grantee::Role));
+    let grantees =
+        std::iter::once(grantee).chain(state.closure(extra).into_iter().map(Grantee::Role));
     for g in grantees {
         for p in state.privileges_of(g) {
             match &p.target {
@@ -145,7 +146,11 @@ pub fn render(
     // db.obj
     let mut objs: Vec<(String, String, ObjectType, ObjectId)> = Vec::new();
     for id in objects.keys().chain(columns.keys()) {
-        let Some(o) = cat.objects.get(*id).filter(|o| o.state == ObjectState::Active) else {
+        let Some(o) = cat
+            .objects
+            .get(*id)
+            .filter(|o| o.state == ObjectState::Active)
+        else {
             continue;
         };
         let Some(d) = cat.databases.get(o.db_id) else {
@@ -224,8 +229,8 @@ pub fn render(
             host: row.host.clone(),
         })
     };
-    match persona {
-        Persona::MySql84 => {
+    if persona == Persona::MySql84 {
+        {
             let plain: Vec<String> = edges
                 .iter()
                 .filter(|e| !e.admin_option)
@@ -242,10 +247,14 @@ pub fn render(
                 .map(|a| format!("{}@{}", q(&a.name), q(&a.host)))
                 .collect();
             if !admin.is_empty() {
-                out.push(format!("GRANT {} TO {to} WITH ADMIN OPTION", admin.join(",")));
+                out.push(format!(
+                    "GRANT {} TO {to} WITH ADMIN OPTION",
+                    admin.join(",")
+                ));
             }
         }
-        _ => {
+    } else {
+        {
             for e in edges {
                 if let Some(a) = role_acc(e.role) {
                     let opt = if e.admin_option {

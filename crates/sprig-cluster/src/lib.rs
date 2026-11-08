@@ -30,8 +30,9 @@
 //! Not yet: the true feed retention (now minus the horizon's commit time,
 //! which needs a binlog read at the horizon), the dump probe in the
 //! controller's `registry` loop (it calls [`probe::Prober::probe_cluster`],
-//! which has no `sprig_repl` endpoint; registration runs it), server
-//! tuning (steps 10-12), and failover hooks with the `read_only`
+//! which has no `sprig_repl` endpoint; registration runs it), live
+//! tuning through the agent and operator (step 12, R2; [`tuning`] has
+//! steps 10 and 11), and failover hooks with the `read_only`
 //! self-fence (step 13, R2).
 
 pub mod driver;
@@ -44,6 +45,7 @@ pub mod registry;
 pub mod settings;
 pub mod sql;
 pub mod sys;
+pub mod tuning;
 #[cfg(test)]
 mod testutil;
 

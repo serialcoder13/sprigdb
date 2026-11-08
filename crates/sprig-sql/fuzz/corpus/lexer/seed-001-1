@@ -1,0 +1,1 @@
+SELECT o.id, c.name FROM billing.orders o JOIN crm.customers c ON c.id = o.customer_id

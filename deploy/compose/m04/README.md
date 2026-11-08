@@ -54,7 +54,7 @@ The test asserts each item and writes `results/<topology>.json`: per example the
 
 ## The drift suite (`drift.sh`)
 
-As `acme.app`: Flyway migrates m03's `shop` and `crm` (V1 to V6), `shop.orders` grows to 30,000 rows and a lookup by `customer_id` runs until an automatic index exists on it. With the index present: Flyway `info` and `validate`, Hibernate `ddl-auto=validate` (m03's image), `mysqldump` 8.4 (port 13306) and `mariadb-dump` 11.8 (port 13307) of `shop`, `SHOW CREATE TABLE`, `SHOW INDEX` and `information_schema.STATISTICS`. No output may contain `sprig_auto_`; the index must still exist (shown with `@sprig_show_auto_indexes = 1`) and `EXPLAIN` must show it. Results go to `results/drift/` (`drift.jsonl`, one line per check). It reuses m03's images; `SPRIG_M03_BUILD=1` builds them first.
+As `acme.app`: Flyway migrates m03's `shop` and `crm` (V1 to V6), `shop.orders` grows to 30,000 rows and a lookup by `qty` (unindexed; `customer_id` has its foreign key's index) runs until an automatic index exists on it. With the index present: Flyway `info` and `validate`, Hibernate `ddl-auto=validate` (m03's image), `mysqldump` 8.4 (port 13306) and `mariadb-dump` 11.8 (port 13307) of `shop`, `SHOW CREATE TABLE`, `SHOW INDEX` and `information_schema.STATISTICS`. No output may contain `sprig_auto_`; the index must still exist (shown with `@sprig_show_auto_indexes = 1`) and `EXPLAIN` must show it. Results go to `results/drift/` (`drift.jsonl`, one line per check). It reuses m03's images; `SPRIG_M03_BUILD=1` builds them first.
 
 ## Results
 

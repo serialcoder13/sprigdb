@@ -61,6 +61,7 @@ pub mod dc;
 pub mod dispatch;
 pub mod live;
 pub mod monitor;
+pub mod registration;
 pub mod runtime;
 pub mod settings;
 pub mod settings_admin;
@@ -336,6 +337,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     let admin_addr = listener
         .local_addr()
         .map_err(|e| SprigError::internal("admin listener address").with_source(e))?;
+    let reg_store = Arc::clone(&stores.dc);
     let svc = Arc::new(
         AdminService::new(stores, monitor, rt.status(), Arc::clone(&clock))
             .with_tenants(tenants)
@@ -348,6 +350,17 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         http::router(svc, token),
         ctx.shutdown.clone(),
     ));
+    // Gateways find the leader's Admin API here (chapter 37 step 4).
+    let registered = tokio::spawn(registration::keep(
+        Arc::clone(&reg_store),
+        Arc::clone(&clock),
+        cfg.node.id(),
+        registration::ControllerRecord {
+            admin_addr: registration::advertised(admin_addr),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+        ctx.shutdown.clone(),
+    ));
 
     ctx.health.set_ready();
     tracing::info!(%role, %dc, admin = %admin_addr, "ready");
@@ -358,6 +371,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Ok(Err(e)) => tracing::warn!(error = %e, "the Admin API stopped with an error"),
         Err(e) => tracing::warn!(error = %e, "the Admin API task failed"),
     }
+    let _ = registered.await;
     tracing::info!(%role, "stopped every loop");
     Ok(())
 }

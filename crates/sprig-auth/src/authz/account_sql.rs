@@ -25,9 +25,9 @@
 
 use std::collections::BTreeMap;
 
+use sprig_catalog::ddl::{database_key, object_key};
 use sprig_catalog::store::{Namespace, ObjectKind, ObjectState};
 use sprig_catalog::{ChangeOpts, MariaCatalog, TenantCatalog, VersionKind};
-use sprig_catalog::ddl::{database_key, object_key};
 use sprig_common::ids::{DbId, ObjectId, RoleId, TenantId, UserId};
 use sprig_common::time::Clock;
 use sprig_common::{Result, SprigError};
@@ -108,6 +108,9 @@ pub struct AccountCtx<'a> {
     pub active_roles: &'a [RoleId],
     /// Password hashing for new passwords.
     pub hashing: Hashing,
+    /// `auth.unsafe_privilege_action = error`: refuse server-wide
+    /// privileges with 1227 instead of dropping them with 39350.
+    pub unsafe_error: bool,
     /// Wall-clock time.
     pub clock: &'a dyn Clock,
 }
@@ -129,7 +132,9 @@ pub fn need_privilege(names: &str) -> SprigError {
     SprigError::standard(
         1227,
         *b"42000",
-        format!("Access denied; you need (at least one of) the {names} privilege(s) for this operation"),
+        format!(
+            "Access denied; you need (at least one of) the {names} privilege(s) for this operation"
+        ),
     )
 }
 
@@ -146,7 +151,7 @@ pub fn table_denied(
 ) -> SprigError {
     let what = match persona {
         Persona::MySql84 => format!("'{table}'"),
-        _ => format!("`{db}`.`{table}`"),
+        Persona::MariaDb => format!("`{db}`.`{table}`"),
     };
     SprigError::standard(
         1142,
@@ -242,7 +247,7 @@ fn unknown_privilege(persona: Persona, name: &str) -> SprigError {
             *b"HY000",
             format!("Dynamic privilege '{name}' is not registered with the server."),
         ),
-        _ => SprigError::standard(
+        Persona::MariaDb => SprigError::standard(
             1064,
             *b"42000",
             format!(
@@ -260,7 +265,7 @@ fn no_account(persona: Persona) -> SprigError {
             *b"42000",
             "You are not allowed to create a user with GRANT",
         ),
-        _ => SprigError::standard(
+        Persona::MariaDb => SprigError::standard(
             1133,
             *b"28000",
             "Can't find any matching row in the user table",
@@ -299,7 +304,7 @@ fn role_not_granted(persona: Persona, role: &AccountRef, user: &AccountRef) -> S
                 role.name, role.host, user.name, user.host
             ),
         ),
-        _ => SprigError::standard(
+        Persona::MariaDb => SprigError::standard(
             1959,
             *b"OP000",
             format!("Invalid role specification `{}`", role.name),
@@ -417,15 +422,37 @@ impl AccountCtx<'_> {
         self.current_db.map(str::to_owned).ok_or_else(no_database)
     }
 
+    /// Refuses grants on system schemas (1044) and on names reserved for
+    /// physical schemas (1049): neither is a database of the tenant.
+    fn grantable_db(&self, db: &str) -> Result<()> {
+        if !sprig_common::names::is_reserved_database(db) {
+            return Ok(());
+        }
+        let system = ["information_schema", "performance_schema", "mysql", "sys"]
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(db));
+        Err(if system {
+            db_denied(self.user_name, self.user_host, db)
+        } else {
+            SprigError::standard(1049, *b"42000", format!("Unknown database '{db}'"))
+        })
+    }
+
     /// The target of `on`, with its level and object type.
     fn target(&self, on: &GrantOn) -> Result<(PrivTarget, ObjectType, String, String)> {
         match on {
-            GrantOn::Tenant => Ok((PrivTarget::Tenant, ObjectType::Table, String::new(), String::new())),
+            GrantOn::Tenant => Ok((
+                PrivTarget::Tenant,
+                ObjectType::Table,
+                String::new(),
+                String::new(),
+            )),
             GrantOn::Database(db) => {
                 let db = match db {
                     Some(d) => d.clone(),
                     None => self.current()?,
                 };
+                self.grantable_db(&db)?;
                 Ok((
                     PrivTarget::Database(self.db_key(&db)),
                     ObjectType::Table,
@@ -438,11 +465,15 @@ impl AccountCtx<'_> {
                     Some(d) => d.clone(),
                     None => self.current()?,
                 };
+                self.grantable_db(&db)?;
                 let missing = || match kind {
                     ObjectType::Table => no_table(&db, name),
                     k => no_routine(*k, &db, name),
                 };
-                let row = self.snapshot.database(&self.db_key(&db)).ok_or_else(missing)?;
+                let row = self
+                    .snapshot
+                    .database(&self.db_key(&db))
+                    .ok_or_else(missing)?;
                 let (ns, okind) = match kind {
                     ObjectType::Table => (Namespace::Relation, ObjectKind::Table),
                     ObjectType::Function => (Namespace::Function, ObjectKind::Function),
@@ -483,6 +514,9 @@ impl AccountCtx<'_> {
                 PrivName::All => all_at(level, kind),
                 PrivName::Usage => ActionSet::EMPTY,
                 PrivName::Action(a) => ActionSet::of(&[a]),
+                PrivName::Dropped if self.unsafe_error => {
+                    return Err(need_privilege(&it.name));
+                }
                 PrivName::Dropped => {
                     notes.push(dropped_note(&it.name));
                     continue;
@@ -515,7 +549,13 @@ impl AccountCtx<'_> {
     }
 
     /// Whether the session may grant or revoke `actions` on `target`.
-    fn may_grant(&self, target: &PrivTarget, actions: ActionSet, db: &str, table: &str) -> Result<()> {
+    fn may_grant(
+        &self,
+        target: &PrivTarget,
+        actions: ActionSet,
+        db: &str,
+        table: &str,
+    ) -> Result<()> {
         if self.admin() {
             return Ok(());
         }
@@ -570,6 +610,7 @@ impl AccountCtx<'_> {
 /// # Errors
 /// The MySQL error the statement fails with (see the module docs), or the
 /// catalog's (39070, 39071, 39072).
+#[allow(clippy::too_many_lines)] // one arm per statement
 pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome> {
     let state = cx.authz();
     let mut notes = Vec::new();
@@ -610,10 +651,7 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
                         notes.push(Note {
                             level: "Note",
                             code: 3163,
-                            message: format!(
-                                "Authorization ID {} already exists.",
-                                r
-                            ),
+                            message: format!("Authorization ID {r} already exists."),
                         });
                     } else {
                         failed.push(r.to_string());
@@ -665,11 +703,20 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
                 actions = actions.with(Action::GrantOption);
             }
             let all_cols = cols.values().fold(ActionSet::EMPTY, |a, b| a.union(*b));
-            cx.may_grant(&target, actions.union(all_cols).minus(ActionSet::of(&[Action::GrantOption])), &db, &table)?;
+            cx.may_grant(
+                &target,
+                actions
+                    .union(all_cols)
+                    .minus(ActionSet::of(&[Action::GrantOption])),
+                &db,
+                &table,
+            )?;
             let mut ops = Vec::new();
             for g in to {
                 let acc = cx.spec(g);
-                let grantee = cx.grantee(&state, &acc).ok_or_else(|| no_account(cx.persona))?;
+                let grantee = cx
+                    .grantee(&state, &acc)
+                    .ok_or_else(|| no_account(cx.persona))?;
                 if !actions.is_empty() || cols.is_empty() {
                     ops.push(Op::Grant(grantee, target.clone(), actions));
                 }
@@ -698,11 +745,20 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
             let level = target.level();
             let (actions, cols) = cx.actions(privileges, level, kind, &mut notes)?;
             let all_cols = cols.values().fold(ActionSet::EMPTY, |a, b| a.union(*b));
-            cx.may_grant(&target, actions.union(all_cols).minus(ActionSet::of(&[Action::GrantOption])), &db, &table)?;
+            cx.may_grant(
+                &target,
+                actions
+                    .union(all_cols)
+                    .minus(ActionSet::of(&[Action::GrantOption])),
+                &db,
+                &table,
+            )?;
             let mut ops = Vec::new();
             for g in from {
                 let acc = cx.spec(g);
-                let grantee = cx.grantee(&state, &acc).ok_or_else(|| no_account(cx.persona))?;
+                let grantee = cx
+                    .grantee(&state, &acc)
+                    .ok_or_else(|| no_account(cx.persona))?;
                 let missing = || match &target {
                     PrivTarget::Tenant => None,
                     PrivTarget::Database(_) => Some(no_such_grant(&acc, None)),
@@ -738,7 +794,9 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
             let mut ops = Vec::new();
             for g in from {
                 let acc = cx.spec(g);
-                let grantee = cx.grantee(&state, &acc).ok_or_else(|| no_account(cx.persona))?;
+                let grantee = cx
+                    .grantee(&state, &acc)
+                    .ok_or_else(|| no_account(cx.persona))?;
                 ops.push(Op::ForgetPrivileges(grantee));
             }
             version = apply(cx, ops).await?;
@@ -768,9 +826,9 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
                 }
                 for g in to {
                     let acc = cx.spec(g);
-                    let grantee = cx.grantee(&state, &acc).ok_or_else(|| {
-                        cannot("GRANT", &[acc.to_string()])
-                    })?;
+                    let grantee = cx
+                        .grantee(&state, &acc)
+                        .ok_or_else(|| cannot("GRANT", &[acc.to_string()]))?;
                     if let Grantee::Role(to_role) = grantee
                         && state.would_cycle(role, to_role)
                     {
@@ -812,7 +870,9 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
             };
             let mut ops = Vec::new();
             for acc in &users {
-                let uid = cx.user_id(acc).ok_or_else(|| cannot("SET DEFAULT ROLE", &[acc.to_string()]))?;
+                let uid = cx
+                    .user_id(acc)
+                    .ok_or_else(|| cannot("SET DEFAULT ROLE", &[acc.to_string()]))?;
                 if uid != cx.user {
                     cx.require_create_user()?;
                 }
@@ -860,8 +920,7 @@ fn choose(
     };
     Ok(match c {
         RoleChoice::None => Vec::new(),
-        RoleChoice::Default => state
-            .default_roles(cx.user_id(user).unwrap_or(cx.user)),
+        RoleChoice::Default => state.default_roles(cx.user_id(user).unwrap_or(cx.user)),
         RoleChoice::All => granted.to_vec(),
         RoleChoice::AllExcept(list) => {
             let except = named(list)?;
@@ -1014,8 +1073,16 @@ async fn alter_users(
         if !options.default_roles.is_empty() {
             let granted = state.granted_roles(id);
             let acc = AccountRef::any_host(String::new());
-            let chosen = choose(cx, state, &RoleChoice::List(options.default_roles.clone()), &granted, &acc)?;
-            version = apply(cx, vec![Op::SetDefaults(id, chosen)]).await?.or(version);
+            let chosen = choose(
+                cx,
+                state,
+                &RoleChoice::List(options.default_roles.clone()),
+                &granted,
+                &acc,
+            )?;
+            version = apply(cx, vec![Op::SetDefaults(id, chosen)])
+                .await?
+                .or(version);
         }
     }
     Ok(version)
@@ -1048,7 +1115,11 @@ async fn drop_users(
     for g in todo {
         match g {
             Grantee::User(u) => {
-                version = Some(admin::drop_user(cx.catalog, cx.tenant, u).await?.auth_version);
+                version = Some(
+                    admin::drop_user(cx.catalog, cx.tenant, u)
+                        .await?
+                        .auth_version,
+                );
                 version = apply(cx, vec![Op::Forget(g)]).await?.or(version);
             }
             Grantee::Role(r) => {
@@ -1066,17 +1137,19 @@ async fn apply(cx: &AccountCtx<'_>, ops: Vec<Op>) -> Result<Option<u64>> {
     if ops.is_empty() {
         return Ok(None);
     }
-    let mut c = cx
+    let mut change = cx
         .catalog
         .change_with(cx.tenant, VersionKind::Auth, ChangeOpts::default())
         .await?;
     let result: Result<()> = async {
-        let (core, q) = c.tx().parts();
+        let (core, q) = change.tx().parts();
         let store = AuthzStore::new(core.schema());
         let by = Some(cx.user);
         for op in ops {
             match op {
-                Op::Grant(g, t, a) => store.grant(q, g, &t, a, by).await?,
+                Op::Grant(grantee, target, actions) => {
+                    store.grant(q, grantee, &target, actions, by).await?;
+                }
                 Op::Revoke {
                     grantee,
                     target,
@@ -1117,9 +1190,9 @@ async fn apply(cx: &AccountCtx<'_>, ops: Vec<Op>) -> Result<Option<u64>> {
     }
     .await;
     match result {
-        Ok(()) => Ok(Some(c.commit().await?)),
+        Ok(()) => Ok(Some(change.commit().await?)),
         Err(e) => {
-            let _ = c.rollback().await;
+            let _ = change.rollback().await;
             let _ = cx.catalog.settle(cx.tenant, VersionKind::Auth).await;
             Err(e)
         }
@@ -1165,7 +1238,8 @@ fn show_grants(
     let acc = account.map_or_else(|| cx.me(), |a| cx.spec(a));
     let own = acc.name == cx.user_name && acc.host.eq_ignore_ascii_case(cx.user_host);
     let grantee = cx.grantee(state, &acc);
-    let granted_role = matches!(grantee, Some(Grantee::Role(r)) if state.closure(cx.active_roles).contains(&r));
+    let granted_role =
+        matches!(grantee, Some(Grantee::Role(r)) if state.closure(cx.active_roles).contains(&r));
     if !own && !granted_role && !cx.has_tenant(Action::CreateUser) {
         return Err(match cx.persona {
             Persona::MySql84 => table_denied(
@@ -1176,7 +1250,7 @@ fn show_grants(
                 "mysql",
                 "user",
             ),
-            _ => db_denied(cx.user_name, cx.user_host, "mysql"),
+            Persona::MariaDb => db_denied(cx.user_name, cx.user_host, "mysql"),
         });
     }
     let Some(grantee) = grantee else {

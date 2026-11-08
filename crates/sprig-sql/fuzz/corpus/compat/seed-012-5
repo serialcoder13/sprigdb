@@ -1,0 +1,1 @@
+SELECT information_schema.KEYWORDS.WORD FROM information_schema.KEYWORDS

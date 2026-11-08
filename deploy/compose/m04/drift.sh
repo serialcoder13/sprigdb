@@ -9,7 +9,7 @@
 #
 #   1. m03/run.sh with the Flyway suite only: shop and crm migrated (V1-V6),
 #      for both tenants, through the MariaDB persona.
-#   2. shop.orders grows to 30,000 rows and a lookup by customer_id runs until
+#   2. shop.orders grows to 30,000 rows and a lookup by qty runs until
 #      an automatic index exists on it (SHOW INDEX with
 #      @sprig_show_auto_indexes = 1).
 #   3. With the index present: Flyway info and validate; Hibernate
@@ -38,7 +38,7 @@ TARGET=host.docker.internal
   export SPRIG_CONN_NETWORK_MODE=host
 }
 mkdir -p "$OUT"
-rm -f "$OUT"/*
+rm -rf "${OUT:?}"/*
 JSONL=$OUT/drift.jsonl
 
 check() { # name status detail
@@ -58,15 +58,15 @@ SPRIG_M03_SUITES=flyway SPRIG_M03_BUILD=${SPRIG_M03_BUILD:-0} SPRIG_M03_RESULTS=
 echo "drift: growing shop.orders and querying it until it has an automatic index"
 my 13306 -e "SPRIG SET (auto_index.window_hours = 1, auto_index.eval_interval_minutes = 1,
   auto_index.p95_threshold_ms = 2, auto_index.max_new_per_day = 50, auto_index.rollout_pause_minutes = 0)"
+# customer_id already has the foreign key's index; qty has none.
 my 13306 shop -e "INSERT INTO orders (customer_id, product_id, qty, placed_on, status, note)
-  SELECT 1 + seq % 2, (SELECT MIN(id) FROM products), 1 + seq % 5, '2026-01-01' + INTERVAL seq % 300 DAY,
-  'NEW', REPEAT('o', 60) FROM seq_1_to_30000"
-my 13306 shop -e "UPDATE orders SET customer_id = 1 + id % 3000"
+  SELECT (SELECT MIN(id) FROM crm.customers), (SELECT MIN(id) FROM products), 1 + seq % 3000,
+  '2026-01-01' + INTERVAL seq % 300 DAY, 'NEW', REPEAT('o', 60) FROM seq_1_to_30000"
 auto=""
 t0=$(date +%s)
 while [[ -z $auto && $(($(date +%s) - t0)) -lt 900 ]]; do
   q=""
-  for _ in $(seq 1 40); do q+="SELECT id, qty FROM orders WHERE customer_id = $((RANDOM % 3000 + 1));"; done
+  for _ in $(seq 1 40); do q+="SELECT id, placed_on FROM orders WHERE qty = $((RANDOM % 3000 + 1));"; done
   my 13306 shop -e "$q" >/dev/null
   auto=$(my 13306 shop -e "SET @sprig_show_auto_indexes = 1; SHOW INDEX FROM orders" |
     awk '$3 ~ /^sprig_auto_/ {print $3}' | sort -u | head -1)
@@ -109,7 +109,7 @@ mysqldump -h 127.0.0.1 -P 13306 -u "$USER_A" "-p$PASSWORD" --ssl-mode=REQUIRED -
   "-p$PASSWORD" --skip-ssl --databases shop --skip-lock-tables --single-transaction >"$OUT/mariadb-dump-shop.sql" 2>"$OUT/mariadb-dump.log" &&
   check mariadb_dump pass "$(wc -c <"$OUT/mariadb-dump-shop.sql") bytes" || check mariadb_dump fail "$(tail -3 "$OUT/mariadb-dump.log")"
 for p in 13306 13307; do
-  my $p shop -e "SHOW CREATE TABLE orders\G" >"$OUT/show-create-$p.txt" || true
+  my $p shop -E -e "SHOW CREATE TABLE orders" >"$OUT/show-create-$p.txt" || true
   my $p shop -e "SHOW INDEX FROM orders" >"$OUT/show-index-$p.txt" || true
   my $p -e "SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = 'shop' AND TABLE_NAME = 'orders'" \
     >"$OUT/statistics-$p.txt" || true
@@ -125,7 +125,7 @@ fi
 still=$(my 13306 shop -e "SET @sprig_show_auto_indexes = 1; SHOW INDEX FROM orders" | awk '$3 ~ /^sprig_auto_/ {print $3}' | sort -u | tr '\n' ' ')
 [[ $still == *"$auto"* ]] && check index_present pass "$still(shown with @sprig_show_auto_indexes = 1)" ||
   check index_present fail "the index is gone: $still"
-my 13306 shop -e "EXPLAIN SELECT id, qty FROM orders WHERE customer_id = 7" >"$OUT/explain.txt" || true
+my 13306 shop -e "EXPLAIN SELECT id, placed_on FROM orders WHERE qty = 7" >"$OUT/explain.txt" || true
 grep -q "$auto" "$OUT/explain.txt" && check explain_shows_it pass "EXPLAIN uses $auto" ||
   check explain_shows_it fail "$(tr '\n' ' ' <"$OUT/explain.txt" | head -c 300)"
 

@@ -46,7 +46,7 @@ use sprig_proto_mysql::error::StdErr;
 use sprig_proto_mysql::packets::{EofPacket, OkPacket, SessionChange};
 use sprig_proto_mysql::resultset::PrepareOk;
 use sprig_proto_mysql::state::ProtoState;
-use sprig_proto_mysql::{Caps, ColumnDef, Command, ErrPacket, PacketCodec, Persona, StatusFlags};
+use sprig_proto_mysql::{Caps, Command, ErrPacket, PacketCodec, Persona, StatusFlags};
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 
@@ -57,8 +57,8 @@ use super::watch::ClientWatch;
 use super::{LoggedIn, Shared};
 use crate::frontend::{GatewayContext, MaybeTls};
 use crate::pipeline::{
-    Abandon, EndOfRows, ExecCtx, ExecSummary, LoginInfo, PreparedMeta, Request, ResultSink,
-    RowFormat, RowValues, SessionExec, StmtRef, int_column, text_column,
+    Abandon, ExecCtx, ExecSummary, LoginInfo, PreparedMeta, Request, ResultSink, SessionExec,
+    StmtRef,
 };
 use crate::session::{Session, SessionState};
 
@@ -442,8 +442,12 @@ impl CommandLoop {
     }
 
     async fn send_error(&mut self, e: &SprigError) -> Result<Flow> {
-        self.send_err(ErrPacket::from_error(self.proto.persona, e))
-            .await
+        let mapped = sprig_sql::compat::errmap::for_persona(self.proto.persona, e);
+        self.send_err(ErrPacket::from_error(
+            self.proto.persona,
+            mapped.as_ref().unwrap_or(e),
+        ))
+        .await
     }
 
     // ----- statements through the executor --------------------------------

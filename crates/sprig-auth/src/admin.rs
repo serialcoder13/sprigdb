@@ -18,11 +18,11 @@
 //!      users.password_changed_at = now, password_expired = 0
 //! ```
 //!
-//! Not yet (later steps): the password policy and history checks
-//! (`auth.password_policy`, `PASSWORD HISTORY`, `REUSE INTERVAL`, `REQUIRE
-//! CURRENT`: step 5), SCRAM verifiers (they need `SASLprep`, step 2's
-//! other half), privileges of the caller (chapter 29) and audit events
-//! (step 10).
+//! These calls don't check the password policy: [`crate::policy::change_password`]
+//! does, then calls [`set_password`]. [`AccountOps`] wraps them with audit
+//! events and the acting administrator (step 6). Not yet: SCRAM verifiers
+//! (they need `SASLprep`, step 2's other half); the caller's privileges are
+//! chapter 29's.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -573,12 +573,7 @@ impl AccountOps<'_> {
         e
     }
 
-    fn done<T>(
-        &self,
-        r: Result<T>,
-        mut e: AuditEvent,
-        user: impl Fn(&T) -> UserId,
-    ) -> Result<T> {
+    fn done<T>(&self, r: Result<T>, mut e: AuditEvent, user: impl Fn(&T) -> UserId) -> Result<T> {
         match &r {
             Ok(v) => e.user_id = Some(user(v)),
             Err(err) => {
@@ -649,7 +644,14 @@ impl AccountOps<'_> {
         expired: bool,
     ) -> Result<Changed> {
         let mut e = self.event(events::ACCOUNT_CHANGED, Some(user), name, host);
-        e.detail = Some(if expired { "PASSWORD EXPIRE" } else { "PASSWORD EXPIRE cleared" }.into());
+        e.detail = Some(
+            if expired {
+                "PASSWORD EXPIRE"
+            } else {
+                "PASSWORD EXPIRE cleared"
+            }
+            .into(),
+        );
         let r = set_password_expired(self.cat, self.tenant, user, expired).await;
         self.done(r, e, |c| c.user_id)
     }

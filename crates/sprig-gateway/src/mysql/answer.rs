@@ -18,21 +18,21 @@ use crate::pipeline::{EndOfRows, ResultSink, RowFormat, RowValues, int_column, t
 use crate::session::{Session, SessionTable};
 
 /// What the answers read besides the session.
-pub struct LocalEnv<'a> {
+pub(crate) struct LocalEnv<'a> {
     /// This gateway's sessions.
-    pub sessions: &'a SessionTable,
+    pub(crate) sessions: &'a SessionTable,
     /// The persona the client sees.
-    pub persona: Persona,
+    pub(crate) persona: Persona,
     /// `@@version` for that persona.
-    pub version: &'a str,
+    pub(crate) version: &'a str,
     /// `@@max_allowed_packet`.
-    pub max_allowed_packet: usize,
+    pub(crate) max_allowed_packet: usize,
     /// `@@hostname`.
-    pub hostname: &'a str,
+    pub(crate) hostname: &'a str,
     /// The status flags the answer carries.
-    pub status: StatusFlags,
+    pub(crate) status: StatusFlags,
     /// Other gateways, for `KILL` of their sessions.
-    pub peers: Option<&'a crate::peer::Peers>,
+    pub(crate) peers: Option<&'a crate::peer::Peers>,
 }
 
 impl std::fmt::Debug for LocalEnv<'_> {
@@ -47,7 +47,7 @@ impl std::fmt::Debug for LocalEnv<'_> {
 ///
 /// # Errors
 /// The sink's error when the client is gone.
-pub async fn answer(
+pub(crate) async fn answer(
     l: &Local,
     me: &Session,
     env: &LocalEnv<'_>,

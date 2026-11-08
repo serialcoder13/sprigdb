@@ -70,7 +70,11 @@ fn templates_match_paths() {
     assert_eq!(m.vars["name"], "gateway.max_connections");
     let m = find("GET", "/admin/v1/settings/gateway.max_connections").unwrap();
     assert_eq!(m.route.short_name(), "Settings.GetSetting");
-    let m = find("POST", "/admin/v1/tenants/acme/indexes/orders.sprig_auto_1:approve").unwrap();
+    let m = find(
+        "POST",
+        "/admin/v1/tenants/acme/indexes/orders.sprig_auto_1:approve",
+    )
+    .unwrap();
     assert_eq!(m.route.short_name(), "Indexes.Apply");
     assert_eq!(m.vars["tenant"], "acme");
     assert_eq!(m.vars["name"], "orders.sprig_auto_1");

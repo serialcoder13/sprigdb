@@ -94,6 +94,51 @@ jobs:
           ./3dc.sh config --quiet
 
   # ---------------------------------------------------------------- S1 ----
+  # A short libFuzzer run of every cargo-fuzz target (chapter 46 step 4):
+  # the wire codec (sprig-proto-mysql/fuzz) and the SQL layer (sprig-sql/fuzz:
+  # lexer, name rewriter, translator R0 rewrites). The committed corpora also
+  # replay on stable in S0's unit tests. Nightly runs longer (S3, later).
+  fuzz-smoke:
+    name: S1 fuzz smoke
+    needs: [fmt, clippy, test]
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      FUZZ_SECONDS: "30"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/sprig-proto-mysql/fuzz
+            crates/sprig-sql/fuzz
+      - name: Run every target for FUZZ_SECONDS
+        run: |
+          set -euo pipefail
+          for crate in crates/sprig-proto-mysql/fuzz crates/sprig-sql/fuzz; do
+            ( cd "$crate"
+              cargo +nightly fuzz build -O
+              for t in $(cargo +nightly fuzz list); do
+                mkdir -p "work/$t" "regressions/$t"
+                cargo +nightly fuzz run -O "$t" "work/$t" "corpus/$t" "regressions/$t" -- \
+                  -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -timeout=10
+              done )
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: crates/*/fuzz/artifacts/
+
   integration:
     name: S1 integration (Compose, one DC)
     needs: [fmt, clippy, test, compose]

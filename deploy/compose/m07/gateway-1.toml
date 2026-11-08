@@ -1,0 +1,27 @@
+# The M0.7 stack's gateway 1 (stack.sh): its own ports, through
+# listen_override, so two gateways share dc-m7's listener settings.
+[node]
+dc = "dc-m7"
+id = "m7-gw-1"
+
+[meta]
+dc_seeds = ["http://127.0.0.1:12479"]
+global_seeds = []
+deployment_id = "sprigdb-m7"
+
+[gateway]
+login_mode = "catalog"
+backends_file = "deploy/compose/m07/backends.toml"
+advertise_addr = "127.0.0.1"
+
+[gateway.listen_override]
+mysql = "127.0.0.1:19306"
+mariadb = "127.0.0.1:19307"
+http = "127.0.0.1:19080"
+https = "127.0.0.1:19443"
+peer = "127.0.0.1:19403"
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "pretty"
+bootstrap_addr = "127.0.0.1:19190"

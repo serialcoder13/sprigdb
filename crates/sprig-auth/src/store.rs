@@ -1307,7 +1307,11 @@ pub(crate) fn from_micros(m: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_micros(u64::try_from(m).unwrap_or(0))
 }
 
-pub(crate) fn col<T: mysql_async::prelude::FromValue>(r: &mut Row, i: usize, name: &str) -> Result<T> {
+pub(crate) fn col<T: mysql_async::prelude::FromValue>(
+    r: &mut Row,
+    i: usize,
+    name: &str,
+) -> Result<T> {
     match r.take_opt::<T, usize>(i) {
         Some(Ok(v)) => Ok(v),
         Some(Err(e)) => Err(SprigError::internal(format!(
@@ -1354,7 +1358,11 @@ pub(crate) async fn exec<Q: Queryable + Send>(q: &mut Q, sql: String, p: Vec<Val
         .map_err(map_err)
 }
 
-pub(crate) async fn exec_count<Q: Queryable + Send>(q: &mut Q, sql: String, p: Vec<Value>) -> Result<u64> {
+pub(crate) async fn exec_count<Q: Queryable + Send>(
+    q: &mut Q,
+    sql: String,
+    p: Vec<Value>,
+) -> Result<u64> {
     exec(q, sql, p).await?;
     let n: Option<i64> = q.query_first("SELECT ROW_COUNT()").await.map_err(map_err)?;
     Ok(n.and_then(|n| u64::try_from(n).ok()).unwrap_or(0))

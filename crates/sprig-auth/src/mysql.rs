@@ -395,6 +395,32 @@ impl CatalogLogins {
         }
     }
 
+    /// The tenant directory.
+    #[must_use]
+    pub fn tenants(&self) -> &Arc<dyn TenantDirectory> {
+        &self.tenants
+    }
+
+    /// The tenant catalogs.
+    #[must_use]
+    pub fn catalogs(&self) -> &Arc<dyn AuthCatalogs> {
+        &self.catalogs
+    }
+
+    /// The tenant's `auth.require_tls`.
+    #[must_use]
+    pub fn require_tls(&self, catalog: &TenantCatalog) -> bool {
+        policy_bool(&*self.policy, &REQUIRE_TLS, catalog)
+    }
+
+    /// The backend target of a verified `user` of `tenant`.
+    ///
+    /// # Errors
+    /// The resolver's (39998).
+    pub fn backend_of(&self, tenant: &TenantInfo, user: &AuthUser) -> Result<BackendTarget> {
+        self.backends.backend(tenant, user)
+    }
+
     /// Sets `listener.tenant_sni_suffixes` (live).
     pub fn set_sni_suffixes(&self, suffixes: Vec<String>) {
         self.sni_suffixes.store(Arc::new(suffixes));
@@ -525,6 +551,12 @@ impl LoginService {
         self
     }
 
+    /// The clock.
+    #[must_use]
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
     /// The audit sink.
     #[must_use]
     pub fn audit(&self) -> &Arc<dyn AuditSink> {
@@ -620,7 +652,9 @@ impl LoginService {
     /// The lockout policy of `user` (catalog logins only).
     pub(crate) fn lockout(&self, user: &AuthUser, catalog: &TenantCatalog) -> LockoutPolicy {
         match (&self.source, &self.state) {
-            (LoginSource::Catalog(cl), Some(_)) => LockoutPolicy::of(&user.row, &*cl.policy, catalog),
+            (LoginSource::Catalog(cl), Some(_)) => {
+                LockoutPolicy::of(&user.row, &*cl.policy, catalog)
+            }
             _ => LockoutPolicy::OFF,
         }
     }
@@ -1247,7 +1281,11 @@ impl MysqlLogin {
                 svc.after_success(&c.tenant, &c.user, lock, &c.catalog, protocol);
             }
             svc.delays.on_success(&self.delay_key());
-            if self.principal.as_ref().is_some_and(|p| p.must_change_password) {
+            if self
+                .principal
+                .as_ref()
+                .is_some_and(|p| p.must_change_password)
+            {
                 e.detail = Some("sandbox mode: the password expired".into());
             }
             svc.audit.emit(&e);
@@ -1272,7 +1310,8 @@ impl MysqlLogin {
             Target::Catalog(c) => Some(Arc::clone(&c.catalog)),
             _ => None,
         };
-        svc.failure_delay(self.delay_key(), catalog.as_deref()).await;
+        svc.failure_delay(self.delay_key(), catalog.as_deref())
+            .await;
     }
 
     fn decide_now(&mut self, outcome: Outcome, path: AuthPath) -> AuthVerdict {

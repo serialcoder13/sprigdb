@@ -1,0 +1,1 @@
+SELECT * FROM `a``b`.t, `o'k`.u

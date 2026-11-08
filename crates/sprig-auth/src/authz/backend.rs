@@ -92,7 +92,10 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
         ipad[i] ^= k[i];
         opad[i] ^= k[i];
     }
-    let inner = Sha256::new().chain_update(ipad).chain_update(msg).finalize();
+    let inner = Sha256::new()
+        .chain_update(ipad)
+        .chain_update(msg)
+        .finalize();
     Sha256::new()
         .chain_update(opad)
         .chain_update(inner)
@@ -328,16 +331,12 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
                 for s in shard_schemas(tenant, d) {
                     let schema = s.to_string();
                     let t = match (o.kind, column) {
-                        (ObjectKind::Function, _) => BackendTarget::Routine(
-                            schema,
-                            o.name.to_lowercase(),
-                            "FUNCTION",
-                        ),
-                        (ObjectKind::Procedure, _) => BackendTarget::Routine(
-                            schema,
-                            o.name.to_lowercase(),
-                            "PROCEDURE",
-                        ),
+                        (ObjectKind::Function, _) => {
+                            BackendTarget::Routine(schema, o.name.to_lowercase(), "FUNCTION")
+                        }
+                        (ObjectKind::Procedure, _) => {
+                            BackendTarget::Routine(schema, o.name.to_lowercase(), "PROCEDURE")
+                        }
                         (_, Some(c)) => {
                             BackendTarget::Column(schema, o.name.clone(), c.to_lowercase())
                         }
@@ -391,7 +390,9 @@ pub async fn read_have(conn: &mut Conn, tenant: TenantId) -> Result<BackendState
                 set = set.with(*a);
             }
         }
-        have.entry(user).or_default().insert(BackendTarget::Db(db), set);
+        have.entry(user)
+            .or_default()
+            .insert(BackendTarget::Db(db), set);
     }
     let rows: Vec<(String, String, String, String)> = conn
         .exec(
@@ -420,10 +421,9 @@ pub async fn read_have(conn: &mut Conn, tenant: TenantId) -> Result<BackendState
     for (user, db, table, column, privs) in rows {
         let set = parse_set(&privs);
         if !set.is_empty() {
-            have.entry(user).or_default().insert(
-                BackendTarget::Column(db, table, column.to_lowercase()),
-                set,
-            );
+            have.entry(user)
+                .or_default()
+                .insert(BackendTarget::Column(db, table, column.to_lowercase()), set);
         }
     }
     let rows: Vec<(String, String, String, String, String)> = conn
@@ -605,8 +605,7 @@ pub async fn reconcile(
         }
     }
     if rep.statements > 0 {
-        metrics::counter!("sprig_auth_reconcile_statements_total")
-            .increment(rep.statements as u64);
+        metrics::counter!("sprig_auth_reconcile_statements_total").increment(rep.statements as u64);
     }
     Ok(rep)
 }
@@ -650,26 +649,30 @@ mod tests {
         let db = BackendTarget::Db("t1\\_d%".into());
         let t = BackendTarget::Table("t1_d1_g1_s1".into(), "orders".into());
         let mut want = BackendState::new();
-        want.entry("t1_u1".into()).or_default().insert(
-            db.clone(),
-            ActionSet::of(&[Action::Select, Action::Insert]),
-        );
+        want.entry("t1_u1".into())
+            .or_default()
+            .insert(db.clone(), ActionSet::of(&[Action::Select, Action::Insert]));
         want.entry("t1_u2".into()).or_default();
         let mut have = BackendState::new();
-        have.entry("t1_u1".into()).or_default().insert(
-            db.clone(),
-            ActionSet::of(&[Action::Select, Action::Delete]),
-        );
+        have.entry("t1_u1".into())
+            .or_default()
+            .insert(db.clone(), ActionSet::of(&[Action::Select, Action::Delete]));
         have.entry("t1_u1".into())
             .or_default()
             .insert(t, ActionSet::of(&[Action::Select]));
         have.entry("t1_u9".into()).or_default();
         let (stmts, rep) = plan(&want, &have, &k, false);
         let text: Vec<&str> = stmts.iter().map(|s| s.as_str()).collect();
-        assert!(text.contains(&"GRANT INSERT ON `t1\\_d%`.* TO 't1_u1'@'%'"), "{text:?}");
+        assert!(
+            text.contains(&"GRANT INSERT ON `t1\\_d%`.* TO 't1_u1'@'%'"),
+            "{text:?}"
+        );
         assert!(text.contains(&"REVOKE DELETE ON `t1\\_d%`.* FROM 't1_u1'@'%'"));
         assert!(text.contains(&"REVOKE SELECT ON `t1_d1_g1_s1`.`orders` FROM 't1_u1'@'%'"));
-        assert!(text.iter().any(|s| s.starts_with("CREATE USER IF NOT EXISTS 't1_u2'@'%'")));
+        assert!(
+            text.iter()
+                .any(|s| s.starts_with("CREATE USER IF NOT EXISTS 't1_u2'@'%'"))
+        );
         assert!(text.contains(&"DROP USER IF EXISTS 't1_u9'@'%'"));
         assert_eq!(rep.created, 1);
         assert_eq!(rep.dropped, 1);
@@ -687,6 +690,9 @@ mod tests {
                 .privileges(ActionSet::of(&[Action::Select, Action::Update])),
             "SELECT (`c`), UPDATE (`c`)"
         );
-        assert_eq!(parse_set("Select,Show view,Grant"), ActionSet::of(&[Action::Select, Action::ShowView]));
+        assert_eq!(
+            parse_set("Select,Show view,Grant"),
+            ActionSet::of(&[Action::Select, Action::ShowView])
+        );
     }
 }

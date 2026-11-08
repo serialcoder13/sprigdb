@@ -116,7 +116,7 @@ key! {
 }
 key! {
     /// `balancer.min_gain_pct`.
-    MIN_GAIN_PCT: u32 = "balancer.min_gain_pct", 5, PROCESS, 0, 100, 11,
+    MIN_GAIN_PCT: u32 = "balancer.min_gain_pct", 1, PROCESS, 0, 100, 11,
     "Smallest gain worth a move, in points"
 }
 key! {

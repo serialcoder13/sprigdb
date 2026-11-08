@@ -1,0 +1,1 @@
+UPDATE billing.t SET a = a + 1 WHERE b LIKE 'z%' ORDER BY a LIMIT 3

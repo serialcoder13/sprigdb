@@ -22,6 +22,7 @@ pub mod account_sql;
 pub mod backend;
 pub mod compile;
 pub mod privilege;
+pub mod settings;
 pub mod show;
 pub mod state;
 pub mod stmt;

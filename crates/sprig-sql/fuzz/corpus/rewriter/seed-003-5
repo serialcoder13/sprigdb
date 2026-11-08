@@ -1,0 +1,1 @@
+INSERT INTO `billing`.`t` (a, b) VALUES (1, 'x'), (2, "y") ON DUPLICATE KEY UPDATE b = VALUES(b)

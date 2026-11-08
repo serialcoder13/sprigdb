@@ -24,6 +24,19 @@
 //! A relative `file:` path is relative to the file's directory. The file is
 //! read at start-up. A verified login of a tenant with neither an entry
 //! nor a default fails with 39998, as chapter 14 says.
+//!
+//! **Per-user backend accounts** (chapter 29, M0.5). With a `[per_user]`
+//! table, every tenant without its own `[tenants.<name>]` entry runs each
+//! user's statements as that user's own MariaDB account,
+//! `t<tenant>_u<user>`, whose password derives from the secret
+//! ([`BackendKey`]); the gateway creates and grants the accounts itself
+//! (`super::authz`). `[default]` then serves nothing.
+//!
+//! ```toml
+//! [per_user]
+//! secret = "file:gateway-backends.toml#backend_secret"   # its `password`
+//! tls = "skip_verify"                                    # verify (default)
+//! ```
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,10 +44,11 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use sprig_auth::account::TenantInfo;
+use sprig_auth::authz::backend::BackendKey;
 use sprig_auth::{AuthUser, BackendResolver, BackendTarget};
-use sprig_common::ids::ClusterId;
+use sprig_common::ids::{ClusterId, TenantId, UserId};
 use sprig_common::{Result, SprigCode, SprigError};
-use sprig_provision::credentials::{SecretRef, SecretSource};
+use sprig_provision::credentials::{Credential, SecretRef, SecretSource, TlsMode};
 
 use super::locator::GatewayLocator;
 
@@ -85,10 +99,48 @@ impl Spec {
     }
 }
 
+/// `[per_user]`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PerUserSpec {
+    secret: String,
+    #[serde(default)]
+    tls: TlsMode,
+}
+
+/// Per-user backend accounts: the key their passwords derive from, and how
+/// the gateway checks the servers' certificates.
+#[derive(Debug, Clone)]
+pub struct PerUser {
+    /// The derivation key.
+    pub key: BackendKey,
+    /// TLS checking of backend connections.
+    pub tls: TlsMode,
+}
+
+impl PerUser {
+    /// The target of `user` of `tenant` on `cluster`.
+    #[must_use]
+    pub fn target(&self, cluster: ClusterId, tenant: TenantId, user: UserId) -> BackendTarget {
+        let acct = sprig_auth::authz::backend::account(tenant, user);
+        let password = self.key.password(&acct);
+        BackendTarget {
+            cluster,
+            credentials: SecretRef::resolved(Credential::new(
+                acct.clone(),
+                password.as_str(),
+                self.tls,
+            )),
+            user: acct,
+        }
+    }
+}
+
 /// Backend targets of catalog logins (see the module docs).
 pub struct TenantBackends {
     default: Option<Entry>,
     tenants: HashMap<String, Entry>,
+    per_user: Option<PerUser>,
     locator: Arc<GatewayLocator>,
 }
 
@@ -108,8 +160,15 @@ impl TenantBackends {
         Self {
             default: None,
             tenants: HashMap::new(),
+            per_user: None,
             locator,
         }
+    }
+
+    /// The per-user accounts' settings, when `[per_user]` is configured.
+    #[must_use]
+    pub fn per_user(&self) -> Option<PerUser> {
+        self.per_user.clone()
     }
 
     /// Parses the file's text; relative `file:` references resolve
@@ -142,9 +201,30 @@ impl TenantBackends {
                 tenants.insert(name.clone(), spec(v, &format!("[tenants.{name}]"))?);
             }
         }
+        let per_user = match doc.get("per_user") {
+            None => None,
+            Some(v) => {
+                let p: PerUserSpec = v
+                    .clone()
+                    .try_into()
+                    .map_err(|e| invalid(format!("backends file, [per_user]: {e}")))?;
+                let mut r: SecretRef = p.secret.parse()?;
+                if let SecretSource::File(f) = &r.source
+                    && f.is_relative()
+                {
+                    r.source = SecretSource::File(base.join(f));
+                }
+                let c = r.resolve("sprig_backend_secret")?;
+                Some(PerUser {
+                    key: BackendKey::new(c.password().as_bytes())?,
+                    tls: p.tls,
+                })
+            }
+        };
         Ok(Self {
             default,
             tenants,
+            per_user,
             locator,
         })
     }
@@ -162,7 +242,18 @@ impl TenantBackends {
 }
 
 impl BackendResolver for TenantBackends {
-    fn backend(&self, tenant: &TenantInfo, _user: &AuthUser) -> Result<BackendTarget> {
+    fn backend(&self, tenant: &TenantInfo, user: &AuthUser) -> Result<BackendTarget> {
+        if let Some(p) = &self.per_user
+            && !self.tenants.contains_key(&tenant.name)
+        {
+            let cluster = self.locator.cached_cluster(tenant.id).ok_or_else(|| {
+                SprigError::new(
+                    SprigCode::TenantNotReady,
+                    format!("tenant {}'s catalog cluster isn't known yet", tenant.name),
+                )
+            })?;
+            return Ok(p.target(cluster, tenant.id, user.row.user_id));
+        }
         let e = self
             .tenants
             .get(&tenant.name)

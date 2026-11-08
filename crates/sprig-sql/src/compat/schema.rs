@@ -37,6 +37,9 @@ use sprig_proto_mysql::packets::Persona;
 use super::collation;
 use super::keywords;
 use crate::lex::{Token, TokenKind, ident_value, string_value};
+use crate::names::map::{NameMap, Purpose};
+use crate::names::rewrite::SystemSchema;
+use crate::names::show::ShowInfo;
 
 /// Where one column of a persona-shaped view comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,13 +75,16 @@ fn is_json(lit: Lit<'_>) -> String {
 /// The `LEFT JOIN` that finds the JSON checks of one schema, for the
 /// `COLUMNS` branch restricted to `phys` (a quoted literal). Its columns
 /// have names `COLUMNS` doesn't, so the branch's other references stay
-/// unqualified.
+/// unqualified. The `LIMIT` keeps MariaDB from merging the derived table
+/// into the outer join, where its schema equality would no longer narrow
+/// the `information_schema` scan to one schema (`EXPLAIN` showed "Scanned
+/// all databases").
 #[must_use]
 pub fn json_join(phys: &str, lit: Lit<'_>) -> String {
     format!(
         " LEFT JOIN (SELECT `TABLE_NAME` AS `_sprig_jt`, `CONSTRAINT_NAME` AS {JSON_COL} \
          FROM information_schema.CHECK_CONSTRAINTS WHERE `CONSTRAINT_SCHEMA` = {phys} \
-         AND `LEVEL` = {} AND `CHECK_CLAUSE` = {}) AS `_sprig_j` \
+         AND `LEVEL` = {} AND `CHECK_CLAUSE` = {} LIMIT 4294967295) AS `_sprig_j` \
          ON `_sprig_jt` = `TABLE_NAME` AND {JSON_COL} = `COLUMN_NAME`",
         lit("Column"),
         json_clause("`CONSTRAINT_NAME`", lit)
@@ -494,6 +500,78 @@ pub fn show_columns_sql(
     sql
 }
 
+/// The physical schema a `SHOW` or `DESCRIBE` reads: the one it names, or
+/// the representative schema of the session's current database. `None`
+/// for a system schema or when neither is known.
+fn target_schema(named: Option<&str>, current: Option<&str>, map: &dyn NameMap) -> Option<String> {
+    let s = match named {
+        Some(s) => s.to_owned(),
+        None => map
+            .physical(current?, Purpose::Metadata)
+            .ok()?
+            .0
+            .first()?
+            .to_string(),
+    };
+    SystemSchema::parse(&s).is_none().then_some(s)
+}
+
+/// `SHOW [FULL] COLUMNS` on 3306 rewritten over the `COLUMNS` provider
+/// (see [`show_columns_sql`]); `None` leaves the statement to MariaDB.
+#[must_use]
+pub fn show_columns_rewrite(
+    info: &ShowInfo,
+    text: &[u8],
+    current: Option<&str>,
+    map: &dyn NameMap,
+    lit: Lit<'_>,
+) -> Option<Vec<u8>> {
+    let table = info.object.as_deref()?;
+    let schema = target_schema(info.schema.as_deref(), current, map)?;
+    let filter = info.filter.clone().map(|f| {
+        let mut b = text.get(f).unwrap_or_default();
+        while let Some((last, rest)) = b.split_last() {
+            if *last == b';' || last.is_ascii_whitespace() {
+                b = rest;
+            } else {
+                break;
+            }
+        }
+        b
+    });
+    Some(show_columns_sql(
+        &schema,
+        table,
+        info.full,
+        info.like.as_deref(),
+        filter,
+        lit,
+    ))
+}
+
+/// `DESCRIBE tbl [col]` on 3306 rewritten as `SHOW COLUMNS`; `None` leaves
+/// the statement to MariaDB (`EXPLAIN` of a statement, odd shapes).
+#[must_use]
+pub fn describe_rewrite(
+    text: &[u8],
+    tokens: &[Token],
+    nbe: bool,
+    current: Option<&str>,
+    map: &dyn NameMap,
+    lit: Lit<'_>,
+) -> Option<Vec<u8>> {
+    let d = describe_target(text, tokens, nbe)?;
+    let schema = target_schema(d.schema.as_deref(), current, map)?;
+    Some(show_columns_sql(
+        &schema,
+        &d.table,
+        false,
+        d.like.as_deref(),
+        None,
+        lit,
+    ))
+}
+
 /// What a `DESCRIBE` names: `DESC[RIBE] | EXPLAIN tbl [col | 'wild']`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeTarget {
@@ -690,13 +768,21 @@ fn mysql_column_line(line: &str) -> String {
     {
         rest = format!(" {stripped}");
     }
+    // An invisible column, as MySQL 8.4 writes it.
+    let (body, comma) = match rest.strip_suffix(',') {
+        Some(b) => (b.to_owned(), ","),
+        None => (rest.clone(), ""),
+    };
+    if let Some(b) = body.strip_suffix(" INVISIBLE") {
+        rest = format!("{b} /*!80023 INVISIBLE */{comma}");
+    }
     format!("{head}{}", mysql_now(&rest))
 }
 
 /// `SHOW CREATE TABLE` text in MySQL 8.4's spelling, for 3306: JSON
 /// columns as `json` without MariaDB's check, no integer display widths,
-/// `CURRENT_TIMESTAMP`, MySQL collation names, and `IGNORED` indexes as
-/// `/*!80000 INVISIBLE */`. Views and other text pass unchanged.
+/// `CURRENT_TIMESTAMP`, MySQL collation names, invisible columns as
+/// `/*!80023 INVISIBLE */` and `IGNORED` indexes as `/*!80000 INVISIBLE */`. Views and other text pass unchanged.
 #[must_use]
 pub fn mysql_create_table(text: &str) -> String {
     if !text.starts_with("CREATE TABLE") && !text.starts_with("CREATE TEMPORARY TABLE") {

@@ -19,6 +19,7 @@
 //! LOCK`, TLS requirement, suspension). `scopes` limit what the key may do
 //! on top of the user's grants; chapter 29 applies them.
 
+use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::time::SystemTime;
 
@@ -29,12 +30,12 @@ use sprig_catalog::{ChangeOpts, MariaCatalog, VersionKind};
 use sprig_common::ids::{TenantId, UserId};
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
 use subtle::ConstantTimeEq as _;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::account::HostPattern;
 use crate::store::{
-    AT, AuthMethods, AuthStore, col, exec, exec_count, map_err, micros, opt_at,
-    opt_micros, opt_time, time,
+    AT, AuthMethods, AuthStore, col, exec, exec_count, map_err, micros, opt_at, opt_micros,
+    opt_time, time,
 };
 
 /// `api_keys` (chapter 14, Appendix C): the auth module's format 2.
@@ -199,9 +200,9 @@ fn generate(tenant: &str) -> Result<(String, Zeroizing<String>, Zeroizing<String
         .collect();
     let mut secret = Zeroizing::new(String::with_capacity(SECRET_LEN * 2));
     for b in &raw[KEY_ID_LEN..] {
-        secret.push_str(&format!("{b:02x}"));
+        let _ = write!(secret, "{b:02x}");
     }
-    raw.iter_mut().for_each(|b| *b = 0);
+    raw.zeroize();
     let full = Zeroizing::new(format!("sprig_{tenant}_{key_id}_{}", secret.as_str()));
     Ok((key_id, secret, full))
 }
@@ -292,9 +293,9 @@ async fn insert<Q: Queryable + Send>(store: &AuthStore, q: &mut Q, r: &ApiKeyRow
         Value::from(r.name.as_str()),
         Value::from(r.secret_sha256.to_vec()),
         json(&r.scopes),
-        r.allowed_cidrs
-            .as_ref()
-            .map_or(Value::NULL, |c| Value::from(serde_json::json!(c).to_string())),
+        r.allowed_cidrs.as_ref().map_or(Value::NULL, |c| {
+            Value::from(serde_json::json!(c).to_string())
+        }),
         opt_micros(r.expires_at),
         r.created_by.map_or(Value::NULL, |u| Value::from(u.0)),
         Value::from(micros(r.created_at)),

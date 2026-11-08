@@ -110,7 +110,12 @@ pub struct AuthChange {
 /// What changed for one user between two auth states.
 fn compare(old: &AuthUser, new: Option<&AuthUser>, out: &mut Vec<Revoked>) {
     let id = old.row.user_id;
-    let mut push = |reason| out.push(Revoked { user_id: id, reason });
+    let mut push = |reason| {
+        out.push(Revoked {
+            user_id: id,
+            reason,
+        });
+    };
     let Some(new) = new else {
         push(RevokeReason::Dropped);
         return;
@@ -141,7 +146,11 @@ fn compare(old: &AuthUser, new: Option<&AuthUser>, out: &mut Vec<Revoked>) {
 
 /// The users `new` revokes compared with `old`.
 #[must_use]
-pub fn revoked_between(old: &TenantAuth, new: &TenantAuth, now: std::time::SystemTime) -> Vec<Revoked> {
+pub fn revoked_between(
+    old: &TenantAuth,
+    new: &TenantAuth,
+    now: std::time::SystemTime,
+) -> Vec<Revoked> {
     let mut out = Vec::new();
     for u in old.users() {
         compare(u, new.user(u.row.user_id).map(|a| &**a), &mut out);
@@ -193,7 +202,10 @@ impl AuthChanges {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(missed = n, "auth change feed lagged behind the catalog loads");
+                        tracing::warn!(
+                            missed = n,
+                            "auth change feed lagged behind the catalog loads"
+                        );
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
@@ -265,12 +277,12 @@ mod tests {
         locked.account_locked = true;
         let mut expired = row(3, "u3", "%", 2);
         expired.password_expired = true;
-        let mut nopw = row(4, "u4", "%", 2);
-        nopw.auth_methods = AuthMethods::API_KEY;
+        let mut no_password = row(4, "u4", "%", 2);
+        no_password.auth_methods = AuthMethods::API_KEY;
         let mut dropped = row(1, "u1", "%", 2);
         dropped.state = crate::store::UserState::Dropped;
         let new = old.apply(
-            vec![dropped, locked, expired, nopw, row(5, "u5", "%", 2)],
+            vec![dropped, locked, expired, no_password, row(5, "u5", "%", 2)],
             &[
                 sha2(20, 2, Slot::Primary, b"pw"),
                 sha2(30, 3, Slot::Primary, b"pw"),

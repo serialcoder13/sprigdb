@@ -4,7 +4,7 @@
 //! the `.proto` files and fails if the table and the annotations disagree,
 //! so the protos stay the one definition. [`find`] matches a request's
 //! method and path against the table and returns the RPC with its path
-//! variables; [`openapi`] builds the OpenAPI v3 document served at
+//! variables; [`openapi`] builds the `OpenAPI` v3 document served at
 //! `/v1/openapi.json` and `/admin/v1/openapi.json`.
 //!
 //! Path templates follow `google.api.http`: `{name}` matches one segment,
@@ -18,6 +18,7 @@
 //! protos) is the same.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use serde_json::{Value, json};
 
@@ -32,7 +33,7 @@ pub struct Route {
     pub method: &'static str,
     /// The path template.
     pub template: &'static str,
-    /// The request message's name, for the OpenAPI document.
+    /// The request message's name, for the `OpenAPI` document.
     pub request: &'static str,
     /// The RPC streams its replies (NDJSON over REST).
     pub streaming: bool,
@@ -101,49 +102,308 @@ macro_rules! r {
 
 /// Every REST route, in the order of the protos.
 pub static ROUTES: &[Route] = &[
-    r!("sprig.v1.Sql", "Query", "POST", "/v1/databases/{database}/sql:query", "QueryRequest", stream),
-    r!("sprig.v1.Sql", "Execute", "POST", "/v1/databases/{database}/sql:execute", "QueryRequest"),
-    r!("sprig.v1.Transactions", "Begin", "POST", "/v1/databases/{database}/transactions", "BeginRequest"),
-    r!("sprig.v1.Transactions", "Commit", "POST", "/v1/{transaction=transactions/*}:commit", "EndTransactionRequest"),
-    r!("sprig.v1.Transactions", "Rollback", "POST", "/v1/{transaction=transactions/*}:rollback", "EndTransactionRequest"),
-    r!("sprig.admin.v1.Clusters", "RegisterCluster", "POST", "/admin/v1/clusters", "BodyRequest"),
-    r!("sprig.admin.v1.Clusters", "ListClusters", "GET", "/admin/v1/clusters", "ListRequest"),
-    r!("sprig.admin.v1.Clusters", "GetCluster", "GET", "/admin/v1/clusters/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Clusters", "ProbeCluster", "POST", "/admin/v1/clusters/{name}:probe", "NameRequest"),
-    r!("sprig.admin.v1.Clusters", "DrainCluster", "POST", "/admin/v1/clusters/{name}:drain", "NameRequest"),
-    r!("sprig.admin.v1.DataCenters", "RegisterDc", "POST", "/admin/v1/dcs", "BodyRequest"),
-    r!("sprig.admin.v1.DataCenters", "ListDcs", "GET", "/admin/v1/dcs", "ListRequest"),
-    r!("sprig.admin.v1.DataCenters", "GetDc", "GET", "/admin/v1/dcs/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Tenants", "CreateTenant", "POST", "/admin/v1/tenants", "BodyRequest"),
-    r!("sprig.admin.v1.Tenants", "ListTenants", "GET", "/admin/v1/tenants", "ListRequest"),
-    r!("sprig.admin.v1.Tenants", "GetTenant", "GET", "/admin/v1/tenants/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Tenants", "DeleteTenant", "DELETE", "/admin/v1/tenants/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Users", "CreateUser", "POST", "/admin/v1/tenants/{name}/users", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "ListSettingKeys", "GET", "/admin/v1/settings", "ListRequest"),
-    r!("sprig.admin.v1.Settings", "GetSetting", "GET", "/admin/v1/settings/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "ExplainSetting", "GET", "/admin/v1/settings/{name}:explain", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "SetSetting", "PUT", "/admin/v1/settings/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "UnsetSetting", "DELETE", "/admin/v1/settings/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "ResetSetting", "POST", "/admin/v1/settings/{name}:reset", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "SetBounds", "POST", "/admin/v1/settings/{name}:bounds", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "LockSetting", "POST", "/admin/v1/settings/{name}:lock", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "UnlockSetting", "POST", "/admin/v1/settings/{name}:unlock", "NameRequest"),
-    r!("sprig.admin.v1.Settings", "TenantSettings", "GET", "/admin/v1/tenants/{name}/settings", "NameRequest"),
-    r!("sprig.admin.v1.Indexes", "ListIndexes", "GET", "/admin/v1/tenants/{tenant}/indexes", "TenantRequest"),
-    r!("sprig.admin.v1.Indexes", "ListRecommendations", "GET", "/admin/v1/tenants/{tenant}/recommendations", "TenantRequest"),
-    r!("sprig.admin.v1.Indexes", "GetIndex", "GET", "/admin/v1/tenants/{tenant}/indexes/{name}", "TenantObjectRequest"),
-    r!("sprig.admin.v1.Indexes", "Apply", "POST", "/admin/v1/tenants/{tenant}/indexes/{name}:approve", "TenantObjectRequest"),
-    r!("sprig.admin.v1.Indexes", "Dismiss", "POST", "/admin/v1/tenants/{tenant}/indexes/{name}:reject", "TenantObjectRequest"),
-    r!("sprig.admin.v1.Indexes", "Drop", "POST", "/admin/v1/tenants/{tenant}/indexes/{name}:drop", "TenantObjectRequest"),
-    r!("sprig.admin.v1.Indexes", "Freeze", "POST", "/admin/v1/tenants/{tenant}/indexes/{name}:pin", "TenantObjectRequest"),
-    r!("sprig.admin.v1.Indexes", "Unfreeze", "POST", "/admin/v1/tenants/{tenant}/indexes/{name}:unpin", "TenantObjectRequest"),
-    r!("sprig.admin.v1.Explain", "ExplainQuery", "GET", "/admin/v1/tenants/{tenant}/queries/{name}:explain", "TenantObjectRequest"),
-    r!("sprig.admin.v1.Jobs", "ListJobs", "GET", "/admin/v1/jobs", "ListRequest"),
-    r!("sprig.admin.v1.Jobs", "GetJob", "GET", "/admin/v1/jobs/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Jobs", "CancelJob", "POST", "/admin/v1/jobs/{name}:cancel", "NameRequest"),
-    r!("sprig.admin.v1.Gateways", "ListGateways", "GET", "/admin/v1/gateways", "ListRequest"),
-    r!("sprig.admin.v1.Gateways", "GetGateway", "GET", "/admin/v1/gateways/{name}", "NameRequest"),
-    r!("sprig.admin.v1.Gateways", "DrainGateway", "POST", "/admin/v1/gateways/{name}:drain", "NameRequest"),
+    r!(
+        "sprig.v1.Sql",
+        "Query",
+        "POST",
+        "/v1/databases/{database}/sql:query",
+        "QueryRequest",
+        stream
+    ),
+    r!(
+        "sprig.v1.Sql",
+        "Execute",
+        "POST",
+        "/v1/databases/{database}/sql:execute",
+        "QueryRequest"
+    ),
+    r!(
+        "sprig.v1.Transactions",
+        "Begin",
+        "POST",
+        "/v1/databases/{database}/transactions",
+        "BeginRequest"
+    ),
+    r!(
+        "sprig.v1.Transactions",
+        "Commit",
+        "POST",
+        "/v1/{transaction=transactions/*}:commit",
+        "EndTransactionRequest"
+    ),
+    r!(
+        "sprig.v1.Transactions",
+        "Rollback",
+        "POST",
+        "/v1/{transaction=transactions/*}:rollback",
+        "EndTransactionRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Clusters",
+        "RegisterCluster",
+        "POST",
+        "/admin/v1/clusters",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Clusters",
+        "ListClusters",
+        "GET",
+        "/admin/v1/clusters",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Clusters",
+        "GetCluster",
+        "GET",
+        "/admin/v1/clusters/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Clusters",
+        "ProbeCluster",
+        "POST",
+        "/admin/v1/clusters/{name}:probe",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Clusters",
+        "DrainCluster",
+        "POST",
+        "/admin/v1/clusters/{name}:drain",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.DataCenters",
+        "RegisterDc",
+        "POST",
+        "/admin/v1/dcs",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.DataCenters",
+        "ListDcs",
+        "GET",
+        "/admin/v1/dcs",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.DataCenters",
+        "GetDc",
+        "GET",
+        "/admin/v1/dcs/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Tenants",
+        "CreateTenant",
+        "POST",
+        "/admin/v1/tenants",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Tenants",
+        "ListTenants",
+        "GET",
+        "/admin/v1/tenants",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Tenants",
+        "GetTenant",
+        "GET",
+        "/admin/v1/tenants/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Tenants",
+        "DeleteTenant",
+        "DELETE",
+        "/admin/v1/tenants/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Users",
+        "CreateUser",
+        "POST",
+        "/admin/v1/tenants/{name}/users",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "ListSettingKeys",
+        "GET",
+        "/admin/v1/settings",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "GetSetting",
+        "GET",
+        "/admin/v1/settings/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "ExplainSetting",
+        "GET",
+        "/admin/v1/settings/{name}:explain",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "SetSetting",
+        "PUT",
+        "/admin/v1/settings/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "UnsetSetting",
+        "DELETE",
+        "/admin/v1/settings/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "ResetSetting",
+        "POST",
+        "/admin/v1/settings/{name}:reset",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "SetBounds",
+        "POST",
+        "/admin/v1/settings/{name}:bounds",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "LockSetting",
+        "POST",
+        "/admin/v1/settings/{name}:lock",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "UnlockSetting",
+        "POST",
+        "/admin/v1/settings/{name}:unlock",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Settings",
+        "TenantSettings",
+        "GET",
+        "/admin/v1/tenants/{name}/settings",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Indexes",
+        "ListIndexes",
+        "GET",
+        "/admin/v1/tenants/{tenant}/indexes",
+        "TenantRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Indexes",
+        "ListRecommendations",
+        "GET",
+        "/admin/v1/tenants/{tenant}/recommendations",
+        "TenantRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Indexes",
+        "GetIndex",
+        "GET",
+        "/admin/v1/tenants/{tenant}/indexes/{name}",
+        "TenantObjectRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Indexes",
+        "Apply",
+        "POST",
+        "/admin/v1/tenants/{tenant}/indexes/{name}:approve",
+        "TenantObjectRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Indexes",
+        "Dismiss",
+        "POST",
+        "/admin/v1/tenants/{tenant}/indexes/{name}:reject",
+        "TenantObjectRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Indexes",
+        "Drop",
+        "POST",
+        "/admin/v1/tenants/{tenant}/indexes/{name}:drop",
+        "TenantObjectRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Indexes",
+        "Freeze",
+        "POST",
+        "/admin/v1/tenants/{tenant}/indexes/{name}:pin",
+        "TenantObjectRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Indexes",
+        "Unfreeze",
+        "POST",
+        "/admin/v1/tenants/{tenant}/indexes/{name}:unpin",
+        "TenantObjectRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Explain",
+        "ExplainQuery",
+        "GET",
+        "/admin/v1/tenants/{tenant}/queries/{name}:explain",
+        "TenantObjectRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Jobs",
+        "ListJobs",
+        "GET",
+        "/admin/v1/jobs",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Jobs",
+        "GetJob",
+        "GET",
+        "/admin/v1/jobs/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Jobs",
+        "CancelJob",
+        "POST",
+        "/admin/v1/jobs/{name}:cancel",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Gateways",
+        "ListGateways",
+        "GET",
+        "/admin/v1/gateways",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Gateways",
+        "GetGateway",
+        "GET",
+        "/admin/v1/gateways/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Gateways",
+        "DrainGateway",
+        "POST",
+        "/admin/v1/gateways/{name}:drain",
+        "NameRequest"
+    ),
 ];
 
 /// The route for `Service.Rpc` (package-less, as [`Route::short_name`]).
@@ -246,7 +506,9 @@ pub fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            let hex = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok());
+            let hex = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
             if let Some(v) = hex {
                 out.push(v);
                 i += 3;
@@ -267,13 +529,13 @@ pub fn percent_encode(s: &str) -> String {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
             out.push(char::from(b));
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out
 }
 
-/// The OpenAPI v3 document for the routes `admin` selects (the Admin API,
+/// The `OpenAPI` v3 document for the routes `admin` selects (the Admin API,
 /// or the data API).
 #[must_use]
 pub fn openapi(admin: bool) -> Value {
@@ -344,7 +606,7 @@ fn reply(r: &Route) -> &'static str {
     }
 }
 
-/// `{transaction=transactions/*}` becomes `{transaction}`, as OpenAPI wants.
+/// `{transaction=transactions/*}` becomes `{transaction}`, as `OpenAPI` wants.
 fn openapi_path(template: &str) -> String {
     let mut out = String::new();
     let mut rest = template;

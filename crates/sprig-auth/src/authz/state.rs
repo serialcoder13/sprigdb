@@ -15,11 +15,15 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use sprig_catalog::{CatalogExtension, ExtState, Migration, SnapshotTx, TenantCatalog, VersionKind};
+use sprig_catalog::{
+    CatalogExtension, ExtState, Migration, SnapshotTx, TenantCatalog, VersionKind,
+};
 use sprig_common::Result;
 use sprig_common::ids::{RoleId, UserId};
 
-use super::store::{AUTHZ_MIGRATIONS, AuthzRows, AuthzStore, EdgeRow, Grantee, MODULE, PrivRow, RoleRow};
+use super::store::{
+    AUTHZ_MIGRATIONS, AuthzRows, AuthzStore, EdgeRow, Grantee, MODULE, PrivRow, RoleRow,
+};
 
 /// One tenant's authorization rows at one auth version, indexed.
 #[derive(Debug, Clone, Default)]

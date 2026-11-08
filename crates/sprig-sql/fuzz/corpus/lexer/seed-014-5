@@ -1,0 +1,1 @@
+SELECT * FROM information_schema.TABLES t JOIN information_schema.STATISTICS s USING (TABLE_SCHEMA, TABLE_NAME)

@@ -38,6 +38,7 @@ pub mod engine;
 pub mod io;
 pub mod maps;
 pub mod model;
+pub mod mysql;
 pub mod record;
 pub mod settings;
 pub mod worker;

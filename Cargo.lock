@@ -2099,6 +2099,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures",
+ "gethostname",
  "metrics",
  "mysql_async",
  "serde",
@@ -2140,6 +2141,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures",
+ "gethostname",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2355,6 +2357,7 @@ dependencies = [
  "bytes",
  "proptest",
  "serde_json",
+ "sprig-auth",
  "sprig-catalog",
  "sprig-common",
  "sprig-proto-mysql",
@@ -2362,6 +2365,7 @@ dependencies = [
  "sqlparser",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2381,8 +2385,13 @@ dependencies = [
  "mysql_async",
  "serde",
  "serde_json",
+ "sprig-balancer",
+ "sprig-binlog",
+ "sprig-catalog",
  "sprig-common",
  "sprig-meta",
+ "sprig-mover",
+ "sprig-shard",
  "tokio",
  "toml",
 ]

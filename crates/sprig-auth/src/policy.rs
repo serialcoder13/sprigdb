@@ -132,14 +132,12 @@ impl LockoutPolicy {
     /// The account clause, else the tenant's resolved `auth.*` values.
     #[must_use]
     pub fn of(row: &UserRow, policy: &dyn PolicySettings, catalog: &TenantCatalog) -> Self {
-        let attempts = row.failed_login_attempts.map_or_else(
-            || get(policy, &FAILED_LOGIN_ATTEMPTS, catalog),
-            u64::from,
-        );
-        let minutes = row.password_lock_minutes.map_or_else(
-            || get(policy, &PASSWORD_LOCK_MINUTES, catalog),
-            i64::from,
-        );
+        let attempts = row
+            .failed_login_attempts
+            .map_or_else(|| get(policy, &FAILED_LOGIN_ATTEMPTS, catalog), u64::from);
+        let minutes = row
+            .password_lock_minutes
+            .map_or_else(|| get(policy, &PASSWORD_LOCK_MINUTES, catalog), i64::from);
         Self {
             attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
             lock: LockLength::from_minutes(minutes),
@@ -262,7 +260,10 @@ impl CatalogLoginState {
             });
         }
         restart_after_lock(&mut row);
-        let failures = row.consecutive_failures.saturating_add(1).saturating_add(extra);
+        let failures = row
+            .consecutive_failures
+            .saturating_add(1)
+            .saturating_add(extra);
         if failures < policy.attempts {
             row.consecutive_failures = failures;
             row.last_failure_at = Some(now);
@@ -321,7 +322,8 @@ fn empty_state(user: UserId, now: SystemTime) -> LoginStateRow {
     }
 }
 
-type ChangeBody<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>;
+type ChangeBody<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>;
 
 /// Runs `body` in one auth change of `tenant`; returns its value and the
 /// committed version. On failure the change rolls back and the allocated
@@ -329,7 +331,10 @@ type ChangeBody<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Resu
 async fn auth_change<T, F>(cat: &MariaCatalog, tenant: TenantId, body: F) -> Result<(T, u64)>
 where
     T: Send,
-    F: for<'a> FnOnce(&'a AuthStore, &'a mut mysql_async::Transaction<'static>) -> ChangeBody<'a, T>
+    F: for<'a> FnOnce(
+            &'a AuthStore,
+            &'a mut mysql_async::Transaction<'static>,
+        ) -> ChangeBody<'a, T>
         + Send,
 {
     let mut c = cat
@@ -392,7 +397,9 @@ impl LoginStateStore for CatalogLoginState {
         {
             let ep = self.cat.backend().locator().writer(tenant).await?;
             let mut conn = ep.pool.get_conn().await.map_err(map_err)?;
-            let row = AuthStore::of(&ep.store).login_state(&mut conn, user).await?;
+            let row = AuthStore::of(&ep.store)
+                .login_state(&mut conn, user)
+                .await?;
             if row.and_then(|r| r.locked_until) != Some(until) {
                 return Ok(false);
             }
@@ -593,7 +600,10 @@ impl PasswordRules {
     #[must_use]
     pub fn of(row: &UserRow, policy: &dyn PolicySettings, catalog: &TenantCatalog) -> Self {
         let n = |v: Option<i16>, s: &'static Setting<u64>| {
-            v.map_or_else(|| get(policy, s, catalog), |d| u64::try_from(d).unwrap_or(0))
+            v.map_or_else(
+                || get(policy, s, catalog),
+                |d| u64::try_from(d).unwrap_or(0),
+            )
         };
         Self {
             strength: Strength::parse(&get(policy, &PASSWORD_POLICY, catalog)),
@@ -807,10 +817,18 @@ pub async fn change_password(
         return Err(p.error(change.persona, &row.name, &row.host));
     }
     let hashing = Hashing {
-        caching_sha2_rounds: get(ctx.policy, &crate::settings::CACHING_SHA2_ROUNDS, ctx.catalog)
-            .try_into()
-            .unwrap_or(crate::verifier::DEFAULT_CACHING_SHA2_ROUNDS),
-        native: get(ctx.policy, &crate::settings::MYSQL_NATIVE_PASSWORD, ctx.catalog),
+        caching_sha2_rounds: get(
+            ctx.policy,
+            &crate::settings::CACHING_SHA2_ROUNDS,
+            ctx.catalog,
+        )
+        .try_into()
+        .unwrap_or(crate::verifier::DEFAULT_CACHING_SHA2_ROUNDS),
+        native: get(
+            ctx.policy,
+            &crate::settings::MYSQL_NATIVE_PASSWORD,
+            ctx.catalog,
+        ),
     };
     let changed = admin::set_password(
         ctx.cat,
@@ -981,7 +999,9 @@ pub fn clause_within_bounds(
     let v = value as f64;
     let out = b.min.is_some_and(|m| v < m)
         || b.max.is_some_and(|m| v > m)
-        || b.allowed.as_ref().is_some_and(|a| !a.contains(&Value::Int(value)))
+        || b.allowed
+            .as_ref()
+            .is_some_and(|a| !a.contains(&Value::Int(value)))
         || (b.locked
             && policy
                 .resolve(key, catalog)

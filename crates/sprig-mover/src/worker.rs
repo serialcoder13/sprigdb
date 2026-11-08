@@ -27,6 +27,17 @@ pub trait EnvFactory: Send + Sync {
     fn settings(&self, rec: &JobRecord) -> MoverSettings;
 }
 
+/// Engine tasks, aborted when dropped.
+struct Running(HashMap<JobId, JoinHandle<()>>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        for h in self.0.values() {
+            h.abort();
+        }
+    }
+}
+
 /// How a runtime behaves.
 #[derive(Debug, Clone)]
 pub struct WorkerOpts {
@@ -114,27 +125,30 @@ impl JobRuntime {
         }
     }
 
-    /// Claims and runs jobs while the session lives.
+    /// Claims and runs jobs while the session lives. Every engine stops
+    /// when the lease is lost, at shutdown, and when this future is dropped
+    /// (a crash takes the jobs with it).
     async fn serve(&self, session: &Session, shutdown: &CancellationToken) {
-        let mut running: HashMap<JobId, JoinHandle<()>> = HashMap::new();
+        let mut running = Running(HashMap::new());
         loop {
-            running.retain(|_, h| !h.is_finished());
+            running.0.retain(|_, h| !h.is_finished());
             if session.is_lost() || shutdown.is_cancelled() {
                 break;
             }
-            if running.len() < self.opts.max_jobs
-                && let Err(e) = self.claim_some(session, &mut running).await
+            if running.0.len() < self.opts.max_jobs
+                && let Err(e) = self.claim_some(session, &mut running.0).await
             {
                 tracing::warn!(error = %e, "job scan failed");
             }
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => break,
+                () = session.lost() => {
+                    tracing::warn!(worker = %self.opts.worker_id, "lease lost; stopping jobs");
+                    break;
+                }
                 () = tokio::time::sleep(self.opts.scan_interval) => {}
             }
-        }
-        for (_, h) in running {
-            h.abort();
         }
     }
 
@@ -160,6 +174,7 @@ impl JobRuntime {
             else {
                 continue;
             };
+            let claim = claim.with_session(session.clone());
             let id = rec.job_id;
             tracing::info!(job = %id.0, token = claim.token(), worker = %self.opts.worker_id, "job claimed");
             let factory = self.factory.clone();

@@ -4,6 +4,7 @@
 //! they resolve at the process scopes for now.
 
 use sprig_common::ids::DcId;
+use sprig_proto_mysql::Persona;
 use sprig_settings::{Apply, HardBounds, LiveSettings, Scopes, Setting, SettingCtx};
 
 /// `gateway.long_data_max_bytes`.
@@ -88,6 +89,25 @@ impl ExecSettingsSource {
                     local_infile: snap.get(&LOCAL_INFILE, &ctx),
                 }
             }
+        }
+    }
+
+    /// The persona's version string, as the greeting reports it
+    /// (`gateway.mysql_server_version`, `gateway.mariadb_server_version`):
+    /// what `@@version` and `VERSION()` answer (chapter 28).
+    #[must_use]
+    pub fn persona_version(&self, persona: Persona) -> String {
+        use crate::mysql::settings::{MARIADB_SERVER_VERSION, MYSQL_SERVER_VERSION};
+        let setting = match persona {
+            Persona::MySql84 => &MYSQL_SERVER_VERSION,
+            Persona::MariaDb => &MARIADB_SERVER_VERSION,
+        };
+        match self {
+            ExecSettingsSource::Fixed(_) => setting.default.clone().into_owned(),
+            ExecSettingsSource::Live { live, dc } => live
+                .snapshot()
+                .get(setting, &SettingCtx::process(dc))
+                .into_owned(),
         }
     }
 }

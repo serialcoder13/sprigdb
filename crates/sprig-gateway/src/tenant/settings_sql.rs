@@ -64,6 +64,12 @@ pub enum SettingsAnswer {
     Rows(LocalAnswer),
 }
 
+/// The persona for messages: settings statements carry none, and their
+/// refusals word tables as MariaDB does.
+fn persona_of(_ts: &TenantSession) -> sprig_proto_mysql::Persona {
+    sprig_proto_mysql::Persona::MariaDb
+}
+
 fn access_denied(what: &str) -> SprigError {
     SprigError::standard(1227, *b"42000", format!("Access denied; {what}"))
 }
@@ -269,6 +275,16 @@ pub async fn execute(
     match stmt {
         SettingsStmt::Show { like, target } => {
             let r = resolve(ts, cat, current, target).await?;
+            super::authz::settings_check(
+                ts,
+                r.target,
+                r.tenant != ts.tenant,
+                false,
+                true,
+                r.schema.as_deref(),
+                r.table.as_deref(),
+                persona_of(ts),
+            )?;
             Ok(SettingsAnswer::Rows(show(
                 ts.services(),
                 &r,
@@ -278,6 +294,17 @@ pub async fn execute(
         }
         SettingsStmt::Alter { target, op } => {
             let r = resolve(ts, cat, current, target).await?;
+            // Chapter 29's settings privileges.
+            super::authz::settings_check(
+                ts,
+                r.target,
+                r.tenant != ts.tenant,
+                matches!(op, SettingsOp::SetBounds(_) | SettingsOp::ResetBounds(_)),
+                false,
+                r.schema.as_deref(),
+                r.table.as_deref(),
+                persona_of(ts),
+            )?;
             let svc = Arc::clone(ts.services());
             let principal = match ts.principal.user_id {
                 Some(u) => Principal::User(u),
@@ -483,6 +510,9 @@ pub fn view_sql(ts: &TenantSession, cat: &Arc<TenantCatalog>, nbe: bool) -> Resu
         .collect();
     dbs.sort_by_key(|d| d.db_id);
     for d in &dbs {
+        if !super::authz::settings_visible(ts, cat, &d.name, d.db_id, None) {
+            continue;
+        }
         let r = own(Target::Database(d.db_id), Some(d.name.clone()), None);
         rows_for(
             svc,
@@ -508,6 +538,9 @@ pub fn view_sql(ts: &TenantSession, cat: &Arc<TenantCatalog>, nbe: bool) -> Resu
         let Some(d) = dbs.iter().find(|d| d.db_id == o.db_id) else {
             continue;
         };
+        if !super::authz::settings_visible(ts, cat, &d.name, d.db_id, Some(o.object_id)) {
+            continue;
+        }
         let r = own(
             Target::Object(o.object_id),
             Some(d.name.clone()),

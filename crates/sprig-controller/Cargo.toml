@@ -12,6 +12,7 @@ publish.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 futures.workspace = true
+gethostname.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true

@@ -23,6 +23,7 @@
 
 use bytes::Bytes;
 use sprig_proto_mysql::ColumnDef;
+use sprig_proto_mysql::packets::Persona;
 use sprig_proto_mysql::resultset::{decode_text_row, encode_text_row};
 
 use super::hide::{Visibility, filter_create_table};
@@ -140,6 +141,9 @@ enum Mode {
 pub struct ResultMapper {
     mode: Mode,
     vis: Visibility,
+    /// The client's persona: on 3306, `SHOW CREATE TABLE` text is spelled
+    /// as MySQL 8.4 spells it (chapter 28).
+    persona: Persona,
     roles: Vec<Option<Role>>,
     fixed: Option<Vec<ColumnDef>>,
     group: Vec<TextRow>,
@@ -152,6 +156,7 @@ impl ResultMapper {
         Self {
             mode,
             vis,
+            persona: Persona::MariaDb,
             roles: Vec::new(),
             fixed: None,
             group: Vec::new(),
@@ -185,6 +190,18 @@ impl ResultMapper {
     pub fn with_columns(mut self, columns: Vec<ColumnDef>) -> Self {
         self.fixed = Some(columns);
         self
+    }
+
+    /// With the client's persona (MariaDB's by default).
+    #[must_use]
+    pub fn with_persona(mut self, persona: Persona) -> Self {
+        self.persona = persona;
+        self
+    }
+
+    /// Sets the client's persona.
+    pub fn set_persona(&mut self, persona: Persona) {
+        self.persona = persona;
     }
 
     /// The `SHOW` kind, for a show mapper.
@@ -404,7 +421,10 @@ impl ResultMapper {
                 }
                 Role::Definition => Some(self.definition(&s, ctx)),
                 Role::CreateTable => {
-                    let filtered = filter_create_table(&s, &self.vis);
+                    let mut filtered = filter_create_table(&s, &self.vis);
+                    if self.persona == Persona::MySql84 {
+                        filtered = crate::compat::schema::mysql_create_table(&filtered);
+                    }
                     Some(self.definition(&filtered, ctx))
                 }
                 Role::Message => {

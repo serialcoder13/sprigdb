@@ -1,0 +1,1 @@
+SELECT 'it''s', 'back\\slash', N'n', X'0A', B'01', 0x0A, 0b01, 1.5e-3

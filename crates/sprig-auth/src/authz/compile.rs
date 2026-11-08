@@ -59,7 +59,7 @@ pub struct CompiledPrivileges {
     pub dbs: HashMap<String, ActionSet>,
     /// `db.obj`.
     pub objects: HashMap<ObjectId, ActionSet>,
-    /// Any column of `db.t`, ORed.
+    /// The union of every column grant of `db.t`.
     pub col_any: HashMap<ObjectId, ActionSet>,
     /// `db.t (c)`, column lower case.
     pub columns: HashMap<(ObjectId, String), ActionSet>,
@@ -131,10 +131,9 @@ impl CompiledPrivileges {
     pub fn actions_on(&self, t: Target<'_>) -> ActionSet {
         match t {
             Target::Tenant => self.tenant,
-            Target::Database { db_key } => {
-                self.tenant
-                    .union(self.dbs.get(db_key).copied().unwrap_or_default())
-            }
+            Target::Database { db_key } => self
+                .tenant
+                .union(self.dbs.get(db_key).copied().unwrap_or_default()),
             Target::Object { db_key, object, .. } => self
                 .actions_on(Target::Database { db_key })
                 .union(self.objects.get(&object).copied().unwrap_or_default()),
