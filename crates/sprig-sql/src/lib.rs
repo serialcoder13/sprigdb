@@ -29,9 +29,9 @@
 //!   persona-shaped `information_schema` providers and `SHOW` rewrites,
 //!   result metadata and error mapping on 3306.
 
-pub mod compat;
 pub mod access;
 pub mod account_stmt;
+pub mod compat;
 pub mod lex;
 pub mod names;
 pub mod settings_stmt;

@@ -465,35 +465,35 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::BackendLost
         | SprigCode::CatalogUnavailable
         | SprigCode::AuthUnavailable
-        | SprigCode::ForwardFailed => (Code::Unavailable, 503),
+        | SprigCode::ForwardFailed
+        | SprigCode::JobLeaseLost
+        | SprigCode::MoveSourceDiverged => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
         | SprigCode::TxnHandleUnknown
-        | SprigCode::TxnHandleExpired => (Code::Aborted, 409),
+        | SprigCode::TxnHandleExpired
+        | SprigCode::ClusterFenceFailed
+        | SprigCode::OutcomeUnknown
+        | SprigCode::SessionStateLost
+        | SprigCode::ShardMoved
+        | SprigCode::ShardLocked
+        | SprigCode::MoveCutoverAborted => (Code::Aborted, 409),
         SprigCode::CatalogFormatTooNew => (Code::FailedPrecondition, 500),
-        SprigCode::BinlogCorrupt => (Code::DataLoss, 500),
-        SprigCode::ShardMoved | SprigCode::ShardLocked | SprigCode::MoveCutoverAborted => {
-            (Code::Aborted, 409)
-        }
-        SprigCode::MoveTargetIncompatible
-        | SprigCode::MoveUnsupported
-        | SprigCode::JobStateInvalid => (Code::FailedPrecondition, 409),
-        SprigCode::JobNotFound => (Code::NotFound, 404),
-        SprigCode::JobLeaseLost | SprigCode::MoveSourceDiverged => (Code::Unavailable, 503),
-        SprigCode::MoveVerifyFailed => (Code::DataLoss, 500),
+        SprigCode::BinlogCorrupt | SprigCode::MoveVerifyFailed => (Code::DataLoss, 500),
         SprigCode::BackendProtocol => (Code::Internal, 502),
-        SprigCode::ClusterFenceFailed | SprigCode::OutcomeUnknown | SprigCode::SessionStateLost => {
-            (Code::Aborted, 409)
-        }
-        SprigCode::ClusterNotFound | SprigCode::UnknownDc | SprigCode::AutoIndexNotFound => {
-            (Code::NotFound, 404)
-        }
+        SprigCode::ClusterNotFound
+        | SprigCode::UnknownDc
+        | SprigCode::AutoIndexNotFound
+        | SprigCode::JobNotFound => (Code::NotFound, 404),
         SprigCode::ClusterExists | SprigCode::TenantExists => (Code::AlreadyExists, 409),
         SprigCode::ClusterStateInvalid
         | SprigCode::AutoIndexStateInvalid
         | SprigCode::TenantNotReady
         | SprigCode::TenantHasChildren
-        | SprigCode::TenantDepthExceeded => (Code::FailedPrecondition, 409),
+        | SprigCode::TenantDepthExceeded
+        | SprigCode::MoveTargetIncompatible
+        | SprigCode::MoveUnsupported
+        | SprigCode::JobStateInvalid => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
         | SprigCode::TxnHandleForbidden => (Code::PermissionDenied, 403),
@@ -504,9 +504,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::PlacementUnavailable => (Code::ResourceExhausted, 503),
         SprigCode::RequestTooLarge => (Code::InvalidArgument, 413),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
-        SprigCode::AdminUnauthenticated | SprigCode::SessionRevoked | SprigCode::TenantAmbiguous => {
-            (Code::Unauthenticated, 401)
-        }
+        SprigCode::AdminUnauthenticated
+        | SprigCode::SessionRevoked
+        | SprigCode::TenantAmbiguous => (Code::Unauthenticated, 401),
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
     };
     ProtocolError {

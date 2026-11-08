@@ -62,6 +62,13 @@ use super::TenantServices;
 use super::backends::PerUser;
 use super::session::TenantSession;
 
+/// Serializes reconciles of one tenant on one cluster.
+type Gate = Arc<tokio::sync::Mutex<()>>;
+
+/// A compiled set and what it was compiled at: auth and catalog
+/// versions, active roles.
+type Compiled = (u64, u64, Vec<RoleId>, Arc<CompiledPrivileges>);
+
 /// The process-wide half: per-user account settings and what was applied.
 #[derive(Default)]
 pub struct AuthzServices {
@@ -69,7 +76,7 @@ pub struct AuthzServices {
     applied: Mutex<HashMap<(TenantId, ClusterId), u64>>,
     /// The snapshot versions last compared, per tenant and cluster.
     checked: Mutex<HashMap<(TenantId, ClusterId), (u64, u64)>>,
-    gates: Mutex<HashMap<(TenantId, ClusterId), Arc<tokio::sync::Mutex<()>>>>,
+    gates: Mutex<HashMap<(TenantId, ClusterId), Gate>>,
     migrating: Mutex<HashSet<TenantId>>,
 }
 
@@ -115,10 +122,10 @@ impl AuthzServices {
         let r = sprig_auth::authz::migrate(&*svc.locator, &svc.catalog, cat.tenant).await;
         match r {
             Ok(v) => {
-                tracing::info!(tenant = %cat.tenant, auth_version = v, "authz module migrated: existing users keep every privilege")
+                tracing::info!(tenant = %cat.tenant, auth_version = v, "authz module migrated: existing users keep every privilege");
             }
             Err(e) => {
-                tracing::warn!(tenant = %cat.tenant, error = %e, "authz migration failed; retried later")
+                tracing::warn!(tenant = %cat.tenant, error = %e, "authz migration failed; retried later");
             }
         }
         lock(&self.migrating).remove(&cat.tenant);
@@ -199,7 +206,7 @@ pub struct SessionAuthz {
     /// The active roles; `None` until the first compile (then the default
     /// roles, or all with `auth.activate_all_roles_on_login`).
     active: Mutex<Option<Vec<RoleId>>>,
-    compiled: Mutex<Option<(u64, u64, Vec<RoleId>, Arc<CompiledPrivileges>)>>,
+    compiled: Mutex<Option<Compiled>>,
 }
 
 impl SessionAuthz {
@@ -313,8 +320,14 @@ pub async fn account_statement(
     let client_host = ts.principal.client_ip.to_string();
     let lctn = ts.lower_case_table_names();
     let active = ts.authz.active();
+    let policy = sprig_auth::SettingsPolicy::new(svc.settings.clone(), svc.dc.clone());
+    let audit = sprig_auth::audit::LogAudit::default();
+    let tenant_name = ts.principal.tenant_name.clone();
     let outcome = {
         let actx = AccountCtx {
+            tenant_name: tenant_name.as_deref(),
+            policy: &policy,
+            audit: &audit,
             catalog: &svc.catalog,
             snapshot: cat,
             tenant: ts.tenant,
@@ -567,9 +580,9 @@ impl CheckCtx<'_> {
 }
 
 /// `CALL [db.]proc`: the procedure's name.
-fn call_target(text: &[u8], lex: &LexOptions) -> Option<(Option<String>, String)> {
+fn call_target(text: &[u8], lex: LexOptions) -> Option<(Option<String>, String)> {
     use sprig_sql::lex::{TokenKind, ident_value};
-    let tokens = sprig_sql::lex::lex(text, lex).ok()?;
+    let tokens = sprig_sql::lex::lex(text, &lex).ok()?;
     let t: Vec<_> = tokens.iter().filter(|t| !t.kind.is_trivia()).collect();
     let name = |i: usize| -> Option<String> {
         let tk = t.get(i)?;
@@ -610,7 +623,7 @@ pub fn check(cx: &CheckCtx<'_>, sp: &StmtPlan, original: &[u8], lex: &LexOptions
             }
         }
         StmtKind::Call => {
-            if let Some((db, name)) = call_target(original, lex) {
+            if let Some((db, name)) = call_target(original, *lex) {
                 cx.routine(db.as_deref(), &name, ObjectType::Procedure, Action::Execute)?;
             }
         }
@@ -720,6 +733,7 @@ pub fn filter_session_databases(ts: &TenantSession, ans: &mut LocalAnswer) {
 ///
 /// # Errors
 /// As the table says.
+#[allow(clippy::too_many_arguments)] // one flag per kind of statement
 pub fn settings_check(
     ts: &TenantSession,
     target: sprig_catalog::Target,
@@ -821,5 +835,21 @@ pub fn settings_visible(
     match object {
         None => p.any_in_database(&key, Some(db_id)),
         Some(o) => p.any_on_object(&key, db_id, o),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_targets() {
+        let lex = LexOptions::for_persona(Persona::MariaDb);
+        assert_eq!(
+            call_target(b"CALL shop.p_count(@n)", lex),
+            Some((Some("shop".into()), "p_count".into()))
+        );
+        assert_eq!(call_target(b"call `p` ()", lex), Some((None, "p".into())));
+        assert_eq!(call_target(b"SELECT 1", lex), None);
     }
 }

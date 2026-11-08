@@ -15,10 +15,14 @@ hyper.workspace = true
 hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `explain placement|decision` render chapter 11's types.
+sprig-balancer.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
 sprig-controller.workspace = true
 sprig-meta.workspace = true
+# `sprigctl shard move` and `sprigctl job` (chapter 10).
+sprig-mover.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true
 tokio.workspace = true

@@ -25,9 +25,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use crate::constraints::{
     Blocker, Feasibility, Fit, Purpose, Unit, cowrite_split_rate, feasible_in, unit_of,
 };
-use crate::model::{
-    ClusterState, FleetView, Fullness, LoadVector, ShardKey, Timestamp,
-};
+use crate::model::{ClusterState, FleetView, Fullness, LoadVector, ShardKey, Timestamp};
 use crate::settings::{BalancerMode, BalancerSettings, GB};
 
 /// A move back to a cluster left within this window counts as reverted
@@ -250,8 +248,12 @@ pub trait PlacementPolicy: Send + Sync {
     ///
     /// # Errors
     /// 39120 `ER_SPRIG_PLACEMENT_UNAVAILABLE` when no cluster can take them.
-    fn place(&self, view: &FleetView, req: &PlaceRequest, now: Timestamp)
-    -> Result<PlacementDecision>;
+    fn place(
+        &self,
+        view: &FleetView,
+        req: &PlaceRequest,
+        now: Timestamp,
+    ) -> Result<PlacementDecision>;
     /// Plans rebalancing moves.
     fn rebalance(&self, view: &FleetView, now: Timestamp) -> PlanReport;
 }
@@ -309,7 +311,12 @@ impl Planner {
             / (w.storage + w.cpu + w.connections)
     }
 
-    fn place_unit(&self, view: &FleetView, unit: &Unit, feas: Feasibility) -> Result<PlacementDecision> {
+    fn place_unit(
+        &self,
+        view: &FleetView,
+        unit: &Unit,
+        feas: Feasibility,
+    ) -> Result<PlacementDecision> {
         if feas.ok.is_empty() {
             let why = feas
                 .main_blocker()
@@ -545,7 +552,9 @@ impl Planner {
             let tenant = view.tenants.get(&s.key.tenant);
             let residency_bad = tenant
                 .and_then(|t| t.allowed_dcs.as_ref())
-                .is_some_and(|a| !a.contains(&c.dc) || c.replica_dcs.iter().any(|d| !a.contains(d)));
+                .is_some_and(|a| {
+                    !a.contains(&c.dc) || c.replica_dcs.iter().any(|d| !a.contains(d))
+                });
             let reason = if residency_bad {
                 MoveReason::ResidencyChange
             } else if c.state == ClusterState::Draining {
@@ -574,10 +583,11 @@ impl Planner {
                 Purpose::Residency
             };
             let feas = feasible_in(&w.view, &w.loads, &unit, purpose, now);
-            let best = feas
-                .ok
-                .iter()
-                .min_by(|a, b| a.1.full_after.total_cmp(&b.1.full_after).then(a.0.cmp(&b.0)));
+            let best = feas.ok.iter().min_by(|a, b| {
+                a.1.full_after
+                    .total_cmp(&b.1.full_after)
+                    .then(a.0.cmp(&b.0))
+            });
             let Some((to, fit)) = best else {
                 r.notes.push(note(
                     "no_target",
@@ -691,10 +701,7 @@ impl Planner {
                 }
                 alts.push((c.clone(), fit.full_after));
                 // Among targets for one shard, the emptiest after.
-                if cand
-                    .as_ref()
-                    .is_none_or(|(_, f)| fit.full_after < *f)
-                {
+                if cand.as_ref().is_none_or(|(_, f)| fit.full_after < *f) {
                     cand = Some((c.clone(), fit.full_after));
                 }
             }
@@ -829,12 +836,18 @@ impl Work {
 
     fn full(&self, c: &ClusterId) -> f64 {
         let l = self.loads.get(c).copied().unwrap_or_default();
-        self.view.clusters.get(c).map_or(0.0, |cv| cv.full_with(&l).value)
+        self.view
+            .clusters
+            .get(c)
+            .map_or(0.0, |cv| cv.full_with(&l).value)
     }
 
     fn full_without(&self, c: &ClusterId, load: &LoadVector) -> f64 {
         let l = (self.loads.get(c).copied().unwrap_or_default() - *load).clamp0();
-        self.view.clusters.get(c).map_or(0.0, |cv| cv.full_with(&l).value)
+        self.view
+            .clusters
+            .get(c)
+            .map_or(0.0, |cv| cv.full_with(&l).value)
     }
 
     fn apply(&mut self, m: &PlannedMove) {

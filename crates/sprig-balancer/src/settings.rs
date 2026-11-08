@@ -523,18 +523,32 @@ mod tests {
         let dc = DcId::new("mum1").unwrap();
         let c7 = ClusterId::new("mum1-c7").unwrap();
         let ctx = SettingCtx::process(&dc);
-        assert_eq!(BalancerSettings::resolve(&s, &ctx), BalancerSettings::default());
+        assert_eq!(
+            BalancerSettings::resolve(&s, &ctx),
+            BalancerSettings::default()
+        );
         let cctx = SettingCtx {
             cluster: Some(&c7),
             ..ctx
         };
-        assert_eq!(ClusterLimits::resolve(&s, &cctx, 2), ClusterLimits::default());
+        assert_eq!(
+            ClusterLimits::resolve(&s, &cctx, 2),
+            ClusterLimits::default()
+        );
         s.set_value(Level::Cluster, &cctx, "balancer.high_pct", &Value::Int(90))
             .unwrap();
         assert_eq!(ClusterLimits::resolve(&s, &cctx, 2).high, 0.9);
-        s.set_value(Level::Dc, &ctx, "balancer.mode", &Value::Str("dry_run".into()))
-            .unwrap();
-        assert_eq!(BalancerSettings::resolve(&s, &ctx).mode, BalancerMode::DryRun);
+        s.set_value(
+            Level::Dc,
+            &ctx,
+            "balancer.mode",
+            &Value::Str("dry_run".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            BalancerSettings::resolve(&s, &ctx).mode,
+            BalancerMode::DryRun
+        );
         // Hard bounds refuse a mode that doesn't exist.
         assert!(
             s.set_value(Level::Dc, &ctx, "balancer.mode", &Value::Str("fast".into()))
@@ -547,11 +561,17 @@ mod tests {
         assert_eq!(LeastBusyWeights::parse(""), LeastBusyWeights::default());
         let w = LeastBusyWeights::parse("storage=1, cpu=0 ,connections=0");
         assert_eq!((w.storage, w.cpu, w.connections), (1.0, 0.0, 0.0));
-        assert_eq!(LeastBusyWeights::parse("disk=1"), LeastBusyWeights::default());
+        assert_eq!(
+            LeastBusyWeights::parse("disk=1"),
+            LeastBusyWeights::default()
+        );
         assert_eq!(
             LeastBusyWeights::parse("storage=0,cpu=0,connections=0"),
             LeastBusyWeights::default()
         );
-        assert_eq!(LeastBusyWeights::parse("cpu=x"), LeastBusyWeights::default());
+        assert_eq!(
+            LeastBusyWeights::parse("cpu=x"),
+            LeastBusyWeights::default()
+        );
     }
 }

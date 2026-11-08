@@ -12,7 +12,8 @@
 //!   `CHECK_CONSTRAINTS`, [`json_join`]), drops integer display widths,
 //!   shows defaults unquoted with `DEFAULT_GENERATED`, and maps collation
 //!   names ([`super::collation`]); `STATISTICS` has `IS_VISIBLE` and
-//!   `EXPRESSION`; `TABLE_CONSTRAINTS` has `ENFORCED`; the JSON checks
+//!   `EXPRESSION`; `TABLE_CONSTRAINTS` has `ENFORCED`; a foreign key's
+//!   default rule reads `NO ACTION`, not MariaDB's `RESTRICT`; the JSON checks
 //!   disappear from `CHECK_CONSTRAINTS` and `TABLE_CONSTRAINTS`, as MySQL
 //!   has none.
 //! - **Tables the persona answers** ([`local_view`]): `KEYWORDS` with
@@ -69,7 +70,10 @@ fn json_clause(name_expr: &str, lit: Lit<'_>) -> String {
 
 /// Whether a `COLUMNS` row is a JSON column: `LONGTEXT` with the check.
 fn is_json(lit: Lit<'_>) -> String {
-    format!("(`DATA_TYPE` = {} AND {JSON_COL} IS NOT NULL)", lit("longtext"))
+    format!(
+        "(`DATA_TYPE` = {} AND {JSON_COL} IS NOT NULL)",
+        lit("longtext")
+    )
 }
 
 /// The `LEFT JOIN` that finds the JSON checks of one schema, for the
@@ -149,6 +153,7 @@ fn extra(lit: Lit<'_>) -> String {
 /// differs from MariaDB 11.8's, with where each comes from. `None`: the
 /// shapes match (or the table isn't one chapter 07 maps).
 #[must_use]
+#[allow(clippy::too_many_lines)] // one column list per table
 pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>> {
     use Src::{Col, Sql};
     let json = is_json(lit);
@@ -283,13 +288,45 @@ pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>>
             v.push(("ENFORCED", Sql(lit("YES"))));
             v
         }
+        // MariaDB reports a rule the DDL left out as RESTRICT, MySQL as NO
+        // ACTION; InnoDB treats the two alike, and an explicit RESTRICT
+        // can't be told apart on MariaDB, so both read NO ACTION.
+        "REFERENTIAL_CONSTRAINTS" => {
+            let rule = |c: &str| {
+                Sql(format!(
+                    "IF(`{c}` = {}, {}, `{c}`)",
+                    lit("RESTRICT"),
+                    lit("NO ACTION")
+                ))
+            };
+            vec![
+                ("CONSTRAINT_CATALOG", Col("CONSTRAINT_CATALOG")),
+                ("CONSTRAINT_SCHEMA", Col("CONSTRAINT_SCHEMA")),
+                ("CONSTRAINT_NAME", Col("CONSTRAINT_NAME")),
+                (
+                    "UNIQUE_CONSTRAINT_CATALOG",
+                    Col("UNIQUE_CONSTRAINT_CATALOG"),
+                ),
+                ("UNIQUE_CONSTRAINT_SCHEMA", Col("UNIQUE_CONSTRAINT_SCHEMA")),
+                ("UNIQUE_CONSTRAINT_NAME", Col("UNIQUE_CONSTRAINT_NAME")),
+                ("MATCH_OPTION", Col("MATCH_OPTION")),
+                ("UPDATE_RULE", rule("UPDATE_RULE")),
+                ("DELETE_RULE", rule("DELETE_RULE")),
+                ("TABLE_NAME", Col("TABLE_NAME")),
+                ("REFERENCED_TABLE_NAME", Col("REFERENCED_TABLE_NAME")),
+            ]
+        }
         "CHECK_CONSTRAINTS" => vec![
             ("CONSTRAINT_CATALOG", Col("CONSTRAINT_CATALOG")),
             ("CONSTRAINT_SCHEMA", Col("CONSTRAINT_SCHEMA")),
             ("CONSTRAINT_NAME", Col("CONSTRAINT_NAME")),
             (
                 "CHECK_CLAUSE",
-                Sql(format!("CONCAT({}, `CHECK_CLAUSE`, {})", lit("("), lit(")"))),
+                Sql(format!(
+                    "CONCAT({}, `CHECK_CLAUSE`, {})",
+                    lit("("),
+                    lit(")")
+                )),
             ),
         ],
         "VIEWS" => [
@@ -310,7 +347,10 @@ pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>>
         "SCHEMATA" => vec![
             ("CATALOG_NAME", Col("CATALOG_NAME")),
             ("SCHEMA_NAME", Col("SCHEMA_NAME")),
-            ("DEFAULT_CHARACTER_SET_NAME", Col("DEFAULT_CHARACTER_SET_NAME")),
+            (
+                "DEFAULT_CHARACTER_SET_NAME",
+                Col("DEFAULT_CHARACTER_SET_NAME"),
+            ),
             (
                 "DEFAULT_COLLATION_NAME",
                 Sql(coll("`DEFAULT_COLLATION_NAME`")),
@@ -318,10 +358,12 @@ pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>>
             ("SQL_PATH", Col("SQL_PATH")),
             ("DEFAULT_ENCRYPTION", Sql(lit("NO"))),
         ],
-        "PROCESSLIST" => ["ID", "USER", "HOST", "DB", "COMMAND", "TIME", "STATE", "INFO"]
-            .into_iter()
-            .map(|c| (c, Col(c)))
-            .collect(),
+        "PROCESSLIST" => [
+            "ID", "USER", "HOST", "DB", "COMMAND", "TIME", "STATE", "INFO",
+        ]
+        .into_iter()
+        .map(|c| (c, Col(c)))
+        .collect(),
         _ => return None,
     })
 }
@@ -462,7 +504,11 @@ pub fn show_columns_sql(
 ) -> Vec<u8> {
     let json = is_json(lit);
     let phys = lit(schema);
-    let ty = format!("IF({json}, {}, {})", lit("json"), column_type("`COLUMN_TYPE`", lit));
+    let ty = format!(
+        "IF({json}, {}, {})",
+        lit("json"),
+        column_type("`COLUMN_TYPE`", lit)
+    );
     let coll = format!(
         "IF({json}, NULL, {})",
         collation::sql_case("`COLLATION_NAME`", lit)
@@ -484,12 +530,12 @@ pub fn show_columns_sql(
         quote(schema),
         quote(table)
     );
-    let cols = if full {
+    let select = if full {
         "`Field`, `Type`, `Collation`, `Null`, `Key`, `Default`, `Extra`, `Privileges`, `Comment`"
     } else {
         "`Field`, `Type`, `Null`, `Key`, `Default`, `Extra`"
     };
-    let mut sql = format!("SELECT {cols} FROM ({inner}) AS `COLUMNS`").into_bytes();
+    let mut sql = format!("SELECT {select} FROM ({inner}) AS `COLUMNS`").into_bytes();
     if let Some(f) = filter {
         sql.push(b' ');
         sql.extend_from_slice(f);
@@ -572,6 +618,23 @@ pub fn describe_rewrite(
     ))
 }
 
+/// Words after `EXPLAIN` that start a statement, not a table.
+const NOT_TABLE: &[&str] = &[
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "REPLACE",
+    "WITH",
+    "TABLE",
+    "VALUES",
+    "FORMAT",
+    "EXTENDED",
+    "PARTITIONS",
+    "ANALYZE",
+    "FOR",
+];
+
 /// What a `DESCRIBE` names: `DESC[RIBE] | EXPLAIN tbl [col | 'wild']`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeTarget {
@@ -605,21 +668,7 @@ pub fn describe_target(text: &[u8], tokens: &[Token], nbe: bool) -> Option<Descr
     if !matches!(word(0)?.as_str(), "DESCRIBE" | "DESC" | "EXPLAIN") {
         return None;
     }
-    const NOT_TABLE: &[&str] = &[
-        "SELECT",
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "REPLACE",
-        "WITH",
-        "TABLE",
-        "VALUES",
-        "FORMAT",
-        "EXTENDED",
-        "PARTITIONS",
-        "ANALYZE",
-        "FOR",
-    ];
+
     if word(1).is_some_and(|w| NOT_TABLE.contains(&w.as_str())) {
         return None;
     }

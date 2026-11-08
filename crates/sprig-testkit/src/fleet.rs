@@ -271,13 +271,17 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
     let ids: Vec<ClusterId> = base.clusters.keys().cloned().collect();
     let mut tenants: BTreeMap<TenantId, TenantView> = BTreeMap::new();
     let mut shards: BTreeMap<ShardKey, SimShard> = BTreeMap::new();
-    let total_storage: f64 = base.clusters.values().map(|c| c.cap.storage_bytes / GB).sum();
+    let total_storage: f64 = base
+        .clusters
+        .values()
+        .map(|c| c.cap.storage_bytes / GB)
+        .sum();
     // Aim the starting fleet at about 45% of total storage.
     let per_tenant_gb = total_storage * 0.45 / f64::from(cfg.tenants.max(1));
     let new_tenant = |t: u64, rng: &SimRng, tenants: &mut BTreeMap<TenantId, TenantView>| {
         let mut tv = TenantView::new(TenantId(t));
         // A third of the tenants are pinned to the home DC.
-        if t % 3 == 0 {
+        if t.is_multiple_of(3) {
             tv.allowed_dcs = Some(BTreeSet::from([dc("mum1")]));
         }
         tenants.insert(TenantId(t), tv);
@@ -286,7 +290,15 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
             .map(|g| {
                 let gb = log_spread(rng, per_tenant_gb / 10.0, per_tenant_gb * 2.5) / groups as f64;
                 let busy = gb * log_spread(rng, 1.0, 12.0);
-                (ShardKey::new(t, u32::try_from(g + 1).unwrap_or(1), u32::try_from(g + 1).unwrap_or(1)), gb, busy)
+                (
+                    ShardKey::new(
+                        t,
+                        u32::try_from(g + 1).unwrap_or(1),
+                        u32::try_from(g + 1).unwrap_or(1),
+                    ),
+                    gb,
+                    busy,
+                )
             })
             .collect::<Vec<_>>()
     };
@@ -304,14 +316,20 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
             };
             let pinned = tenants[&k.tenant].allowed_dcs.is_some();
             let room = |c: &ClusterId, used: &BTreeMap<ClusterId, f64>| {
-                used.get(c).copied().unwrap_or(0.0) + gb <= 0.95 * base.clusters[c].cap.storage_bytes / GB
+                used.get(c).copied().unwrap_or(0.0) + gb
+                    <= 0.95 * base.clusters[c].cap.storage_bytes / GB
                     && !(pinned && base.clusters[c].replica_dcs.contains(&dc("fra1")))
             };
             if !room(&c, &used) {
                 c = ids
                     .iter()
                     .filter(|x| room(x, &used))
-                    .min_by(|a, b| used.get(*a).copied().unwrap_or(0.0).total_cmp(&used.get(*b).copied().unwrap_or(0.0)))
+                    .min_by(|a, b| {
+                        used.get(*a)
+                            .copied()
+                            .unwrap_or(0.0)
+                            .total_cmp(&used.get(*b).copied().unwrap_or(0.0))
+                    })
                     .cloned()
                     .unwrap_or(c);
             }
@@ -329,7 +347,9 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
         }
     }
 
-    let truth = |shards: &BTreeMap<ShardKey, SimShard>, tenants: &BTreeMap<TenantId, TenantView>, noisy: bool| {
+    let truth = |shards: &BTreeMap<ShardKey, SimShard>,
+                 tenants: &BTreeMap<TenantId, TenantView>,
+                 noisy: bool| {
         let mut v = base.clone();
         v.tenants.clone_from(tenants);
         for (k, s) in shards {
@@ -421,7 +441,14 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
                     match planner.place(&view, &req, t) {
                         Ok(d) => {
                             report.placements += 1;
-                            check_target(&view, k.tenant, &d.cluster, gb * GB, &mut report.violations, "place");
+                            check_target(
+                                &view,
+                                k.tenant,
+                                &d.cluster,
+                                gb * GB,
+                                &mut report.violations,
+                                "place",
+                            );
                             view.add_shard(ShardView::new(k, d.cluster.clone(), req.predicted));
                             shards.insert(
                                 k,
@@ -446,15 +473,45 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
         sched.annotate(&mut view, t);
         let plan = planner.rebalance(&view, t);
         if std::env::var("SPRIG_FLEET_DEBUG").is_ok() && step % 240 == 0 {
-            eprintln!("t+{}h trigger {:?} moves {} notes {:?} full {:?}", step / 60, plan.trigger, plan.moves.len(),
-                plan.notes.iter().map(|n| n.text.clone()).collect::<Vec<_>>(),
-                plan.fullness.iter().map(|(c, f)| (c.to_string(), (f.value * 100.0).round() / 100.0, f.bottleneck.to_string())).collect::<Vec<_>>());
+            eprintln!(
+                "t+{}h trigger {:?} moves {} notes {:?} full {:?}",
+                step / 60,
+                plan.trigger,
+                plan.moves.len(),
+                plan.notes
+                    .iter()
+                    .map(|n| n.text.clone())
+                    .collect::<Vec<_>>(),
+                plan.fullness
+                    .iter()
+                    .map(|(c, f)| (
+                        c.to_string(),
+                        (f.value * 100.0).round() / 100.0,
+                        f.bottleneck.to_string()
+                    ))
+                    .collect::<Vec<_>>()
+            );
         }
         for m in &plan.moves {
-            check_target(&view, m.tenant, &m.to, m.size_bytes, &mut report.violations, "move");
+            check_target(
+                &view,
+                m.tenant,
+                &m.to,
+                m.size_bytes,
+                &mut report.violations,
+                "move",
+            );
         }
         sched
-            .schedule(&plan, &view, &mode_of, settings.max_concurrent_moves_per_dc as usize, &mover, &log, t)
+            .schedule(
+                &plan,
+                &view,
+                &mode_of,
+                settings.max_concurrent_moves_per_dc as usize,
+                &mover,
+                &log,
+                t,
+            )
             .await;
         // Spread on the true loads.
         let real = truth(&shards, &tenants, false);
@@ -538,30 +595,53 @@ fn check_target(
         return;
     };
     if c.state != ClusterState::Placeable {
-        out.push(format!("{what} of tenant {tenant} to {to}, which is not placeable"));
+        out.push(format!(
+            "{what} of tenant {tenant} to {to}, which is not placeable"
+        ));
     }
-    if let Some(allowed) = view.tenants.get(&tenant).and_then(|t| t.allowed_dcs.as_ref())
+    if let Some(allowed) = view
+        .tenants
+        .get(&tenant)
+        .and_then(|t| t.allowed_dcs.as_ref())
         && (!allowed.contains(&c.dc) || c.replica_dcs.iter().any(|d| !allowed.contains(d)))
     {
-        out.push(format!("{what} of tenant {tenant} to {to} breaks residency"));
+        out.push(format!(
+            "{what} of tenant {tenant} to {to} breaks residency"
+        ));
     }
     let after = view.load_on(to).storage_bytes + bytes;
     if after / c.cap.storage_bytes > c.limits.storage_hard + 1e-9 {
-        out.push(format!("{what} of tenant {tenant} to {to} passes storage_hard_pct"));
+        out.push(format!(
+            "{what} of tenant {tenant} to {to} passes storage_hard_pct"
+        ));
     }
 }
 
-/// Runs `seeds` and summarizes.
+/// Runs `seeds`, several at once (one per CPU, at most 8), in seed order.
 #[must_use]
 pub fn run_many(base: &FleetConfig, seeds: std::ops::Range<u64>) -> Vec<FleetReport> {
-    seeds
-        .map(|s| {
-            run(&FleetConfig {
-                seed: s,
-                ..base.clone()
-            })
-        })
-        .collect()
+    let seeds: Vec<u64> = seeds.collect();
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out = Mutex::new(Vec::with_capacity(seeds.len()));
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&seed) = seeds.get(i) else { break };
+                    let r = run(&FleetConfig {
+                        seed,
+                        ..base.clone()
+                    });
+                    out.lock().unwrap_or_else(PoisonError::into_inner).push(r);
+                }
+            });
+        }
+    });
+    let mut v = out.into_inner().unwrap_or_else(PoisonError::into_inner);
+    v.sort_by_key(|r| r.seed);
+    v
 }
 
 #[cfg(test)]

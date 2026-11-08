@@ -48,7 +48,8 @@ async fn register_once(
     node: &str,
     rec: &ControllerRecord,
 ) -> Result<Session> {
-    let session = Session::open(Arc::clone(store), Arc::clone(clock), SessionOpts::new(TTL)).await?;
+    let session =
+        Session::open(Arc::clone(store), Arc::clone(clock), SessionOpts::new(TTL)).await?;
     let key = store.tier().key(&format!("controllers/{node}"))?;
     store
         .txn(Txn {
@@ -110,7 +111,8 @@ mod tests {
 
     #[tokio::test]
     async fn registers_and_deregisters() {
-        let store: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Dc(DcId::new("dc-t").unwrap())));
+        let store: Arc<dyn MetaStore> =
+            Arc::new(MemStore::new(Tier::Dc(DcId::new("dc-t").unwrap())));
         let stop = CancellationToken::new();
         let rec = ControllerRecord {
             admin_addr: "127.0.0.1:7480".into(),
@@ -135,6 +137,12 @@ mod tests {
         assert_eq!(seen, Some(rec));
         stop.cancel();
         task.await.unwrap();
-        assert!(store.get(&key, Consistency::Linearizable).await.unwrap().is_none());
+        assert!(
+            store
+                .get(&key, Consistency::Linearizable)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

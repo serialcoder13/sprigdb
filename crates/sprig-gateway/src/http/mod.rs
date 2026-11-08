@@ -71,10 +71,12 @@ impl ConnInfo {
         &self,
         authorization: Option<String>,
         tenant: Option<String>,
+        host: Option<String>,
     ) -> HttpCredentials {
         HttpCredentials {
             authorization,
             tenant_header: tenant,
+            host,
             sni: self.tls.as_ref().and_then(|t| t.sni.clone()),
             client_ip: self.peer.ip(),
             tls: self.tls.is_some(),
@@ -111,8 +113,9 @@ impl Core {
         info: &ConnInfo,
         authorization: Option<String>,
         tenant: Option<String>,
+        host: Option<String>,
     ) -> Result<Caller> {
-        let creds = info.credentials(authorization.clone(), tenant);
+        let creds = info.credentials(authorization.clone(), tenant, host);
         let principal = self.auth.authenticate(&creds).await?;
         Ok(Caller {
             principal,

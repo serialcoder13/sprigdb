@@ -439,6 +439,81 @@ const CORPUS: &[(&str, &str, Expect)] = &[
         Expect::Any,
     ),
     ("show grants", "SHOW GRANTS", Expect::Any),
+    // Account statements (chapter 29, M0.5): grantees, grant targets and
+    // errors name logical databases and tenant users only.
+    (
+        "show grants for current_user",
+        "SHOW GRANTS FOR CURRENT_USER()",
+        Expect::Any,
+    ),
+    (
+        "create user",
+        "CREATE USER IF NOT EXISTS leak_probe IDENTIFIED BY 'Leak-probe-1x'",
+        Expect::Any,
+    ),
+    (
+        "create role",
+        "CREATE ROLE IF NOT EXISTS leak_role",
+        Expect::Any,
+    ),
+    (
+        "grant database",
+        "GRANT SELECT ON {db}.* TO leak_probe",
+        Expect::Any,
+    ),
+    (
+        "grant table",
+        "GRANT SELECT, INSERT ON {db}.child TO leak_probe",
+        Expect::Any,
+    ),
+    (
+        "grant column",
+        "GRANT SELECT (note) ON {db}.parent TO leak_role",
+        Expect::Any,
+    ),
+    (
+        "grant routine",
+        "GRANT EXECUTE ON PROCEDURE {db}.p_count TO leak_probe",
+        Expect::Any,
+    ),
+    ("grant role", "GRANT leak_role TO leak_probe", Expect::Any),
+    (
+        "show grants for user",
+        "SHOW GRANTS FOR leak_probe",
+        Expect::Any,
+    ),
+    (
+        "show grants using",
+        "SHOW GRANTS FOR leak_probe USING leak_role",
+        Expect::Any,
+    ),
+    (
+        "is table_privileges",
+        "SELECT * FROM information_schema.TABLE_PRIVILEGES",
+        Expect::Any,
+    ),
+    (
+        "is column_privileges",
+        "SELECT * FROM information_schema.COLUMN_PRIVILEGES",
+        Expect::Any,
+    ),
+    (
+        "err grant missing table",
+        "GRANT SELECT ON {db}.nope TO leak_probe",
+        Expect::Err,
+    ),
+    (
+        "err revoke missing grant",
+        "REVOKE SELECT ON {vault}.* FROM leak_probe",
+        Expect::Err,
+    ),
+    (
+        "revoke table",
+        "REVOKE INSERT ON {db}.child FROM leak_probe",
+        Expect::Any,
+    ),
+    ("drop role", "DROP ROLE IF EXISTS leak_role", Expect::Any),
+    ("drop user", "DROP USER IF EXISTS leak_probe", Expect::Any),
     // information_schema
     (
         "is schemata",

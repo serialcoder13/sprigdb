@@ -331,7 +331,14 @@ impl Scheduler {
             };
             sch.decision_id = id;
             if mode != BalancerMode::Auto {
-                self.count(m.reason, if mode == BalancerMode::Recommend { "recommended" } else { "dry_run" });
+                self.count(
+                    m.reason,
+                    if mode == BalancerMode::Recommend {
+                        "recommended"
+                    } else {
+                        "dry_run"
+                    },
+                );
                 out.push(sch);
                 continue;
             }
@@ -360,7 +367,9 @@ impl Scheduler {
                 Err(e) => {
                     tracing::warn!(tenant = %m.tenant, shard = %m.shards[0], error = %e,
                         "move not submitted");
-                    let _ = log.update_outcome(m.tenant, id, Outcome::Failed, us(now)).await;
+                    let _ = log
+                        .update_outcome(m.tenant, id, Outcome::Failed, us(now))
+                        .await;
                     self.count(m.reason, "failed");
                     self.exclude(m, view, now);
                     sch.blocked = Some("submit_failed".to_owned());
@@ -548,7 +557,11 @@ impl Scheduler {
                     }
                     self.count(
                         f.order.reason,
-                        if outcome == Outcome::Failed { "failed" } else { "cancelled" },
+                        if outcome == Outcome::Failed {
+                            "failed"
+                        } else {
+                            "cancelled"
+                        },
                     );
                 }
             }

@@ -90,7 +90,11 @@ pub fn explain_placement(
     mode: &str,
     now: Timestamp,
 ) -> PlacementExplanation {
-    let mine: Vec<_> = view.shards.values().filter(|s| s.key.tenant == tenant).collect();
+    let mine: Vec<_> = view
+        .shards
+        .values()
+        .filter(|s| s.key.tenant == tenant)
+        .collect();
     let holding: BTreeSet<ClusterId> = mine.iter().map(|s| s.cluster.clone()).collect();
     let shards = mine
         .iter()
@@ -129,7 +133,11 @@ pub fn explain_placement(
             }
         })
         .collect();
-    clusters.sort_by(|a, b| b.holds_tenant.cmp(&a.holds_tenant).then(a.cluster.cmp(&b.cluster)));
+    clusters.sort_by(|a, b| {
+        b.holds_tenant
+            .cmp(&a.holds_tenant)
+            .then(a.cluster.cmp(&b.cluster))
+    });
     let mut reasoning = Vec::new();
     if let Some(r) = last {
         reasoning.push(format!(
@@ -217,7 +225,10 @@ pub fn explain_placement(
 pub fn placement_text(e: &PlacementExplanation) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "tenant {}  balancer.mode {}", e.tenant, e.mode);
-    let _ = writeln!(s, "\nSHARD                CLUSTER        SIZE_GB  BUSY_MS/S  WRITES/S  STATE");
+    let _ = writeln!(
+        s,
+        "\nSHARD                CLUSTER        SIZE_GB  BUSY_MS/S  WRITES/S  STATE"
+    );
     for l in &e.shards {
         let state = if l.locked {
             "moving".to_owned()
@@ -238,7 +249,10 @@ pub fn placement_text(e: &PlacementExplanation) -> String {
             l.write_rows_per_sec
         );
     }
-    let _ = writeln!(s, "\nCLUSTER        FULL  BOTTLENECK   STATE        SCHEMAS   TABLES");
+    let _ = writeln!(
+        s,
+        "\nCLUSTER        FULL  BOTTLENECK   STATE        SCHEMAS   TABLES"
+    );
     for c in &e.clusters {
         let _ = writeln!(
             s,
@@ -267,11 +281,26 @@ pub fn decision_text(r: &DecisionRow) -> String {
         sprig_meta::bootstrap::rfc3339(UNIX_EPOCH + Duration::from_secs(secs))
     };
     let mut s = String::new();
-    let _ = writeln!(s, "decision {}  {} {}", r.decision_id, r.d.component, r.d.kind);
+    let _ = writeln!(
+        s,
+        "decision {}  {} {}",
+        r.decision_id, r.d.component, r.d.kind
+    );
     let _ = writeln!(s, "subject   {} {}", r.d.subject_type, r.d.subject_id);
-    let _ = writeln!(s, "decided   {} by {} in {}", at(r.d.decided_at_us), r.d.actor, r.d.dc_id);
+    let _ = writeln!(
+        s,
+        "decided   {} by {} in {}",
+        at(r.d.decided_at_us),
+        r.d.actor,
+        r.d.dc_id
+    );
     let _ = writeln!(s, "mode      {}", r.d.mode);
-    let _ = writeln!(s, "outcome   {} (updated {})", r.d.outcome, at(r.updated_at_us));
+    let _ = writeln!(
+        s,
+        "outcome   {} (updated {})",
+        r.d.outcome,
+        at(r.updated_at_us)
+    );
     let _ = writeln!(s, "reason    {}", r.d.reason_code);
     let _ = writeln!(s, "summary   {}", r.d.summary);
     if let Some(p) = r.d.parent_id {

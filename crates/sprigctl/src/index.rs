@@ -138,18 +138,9 @@ pub(crate) fn group() -> Command {
         ))
 }
 
-/// `sprigctl explain`: `query` is implemented; `decision` and `placement`
-/// wait for chapter 11's decision log.
+/// `sprigctl explain`: `query` here; `decision` and `placement` in
+/// [`crate::placement`].
 pub(crate) fn explain_group() -> Command {
-    let later = |name: &'static str, about: &'static str| {
-        Command::new(name).about(about).arg(
-            Arg::new("args")
-                .num_args(0..)
-                .trailing_var_arg(true)
-                .allow_hyphen_values(true)
-                .help("Arguments (not parsed yet)"),
-        )
-    };
     Command::new("explain")
         .about("Explain a query fingerprint, a decision or a tenant's placement")
         .subcommand_required(true)
@@ -164,14 +155,8 @@ pub(crate) fn explain_group() -> Command {
                 )
                 .arg(tenant()),
         )
-        .subcommand(later(
-            "decision",
-            "Explain a decision (not implemented yet)",
-        ))
-        .subcommand(later(
-            "placement",
-            "Explain a tenant's placement (not implemented yet)",
-        ))
+        .subcommand(crate::placement::decision_cmd())
+        .subcommand(crate::placement::placement_cmd())
 }
 
 fn tenant_of(sub: &ArgMatches) -> String {
@@ -289,8 +274,12 @@ pub(crate) async fn explain(
     group: &ArgMatches,
     out: Output,
 ) -> Result<(), Failed> {
-    let Some(("query", sub)) = group.subcommand() else {
-        return Err(Failed("not implemented yet".into()));
+    let sub = match group.subcommand() {
+        Some(("query", sub)) => sub,
+        Some((cmd @ ("decision" | "placement"), sub)) => {
+            return crate::placement::run(c, cmd, sub, out).await;
+        }
+        _ => return Err(Failed("not implemented yet".into())),
     };
     let fp = sub
         .get_one::<String>("fingerprint")

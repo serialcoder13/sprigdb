@@ -84,6 +84,11 @@ pub struct UserOptions {
     pub default_roles: Vec<AccountRef>,
     /// `DISCARD OLD PASSWORD`.
     pub discard_old: bool,
+    /// Chapter 14's account-level policy clauses (`FAILED_LOGIN_ATTEMPTS`,
+    /// `PASSWORD_LOCK_TIME`, `PASSWORD EXPIRE INTERVAL | NEVER | DEFAULT`,
+    /// `PASSWORD HISTORY`, `PASSWORD REUSE INTERVAL`, `PASSWORD REQUIRE
+    /// CURRENT`).
+    pub clauses: crate::policy::AccountClauses,
 }
 
 /// What `GRANT` and `REVOKE` act on.

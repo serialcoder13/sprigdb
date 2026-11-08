@@ -42,7 +42,10 @@ use sprig_cluster::tuning::{
 };
 
 fn env_u64(k: &str, d: u64) -> u64 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(d)
 }
 
 const PREFIX: &str = "placement_s_";
@@ -149,8 +152,18 @@ async fn read_phase(
     let elapsed = started.elapsed().as_secs_f64();
     let after = status(pool).await;
     lat.sort_unstable();
-    let pct = |p: f64| lat.get(((lat.len() as f64 * p) as usize).min(lat.len().saturating_sub(1))).copied().unwrap_or(0);
-    let d = |k: &str| after.get(k).copied().unwrap_or(0).saturating_sub(before.get(k).copied().unwrap_or(0));
+    let pct = |p: f64| {
+        lat.get(((lat.len() as f64 * p) as usize).min(lat.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
+    };
+    let d = |k: &str| {
+        after
+            .get(k)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(before.get(k).copied().unwrap_or(0))
+    };
     Phase {
         name,
         secs: elapsed,
@@ -220,11 +233,21 @@ async fn wait_for_flush(pool: &Pool, baseline: u64) {
     let mut flat = 0;
     loop {
         let s = status(pool).await;
-        let dirty = s.get("innodb_buffer_pool_pages_dirty").copied().unwrap_or(0);
-        let total = s.get("innodb_buffer_pool_pages_total").copied().unwrap_or(1);
-        flat = if dirty + total / 200 >= last { flat + 1 } else { 0 };
+        let dirty = s
+            .get("innodb_buffer_pool_pages_dirty")
+            .copied()
+            .unwrap_or(0);
+        let total = s
+            .get("innodb_buffer_pool_pages_total")
+            .copied()
+            .unwrap_or(1);
+        flat = if dirty + total / 200 >= last {
+            flat + 1
+        } else {
+            0
+        };
         last = dirty;
-        if dirty <= baseline + total / 20 || flat >= 10 || t0.elapsed() > Duration::from_secs(180) {
+        if dirty <= baseline + total / 20 || flat >= 30 || t0.elapsed() > Duration::from_secs(180) {
             println!(
                 "flush: {dirty} dirty of {total} pages (before: {baseline}) after {:.0} s",
                 t0.elapsed().as_secs_f64()
@@ -249,9 +272,8 @@ async fn ten_thousand_schemas_without_table_cache_thrashing() {
     let memory = env_u64("SPRIG_SCALE_MEMORY_MB", 1024) << 20;
     let budget = u32::try_from(env_u64("SPRIG_SCALE_BUDGET_PCT", 40)).unwrap();
     let keep = std::env::var("SPRIG_SCALE_KEEP").is_ok_and(|v| v == "1");
-    let opts = OptsBuilder::from_opts(Opts::from_url(&url).unwrap()).pool_opts(
-        PoolOpts::default().with_constraints(PoolConstraints::new(1, 32).unwrap()),
-    );
+    let opts = OptsBuilder::from_opts(Opts::from_url(&url).unwrap())
+        .pool_opts(PoolOpts::default().with_constraints(PoolConstraints::new(1, 32).unwrap()));
     let pool = Pool::new(opts);
     let original = vars(&pool).await;
     let before = status(&pool).await;
@@ -269,7 +291,9 @@ async fn ten_thousand_schemas_without_table_cache_thrashing() {
                 "CREATE TABLE IF NOT EXISTS {db}.t{t} (id INT PRIMARY KEY, a INT, v VARCHAR(32), \
                  KEY ka (a)) ENGINE=InnoDB"
             ));
-            v.push(format!("INSERT IGNORE INTO {db}.t{t} VALUES (1, 1, 'x'), (2, 2, 'y')"));
+            v.push(format!(
+                "INSERT IGNORE INTO {db}.t{t} VALUES (1, 1, 'x'), (2, 2, 'y')"
+            ));
         }
         jobs.push(v);
     }
@@ -278,12 +302,23 @@ async fn ten_thousand_schemas_without_table_cache_thrashing() {
         "created {schemas} schemas x {tables} tables in {:.1} s",
         t0.elapsed().as_secs_f64()
     );
-    wait_for_flush(&pool, before.get("innodb_buffer_pool_pages_dirty").copied().unwrap_or(0)).await;
+    wait_for_flush(
+        &pool,
+        before
+            .get("innodb_buffer_pool_pages_dirty")
+            .copied()
+            .unwrap_or(0),
+    )
+    .await;
 
     // 2. The defaults (as the server had them), warm then measured.
     let mut c = pool.get_conn().await.unwrap();
-    c.query_drop("SET GLOBAL table_open_cache = 2000").await.unwrap();
-    c.query_drop("SET GLOBAL table_definition_cache = 400").await.unwrap();
+    c.query_drop("SET GLOBAL table_open_cache = 2000")
+        .await
+        .unwrap();
+    c.query_drop("SET GLOBAL table_definition_cache = 400")
+        .await
+        .unwrap();
     drop(c);
     let _ = read_phase(&pool, "defaults warm", schemas, tables, threads, 5, 1).await;
     let defaults = read_phase(&pool, "defaults", schemas, tables, threads, secs, 2).await;
@@ -299,7 +334,9 @@ async fn ten_thousand_schemas_without_table_cache_thrashing() {
     let mut r_total = 0;
     let mut r_max = 0;
     for s in &all {
-        let (t, r) = sprig_cluster::tuning::count_schema(&mut c, s).await.unwrap();
+        let (t, r) = sprig_cluster::tuning::count_schema(&mut c, s)
+            .await
+            .unwrap();
         t_total += t;
         r_total += r;
         r_max = r_max.max(r);
@@ -307,7 +344,10 @@ async fn ten_thousand_schemas_without_table_cache_thrashing() {
     let count_secs = t1.elapsed().as_secs_f64();
     let cur = vars(&pool).await;
     let current = BTreeMap::from([
-        (ServerVar::TableDefinitionCache, cur["table_definition_cache"]),
+        (
+            ServerVar::TableDefinitionCache,
+            cur["table_definition_cache"],
+        ),
         (ServerVar::TableOpenCache, cur["table_open_cache"]),
         (ServerVar::InnodbOpenFiles, cur["innodb_open_files"]),
         (ServerVar::OpenFilesLimit, cur["open_files_limit"]),
@@ -330,7 +370,15 @@ async fn ten_thousand_schemas_without_table_cache_thrashing() {
     };
     let mut tuner = Tuner::new();
     let miss_rate = defaults.misses as f64 / defaults.secs;
-    let plan = tuner.plan(&inputs, &current, &Costs::default(), &settings, true, miss_rate, 0);
+    let plan = tuner.plan(
+        &inputs,
+        &current,
+        &Costs::default(),
+        &settings,
+        true,
+        miss_rate,
+        0,
+    );
     println!(
         "inputs: {inputs:?} (counted {} schemas in {count_secs:.1} s)",
         all.len()
@@ -364,14 +412,18 @@ async fn ten_thousand_schemas_without_table_cache_thrashing() {
         dm / 1_048_576.0,
         dm / dt.max(1.0) / 1024.0
     );
-    let cut = 1.0 - (tuned.misses as f64 / tuned.secs) / (defaults.misses as f64 / defaults.secs).max(1e-9);
+    let cut = 1.0
+        - (tuned.misses as f64 / tuned.secs) / (defaults.misses as f64 / defaults.secs).max(1e-9);
     println!("table-cache misses per second cut by {:.1}%", cut * 100.0);
 
     // 5. Restore and clean up.
     let mut c = pool.get_conn().await.unwrap();
-    c.query_drop(format!("SET GLOBAL table_open_cache = {}", original["table_open_cache"]))
-        .await
-        .unwrap();
+    c.query_drop(format!(
+        "SET GLOBAL table_open_cache = {}",
+        original["table_open_cache"]
+    ))
+    .await
+    .unwrap();
     c.query_drop(format!(
         "SET GLOBAL table_definition_cache = {}",
         original["table_definition_cache"]
@@ -379,13 +431,21 @@ async fn ten_thousand_schemas_without_table_cache_thrashing() {
     .await
     .unwrap();
     drop(c);
+    // The defaults again, now that the creation's flush is long over: the
+    // first measurement may still have paid for it.
+    let _ = read_phase(&pool, "defaults again warm", schemas, tables, threads, 5, 5).await;
+    let again = read_phase(&pool, "defaults again", schemas, tables, threads, secs, 6).await;
+    print_phase(&again);
     if !keep {
         let t2 = Instant::now();
         let jobs = (0..schemas)
             .map(|s| vec![format!("DROP DATABASE IF EXISTS {PREFIX}{s:05}")])
             .collect();
         run_parallel(&pool, jobs, 8).await;
-        println!("dropped {schemas} schemas in {:.1} s", t2.elapsed().as_secs_f64());
+        println!(
+            "dropped {schemas} schemas in {:.1} s",
+            t2.elapsed().as_secs_f64()
+        );
     }
     pool.disconnect().await.unwrap();
     // The check is meaningful only where the defaults thrash.

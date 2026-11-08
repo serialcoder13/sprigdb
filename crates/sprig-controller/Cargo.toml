@@ -21,10 +21,16 @@ serde_json.workspace = true
 # `sprigctl explain query` (autoindex_admin).
 sprig-advisor.workspace = true
 sprig-auth.workspace = true
+# Chapter 11's balancer loop, decision log and explain calls.
+sprig-balancer.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
+# `mover.max_copies_per_cluster` is sprig-mover's key (chapter 10).
+sprig-mover.workspace = true
+# The tenant map a move starts from (chapter 15).
+sprig-shard.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true
 # Chapter 07's rewriter and the persona's lexer: validation replays sampled

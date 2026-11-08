@@ -43,9 +43,14 @@ use super::stmt::{
     AccountRef, AccountStmt, GrantOn, PrivItem, RoleChoice, UserItem, UserOptions, UserSpec,
 };
 use super::store::{AuthzStore, Grantee, PrivTarget};
-use crate::admin::{self, Hashing, NewUser, SetPassword};
+use crate::admin::{self, AccountOps, Hashing, NewUser};
+use crate::audit::{Actor, AuditSink};
 use crate::cache::TenantAuth;
-use crate::store::UserSource;
+use crate::mysql::PolicySettings;
+use crate::policy::{
+    AccountClauses, PasswordChange, PasswordCtx, PasswordProblem, PasswordRules, change_password,
+};
+use crate::store::{UserRow, UserSource};
 
 /// A warning or note for `SHOW WARNINGS`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +111,12 @@ pub struct AccountCtx<'a> {
     pub privileges: &'a CompiledPrivileges,
     /// The session's active roles.
     pub active_roles: &'a [RoleId],
+    /// The tenant's name, for audit events.
+    pub tenant_name: Option<&'a str>,
+    /// Resolution of the `auth.*` keys (chapter 14's password rules).
+    pub policy: &'a dyn PolicySettings,
+    /// Where chapter 14's audit events go.
+    pub audit: &'a dyn AuditSink,
     /// Password hashing for new passwords.
     pub hashing: Hashing,
     /// `auth.unsafe_privilege_action = error`: refuse server-wide
@@ -934,6 +945,33 @@ fn choose(
     })
 }
 
+impl AccountCtx<'_> {
+    /// Chapter 14's account operations, as this session's user (audited).
+    fn ops(&self) -> AccountOps<'_> {
+        AccountOps {
+            cat: self.catalog,
+            tenant: self.tenant,
+            tenant_name: self.tenant_name.map(str::to_owned),
+            actor: self.actor(),
+            audit: self.audit,
+            clock: self.clock,
+            protocol: match self.persona {
+                Persona::MySql84 => "mysql",
+                Persona::MariaDb => "mariadb",
+            },
+        }
+    }
+
+    fn actor(&self) -> Actor {
+        Actor {
+            tenant: self.tenant,
+            tenant_name: self.tenant_name.map(str::to_owned),
+            user: self.user_name.to_owned(),
+            user_id: Some(self.user),
+        }
+    }
+}
+
 async fn create_users(
     cx: &AccountCtx<'_>,
     state: &AuthzState,
@@ -942,6 +980,7 @@ async fn create_users(
     options: &UserOptions,
     notes: &mut Vec<Note>,
 ) -> Result<Option<u64>> {
+    options.clauses.validate(cx.policy, cx.snapshot)?;
     let mut failed = Vec::new();
     let mut todo = Vec::new();
     for u in users {
@@ -971,6 +1010,7 @@ async fn create_users(
                 .ok_or_else(|| cannot("CREATE USER", &[r.to_string()]))?,
         );
     }
+    let ops = cx.ops();
     let mut version = None;
     for (acc, u) in todo {
         let password = u
@@ -978,6 +1018,21 @@ async fn create_users(
             .as_ref()
             .map(|i| i.password.to_vec())
             .unwrap_or_default();
+        // Chapter 14's strength rules (`auth.password_policy`).
+        let probe = UserRow::new(
+            UserId(0),
+            acc.name.clone(),
+            acc.host.clone(),
+            UserSource::Sql,
+            cx.clock.wall(),
+            0,
+        );
+        if !PasswordRules::of(&probe, cx.policy, cx.snapshot)
+            .strength
+            .accepts(&password, &acc.name)
+        {
+            return Err(PasswordProblem::Weak.error(cx.persona, &acc.name, &acc.host));
+        }
         let mut new = NewUser::new(acc.name.clone(), &password);
         new.host.clone_from(&acc.host);
         new.source = UserSource::Sql;
@@ -987,23 +1042,28 @@ async fn create_users(
         if let Some(r) = options.require {
             new.require_tls = r;
         }
-        let changed = admin::create_user(cx.catalog, cx.tenant, &new, cx.clock)
-            .await
-            .map_err(|e| match e.kind {
-                sprig_common::ErrorKind::Backend { errno: 1396, .. }
-                | sprig_common::ErrorKind::Standard { errno: 1396, .. } => {
-                    cannot("CREATE USER", &[acc.to_string()])
-                }
-                _ => e,
-            })?;
-        version = Some(changed.auth_version);
-        if !defaults.is_empty() {
-            let mut ops = Vec::new();
-            for r in &defaults {
-                ops.push(Op::GrantRole(Grantee::User(changed.user_id), *r, false));
+        let changed = ops.create_user(&new).await.map_err(|e| match e.kind {
+            sprig_common::ErrorKind::Backend { errno: 1396, .. }
+            | sprig_common::ErrorKind::Standard { errno: 1396, .. } => {
+                cannot("CREATE USER", &[acc.to_string()])
             }
-            ops.push(Op::SetDefaults(changed.user_id, defaults.clone()));
-            version = apply(cx, ops).await?.or(version);
+            _ => e,
+        })?;
+        version = Some(changed.auth_version);
+        if options.clauses != AccountClauses::default() {
+            version = Some(
+                ops.set_clauses(changed.user_id, &acc.name, &acc.host, options.clauses)
+                    .await?
+                    .auth_version,
+            );
+        }
+        if !defaults.is_empty() {
+            let mut list = Vec::new();
+            for r in &defaults {
+                list.push(Op::GrantRole(Grantee::User(changed.user_id), *r, false));
+            }
+            list.push(Op::SetDefaults(changed.user_id, defaults.clone()));
+            version = apply(cx, list).await?.or(version);
         }
     }
     Ok(version)
@@ -1017,6 +1077,7 @@ async fn alter_users(
     options: &UserOptions,
     notes: &mut Vec<Note>,
 ) -> Result<Option<u64>> {
+    options.clauses.validate(cx.policy, cx.snapshot)?;
     let mut version = None;
     let mut targets = Vec::new();
     let mut failed = Vec::new();
@@ -1024,7 +1085,12 @@ async fn alter_users(
         let acc = cx.spec(&u.user);
         match cx.user_id(&acc) {
             Some(id) => {
-                if id != cx.user || !options.default_roles.is_empty() || options.lock.is_some() {
+                let own_password_only = id == cx.user
+                    && options.default_roles.is_empty()
+                    && options.lock.is_none()
+                    && options.require.is_none()
+                    && options.clauses == AccountClauses::default();
+                if !own_password_only {
                     cx.require_create_user()?;
                 }
                 targets.push((id, acc, u));
@@ -1040,21 +1106,31 @@ async fn alter_users(
     if !failed.is_empty() {
         return Err(cannot("ALTER USER", &failed));
     }
+    let ops = cx.ops();
     let keep = |c: admin::Changed| Some(c.auth_version);
-    for (id, _acc, u) in targets {
+    for (id, acc, u) in targets {
         if let Some(i) = &u.identified {
-            let c = admin::set_password(
-                cx.catalog,
-                cx.tenant,
+            // Chapter 14's rules: strength, history, reuse; REQUIRE
+            // CURRENT only for the user's own change.
+            let pctx = PasswordCtx {
+                tenant_name: cx.tenant_name,
+                cat: cx.catalog,
+                catalog: cx.snapshot,
+                policy: cx.policy,
+                audit: cx.audit,
+                clock: cx.clock,
+            };
+            let c = change_password(
+                &pctx,
                 id,
-                &i.password,
-                SetPassword {
+                &PasswordChange {
+                    password: &i.password,
+                    current: None,
                     retain_current: i.retain_current,
                     discard_old: options.discard_old,
-                    hashing: cx.hashing,
-                    ..SetPassword::default()
+                    actor: (id != cx.user).then(|| cx.actor()),
+                    persona: cx.persona,
                 },
-                cx.clock,
             )
             .await?;
             version = keep(c);
@@ -1062,17 +1138,22 @@ async fn alter_users(
             version = keep(admin::discard_old_password(cx.catalog, cx.tenant, id, 0).await?);
         }
         if let Some(l) = options.lock {
-            version = keep(admin::set_account_locked(cx.catalog, cx.tenant, id, l).await?);
+            version = keep(ops.set_locked(id, &acc.name, &acc.host, l).await?);
         }
         if let Some(e) = options.expire {
-            version = keep(admin::set_password_expired(cx.catalog, cx.tenant, id, e).await?);
+            version = keep(ops.set_expired(id, &acc.name, &acc.host, e).await?);
         }
         if let Some(r) = options.require {
             version = keep(admin::set_require_tls(cx.catalog, cx.tenant, id, r).await?);
         }
+        if options.clauses != AccountClauses::default() {
+            version = keep(
+                ops.set_clauses(id, &acc.name, &acc.host, options.clauses)
+                    .await?,
+            );
+        }
         if !options.default_roles.is_empty() {
             let granted = state.granted_roles(id);
-            let acc = AccountRef::any_host(String::new());
             let chosen = choose(
                 cx,
                 state,
@@ -1099,7 +1180,7 @@ async fn drop_users(
     let mut todo = Vec::new();
     for acc in users {
         match cx.grantee(state, acc) {
-            Some(g) => todo.push(g),
+            Some(g) => todo.push((g, acc)),
             None if if_exists => notes.push(Note {
                 level: "Note",
                 code: 3162,
@@ -1111,15 +1192,14 @@ async fn drop_users(
     if !failed.is_empty() {
         return Err(cannot("DROP USER", &failed));
     }
+    let ops = cx.ops();
     let mut version = None;
-    for g in todo {
+    for (g, acc) in todo {
         match g {
             Grantee::User(u) => {
-                version = Some(
-                    admin::drop_user(cx.catalog, cx.tenant, u)
-                        .await?
-                        .auth_version,
-                );
+                // Chapter 14 closes the user's sessions (39306) from the
+                // auth change feed.
+                version = Some(ops.drop_user(u, &acc.name, &acc.host).await?.auth_version);
                 version = apply(cx, vec![Op::Forget(g)]).await?.or(version);
             }
             Grantee::Role(r) => {

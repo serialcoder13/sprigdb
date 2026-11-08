@@ -72,7 +72,15 @@ fn plan_grows_at_once_shrinks_after_a_day_and_respects_the_margin() {
     let mut t = Tuner::new();
     let s = TuningSettings::default();
     let k = Costs::default();
-    let p = t.plan(&inputs(10_000, 10_000), &defaults(), &k, &s, true, 1000.0, 0);
+    let p = t.plan(
+        &inputs(10_000, 10_000),
+        &defaults(),
+        &k,
+        &s,
+        true,
+        1000.0,
+        0,
+    );
     let got: Vec<(ServerVar, u64, ApplyMode)> =
         p.wanted.iter().map(|c| (c.var, c.to, c.mode)).collect();
     assert_eq!(
@@ -102,13 +110,31 @@ fn plan_grows_at_once_shrinks_after_a_day_and_respects_the_margin() {
     ]);
     // 10% more tables: under tuning.min_change_pct, nothing.
     let p = t.plan(&inputs(11_000, 11_000), &now_cur, &k, &s, true, 0.0, 600);
-    assert!(p.wanted.iter().all(|c| c.var == ServerVar::InnodbOpenFiles), "{p:?}");
+    assert!(
+        p.wanted.iter().all(|c| c.var == ServerVar::InnodbOpenFiles),
+        "{p:?}"
+    );
     // Fewer tables: the shrink waits 24 h.
     let p = t.plan(&inputs(5000, 5000), &now_cur, &k, &s, true, 0.0, 3600);
-    assert!(p.wanted.iter().all(|c| c.var == ServerVar::InnodbOpenFiles), "{p:?}");
+    assert!(
+        p.wanted.iter().all(|c| c.var == ServerVar::InnodbOpenFiles),
+        "{p:?}"
+    );
     assert!(p.held.iter().any(|h| h.contains("after 24 h")));
-    let p = t.plan(&inputs(5000, 5000), &now_cur, &k, &s, true, 0.0, 3600 + 86_400);
-    assert!(p.wanted.iter().any(|c| c.var == ServerVar::TableDefinitionCache && c.to == 5900));
+    let p = t.plan(
+        &inputs(5000, 5000),
+        &now_cur,
+        &k,
+        &s,
+        true,
+        0.0,
+        3600 + 86_400,
+    );
+    assert!(
+        p.wanted
+            .iter()
+            .any(|c| c.var == ServerVar::TableDefinitionCache && c.to == 5900)
+    );
 }
 
 #[test]
@@ -147,7 +173,12 @@ fn external_clusters_and_modes() {
     let p = Tuner::new().plan(&i, &defaults(), &k, &s, true, 0.0, 0);
     assert!(p.wanted.iter().all(|c| c.mode == ApplyMode::RecommendOnly));
     s.mode = TuningMode::Off;
-    assert!(Tuner::new().plan(&i, &defaults(), &k, &s, true, 0.0, 0).wanted.is_empty());
+    assert!(
+        Tuner::new()
+            .plan(&i, &defaults(), &k, &s, true, 0.0, 0)
+            .wanted
+            .is_empty()
+    );
 }
 
 #[test]
@@ -163,9 +194,17 @@ fn table_open_cache_is_capped_by_the_running_descriptors() {
         0.0,
         0,
     );
-    let toc = p.wanted.iter().find(|c| c.var == ServerVar::TableOpenCache).unwrap();
+    let toc = p
+        .wanted
+        .iter()
+        .find(|c| c.var == ServerVar::TableOpenCache)
+        .unwrap();
     assert_eq!(toc.to, 32_198 - 2000 - 1000 - 1000);
-    let ofl = p.wanted.iter().find(|c| c.var == ServerVar::OpenFilesLimit).unwrap();
+    let ofl = p
+        .wanted
+        .iter()
+        .find(|c| c.var == ServerVar::OpenFilesLimit)
+        .unwrap();
     assert_eq!(ofl.mode, ApplyMode::NextRestart);
 }
 
@@ -180,9 +219,20 @@ fn keys_are_registered() {
         ..SettingCtx::process(&dc)
     };
     assert_eq!(TuningSettings::resolve(&s, &ctx), TuningSettings::default());
-    s.set_value(Level::Cluster, &ctx, "tuning.table_open_cache_mode", &Value::Str("recommend".into()))
-        .unwrap();
-    s.set_value(Level::Cluster, &ctx, "tuning.memory_budget_pct", &Value::Int(30)).unwrap();
+    s.set_value(
+        Level::Cluster,
+        &ctx,
+        "tuning.table_open_cache_mode",
+        &Value::Str("recommend".into()),
+    )
+    .unwrap();
+    s.set_value(
+        Level::Cluster,
+        &ctx,
+        "tuning.memory_budget_pct",
+        &Value::Int(30),
+    )
+    .unwrap();
     let r = TuningSettings::resolve(&s, &ctx);
     assert_eq!((r.mode, r.memory_budget_pct), (TuningMode::Recommend, 30));
 }

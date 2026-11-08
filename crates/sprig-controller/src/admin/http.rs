@@ -69,8 +69,15 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
             "/admin/v1/tenants/{name}/queries/{fingerprint}",
             get(explain_query),
         )
+        .route("/admin/v1/mover/jobs", get(list_moves).post(submit_move))
+        .route("/admin/v1/mover/jobs/{id}", get(get_move).post(move_method))
         .route("/admin/v1/jobs", get(list_jobs))
         .route("/admin/v1/jobs/{id}", get(get_job).post(job_method))
+        .route("/admin/v1/tenants/{name}/placement", get(explain_placement))
+        .route(
+            "/admin/v1/tenants/{name}/decisions/{id}",
+            get(explain_decision),
+        )
         .route("/admin/v1/settings", get(list_setting_keys))
         .route(
             "/admin/v1/settings/{key}",
@@ -321,6 +328,60 @@ async fn job_method(
         Some((id, "cancel")) => respond(app.svc.cancel_job(id).await),
         _ => error_response(&invalid(format!(
             "POST /admin/v1/jobs/{name}: expected {{job_id}}:cancel"
+        ))),
+    }
+}
+
+/// `?tenant=` of `GET /admin/v1/mover/jobs`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct MovesQuery {
+    tenant: Option<String>,
+}
+
+async fn list_moves(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let q: MovesQuery = query(&uri)?;
+        app.svc.list_moves(q.tenant.as_deref()).await
+    };
+    respond(r.await)
+}
+
+async fn submit_move(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let req: super::mover::MoveRequest = parse_required(&body)?;
+        app.svc.submit_move(req).await
+    };
+    respond(r.await)
+}
+
+async fn get_move(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.get_move(&id).await
+    };
+    respond(r.await)
+}
+
+/// `{job_id}:cancel` and `{job_id}:cutover`.
+async fn move_method(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    if let Err(e) = authorize(&app, &headers) {
+        return error_response(&e);
+    }
+    match name.rsplit_once(':') {
+        Some((id, "cancel")) => respond(app.svc.cancel_move(id).await),
+        Some((id, "cutover")) => respond(app.svc.cutover_move(id).await),
+        _ => error_response(&invalid(format!(
+            "POST /admin/v1/mover/jobs/{name}: expected {{job_id}}:cancel or :cutover"
         ))),
     }
 }
@@ -692,6 +753,33 @@ async fn explain_query(
             )));
         };
         app.svc.explain_query(&name, fp).await
+    };
+    respond(r.await)
+}
+
+async fn explain_placement(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.explain_placement(&name).await
+    };
+    respond(r.await)
+}
+
+async fn explain_decision(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath((name, id)): UrlPath<(String, String)>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let id: u64 = id
+            .parse()
+            .map_err(|_| invalid(format!("decision id {id:?} is not a number")))?;
+        app.svc.explain_decision(&name, id).await
     };
     respond(r.await)
 }

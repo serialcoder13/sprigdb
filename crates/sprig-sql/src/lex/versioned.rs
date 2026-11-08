@@ -219,8 +219,14 @@ mod tests {
             Some("CREATE TABLE g (p point NOT NULL REF_SYSTEM_ID=4326)")
         );
         // Bodies MariaDB lacks stay comments (MariaDB skips them).
-        assert_eq!(run("CREATE DATABASE d /*!80016 DEFAULT ENCRYPTION='N' */"), None);
-        assert_eq!(run("/*!80000 SET SESSION information_schema_stats_expiry=0 */"), None);
+        assert_eq!(
+            run("CREATE DATABASE d /*!80016 DEFAULT ENCRYPTION='N' */"),
+            None
+        );
+        assert_eq!(
+            run("/*!80000 SET SESSION information_schema_stats_expiry=0 */"),
+            None
+        );
         // Comments MariaDB runs anyway are left alone.
         assert_eq!(run("/*!40101 SET NAMES utf8mb4 */"), None);
         // Above the persona's version: a comment for both.

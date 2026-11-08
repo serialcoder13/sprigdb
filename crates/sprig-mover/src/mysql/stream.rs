@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use sprig_binlog::{
-    BinlogSource, BinlogStream, Event, Gtid, GtidFlags, GtidPos, RowImage, StreamOptions,
-    TableMap, Value as BValue,
+    BinlogSource, BinlogStream, Event, Gtid, GtidFlags, GtidPos, RowImage, StreamOptions, TableMap,
+    Value as BValue,
 };
 use sprig_common::ids::JobId;
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
@@ -78,9 +78,11 @@ fn column_map(tm: &TableMap, t: &TableMeta) -> Vec<Option<usize>> {
         .enumerate()
         .map(|(i, c)| {
             if named {
-                tm.columns
-                    .iter()
-                    .position(|bc| bc.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&c.name)))
+                tm.columns.iter().position(|bc| {
+                    bc.name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(&c.name))
+                })
             } else {
                 (i < tm.columns.len()).then_some(i)
             }
@@ -218,7 +220,10 @@ impl MysqlStream {
     }
 
     fn table_map(&mut self, tm: &TableMap) -> Option<(Arc<TableMeta>, Vec<Option<usize>>)> {
-        let t = self.tables.get(&(tm.schema.clone(), tm.table.clone()))?.clone();
+        let t = self
+            .tables
+            .get(&(tm.schema.clone(), tm.table.clone()))?
+            .clone();
         let map = self
             .maps
             .entry(tm.table_id)
@@ -230,11 +235,13 @@ impl MysqlStream {
     fn finish(&mut self) -> Option<SourceTxn> {
         let g = self.group.take()?;
         let mut txn = g.txn;
-        txn.gtid = g.gtid.filter(|gt| self.domain.is_none_or(|d| d == gt.domain));
-        if g.flags.prepared_xa() {
-            if let Some(x) = g.xa {
-                txn.xa = Some(XaPhase::Prepare(x));
-            }
+        txn.gtid = g
+            .gtid
+            .filter(|gt| self.domain.is_none_or(|d| d == gt.domain));
+        if g.flags.prepared_xa()
+            && let Some(x) = g.xa
+        {
+            txn.xa = Some(XaPhase::Prepare(x));
         }
         Some(txn)
     }
@@ -242,11 +249,14 @@ impl MysqlStream {
 
 #[async_trait::async_trait]
 impl ChangeStream for MysqlStream {
+    #[allow(clippy::too_many_lines)] // one arm per event type
     async fn next(&mut self) -> Result<StreamItem> {
         loop {
             let ev = self.stream.next().await.map_err(diverged)?;
             match ev {
-                Event::Gtid { gtid, flags, xa, .. } => {
+                Event::Gtid {
+                    gtid, flags, xa, ..
+                } => {
                     self.group = Some(Group {
                         gtid: Some(gtid),
                         flags,
@@ -275,7 +285,9 @@ impl ChangeStream for MysqlStream {
                     let Some((t, map)) = self.table_map(&table) else {
                         continue;
                     };
-                    let Some(g) = self.group.as_mut() else { continue };
+                    let Some(g) = self.group.as_mut() else {
+                        continue;
+                    };
                     for r in rows {
                         g.txn.changes.push(RowChange {
                             table: t.clone(),
@@ -325,7 +337,7 @@ impl ChangeStream for MysqlStream {
                             }
                         }
                         QueryKind::Dml => {
-                            if self.schemas.iter().any(|s| *s == db) {
+                            if self.schemas.contains(&db) {
                                 return Err(SprigError::new(
                                     SprigCode::MoveUnsupported,
                                     format!(
@@ -381,14 +393,48 @@ mod tests {
     #[test]
     fn values_convert_like_the_binary_protocol() {
         assert_eq!(value(&BValue::Enum(3)), Value::UInt(3));
-        assert_eq!(value(&BValue::Decimal("-1.50".into())), Value::Bytes(b"-1.50".to_vec()));
-        let d = Date { year: 2026, month: 11, day: 8 };
-        assert_eq!(value(&BValue::Date(d)), Value::Date(2026, 11, 8, 0, 0, 0, 0));
-        let dt = DateTime { date: d, hour: 1, minute: 2, second: 3, micros: 4, fsp: 6 };
-        assert_eq!(value(&BValue::DateTime(dt)), Value::Date(2026, 11, 8, 1, 2, 3, 4));
-        let t = Time { negative: true, hours: 49, minutes: 1, seconds: 2, micros: 3, fsp: 6 };
+        assert_eq!(
+            value(&BValue::Decimal("-1.50".into())),
+            Value::Bytes(b"-1.50".to_vec())
+        );
+        let d = Date {
+            year: 2026,
+            month: 11,
+            day: 8,
+        };
+        assert_eq!(
+            value(&BValue::Date(d)),
+            Value::Date(2026, 11, 8, 0, 0, 0, 0)
+        );
+        let dt = DateTime {
+            date: d,
+            hour: 1,
+            minute: 2,
+            second: 3,
+            micros: 4,
+            fsp: 6,
+        };
+        assert_eq!(
+            value(&BValue::DateTime(dt)),
+            Value::Date(2026, 11, 8, 1, 2, 3, 4)
+        );
+        let t = Time {
+            negative: true,
+            hours: 49,
+            minutes: 1,
+            seconds: 2,
+            micros: 3,
+            fsp: 6,
+        };
         assert_eq!(value(&BValue::Time(t)), Value::Time(true, 2, 1, 1, 2, 3));
-        let ts = Timestamp { secs: 86_400, micros: 0, fsp: 0 };
-        assert_eq!(value(&BValue::Timestamp(ts)), Value::Date(1970, 1, 2, 0, 0, 0, 0));
+        let ts = Timestamp {
+            secs: 86_400,
+            micros: 0,
+            fsp: 0,
+        };
+        assert_eq!(
+            value(&BValue::Timestamp(ts)),
+            Value::Date(1970, 1, 2, 0, 0, 0, 0)
+        );
     }
 }

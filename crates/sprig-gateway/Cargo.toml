@@ -40,6 +40,8 @@ sprig-meta.workspace = true
 sprig-proto-mysql.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true
+# The tenant map a cutover holds and flips (chapters 10 and 15).
+sprig-shard.workspace = true
 sprig-sql.workspace = true
 # Chapter 12: fingerprints, the recorder, the flusher and samples.
 sprig-workload.workspace = true

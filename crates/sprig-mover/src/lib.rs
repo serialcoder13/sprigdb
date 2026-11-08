@@ -6,7 +6,7 @@
 //! writing, then switches ownership with a write hold of at most
 //! `mover.cutover_max_hold_ms`:
 //!
-//! 1. a chunked copy with DBLog watermarks ([`engine`]);
+//! 1. a chunked copy with `DBLog` watermarks ([`engine`]);
 //! 2. catch-up from the binlog through one ordered, idempotent apply lane,
 //!    whose every target transaction also commits the source position;
 //! 3. verification by per-row digests, with range repair;
@@ -44,8 +44,8 @@ pub mod settings;
 pub mod worker;
 
 pub use api::{
-    CutoverMode, DdlTransform, HashRange, JobFilter, JobKind, JobSpec, JobState, JobStatus,
-    Mover, Progress, Routing, SourceSpec, TargetSpec, VerifyMode,
+    CutoverMode, DdlTransform, HashRange, JobFilter, JobKind, JobSpec, JobState, JobStatus, Mover,
+    Progress, Routing, SourceSpec, TargetSpec, VerifyMode,
 };
 pub use io::{ChangeStream, CommitOutcome, JobEnv, MapIo, SourceIo, TargetIo};
 pub use record::{Claim, JobRecord, JobStore, MetaMover};

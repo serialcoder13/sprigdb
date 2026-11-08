@@ -9,7 +9,11 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+sprig-cluster.workspace = true
 sprig-common.workspace = true
+sprig-meta.workspace = true
+sprig-mover.workspace = true
+sprig-shard.workspace = true
 tracing.workspace = true
 
 [lints]

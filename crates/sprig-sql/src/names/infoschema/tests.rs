@@ -93,7 +93,10 @@ fn one_branch_per_representative_schema() {
     );
     assert_eq!(sql.matches(" UNION ALL ").count(), 2);
     assert!(sql.ends_with(") AS `TABLES`"), "{sql}");
-    assert!(sql.contains("'o''k' AS `TABLE_SCHEMA`"), "{sql}");
+    assert!(
+        sql.contains("CONVERT('o''k' USING utf8mb3) COLLATE utf8mb3_general_ci AS `TABLE_SCHEMA`"),
+        "{sql}"
+    );
     assert!(!sql.contains(" IN ("), "never an IN list on the schema");
     assert!(!sql.contains("LIKE"), "never LIKE on the schema");
 }
@@ -208,8 +211,10 @@ fn hiding_follows_visibility() {
 fn schema_and_definition_columns_are_mapped() {
     let sql =
         run("SELECT * FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = 'billing'");
-    assert!(sql.contains("'billing' AS `CONSTRAINT_SCHEMA`"));
-    assert!(sql.contains("CASE `REFERENCED_TABLE_SCHEMA` WHEN 't42_d1_g1_s1' THEN 'billing' WHEN 't42_d2_g2_s2' THEN 'crm' WHEN 't42_d3_g3_s5' THEN 'o''k' WHEN 't42_d3_g3_s4' THEN 'o''k' WHEN 't42_d3_ref' THEN 'o''k' ELSE NULL END AS `REFERENCED_TABLE_SCHEMA`"), "{sql}");
+    assert!(sql.contains(
+        "CONVERT('billing' USING utf8mb3) COLLATE utf8mb3_general_ci AS `CONSTRAINT_SCHEMA`"
+    ));
+    assert!(sql.contains("CASE `REFERENCED_TABLE_SCHEMA` WHEN 't42_d1_g1_s1' THEN CONVERT('billing' USING utf8mb3) COLLATE utf8mb3_general_ci WHEN 't42_d2_g2_s2' THEN CONVERT('crm' USING utf8mb3) COLLATE utf8mb3_general_ci WHEN 't42_d3_g3_s5' THEN CONVERT('o''k' USING utf8mb3) COLLATE utf8mb3_general_ci WHEN 't42_d3_g3_s4' THEN CONVERT('o''k' USING utf8mb3) COLLATE utf8mb3_general_ci WHEN 't42_d3_ref' THEN CONVERT('o''k' USING utf8mb3) COLLATE utf8mb3_general_ci ELSE NULL END AS `REFERENCED_TABLE_SCHEMA`"), "{sql}");
     let sql =
         run("SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'billing'");
     assert!(sql.contains("REPLACE(REPLACE(`VIEW_DEFINITION`, '`t42_d1_g1_s1`', '`billing`'), '`t42_d2_g2_s2`', '`crm`')"), "{sql}");
@@ -228,7 +233,9 @@ fn literals_follow_sql_mode() {
     )
     .unwrap()
     .unwrap();
-    assert!(sql.contains("'o''k' AS `TABLE_SCHEMA`"));
+    assert!(
+        sql.contains("CONVERT('o''k' USING utf8mb3) COLLATE utf8mb3_general_ci AS `TABLE_SCHEMA`")
+    );
     let map = MemoryNameMap::new(TenantId(42)).with_db(1, "a\\b", 1, 1);
     let reg = ColumnRegistry::mariadb_11_8();
     let ctx = ctx_with(&map, &reg, |_| {});
@@ -239,7 +246,11 @@ fn literals_follow_sql_mode() {
     )
     .unwrap()
     .unwrap();
-    assert!(String::from_utf8(r.sql).unwrap().contains("'a\\\\b' AS"));
+    assert!(
+        String::from_utf8(r.sql)
+            .unwrap()
+            .contains("'a\\\\b' USING utf8mb3) COLLATE utf8mb3_general_ci AS")
+    );
 }
 
 #[test]
@@ -374,7 +385,7 @@ fn registry() {
 fn schemata_and_processlist() {
     let sql = run("SELECT * FROM information_schema.SCHEMATA");
     assert!(
-        sql.contains("'information_schema' AS `SCHEMA_NAME`"),
+        sql.contains("CONVERT('information_schema' USING utf8mb3) COLLATE utf8mb3_general_ci AS `SCHEMA_NAME`"),
         "{sql}"
     );
     assert_eq!(
@@ -393,7 +404,9 @@ fn schemata_and_processlist() {
     )
     .unwrap()
     .unwrap();
-    assert!(sql.contains("'performance_schema' AS `SCHEMA_NAME`"));
+    assert!(sql.contains(
+        "CONVERT('performance_schema' USING utf8mb3) COLLATE utf8mb3_general_ci AS `SCHEMA_NAME`"
+    ));
     let sql = run_with(
         "SELECT * FROM information_schema.SCHEMATA",
         StmtKind::Select,

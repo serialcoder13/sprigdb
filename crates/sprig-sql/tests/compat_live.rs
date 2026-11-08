@@ -219,6 +219,14 @@ async fn checks(c: &mut MysqlClient) {
     let v = view(
         c,
         my,
+        "SELECT UPDATE_RULE, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS \
+         WHERE CONSTRAINT_SCHEMA = 'shop'",
+    )
+    .await;
+    assert_eq!(s(&v.1[0]), ["NO ACTION", "NO ACTION"]);
+    let v = view(
+        c,
+        my,
         "SELECT INDEX_NAME, IS_VISIBLE, EXPRESSION FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = 'shop' AND TABLE_NAME = 'j' ORDER BY INDEX_NAME",
     )
@@ -297,11 +305,7 @@ async fn checks(c: &mut MysqlClient) {
             "Comment"
         ]
     );
-    let rows: Vec<String> =
-        v.1.iter()
-            .map(|r| s(&r[..7]).join("|"))
-            .take(6)
-            .collect();
+    let rows: Vec<String> = v.1.iter().map(|r| s(&r[..7]).join("|")).take(6).collect();
     assert_eq!(
         rows,
         [
@@ -319,7 +323,9 @@ async fn checks(c: &mut MysqlClient) {
     assert_eq!(s(&col(&v, "Field")), ["d", "d2", "dc"]);
     let e = client_view(c, my, "DESCRIBE nope").await.unwrap_err();
     assert_eq!(e, "ERR 1146 Table 'shop.nope' doesn't exist");
-    let e = client_view(c, my, "SHOW COLUMNS FROM nope").await.unwrap_err();
+    let e = client_view(c, my, "SHOW COLUMNS FROM nope")
+        .await
+        .unwrap_err();
     assert_eq!(e, "ERR 1146 Table 'shop.nope' doesn't exist");
 
     // SHOW CREATE TABLE in MySQL's spelling.
@@ -328,9 +334,18 @@ async fn checks(c: &mut MysqlClient) {
     assert!(text.contains("  `j` json DEFAULT NULL,\n"), "{text}");
     assert!(text.contains("  `k` json NOT NULL,\n"), "{text}");
     assert!(!text.contains("json_valid"), "{text}");
-    assert!(text.contains("  `id` int NOT NULL AUTO_INCREMENT,"), "{text}");
-    assert!(text.contains("KEY `ix` (`s`) /*!80000 INVISIBLE */"), "{text}");
-    assert!(text.contains("DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"), "{text}");
+    assert!(
+        text.contains("  `id` int NOT NULL AUTO_INCREMENT,"),
+        "{text}"
+    );
+    assert!(
+        text.contains("KEY `ix` (`s`) /*!80000 INVISIBLE */"),
+        "{text}"
+    );
+    assert!(
+        text.contains("DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"),
+        "{text}"
+    );
     // 3307: MariaDB's text.
     let v = view(c, Persona::MariaDb, "SHOW CREATE TABLE j").await;
     let text = col(&v, "Create Table")[0].clone().unwrap();

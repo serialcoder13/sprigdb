@@ -55,6 +55,7 @@ pub mod autoindex_env;
 pub mod autoindex_loop;
 pub mod autoindex_validate;
 pub mod autoindex_workload;
+pub mod balancer_loop;
 pub mod catalog_reconciler;
 pub mod catalogs;
 pub mod dc;
@@ -125,6 +126,11 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let global = tiers
         .global
         .ok_or_else(|| SprigError::internal("controllers always connect the global tier"))?;
+    // Endpoint discovery (chapter 23 step 9): new etcd members join the
+    // client without a restart. One etcd in single-etcd mode: one follower.
+    let discovery = Arc::new(sprig_meta::discovery::Discovery::new(&tiers.dc));
+    let period = Duration::from_secs(settings::ETCD_MEMBER_REFRESH_SECONDS.default);
+    let _discovery = discovery.spawn(move || period, ctx.shutdown.clone());
     let stores = Stores {
         dc: Arc::new(tiers.dc),
         global: Arc::new(global),
@@ -170,6 +176,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         build: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let registry = ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?;
+    let registry_for_balancer = registry.clone();
     let monitor = Arc::new(ClusterMonitor::new(
         registry.clone(),
         settings.live.clone(),
@@ -304,13 +311,33 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Some(settings.live.clone()),
         Arc::clone(&clock),
     );
+    // Chapter 11's balancer: plans and decisions; no mover workers run
+    // jobs in this deployment yet, so `auto` runs as `recommend`.
+    let balancer = Arc::new(balancer_loop::BalancerLoop::new(
+        dc.clone(),
+        ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?,
+        Arc::clone(&stores.dc),
+        Arc::new(RegistryPools::new(
+            registry_for_balancer,
+            Some(Arc::clone(&monitor)),
+        )),
+        Arc::new(locator.clone()),
+        Directory::new(Arc::clone(&stores.global)),
+        Some(settings.live.clone()),
+        Arc::clone(&clock),
+        None,
+        cfg.node.id().clone(),
+    ));
     let tenants = Arc::new(TenantService::new(
         Arc::clone(&stores.dc),
         locator,
         Arc::clone(&tree),
         // Chapter 14's verifier tables and chapter 13's automatic-indexing
         // tables with the core catalog.
-        Arc::new(autoindex_loop::WithAutoIndex(users::AuthHooks)),
+        // Chapter 11's decision log too.
+        Arc::new(balancer_loop::WithDecisions(autoindex_loop::WithAutoIndex(
+            users::AuthHooks,
+        ))),
         Arc::clone(&clock),
         Some(settings.live.clone()),
     )?);
@@ -325,6 +352,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(reconciler))
         .with_loop(Loop::new(auto_index))
         .with_loop(Loop::new(workload_rollup))
+        .with_loop(Loop::new(Arc::clone(&balancer)))
         .global_candidate(cfg.controller.global_candidate);
 
     let token = cfg
@@ -343,7 +371,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             .with_tenants(tenants)
             .with_users(users)
             .with_settings(settings_admin)
-            .with_indexes(indexes),
+            .with_indexes(indexes)
+            .with_placement(balancer),
     );
     let admin = tokio::spawn(http::serve(
         listener,

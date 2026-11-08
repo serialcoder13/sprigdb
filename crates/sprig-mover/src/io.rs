@@ -17,9 +17,7 @@ use sprig_binlog::GtidPos;
 use sprig_common::Result;
 use sprig_common::ids::{ClusterId, JobId};
 
-use crate::model::{
-    ApplyOp, CopyState, PosRow, Row, RowDigest, StreamItem, TableMeta, Watermark,
-};
+use crate::model::{ApplyOp, CopyState, PosRow, Row, RowDigest, StreamItem, TableMeta, Watermark};
 
 /// A stream of the source's committed transactions, filtered to the job.
 #[async_trait::async_trait]
@@ -94,8 +92,12 @@ pub trait SourceIo: Send + Sync {
     async fn write_watermark(&self, wm: &Watermark) -> Result<()>;
     /// Up to `limit` rows after `after` (key values) in key order, from the
     /// stream node, autocommit.
-    async fn read_chunk(&self, t: &TableMeta, after: Option<&Row>, limit: usize)
-    -> Result<Vec<Row>>;
+    async fn read_chunk(
+        &self,
+        t: &TableMeta,
+        after: Option<&Row>,
+        limit: usize,
+    ) -> Result<Vec<Row>>;
     /// Per-row digests of up to `limit` rows after `after`, in key order.
     async fn digests(
         &self,
@@ -169,11 +171,14 @@ pub trait TargetIo: Send + Sync {
         copy: &CopyState,
     ) -> Result<()>;
     /// Per-row digests of the rows with keys in `(after, last]`.
-    async fn digests(&self, t: &TableMeta, after: Option<&Row>, last: &Row)
-    -> Result<Vec<RowDigest>>;
+    async fn digests(
+        &self,
+        t: &TableMeta,
+        after: Option<&Row>,
+        last: &Row,
+    ) -> Result<Vec<RowDigest>>;
     /// Deletes the rows with these keys.
-    async fn delete_keys(&self, job: JobId, token: u64, t: &TableMeta, keys: &[Row])
-    -> Result<()>;
+    async fn delete_keys(&self, job: JobId, token: u64, t: &TableMeta, keys: &[Row]) -> Result<()>;
     /// Raises `AUTO_INCREMENT` counters to at least the given values.
     async fn raise_counters(&self, counters: &[Counter]) -> Result<()>;
     /// Creates triggers and enables events at cutover; returns `H`, the

@@ -34,7 +34,7 @@ use sprig_auth::authz::stmt::{
     AccountRef, AccountStmt, GrantOn, Identified, PrivItem, RoleChoice, UserItem, UserOptions,
     UserSpec,
 };
-use sprig_auth::store::RequireTls;
+use sprig_auth::store::{RequireCurrent, RequireTls};
 use sprig_common::SprigError;
 use zeroize::Zeroizing;
 
@@ -163,6 +163,20 @@ impl<'a> P<'a> {
                 .ok_or_else(|| self.err())?,
             _ => return Err(self.err()),
         };
+        self.at += 1;
+        Ok(v)
+    }
+
+    /// A non-negative integer.
+    fn number(&mut self) -> R<u64> {
+        let t = self.peek().ok_or_else(|| self.err())?;
+        if t.kind != TokenKind::Number {
+            return Err(self.err());
+        }
+        let v = std::str::from_utf8(t.bytes(self.sql))
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| self.err())?;
         self.at += 1;
         Ok(v)
     }
@@ -418,13 +432,48 @@ fn user_options(p: &mut P<'_>) -> R<UserOptions> {
                 return Err(unsupported("REQUIRE SUBJECT, ISSUER or CIPHER"));
             });
         } else if p.eat_words(&["PASSWORD", "EXPIRE"]) {
-            if p.eat_word("DEFAULT") || p.eat_word("NEVER") {
-                // The tenant's policy applies (chapter 14).
-            } else if p.word("INTERVAL") {
-                return Err(unsupported("PASSWORD EXPIRE INTERVAL"));
+            if p.eat_word("DEFAULT") {
+                o.clauses.password_lifetime = Some(None);
+            } else if p.eat_word("NEVER") {
+                o.clauses.password_lifetime = Some(Some(0));
+            } else if p.eat_word("INTERVAL") {
+                let n = p.number()?;
+                p.expect_word("DAY")?;
+                o.clauses.password_lifetime = Some(Some(i16::try_from(n).map_err(|_| p.err())?));
             } else {
                 o.expire = Some(true);
             }
+        } else if p.eat_words(&["PASSWORD", "HISTORY"]) {
+            o.clauses.password_history = Some(if p.eat_word("DEFAULT") {
+                None
+            } else {
+                Some(i16::try_from(p.number()?).map_err(|_| p.err())?)
+            });
+        } else if p.eat_words(&["PASSWORD", "REUSE", "INTERVAL"]) {
+            o.clauses.password_reuse_days = Some(if p.eat_word("DEFAULT") {
+                None
+            } else {
+                let n = i16::try_from(p.number()?).map_err(|_| p.err())?;
+                p.expect_word("DAY")?;
+                Some(n)
+            });
+        } else if p.eat_words(&["PASSWORD", "REQUIRE", "CURRENT"]) {
+            o.clauses.require_current = Some(if p.eat_word("OPTIONAL") {
+                RequireCurrent::Optional
+            } else if p.eat_word("DEFAULT") {
+                RequireCurrent::Default
+            } else {
+                RequireCurrent::Yes
+            });
+        } else if p.eat_word("FAILED_LOGIN_ATTEMPTS") {
+            o.clauses.failed_login_attempts =
+                Some(Some(u16::try_from(p.number()?).map_err(|_| p.err())?));
+        } else if p.eat_word("PASSWORD_LOCK_TIME") {
+            o.clauses.password_lock_minutes = Some(Some(if p.eat_word("UNBOUNDED") {
+                -1
+            } else {
+                i32::try_from(p.number()?).map_err(|_| p.err())?
+            }));
         } else if p.eat_word("ACCOUNT") {
             if p.eat_word("LOCK") {
                 o.lock = Some(true);
@@ -435,13 +484,7 @@ fn user_options(p: &mut P<'_>) -> R<UserOptions> {
             }
         } else if p.eat_words(&["DISCARD", "OLD", "PASSWORD"]) {
             o.discard_old = true;
-        } else if p.word("WITH")
-            || p.word("PASSWORD")
-            || p.word("FAILED_LOGIN_ATTEMPTS")
-            || p.word("PASSWORD_LOCK_TIME")
-            || p.word("COMMENT")
-            || p.word("ATTRIBUTE")
-        {
+        } else if p.word("WITH") || p.word("PASSWORD") || p.word("COMMENT") || p.word("ATTRIBUTE") {
             let t = p.peek().map(|t| p.text(t)).unwrap_or_default();
             return Err(unsupported(&format!("{} options", t.to_ascii_uppercase())));
         } else {
@@ -750,6 +793,27 @@ mod tests {
                 using: vec![]
             }
         );
+    }
+
+    #[test]
+    fn policy_clauses() {
+        match parse_ok(
+            "ALTER USER bob FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME UNBOUNDED \
+             PASSWORD EXPIRE INTERVAL 90 DAY PASSWORD HISTORY 5 \
+             PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT OPTIONAL",
+        ) {
+            AccountStmt::AlterUser { options, .. } => {
+                let c = options.clauses;
+                assert_eq!(c.failed_login_attempts, Some(Some(3)));
+                assert_eq!(c.password_lock_minutes, Some(Some(-1)));
+                assert_eq!(c.password_lifetime, Some(Some(90)));
+                assert_eq!(c.password_history, Some(Some(5)));
+                assert_eq!(c.password_reuse_days, Some(None));
+                assert_eq!(c.require_current, Some(RequireCurrent::Optional));
+                assert_eq!(options.expire, None);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

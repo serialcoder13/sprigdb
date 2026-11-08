@@ -28,6 +28,10 @@ etcd=http://127.0.0.1:12479
 dc=dc-m7
 admin=http://127.0.0.1:19480
 certs=deploy/compose/gateway-certs
+# The gateways' certificate files: copies, so rotating them (soak tests)
+# never touches the shared dev gateway's. server-b.pem is a second
+# certificate from the same dev CA, for rotation.
+mycerts=$state/certs
 
 say() { echo "m07: $*"; }
 die() { echo "m07: $*" >&2; exit 1; }
@@ -79,6 +83,27 @@ stop() {
     say "$name stopped"
 }
 
+# The dev CA's server certificate (a) and a second one (b) for rotation.
+make_certs() {
+    mkdir -p "$mycerts"
+    [[ -s $mycerts/server-a.pem ]] && return
+    cp "$certs/server.pem" "$mycerts/server-a.pem"
+    cp "$certs/server-key.pem" "$mycerts/server-a-key.pem"
+    (
+        cd "$mycerts"
+        openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" \
+            -keyout server-b-key.pem -out b.csr 2>/dev/null
+        printf '%s\n' "subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:host.docker.internal" \
+            "basicConstraints=CA:FALSE" "keyUsage=digitalSignature,keyEncipherment" \
+            "extendedKeyUsage=serverAuth" >b.ext
+        openssl x509 -req -in b.csr -CA "$root/$certs/ca.pem" -CAkey "$root/$certs/ca-key.pem" \
+            -CAcreateserial -CAserial b.srl -days 825 -extfile b.ext -out server-b.pem 2>/dev/null
+        rm -f b.csr b.ext b.srl
+    )
+    cp "$mycerts/server-a.pem" "$mycerts/server.pem"
+    cp "$mycerts/server-a-key.pem" "$mycerts/server-key.pem"
+}
+
 gw_ready() { echo "http://127.0.0.1:$((19189 + $1))/readyz"; }
 
 up() {
@@ -100,15 +125,16 @@ up() {
     fi
     # Listeners of both gateways come from listen_override; TLS and
     # certificates are dc-scope settings of dc-m7.
-    set_setting tls.bundles.default.cert_path "\"$root/$certs/server.pem\""
-    set_setting tls.bundles.default.key_path "\"$root/$certs/server-key.pem\""
+    [[ -s $certs/server.pem ]] || die "no dev certificates in $certs: run deploy/compose/gateway-dev.sh up once (it makes them)"
+    make_certs
+    set_setting tls.bundles.default.cert_path "\"$root/$mycerts/server.pem\""
+    set_setting tls.bundles.default.key_path "\"$root/$mycerts/server-key.pem\""
     set_setting listener.mysql.tls '"optional"'
     set_setting listener.mariadb.tls '"optional"'
     set_setting listener.http.tls '"off"'
     set_setting listener.https.tls '"required"'
     set_setting gateway.drain_lb_delay_seconds 2
     set_setting listener.drain_seconds 5
-    [[ -s $certs/server.pem ]] || die "no dev certificates in $certs: run deploy/compose/gateway-dev.sh up once (it makes them)"
     gateway 1 start
     gateway 2 start
     local cid

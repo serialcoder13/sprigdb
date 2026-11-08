@@ -19,10 +19,12 @@
 //!   (alias `config`; chapter 08 steps 7-8, chapter 23 step 8, chapter 47
 //!   step 5): see where a value comes from and change it at any of the six
 //!   scopes (see [`settings`]);
+//! - `sprigctl shard move <tenant> --to <cluster>` and `sprigctl job
+//!   list|show|cancel|cutover` (chapter 10 step 11): see [`mover`];
 //! - `sprigctl index list|show|recommendations|approve|reject|drop|pin|unpin`
 //!   and `sprigctl explain query <fingerprint>` (chapter 13 step 13): see
-//!   [`index`]. `explain decision` and `explain placement` wait for
-//!   chapter 11's decision log.
+//!   [`index`]; `sprigctl explain decision|placement` (chapter 11 step
+//!   7): see [`placement`].
 //!
 //! Every other command group parses and prints "not implemented yet",
 //! exiting with status 1.
@@ -35,6 +37,8 @@
 mod client;
 mod cluster;
 mod index;
+mod mover;
+mod placement;
 mod render;
 mod settings;
 
@@ -57,8 +61,6 @@ use crate::cluster::RegisterFlags;
 /// Command groups not implemented yet, and their subcommands (writing
 /// guide, 5.10).
 const GROUPS: &[(&str, &str, &[&str])] = &[
-    ("shard", "Shards", &["list", "split", "merge", "move"]),
-    ("job", "Jobs", &["list", "show", "cancel"]),
     ("feed", "Change feeds", &["list", "show", "lag"]),
     ("search", "Search indexes", &["list", "show", "rebuild"]),
     (
@@ -358,7 +360,9 @@ fn cli() -> Command {
         .subcommand(tenant_group())
         .subcommand(settings::group())
         .subcommand(index::group())
-        .subcommand(index::explain_group());
+        .subcommand(index::explain_group())
+        .subcommand(mover::shard_group())
+        .subcommand(mover::job_group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -403,9 +407,10 @@ fn main() -> ExitCode {
     };
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
-        "dc" | "cluster" | "settings" | "index" => true,
-        "explain" => name == "query",
+        "dc" | "cluster" | "settings" | "index" | "job" => true,
+        "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
+        "shard" => name == "move",
         _ => false,
     };
     if !implemented {
@@ -434,6 +439,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "explain" => index::explain(&client, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "shard" | "job" => mover::run(&client, group, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             _ => run_cluster(&client, &matches, sub).await,

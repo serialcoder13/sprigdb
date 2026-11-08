@@ -221,21 +221,32 @@ impl CommandLoop {
     async fn serve(&mut self) -> Result<()> {
         loop {
             self.framed.codec_mut().reset_seq();
-            // Idle outside a transaction, a close at the safe point (drain,
-            // a stricter listener, a revoked account) happens at once: the
-            // reason's error, unsolicited, then the close (as MySQL's 4031).
+            // A drain closes an idle session (outside a transaction) at once
+            // (chapter 04, "Drain" step 3), silently: an unsolicited ERR
+            // packet is read out of turn by most clients ("Packets out of
+            // sync"), so the client sees the closed connection on its next
+            // use and reconnects. Other reasons (a stricter listener, a
+            // revoked account) wait for the next command, which gets the
+            // reason's error.
             let idle_close = !self.status.contains(StatusFlags::IN_TRANS);
             let handle = Arc::clone(self.session.handle());
-            let next = tokio::select! {
-                biased;
-                n = self.framed.next() => Some(n),
-                () = handle.flags().close_wanted(), if idle_close => None,
+            let mut watch_close = idle_close;
+            let next = loop {
+                tokio::select! {
+                    biased;
+                    n = self.framed.next() => break Some(n),
+                    () = handle.flags().close_wanted(), if watch_close => {
+                        if handle.flags().close_reason() == Some(crate::session::CloseReason::Drain)
+                            || handle.flags().conn_killed()
+                        {
+                            break None;
+                        }
+                        watch_close = false;
+                    }
+                }
             };
             let Some(next) = next else {
-                if let Some(reason) = self.session.flags().close_reason() {
-                    let _ = self.send_error(&reason.error()).await;
-                    let _ = super::sink::flush(&mut self.framed).await;
-                }
+                tracing::debug!(session = %self.session.id, "idle session closed: the gateway is draining");
                 return Ok(());
             };
             let payload = match next {

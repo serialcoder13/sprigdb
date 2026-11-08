@@ -103,7 +103,9 @@ pub struct Engine {
     read: GtidPos,
     copy: CopyState,
     pending: Vec<ApplyOp>,
-    pending_keys: HashSet<KeyBytes>,
+    /// Per table: the index in `pending` of its latest op, and that op's
+    /// keys.
+    pending_keys: std::collections::HashMap<TableId, (usize, HashSet<KeyBytes>)>,
     pending_rows: usize,
     pending_since: Option<Instant>,
     window: Option<Window>,
@@ -158,12 +160,7 @@ fn aborted(m: impl Into<String>) -> SprigError {
 impl Engine {
     /// An engine for the job `claim` owns.
     #[must_use]
-    pub fn new(
-        claim: Claim,
-        env: JobEnv,
-        clock: Arc<dyn Clock>,
-        settings: MoverSettings,
-    ) -> Self {
+    pub fn new(claim: Claim, env: JobEnv, clock: Arc<dyn Clock>, settings: MoverSettings) -> Self {
         let now = clock.now();
         // Watermark sequences only grow across restarts: start from the
         // wall clock in microseconds.
@@ -187,7 +184,7 @@ impl Engine {
             read: GtidPos::new(),
             copy: CopyState::default(),
             pending: Vec::new(),
-            pending_keys: HashSet::new(),
+            pending_keys: std::collections::HashMap::new(),
             pending_rows: 0,
             pending_since: None,
             window: None,
@@ -449,8 +446,8 @@ impl Engine {
                 self.maybe_save().await?;
             }
         }
-        let done = u32::try_from(self.copy.tables.values().filter(|c| c.done).count())
-            .unwrap_or(u32::MAX);
+        let done =
+            u32::try_from(self.copy.tables.values().filter(|c| c.done).count()).unwrap_or(u32::MAX);
         self.claim
             .save(|r| {
                 r.state = JobState::CatchingUp;
@@ -482,7 +479,7 @@ impl Engine {
         Ok(seq)
     }
 
-    /// One DBLog chunk (chapter 10, "The watermark copy").
+    /// One `DBLog` chunk (chapter 10, "The watermark copy").
     async fn copy_chunk(&mut self, t: &Arc<TableMeta>) -> Result<()> {
         let id = t.id();
         let after: Option<Row> = self
@@ -533,7 +530,13 @@ impl Engine {
         };
         self.env
             .target
-            .apply(self.job, self.token, &ops, &self.persist_pos(&self.applied.clone()), &self.copy)
+            .apply(
+                self.job,
+                self.token,
+                &ops,
+                &self.persist_pos(&self.applied.clone()),
+                &self.copy,
+            )
             .await?;
         metrics::counter!("sprig_mover_copy_rows_total").increment(copied);
         self.claim.rec.progress.rows_copied += copied;
@@ -607,10 +610,7 @@ impl Engine {
             }
             let item = {
                 let Some(r) = self.reader.as_mut() else {
-                    return Err(SprigError::new(
-                        SprigCode::BinlogDisconnected,
-                        "no stream",
-                    ));
+                    return Err(SprigError::new(SprigCode::BinlogDisconnected, "no stream"));
                 };
                 tokio::time::timeout(wait.max(Duration::from_millis(1)), r.rx.recv()).await
             };
@@ -717,7 +717,14 @@ impl Engine {
             let pos = self.read.clone();
             self.env
                 .target
-                .apply_ddl(self.job, self.token, &ddl.db, &ddl.sql, &self.persist_pos(&pos), &self.copy)
+                .apply_ddl(
+                    self.job,
+                    self.token,
+                    &ddl.db,
+                    &ddl.sql,
+                    &self.persist_pos(&pos),
+                    &self.copy,
+                )
                 .await?;
             self.applied = pos;
             self.refresh_tables().await?;
@@ -792,13 +799,21 @@ impl Engine {
     /// Adds one row op to the batch: consecutive same-kind rows of a table
     /// share a statement; a repeated key or another kind starts a new one.
     fn push(&mut self, upsert: bool, t: &Arc<TableMeta>, key: KeyBytes, row: Row) {
-        let same = match self.pending.last() {
-            Some(ApplyOp::Upsert { table, .. }) => upsert && Arc::ptr_eq(table, t),
-            Some(ApplyOp::Delete { table, .. }) => !upsert && Arc::ptr_eq(table, t),
-            None => false,
-        };
-        if !same || self.pending_keys.contains(&key) {
-            self.pending_keys.clear();
+        // Ops of different tables may run in any order inside the batch's
+        // transaction (no constraint spans tables; foreign key checks are
+        // off), so each table keeps its own latest op; within a table the
+        // order is the source's, and a repeated key starts a new statement.
+        let id = t.id();
+        let reuse = self.pending_keys.get(&id).and_then(|(i, keys)| {
+            let same = matches!(
+                (self.pending.get(*i), upsert),
+                (Some(ApplyOp::Upsert { .. }), true) | (Some(ApplyOp::Delete { .. }), false)
+            );
+            (same && !keys.contains(&key)).then_some(*i)
+        });
+        let i = if let Some(i) = reuse {
+            i
+        } else {
             self.pending.push(if upsert {
                 ApplyOp::Upsert {
                     table: t.clone(),
@@ -810,9 +825,14 @@ impl Engine {
                     keys: Vec::new(),
                 }
             });
+            let i = self.pending.len() - 1;
+            self.pending_keys.insert(id.clone(), (i, HashSet::new()));
+            i
+        };
+        if let Some((_, keys)) = self.pending_keys.get_mut(&id) {
+            keys.insert(key);
         }
-        self.pending_keys.insert(key);
-        match self.pending.last_mut() {
+        match self.pending.get_mut(i) {
             Some(ApplyOp::Upsert { rows, .. }) => rows.push(row),
             Some(ApplyOp::Delete { keys, .. }) => keys.push(row),
             None => {}
@@ -913,7 +933,8 @@ impl Engine {
             metrics::counter!("sprig_mover_throttled_seconds_total", "reason" => reason)
                 .increment(0);
             let t0 = self.clock.now();
-            self.pump(Until::For(Duration::from_millis(100)), None).await?;
+            self.pump(Until::For(Duration::from_millis(100)), None)
+                .await?;
             let waited = self.clock.now().saturating_duration_since(t0);
             metrics::counter!("sprig_mover_throttled_millis_total", "reason" => reason)
                 .increment(u64::try_from(waited.as_millis()).unwrap_or(0));
@@ -972,7 +993,8 @@ impl Engine {
             if self.lag_ready() {
                 break;
             }
-            self.pump(Until::For(Duration::from_millis(500)), None).await?;
+            self.pump(Until::For(Duration::from_millis(500)), None)
+                .await?;
             self.maybe_save().await?;
         }
         let verify = self.claim.rec.spec.verify != VerifyMode::Off && !self.verified();
@@ -1093,7 +1115,12 @@ impl Engine {
 
     /// Makes `(after, last]` on the target equal the source at a high
     /// watermark.
-    async fn repair_range(&mut self, t: &Arc<TableMeta>, after: Option<&Row>, last: &Row) -> Result<()> {
+    async fn repair_range(
+        &mut self,
+        t: &Arc<TableMeta>,
+        after: Option<&Row>,
+        last: &Row,
+    ) -> Result<()> {
         let lo = self.watermark(WmKind::Low).await?;
         self.pump(Until::Wm(WmKind::Low, lo), None).await?;
         let rows = self.env.source.read_range(t, after, last).await?;
@@ -1133,7 +1160,13 @@ impl Engine {
         }];
         self.env
             .target
-            .apply(self.job, self.token, &ops, &self.persist_pos(&self.applied.clone()), &self.copy)
+            .apply(
+                self.job,
+                self.token,
+                &ops,
+                &self.persist_pos(&self.applied.clone()),
+                &self.copy,
+            )
             .await
     }
 
@@ -1161,7 +1194,8 @@ impl Engine {
                 self.claim.rec.spec.cutover == CutoverMode::Manual && !self.claim.rec.go;
             let now_ms = wall_ms(self.clock.wall());
             if manual_wait || now_ms < self.claim.rec.not_before_ms || !self.lag_ready() {
-                self.pump(Until::For(Duration::from_millis(250)), None).await?;
+                self.pump(Until::For(Duration::from_millis(250)), None)
+                    .await?;
                 self.maybe_save().await?;
                 continue;
             }
@@ -1184,6 +1218,7 @@ impl Engine {
     /// The cutover (chapter 10, "Cutover"). Every failure before the commit
     /// aborts: the hold is cleared first (so a commit still in flight can't
     /// land afterwards), then the sources are unfenced.
+    #[allow(clippy::too_many_lines)] // the chapter's nine steps, in order
     async fn cutover(&mut self) -> Result<Step> {
         let s = self.settings.clone();
         let swap = self.claim.rec.kind == JobKind::CopySwapDdl;
@@ -1315,7 +1350,12 @@ impl Engine {
         Ok(CommitOutcome::Rejected)
     }
 
-    async fn abort_cutover(&mut self, why: &str, held_ms: u64, triggers: &[String]) -> Result<Step> {
+    async fn abort_cutover(
+        &mut self,
+        why: &str,
+        held_ms: u64,
+        triggers: &[String],
+    ) -> Result<Step> {
         tracing::warn!(job = %self.job.0, why, held_ms, "cutover aborted");
         metrics::counter!("sprig_mover_cutovers_total", "outcome" => "aborted").increment(1);
         self.drop_stream();
@@ -1337,7 +1377,8 @@ impl Engine {
             .settings
             .cutover_retry
             .saturating_mul(1u32 << attempts.saturating_sub(1).min(6));
-        let not_before = wall_ms(self.clock.wall()) + u64::try_from(backoff.as_millis()).unwrap_or(0);
+        let not_before =
+            wall_ms(self.clock.wall()) + u64::try_from(backoff.as_millis()).unwrap_or(0);
         let why = why.to_owned();
         self.claim
             .save(|r| {
@@ -1415,7 +1456,8 @@ impl Engine {
             .settings
             .cutover_retry
             .saturating_mul(1u32 << attempts.saturating_sub(1).min(6));
-        let not_before = wall_ms(self.clock.wall()) + u64::try_from(backoff.as_millis()).unwrap_or(0);
+        let not_before =
+            wall_ms(self.clock.wall()) + u64::try_from(backoff.as_millis()).unwrap_or(0);
         self.claim
             .save(|r| {
                 r.state = JobState::Ready;
@@ -1509,9 +1551,7 @@ impl Engine {
                 .await?;
         }
         self.drop_stream();
-        if !self.claim.rec.receipts.is_empty()
-            || self.claim.rec.cutover_step.is_some()
-        {
+        if !self.claim.rec.receipts.is_empty() || self.claim.rec.cutover_step.is_some() {
             let triggers = self.env.source.triggers().await.unwrap_or_default();
             if self.undo_cutover(&triggers).await? {
                 // Committed after all: roll forward instead.

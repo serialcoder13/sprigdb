@@ -67,7 +67,11 @@ fn approvals_and_placement_failures() {
     assert_eq!(b.open()[0].shard.as_deref(), Some("t7/g1/s3 to mum1-c2"));
     let ch = b.placement_failed("mum1", TenantId(9), load(1.0, 0.0), true, vec![], 20);
     assert_eq!(ch.len(), 1);
-    let r = b.open().into_iter().find(|r| r.kind == RecKind::AddCluster).unwrap();
+    let r = b
+        .open()
+        .into_iter()
+        .find(|r| r.kind == RecKind::AddCluster)
+        .unwrap();
     assert_eq!(r.reason, "schema_cap");
     assert_eq!(r.cluster, "mum1");
     // Placement-time recommendations survive planning runs ...
@@ -84,7 +88,14 @@ async fn store_round_trips_in_the_dc_tier() {
     let mem: Arc<dyn MetaStore> = Arc::new(MemStore::new(tier.clone()));
     let st = RecommendationStore::new(mem, tier);
     let mut b = RecommendationBook::new();
-    let ch = b.placement_failed("mum1", TenantId(9), load(1.0, 0.0), false, vec!["mum1".into()], 5);
+    let ch = b.placement_failed(
+        "mum1",
+        TenantId(9),
+        load(1.0, 0.0),
+        false,
+        vec!["mum1".into()],
+        5,
+    );
     st.apply(&ch).await.unwrap();
     let all = st.list().await.unwrap();
     assert_eq!(all.len(), 1);

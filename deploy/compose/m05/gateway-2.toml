@@ -1,0 +1,30 @@
+# A second development gateway (milestone M0.5): the isolation suite's
+# propagation check revokes a privilege through the first gateway
+# (gateway-dev.sh, 13306/13307) and times its refusal here. Same DC, same
+# etcd, same backends file; its own node id, listeners and telemetry port.
+# m05/run.sh starts and stops it; run from the repository root.
+#
+# Development only: plain-text etcd, no [tls].
+
+[node]
+dc = "dc-a"
+id = "gw-2"
+
+[meta]
+dc_seeds = ["http://127.0.0.1:2379"]
+global_seeds = []
+deployment_id = "sprigdb-dev"
+
+[gateway]
+login_mode = "catalog"
+backends_file = "deploy/compose/gateway-backends.dev.toml"
+workload_key_file = "deploy/compose/workload-keys.dev"
+
+[gateway.listen_override]
+mysql = "127.0.0.1:13316"
+mariadb = "127.0.0.1:13317"
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "pretty"
+bootstrap_addr = "127.0.0.1:9191"

@@ -299,21 +299,29 @@ impl Wanted {
 
 #[allow(clippy::cast_precision_loss)]
 fn mem(def: u64, toc: u64, c: u64, spc: u64, k: &Costs) -> f64 {
-    def as f64 * k.def_bytes + toc as f64 * k.toc_bytes + c as f64 * spc as f64 * k.sp_bytes * k.sp_use
+    def as f64 * k.def_bytes
+        + toc as f64 * k.toc_bytes
+        + c as f64 * spc as f64 * k.sp_bytes * k.sp_use
 }
 
 /// Steps 1 to 7 of the plan.
 #[must_use]
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn want(i: &TuningInputs, k: &Costs, budget_pct: u32) -> Wanted {
     let t = i.tables;
     let ta = i.tables_used;
     let c = i.max_connections;
     // ceil(T × 1.1) and ceil(Ta × 1.2) in integers.
     let mut def = (t.saturating_mul(11).div_ceil(10) + 400).clamp(400, 2_097_152);
-    let mut toc = (ta.saturating_mul(12).div_ceil(10) + i.peak_threads_running * 8)
-        .clamp(2000, 1_048_576);
-    let mut spc = (i.max_routines_per_schema * 2).next_power_of_two().clamp(256, 4096);
+    let mut toc =
+        (ta.saturating_mul(12).div_ceil(10) + i.peak_threads_running * 8).clamp(2000, 1_048_576);
+    let mut spc = (i.max_routines_per_schema * 2)
+        .next_power_of_two()
+        .clamp(256, 4096);
     let mut over = false;
     if let Some(m) = i.memory_bytes {
         let budget = m as f64 * f64::from(budget_pct) / 100.0;
@@ -324,13 +332,21 @@ pub fn want(i: &TuningInputs, k: &Costs, budget_pct: u32) -> Wanted {
         if mem(def, toc, c, spc, k) > budget {
             let floor = ta.max(2000).min(toc);
             let room = budget - mem(def, 0, c, spc, k);
-            let fit = if room > 0.0 { (room / k.toc_bytes) as u64 } else { 0 };
+            let fit = if room > 0.0 {
+                (room / k.toc_bytes) as u64
+            } else {
+                0
+            };
             toc = fit.clamp(floor, toc);
         }
         if mem(def, toc, c, spc, k) > budget {
             let floor = t.max(400).min(def);
             let room = budget - mem(0, toc, c, spc, k);
-            let fit = if room > 0.0 { (room / k.def_bytes) as u64 } else { 0 };
+            let fit = if room > 0.0 {
+                (room / k.def_bytes) as u64
+            } else {
+                0
+            };
             def = fit.clamp(floor, def);
         }
         over = mem(def, toc, c, spc, k) > budget;
@@ -530,7 +546,8 @@ impl Tuner {
                 }
                 let since = *self.smaller_since.entry(v).or_insert(now);
                 if now < since + SHRINK_AFTER_SECS {
-                    plan.held.push(format!("{v} shrinks to {to} after 24 h of wanting it"));
+                    plan.held
+                        .push(format!("{v} shrinks to {to} after 24 h of wanting it"));
                     continue;
                 }
             }
@@ -541,7 +558,12 @@ impl Tuner {
             } else {
                 ApplyMode::NextRestart
             };
-            plan.wanted.push(Change { var: v, from, to, mode });
+            plan.wanted.push(Change {
+                var: v,
+                from,
+                to,
+                mode,
+            });
         }
         plan
     }
@@ -590,15 +612,19 @@ pub async fn apply_on_node<Q: Queryable + Send>(
     let mut done = Vec::new();
     for c in &plan.wanted {
         let go = c.var.dynamic()
-            && (c.mode == ApplyMode::Live || (recommendations && c.mode == ApplyMode::RecommendOnly));
+            && (c.mode == ApplyMode::Live
+                || (recommendations && c.mode == ApplyMode::RecommendOnly));
         if !go {
             continue;
         }
         q.query_drop(format!("SET GLOBAL {} = {}", c.var.name(), c.to))
             .await
             .map_err(|e| {
-                SprigError::new(SprigCode::ClusterCapabilityRequired, format!("SET GLOBAL {} failed", c.var))
-                    .with_source(e)
+                SprigError::new(
+                    SprigCode::ClusterCapabilityRequired,
+                    format!("SET GLOBAL {} failed", c.var),
+                )
+                .with_source(e)
             })?;
         done.push((c.var, c.to));
     }

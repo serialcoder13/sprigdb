@@ -111,7 +111,9 @@ pub fn to_mysql(e: &WireError) -> Option<WireError> {
                 ))
             }
         }
-        1451 if e.message.trim_end() == "Cannot delete or update a parent row: a foreign key constraint fails" => {
+        1451 if e.message.trim_end()
+            == "Cannot delete or update a parent row: a foreign key constraint fails" =>
+        {
             Some(WireError::new(
                 3730,
                 *b"HY000",
@@ -134,6 +136,7 @@ pub fn to_mysql(e: &WireError) -> Option<WireError> {
 mod tests {
     use super::*;
 
+    #[allow(clippy::trivially_copy_pass_by_ref)] // reads as b"23000"
     fn map(code: u16, state: &[u8; 5], msg: &str) -> Option<(u16, [u8; 5], String)> {
         to_mysql(&WireError::new(code, *state, msg)).map(|e| (e.code, e.sqlstate, e.message))
     }
@@ -141,7 +144,11 @@ mod tests {
     #[test]
     fn mariadb_only_codes_become_mysqls() {
         assert_eq!(
-            map(1969, b"70100", "Query execution was interrupted (max_statement_time exceeded)"),
+            map(
+                1969,
+                b"70100",
+                "Query execution was interrupted (max_statement_time exceeded)"
+            ),
             Some((
                 3024,
                 *b"HY000",
@@ -161,7 +168,11 @@ mod tests {
         );
         assert_eq!(
             map(4025, b"23000", "CONSTRAINT `c_chk_1` failed for `shop`.`c`"),
-            Some((3819, *b"HY000", "Check constraint 'c_chk_1' is violated.".to_owned()))
+            Some((
+                3819,
+                *b"HY000",
+                "Check constraint 'c_chk_1' is violated.".to_owned()
+            ))
         );
         assert_eq!(
             map(

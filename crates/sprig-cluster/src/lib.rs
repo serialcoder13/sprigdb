@@ -45,9 +45,9 @@ pub mod registry;
 pub mod settings;
 pub mod sql;
 pub mod sys;
-pub mod tuning;
 #[cfg(test)]
 mod testutil;
+pub mod tuning;
 
 pub use driver::{BasicDriver, GaleraDriver, TopologyDriver};
 pub use fence::{FenceReceipt, FenceRequest, FenceScope};

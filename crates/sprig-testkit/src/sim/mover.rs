@@ -30,6 +30,8 @@
 //!    plus the hold grace.
 //! 7. Every job ends `done` or `rolled_back`.
 
+#![allow(clippy::many_single_char_names)] // keys, values, tables: k, v, t
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -128,10 +130,13 @@ impl Rates {
     }
 }
 
+/// One row change of the model: table, before, after.
+type ModelChange = (String, Option<(i64, String)>, Option<(i64, String)>);
+
 /// One binlog event group of the source model.
 #[derive(Debug, Clone)]
 enum Entry {
-    Rows(Vec<(String, Option<(i64, String)>, Option<(i64, String)>)>),
+    Rows(Vec<ModelChange>),
     Wm(Watermark),
     Ddl(String),
 }
@@ -325,7 +330,12 @@ impl SourceIo for SimSource {
         Ok(())
     }
 
-    async fn read_chunk(&self, t: &TableMeta, after: Option<&Row>, limit: usize) -> Result<Vec<Row>> {
+    async fn read_chunk(
+        &self,
+        t: &TableMeta,
+        after: Option<&Row>,
+        limit: usize,
+    ) -> Result<Vec<Row>> {
         self.call(self.rates.source_err, "read_chunk").await?;
         let db = lock(&self.db);
         let lo = key_of(after);
@@ -342,7 +352,12 @@ impl SourceIo for SimSource {
             .unwrap_or_default())
     }
 
-    async fn digests(&self, t: &TableMeta, after: Option<&Row>, limit: usize) -> Result<Vec<RowDigest>> {
+    async fn digests(
+        &self,
+        t: &TableMeta,
+        after: Option<&Row>,
+        limit: usize,
+    ) -> Result<Vec<RowDigest>> {
         self.call(self.rates.source_err, "digests").await?;
         let db = lock(&self.db);
         let lo = key_of(after);
@@ -638,7 +653,12 @@ impl TargetIo for SimTarget {
         self.apply(job, token, &[], pos, copy).await
     }
 
-    async fn digests(&self, t: &TableMeta, after: Option<&Row>, last: &Row) -> Result<Vec<RowDigest>> {
+    async fn digests(
+        &self,
+        t: &TableMeta,
+        after: Option<&Row>,
+        last: &Row,
+    ) -> Result<Vec<RowDigest>> {
         self.call(self.rates.target_err_before, "digests").await?;
         let db = lock(&self.db);
         let lo = key_of(after);
@@ -733,7 +753,8 @@ impl MapIo for CheckedMaps {
         {
             let db = lock(&self.db);
             if !db.fenced {
-                self.world.fail("invariant 3: commit while the source is unfenced");
+                self.world
+                    .fail("invariant 3: commit while the source is unfenced");
             }
             let empty = BTreeMap::new();
             for (t, rows) in &db.src {
@@ -789,7 +810,9 @@ struct Factory {
 #[async_trait::async_trait]
 impl EnvFactory for Factory {
     async fn env(&self, _rec: &JobRecord) -> Result<JobEnv> {
-        let tier = Tier::Dc(sprig_common::ids::DcId::new(DC).map_err(|e| SprigError::internal(e.to_string()))?);
+        let tier = Tier::Dc(
+            sprig_common::ids::DcId::new(DC).map_err(|e| SprigError::internal(e.to_string()))?,
+        );
         let meta = self.world.etcd().client(&self.node, tier);
         Ok(JobEnv {
             source: Arc::new(SimSource {
@@ -848,7 +871,9 @@ impl ClientWrite<'_> {
                 // DDL acknowledges nothing about rows.
                 d.ddl_seq += 1;
                 let s = d.ddl_seq;
-                d.log(Entry::Ddl(format!("ALTER TABLE `{SCHEMA}`.`{t}` COMMENT 'c{s}'")));
+                d.log(Entry::Ddl(format!(
+                    "ALTER TABLE `{SCHEMA}`.`{t}` COMMENT 'c{s}'"
+                )));
                 return true;
             }
             let before = d.src.get(&t).and_then(|r| r.get(&k)).cloned();
@@ -865,7 +890,11 @@ impl ClientWrite<'_> {
                 }
             }
             if before.is_some() || after.is_some() {
-                d.log(Entry::Rows(vec![(t.clone(), before.map(|b| (k, b)), after)]));
+                d.log(Entry::Rows(vec![(
+                    t.clone(),
+                    before.map(|b| (k, b)),
+                    after,
+                )]));
             }
             d.last_src_ack = Some(self.at);
         } else {
@@ -914,8 +943,12 @@ async fn client(
         return;
     }
     while !stop.is_cancelled() {
-        tokio::time::sleep(world.rng().duration(Duration::from_millis(20), Duration::from_millis(120)))
-            .await;
+        tokio::time::sleep(
+            world
+                .rng()
+                .duration(Duration::from_millis(20), Duration::from_millis(120)),
+        )
+        .await;
         n += 1;
         let t = world.rng().pick(&tables).clone();
         let k = *world.rng().pick(&keys);
@@ -931,19 +964,15 @@ async fn client(
                 clock.now().saturating_duration_since(*at) > Duration::from_millis(200)
             });
             if cached.is_none() || stale {
-                match maps.load(TENANT).await {
-                    Ok((m, _)) => {
-                        if let Ok(p) = Placement::of(&m) {
-                            cached = Some((p, clock.now()));
-                        }
-                    }
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                }
+                let Ok((m, _)) = maps.load(TENANT).await else {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                };
+                cached = Placement::of(&m).ok().map(|p| (p, clock.now()));
             }
-            let Some((p, _)) = cached.clone() else { continue };
+            let Some((p, _)) = cached.clone() else {
+                continue;
+            };
             let now_ms = sprig_mover::record::wall_ms(clock.wall());
             if p.held_at(now_ms) && !late {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1096,20 +1125,23 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
     ];
     let crash_at = sc.faults.then(|| *rng.pick(&crash_states));
     let mut crashed = false;
-    let partition_at = (sc.faults && rng.chance(0.3)).then(|| rng.duration(Duration::from_secs(1), Duration::from_secs(20)));
+    let partition_at = (sc.faults && rng.chance(0.3))
+        .then(|| rng.duration(Duration::from_secs(1), Duration::from_secs(20)));
     let mut partitioned = None;
-    let purge_at = (sc.faults && rng.chance(0.2)).then(|| rng.duration(Duration::from_millis(200), Duration::from_secs(10)));
+    let purge_at = (sc.faults && rng.chance(0.2))
+        .then(|| rng.duration(Duration::from_millis(200), Duration::from_secs(10)));
     let deadline = Duration::from_secs(1200);
     let started = world.elapsed();
     let end_state = loop {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let now = world.elapsed() - started;
+        let now = world.elapsed().saturating_sub(started);
         if now > deadline {
-            return Err(format!("invariant 7: the job didn't end within {deadline:?}"));
+            return Err(format!(
+                "invariant 7: the job didn't end within {deadline:?}"
+            ));
         }
-        let st = match mover.status(&id).await {
-            Ok(s) => s,
-            Err(_) => continue,
+        let Ok(st) = mover.status(&id).await else {
+            continue;
         };
         if st.state.is_terminal() || st.state == JobState::Paused {
             break st;
@@ -1120,12 +1152,7 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
             && rng.chance(0.2)
         {
             crashed = true;
-            let owner = mover
-                .store()
-                .get(&id)
-                .await
-                .ok()
-                .and_then(|(r, _)| r.owner);
+            let owner = mover.store().get(&id).await.ok().and_then(|(r, _)| r.owner);
             if let Some(o) = owner
                 && let Some((h, tok)) = running.remove(&o)
             {
@@ -1145,7 +1172,10 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
             let w = rng.pick(&workers).clone();
             world.record(format!("partition {w} from etcd"));
             let f = world.net().partition(&[w], &[world.etcd().node().clone()]);
-            partitioned = Some((f, now + rng.duration(Duration::from_secs(1), Duration::from_secs(15))));
+            partitioned = Some((
+                f,
+                now + rng.duration(Duration::from_secs(1), Duration::from_secs(15)),
+            ));
         }
         if let Some((f, until)) = partitioned
             && now >= until
@@ -1185,7 +1215,12 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
     let (owner, expect_epoch) = match end_state.state {
         JobState::Done => (&d.tgt, 2),
         JobState::RolledBack => (&d.src, 1),
-        s => return Err(format!("invariant 7: the job ended {s}: {:?}", end_state.error)),
+        s => {
+            return Err(format!(
+                "invariant 7: the job ended {s}: {:?}",
+                end_state.error
+            ));
+        }
     };
     if p.epoch != expect_epoch || p.hold.is_some() {
         return Err(format!(
@@ -1214,7 +1249,9 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
     for (t, rows) in owner {
         for (k, v) in rows {
             if d.acked.get(&(t.clone(), *k)) != Some(&Some(v.clone())) {
-                return Err(format!("invariant 1: {t}.{k} = {v:?} was never acknowledged last"));
+                return Err(format!(
+                    "invariant 1: {t}.{k} = {v:?} was never acknowledged last"
+                ));
             }
         }
     }

@@ -24,7 +24,8 @@ fn blocker_of(f: &Feasibility, c: u32) -> Option<&Blocker> {
 #[test]
 fn every_hard_constraint_blocks_its_cluster() {
     let mut v = fleet(9);
-    v.tenants.insert(TenantId(1), crate::model::TenantView::new(TenantId(1)));
+    v.tenants
+        .insert(TenantId(1), crate::model::TenantView::new(TenantId(1)));
     let t = v.tenants.get_mut(&TenantId(1)).unwrap();
     t.allowed_dcs = Some(BTreeSet::from([dc("mum1")]));
     t.needs = BTreeSet::from(["vector".to_owned()]);
@@ -52,7 +53,10 @@ fn every_hard_constraint_blocks_its_cluster() {
     let f = feasible(&v, &u, Purpose::Place, 1000);
     assert_eq!(blocker_of(&f, 1), Some(&Blocker::Residency));
     assert!(matches!(blocker_of(&f, 2), Some(Blocker::State { .. })));
-    assert!(matches!(blocker_of(&f, 3), Some(Blocker::Capability { .. })));
+    assert!(matches!(
+        blocker_of(&f, 3),
+        Some(Blocker::Capability { .. })
+    ));
     assert_eq!(blocker_of(&f, 4), Some(&Blocker::Storage));
     assert_eq!(blocker_of(&f, 5), Some(&Blocker::TableCap));
     assert_eq!(blocker_of(&f, 6), Some(&Blocker::TableBudget));
@@ -77,7 +81,9 @@ fn moves_need_mover_flags_on_both_ends() {
     v.clusters.get_mut(&cid(2)).unwrap().caps.mover_target = false;
     let u = unit_of(&v, k).unwrap();
     let f = feasible(&v, &u, Purpose::Rebalance, 0);
-    assert!(matches!(blocker_of(&f, 2), Some(Blocker::Capability { missing }) if missing == "mover_target"));
+    assert!(
+        matches!(blocker_of(&f, 2), Some(Blocker::Capability { missing }) if missing == "mover_target")
+    );
     assert!(f.ok.iter().any(|(c, _)| *c == cid(3)));
     v.clusters.get_mut(&cid(1)).unwrap().caps.mover_source = false;
     let f = feasible(&v, &u, Purpose::Rebalance, 0);
@@ -114,7 +120,12 @@ fn schema_cap_counts_schemas_and_tables() {
     // Operators may go past the caps.
     let mut u = unit(500, load(0.0, 0.0));
     u.from = Some(cid(2));
-    assert!(feasible(&v, &u, Purpose::Operator, 0).ok.iter().any(|(c, _)| *c == cid(1)));
+    assert!(
+        feasible(&v, &u, Purpose::Operator, 0)
+            .ok
+            .iter()
+            .any(|(c, _)| *c == cid(1))
+    );
 }
 
 #[test]
@@ -159,7 +170,10 @@ fn co_writes_bind_groups_only_under_reject() {
     assert!(u.shards.contains(&b));
     assert_eq!(u.load.storage_bytes, 2.0 * crate::settings::GB);
     // 0.5 per hour is under balancer.cowrite_min_per_hour (1).
-    assert_eq!(bound_groups(&v, TenantId(1), GroupId(3)), BTreeSet::from([GroupId(3)]));
+    assert_eq!(
+        bound_groups(&v, TenantId(1), GroupId(3)),
+        BTreeSet::from([GroupId(3)])
+    );
     // The split rate counts co-writes left on other clusters.
     let solo = Unit {
         tenant: TenantId(1),

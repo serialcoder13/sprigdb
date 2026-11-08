@@ -93,10 +93,7 @@ impl PersonaVars {
     pub fn show_rows(&self) -> Vec<(&'static str, String)> {
         vec![
             ("version", self.version.clone()),
-            (
-                "version_comment",
-                version_comment(self.persona).to_owned(),
-            ),
+            ("version_comment", version_comment(self.persona).to_owned()),
         ]
     }
 }

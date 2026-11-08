@@ -70,7 +70,16 @@ fn accumulator_reports_cumulative_counters() {
     let r = a.report("gw", 1);
     assert_eq!(r.shards.len(), 1);
     let s = &r.shards[0];
-    assert_eq!((s.statements, s.busy_us, s.rows_written, s.rows_read, s.connections), (2, 5000, 1, 7, 4));
+    assert_eq!(
+        (
+            s.statements,
+            s.busy_us,
+            s.rows_written,
+            s.rows_read,
+            s.connections
+        ),
+        (2, 5000, 1, 7, 4)
+    );
 }
 
 /// Live: `SPRIG_TEST_MARIADB_SINGLE`; creates and drops
@@ -84,8 +93,12 @@ async fn live_storage_scan_reads_innodb_table_stats() {
     let pool = mysql_async::Pool::new(mysql_async::Opts::from_url(&url).unwrap());
     let mut conn = pool.get_conn().await.unwrap();
     let schema = format!("placement_scan_{}", std::process::id());
-    conn.query_drop(format!("DROP DATABASE IF EXISTS {schema}")).await.unwrap();
-    conn.query_drop(format!("CREATE DATABASE {schema}")).await.unwrap();
+    conn.query_drop(format!("DROP DATABASE IF EXISTS {schema}"))
+        .await
+        .unwrap();
+    conn.query_drop(format!("CREATE DATABASE {schema}"))
+        .await
+        .unwrap();
     conn.query_drop(format!("USE {schema}")).await.unwrap();
     for t in ["a", "b"] {
         conn.query_drop(format!(
@@ -98,11 +111,15 @@ async fn live_storage_scan_reads_innodb_table_stats() {
         ))
         .await
         .unwrap();
-        conn.query_drop(format!("ANALYZE TABLE {schema}.{t}")).await.unwrap();
+        conn.query_drop(format!("ANALYZE TABLE {schema}.{t}"))
+            .await
+            .unwrap();
     }
     let page = page_size(&mut conn).await.unwrap();
     let s = scan_schema(&mut conn, &schema, page).await.unwrap();
-    conn.query_drop(format!("DROP DATABASE {schema}")).await.unwrap();
+    conn.query_drop(format!("DROP DATABASE {schema}"))
+        .await
+        .unwrap();
     assert_eq!(s.tables, 2);
     // 4,000 rows of about 160 bytes, in two indexes each: well over 1 MB.
     assert!(s.bytes > 1_000_000, "{s:?}");

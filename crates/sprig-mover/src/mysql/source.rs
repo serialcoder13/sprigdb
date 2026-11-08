@@ -198,7 +198,10 @@ impl MysqlSource {
             .filter_map(|k| columns.iter().position(|c| c.name.eq_ignore_ascii_case(&k)))
             .collect();
         let create = self
-            .rows(&format!("SHOW CREATE TABLE {}", qualified(schema, name)), Vec::new())
+            .rows(
+                &format!("SHOW CREATE TABLE {}", qualified(schema, name)),
+                Vec::new(),
+            )
             .await?;
         let create_sql = create
             .into_iter()
@@ -267,7 +270,10 @@ impl MysqlSource {
                 .await?;
             for v in views.into_iter().filter_map(|r| r.get::<String, _>(0)) {
                 let r = self
-                    .rows(&format!("SHOW CREATE VIEW {}", qualified(s, &v)), Vec::new())
+                    .rows(
+                        &format!("SHOW CREATE VIEW {}", qualified(s, &v)),
+                        Vec::new(),
+                    )
                     .await?;
                 if let Some(c) = r.into_iter().next().and_then(|r| r.get::<String, _>(1)) {
                     out.push(format!("USE {}", quote(s)));
@@ -282,11 +288,15 @@ impl MysqlSource {
                 )
                 .await?;
             for r in routines {
-                let (Some(name), Some(kind)) = (r.get::<String, _>(0), r.get::<String, _>(1)) else {
+                let (Some(name), Some(kind)) = (r.get::<String, _>(0), r.get::<String, _>(1))
+                else {
                     continue;
                 };
                 let rows = self
-                    .rows(&format!("SHOW CREATE {kind} {}", qualified(s, &name)), Vec::new())
+                    .rows(
+                        &format!("SHOW CREATE {kind} {}", qualified(s, &name)),
+                        Vec::new(),
+                    )
                     .await?;
                 if let Some(row) = rows.into_iter().next() {
                     let mode: Option<String> = row.get(1);
@@ -320,12 +330,17 @@ impl MysqlSource {
                 continue; // roles: chapter 29's reconciler
             }
             let who = format!("'{}'@'{}'", u.replace('\'', ""), h.replace('\'', ""));
-            if let Ok(r) = self.rows(&format!("SHOW CREATE USER {who}"), Vec::new()).await
+            if let Ok(r) = self
+                .rows(&format!("SHOW CREATE USER {who}"), Vec::new())
+                .await
                 && let Some(c) = r.into_iter().next().and_then(|r| r.get::<String, _>(0))
             {
                 out.push(c.replacen("CREATE USER", "CREATE USER IF NOT EXISTS", 1));
             }
-            if let Ok(r) = self.rows(&format!("SHOW GRANTS FOR {who}"), Vec::new()).await {
+            if let Ok(r) = self
+                .rows(&format!("SHOW GRANTS FOR {who}"), Vec::new())
+                .await
+            {
                 out.extend(r.into_iter().filter_map(|r| r.get::<String, _>(0)));
             }
         }
@@ -400,7 +415,10 @@ impl SourceIo for MysqlSource {
                 .await?;
             for n in names.into_iter().filter_map(|r| r.get::<String, _>(0)) {
                 let rows = self
-                    .rows(&format!("SHOW CREATE TRIGGER {}", qualified(&s, &n)), Vec::new())
+                    .rows(
+                        &format!("SHOW CREATE TRIGGER {}", qualified(&s, &n)),
+                        Vec::new(),
+                    )
                     .await?;
                 if let Some(r) = rows.into_iter().next() {
                     let mode: Option<String> = r.get(1);
@@ -463,12 +481,27 @@ impl SourceIo for MysqlSource {
         .map_err(|e| db_err("write a watermark", &e))
     }
 
-    async fn read_chunk(&self, t: &TableMeta, after: Option<&Row>, limit: usize) -> Result<Vec<Row>> {
+    async fn read_chunk(
+        &self,
+        t: &TableMeta,
+        after: Option<&Row>,
+        limit: usize,
+    ) -> Result<Vec<Row>> {
         let (q, p) = sql::chunk(t, after, limit);
-        Ok(self.rows(&q, p).await?.into_iter().map(MyRow::unwrap).collect())
+        Ok(self
+            .rows(&q, p)
+            .await?
+            .into_iter()
+            .map(MyRow::unwrap)
+            .collect())
     }
 
-    async fn digests(&self, t: &TableMeta, after: Option<&Row>, limit: usize) -> Result<Vec<RowDigest>> {
+    async fn digests(
+        &self,
+        t: &TableMeta,
+        after: Option<&Row>,
+        limit: usize,
+    ) -> Result<Vec<RowDigest>> {
         let (q, p) = sql::digests(t, after, limit);
         Ok(self
             .rows(&q, p)
@@ -480,7 +513,12 @@ impl SourceIo for MysqlSource {
 
     async fn read_range(&self, t: &TableMeta, after: Option<&Row>, last: &Row) -> Result<Vec<Row>> {
         let (q, p) = sql::range(t, &t.name, &sql::select_list(t), after, last);
-        Ok(self.rows(&q, p).await?.into_iter().map(MyRow::unwrap).collect())
+        Ok(self
+            .rows(&q, p)
+            .await?
+            .into_iter()
+            .map(MyRow::unwrap)
+            .collect())
     }
 
     async fn plan_fence(&self) -> Result<serde_json::Value> {
@@ -511,8 +549,13 @@ impl SourceIo for MysqlSource {
     async fn fence(&self, deadline: Duration) -> Result<Fenced> {
         let schemas = self.schemas().await?;
         let req = self.fence_request(schemas, deadline);
-        let r = fence::fence(&req, &self.access.writer, &self.access.nodes, &FenceOptions::default())
-            .await?;
+        let r = fence::fence(
+            &req,
+            &self.access.writer,
+            &self.access.nodes,
+            &FenceOptions::default(),
+        )
+        .await?;
         let pos: GtidPos = r.writer_pos.0.parse()?;
         let receipt = serde_json::to_value(&r).map_err(|e| SprigError::internal(e.to_string()))?;
         Ok(Fenced {

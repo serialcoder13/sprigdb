@@ -21,6 +21,8 @@ sprig-catalog.workspace = true
 sprig-common.workspace = true
 # Recommendations live in the DC tier (`/sprig/dc/<dc>/recommendations/`).
 sprig-meta.workspace = true
+# Chapter 10's `Mover`: the real executor of planned moves.
+sprig-mover.workspace = true
 sprig-settings.workspace = true
 tokio.workspace = true
 tracing.workspace = true

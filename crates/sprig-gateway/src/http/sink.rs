@@ -52,7 +52,10 @@ pub enum Item {
 /// SQLSTATE and text.
 #[must_use]
 pub fn as_wire(e: &SprigError) -> SprigError {
-    let p = ErrPacket::from_error(Persona::MySql84, e);
+    // The same two steps as the wire's sink: MariaDB-only errors as MySQL
+    // 8.4's (chapter 28), then the persona's error map.
+    let mapped = sprig_sql::compat::errmap::for_persona(Persona::MySql84, e);
+    let p = ErrPacket::from_error(Persona::MySql84, mapped.as_ref().unwrap_or(e));
     sprig_api::status::from_parts(p.code, &p.sqlstate, &p.message)
 }
 

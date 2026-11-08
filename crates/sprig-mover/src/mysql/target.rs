@@ -109,9 +109,7 @@ impl MysqlTarget {
         } else {
             Params::Positional(p)
         };
-        c.exec_drop(q, params)
-            .await
-            .map_err(|e| db_err(what, &e))?;
+        c.exec_drop(q, params).await.map_err(|e| db_err(what, &e))?;
         Ok(c.affected_rows())
     }
 
@@ -173,11 +171,18 @@ impl MysqlTarget {
 }
 
 #[async_trait::async_trait]
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
 impl TargetIo for MysqlTarget {
     async fn prepare(&self, tables: &[TableMeta], objects: &[String]) -> Result<()> {
         let mut c = self.conn().await?;
-        for q in ["CREATE DATABASE IF NOT EXISTS `__sprig_sys`", sql::POS_DDL, sql::XA_DDL] {
-            c.query_drop(q).await.map_err(|e| db_err("create the mover's tables", &e))?;
+        for q in [
+            "CREATE DATABASE IF NOT EXISTS `__sprig_sys`",
+            sql::POS_DDL,
+            sql::XA_DDL,
+        ] {
+            c.query_drop(q)
+                .await
+                .map_err(|e| db_err("create the mover's tables", &e))?;
         }
         let has_pos: Option<u64> = c
             .exec_first(
@@ -197,14 +202,18 @@ impl TargetIo for MysqlTarget {
                 ))
                 .await
                 .map_err(|e| db_err("create the shadow table", &e))?;
-                c.query_drop(format!("ALTER TABLE {} {}", qualified(&d.schema, &shadow), d.alter))
-                    .await
-                    .map_err(|e| {
-                        SprigError::new(
-                            SprigCode::MoveUnsupported,
-                            format!("the copy-and-swap DDL failed on the shadow: {e}"),
-                        )
-                    })?;
+                c.query_drop(format!(
+                    "ALTER TABLE {} {}",
+                    qualified(&d.schema, &shadow),
+                    d.alter
+                ))
+                .await
+                .map_err(|e| {
+                    SprigError::new(
+                        SprigCode::MoveUnsupported,
+                        format!("the copy-and-swap DDL failed on the shadow: {e}"),
+                    )
+                })?;
             }
             return Ok(());
         }
@@ -231,7 +240,9 @@ impl TargetIo for MysqlTarget {
             }
         }
         for q in objects.iter().filter(|q| q.starts_with("CREATE DATABASE")) {
-            c.query_drop(q.as_str()).await.map_err(|e| db_err("create a schema", &e))?;
+            c.query_drop(q.as_str())
+                .await
+                .map_err(|e| db_err("create a schema", &e))?;
         }
         for t in tables {
             c.query_drop(format!("USE {}", quote(&t.schema)))
@@ -240,7 +251,9 @@ impl TargetIo for MysqlTarget {
             let create = t
                 .create_sql
                 .replacen("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1);
-            c.query_drop(create).await.map_err(|e| db_err("create a table", &e))?;
+            c.query_drop(create)
+                .await
+                .map_err(|e| db_err("create a table", &e))?;
         }
         // Views may need other views first: retry until nothing changes.
         let mut pending: Vec<&String> = objects
@@ -271,7 +284,10 @@ impl TargetIo for MysqlTarget {
             }
             pending = failed;
         }
-        tracing::warn!(left = pending.len(), "some views, routines or grants couldn't be created on the target");
+        tracing::warn!(
+            left = pending.len(),
+            "some views, routines or grants couldn't be created on the target"
+        );
         Ok(())
     }
 
@@ -408,7 +424,12 @@ impl TargetIo for MysqlTarget {
         self.apply(job, token, &[], pos, copy).await
     }
 
-    async fn digests(&self, t: &TableMeta, after: Option<&Row>, last: &Row) -> Result<Vec<RowDigest>> {
+    async fn digests(
+        &self,
+        t: &TableMeta,
+        after: Option<&Row>,
+        last: &Row,
+    ) -> Result<Vec<RowDigest>> {
         let name = self.name_of(t);
         let (q, p) = sql::range(t, &name, &sql::digest_list(t), after, last);
         let mut c = self.conn().await?;
@@ -445,7 +466,8 @@ impl TargetIo for MysqlTarget {
             table: Arc::new(t.clone()),
             keys: keys.to_vec(),
         };
-        self.apply(job, token, &[op], &cur.gtid_pos, &cur.copy).await
+        self.apply(job, token, &[op], &cur.gtid_pos, &cur.copy)
+            .await
     }
 
     async fn raise_counters(&self, counters: &[Counter]) -> Result<()> {
@@ -489,7 +511,9 @@ impl TargetIo for MysqlTarget {
                 qualified(&d.schema, &old_name(&d.table)),
             );
             if !self.swapped().await? {
-                c.query_drop(q).await.map_err(|e| db_err("swap the shadow in", &e))?;
+                c.query_drop(q)
+                    .await
+                    .map_err(|e| db_err("swap the shadow in", &e))?;
             }
         } else {
             for q in triggers {
@@ -514,7 +538,9 @@ impl TargetIo for MysqlTarget {
             return Ok(false);
         };
         let mut c = self.conn().await?;
-        Ok(!self.exists(&mut c, &d.schema, &shadow_name(&d.table)).await?
+        Ok(!self
+            .exists(&mut c, &d.schema, &shadow_name(&d.table))
+            .await?
             && self.exists(&mut c, &d.schema, &old_name(&d.table)).await?)
     }
 

@@ -115,7 +115,7 @@ impl EtcdTls {
         })
     }
 
-    fn options(&self) -> TlsOptions {
+    pub(crate) fn options(&self) -> TlsOptions {
         let mut o = TlsOptions::new()
             .ca_certificate(Certificate::from_pem(&self.ca_pem))
             .identity(Identity::from_pem(&self.cert_pem, &self.key_pem));
@@ -219,6 +219,8 @@ pub struct EtcdStore {
     client: Client,
     timeout: Duration,
     shared: Arc<Shared>,
+    /// How it connected: the seeds and TLS, for endpoint discovery.
+    cfg: Arc<EtcdConfig>,
 }
 
 impl std::fmt::Debug for EtcdStore {
@@ -268,6 +270,7 @@ impl EtcdStore {
             client,
             timeout: cfg.request_timeout,
             shared: Arc::default(),
+            cfg: Arc::new(cfg.clone()),
         };
         // The channel connects lazily; one read proves a seed answers.
         let root = store.tier.root();
@@ -291,7 +294,18 @@ impl EtcdStore {
             client: self.client.clone(),
             timeout: self.timeout,
             shared: Arc::clone(&self.shared),
+            cfg: Arc::clone(&self.cfg),
         }
+    }
+
+    /// The client, for endpoint discovery.
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// The configuration it connected with.
+    pub(crate) fn config(&self) -> &EtcdConfig {
+        &self.cfg
     }
 
     /// Compacts etcd's history at or below `revision`, as

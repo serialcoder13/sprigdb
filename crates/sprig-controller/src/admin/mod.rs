@@ -45,6 +45,7 @@
 
 pub mod http;
 pub mod jobs;
+pub mod mover;
 pub mod types;
 
 use std::sync::Arc;
@@ -100,6 +101,7 @@ pub struct AdminService {
     users: Option<Arc<dyn UserAdmin>>,
     settings: Option<Arc<dyn SettingsAdmin>>,
     indexes: Option<Arc<dyn AutoIndexAdmin>>,
+    placement: Option<Arc<crate::balancer_loop::BalancerLoop>>,
 }
 
 impl std::fmt::Debug for AdminService {
@@ -129,6 +131,7 @@ impl AdminService {
             users: None,
             settings: None,
             indexes: None,
+            placement: None,
         }
     }
 
@@ -191,6 +194,42 @@ impl AdminService {
     /// As [`AutoIndexAdmin::explain_query`].
     pub async fn explain_query(&self, tenant: &str, fingerprint: &str) -> Result<QueryExplanation> {
         self.indexes()?.explain_query(tenant, fingerprint).await
+    }
+
+    /// The same service with chapter 11's explain calls.
+    #[must_use]
+    pub fn with_placement(mut self, b: Arc<crate::balancer_loop::BalancerLoop>) -> Self {
+        self.placement = Some(b);
+        self
+    }
+
+    fn placement(&self) -> Result<&Arc<crate::balancer_loop::BalancerLoop>> {
+        self.placement
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't run the balancer"))
+    }
+
+    /// `Explain.ExplainPlacement`: the DC leader's view of a tenant.
+    ///
+    /// # Errors
+    /// As `BalancerLoop::explain_placement`.
+    pub async fn explain_placement(
+        &self,
+        tenant: &str,
+    ) -> Result<sprig_balancer::explain::PlacementExplanation> {
+        self.placement()?.explain_placement(tenant).await
+    }
+
+    /// `Explain.ExplainDecision`: one row of a tenant's decision log.
+    ///
+    /// # Errors
+    /// As `BalancerLoop::decision`.
+    pub async fn explain_decision(
+        &self,
+        tenant: &str,
+        id: u64,
+    ) -> Result<sprig_balancer::decisions::DecisionRow> {
+        self.placement()?.decision(tenant, id).await
     }
 
     /// The same service with the tenant calls.

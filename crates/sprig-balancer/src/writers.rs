@@ -52,7 +52,11 @@ impl WriterWeights {
 
     /// Takes one sample per node at `now`; returns the weights (1.0 for a
     /// node never seen overloaded).
-    pub fn observe(&mut self, samples: &BTreeMap<String, NodeSample>, now: Timestamp) -> BTreeMap<String, f64> {
+    pub fn observe(
+        &mut self,
+        samples: &BTreeMap<String, NodeSample>,
+        now: Timestamp,
+    ) -> BTreeMap<String, f64> {
         let n = samples.len();
         for (node, s) in samples {
             let st = self.nodes.entry(node.clone()).or_insert(NodeState {
@@ -94,7 +98,10 @@ impl WriterWeights {
             }
         }
         self.nodes.retain(|k, _| samples.contains_key(k));
-        self.nodes.iter().map(|(k, s)| (k.clone(), s.weight)).collect()
+        self.nodes
+            .iter()
+            .map(|(k, s)| (k.clone(), s.weight))
+            .collect()
     }
 }
 

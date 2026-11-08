@@ -1,0 +1,28 @@
+# The mover's live tests' gateway (milestone M0.6): a second gateway in
+# dc-a, next to gateway-dev.sh's, on its own ports through listen_override
+# (MySQL persona 17306, MariaDB persona 17307). run.sh starts it.
+[node]
+dc = "dc-a"
+id = "gw-mover"
+
+[meta]
+dc_seeds = ["http://127.0.0.1:2379"]
+global_seeds = []
+deployment_id = "sprigdb-dev"
+
+[gateway]
+login_mode = "catalog"
+backends_file = "deploy/compose/gateway-backends.dev.toml"
+workload_key_file = "deploy/compose/workload-keys.dev"
+
+[gateway.listen_override]
+mysql = "127.0.0.1:17306"
+mariadb = "127.0.0.1:17307"
+http = "127.0.0.1:17380"
+https = "127.0.0.1:17443"
+peer = "127.0.0.1:17413"
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "pretty"
+bootstrap_addr = "127.0.0.1:17190"

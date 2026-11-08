@@ -124,6 +124,7 @@ impl fmt::Display for TableId {
 pub struct KeyBytes(pub Vec<u8>);
 
 /// Appends `v`'s canonical bytes to `out`: a tag, then the payload.
+#[allow(clippy::many_single_char_names)] // date and time fields
 pub fn encode_value(v: &Value, out: &mut Vec<u8>) {
     match v {
         Value::NULL => out.push(0),
@@ -306,6 +307,7 @@ pub enum KeyPart {
 impl KeyPart {
     /// From a value.
     #[must_use]
+    #[allow(clippy::many_single_char_names)] // date and time fields
     pub fn from_value(v: &Value) -> Self {
         match v {
             Value::NULL => KeyPart::Null,
@@ -321,6 +323,7 @@ impl KeyPart {
 
     /// Back to a value.
     #[must_use]
+    #[allow(clippy::many_single_char_names)] // date and time fields
     pub fn to_value(&self) -> Value {
         match self {
             KeyPart::Null => Value::NULL,
@@ -471,10 +474,7 @@ mod tests {
         let r1 = vec![Value::Bytes(b"ab".to_vec()), Value::Bytes(b"c".to_vec())];
         let r2 = vec![Value::Bytes(b"a".to_vec()), Value::Bytes(b"bc".to_vec())];
         assert_ne!(t.key_of(&r1), t.key_of(&r2));
-        assert_eq!(
-            t.key_of(&r1),
-            TableMeta::key_of_values(&t.key_values(&r1))
-        );
+        assert_eq!(t.key_of(&r1), TableMeta::key_of_values(&t.key_values(&r1)));
     }
 
     #[test]

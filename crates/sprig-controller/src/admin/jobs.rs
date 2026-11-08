@@ -43,7 +43,10 @@ fn parse(id: &str) -> Result<JobId> {
 }
 
 fn not_found(id: JobId) -> SprigError {
-    SprigError::new(SprigCode::AdminRequestInvalid, format!("no job {id} in this DC"))
+    SprigError::new(
+        SprigCode::AdminRequestInvalid,
+        format!("no job {id} in this DC"),
+    )
 }
 
 impl AdminService {
@@ -51,7 +54,11 @@ impl AdminService {
     ///
     /// # Errors
     /// The store's errors.
-    pub async fn list_jobs(&self, state: Option<&str>, kind: Option<&str>) -> Result<ListJobsResponse> {
+    pub async fn list_jobs(
+        &self,
+        state: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<ListJobsResponse> {
         let mut jobs: Vec<JobView> = dispatch::list_jobs(&*self.stores.dc)
             .await?
             .into_iter()

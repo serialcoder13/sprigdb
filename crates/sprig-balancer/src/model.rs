@@ -335,7 +335,11 @@ impl ClusterView {
         };
         put(Dim::Storage, load.storage_bytes, self.cap.storage_bytes);
         put(Dim::Busy, load.busy_ms_per_sec, self.cap.busy_ms_per_sec);
-        put(Dim::Writes, load.write_rows_per_sec, self.cap.write_rows_per_sec);
+        put(
+            Dim::Writes,
+            load.write_rows_per_sec,
+            self.cap.write_rows_per_sec,
+        );
         put(Dim::Connections, load.connections, self.cap.connections);
         #[allow(clippy::cast_precision_loss)]
         let schemas = (load.tables / self.limits.max_tables.max(1) as f64)
@@ -739,8 +743,8 @@ mod tests {
         c.limits.max_tables = 250;
         c.limits.max_schemas = 50;
         let l = LoadVector {
-            schemas: 40.0,  // 0.8 of 50
-            tables: 225.0,  // 0.9 of 250
+            schemas: 40.0, // 0.8 of 50
+            tables: 225.0, // 0.9 of 250
             ..LoadVector::default()
         };
         let f = c.full_with(&l);

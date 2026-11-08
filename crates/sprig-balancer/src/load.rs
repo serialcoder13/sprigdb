@@ -170,15 +170,20 @@ impl LoadCollector {
                 Some(prev) if r.at_ms > prev.at_ms => {
                     let dt = (r.at_ms - prev.at_ms) as f64 / 1000.0;
                     // A restarted gateway's counters start again: no rate.
-                    if s.busy_us < prev.counters.busy_us || s.rows_written < prev.counters.rows_written {
+                    if s.busy_us < prev.counters.busy_us
+                        || s.rows_written < prev.counters.rows_written
+                    {
                         Rate {
                             connections: f64::from(s.connections),
                             ..Rate::default()
                         }
                     } else {
                         Rate {
-                            busy_ms_per_sec: (s.busy_us - prev.counters.busy_us) as f64 / 1000.0 / dt,
-                            write_rows_per_sec: (s.rows_written - prev.counters.rows_written) as f64
+                            busy_ms_per_sec: (s.busy_us - prev.counters.busy_us) as f64
+                                / 1000.0
+                                / dt,
+                            write_rows_per_sec: (s.rows_written - prev.counters.rows_written)
+                                as f64
                                 / dt,
                             connections: f64::from(s.connections),
                         }
@@ -260,7 +265,9 @@ impl LoadCollector {
         if expected == 0 {
             return 1.0;
         }
-        let horizon = u64::try_from(period.as_millis()).unwrap_or(u64::MAX).saturating_mul(2);
+        let horizon = u64::try_from(period.as_millis())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(2);
         let fresh = self
             .gateways
             .values()
@@ -308,8 +315,15 @@ pub async fn page_size<Q: Queryable + Send>(q: &mut Q) -> Result<u64> {
 ///
 /// # Errors
 /// The driver's, as 39070.
-pub async fn scan_schema<Q: Queryable + Send>(q: &mut Q, schema: &str, page: u64) -> Result<SchemaSize> {
-    let row: Option<(u64, u64)> = q.exec_first(STORAGE_SQL, (schema,)).await.map_err(scan_err)?;
+pub async fn scan_schema<Q: Queryable + Send>(
+    q: &mut Q,
+    schema: &str,
+    page: u64,
+) -> Result<SchemaSize> {
+    let row: Option<(u64, u64)> = q
+        .exec_first(STORAGE_SQL, (schema,))
+        .await
+        .map_err(scan_err)?;
     let (tables, pages) = row.unwrap_or((0, 0));
     Ok(SchemaSize {
         tables,

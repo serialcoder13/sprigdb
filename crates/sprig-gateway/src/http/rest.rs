@@ -186,10 +186,11 @@ async fn data(
 ) -> Result<Response<Body>, SprigError> {
     let auth = header(&req, "authorization");
     let tenant = header(&req, TENANT_HEADER);
+    let host = header(&req, "host");
     let ndjson = header(&req, "accept").is_some_and(|a| a.contains("application/x-ndjson"));
     let api = core.engine.settings();
     let body = parse_json(&read_body(req, api.max_request).await?)?;
-    let caller = core.caller(info, auth, tenant).await?;
+    let caller = core.caller(info, auth, tenant, host).await?;
     let transaction = m
         .vars
         .get("transaction")
@@ -407,7 +408,7 @@ pub async fn forwarded(core: &Arc<Core>, req: ForwardRequest) -> ForwardReply {
             )
         })?;
         let auth = (!req.authorization.is_empty()).then(|| req.authorization.clone());
-        let caller = core.caller(&info, auth, None).await?;
+        let caller = core.caller(&info, auth, None, None).await?;
         let route = routes::by_name(&req.method).ok_or_else(|| {
             SprigError::new(
                 SprigCode::AdminRequestInvalid,

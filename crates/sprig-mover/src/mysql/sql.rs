@@ -353,10 +353,12 @@ pub fn classify(sql: &str) -> QueryKind {
                 .chain(std::iter::once(w3))
                 .chain(words.take(6))
                 .collect();
-            if rest.iter().any(|w| {
-                matches!(w.as_str(), "USER" | "ROLE" | "SERVER")
-                    || w.starts_with("USER")
-            }) && !rest.iter().any(|w| matches!(w.as_str(), "TABLE" | "VIEW" | "DATABASE" | "SCHEMA"))
+            if rest
+                .iter()
+                .any(|w| matches!(w.as_str(), "USER" | "ROLE" | "SERVER") || w.starts_with("USER"))
+                && !rest
+                    .iter()
+                    .any(|w| matches!(w.as_str(), "TABLE" | "VIEW" | "DATABASE" | "SCHEMA"))
             {
                 QueryKind::Other
             } else {
@@ -383,7 +385,8 @@ pub fn ddl_touches(db: &str, sql: &str, schemas: &[String]) -> bool {
             lower.match_indices(&s).any(|(i, _)| {
                 let before = lower[..i].chars().next_back();
                 let after = lower[i + s.len()..].chars().next();
-                let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                let word =
+                    |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
                 !word(before) && !word(after)
             })
         }
@@ -400,10 +403,26 @@ mod tests {
             schema: "s".into(),
             name: "t".into(),
             columns: vec![
-                ColumnMeta { name: "a".into(), generated: false, numeric: false },
-                ColumnMeta { name: "b".into(), generated: false, numeric: true },
-                ColumnMeta { name: "g".into(), generated: true, numeric: false },
-                ColumnMeta { name: "v".into(), generated: false, numeric: false },
+                ColumnMeta {
+                    name: "a".into(),
+                    generated: false,
+                    numeric: false,
+                },
+                ColumnMeta {
+                    name: "b".into(),
+                    generated: false,
+                    numeric: true,
+                },
+                ColumnMeta {
+                    name: "g".into(),
+                    generated: true,
+                    numeric: false,
+                },
+                ColumnMeta {
+                    name: "v".into(),
+                    generated: false,
+                    numeric: false,
+                },
             ],
             pk: vec![0, 1],
             create_sql: String::new(),
@@ -417,7 +436,10 @@ mod tests {
         assert_eq!(c, "((`a` > ?) OR (`a` = ? AND `b` > ?))");
         assert_eq!(p.len(), 3);
         let (c, p) = upto_cond(&t, &[Value::Int(1), Value::Int(2)]);
-        assert_eq!(c, "((`a` < ?) OR (`a` = ? AND `b` < ?) OR (`a` = ? AND `b` = ?))");
+        assert_eq!(
+            c,
+            "((`a` < ?) OR (`a` = ? AND `b` < ?) OR (`a` = ? AND `b` = ?))"
+        );
         assert_eq!(p.len(), 5);
         let (sql, _) = chunk(&t, None, 10);
         assert_eq!(
@@ -441,7 +463,10 @@ mod tests {
         let many = vec![vec![Value::Int(1), Value::Int(2), Value::Int(9), Value::NULL]; 25_000];
         assert_eq!(upserts(&t, "t", &many).len(), 2);
         let d = deletes(&t, "t", &[vec![Value::Int(1), Value::Int(2)]]);
-        assert_eq!(d[0].0, "DELETE FROM `s`.`t` WHERE (`a` <=> ? AND `b` <=> ?)");
+        assert_eq!(
+            d[0].0,
+            "DELETE FROM `s`.`t` WHERE (`a` <=> ? AND `b` <=> ?)"
+        );
     }
 
     #[test]
@@ -457,7 +482,10 @@ mod tests {
         );
         assert_eq!(classify("CREATE USER 't1_u1'@'%'"), QueryKind::Other);
         assert_eq!(classify("GRANT SELECT ON `t1_d1`.* TO x"), QueryKind::Other);
-        assert_eq!(classify("REVOKE INSERT ON `t1_d1`.* FROM x"), QueryKind::Other);
+        assert_eq!(
+            classify("REVOKE INSERT ON `t1_d1`.* FROM x"),
+            QueryKind::Other
+        );
         assert_eq!(classify("insert into t values (1)"), QueryKind::Dml);
         assert_eq!(classify("TRUNCATE TABLE t"), QueryKind::Ddl);
         assert_eq!(first_word("  -- c\n drop table x"), "DROP");

@@ -208,10 +208,19 @@ mod tests {
         io.hold(job, 2, u64::MAX).await.unwrap();
         assert_eq!(io.read().await.unwrap().held_by, Some((job, 2)));
         assert_eq!(io.release(job, 1).await.unwrap(), Released::Newer);
-        assert_eq!(io.commit(job, 1, &to).await.unwrap(), CommitOutcome::Rejected);
-        assert_eq!(io.commit(job, 2, &to).await.unwrap(), CommitOutcome::Committed);
+        assert_eq!(
+            io.commit(job, 1, &to).await.unwrap(),
+            CommitOutcome::Rejected
+        );
+        assert_eq!(
+            io.commit(job, 2, &to).await.unwrap(),
+            CommitOutcome::Committed
+        );
         // A retried commit after a lost reply is still committed.
-        assert_eq!(io.commit(job, 2, &to).await.unwrap(), CommitOutcome::Committed);
+        assert_eq!(
+            io.commit(job, 2, &to).await.unwrap(),
+            CommitOutcome::Committed
+        );
         assert_eq!(io.release(job, 2).await.unwrap(), Released::Committed);
         let st = io.read().await.unwrap();
         assert_eq!((st.cluster, st.epoch), (to, 2));

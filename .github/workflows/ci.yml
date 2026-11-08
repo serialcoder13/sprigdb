@@ -386,14 +386,23 @@ jobs:
   # deploy/compose/m03 (README there); its baseline mode already passes
   # against MariaDB 11.8 directly.
   #
-  # Disabled until the gateway serves M0.3's tenants (the catalog, name
-  # virtualization and SPRIG SET). To enable: drop `if: false`. gateway-dev.sh
-  # up provisions the tenants itself (acme and globex on dc-a-single, users
-  # acme.app and globex.app with password sprig-dev-app).
+  # gateway-dev.sh up provisions the tenants itself (acme and globex on
+  # dc-a-single, users acme.app and globex.app with password sprig-dev-app).
+  #
+  # M0.5 (chapter 29 step 6, chapter 46 step 4): the SQL isolation suite runs
+  # here too, next to the leak suite: users with different grants in both
+  # tenants, every crossing refused with the persona's error number, MariaDB's
+  # grant tables audited, and a REVOKE timed on a second gateway
+  # (deploy/compose/m05, README there). Both suites are security controls
+  # (chapter 46): they run on pull requests and on main.
   m03:
-    name: M0.3 tenants, names and settings (gateway)
+    name: M0.3 and M0.5 tenants, names, settings and isolation (gateway)
     needs: [integration]
-    if: false
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -410,7 +419,7 @@ jobs:
           docker compose --profile m03 pull --quiet m03-flyway
           docker compose --profile m03 build --quiet m03-hibernate m03-mysql-cli m03-mariadb-cli
       - run: cargo build --locked -p sprigdb -p sprigctl
-      - run: cargo test --locked -p sprig-testkit --test m03_leaks --test m03_settings --no-run
+      - run: cargo test --locked -p sprig-testkit --test m03_leaks --test m03_settings --test m05_isolation --no-run
       - name: Baseline (direct MariaDB) proves the harness
         run: |
           for persona in mariadb mysql; do
@@ -424,12 +433,15 @@ jobs:
           export SPRIG_M03_BUILD=0 SPRIG_M03_BACKEND=mysql://root:sprig-dev-root@127.0.0.1:13301
           deploy/compose/m03/run.sh 127.0.0.1 13307 mariadb acme.app globex.app sprig-dev-app
           deploy/compose/m03/run.sh 127.0.0.1 13306 mysql acme.app globex.app sprig-dev-app
+      - name: M0.5 isolation suite (both personas, a second gateway for propagation)
+        run: deploy/compose/m05/run.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: m03-harness
           path: |
             deploy/compose/m03/results
+            deploy/compose/m05/results
             deploy/compose/.gateway-dev/*.log
           if-no-files-found: ignore
       - name: Stop

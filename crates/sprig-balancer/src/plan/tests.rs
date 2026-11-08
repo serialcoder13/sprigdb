@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::float_cmp, clippy::too_many_lines, clippy::many_single_char_names)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    clippy::too_many_lines,
+    clippy::many_single_char_names
+)]
 
 use std::collections::BTreeSet;
 
@@ -96,7 +101,11 @@ fn placement_unavailable_names_the_blocker() {
     put(&mut v, 2, 1, 2, load(0.0, 0.0));
     let e = planner().place(&v, &req(7, load(0.0, 0.0)), 0).unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::PlacementUnavailable));
-    assert!(e.message.contains("max_shard_schemas_per_cluster"), "{}", e.message);
+    assert!(
+        e.message.contains("max_shard_schemas_per_cluster"),
+        "{}",
+        e.message
+    );
     // Never names other tenants.
     assert!(!e.message.contains("t1"));
 }
@@ -137,9 +146,21 @@ fn a_thousand_new_tenants_spread_evenly_and_weights_apply_live() {
         ..BalancerSettings::default()
     };
     s.least_busy = LeastBusyWeights::parse("storage=1,cpu=0,connections=0");
-    assert_eq!(Planner::new(s.clone()).place(&v, &req(7, LoadVector::default()), 0).unwrap().cluster, cid(1));
+    assert_eq!(
+        Planner::new(s.clone())
+            .place(&v, &req(7, LoadVector::default()), 0)
+            .unwrap()
+            .cluster,
+        cid(1)
+    );
     s.least_busy = LeastBusyWeights::parse("storage=0,cpu=0,connections=1");
-    assert_eq!(Planner::new(s).place(&v, &req(7, LoadVector::default()), 0).unwrap().cluster, cid(2));
+    assert_eq!(
+        Planner::new(s)
+            .place(&v, &req(7, LoadVector::default()), 0)
+            .unwrap()
+            .cluster,
+        cid(2)
+    );
 }
 
 /// c1 at 85% storage with 17 shards of 5 GB, c2 and c3 empty.
@@ -203,7 +224,11 @@ fn guardrails_block_moves() {
     let r = p.rebalance(&w, now);
     assert!(r.moves.is_empty());
     for g in ["shard_cooldown", "pinned", "locked"] {
-        assert!(r.notes.iter().any(|n| n.guardrail == g), "{g}: {:?}", r.notes);
+        assert!(
+            r.notes.iter().any(|n| n.guardrail == g),
+            "{g}: {:?}",
+            r.notes
+        );
     }
     assert_eq!(r.stuck, vec![cid(1)]);
     // DC concurrency.
@@ -255,7 +280,11 @@ fn moves_never_heat_the_target_or_invert_the_pair() {
     p.rebalance(&w, 0);
     let r = p.rebalance(&w, 3600);
     assert!(r.moves.is_empty());
-    assert!(r.notes.iter().any(|n| n.guardrail == "would_invert"), "{:?}", r.notes);
+    assert!(
+        r.notes.iter().any(|n| n.guardrail == "would_invert"),
+        "{:?}",
+        r.notes
+    );
 }
 
 #[test]
@@ -316,8 +345,11 @@ fn residency_and_drain_moves_skip_cooldowns() {
     v.tenants.get_mut(&TenantId(1)).unwrap().allowed_dcs = Some(BTreeSet::from([dc("fra1")]));
     v.clusters.get_mut(&cid(2)).unwrap().state = ClusterState::Draining;
     let r = planner().rebalance(&v, 0);
-    let mut got: Vec<(ShardKey, ClusterId, MoveReason)> =
-        r.moves.iter().map(|m| (m.shards[0], m.to.clone(), m.reason)).collect();
+    let mut got: Vec<(ShardKey, ClusterId, MoveReason)> = r
+        .moves
+        .iter()
+        .map(|m| (m.shards[0], m.to.clone(), m.reason))
+        .collect();
     got.sort();
     assert_eq!(
         got,

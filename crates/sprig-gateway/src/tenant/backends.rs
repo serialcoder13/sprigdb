@@ -267,6 +267,7 @@ impl BackendResolver for TenantBackends {
         let cluster = e
             .cluster
             .clone()
+            .or_else(|| self.locator.placement(tenant.id).map(|p| p.cluster))
             .or_else(|| self.locator.cached_cluster(tenant.id))
             .ok_or_else(|| {
                 SprigError::new(

@@ -60,9 +60,14 @@ async fn caller<T>(core: &Core, req: &Request<T>) -> std::result::Result<Caller,
         .get::<ConnInfo>()
         .cloned()
         .ok_or_else(|| Status::internal("no connection info"))?;
-    core.caller(&info, meta(req, "authorization"), meta(req, TENANT_HEADER))
-        .await
-        .map_err(|e| st(&e))
+    core.caller(
+        &info,
+        meta(req, "authorization"),
+        meta(req, TENANT_HEADER),
+        None,
+    )
+    .await
+    .map_err(|e| st(&e))
 }
 
 /// A reply from a gateway the call was forwarded to, as the error or the

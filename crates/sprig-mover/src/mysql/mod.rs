@@ -27,12 +27,12 @@ use sprig_provision::credentials::CredentialConnector;
 use sprig_shard::TenantMaps;
 use twox_hash::XxHash3_64;
 
+use crate::api::JobKind;
 use crate::io::JobEnv;
 use crate::maps::TenantMapIo;
 use crate::record::JobRecord;
 use crate::settings::MoverSettings;
 use crate::worker::EnvFactory;
-use crate::api::JobKind;
 
 pub use source::MysqlSource;
 pub use stream::MysqlStream;

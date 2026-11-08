@@ -9,8 +9,9 @@
 #   up creates the tenants acme and globex on dc-a-single (dc-a-c1), each
 #   with the user app (password sprig-dev-app, also a mysql_native_password
 #   verifier, with auth.mysql_native_password on for both tenants): log in as
-#   acme.app or globex.app. Their sessions run as the backend account in
-#   gateway-backends.dev.toml (root, interim until chapter 29); DDL creating
+#   acme.app or globex.app. Their sessions run as per-user backend accounts
+#   (t<tenant>_u<user>, chapter 29, [per_user] in gateway-backends.dev.toml),
+#   granted only on the tenant's own schemas; DDL creating
 #   databases and stored programs runs as the cluster's sprig_ctl account.
 #   down drops the two tenants' databases through the gateway (needs the
 #   mysql client) and deletes the tenants.

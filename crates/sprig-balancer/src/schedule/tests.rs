@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use super::*;
 use crate::decisions::MemDecisionLog;
-use crate::plan::{Planner, PlacementPolicy};
+use crate::plan::{PlacementPolicy, Planner};
 use crate::settings::BalancerSettings;
 use crate::testutil::{cid, fleet, load, put};
 
@@ -100,7 +100,10 @@ async fn auto_mode_schedules_records_and_cools_down() {
     assert_eq!(sv.history.len(), 1);
     assert_eq!(sv.history[0].cluster, cid(1));
     assert!(s.in_flight().is_empty());
-    assert_eq!(s.moves_total[&("cluster_hot".to_owned(), "succeeded".to_owned())], 1);
+    assert_eq!(
+        s.moves_total[&("cluster_hot".to_owned(), "succeeded".to_owned())],
+        1
+    );
 }
 
 #[tokio::test]
@@ -135,7 +138,8 @@ async fn failures_exclude_the_target_and_moves_back_are_counted() {
         approvals: Vec::new(),
         stuck: Vec::new(),
     };
-    s.schedule(&plan(2, 1), &v, &auto, 4, &exec, &log, 100).await;
+    s.schedule(&plan(2, 1), &v, &auto, 4, &exec, &log, 100)
+        .await;
     exec.finish_all(&MoveStatus::Failed {
         reason: "verify".to_owned(),
     });
@@ -147,11 +151,13 @@ async fn failures_exclude_the_target_and_moves_back_are_counted() {
 
     // c1 -> c3, then back to c1 within 7 days: reverted, cooldown doubles.
     let exec = Fake::default();
-    s.schedule(&plan(3, 1), &v, &auto, 4, &exec, &log, 1000).await;
+    s.schedule(&plan(3, 1), &v, &auto, 4, &exec, &log, 1000)
+        .await;
     exec.finish_all(&MoveStatus::Succeeded);
     s.poll(&v, &exec, &log, 2000).await;
     let exec = Fake::default();
-    s.schedule(&plan(1, 3), &v, &auto, 4, &exec, &log, 200_000).await;
+    s.schedule(&plan(1, 3), &v, &auto, 4, &exec, &log, 200_000)
+        .await;
     exec.finish_all(&MoveStatus::Succeeded);
     let done = s.poll(&v, &exec, &log, 200_100).await;
     assert!(done[0].reverted);
@@ -192,7 +198,9 @@ async fn recommend_and_dry_run_write_once_and_run_nothing() {
     // Off: nothing.
     let off = |_: TenantId| BalancerMode::Off;
     let log = MemDecisionLog::new();
-    let out = Scheduler::new("mum1", "c").schedule(&r, &v, &off, 4, &exec, &log, 0).await;
+    let out = Scheduler::new("mum1", "c")
+        .schedule(&r, &v, &off, 4, &exec, &log, 0)
+        .await;
     assert_eq!(out[0].blocked.as_deref(), Some("mode_off"));
     assert!(log.all().is_empty());
 }

@@ -9,11 +9,11 @@
 
 # MySQL Connector/J 9.7's DatabaseMetaData.getSQLKeywords() reads
 # information_schema.KEYWORDS WHERE RESERVED = 1, which MariaDB doesn't have,
-# so Hibernate can't resolve a dialect and validation fails before it looks
-# at a table. On 3306 the gateway must answer that view: chapter 28's
-# translator, milestone M0.5. The rest of the check runs after a restart
-# without validation and must pass.
-*         *        hibernate  hibernate          schema_validate  fail    MySQL Connector/J reads information_schema.KEYWORDS.RESERVED (translator, M0.5)
+# so against MariaDB directly Hibernate can't resolve a dialect and validation
+# fails before it looks at a table. The rest of the check runs after a restart
+# without validation and must pass. Through the gateway the translator answers
+# KEYWORDS with MySQL 8.4's list (chapter 28, M0.5), and the check passes.
+baseline  mysql    hibernate  hibernate          schema_validate  fail    MySQL Connector/J reads information_schema.KEYWORDS.RESERVED, which MariaDB lacks
 
 # Baseline: direct MariaDB has no physical names to leak, so the leak checks
 # report n/a (the Rust leak suite still asserts that its detector catches the

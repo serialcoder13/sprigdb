@@ -635,7 +635,7 @@ pub fn rewrite_information_schema(
             let replacement = if alias.is_some() {
                 format!("({view})")
             } else {
-                format!("({view}) AS {}", quote(&r.table))
+                format!("({view}) AS {}", quote(&tk.value(r.last)))
             };
             edits.push((range, replacement));
             continue;
@@ -679,7 +679,7 @@ pub fn rewrite_information_schema(
         let replacement = if alias.is_some() {
             format!("({view})")
         } else {
-            format!("({view}) AS {}", quote(&r.table))
+            format!("({view}) AS {}", quote(&tk.value(r.last)))
         };
         edits.push((range, replacement));
     }
@@ -1007,6 +1007,18 @@ fn lit(s: &str, ctx: &InfoSchemaCtx<'_>) -> String {
     sql_string(s, ctx.lex.no_backslash_escapes)
 }
 
+/// A logical name in a view, typed as MariaDB types its `information_schema`
+/// name columns (`utf8mb3_general_ci`). A bare literal would take the
+/// session's collation, and MariaDB 11.8 refuses to compare it with a
+/// prepared statement's parameter when the two differ ("Illegal mix of
+/// collations", seen with Prisma's introspection through the gateway).
+fn name_lit(s: &str, ctx: &InfoSchemaCtx<'_>) -> String {
+    format!(
+        "CONVERT({} USING utf8mb3) COLLATE utf8mb3_general_ci",
+        lit(s, ctx)
+    )
+}
+
 /// Every (physical, logical) pair of the tenant, for `CASE` and `REPLACE`.
 fn all_pairs(ctx: &InfoSchemaCtx<'_>) -> Vec<(String, String)> {
     let mut v = Vec::new();
@@ -1197,14 +1209,14 @@ fn column_sql(
     let up = c.to_ascii_uppercase();
     let qc = quote(c);
     if up == spec.restrict || spec.same.contains(&up.as_str()) {
-        lit(logical, ctx)
+        name_lit(logical, ctx)
     } else if spec.schemas.contains(&up.as_str()) {
         if pairs.is_empty() {
             "NULL".to_owned()
         } else {
             let mut e = format!("CASE {qc}");
             for (p, l) in pairs {
-                let _ = write!(e, " WHEN {} THEN {}", lit(p, ctx), lit(l, ctx));
+                let _ = write!(e, " WHEN {} THEN {}", lit(p, ctx), name_lit(l, ctx));
             }
             e.push_str(" ELSE NULL END");
             e
@@ -1263,7 +1275,7 @@ fn schemata_view(push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<String, Nam
                 .map(|(c, _)| {
                     let v = match c.to_ascii_uppercase().as_str() {
                         "CATALOG_NAME" => "'def'".to_owned(),
-                        "SCHEMA_NAME" => lit(name, ctx),
+                        "SCHEMA_NAME" => name_lit(name, ctx),
                         "DEFAULT_CHARACTER_SET_NAME" => "'utf8mb3'".to_owned(),
                         "DEFAULT_COLLATION_NAME" => "'utf8mb3_general_ci'".to_owned(),
                         "SCHEMA_COMMENT" => "''".to_owned(),
@@ -1286,7 +1298,7 @@ fn schemata_view(push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<String, Nam
             .iter()
             .map(|(c, computed)| {
                 if c.eq_ignore_ascii_case("SCHEMA_NAME") {
-                    format!("{} AS {}", lit(name, ctx), quote(c))
+                    format!("{} AS {}", name_lit(name, ctx), quote(c))
                 } else if let Some(e) = computed {
                     format!("{e} AS {}", quote(c))
                 } else {

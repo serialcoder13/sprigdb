@@ -3,7 +3,7 @@
 //! MySQL 8.4's `utf8mb4_*_0900_*` collations and MariaDB's UCA 14.0
 //! collations, both ways, with MySQL's metadata ids. MariaDB 11.4.5 and
 //! later accept the MySQL names as aliases (`COLLATIONS.COMMENT` reads
-//! "Alias for utf8mb4_uca1400_nopad_ai_ci"), keep the alias name in
+//! "Alias for `utf8mb4_uca1400_nopad_ai_ci`"), keep the alias name in
 //! `information_schema` and `SHOW CREATE TABLE`, and send the alias id in
 //! column metadata, so a client that names a MySQL collation gets it back.
 //! What the map adds:
@@ -27,6 +27,8 @@
 //! The table was captured on 8 November 2026 from MySQL 8.4.11
 //! (`information_schema.COLLATIONS`) and MariaDB 11.8.9 (the aliases'
 //! `COMMENT`).
+
+use std::fmt::Write as _;
 
 /// One MySQL 0900 collation: its id, its name, and the MariaDB collation
 /// it is an alias of (`None`: MariaDB 11.8 lacks it).
@@ -59,47 +61,207 @@ const fn missing(id: u16, mysql: &'static str) -> Collation {
 /// Every MySQL 8.4 `utf8mb4` 0900 collation, by id.
 pub const MAP: &[Collation] = &[
     c(255, "utf8mb4_0900_ai_ci", "utf8mb4_uca1400_nopad_ai_ci"),
-    c(256, "utf8mb4_de_pb_0900_ai_ci", "utf8mb4_uca1400_german2_nopad_ai_ci"),
-    c(257, "utf8mb4_is_0900_ai_ci", "utf8mb4_uca1400_icelandic_nopad_ai_ci"),
-    c(258, "utf8mb4_lv_0900_ai_ci", "utf8mb4_uca1400_latvian_nopad_ai_ci"),
-    c(259, "utf8mb4_ro_0900_ai_ci", "utf8mb4_uca1400_romanian_nopad_ai_ci"),
-    c(260, "utf8mb4_sl_0900_ai_ci", "utf8mb4_uca1400_slovenian_nopad_ai_ci"),
-    c(261, "utf8mb4_pl_0900_ai_ci", "utf8mb4_uca1400_polish_nopad_ai_ci"),
-    c(262, "utf8mb4_et_0900_ai_ci", "utf8mb4_uca1400_estonian_nopad_ai_ci"),
-    c(263, "utf8mb4_es_0900_ai_ci", "utf8mb4_uca1400_spanish_nopad_ai_ci"),
-    c(264, "utf8mb4_sv_0900_ai_ci", "utf8mb4_uca1400_swedish_nopad_ai_ci"),
-    c(265, "utf8mb4_tr_0900_ai_ci", "utf8mb4_uca1400_turkish_nopad_ai_ci"),
-    c(266, "utf8mb4_cs_0900_ai_ci", "utf8mb4_uca1400_czech_nopad_ai_ci"),
-    c(267, "utf8mb4_da_0900_ai_ci", "utf8mb4_uca1400_danish_nopad_ai_ci"),
-    c(268, "utf8mb4_lt_0900_ai_ci", "utf8mb4_uca1400_lithuanian_nopad_ai_ci"),
-    c(269, "utf8mb4_sk_0900_ai_ci", "utf8mb4_uca1400_slovak_nopad_ai_ci"),
-    c(270, "utf8mb4_es_trad_0900_ai_ci", "utf8mb4_uca1400_spanish2_nopad_ai_ci"),
-    c(271, "utf8mb4_la_0900_ai_ci", "utf8mb4_uca1400_roman_nopad_ai_ci"),
-    c(273, "utf8mb4_eo_0900_ai_ci", "utf8mb4_uca1400_esperanto_nopad_ai_ci"),
-    c(274, "utf8mb4_hu_0900_ai_ci", "utf8mb4_uca1400_hungarian_nopad_ai_ci"),
-    c(275, "utf8mb4_hr_0900_ai_ci", "utf8mb4_uca1400_croatian_nopad_ai_ci"),
-    c(277, "utf8mb4_vi_0900_ai_ci", "utf8mb4_uca1400_vietnamese_nopad_ai_ci"),
+    c(
+        256,
+        "utf8mb4_de_pb_0900_ai_ci",
+        "utf8mb4_uca1400_german2_nopad_ai_ci",
+    ),
+    c(
+        257,
+        "utf8mb4_is_0900_ai_ci",
+        "utf8mb4_uca1400_icelandic_nopad_ai_ci",
+    ),
+    c(
+        258,
+        "utf8mb4_lv_0900_ai_ci",
+        "utf8mb4_uca1400_latvian_nopad_ai_ci",
+    ),
+    c(
+        259,
+        "utf8mb4_ro_0900_ai_ci",
+        "utf8mb4_uca1400_romanian_nopad_ai_ci",
+    ),
+    c(
+        260,
+        "utf8mb4_sl_0900_ai_ci",
+        "utf8mb4_uca1400_slovenian_nopad_ai_ci",
+    ),
+    c(
+        261,
+        "utf8mb4_pl_0900_ai_ci",
+        "utf8mb4_uca1400_polish_nopad_ai_ci",
+    ),
+    c(
+        262,
+        "utf8mb4_et_0900_ai_ci",
+        "utf8mb4_uca1400_estonian_nopad_ai_ci",
+    ),
+    c(
+        263,
+        "utf8mb4_es_0900_ai_ci",
+        "utf8mb4_uca1400_spanish_nopad_ai_ci",
+    ),
+    c(
+        264,
+        "utf8mb4_sv_0900_ai_ci",
+        "utf8mb4_uca1400_swedish_nopad_ai_ci",
+    ),
+    c(
+        265,
+        "utf8mb4_tr_0900_ai_ci",
+        "utf8mb4_uca1400_turkish_nopad_ai_ci",
+    ),
+    c(
+        266,
+        "utf8mb4_cs_0900_ai_ci",
+        "utf8mb4_uca1400_czech_nopad_ai_ci",
+    ),
+    c(
+        267,
+        "utf8mb4_da_0900_ai_ci",
+        "utf8mb4_uca1400_danish_nopad_ai_ci",
+    ),
+    c(
+        268,
+        "utf8mb4_lt_0900_ai_ci",
+        "utf8mb4_uca1400_lithuanian_nopad_ai_ci",
+    ),
+    c(
+        269,
+        "utf8mb4_sk_0900_ai_ci",
+        "utf8mb4_uca1400_slovak_nopad_ai_ci",
+    ),
+    c(
+        270,
+        "utf8mb4_es_trad_0900_ai_ci",
+        "utf8mb4_uca1400_spanish2_nopad_ai_ci",
+    ),
+    c(
+        271,
+        "utf8mb4_la_0900_ai_ci",
+        "utf8mb4_uca1400_roman_nopad_ai_ci",
+    ),
+    c(
+        273,
+        "utf8mb4_eo_0900_ai_ci",
+        "utf8mb4_uca1400_esperanto_nopad_ai_ci",
+    ),
+    c(
+        274,
+        "utf8mb4_hu_0900_ai_ci",
+        "utf8mb4_uca1400_hungarian_nopad_ai_ci",
+    ),
+    c(
+        275,
+        "utf8mb4_hr_0900_ai_ci",
+        "utf8mb4_uca1400_croatian_nopad_ai_ci",
+    ),
+    c(
+        277,
+        "utf8mb4_vi_0900_ai_ci",
+        "utf8mb4_uca1400_vietnamese_nopad_ai_ci",
+    ),
     c(278, "utf8mb4_0900_as_cs", "utf8mb4_uca1400_nopad_as_cs"),
-    c(279, "utf8mb4_de_pb_0900_as_cs", "utf8mb4_uca1400_german2_nopad_as_cs"),
-    c(280, "utf8mb4_is_0900_as_cs", "utf8mb4_uca1400_icelandic_nopad_as_cs"),
-    c(281, "utf8mb4_lv_0900_as_cs", "utf8mb4_uca1400_latvian_nopad_as_cs"),
-    c(282, "utf8mb4_ro_0900_as_cs", "utf8mb4_uca1400_romanian_nopad_as_cs"),
-    c(283, "utf8mb4_sl_0900_as_cs", "utf8mb4_uca1400_slovenian_nopad_as_cs"),
-    c(284, "utf8mb4_pl_0900_as_cs", "utf8mb4_uca1400_polish_nopad_as_cs"),
-    c(285, "utf8mb4_et_0900_as_cs", "utf8mb4_uca1400_estonian_nopad_as_cs"),
-    c(286, "utf8mb4_es_0900_as_cs", "utf8mb4_uca1400_spanish_nopad_as_cs"),
-    c(287, "utf8mb4_sv_0900_as_cs", "utf8mb4_uca1400_swedish_nopad_as_cs"),
-    c(288, "utf8mb4_tr_0900_as_cs", "utf8mb4_uca1400_turkish_nopad_as_cs"),
-    c(289, "utf8mb4_cs_0900_as_cs", "utf8mb4_uca1400_czech_nopad_as_cs"),
-    c(290, "utf8mb4_da_0900_as_cs", "utf8mb4_uca1400_danish_nopad_as_cs"),
-    c(291, "utf8mb4_lt_0900_as_cs", "utf8mb4_uca1400_lithuanian_nopad_as_cs"),
-    c(292, "utf8mb4_sk_0900_as_cs", "utf8mb4_uca1400_slovak_nopad_as_cs"),
-    c(293, "utf8mb4_es_trad_0900_as_cs", "utf8mb4_uca1400_spanish2_nopad_as_cs"),
-    c(294, "utf8mb4_la_0900_as_cs", "utf8mb4_uca1400_roman_nopad_as_cs"),
-    c(296, "utf8mb4_eo_0900_as_cs", "utf8mb4_uca1400_esperanto_nopad_as_cs"),
-    c(297, "utf8mb4_hu_0900_as_cs", "utf8mb4_uca1400_hungarian_nopad_as_cs"),
-    c(298, "utf8mb4_hr_0900_as_cs", "utf8mb4_uca1400_croatian_nopad_as_cs"),
-    c(300, "utf8mb4_vi_0900_as_cs", "utf8mb4_uca1400_vietnamese_nopad_as_cs"),
+    c(
+        279,
+        "utf8mb4_de_pb_0900_as_cs",
+        "utf8mb4_uca1400_german2_nopad_as_cs",
+    ),
+    c(
+        280,
+        "utf8mb4_is_0900_as_cs",
+        "utf8mb4_uca1400_icelandic_nopad_as_cs",
+    ),
+    c(
+        281,
+        "utf8mb4_lv_0900_as_cs",
+        "utf8mb4_uca1400_latvian_nopad_as_cs",
+    ),
+    c(
+        282,
+        "utf8mb4_ro_0900_as_cs",
+        "utf8mb4_uca1400_romanian_nopad_as_cs",
+    ),
+    c(
+        283,
+        "utf8mb4_sl_0900_as_cs",
+        "utf8mb4_uca1400_slovenian_nopad_as_cs",
+    ),
+    c(
+        284,
+        "utf8mb4_pl_0900_as_cs",
+        "utf8mb4_uca1400_polish_nopad_as_cs",
+    ),
+    c(
+        285,
+        "utf8mb4_et_0900_as_cs",
+        "utf8mb4_uca1400_estonian_nopad_as_cs",
+    ),
+    c(
+        286,
+        "utf8mb4_es_0900_as_cs",
+        "utf8mb4_uca1400_spanish_nopad_as_cs",
+    ),
+    c(
+        287,
+        "utf8mb4_sv_0900_as_cs",
+        "utf8mb4_uca1400_swedish_nopad_as_cs",
+    ),
+    c(
+        288,
+        "utf8mb4_tr_0900_as_cs",
+        "utf8mb4_uca1400_turkish_nopad_as_cs",
+    ),
+    c(
+        289,
+        "utf8mb4_cs_0900_as_cs",
+        "utf8mb4_uca1400_czech_nopad_as_cs",
+    ),
+    c(
+        290,
+        "utf8mb4_da_0900_as_cs",
+        "utf8mb4_uca1400_danish_nopad_as_cs",
+    ),
+    c(
+        291,
+        "utf8mb4_lt_0900_as_cs",
+        "utf8mb4_uca1400_lithuanian_nopad_as_cs",
+    ),
+    c(
+        292,
+        "utf8mb4_sk_0900_as_cs",
+        "utf8mb4_uca1400_slovak_nopad_as_cs",
+    ),
+    c(
+        293,
+        "utf8mb4_es_trad_0900_as_cs",
+        "utf8mb4_uca1400_spanish2_nopad_as_cs",
+    ),
+    c(
+        294,
+        "utf8mb4_la_0900_as_cs",
+        "utf8mb4_uca1400_roman_nopad_as_cs",
+    ),
+    c(
+        296,
+        "utf8mb4_eo_0900_as_cs",
+        "utf8mb4_uca1400_esperanto_nopad_as_cs",
+    ),
+    c(
+        297,
+        "utf8mb4_hu_0900_as_cs",
+        "utf8mb4_uca1400_hungarian_nopad_as_cs",
+    ),
+    c(
+        298,
+        "utf8mb4_hr_0900_as_cs",
+        "utf8mb4_uca1400_croatian_nopad_as_cs",
+    ),
+    c(
+        300,
+        "utf8mb4_vi_0900_as_cs",
+        "utf8mb4_uca1400_vietnamese_nopad_as_cs",
+    ),
     missing(303, "utf8mb4_ja_0900_as_cs"),
     missing(304, "utf8mb4_ja_0900_as_cs_ks"),
     c(305, "utf8mb4_0900_as_ci", "utf8mb4_uca1400_nopad_as_ci"),
@@ -210,9 +372,9 @@ pub fn sql_case(expr: &str, lit: &dyn Fn(&str) -> String) -> String {
         .iter()
         .filter(|(_, my)| my.starts_with("utf8mb4_0900_"))
     {
-        s.push_str(&format!(" WHEN {} THEN {}", lit(m), lit(my)));
+        let _ = write!(s, " WHEN {} THEN {}", lit(m), lit(my));
     }
-    s.push_str(&format!(" ELSE {expr} END"));
+    let _ = write!(s, " ELSE {expr} END");
     s
 }
 
@@ -223,9 +385,15 @@ mod tests {
     #[test]
     fn mariadb_names_read_as_mysql_ones() {
         assert_eq!(mysql_name("utf8mb4_uca1400_ai_ci"), "utf8mb4_0900_ai_ci");
-        assert_eq!(mysql_name("utf8mb4_uca1400_nopad_ai_ci"), "utf8mb4_0900_ai_ci");
+        assert_eq!(
+            mysql_name("utf8mb4_uca1400_nopad_ai_ci"),
+            "utf8mb4_0900_ai_ci"
+        );
         assert_eq!(mysql_name("UTF8MB4_UCA1400_AS_CS"), "utf8mb4_0900_as_cs");
-        assert_eq!(mysql_name("utf8mb4_uca1400_nopad_as_ci"), "utf8mb4_0900_as_ci");
+        assert_eq!(
+            mysql_name("utf8mb4_uca1400_nopad_as_ci"),
+            "utf8mb4_0900_as_ci"
+        );
         assert_eq!(mysql_name("utf8mb4_nopad_bin"), "utf8mb4_0900_bin");
         assert_eq!(
             mysql_name("utf8mb4_uca1400_german2_ai_ci"),

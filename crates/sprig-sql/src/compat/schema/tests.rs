@@ -72,17 +72,16 @@ fn columns_take_mysqls_shape_on_3306() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(
-        branch_columns(&sql),
-        mysql_column_names("COLUMNS").unwrap()
-    );
+    assert_eq!(branch_columns(&sql), mysql_column_names("COLUMNS").unwrap());
     assert!(sql.contains("LEFT JOIN (SELECT `TABLE_NAME` AS `_sprig_jt`"));
     assert!(sql.contains("WHERE `CONSTRAINT_SCHEMA` = 't42_d1_g1_s1'"));
     assert!(sql.contains("IF((`DATA_TYPE` = 'longtext' AND `_sprig_jc` IS NOT NULL), 'json', `DATA_TYPE`) AS `DATA_TYPE`"));
     // MariaDB's own columns are gone.
     assert!(!sql.contains("IS_SYSTEM_TIME_PERIOD_START"));
     // The schema is still the logical name.
-    assert!(sql.contains("'shop' AS `TABLE_SCHEMA`"));
+    assert!(
+        sql.contains("CONVERT('shop' USING utf8mb3) COLLATE utf8mb3_general_ci AS `TABLE_SCHEMA`")
+    );
     // 3307 keeps MariaDB's shape and no join.
     let sql = rewrite("SELECT * FROM information_schema.COLUMNS", Persona::MariaDb)
         .unwrap()
@@ -93,9 +92,12 @@ fn columns_take_mysqls_shape_on_3306() {
 
 #[test]
 fn other_mysql_shapes() {
-    let sql = rewrite("SELECT * FROM information_schema.STATISTICS", Persona::MySql84)
-        .unwrap()
-        .unwrap();
+    let sql = rewrite(
+        "SELECT * FROM information_schema.STATISTICS",
+        Persona::MySql84,
+    )
+    .unwrap()
+    .unwrap();
     let cols = branch_columns(&sql);
     assert_eq!(cols[cols.len() - 2..], ["IS_VISIBLE", "EXPRESSION"]);
     // Hiding still reads MariaDB's columns in the branch's WHERE.
@@ -125,7 +127,11 @@ fn other_mysql_shapes() {
     .unwrap()
     .unwrap();
     assert_eq!(branch_columns(&sql).last().unwrap(), "ENFORCED");
-    assert!(sql.contains("AND NOT (`CONSTRAINT_TYPE` = 'CHECK' AND (`TABLE_NAME`, `CONSTRAINT_NAME`) IN"));
+    assert!(
+        sql.contains(
+            "AND NOT (`CONSTRAINT_TYPE` = 'CHECK' AND (`TABLE_NAME`, `CONSTRAINT_NAME`) IN"
+        )
+    );
 
     let sql = rewrite("SELECT * FROM information_schema.TABLES", Persona::MySql84)
         .unwrap()
@@ -134,9 +140,12 @@ fn other_mysql_shapes() {
     assert_eq!(cols.len(), 21);
     assert!(!cols.contains(&"TEMPORARY".to_owned()));
 
-    let sql = rewrite("SELECT * FROM information_schema.SCHEMATA", Persona::MySql84)
-        .unwrap()
-        .unwrap();
+    let sql = rewrite(
+        "SELECT * FROM information_schema.SCHEMATA",
+        Persona::MySql84,
+    )
+    .unwrap()
+    .unwrap();
     assert!(sql.contains("'NO' AS `DEFAULT_ENCRYPTION`"));
     assert!(!sql.contains("SCHEMA_COMMENT"));
 }
@@ -149,7 +158,9 @@ fn keywords_carry_reserved_on_both_ports() {
     )
     .unwrap()
     .unwrap();
-    assert!(my.starts_with("SELECT WORD FROM (SELECT `WORD`, `RESERVED` FROM JSON_TABLE('[[\"ACCESSIBLE\",1],"));
+    assert!(my.starts_with(
+        "SELECT WORD FROM (SELECT `WORD`, `RESERVED` FROM JSON_TABLE('[[\"ACCESSIBLE\",1],"
+    ));
     assert!(my.ends_with(") AS `KEYWORDS` WHERE RESERVED=1 ORDER BY WORD"));
     let ma = rewrite(
         "SELECT k.word FROM information_schema.keywords k WHERE k.reserved = 1",
@@ -157,7 +168,9 @@ fn keywords_carry_reserved_on_both_ports() {
     )
     .unwrap()
     .unwrap();
-    assert!(ma.contains("FROM information_schema.KEYWORDS AS `_sprig_k` LEFT JOIN JSON_TABLE('[\"ACCESSIBLE\","));
+    assert!(ma.contains(
+        "FROM information_schema.KEYWORDS AS `_sprig_k` LEFT JOIN JSON_TABLE('[\"ACCESSIBLE\","
+    ));
     assert!(ma.ends_with(") k WHERE k.reserved = 1"));
     assert_eq!(keywords::MYSQL84.len(), 734);
     assert_eq!(keywords::MYSQL84.iter().filter(|(_, r)| *r).count(), 262);
@@ -188,7 +201,11 @@ fn mysql_only_tables_on_3306() {
     assert!(sql.contains("AS `PAD_ATTRIBUTE` FROM information_schema.COLLATIONS"));
     // Relayed unchanged on 3307.
     assert_eq!(
-        rewrite("SELECT * FROM information_schema.COLLATIONS", Persona::MariaDb).unwrap(),
+        rewrite(
+            "SELECT * FROM information_schema.COLLATIONS",
+            Persona::MariaDb
+        )
+        .unwrap(),
         None
     );
     // Three-part column references lose their schema with the view.
@@ -301,4 +318,19 @@ fn create_table_in_mysqls_spelling() {
     // Views and anything else pass.
     let v = "CREATE ALGORITHM=UNDEFINED VIEW `v` AS select 1";
     assert_eq!(mysql_create_table(v), v);
+}
+
+#[test]
+fn the_view_keeps_the_clients_spelling_of_the_table() {
+    // SQLAlchemy's reflection query: the derived table must answer to
+    // `columns`, as MariaDB compares table aliases case-sensitively.
+    let sql = rewrite(
+        "SELECT information_schema.columns.table_schema FROM information_schema.columns \
+         WHERE information_schema.columns.table_schema = 'shop'",
+        Persona::MySql84,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(sql.starts_with("SELECT columns.table_schema FROM (SELECT"));
+    assert!(sql.ends_with(") AS `columns` WHERE columns.table_schema = 'shop'"));
 }

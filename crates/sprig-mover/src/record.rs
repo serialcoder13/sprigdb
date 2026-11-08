@@ -2,11 +2,17 @@
 //! copy slots (chapter 10, "Job record", "Jobs and workers"; build step 3).
 //!
 //! ```text
-//! /sprig/dc/<dc>/jobs/<job_id>                 the record (JSON, below)
-//! /sprig/dc/<dc>/job-owners/<job_id>           the owning worker, on its lease
-//! /sprig/dc/<dc>/shard-locks/<tenant>/<shard>  the job id; one job per shard
-//! /sprig/dc/<dc>/slots/copy/<cluster>/<n>      the job id, on the worker's lease
+//! /sprig/dc/<dc>/mover/jobs/<job_id>                 the record (JSON, below)
+//! /sprig/dc/<dc>/mover/owners/<job_id>               the owning worker, on its lease
+//! /sprig/dc/<dc>/mover/shard-locks/<tenant>/<shard>  the job id; one job per shard
+//! /sprig/dc/<dc>/mover/slots/copy/<cluster>/<n>      the job id, on the worker's lease
 //! ```
+//!
+//! **Decision, against the book.** Chapter 10 puts records at `jobs/`,
+//! where chapter 23's job scheduler (being built alongside) keeps its own,
+//! differently shaped records and dispatches them. Until mover jobs run
+//! through that scheduler, they live under `mover/` so neither side
+//! misreads the other's records.
 //!
 //! A submit creates the record and the shard lock in one transaction, so
 //! two jobs never hold one shard. The lock lives as long as the job, not a
@@ -137,7 +143,10 @@ impl JobRecord {
     /// The shard lock this job holds.
     #[must_use]
     pub fn lock_rel(&self) -> String {
-        lock_rel(self.tenant_id, self.spec.sources.first().map_or(0, |s| s.shard))
+        lock_rel(
+            self.tenant_id,
+            self.spec.sources.first().map_or(0, |s| s.shard),
+        )
     }
 }
 
@@ -149,19 +158,19 @@ pub fn wall_ms(t: SystemTime) -> u64 {
 }
 
 fn job_rel(id: &JobId) -> String {
-    format!("jobs/{}", id.0)
+    format!("mover/jobs/{}", id.0)
 }
 
 fn owner_rel(id: &JobId) -> String {
-    format!("job-owners/{}", id.0)
+    format!("mover/owners/{}", id.0)
 }
 
 fn lock_rel(tenant: TenantId, shard: u32) -> String {
-    format!("shard-locks/{tenant}/{shard}")
+    format!("mover/shard-locks/{tenant}/{shard}")
 }
 
 fn slot_rel(cluster: &ClusterId, n: u32) -> String {
-    format!("slots/copy/{cluster}/{n}")
+    format!("mover/slots/copy/{cluster}/{n}")
 }
 
 fn not_found(id: &JobId) -> SprigError {
@@ -229,7 +238,10 @@ impl JobStore {
             .get(&self.key(&job_rel(id))?, Consistency::Linearizable)
             .await?
             .ok_or_else(|| not_found(id))?;
-        Ok((Record::<JobRecord>::decode(&kv.value)?.body, kv.mod_revision))
+        Ok((
+            Record::<JobRecord>::decode(&kv.value)?.body,
+            kv.mod_revision,
+        ))
     }
 
     /// Every record, oldest first.
@@ -237,7 +249,7 @@ impl JobStore {
     /// # Errors
     /// The store's errors.
     pub async fn all(&self) -> Result<Vec<(JobRecord, Revision)>> {
-        let prefix = self.key("jobs/")?;
+        let prefix = self.key("mover/jobs/")?;
         let mut out = Vec::new();
         let mut opts = ListOpts::default();
         loop {
@@ -245,7 +257,9 @@ impl JobStore {
             for kv in &page.kvs {
                 match Record::<JobRecord>::decode(&kv.value) {
                     Ok(r) => out.push((r.body, kv.mod_revision)),
-                    Err(e) => tracing::warn!(key = %kv.key.as_str(), error = %e, "unreadable job record"),
+                    Err(e) => {
+                        tracing::warn!(key = %kv.key.as_str(), error = %e, "unreadable job record");
+                    }
                 }
             }
             if !page.more {
@@ -329,10 +343,7 @@ impl JobStore {
         };
         Err(SprigError::new(
             SprigCode::ShardLocked,
-            format!(
-                "tenant {} is locked by job {holder}",
-                rec.tenant_id
-            ),
+            format!("tenant {} is locked by job {holder}", rec.tenant_id),
         ))
     }
 
@@ -416,7 +427,7 @@ impl JobStore {
     }
 
     /// Deletes the shard lock and the owner key of a finished job.
-    async fn unlock_ops(&self, rec: &JobRecord) -> Result<Vec<Op>> {
+    fn unlock_ops(&self, rec: &JobRecord) -> Result<Vec<Op>> {
         Ok(vec![
             Op::Delete(self.key(&rec.lock_rel())?),
             Op::Delete(self.key(&owner_rel(&rec.job_id))?),
@@ -525,7 +536,11 @@ impl Claim {
     /// # Errors
     /// 39133.
     pub fn check_lease(&self) -> Result<()> {
-        if self.session.as_ref().is_some_and(sprig_meta::Session::is_lost) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(sprig_meta::Session::is_lost)
+        {
             return Err(lease_lost(&self.rec.job_id));
         }
         Ok(())
@@ -585,7 +600,9 @@ impl Claim {
                 return Ok(());
             }
             match r.results.first() {
-                Some(sprig_meta::OpResult::Get(Some(kv))) if kv.create_revision == self.owner_rev => {
+                Some(sprig_meta::OpResult::Get(Some(kv)))
+                    if kv.create_revision == self.owner_rev =>
+                {
                     // Only the record changed (an operator wrote it): retry.
                 }
                 _ => return Err(lease_lost(&next.job_id)),
@@ -624,7 +641,7 @@ impl Claim {
             value: Record::new(next.clone()).encode()?,
             lease: None,
         }];
-        then.extend(self.store.unlock_ops(&next).await?);
+        then.extend(self.store.unlock_ops(&next)?);
         let r = self
             .store
             .dc
@@ -682,7 +699,9 @@ fn check_spec(spec: &JobSpec) -> Result<()> {
     match spec.kind {
         JobKind::MoveShard if s.cluster == t.cluster => bad("a move needs another cluster"),
         JobKind::CopySwapDdl
-            if s.cluster != t.cluster || t.ddl.is_none() || s.tables.as_ref().map(Vec::len) != Some(1) =>
+            if s.cluster != t.cluster
+                || t.ddl.is_none()
+                || s.tables.as_ref().map(Vec::len) != Some(1) =>
         {
             bad("a copy-and-swap names one table on one cluster and its DDL")
         }
@@ -768,7 +787,7 @@ impl Mover for MetaMover {
                 value: Record::new(next.clone()).encode()?,
                 lease: None,
             }];
-            then.extend(self.store.unlock_ops(&next).await?);
+            then.extend(self.store.unlock_ops(&next)?);
             let r = self
                 .store
                 .dc

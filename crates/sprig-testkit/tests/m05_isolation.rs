@@ -107,7 +107,9 @@ fn opts(url: &str, host_port: Option<&str>, user: Option<(&str, &str)>) -> Opts 
 fn tenant_prefix(url: &str) -> String {
     let u = Opts::from_url(url).unwrap();
     let user = u.user().unwrap().to_owned();
-    let (t, _) = user.split_once('.').expect("a qualified login: <tenant>.<user>");
+    let (t, _) = user
+        .split_once('.')
+        .expect("a qualified login: <tenant>.<user>");
     format!("{t}.")
 }
 
@@ -169,7 +171,11 @@ async fn setup(c: &mut Conn, marker: &str) {
         &format!("INSERT INTO m05_shop.orders VALUES (1, 10, '{marker}')"),
     )
     .await;
-    admin(c, &format!("INSERT INTO m05_crm.leads VALUES (1, '{marker}')")).await;
+    admin(
+        c,
+        &format!("INSERT INTO m05_crm.leads VALUES (1, '{marker}')"),
+    )
+    .await;
     for s in [
         format!("CREATE USER m05_reader IDENTIFIED BY '{PW}'"),
         format!("CREATE USER m05_writer IDENTIFIED BY '{PW}'"),
@@ -183,6 +189,8 @@ async fn setup(c: &mut Conn, marker: &str) {
         "GRANT SELECT ON m05_crm.* TO m05_r".into(),
         "GRANT m05_r TO m05_reader, m05_roleu".into(),
         "SET DEFAULT ROLE m05_r FOR m05_roleu".into(),
+        "ALTER USER m05_none FAILED_LOGIN_ATTEMPTS 5 PASSWORD_LOCK_TIME 1".into(),
+        format!("ALTER USER m05_col IDENTIFIED BY '{PW}'"),
     ] {
         admin(c, &s).await;
     }
@@ -231,9 +239,18 @@ fn scripts() -> Vec<(&'static str, Vec<(&'static str, Expect)>)> {
                 ("GRANT m05_r TO m05_none", Err(1227)),
                 ("SHOW GRANTS FOR m05_writer", P(1142, 1044)),
                 ("SHOW GRANTS", Ok),
-                ("ALTER TABLE m05_shop.orders SPRIG SET (reads.max_replica_lag_ms = 500)", Err(1142)),
-                ("ALTER DATABASE m05_shop SPRIG SET (reads.max_replica_lag_ms = 500)", Err(1044)),
-                ("ALTER TENANT SPRIG SET (reads.max_replica_lag_ms = 500)", Err(1227)),
+                (
+                    "ALTER TABLE m05_shop.orders SPRIG SET (reads.max_replica_lag_ms = 500)",
+                    Err(1142),
+                ),
+                (
+                    "ALTER DATABASE m05_shop SPRIG SET (reads.max_replica_lag_ms = 500)",
+                    Err(1044),
+                ),
+                (
+                    "ALTER TENANT SPRIG SET (reads.max_replica_lag_ms = 500)",
+                    Err(1227),
+                ),
                 ("SET ROLE m05_r", Ok),
                 ("SELECT * FROM m05_crm.leads", Ok),
                 ("SET ROLE NONE", Ok),
@@ -244,7 +261,7 @@ fn scripts() -> Vec<(&'static str, Vec<(&'static str, Expect)>)> {
         (
             "m05_writer",
             vec![
-                ("INSERT INTO m05_shop.orders VALUES (2, 20, 'w')", Ok),
+                ("INSERT IGNORE INTO m05_shop.orders VALUES (2, 20, 'w')", Ok),
                 ("SELECT * FROM m05_shop.orders", Ok),
                 ("DELETE FROM m05_shop.orders WHERE id = 2", Err(1142)),
                 ("UPDATE m05_shop.orders SET total = 1", Err(1142)),
@@ -350,9 +367,8 @@ async fn m05_isolation_suite() {
     let a_url = require_env!(A);
     let b_url = require_env!(B);
     let mysql_port = skip::var(MYSQL_PORT);
-    let mut report = Report(
-        skip::var(REPORT).map(|p| std::fs::File::create(p).expect("report file")),
-    );
+    let mut report =
+        Report(skip::var(REPORT).map(|p| std::fs::File::create(p).expect("report file")));
     let tenants = [("A", a_url.clone()), ("B", b_url.clone())];
     let markers = ["m05-marker-tenant-a-77", "m05-marker-tenant-b-88"];
     for ((_, url), marker) in tenants.iter().zip(markers) {
@@ -395,8 +411,12 @@ async fn m05_isolation_suite() {
             }
             // Wrong password.
             checks += 1;
-            let bad = Conn::new(opts(url, Some(hp), Some((&format!("{prefix}m05_reader"), "nope"))))
-                .await;
+            let bad = Conn::new(opts(
+                url,
+                Some(hp),
+                Some((&format!("{prefix}m05_reader"), "nope")),
+            ))
+            .await;
             let code = match bad {
                 Err(mysql_async::Error::Server(s)) => Some(s.code),
                 Ok(_) => None,
@@ -410,9 +430,15 @@ async fn m05_isolation_suite() {
 
     // Across tenants: A's administrator against B's physical names.
     if let Some(burl) = skip::var(BACKEND) {
-        let mut backend = Conn::new(opts(&burl, None, None)).await.expect("backend root");
-        let b_schema = schema_with(&mut backend, "orders", markers[1]).await.expect("B's schema");
-        let a_schema = schema_with(&mut backend, "orders", markers[0]).await.expect("A's schema");
+        let mut backend = Conn::new(opts(&burl, None, None))
+            .await
+            .expect("backend root");
+        let b_schema = schema_with(&mut backend, "orders", markers[1])
+            .await
+            .expect("B's schema");
+        let a_schema = schema_with(&mut backend, "orders", markers[0])
+            .await
+            .expect("A's schema");
         let mut a = Conn::new(opts(&a_url, None, None)).await.unwrap();
         let upper = b_schema.to_uppercase();
         let probes = [
@@ -510,7 +536,11 @@ async fn m05_isolation_suite() {
     if let Some(second) = skip::var(SECOND) {
         let prefix = tenant_prefix(&a_url);
         let mut adm = Conn::new(opts(&a_url, None, None)).await.unwrap();
-        admin(&mut adm, &format!("CREATE USER m05_prop IDENTIFIED BY '{PW}'")).await;
+        admin(
+            &mut adm,
+            &format!("CREATE USER m05_prop IDENTIFIED BY '{PW}'"),
+        )
+        .await;
         let login = format!("{prefix}m05_prop");
         for (level, grant, revoke, probe, code) in [
             (
@@ -582,7 +612,10 @@ async fn m05_isolation_suite() {
         teardown(&mut c).await;
         let _ = c.disconnect().await;
     }
-    println!("m05 isolation: {checks} checks, {} failures", failures.len());
+    println!(
+        "m05 isolation: {checks} checks, {} failures",
+        failures.len()
+    );
     for f in &failures {
         println!("FAIL {f}");
     }

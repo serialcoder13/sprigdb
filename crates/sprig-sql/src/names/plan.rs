@@ -252,7 +252,10 @@ fn plan_statement(
                     &|v| sql_string(v, lex_opts.no_backslash_escapes),
                 )
             {
-                return Ok((None, forward(sql, ResultMapper::show(ShowKind::Columns, ctx.vis))));
+                return Ok((
+                    None,
+                    forward(sql, ResultMapper::show(ShowKind::Columns, ctx.vis)),
+                ));
             }
             let mapper = if matches!(word.as_str(), "DESCRIBE" | "DESC" | "EXPLAIN") && !in_is {
                 ResultMapper::show(ShowKind::Columns, ctx.vis)

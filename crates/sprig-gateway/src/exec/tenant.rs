@@ -691,16 +691,16 @@ impl PassSession {
             Some(Err(e)) => return self.fail(out, &e).await,
         };
         // 3306: MySQL-only executable comments whose body MariaDB
-        // understands (chapter 28 step 1).
+        // understands, and `CAST(? AS JSON)` (chapter 28).
         let expanded;
-        let text: &Bytes =
-            match sprig_sql::lex::versioned::expand_text_for_mariadb(text, &lex, BACKEND_VERSION) {
-                Some(t) => {
-                    expanded = Bytes::from(t);
-                    &expanded
-                }
-                None => text,
-            };
+        let text: &Bytes = match sprig_sql::compat::mysql_text_rewrites(text, &lex, BACKEND_VERSION)
+        {
+            Some(t) => {
+                expanded = Bytes::from(t);
+                &expanded
+            }
+            None => text,
+        };
         let attr_owned = attr_pairs(attrs);
         let mut retried = false;
         let planned = loop {
@@ -1404,6 +1404,11 @@ impl PassSession {
             return Ok(self.prepared_deferred(sql, columns));
         }
         ts.refresh().await?;
+        // 3306: the same text rewrites as for COM_QUERY (chapter 28).
+        let sql = match sprig_sql::compat::mysql_text_rewrites(&sql, &lex, BACKEND_VERSION) {
+            Some(t) => Bytes::from(t),
+            None => sql,
+        };
         let current = self.current_logical();
         let Some(ts) = self.tenant.as_deref() else {
             return Err(SprigError::internal("no tenant"));

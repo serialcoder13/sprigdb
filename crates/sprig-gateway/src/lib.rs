@@ -240,7 +240,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let drain_lc = lifecycle.clone();
     let core = Arc::new(http::Core {
         engine: Arc::clone(&engine),
-        auth: Arc::new(http::auth::BasicLogins::new(Arc::clone(&login))),
+        auth: Arc::new(http::auth::ChapterFourteen::new(Arc::clone(&login))),
         admin: Arc::new(http::admin::AdminApi::new(
             Arc::clone(&stores.dc),
             gateway_id.clone(),
@@ -538,6 +538,9 @@ fn logins(
     }
 }
 
+/// How often the gateway re-reads etcd's member list.
+const DISCOVERY_PERIOD: Duration = Duration::from_secs(60);
+
 /// The stores the settings mirrors read: the etcd tiers named by `[meta]`
 /// (single-etcd mode when the global seeds are empty or the same), or, with
 /// no seeds, an empty in-memory store, so every key keeps its default.
@@ -560,6 +563,11 @@ async fn settings_stores(ctx: &RoleContext) -> Result<SettingsStores> {
     // Until the relay (chapter 23 step 11), the gateway reads the global
     // settings straight from the global tier.
     let tiers = connect_tiers(dc, meta, tls, DEFAULT_REQUEST_TIMEOUT, true).await?;
+    // Endpoint discovery (chapter 23 step 9), every 60 s
+    // (control.etcd_member_refresh_seconds' default; the key is the
+    // controller's).
+    let discovery = Arc::new(sprig_meta::discovery::Discovery::new(&tiers.dc));
+    drop(discovery.spawn(|| DISCOVERY_PERIOD, ctx.shutdown.clone()));
     let global = tiers
         .global
         .ok_or_else(|| SprigError::internal("connect_tiers returned no global store"))?;

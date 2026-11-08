@@ -15,7 +15,7 @@
 //! `mysql_async` pool per cluster.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use mysql_async::{OptsBuilder, Pool, PoolConstraints, PoolOpts};
 use sprig_catalog::placement::ShardMap;
@@ -25,8 +25,10 @@ use sprig_cluster::registry::ClusterRegistry;
 use sprig_common::ids::{ClusterId, ShardId, TenantId};
 use sprig_common::names::SchemaName;
 use sprig_common::{Result, SprigCode, SprigError};
-use sprig_meta::{Consistency, MetaStore, Record};
+use sprig_meta::{Consistency, MetaStore, Mirror, Record};
 use sprig_provision::credentials::CredentialConnector;
+use sprig_shard::Placement;
+use tokio::sync::watch;
 
 use crate::backend::Backends;
 
@@ -41,6 +43,9 @@ pub struct GatewayLocator {
     pools: Mutex<HashMap<ClusterId, (String, Pool)>>,
     clusters: Mutex<HashMap<TenantId, ClusterId>>,
     ctl_users: Mutex<HashMap<ClusterId, String>>,
+    /// Every tenant map in this DC tier (`shardmaps/`), fed by a watch,
+    /// started at first use: holds and moves (chapter 10).
+    maps: OnceLock<Mirror>,
 }
 
 impl std::fmt::Debug for GatewayLocator {
@@ -63,7 +68,36 @@ impl GatewayLocator {
             pools: Mutex::new(HashMap::new()),
             clusters: Mutex::new(HashMap::new()),
             ctl_users: Mutex::new(HashMap::new()),
+            maps: OnceLock::new(),
         }
+    }
+
+    fn maps(&self) -> &Mirror {
+        self.maps.get_or_init(|| {
+            let prefix = self
+                .dc
+                .tier()
+                .key("shardmaps/")
+                .unwrap_or_else(|_| self.dc.tier().root());
+            Mirror::spawn(self.dc.clone(), prefix)
+        })
+    }
+
+    /// Where `tenant`'s map points and whether a mover cutover holds it,
+    /// from the watched copy (no I/O); `None` until the copy has loaded or
+    /// for a tenant without a map here.
+    #[must_use]
+    pub fn placement(&self, tenant: TenantId) -> Option<Placement> {
+        let key = ShardMap::catalog_key(self.dc.tier(), tenant).ok()?;
+        let kv = self.maps().get(&key)?;
+        let map = Record::<ShardMap>::decode(&kv.value).ok()?.body;
+        Placement::of(&map).ok()
+    }
+
+    /// Changes whenever any tenant map changes.
+    #[must_use]
+    pub fn placement_changes(&self) -> watch::Receiver<u64> {
+        self.maps().changes()
     }
 
     /// The cluster holding `tenant`'s catalog (and, in R0, its data),

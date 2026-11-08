@@ -2,9 +2,9 @@
 //! 23, "Configuration"), declared next to the code (chapter 03, "Declaring
 //! a key"), and a typed snapshot of them.
 //!
-//! The three slot keys belong to chapters 10, 13 and 25; the copy and
-//! recovery keys are declared here until `sprig-mover` and the recovery
-//! loops exist, and move to those crates then. The build key,
+//! The three slot keys belong to chapters 10, 13 and 25; the copy key is
+//! `sprig-mover`'s, and the recovery key is declared here until the
+//! recovery loops exist, and moves to that crate then. The build key,
 //! `auto_index.max_builds_per_cluster`, is `sprig-advisor`'s
 //! ([`MAX_BUILDS_PER_CLUSTER`]), registered there once.
 //!
@@ -61,6 +61,12 @@ key! {
     "DC leader session TTL; used at the next campaign"
 }
 key! {
+    /// `control.etcd_member_refresh_seconds`: endpoint discovery's period
+    /// (chapter 23 step 9; `sprig_meta::discovery`).
+    ETCD_MEMBER_REFRESH_SECONDS: u64 = "control.etcd_member_refresh_seconds", 60, PROCESS, 1, 3600, 23,
+    "Endpoint discovery period"
+}
+key! {
     /// `control.global_leader_lease_seconds`.
     GLOBAL_LEADER_LEASE_SECONDS: u64 = "control.global_leader_lease_seconds", 15, Scopes(0b10_0000), 2, 600, 23,
     "Global leader session TTL"
@@ -70,11 +76,10 @@ key! {
     REQUEST_TIMEOUT_MS: u64 = "meta.request_timeout_ms", 2000, PROCESS, 100, 60_000, 23,
     "Timeout per etcd request"
 }
-key! {
-    /// `mover.max_copies_per_cluster` (chapter 10): the `copy` slot pool.
-    MAX_COPIES_PER_CLUSTER: u32 = "mover.max_copies_per_cluster", 2, Scopes::OPERATIONAL, 1, 64, 10,
-    "Concurrent copies reading or writing one cluster"
-}
+/// `mover.max_copies_per_cluster` (chapter 10): the `copy` slot pool,
+/// declared once by `sprig-mover` (a second declaration fails the
+/// registry when both crates are linked, as the balancer does).
+pub use sprig_mover::settings::MAX_COPIES_PER_CLUSTER;
 key! {
     /// `recovery.max_rebuilds_per_cluster` (chapter 25): the `recovery`
     /// slot pool.
@@ -121,7 +126,8 @@ impl Default for ControlSettings {
             leader_lease: Duration::from_secs(LEADER_LEASE_SECONDS.default),
             global_leader_lease: Duration::from_secs(GLOBAL_LEADER_LEASE_SECONDS.default),
             request_timeout: Duration::from_millis(REQUEST_TIMEOUT_MS.default),
-            max_copies_per_cluster: MAX_COPIES_PER_CLUSTER.default,
+            max_copies_per_cluster: u32::try_from(MAX_COPIES_PER_CLUSTER.default)
+                .unwrap_or(u32::MAX),
             max_builds_per_cluster: MAX_BUILDS_PER_CLUSTER.default,
             max_rebuilds_per_cluster: MAX_REBUILDS_PER_CLUSTER.default,
         }
@@ -142,7 +148,8 @@ impl ControlSettings {
                 settings.get(&GLOBAL_LEADER_LEASE_SECONDS, &ctx),
             ),
             request_timeout: Duration::from_millis(settings.get(&REQUEST_TIMEOUT_MS, &ctx)),
-            max_copies_per_cluster: settings.get(&MAX_COPIES_PER_CLUSTER, &ctx),
+            max_copies_per_cluster: u32::try_from(settings.get(&MAX_COPIES_PER_CLUSTER, &ctx))
+                .unwrap_or(u32::MAX),
             max_builds_per_cluster: settings.get(&MAX_BUILDS_PER_CLUSTER, &ctx),
             max_rebuilds_per_cluster: settings.get(&MAX_REBUILDS_PER_CLUSTER, &ctx),
         }

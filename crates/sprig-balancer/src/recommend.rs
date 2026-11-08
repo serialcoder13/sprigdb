@@ -174,7 +174,11 @@ impl RecommendationBook {
     }
 
     fn put(&mut self, r: Recommendation, out: &mut Vec<RecChange>) {
-        if self.open.get(&r.rec_id).is_some_and(|x| x.need == r.need && x.tenants == r.tenants) {
+        if self
+            .open
+            .get(&r.rec_id)
+            .is_some_and(|x| x.need == r.need && x.tenants == r.tenants)
+        {
             return;
         }
         let r = match self.open.get(&r.rec_id) {
@@ -189,7 +193,12 @@ impl RecommendationBook {
     }
 
     /// Updates the book from a planning run.
-    pub fn observe(&mut self, view: &FleetView, report: &PlanReport, now: Timestamp) -> Vec<RecChange> {
+    pub fn observe(
+        &mut self,
+        view: &FleetView,
+        report: &PlanReport,
+        now: Timestamp,
+    ) -> Vec<RecChange> {
         let mut out = Vec::new();
         // Hot clusters with no move: an hour, then add_cluster or
         // grow_storage.
@@ -263,7 +272,9 @@ impl RecommendationBook {
         let close: Vec<String> = self
             .open
             .iter()
-            .filter(|(id, r)| !keep.contains(id) && r.reason != "schema_cap" && r.reason != "no_capacity")
+            .filter(|(id, r)| {
+                !keep.contains(id) && r.reason != "schema_cap" && r.reason != "no_capacity"
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in close {
@@ -288,7 +299,11 @@ impl RecommendationBook {
     ) -> Vec<RecChange> {
         let mut out = Vec::new();
         let id = rec_id(RecKind::AddCluster, dc);
-        let mut tenants = self.open.get(&id).map(|r| r.tenants.clone()).unwrap_or_default();
+        let mut tenants = self
+            .open
+            .get(&id)
+            .map(|r| r.tenants.clone())
+            .unwrap_or_default();
         if !tenants.contains(&tenant) {
             tenants.push(tenant);
             tenants.sort_unstable();
@@ -301,7 +316,12 @@ impl RecommendationBook {
                 residency,
                 ..need_of(predicted)
             },
-            reason: if schema_cap { "schema_cap" } else { "no_capacity" }.to_owned(),
+            reason: if schema_cap {
+                "schema_cap"
+            } else {
+                "no_capacity"
+            }
+            .to_owned(),
             tenants,
             shard: None,
             first_seen: now,
@@ -332,7 +352,8 @@ pub struct RecommendationStore {
 
 impl std::fmt::Debug for RecommendationStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecommendationStore").finish_non_exhaustive()
+        f.debug_struct("RecommendationStore")
+            .finish_non_exhaustive()
     }
 }
 

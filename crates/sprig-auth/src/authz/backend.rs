@@ -628,7 +628,10 @@ mod tests {
     #[test]
     fn hmac_matches_rfc4231_case_2() {
         let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
-        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = mac.iter().fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
         assert_eq!(
             hex,
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"

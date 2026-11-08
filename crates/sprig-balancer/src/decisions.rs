@@ -314,20 +314,24 @@ impl DecisionStore {
              WHERE decision_id = ?",
             self.table()
         );
-        q.exec_drop(
-            sql,
-            (o.as_str(), job_id.map(|j| j.to_vec()), at_us, id),
-        )
-        .await
-        .map_err(map_err)
+        q.exec_drop(sql, (o.as_str(), job_id.map(|j| j.to_vec()), at_us, id))
+            .await
+            .map_err(map_err)
     }
 
     /// One decision.
     ///
     /// # Errors
     /// The driver's, mapped.
-    pub async fn get<Q: Queryable + Send>(&self, q: &mut Q, id: u64) -> Result<Option<DecisionRow>> {
-        let sql = format!("SELECT {COLUMNS} FROM {} WHERE decision_id = ?", self.table());
+    pub async fn get<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        id: u64,
+    ) -> Result<Option<DecisionRow>> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM {} WHERE decision_id = ?",
+            self.table()
+        );
         let row: Option<Row> = q.exec_first(sql, (id,)).await.map_err(map_err)?;
         row.map(decode).transpose()
     }
@@ -384,7 +388,11 @@ impl DecisionStore {
     ///
     /// # Errors
     /// The driver's, mapped.
-    pub async fn purge_before<Q: Queryable + Send>(&self, q: &mut Q, before_us: i64) -> Result<u64> {
+    pub async fn purge_before<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        before_us: i64,
+    ) -> Result<u64> {
         let sql = format!(
             "DELETE FROM {} WHERE decided_at < {AT} ORDER BY decided_at LIMIT {PURGE_BATCH}",
             self.table()
@@ -421,8 +429,12 @@ fn map_err(e: mysql_async::Error) -> SprigError {
     match &e {
         mysql_async::Error::Server(s) => {
             let code = s.code;
-            SprigError::backend(code, *b"HY000", format!("decisions: statement failed ({code})"))
-                .with_source(e)
+            SprigError::backend(
+                code,
+                *b"HY000",
+                format!("decisions: statement failed ({code})"),
+            )
+            .with_source(e)
         }
         _ => SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e),
     }
@@ -592,7 +604,22 @@ impl CatalogDecisionLog {
     async fn write(&self, tenant: TenantId, d: &NewDecision) -> Result<u64> {
         let ep = self.locator.writer(tenant).await?;
         let mut conn = ep.pool.get_conn().await.map_err(map_err)?;
-        DecisionStore::new(ep.store.schema()).insert(&mut conn, d).await
+        let st = DecisionStore::new(ep.store.schema());
+        match st.insert(&mut conn, d).await {
+            // A catalog bootstrapped before the module existed: migrate it
+            // (idempotent, under the migrator's lock) and retry once.
+            Err(e) if matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1146, .. }) => {
+                sprig_catalog::Migrator::new(&[DECISIONS_MODULE])?
+                    .run(
+                        &mut conn,
+                        ep.store.schema(),
+                        &sprig_catalog::migrate::MigrateOpts::default(),
+                    )
+                    .await?;
+                st.insert(&mut conn, d).await
+            }
+            r => r,
+        }
     }
 
     /// Retries buffered decisions; returns how many were written.
@@ -632,7 +659,9 @@ impl CatalogDecisionLog {
     pub async fn get(&self, tenant: TenantId, id: u64) -> Result<Option<DecisionRow>> {
         let ep = self.locator.reader(tenant).await?;
         let mut conn = ep.pool.get_conn().await.map_err(map_err)?;
-        DecisionStore::new(ep.store.schema()).get(&mut conn, id).await
+        DecisionStore::new(ep.store.schema())
+            .get(&mut conn, id)
+            .await
     }
 
     /// The retention job for one tenant: deletes rows older than

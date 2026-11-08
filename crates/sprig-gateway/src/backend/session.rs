@@ -1606,6 +1606,27 @@ impl BackendSession {
         Ok(())
     }
 
+    /// Points the session at another cluster: its tenant moved (chapter
+    /// 10, "Cutover"). A held connection is discarded (the old cluster
+    /// rolls back an open transaction, which the next statement reports as
+    /// 1213, as for any lost connection); tracked session state is replayed
+    /// on the next connection, which comes from the new cluster's pools.
+    /// The causal position named the old cluster's GTIDs and is dropped.
+    pub fn retarget(&mut self, cluster: sprig_common::ids::ClusterId) {
+        if self.target.cluster == cluster {
+            return;
+        }
+        drop(self.cur.take());
+        if let Some((lease, _)) = self.held.take() {
+            let limits = self.backends.limits(&self.target.cluster);
+            self.backends.pools.release(lease, Release::Discard, limits);
+            self.connection_gone();
+        }
+        self.causal = GtidSet::default();
+        tracing::info!(from = %self.target.cluster, to = %cluster, "session follows its tenant to another cluster");
+        self.target.cluster = cluster;
+    }
+
     /// Ends the session: a held connection is closed (the server rolls back
     /// an open transaction), anything in flight is abandoned.
     #[allow(clippy::unused_async)] // async in the API: closing may send COM_QUIT later

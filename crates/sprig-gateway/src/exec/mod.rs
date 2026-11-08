@@ -26,6 +26,7 @@
 //! capabilities and collation are known (the pool key depends on them).
 
 mod capture;
+mod follow;
 pub mod relay;
 pub mod settings;
 pub mod split;
@@ -759,6 +760,8 @@ impl SessionExec for PassSession {
         req: Request,
         out: &mut dyn ResultSink,
     ) -> Result<ExecSummary> {
+        // Tenant sessions wait out a mover's hold and follow a move.
+        self.follow_tenant().await;
         let r = self.run_request(cx, req, out).await;
         // Tenant sessions: no error the gateway returns carries a physical
         // name (the relay maps the ones it sends itself).

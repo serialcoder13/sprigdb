@@ -330,10 +330,18 @@ fn index_commands_parse() {
         sub.get_one::<String>("fingerprint").unwrap(),
         "9c41d2e07b3a5f18"
     );
-    assert!(
-        matches(&["explain", "decision", "x"])
-            .subcommand()
-            .is_some()
+    // Chapter 11's explain calls (crate::placement).
+    let m = matches(&["explain", "decision", "17", "--tenant", "acme"]);
+    let (cmd, sub) = sub_of(&m);
+    assert_eq!(
+        (cmd, sub.get_one::<String>("id").unwrap().as_str()),
+        ("decision", "17")
+    );
+    let m = matches(&["explain", "placement", "acme"]);
+    let (cmd, sub) = sub_of(&m);
+    assert_eq!(
+        (cmd, sub.get_one::<String>("tenant").unwrap().as_str()),
+        ("placement", "acme")
     );
 }
 
