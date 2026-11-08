@@ -1,0 +1,297 @@
+//! Node states (chapter 06, "Health checks"; build step 7): Up, Suspect
+//! and Down from active checks and from errors on real traffic, plus what
+//! the checks and the position poller observed (role, Galera state, GTID
+//! positions, estimated replica lag).
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use sprig_common::ids::ClusterId;
+
+use super::cluster::NodeKey;
+use crate::reads::GtidSet;
+
+/// A node's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeHealth {
+    /// Usable.
+    #[default]
+    Up,
+    /// A check or real traffic failed; still usable.
+    Suspect,
+    /// `backend.health_failures_to_down` failures: no new leases, idle
+    /// connections closed, readers chosen elsewhere.
+    Down,
+}
+
+impl NodeHealth {
+    /// The log and metric name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NodeHealth::Up => "up",
+            NodeHealth::Suspect => "suspect",
+            NodeHealth::Down => "down",
+        }
+    }
+}
+
+/// The replication role a check saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeRole {
+    /// Not checked yet.
+    #[default]
+    Unknown,
+    /// Writable and replicating from nobody.
+    Writer,
+    /// Replicates from another node, or is `read_only`.
+    Replica,
+    /// A Galera node.
+    Galera,
+}
+
+/// What one check saw.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Observation {
+    /// The role.
+    pub role: NodeRole,
+    /// `@@read_only`.
+    pub read_only: bool,
+    /// Galera: Synced (`wsrep_local_state` 4) and `wsrep_ready = ON`.
+    pub galera_usable: Option<bool>,
+}
+
+/// Everything known about one node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeStatus {
+    /// Up, Suspect or Down.
+    pub health: NodeHealth,
+    /// Consecutive failures.
+    pub failures: u32,
+    /// Consecutive passes.
+    pub passes: u32,
+    /// The last check's observation.
+    pub observed: Option<Observation>,
+    /// `@@gtid_slave_pos` at the last poll.
+    pub slave_pos: Option<GtidSet>,
+    /// `@@gtid_binlog_pos` at the last poll.
+    pub binlog_pos: Option<GtidSet>,
+    /// Estimated replication lag at the last poll.
+    pub lag: Option<Duration>,
+}
+
+impl NodeStatus {
+    /// Whether the node may get new leases.
+    #[must_use]
+    pub fn usable(&self) -> bool {
+        self.health != NodeHealth::Down
+            && self
+                .observed
+                .as_ref()
+                .and_then(|o| o.galera_usable)
+                .unwrap_or(true)
+    }
+
+    /// The role seen, or `Unknown`.
+    #[must_use]
+    pub fn role(&self) -> NodeRole {
+        self.observed.as_ref().map_or(NodeRole::Unknown, |o| o.role)
+    }
+}
+
+/// How long the writer's position history is kept for lag estimates.
+const HISTORY: Duration = Duration::from_secs(120);
+
+/// The state of every node this gateway uses.
+#[derive(Debug, Default)]
+pub struct NodeTable {
+    nodes: Mutex<HashMap<NodeKey, NodeStatus>>,
+    writer_history: Mutex<HashMap<ClusterId, VecDeque<(Instant, GtidSet)>>>,
+}
+
+impl NodeTable {
+    /// An empty table: unknown nodes are Up.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn with<T>(&self, k: &NodeKey, f: impl FnOnce(&mut NodeStatus) -> T) -> T {
+        let mut g = self.nodes.lock().unwrap_or_else(PoisonError::into_inner);
+        f(g.entry(k.clone()).or_default())
+    }
+
+    /// A node's status.
+    #[must_use]
+    pub fn status(&self, k: &NodeKey) -> NodeStatus {
+        self.nodes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(k)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// A passed check: Suspect and Down nodes return to Up after two passes
+    /// in a row. Returns the new state if it changed.
+    pub fn record_pass(&self, k: &NodeKey, obs: Observation) -> Option<NodeHealth> {
+        self.with(k, |s| {
+            s.failures = 0;
+            s.passes = s.passes.saturating_add(1);
+            s.observed = Some(obs);
+            (s.health != NodeHealth::Up && s.passes >= 2).then(|| {
+                s.health = NodeHealth::Up;
+                NodeHealth::Up
+            })
+        })
+    }
+
+    /// A failed check, or a connect or I/O error on real traffic: Suspect,
+    /// then Down at `to_down` failures in a row. Returns the new state if it
+    /// changed.
+    pub fn record_failure(&self, k: &NodeKey, to_down: u32) -> Option<NodeHealth> {
+        self.with(k, |s| {
+            s.passes = 0;
+            s.failures = s.failures.saturating_add(1);
+            let next = if s.failures >= to_down {
+                NodeHealth::Down
+            } else {
+                NodeHealth::Suspect
+            };
+            (next != s.health && !(s.health == NodeHealth::Down && next == NodeHealth::Suspect))
+                .then(|| {
+                    s.health = next;
+                    next
+                })
+        })
+    }
+
+    /// Records a position poll of a node. A writer's binlog position also
+    /// goes into its cluster's history; a replica's lag is estimated as now
+    /// minus the time the writer first had a commit the replica lacks.
+    pub fn record_positions(
+        &self,
+        k: &NodeKey,
+        slave: Option<GtidSet>,
+        binlog: Option<GtidSet>,
+        is_writer: bool,
+    ) {
+        let now = Instant::now();
+        if is_writer && let Some(b) = &binlog {
+            let mut h = self
+                .writer_history
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let q = h.entry(k.cluster.clone()).or_default();
+            if q.back().is_none_or(|(_, last)| last != b) {
+                q.push_back((now, b.clone()));
+            }
+            while q
+                .front()
+                .is_some_and(|(t, _)| now.duration_since(*t) > HISTORY)
+                && q.len() > 1
+            {
+                q.pop_front();
+            }
+        }
+        let lag = if is_writer {
+            Some(Duration::ZERO)
+        } else {
+            slave
+                .as_ref()
+                .and_then(|p| self.estimate_lag(&k.cluster, p, now))
+        };
+        self.with(k, |s| {
+            s.slave_pos = slave;
+            s.binlog_pos = binlog;
+            s.lag = lag;
+        });
+    }
+
+    /// Forgets a node's positions (its poll failed).
+    pub fn clear_positions(&self, k: &NodeKey) {
+        self.with(k, |s| {
+            s.slave_pos = None;
+            s.lag = None;
+        });
+    }
+
+    fn estimate_lag(&self, cluster: &ClusterId, pos: &GtidSet, now: Instant) -> Option<Duration> {
+        let h = self
+            .writer_history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let q = h.get(cluster)?;
+        let (_, latest) = q.back()?;
+        if pos.covers(latest) {
+            return Some(Duration::ZERO);
+        }
+        // The first writer position this replica hasn't applied.
+        let first_missing = q.iter().find(|(_, w)| !pos.covers(w)).map(|(t, _)| *t)?;
+        Some(now.duration_since(first_missing))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sprig_common::ids::NodeId;
+
+    fn key(n: &str) -> NodeKey {
+        NodeKey {
+            cluster: ClusterId::new("dc-a-c1").unwrap(),
+            node: NodeId::new(n).unwrap(),
+        }
+    }
+
+    #[test]
+    fn up_suspect_down_and_back() {
+        let t = NodeTable::new();
+        let k = key("n1");
+        assert_eq!(t.status(&k).health, NodeHealth::Up);
+        assert_eq!(t.record_failure(&k, 3), Some(NodeHealth::Suspect));
+        assert_eq!(t.record_failure(&k, 3), None);
+        assert_eq!(t.record_failure(&k, 3), Some(NodeHealth::Down));
+        assert!(!t.status(&k).usable());
+        assert_eq!(t.record_failure(&k, 3), None);
+        assert_eq!(t.record_pass(&k, Observation::default()), None);
+        assert_eq!(
+            t.record_pass(&k, Observation::default()),
+            Some(NodeHealth::Up)
+        );
+        assert!(t.status(&k).usable());
+        t.record_pass(
+            &k,
+            Observation {
+                role: NodeRole::Galera,
+                galera_usable: Some(false),
+                ..Observation::default()
+            },
+        );
+        assert!(
+            !t.status(&k).usable(),
+            "a desynced Galera node is not usable"
+        );
+    }
+
+    #[test]
+    fn lag_is_the_age_of_the_oldest_missing_commit() {
+        let t = NodeTable::new();
+        let w = key("w");
+        let r = key("r");
+        let p = |s: &str| GtidSet::parse(s).unwrap();
+        t.record_positions(&w, None, Some(p("2-1-10")), true);
+        t.record_positions(&r, Some(p("2-1-10")), None, false);
+        assert_eq!(t.status(&r).lag, Some(Duration::ZERO));
+        std::thread::sleep(Duration::from_millis(20));
+        t.record_positions(&w, None, Some(p("2-1-11")), true);
+        std::thread::sleep(Duration::from_millis(20));
+        t.record_positions(&r, Some(p("2-1-10")), None, false);
+        let lag = t.status(&r).lag.unwrap();
+        assert!(
+            lag >= Duration::from_millis(20) && lag < Duration::from_secs(5),
+            "{lag:?}"
+        );
+    }
+}

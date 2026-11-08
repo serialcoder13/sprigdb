@@ -1,0 +1,52 @@
+# Expected connector matrix: every outcome other than "pass".
+#
+# run.sh compares each reported check against this file. A check passes the
+# matrix when its status equals the expected one; anything else, including a
+# pass where n/a, skip or fail is expected, fails the run, so this file
+# always describes what actually happens.
+#
+# Statuses: pass, fail, n/a (the connector can't do it), skip (the server
+# can't show it). An expected "fail" is a known incompatibility of the
+# reference server itself: the gateway must behave the same way.
+#
+# Lookup for (persona, connector, tls, check), first match wins:
+#   [<persona>.<connector>], [all.<connector>], [<persona>."*"], [all."*"];
+# inside a table: <tls>.<check>, <tls>."*", <check>, "*". Default: "pass".
+
+# Checks every SQL connector must report (a missing one fails the run).
+# Connectors may report extra checks; those are compared too.
+checks = [
+  "connect", "plain_query", "types", "prepared", "transaction", "multi_statement",
+  "duplicate_key", "last_insert_id", "large_row", "multi_packet", "compression", "conn_attrs",
+]
+# sysbench reports these instead.
+sysbench_checks = [
+  "prepare", "point_select_ps", "point_select_text", "read_write_ps", "read_write_text", "cleanup",
+]
+
+# --- connector limits (both personas) ----------------------------------------
+
+[all.pymysql]
+prepared = "n/a"       # no binary protocol: parameters are interpolated client-side
+compression = "n/a"    # no compressed protocol ("compress ... not supported")
+
+[all.mysqlclient]
+prepared = "n/a"       # MySQLdb interpolates parameters client-side
+
+[all.sysbench.required]
+"*" = "n/a"            # sysbench 1.0.20 can't encrypt without a client certificate and CA
+
+# --- MariaDB as the reference ----------------------------------------------
+
+[mariadb."*"]
+# MariaDB ships with performance_schema off, so session_connect_attrs is
+# empty and the attributes can't be seen (the Compose servers keep the
+# default). The MySQL 8.4 reference shows them.
+conn_attrs = "skip"
+
+[mariadb.mysql-connector-j]
+# Connector/J 9.7 with useServerPrepStmts=true binds a BigInteger above
+# Long.MAX_VALUE (BIGINT UNSIGNED max) in a way MariaDB 11.8 rejects with
+# 1264 "Out of range"; MySQL 8.4 accepts it, and client-side prepares work
+# on both. The 3306 persona over a MariaDB backend must not inherit this.
+prepared_biginteger = "fail"

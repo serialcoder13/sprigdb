@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# Runs a controller and a gateway on the host against the Compose stack
+# (milestone M0.2), so real MySQL and MariaDB clients can log in to the
+# gateway and run statements on a registered cluster.
+#
+#   deploy/compose/gateway-dev.sh up       # build, start, register, configure
+#   deploy/compose/gateway-dev.sh status
+#   deploy/compose/gateway-dev.sh tls required|optional|off
+#   deploy/compose/gateway-dev.sh down     # stop, and undo what up wrote to etcd
+#
+# Needs the Compose stack (`docker compose --profile all up -d --wait`),
+# curl, jq and openssl. Runs from anywhere: it works from the repository
+# root. Processes, logs and what up created live in deploy/compose/.gateway-dev/
+# (git-ignored); the dev certificates in deploy/compose/gateway-certs/.
+# Re-running up leaves running processes alone, so after a code change run
+# down and up again.
+#
+# Listeners (decision D6): MySQL persona 127.0.0.1:13306, MariaDB persona
+# 127.0.0.1:13307. They're live settings in etcd, not config, so up writes
+# them at dc scope. TLS is `optional` unless SPRIG_GATEWAY_TLS says otherwise:
+# the connector matrix runs every connector with TLS required and then
+# disabled, and sysbench only speaks plaintext, so both must log in. A client
+# that asks for TLS still gets it. `tls required` switches both listeners
+# live (the gateway's own default); `tls optional` switches back.
+#
+# Variables: SPRIG_GATEWAY_TLS (optional), SPRIG_ETCD (http://127.0.0.1:2379),
+# CARGO_TARGET_DIR (target).
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+root=$(pwd)
+
+etcd=${SPRIG_ETCD:-http://127.0.0.1:2379}
+dc="dc-a"
+state=deploy/compose/.gateway-dev
+certs=deploy/compose/gateway-certs
+# status and down use the binaries up built, whatever CARGO_TARGET_DIR is then.
+bin=$(cat "$state/bin" 2>/dev/null || echo "${CARGO_TARGET_DIR:-target}/debug")
+# sprigdb.dev.toml's Admin API and telemetry, and the gateway's.
+admin=http://127.0.0.1:7480
+ctl_ready=http://127.0.0.1:9180/readyz
+gw_ready=http://127.0.0.1:9190/readyz
+mysql_port=13306
+mariadb_port=13307
+
+# Registration order fixes the ids (numbers are allocated max + 1 across the
+# deployment), and gateway-accounts.dev.toml names these ids:
+# name|topology|ports|expected id.
+clusters=(
+    "dc-a-single|single|13301|dc-a-c1"
+    "dc-a-repl|primary_replica|13311,13312,13313|dc-a-c2"
+    "dc-a-galera|galera|13321,13322,13323|dc-a-c3"
+)
+
+# Every setting up writes, so down can remove them. The HTTP listeners are
+# switched off: the gateway has no HTTP front end yet, and 8080 is often
+# taken on development machines.
+settings=(
+    listener.mysql.bind listener.mariadb.bind
+    listener.mysql.tls listener.mariadb.tls
+    tls.bundles.default.cert_path tls.bundles.default.key_path
+    listener.http.enabled listener.https.enabled
+)
+
+say() { echo "gateway-dev: $*"; }
+die() {
+    echo "gateway-dev: $*" >&2
+    exit 1
+}
+
+# --- etcd, through its JSON gateway (no etcdctl needed) ----------------------
+
+b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+
+kv() { curl -fsS -X POST "$etcd/v3/kv/$1" -d "$2"; }
+
+# The first key after every key that starts with $1.
+prefix_end() {
+    local p=$1 last
+    last=$(printf '%d' "'${p: -1}")
+    printf '%s' "${p%?}"
+    # shellcheck disable=SC2059 # the octal escape is the format
+    printf "\\$(printf '%03o' $((last + 1)))"
+}
+
+etcd_get() {
+    kv range "$(jq -cn --arg k "$(b64 "$1")" '{key: $k}')" | jq -r '.kvs[0].value // empty | @base64d'
+}
+
+etcd_put() {
+    kv put "$(jq -cn --arg k "$(b64 "$1")" --arg v "$(b64 "$2")" '{key: $k, value: $v}')" >/dev/null
+}
+
+etcd_del() {
+    kv deleterange "$(jq -cn --arg k "$(b64 "$1")" '{key: $k}')" | jq -r '.deleted // "0"'
+}
+
+etcd_del_prefix() {
+    kv deleterange "$(jq -cn --arg k "$(b64 "$1")" --arg e "$(b64 "$(prefix_end "$1")")" \
+        '{key: $k, range_end: $e}')" | jq -r '.deleted // "0"'
+}
+
+# The kvs under a prefix, as the range call's JSON.
+etcd_range() {
+    kv range "$(jq -cn --arg k "$(b64 "$1")" --arg e "$(b64 "$(prefix_end "$1")")" \
+        '{key: $k, range_end: $e}')"
+}
+
+# A setting record at dc scope (chapter 23, "Setting records"); $2 is the
+# value as JSON.
+set_setting() {
+    etcd_put "/sprig/dc/$dc/settings/$1" "$(jq -cn --argjson v "$2" \
+        '{v: 1, value: $v, set_by: "op:gateway-dev", reason: "deploy/compose/gateway-dev.sh"}')"
+}
+
+get_setting() {
+    etcd_get "/sprig/dc/$dc/settings/$1" | jq -c '.value' 2>/dev/null || true
+}
+
+# --- processes ---------------------------------------------------------------
+
+pid_of() { cat "$state/$1.pid" 2>/dev/null || true; }
+
+# Alive and still ours: a stale pid file can name a recycled pid.
+running() {
+    local pid
+    pid=$(pid_of "$1")
+    [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null &&
+        ps -p "$pid" -o command= | grep -q "sprigdb"
+}
+
+start() {
+    local name=$1 config=$2 role=$3
+    if running "$name"; then
+        say "$name already running (pid $(pid_of "$name"))"
+        return
+    fi
+    nohup "$bin/sprigdb" --config "$config" "$role" >>"$state/$name.log" 2>&1 </dev/null &
+    echo $! >"$state/$name.pid"
+    say "$name started (pid $!, log $state/$name.log)"
+}
+
+wait_ready() {
+    local name=$1 url=$2
+    for _ in $(seq 1 120); do
+        curl -fsS -o /dev/null "$url" 2>/dev/null && return
+        if ! running "$name"; then
+            tail -n 30 "$state/$name.log" >&2
+            die "$name exited; log above"
+        fi
+        sleep 0.5
+    done
+    die "$name not ready after 60 s; see $state/$name.log"
+}
+
+listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+stop() {
+    local name=$1 pid
+    if ! running "$name"; then
+        rm -f "$state/$name.pid"
+        return
+    fi
+    pid=$(pid_of "$name")
+    kill -TERM "$pid"
+    # The gateway drains for up to gateway.drain_timeout_seconds (30).
+    for _ in $(seq 1 80); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        say "$name didn't stop in 40 s; killing it"
+        kill -KILL "$pid"
+    fi
+    rm -f "$state/$name.pid"
+    say "$name stopped"
+}
+
+ctl() { "$bin/sprigctl" --endpoint "$admin" "$@"; }
+
+# --- dev certificates ---------------------------------------------------------
+
+# A self-signed CA and a server certificate for localhost, 127.0.0.1 and
+# host.docker.internal (the connector containers' name for the host), made
+# once. Clients that verify use ca.pem.
+make_certs() {
+    if [[ -s $certs/server.pem && -s $certs/server-key.pem ]] &&
+        openssl x509 -checkend 86400 -noout -in "$certs/server.pem" >/dev/null; then
+        return
+    fi
+    say "making development certificates in $certs/"
+    mkdir -p "$certs"
+    (
+        cd "$certs"
+        umask 077
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=SprigDB dev CA" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" \
+            -keyout ca-key.pem -out ca.pem 2>/dev/null
+        openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" \
+            -keyout server-key.pem -out server.csr 2>/dev/null
+        printf '%s\n' "subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:host.docker.internal" \
+            "basicConstraints=CA:FALSE" "keyUsage=digitalSignature,keyEncipherment" \
+            "extendedKeyUsage=serverAuth" >server.ext
+        openssl x509 -req -in server.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial \
+            -days 825 -extfile server.ext -out server.pem 2>/dev/null
+        rm -f server.csr server.ext ca.srl
+        chmod 644 ca.pem server.pem
+    )
+}
+
+# --- clusters ------------------------------------------------------------------
+
+# Registers the three Compose clusters unless they are, and checks they got
+# the ids the accounts file names. Checks before registering anything, so a
+# wrong order leaves etcd as it was.
+register_clusters() {
+    local list max next name topology ports want have
+    list=$(ctl -o json cluster list)
+    max=$(etcd_range /sprig/g/cluster-ids/ |
+        jq '[.kvs[]? | .key | @base64d | split("/") | last | tonumber] | max // 0')
+    next=$max
+    local todo=()
+    for c in "${clusters[@]}"; do
+        IFS='|' read -r name topology ports want <<<"$c"
+        have=$(jq -r --arg n "$name" '.clusters[] | select(.name == $n) | .cluster_id' <<<"$list")
+        if [[ -n $have ]]; then
+            [[ $have == "$want" ]] || die "$name is registered as $have, but gateway-accounts.dev.toml expects $want.
+  Run '$0 down' (it removes clusters up registered), or remove the registrations by hand."
+            continue
+        fi
+        next=$((next + 1))
+        [[ $dc-c$next == "$want" ]] || die "$name would be registered as $dc-c$next, but gateway-accounts.dev.toml expects $want:
+  cluster numbers are allocated max + 1 across the deployment, and /sprig/g/cluster-ids/ already goes up to $max.
+  Remove the other registrations (or run '$0 down' if this script made them) and try again."
+        todo+=("$c")
+    done
+
+    # The credentials the controller probes with: compose.yaml's root.
+    (umask 077 && cat >"$state/cluster-credentials.toml") <<'TOML'
+# Written by gateway-dev.sh: compose.yaml's MariaDB root, development only.
+[sprig_ctl]
+user = "root"
+password = "sprig-dev-root"
+tls = "skip_verify"
+[sprig_repl]
+user = "root"
+password = "sprig-dev-root"
+tls = "skip_verify"
+TOML
+
+    for c in ${todo[@]+"${todo[@]}"}; do
+        IFS='|' read -r name topology ports want <<<"$c"
+        local args=(cluster register "$name" --topology "$topology"
+            --credentials "file:$root/$state/cluster-credentials.toml")
+        IFS=',' read -ra port_list <<<"$ports"
+        for p in "${port_list[@]}"; do args+=(--node "127.0.0.1:$p"); done
+        say "registering $name ($topology)"
+        local out
+        out=$(ctl -o json "${args[@]}") || die "sprigctl cluster register $name failed: $out"
+        have=$(jq -r '.cluster.cluster_id // empty' <<<"$out")
+        [[ -n $have ]] || die "$name wasn't registered: $(jq -c '.precheck' <<<"$out")"
+        echo "$have $(jq -r '.cluster.cluster_number' <<<"$out")" >>"$state/clusters"
+        [[ $have == "$want" ]] || die "$name got $have, but gateway-accounts.dev.toml expects $want"
+        say "$name is $have ($(jq -r '.cluster.admin_state' <<<"$out"))"
+    done
+}
+
+# --- commands --------------------------------------------------------------------
+
+up() {
+    command -v jq >/dev/null || die "needs jq"
+    command -v openssl >/dev/null || die "needs openssl"
+    curl -fsS -o /dev/null "$etcd/version" ||
+        die "no etcd at $etcd: start the Compose stack (cd deploy/compose && docker compose --profile all up -d --wait)"
+    mkdir -p "$state"
+    echo '*' >"$state/.gitignore"
+
+    # Ports held by anything other than our processes.
+    local port
+    for port in 7480 9180; do
+        running controller || ! listening $port || die "127.0.0.1:$port is taken by another process"
+    done
+    for port in 9190 $mysql_port $mariadb_port; do
+        running gateway || ! listening "$port" || die "127.0.0.1:$port is taken by another process"
+    done
+
+    say "building sprigdb and sprigctl"
+    cargo build -q -p sprigdb -p sprigctl
+    bin=${CARGO_TARGET_DIR:-target}/debug
+    echo "$bin" >"$state/bin"
+
+    # Whether the controller bootstraps the deployment here; then down removes
+    # all of dc-a, not only what up registered and set.
+    if [[ ! -f $state/etcd-created ]]; then
+        if [[ -z $(etcd_get /sprig/g/settings/system.deployment_id) ]]; then
+            echo bootstrap >"$state/etcd-created"
+        else
+            echo existing >"$state/etcd-created"
+        fi
+    fi
+
+    start controller deploy/compose/sprigdb.dev.toml controller
+    wait_ready controller "$ctl_ready"
+    # Registration needs the DC leader.
+    has_leader() { ctl -o json dc show "$dc" 2>/dev/null | jq -e '.leader != null' >/dev/null; }
+    for _ in $(seq 1 60); do
+        has_leader && break
+        sleep 0.5
+    done
+    has_leader || die "no DC leader for $dc after 30 s; see $state/controller.log"
+
+    register_clusters
+
+    make_certs
+    local tls=${SPRIG_GATEWAY_TLS:-optional}
+    case $tls in required | optional | off) ;; *) die "SPRIG_GATEWAY_TLS must be required, optional or off" ;; esac
+    set_setting listener.mysql.bind "\"127.0.0.1:$mysql_port\""
+    set_setting listener.mariadb.bind "\"127.0.0.1:$mariadb_port\""
+    set_setting listener.mysql.tls "\"$tls\""
+    set_setting listener.mariadb.tls "\"$tls\""
+    set_setting tls.bundles.default.cert_path "\"$root/$certs/server.pem\""
+    set_setting tls.bundles.default.key_path "\"$root/$certs/server-key.pem\""
+    set_setting listener.http.enabled false
+    set_setting listener.https.enabled false
+
+    start gateway deploy/compose/sprigdb.gateway.dev.toml gateway
+    wait_ready gateway "$gw_ready"
+    for _ in $(seq 1 20); do
+        listening $mysql_port && listening $mariadb_port && break
+        sleep 0.5
+    done
+    if ! listening $mysql_port || ! listening $mariadb_port; then
+        grep -i "listener" "$state/gateway.log" | tail -n 10 >&2 || true
+        die "the gateway isn't listening on $mysql_port and $mariadb_port; see $state/gateway.log"
+    fi
+
+    cat <<EOF
+
+gateway-dev: up. Listeners: MySQL persona 127.0.0.1:$mysql_port, MariaDB persona 127.0.0.1:$mariadb_port (TLS $tls).
+Logins (password sprig-dev-app): app -> dc-a-c1 (single), app_repl -> dc-a-c2 (primary + replicas), app_galera -> dc-a-c3 (Galera).
+
+  mysql -h 127.0.0.1 -P $mysql_port -u app -psprig-dev-app --ssl-mode=VERIFY_IDENTITY --ssl-ca=$root/$certs/ca.pem
+  mariadb -h 127.0.0.1 -P $mariadb_port -u app -psprig-dev-app --ssl --ssl-ca=$root/$certs/ca.pem
+  SPRIG_CONN_USER=app SPRIG_CONN_PASSWORD=sprig-dev-app deploy/compose/connectors/run.sh 127.0.0.1 $mysql_port mysql
+
+Logs: $state/controller.log, $state/gateway.log. Stop with: $0 down
+EOF
+}
+
+down() {
+    if [[ ! -d $state ]]; then
+        say "not up (no $state/)"
+        return
+    fi
+    stop gateway
+    stop controller
+
+    local n=0 created
+    created=$(cat "$state/etcd-created" 2>/dev/null || echo existing)
+    for key in "${settings[@]}"; do
+        n=$((n + $(etcd_del "/sprig/dc/$dc/settings/$key")))
+    done
+    if [[ -f $state/clusters ]]; then
+        while read -r id number; do
+            n=$((n + $(etcd_del "/sprig/dc/$dc/clusters/$id")))
+            n=$((n + $(etcd_del_prefix "/sprig/dc/$dc/cluster-settings/$id/")))
+            n=$((n + $(etcd_del "/sprig/g/cluster-ids/$number")))
+        done <"$state/clusters"
+    fi
+    if [[ $created == bootstrap ]]; then
+        # The controller bootstrapped the deployment for this run: remove the
+        # DC tier, dc-a's cluster ids and the bootstrap records too, as the
+        # M0.1 check does.
+        n=$((n + $(etcd_del_prefix "/sprig/dc/$dc/")))
+        while read -r key; do
+            [[ -n $key ]] && n=$((n + $(etcd_del "$key")))
+        done < <(etcd_range /sprig/g/cluster-ids/ |
+            jq -r --arg dc "$dc" '.kvs[]? | select((.value | @base64d | fromjson | .dc_id) == $dc) | .key | @base64d')
+        for key in /sprig/g/settings/system.deployment_id "/sprig/g/dcs/$dc" /sprig/g/ids/tenant; do
+            n=$((n + $(etcd_del "$key")))
+        done
+    fi
+    say "deleted $n etcd keys"
+    rm -rf "$state"
+    say "down"
+}
+
+status() {
+    local name port
+    for name in controller gateway; do
+        if running "$name"; then
+            say "$name running (pid $(pid_of "$name"))"
+        else
+            say "$name not running"
+        fi
+    done
+    for port in 7480 $mysql_port $mariadb_port; do
+        if listening "$port"; then say "127.0.0.1:$port listening"; else say "127.0.0.1:$port closed"; fi
+    done
+    if curl -fsS -o /dev/null "$etcd/version" 2>/dev/null; then
+        for key in "${settings[@]}"; do
+            local value
+            value=$(get_setting "$key")
+            say "setting $key = ${value:-(unset: the built-in default)}"
+        done
+    else
+        say "no etcd at $etcd"
+    fi
+    if running controller; then ctl cluster list || true; fi
+}
+
+tls() {
+    case ${1:-} in required | optional | off) ;; *) die "usage: $0 tls required|optional|off" ;; esac
+    set_setting listener.mysql.tls "\"$1\""
+    set_setting listener.mariadb.tls "\"$1\""
+    say "both listeners now TLS $1 (applies live; a stricter mode drains older sessions)"
+}
+
+case ${1:-} in
+    up) up ;;
+    down) down ;;
+    status) status ;;
+    tls) tls "${2:-}" ;;
+    *) die "usage: $0 up|down|status|tls required|optional|off" ;;
+esac

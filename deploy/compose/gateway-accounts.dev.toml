@@ -1,0 +1,59 @@
+# Gateway logins for the Compose development stack (M0.2 interim decision D1;
+# format in crates/sprig-auth/src/accounts.rs). Development only.
+#
+# sprigdb.gateway.dev.toml points the gateway at it:
+#
+#   [gateway]
+#   accounts_file = "deploy/compose/gateway-accounts.dev.toml"
+#
+# (or SPRIGDB_GATEWAY_ACCOUNTS_FILE). The gateway re-reads this file within
+# a second of a change; without it every login fails with 1045.
+#
+# Every account below logs in with the password "sprig-dev-app", on the MySQL
+# persona's 13306 or the MariaDB persona's 13307 (decision D6):
+#
+#   deploy/compose/gateway-dev.sh up
+#   mysql -h 127.0.0.1 -P 13306 -u app -psprig-dev-app --ssl-mode=REQUIRED
+#
+# Cluster ids are allocated in registration order, so these assume the README's
+# order: dc-a-single (dc-a-c1), dc-a-repl (dc-a-c2), dc-a-galera (dc-a-c3).
+# gateway-dev.sh registers them in that order and stops if the ids differ.
+#
+# The verifiers are chapter 14's formats. To make one for another password:
+# sprig_auth::verifier::caching_sha2_string("<password>") (sprigctl will wrap
+# it), or take a MySQL 8.4 hash as "0x" || HEX(authentication_string).
+
+[[account]]
+user = "app"
+caching_sha2_password = "$A$005$taV.kdW3OVBWC3CnhhCdDzY0aMxxzSZaJvdcwhahcXtWYUuhp1IzjwblNcaV0V0"
+mysql_native_password = "*67D89EE1742A5EE0A4888A8831527FA7A29AA1F5"
+cluster = "dc-a-c1"
+backend_user = "root"
+# A relative path is relative to this file's directory: this file's own
+# [backend_root] table below.
+backend_credentials = "file:gateway-accounts.dev.toml#backend_root"
+
+[[account]]
+user = "app_repl"
+caching_sha2_password = "$A$005$taV.kdW3OVBWC3CnhhCdDzY0aMxxzSZaJvdcwhahcXtWYUuhp1IzjwblNcaV0V0"
+mysql_native_password = "*67D89EE1742A5EE0A4888A8831527FA7A29AA1F5"
+cluster = "dc-a-c2"
+backend_user = "root"
+backend_credentials = "file:gateway-accounts.dev.toml#backend_root"
+
+[[account]]
+user = "app_galera"
+caching_sha2_password = "$A$005$taV.kdW3OVBWC3CnhhCdDzY0aMxxzSZaJvdcwhahcXtWYUuhp1IzjwblNcaV0V0"
+mysql_native_password = "*67D89EE1742A5EE0A4888A8831527FA7A29AA1F5"
+cluster = "dc-a-c3"
+backend_user = "root"
+backend_credentials = "file:gateway-accounts.dev.toml#backend_root"
+
+# The backend credential the accounts above use: compose.yaml's MariaDB root
+# (MARIADB_ROOT_PASSWORD's default). The Compose servers have self-signed
+# certificates, hence skip_verify. In real deployments keep credentials in a
+# separate file with mode 0600, or in an environment variable (env:<VAR>).
+[backend_root]
+user = "root"
+password = "sprig-dev-root"
+tls = "skip_verify"

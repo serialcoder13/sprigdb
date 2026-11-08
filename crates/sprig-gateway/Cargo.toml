@@ -11,19 +11,28 @@ publish.workspace = true
 [dependencies]
 arc-swap = "1.7"
 async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
 metrics.workspace = true
 rustls.workspace = true
+sprig-auth.workspace = true
+sprig-cluster.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
+sprig-proto-mysql.workspace = true
+sprig-provision.workspace = true
 sprig-settings.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 tokio-rustls.workspace = true
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = ["codec", "rt"] }
 tracing.workspace = true
+twox-hash.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-futures.workspace = true
+mysql_async.workspace = true
 rcgen.workspace = true
+sprig-testkit.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }
 
 [lints]

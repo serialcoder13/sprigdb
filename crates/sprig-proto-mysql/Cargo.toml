@@ -8,5 +8,32 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+bitflags.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+sprig-common.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tokio-util = { workspace = true, features = ["codec"] }
+zeroize.workspace = true
+zstd.workspace = true
+# The backend client (`client`, chapter 05 step 5): TLS through rustls with
+# ring (no OpenSSL), Mozilla's roots when no CA file is given, SHA-1 and
+# SHA-256 for the auth scrambles.
+rustls.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+webpki-roots = "1.0"
+
+[dev-dependencies]
+proptest.workspace = true
+sprig-testkit.workspace = true
+
 [lints]
 workspace = true

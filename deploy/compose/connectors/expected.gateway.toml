@@ -1,0 +1,14 @@
+# Expected outcomes for the connector matrix through the gateway (M0.2),
+# merged over expected.toml with SPRIG_CONN_EXPECTED_OVERLAY:
+#
+#   SPRIG_CONN_USER=app SPRIG_CONN_PASSWORD=sprig-dev-app \
+#   SPRIG_CONN_EXPECTED_OVERLAY=deploy/compose/connectors/expected.gateway.toml \
+#     deploy/compose/connectors/run.sh 127.0.0.1 13306 mysql
+#
+# Each entry is an interim decision of the plan's decisions/m0.2-interim.md.
+
+[mysql."*"]
+# D7: the check reads performance_schema.session_connect_attrs, which the
+# MariaDB backends have off. The gateway parses the attributes; showing
+# them there is the R4 translator's job (chapter 28).
+conn_attrs = "skip"

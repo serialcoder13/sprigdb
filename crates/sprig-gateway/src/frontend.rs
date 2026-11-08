@@ -21,6 +21,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
 use crate::listener::{ListenerSpec, TlsMode};
+use crate::session::SessionTable;
 
 /// A client protocol, one per listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,6 +49,17 @@ impl Protocol {
     #[must_use]
     pub const fn client_speaks_first(self) -> bool {
         !matches!(self, Protocol::MySql84 | Protocol::MariaDb)
+    }
+
+    /// Whether the front end closes its sessions at a safe point (after the
+    /// current statement or transaction) when its listener is made stricter.
+    /// The listener manager then waits twice `listener.drain_seconds` before
+    /// forcing the older generation's connections closed, so the safe-point
+    /// close at `drain_seconds` gets its chance first (chapter 04, "Live
+    /// listener changes").
+    #[must_use]
+    pub const fn closes_at_safe_points(self) -> bool {
+        matches!(self, Protocol::MySql84 | Protocol::MariaDb)
     }
 
     /// The log and metric name.
@@ -78,13 +90,36 @@ impl fmt::Display for Protocol {
 pub struct GatewayContext {
     /// The clock every component reads time through.
     pub clock: Arc<dyn Clock>,
+    /// Every open session: connection ids, `SHOW PROCESSLIST`, `KILL`.
+    pub sessions: Arc<SessionTable>,
+    /// Backend pools, routing and read-your-writes (chapter 06); `None`
+    /// in contexts built without them (tests of the listener layer).
+    pub backends: Option<Arc<crate::backend::Backends>>,
 }
 
 impl GatewayContext {
-    /// A context with only a clock.
+    /// A context with a clock and an empty session table on slot 0.
     #[must_use]
     pub fn new(clock: Arc<dyn Clock>) -> Self {
-        Self { clock }
+        let sessions = Arc::new(SessionTable::new(clock.clone()));
+        Self::with_sessions(clock, sessions)
+    }
+
+    /// A context with a clock and a given session table.
+    #[must_use]
+    pub fn with_sessions(clock: Arc<dyn Clock>, sessions: Arc<SessionTable>) -> Self {
+        Self {
+            clock,
+            sessions,
+            backends: None,
+        }
+    }
+
+    /// The same context with the gateway's backends.
+    #[must_use]
+    pub fn with_backends(mut self, backends: Arc<crate::backend::Backends>) -> Self {
+        self.backends = Some(backends);
+        self
     }
 }
 

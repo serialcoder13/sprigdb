@@ -141,6 +141,31 @@ macro_rules! sprig_codes {
 sprig_codes! {
     /// The gateway is draining (chapter 04).
     GatewayDraining = 39000, "ER_SPRIG_GATEWAY_DRAINING", "SprigGatewayDraining", SQLSTATE_CONNECTION, true;
+    /// The session is closing at a safe point because the listener it
+    /// arrived on moved, was disabled or tightened (chapter 04).
+    ListenerRetired = 39004, "ER_SPRIG_LISTENER_RETIRED", "SprigListenerRetired", SQLSTATE_CONNECTION, true;
+    /// The backend asked for a `LOAD DATA LOCAL INFILE` file the statement
+    /// didn't name; the load was aborted (chapter 05).
+    LocalInfileRejected = 39010, "ER_SPRIG_LOCAL_INFILE_REJECTED", "SprigLocalInfileRejected", SQLSTATE_GENERAL, false;
+    /// Buffered `COM_STMT_SEND_LONG_DATA` for a statement went over
+    /// `gateway.long_data_max_bytes` (chapter 05).
+    LongDataLimit = 39011, "ER_SPRIG_LONG_DATA_LIMIT", "SprigLongDataLimit", SQLSTATE_GENERAL, false;
+    /// The backend sent a packet the protocol doesn't allow at that point
+    /// (chapter 05).
+    BackendProtocol = 39012, "ER_SPRIG_BACKEND_PROTOCOL", "SprigBackendProtocol", SQLSTATE_CONNECTION, false;
+    /// No backend node could be reached before the deadline (chapter 06).
+    BackendUnavailable = 39030, "ER_SPRIG_BACKEND_UNAVAILABLE", "SprigBackendUnavailable", SQLSTATE_CONNECTION, true;
+    /// No pooled backend connection became free before the deadline
+    /// (chapter 06).
+    BackendPoolTimeout = 39031, "ER_SPRIG_BACKEND_POOL_TIMEOUT", "SprigBackendPoolTimeout", SQLSTATE_GENERAL, true;
+    /// The backend was lost during a commit or an autocommit write: the
+    /// outcome is unknown (chapter 06).
+    OutcomeUnknown = 39032, "ER_SPRIG_OUTCOME_UNKNOWN", "SprigOutcomeUnknown", SQLSTATE_CONNECTION, false;
+    /// The backend holding state that can't be replayed was lost (chapter
+    /// 06).
+    SessionStateLost = 39033, "ER_SPRIG_SESSION_STATE_LOST", "SprigSessionStateLost", SQLSTATE_CONNECTION, false;
+    /// The backend was lost after part of a result was sent (chapter 06).
+    BackendLost = 39034, "ER_SPRIG_BACKEND_LOST", "SprigBackendLost", SQLSTATE_CONNECTION, false;
     /// A setting value lies outside the bounds in force (chapter 08).
     SettingOutOfBounds = 39080, "ER_SPRIG_SETTING_OUT_OF_BOUNDS", "SprigSettingOutOfBounds", SQLSTATE_GENERAL, false;
     /// The setting key is not in the registry (chapter 08).
@@ -296,15 +321,24 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::BinlogUnsupported
         | SprigCode::ClusterCapabilityRequired
         | SprigCode::ProvisionerUnsupported
-        | SprigCode::ClusterPrecheckFailed => (Code::FailedPrecondition, 400),
+        | SprigCode::ClusterPrecheckFailed
+        | SprigCode::LocalInfileRejected
+        | SprigCode::LongDataLimit => (Code::FailedPrecondition, 400),
         SprigCode::GatewayDraining
+        | SprigCode::ListenerRetired
         | SprigCode::MetaUnavailable
         | SprigCode::NotLeader
         | SprigCode::BinlogDisconnected
         | SprigCode::ClusterUnavailable
-        | SprigCode::ClusterFenced => (Code::Unavailable, 503),
+        | SprigCode::ClusterFenced
+        | SprigCode::BackendUnavailable
+        | SprigCode::BackendPoolTimeout
+        | SprigCode::BackendLost => (Code::Unavailable, 503),
         SprigCode::BinlogCorrupt => (Code::DataLoss, 500),
-        SprigCode::ClusterFenceFailed => (Code::Aborted, 409),
+        SprigCode::BackendProtocol => (Code::Internal, 502),
+        SprigCode::ClusterFenceFailed | SprigCode::OutcomeUnknown | SprigCode::SessionStateLost => {
+            (Code::Aborted, 409)
+        }
         SprigCode::ClusterNotFound | SprigCode::UnknownDc => (Code::NotFound, 404),
         SprigCode::ClusterExists => (Code::AlreadyExists, 409),
         SprigCode::ClusterStateInvalid => (Code::FailedPrecondition, 409),

@@ -69,6 +69,27 @@ hyper = { version = "1.6", default-features = false, features = ["client", "http
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 
+# sprig-auth (chapter 14, M0.2 interim accounts): SHA-256 for
+# caching_sha2_password (SHA-1 is above), constant-time compares, salts from
+# the OS generator, zeroized password buffers, and atomic account swaps.
+# sha2, subtle, getrandom, zeroize, arc-swap: MIT or Apache-2.0.
+sprig-auth = { path = "crates/sprig-auth" }
+arc-swap = "1.7"
+getrandom = "0.3"
+sha2 = "0.10"
+subtle = "2.6"
+zeroize = "1.8"
+
+# The MySQL and MariaDB wire codec (chapter 05): byte buffers, capability
+# bitflags, zstd compressed framing (zstd crate MIT; zstd-sys and zstd-safe
+# MIT/Apache-2.0; libzstd is BSD), and property tests. proptest is
+# MIT/Apache-2.0.
+sprig-proto-mysql = { path = "crates/sprig-proto-mysql" }
+bitflags = "2.13"
+bytes = "1.12"
+zstd = { version = "0.13", default-features = false }
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
 [workspace.lints.rust]
 # `deny`, not `forbid`, so vetted spots can opt out with a `SAFETY:` comment
 # (chapter 03). The only one so far: linkme's link sections in sprig-settings.

@@ -36,9 +36,9 @@ pub struct ProcessConfig {
     /// is implemented.
     #[serde(default)]
     pub tls: Option<TlsConfig>,
-    /// Gateway runtime sizing.
+    /// Gateway runtime sizing and the interim accounts file.
     #[serde(default)]
-    pub gateway: RuntimeConfig,
+    pub gateway: GatewayConfig,
     /// Controller runtime sizing and start-up switches.
     #[serde(default)]
     pub controller: ControllerConfig,
@@ -113,6 +113,24 @@ pub struct RuntimeConfig {
     /// Tokio worker threads; 0 means one per CPU.
     #[serde(default)]
     pub worker_threads: usize,
+}
+
+/// `[gateway]`: runtime sizing plus, until M0.3, the accounts file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayConfig {
+    /// Tokio worker threads; 0 means one per CPU.
+    #[serde(default)]
+    pub worker_threads: usize,
+    /// Interim (M0.2, decision D1 in the plan's `decisions/m0.2-interim.md`):
+    /// the TOML file listing the logins the gateway accepts, each with its
+    /// chapter 14 password verifier, cluster, backend account and backend
+    /// `credentials_ref` (format in `sprig_auth::accounts`). Re-read within
+    /// a second of a change. Unset, or a missing file, means no accounts:
+    /// every login fails with 1045. Removed when chapter 14's catalog
+    /// logins land (M0.3).
+    #[serde(default)]
+    pub accounts_file: Option<PathBuf>,
 }
 
 /// `[controller]`: runtime sizing plus the start-up switches of chapter 23.
@@ -276,7 +294,9 @@ impl ProcessConfig {
     #[must_use]
     pub fn runtime(&self, role: crate::Role) -> RuntimeConfig {
         match role {
-            crate::Role::Gateway => self.gateway.clone(),
+            crate::Role::Gateway => RuntimeConfig {
+                worker_threads: self.gateway.worker_threads,
+            },
             crate::Role::Controller => RuntimeConfig {
                 worker_threads: self.controller.worker_threads,
             },
@@ -430,6 +450,34 @@ mod tests {
         // Controller switches belong to [controller] only.
         let wrong = ProcessConfig::from_toml_and_env(
             "[node]\ndc = \"mum1\"\n[gateway]\nbootstrap = true\n",
+            env(&[]),
+        );
+        assert!(wrong.is_err());
+    }
+
+    #[test]
+    fn gateway_accounts_file() {
+        let c = ProcessConfig::from_toml_and_env(
+            "[node]\ndc = \"mum1\"\n[gateway]\nworker_threads = 2\naccounts_file = \"/etc/sprigdb/accounts.toml\"\n",
+            env(&[]),
+        )
+        .unwrap();
+        assert_eq!(
+            c.gateway.accounts_file,
+            Some(PathBuf::from("/etc/sprigdb/accounts.toml"))
+        );
+        assert_eq!(c.runtime(crate::Role::Gateway).worker_threads, 2);
+        let d = ProcessConfig::from_toml_and_env(
+            "[node]\ndc = \"mum1\"\n",
+            env(&[("SPRIGDB_GATEWAY_ACCOUNTS_FILE", "/tmp/a.toml")]),
+        )
+        .unwrap();
+        assert_eq!(d.gateway.accounts_file, Some(PathBuf::from("/tmp/a.toml")));
+        let none = ProcessConfig::from_toml_and_env("[node]\ndc = \"mum1\"\n", env(&[])).unwrap();
+        assert!(none.gateway.accounts_file.is_none());
+        // Gateway-only: other roles' sections refuse it.
+        let wrong = ProcessConfig::from_toml_and_env(
+            "[node]\ndc = \"mum1\"\n[worker]\naccounts_file = \"/a\"\n",
             env(&[]),
         );
         assert!(wrong.is_err());

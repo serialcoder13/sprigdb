@@ -40,6 +40,7 @@
 //! ```
 
 pub mod compose;
+pub mod connectors;
 pub mod env;
 pub mod faults;
 pub mod sim;

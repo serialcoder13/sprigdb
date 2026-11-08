@@ -1,0 +1,35 @@
+# A development gateway next to the controller of sprigdb.dev.toml, in the
+# same DC and on the same etcd (milestone M0.2). gateway-dev.sh runs both:
+#
+#   deploy/compose/gateway-dev.sh up
+#
+# or by hand, from the repository root:
+#
+#   cargo run -p sprigdb -- --config deploy/compose/sprigdb.gateway.dev.toml gateway
+#
+# The listeners aren't configured here: their addresses, TLS modes and
+# certificate bundle are live settings in etcd (chapter 04), which
+# gateway-dev.sh writes (13306 and 13307, decision D6). Without them the
+# gateway would try 3306 and 3307 with TLS required and no certificate.
+#
+# Development only: plain-text etcd, no [tls].
+
+[node]
+dc = "dc-a"
+id = "gw-1"
+
+[meta]
+dc_seeds = ["http://127.0.0.1:2379"]
+global_seeds = []
+deployment_id = "sprigdb-dev"
+
+[gateway]
+# Relative to the working directory, so run from the repository root, or set
+# SPRIGDB_GATEWAY_ACCOUNTS_FILE to an absolute path.
+accounts_file = "deploy/compose/gateway-accounts.dev.toml"
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "pretty"
+# The controller has 9180.
+bootstrap_addr = "127.0.0.1:9190"

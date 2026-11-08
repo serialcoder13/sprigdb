@@ -508,10 +508,17 @@ fn retire(
             continue;
         }
         let g = g.clone();
+        // Front ends that close at a safe point do so at `drain`; the forced
+        // close waits another `drain` for sessions still mid-transaction.
+        let force_after = if g.spec.protocol.closes_at_safe_points() {
+            drain.saturating_mul(2)
+        } else {
+            drain
+        };
         tokio::spawn(async move {
             tokio::select! {
                 () = g.tracker.wait() => {}
-                () = tokio::time::sleep(drain) => {
+                () = tokio::time::sleep(force_after) => {
                     tracing::info!(listener = name, open = g.tracker.len(), "drain time over: closing connections of an older listener generation");
                     g.close.cancel();
                 }

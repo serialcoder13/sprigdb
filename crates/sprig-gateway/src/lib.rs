@@ -10,21 +10,42 @@
 //!   atomic resolver swap, `sprig_gateway_cert_expiry_seconds`;
 //! - [`frontend`]: the [`Frontend`](frontend::Frontend) trait the protocol
 //!   front ends plug into, and the [`ClientConn`](frontend::ClientConn)
-//!   they receive.
+//!   they receive;
+//! - [`session`]: sessions (build step 5): `Session`, the `SessionTable`
+//!   with connection ids, `SHOW PROCESSLIST` and `KILL`, the connection
+//!   task wrapper with panic isolation, and disconnect detection;
+//! - [`mysql`]: the MySQL 8.4 and MariaDB front ends (chapter 05 steps 3,
+//!   4, 6, 10 and 12): handshake and TLS upgrade, the auth plugins over the
+//!   interim accounts file, command dispatch, compression and live
+//!   listener hooks;
+//! - [`pipeline`]: the `Request`, `Executor` and `ResultSink` boundary
+//!   between front ends and the execution layer (step 9's interfaces), a
+//!   `NullExecutor` and a canned executor for tests.
 //!
 //! Listener settings come from the control plane: [`run`] mirrors the
 //! `global`, `dc` and `cluster` settings scopes from etcd
 //! ([`LiveSettings`]) and re-applies the listeners whenever their keys
 //! change ([`listener::live`]). Without `[meta] dc_seeds` (development
 //! without etcd) it runs on the built-in defaults, which then never change.
-//! With no front ends compiled in, every listener is reported as not
-//! applied.
+//! Listeners without a front end in this build (HTTP, MongoDB, Redis, ...)
+//! are reported as not applied.
 //!
-//! Not yet: front ends (chapters 05, 30, 37, 40), sessions, limits,
+//! - [`exec`]: the pass-through executor (decision D3) and the relay
+//!   engine (chapter 05 steps 7-9): statements to the login's cluster,
+//!   prepared statements across pooled connections, multi-statements,
+//!   `LOCAL INFILE`; requests reach it through the workload hook.
+//!
+//! Not yet: the other front ends (chapters 30, 37, 40), limits,
 //! registration and the other `MetaStore` caches (steps 4-10).
 
+pub mod backend;
+pub mod exec;
 pub mod frontend;
 pub mod listener;
+pub mod mysql;
+pub mod pipeline;
+pub mod reads;
+pub mod session;
 pub mod tls;
 
 use std::sync::Arc;
@@ -38,6 +59,7 @@ use sprig_settings::{LiveSettings, Registry, SettingCtx, SettingsStores};
 
 use crate::frontend::GatewayContext;
 use crate::listener::{Frontends, ListenerManager};
+use crate::session::SessionTable;
 use crate::tls::CertStore;
 
 /// Runs the gateway role until `ctx.shutdown` is cancelled.
@@ -68,9 +90,50 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let certs = Arc::new(CertStore::new(clock.clone()));
     let watcher = certs.spawn_watcher(tls::POLL_INTERVAL, ctx.shutdown.clone());
+    // Backend pools and read routing (chapter 06): clusters from the DC
+    // tier's registry, settings from the live mirror.
+    let stores = live.stores();
+    let backends = backend::Backends::new(
+        dc.clone(),
+        backend::RegistryClusters::new(
+            sprig_cluster::registry::ClusterRegistry::new(
+                Arc::clone(&stores.global),
+                Arc::clone(&stores.dc),
+            )?,
+            Duration::from_secs(2),
+        ),
+        backend::LiveBackendSettings::new(live.clone(), dc.clone()),
+    );
+    let _reaper = backends.start();
+    // The MySQL and MariaDB front ends (chapter 05): requests pass the
+    // workload hook (chapter 12, a no-op until M0.4) into the pass-through
+    // executor (decision D3).
+    let mysql = mysql::MySqlStack::start(
+        mysql::StackConfig {
+            accounts_file: ctx.config.gateway.accounts_file.clone(),
+            live: live.clone(),
+            dc: dc.clone(),
+            hostname: ctx.config.node.id(),
+            clock: clock.clone(),
+            executor: pipeline::with_workload(
+                Arc::new(exec::PassThrough::new(
+                    Arc::clone(&backends),
+                    exec::ExecSettingsSource::Live {
+                        live: live.clone(),
+                        dc: dc.clone(),
+                    },
+                )),
+                Arc::new(pipeline::NoWorkload),
+            ),
+        },
+        ctx.shutdown.clone(),
+    )?;
     let listeners = Arc::new(ListenerManager::new(
-        Frontends::new(),
-        Arc::new(GatewayContext::new(clock)),
+        mysql.register(Frontends::new()),
+        Arc::new(
+            GatewayContext::with_sessions(clock.clone(), Arc::new(SessionTable::new(clock)))
+                .with_backends(Arc::clone(&backends)),
+        ),
     ));
     // Subscribe before the first apply, so no change falls in between.
     let changes = live.subscribe(listener::live::LISTENER_KEYS);
@@ -98,7 +161,9 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     tracing::info!(%role, timeout_s = drain.as_secs(), "draining: closing listeners");
     let _ = follower.await;
     listeners.shutdown(drain).await;
+    backends.shutdown();
     let _ = watcher.await;
+    mysql.join().await;
     Ok(())
 }
 

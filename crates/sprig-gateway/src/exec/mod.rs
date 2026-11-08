@@ -1,0 +1,597 @@
+//! The pass-through executor (decision D3; chapter 05 build steps 7-9,
+//! chapter 06 "Acquire, sync and release"): every request of a session
+//! goes, as MySQL text or binary protocol, to the login's cluster through
+//! the session's [`BackendSession`], and the response streams back through
+//! the [relay engine](relay). The router (chapter 17) replaces it in R1
+//! behind the same [`Executor`] trait.
+//!
+//! | Request | Backend |
+//! |---|---|
+//! | `Query` | Split into statements ([`split`]); each is classified, routed (reads may go to a replica, chapter 06) and relayed; all but the last get `MORE_RESULTS_EXISTS`; an ERR stops the rest. More than one statement without multi-statements fails with 1064 |
+//! | `Prepare` | Prepared on the routed connection's statement cache; `PREPARE_OK`'s metadata from it |
+//! | `Execute` | The connection's own statement for the text (re-prepared lazily on another connection or node), types re-bound when it is fresh, long data folded in ([`stmt`]); a cursor pins the connection |
+//! | `Fetch` | `COM_STMT_FETCH` on the pinned connection; the last row unpins |
+//! | `LongData` | Buffered (39011 past `gateway.long_data_max_bytes`) |
+//! | `ResetStmt` | Buffers dropped; an open cursor is reset on its connection |
+//! | `CloseStmt` | Mapping dropped (backend statements stay cached per connection) |
+//! | `BulkExecute` | `COM_STMT_BULK_EXECUTE` with the id rewritten (3307) |
+//! | `FieldList` | `COM_FIELD_LIST`, definitions re-encoded |
+//!
+//! `LOAD DATA LOCAL INFILE` needs the client's `LOCAL_FILES` and
+//! `sql.local_infile = on`, else 3948 before anything reaches the backend;
+//! the backend's request must name the statement's file, else 39010.
+//!
+//! The [`BackendSession`] opens at the first request, when the client's
+//! capabilities and collation are known (the pool key depends on them).
+
+pub mod relay;
+pub mod settings;
+pub mod split;
+pub mod stmt;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use bytes::{BufMut, Bytes, BytesMut};
+use sprig_auth::BackendTarget;
+use sprig_common::{Result, SprigError};
+use sprig_proto_mysql::client::PacketKind;
+use sprig_proto_mysql::command::{CURSOR_TYPE_FOR_UPDATE, CURSOR_TYPE_READ_ONLY, CURSOR_TYPE_SCROLLABLE, com};
+use sprig_proto_mysql::packets::OkPacket;
+use sprig_proto_mysql::{Caps, ColumnDef, Persona, StatusFlags};
+
+use self::relay::{Infile, Relay, Relayed, backend_error, protocol_error, relay};
+pub use self::settings::{ExecSettings, ExecSettingsSource};
+use self::stmt::{Stmt, Stmts, bulk_payload, execute_payload};
+use crate::backend::{BackendSession, BackendStmt, Backends, SessionOpts, StmtInfo};
+use crate::pipeline::{
+    Abandon, EndOfRows, ExecCtx, ExecSummary, Executor, LoginInfo, PreparedMeta, Request, ResultSink, RowFormat,
+    SessionExec, StmtRef,
+};
+
+/// How long `abandoned` waits for `KILL QUERY`, and for the killed
+/// statement's response before its connection is discarded.
+const KILL_TIMEOUT: Duration = Duration::from_secs(3);
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The pass-through executor: one per gateway.
+#[derive(Debug, Clone)]
+pub struct PassThrough {
+    backends: Arc<Backends>,
+    settings: ExecSettingsSource,
+}
+
+impl PassThrough {
+    /// An executor over `backends`, reading its settings from `settings`.
+    #[must_use]
+    pub fn new(backends: Arc<Backends>, settings: ExecSettingsSource) -> Self {
+        Self { backends, settings }
+    }
+}
+
+impl Executor for PassThrough {
+    fn open(&self, login: &LoginInfo) -> Box<dyn SessionExec> {
+        Box::new(PassSession {
+            backends: Arc::clone(&self.backends),
+            target: login.backend.clone(),
+            persona: login.persona,
+            settings: self.settings.clone(),
+            bs: None,
+            stmts: Stmts::default(),
+        })
+    }
+}
+
+/// One session's side of the pass-through executor.
+pub struct PassSession {
+    backends: Arc<Backends>,
+    target: BackendTarget,
+    persona: Persona,
+    settings: ExecSettingsSource,
+    bs: Option<BackendSession>,
+    stmts: Stmts,
+}
+
+impl std::fmt::Debug for PassSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PassSession")
+            .field("cluster", &self.target.cluster)
+            .field("persona", &self.persona)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The MariaDB capabilities a backend connection takes from a 3307 client,
+/// so its packets need no rewriting for that client.
+const MARIADB_PASS_CAPS: Caps = Caps::MARIADB_CLIENT_EXTENDED_METADATA.union(Caps::MARIADB_CLIENT_STMT_BULK_OPERATIONS);
+
+fn mariadb_caps(persona: Persona, client: Caps) -> Caps {
+    match persona {
+        Persona::MariaDb => client & MARIADB_PASS_CAPS,
+        Persona::MySql84 => Caps::empty(),
+    }
+}
+
+/// 1064, as MySQL answers several statements without multi-statements.
+fn multi_statements_off(rest: &[u8]) -> SprigError {
+    let near: String = String::from_utf8_lossy(rest).chars().take(80).collect();
+    SprigError::standard(
+        1064,
+        *b"42000",
+        format!(
+            "You have an error in your SQL syntax; check the manual that corresponds to your server version for the right syntax to use near '{}' at line 1",
+            near.trim_start()
+        ),
+    )
+}
+
+/// 3948: `LOCAL INFILE` without the client's `LOCAL_FILES` or with
+/// `sql.local_infile = off`.
+fn local_infile_disabled() -> SprigError {
+    SprigError::standard(
+        3948,
+        *b"42000",
+        "Loading local data is disabled; this must be enabled on both the client and server sides",
+    )
+}
+
+/// 1421.
+fn no_open_cursor(stmt: StmtRef) -> SprigError {
+    SprigError::standard(1421, *b"HY000", format!("The statement ({}) has no open cursor.", stmt.0))
+}
+
+/// Whether `flags` (of `COM_STMT_EXECUTE`) ask for a cursor.
+fn wants_cursor(flags: u8) -> bool {
+    flags & (CURSOR_TYPE_READ_ONLY | CURSOR_TYPE_FOR_UPDATE | CURSOR_TYPE_SCROLLABLE) != 0
+}
+
+impl PassSession {
+    /// The backend session, opened with the client's capabilities.
+    fn bs(&mut self, cx: &ExecCtx<'_>) -> &mut BackendSession {
+        let backends = &self.backends;
+        let target = &self.target;
+        let persona = self.persona;
+        self.bs.get_or_insert_with(|| {
+            backends.session(
+                target.clone(),
+                SessionOpts {
+                    persona,
+                    found_rows: cx.proto.has(Caps::FOUND_ROWS),
+                    mariadb_caps: mariadb_caps(persona, cx.proto.caps),
+                    collation: cx.proto.collation,
+                    schema: cx.db.map(str::to_owned),
+                    ..SessionOpts::default()
+                },
+            )
+        })
+    }
+
+    fn backend_caps(&self, cx: &ExecCtx<'_>) -> Caps {
+        mariadb_caps(self.persona, cx.proto.caps)
+    }
+
+    /// The status flags the session has now, for answers the executor
+    /// makes itself.
+    fn status(&self) -> StatusFlags {
+        let mut s = StatusFlags::empty();
+        if let Some(bs) = &self.bs {
+            let autocommit_off = bs
+                .vars()
+                .vars
+                .get("autocommit")
+                .is_some_and(|v| v.eq_ignore_ascii_case("off") || v == "0");
+            if !autocommit_off {
+                s |= StatusFlags::AUTOCOMMIT;
+            }
+            if bs.pins().in_transaction() {
+                s |= StatusFlags::IN_TRANS;
+            }
+        } else {
+            s |= StatusFlags::AUTOCOMMIT;
+        }
+        s
+    }
+
+    /// Ends the statement in flight. A failure after the client's response
+    /// completed can't be reported any more (another packet would break
+    /// the protocol), so it is only logged.
+    async fn finish(&mut self, finished: bool) -> Result<Option<StatusFlags>> {
+        let Some(bs) = self.bs.as_mut() else {
+            return Ok(None);
+        };
+        match bs.finish().await {
+            Ok(o) => Ok(Some(o.status)),
+            Err(e) if finished => {
+                tracing::warn!(error = %e, "backend statement failed after its response was sent");
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn query(&mut self, cx: &mut ExecCtx<'_>, sql: Bytes, out: &mut dyn ResultSink) -> Result<ExecSummary> {
+        let mut pieces = split::split(&sql);
+        if pieces.len() > 1 && !cx.proto.multi_statements {
+            let second = pieces[1].as_ptr() as usize - sql.as_ptr() as usize;
+            return Err(multi_statements_off(&sql[second.min(sql.len())..]));
+        }
+        if pieces.is_empty() {
+            // Nothing but comments: the backend answers it (1065).
+            pieces.push(sql);
+        }
+        let backend_caps = self.backend_caps(cx);
+        let client_local = cx.proto.has(Caps::LOCAL_FILES);
+        let n = pieces.len();
+        let mut summary = ExecSummary::default();
+        for (i, piece) in pieces.into_iter().enumerate() {
+            let infile_name = split::local_infile_name(&piece);
+            let mut allowed = false;
+            if infile_name.is_some() {
+                allowed = client_local && self.settings.current().local_infile;
+                if !allowed {
+                    return Err(local_infile_disabled());
+                }
+            }
+            let info = StmtInfo::classify(&piece);
+            let bs = self.bs(cx);
+            bs.query(&info, &piece).await?;
+            let r = Relay {
+                more: i + 1 < n,
+                format: RowFormat::Text,
+                cursor: false,
+                fetch: false,
+                backend_caps,
+                infile: Infile {
+                    name: infile_name.as_deref(),
+                    allowed,
+                },
+            };
+            let relayed = relay(bs, out, &r).await?;
+            let status = self.finish(out.finished()).await?;
+            summary.status = status.or(relayed.status);
+            if relayed.errored {
+                break;
+            }
+        }
+        Ok(summary)
+    }
+
+    async fn prepare(&mut self, cx: &mut ExecCtx<'_>, sql: Bytes) -> Result<ExecSummary> {
+        let info = StmtInfo::classify(&sql);
+        let prepared = self.bs(cx).prepare(&info, &sql).await?;
+        let meta_params = prepared.param_defs.clone();
+        let meta_columns = prepared.columns.clone();
+        let stmt = self.stmts.insert(Stmt::new(sql, info, &prepared));
+        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).increment(1.0);
+        Ok(ExecSummary {
+            status: None,
+            prepared: Some(PreparedMeta {
+                stmt,
+                params: meta_params,
+                columns: meta_columns,
+                warnings: 0,
+            }),
+        })
+    }
+
+    async fn execute(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: StmtRef,
+        raw: &sprig_proto_mysql::command::StmtExecute,
+        params: &sprig_proto_mysql::command::ExecuteParams,
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
+        let persona = self.persona;
+        let backend_caps = self.backend_caps(cx);
+        let s = self.stmts.get_mut(stmt)?;
+        let values = s.params_for_backend(params, persona)?;
+        if params.new_params_bound {
+            s.types = Some(values.iter().map(|p| p.param_type).collect());
+        }
+        let cursor = wants_cursor(raw.flags) && !s.columns.is_empty();
+        let had_cursor = s.cursor.take().is_some();
+        let (sql, info) = (s.sql.clone(), s.info.clone());
+        let flags = raw.flags;
+        let client_bound = params.new_params_bound;
+        tracing::trace!(
+            stmt = stmt.0,
+            types = ?values.iter().map(|p| p.param_type).collect::<Vec<_>>(),
+            "execute parameters"
+        );
+        let bs = self.bs(cx);
+        if had_cursor {
+            // Executing again closes the old cursor on the server.
+            bs.close_cursor();
+        }
+        if cursor {
+            // Pin before routing, so FETCH finds the same connection.
+            bs.open_cursor();
+        }
+        let mut backend_id = 0u32;
+        let mut build = |b: &BackendStmt| {
+            backend_id = b.id;
+            execute_payload(b, flags, &values, client_bound)
+        };
+        if let Err(e) = bs.execute(&info, &sql, &mut build).await {
+            if cursor {
+                bs.close_cursor();
+            }
+            return Err(e);
+        }
+        let r = Relay {
+            more: false,
+            format: RowFormat::Binary,
+            cursor,
+            fetch: false,
+            backend_caps,
+            infile: Infile::default(),
+        };
+        let relayed = relay(bs, out, &r).await;
+        let status = self.finish(out.finished()).await;
+        let opened = matches!(relayed, Ok(Relayed { cursor_opened: true, .. }));
+        if cursor && !opened {
+            if let Some(bs) = self.bs.as_mut() {
+                bs.close_cursor();
+            }
+        } else if opened && let Ok(s) = self.stmts.get_mut(stmt) {
+            s.cursor = Some(backend_id);
+        }
+        let relayed = relayed?;
+        Ok(ExecSummary {
+            status: status?.or(relayed.status),
+            prepared: None,
+        })
+    }
+
+    async fn fetch(&mut self, cx: &mut ExecCtx<'_>, stmt: StmtRef, rows: u32, out: &mut dyn ResultSink) -> Result<ExecSummary> {
+        let backend_caps = self.backend_caps(cx);
+        let s = self.stmts.get_mut(stmt)?;
+        let Some(id) = s.cursor else {
+            return Err(no_open_cursor(stmt));
+        };
+        let info = s.info.clone();
+        let mut p = BytesMut::with_capacity(9);
+        p.put_u8(com::STMT_FETCH);
+        p.put_u32_le(id);
+        p.put_u32_le(rows);
+        let bs = self.bs(cx);
+        bs.command(&info, p.freeze()).await?;
+        let r = Relay {
+            more: false,
+            format: RowFormat::Binary,
+            cursor: false,
+            fetch: true,
+            backend_caps,
+            infile: Infile::default(),
+        };
+        let relayed = relay(bs, out, &r).await;
+        let status = self.finish(out.finished()).await;
+        let closed = match &relayed {
+            Ok(r) => r.errored || r.status.is_some_and(|s| s.contains(StatusFlags::LAST_ROW_SENT)),
+            Err(_) => true,
+        };
+        if closed {
+            self.close_cursor(stmt);
+        }
+        let relayed = relayed?;
+        Ok(ExecSummary {
+            status: status?.or(relayed.status),
+            prepared: None,
+        })
+    }
+
+    /// Forgets `stmt`'s cursor and its pin.
+    fn close_cursor(&mut self, stmt: StmtRef) {
+        if let Ok(s) = self.stmts.get_mut(stmt)
+            && s.cursor.take().is_some()
+            && let Some(bs) = self.bs.as_mut()
+        {
+            bs.close_cursor();
+        }
+    }
+
+    async fn reset_stmt(&mut self, cx: &mut ExecCtx<'_>, stmt: StmtRef, out: &mut dyn ResultSink) -> Result<ExecSummary> {
+        let backend_caps = self.backend_caps(cx);
+        let s = self.stmts.get_mut(stmt)?;
+        s.clear_long_data();
+        let Some(id) = s.cursor else {
+            // Nothing on a backend: long data lives here.
+            out.ok(OkPacket::new(self.status())).await?;
+            return Ok(ExecSummary::default());
+        };
+        let info = s.info.clone();
+        let mut p = BytesMut::with_capacity(5);
+        p.put_u8(com::STMT_RESET);
+        p.put_u32_le(id);
+        let bs = self.bs(cx);
+        bs.command(&info, p.freeze()).await?;
+        let r = Relay {
+            more: false,
+            format: RowFormat::Binary,
+            cursor: false,
+            fetch: false,
+            backend_caps,
+            infile: Infile::default(),
+        };
+        let relayed = relay(bs, out, &r).await;
+        let status = self.finish(out.finished()).await;
+        self.close_cursor(stmt);
+        let relayed = relayed?;
+        Ok(ExecSummary {
+            status: status?.or(relayed.status),
+            prepared: None,
+        })
+    }
+
+    async fn bulk(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: StmtRef,
+        raw: &sprig_proto_mysql::command::BulkExecute,
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
+        let backend_caps = self.backend_caps(cx);
+        let s = self.stmts.get_mut(stmt)?;
+        let (sql, info, params, types) = (s.sql.clone(), s.info.clone(), s.params, s.types.clone());
+        let bs = self.bs(cx);
+        let mut build = |b: &BackendStmt| bulk_payload(b, raw, params, types.as_deref());
+        bs.execute(&info, &sql, &mut build).await?;
+        let r = Relay {
+            more: false,
+            format: RowFormat::Binary,
+            cursor: false,
+            fetch: false,
+            backend_caps,
+            infile: Infile::default(),
+        };
+        let relayed = relay(bs, out, &r).await?;
+        let status = self.finish(out.finished()).await?;
+        Ok(ExecSummary {
+            status: status.or(relayed.status),
+            prepared: None,
+        })
+    }
+
+    async fn field_list(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        table: &[u8],
+        wildcard: &[u8],
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
+        let backend_caps = self.backend_caps(cx);
+        let mut p = BytesMut::with_capacity(2 + table.len() + wildcard.len());
+        p.put_u8(com::FIELD_LIST);
+        p.put_slice(table);
+        p.put_u8(0);
+        p.put_slice(wildcard);
+        let bs = self.bs(cx);
+        bs.command(&StmtInfo::read(), p.freeze()).await?;
+        let mut cols: Vec<ColumnDef> = Vec::new();
+        let mut done = false;
+        while let Some(pk) = bs.next().await? {
+            match pk.kind {
+                PacketKind::ColumnDef => cols.push(ColumnDef::decode(&pk.payload, backend_caps)?),
+                PacketKind::End(t) => {
+                    let mut status = t.status();
+                    status.remove(StatusFlags::SESSION_STATE_CHANGED);
+                    out.column_list(
+                        &cols,
+                        EndOfRows {
+                            status,
+                            warnings: t.warnings(),
+                        },
+                    )
+                    .await?;
+                    done = true;
+                }
+                PacketKind::Err(e) => {
+                    out.error(&backend_error(&e)).await?;
+                    done = true;
+                }
+                _ => return Err(protocol_error("in a COM_FIELD_LIST response")),
+            }
+        }
+        let status = self.finish(out.finished()).await?;
+        if !done {
+            return Err(protocol_error("COM_FIELD_LIST response without a terminator"));
+        }
+        Ok(ExecSummary { status, prepared: None })
+    }
+}
+
+#[async_trait]
+impl SessionExec for PassSession {
+    async fn execute(&mut self, cx: &mut ExecCtx<'_>, req: Request, out: &mut dyn ResultSink) -> Result<ExecSummary> {
+        match req {
+            Request::Query { sql, attrs: _ } => self.query(cx, sql, out).await,
+            Request::Prepare { sql } => self.prepare(cx, sql).await,
+            Request::Execute { stmt, raw, params } => self.execute(cx, stmt, &raw, &params, out).await,
+            Request::Fetch { stmt, rows } => self.fetch(cx, stmt, rows, out).await,
+            Request::LongData { stmt, param, data } => {
+                let limit = self.settings.current().long_data_max;
+                // An unknown statement is reported by nothing: long data
+                // has no response.
+                if let Ok(s) = self.stmts.get_mut(stmt) {
+                    s.add_long_data(param, &data, limit);
+                }
+                Ok(ExecSummary::default())
+            }
+            Request::ResetStmt { stmt } => self.reset_stmt(cx, stmt, out).await,
+            Request::CloseStmt { stmt } => {
+                self.close_cursor(stmt);
+                if self.stmts.remove(stmt).is_some() {
+                    metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).decrement(1.0);
+                }
+                Ok(ExecSummary::default())
+            }
+            Request::BulkExecute { stmt, raw } => self.bulk(cx, stmt, &raw, out).await,
+            Request::FieldList { table, wildcard } => self.field_list(cx, &table, &wildcard, out).await,
+        }
+    }
+
+    async fn init_db(&mut self, cx: &mut ExecCtx<'_>, schema: &str) -> Result<()> {
+        let sql = format!("USE {}", crate::backend::state::quote_ident(schema));
+        let info = StmtInfo::classify(sql.as_bytes());
+        let bs = self.bs(cx);
+        bs.query(&info, sql.as_bytes()).await?;
+        let mut err = None;
+        while let Some(p) = bs.next().await? {
+            if let PacketKind::Err(e) = p.kind {
+                err = Some(backend_error(&e));
+            }
+        }
+        bs.finish().await?;
+        err.map_or(Ok(()), Err)
+    }
+
+    async fn reset(&mut self, _cx: &mut ExecCtx<'_>) -> Result<()> {
+        let n = self.stmts_len();
+        self.stmts.clear();
+        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).decrement(n);
+        match self.bs.as_mut() {
+            Some(bs) => bs.reset().await,
+            None => Ok(()),
+        }
+    }
+
+    async fn abandoned(&mut self, _cx: &mut ExecCtx<'_>, why: Abandon) {
+        let Some(bs) = self.bs.as_mut() else {
+            return;
+        };
+        match why {
+            // KILL QUERY on the backend, then drain the killed statement so
+            // the connection and an open transaction survive (as on MySQL).
+            Abandon::Killed => bs.abandon(DRAIN_TIMEOUT).await,
+            // The session ends: stop the backend's work, drop the connection.
+            Abandon::ClientGone => {
+                if let Err(e) = tokio::time::timeout(KILL_TIMEOUT, bs.kill_query())
+                    .await
+                    .unwrap_or_else(|_| Err(SprigError::internal("KILL QUERY timed out")))
+                {
+                    tracing::debug!(error = %e, "KILL QUERY on the backend failed");
+                }
+                bs.close().await;
+            }
+        }
+    }
+
+    async fn close(&mut self) {
+        let n = self.stmts_len();
+        self.stmts.clear();
+        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).decrement(n);
+        if let Some(bs) = self.bs.as_mut() {
+            bs.close().await;
+        }
+    }
+}
+
+impl PassSession {
+    #[allow(clippy::cast_precision_loss)] // a gauge
+    fn stmts_len(&self) -> f64 {
+        self.stmts.len() as f64
+    }
+}
+

@@ -210,6 +210,71 @@ services:
     profiles: [elle]
     network_mode: none
 
+  # --- connector matrix and sysbench (chapter 46, step 5; chapter 05,
+  # step 13): profile connectors. One image per client runtime; run.sh
+  # builds them and runs one container per connector and TLS mode, one at a
+  # time, against any endpoint (MariaDB or MySQL directly today, the
+  # gateway's 3306 and 3307 later):
+  #
+  #   connectors/run.sh 127.0.0.1 13301 mariadb
+  #
+  # Containers reach a loopback target through host.docker.internal on
+  # Docker Desktop, or the host network on Linux (SPRIG_CONN_NETWORK_MODE,
+  # which run.sh sets). See connectors/README.md.
+  conn-java: &connector
+    build: ./connectors/java
+    image: sprigdb-conn-java:dev
+    profiles: [connectors]
+    network_mode: ${SPRIG_CONN_NETWORK_MODE:-bridge}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    mem_limit: 768m
+
+  conn-go:
+    <<: *connector
+    build: ./connectors/go
+    image: sprigdb-conn-go:dev
+    mem_limit: 256m
+
+  conn-node:
+    <<: *connector
+    build: ./connectors/node
+    image: sprigdb-conn-node:dev
+    mem_limit: 512m
+
+  conn-python:
+    <<: *connector
+    build: ./connectors/python
+    image: sprigdb-conn-python:dev
+    mem_limit: 512m
+
+  conn-php:
+    <<: *connector
+    build: ./connectors/php
+    image: sprigdb-conn-php:dev
+    mem_limit: 768m
+
+  conn-mysql-cli:
+    <<: *connector
+    build:
+      context: ./connectors/cli
+      args: { BASE: "mysql:8.4.11" }
+    image: sprigdb-conn-mysql-cli:dev
+    mem_limit: 512m
+
+  conn-mariadb-cli:
+    <<: *connector
+    build:
+      context: ./connectors/cli
+      args: { BASE: "mariadb:11.8.9" }
+    image: sprigdb-conn-mariadb-cli:dev
+    mem_limit: 512m
+
+  sysbench:
+    <<: *connector
+    build: ./connectors/sysbench
+    image: sprigdb-sysbench:dev
+    mem_limit: 256m
+
 networks:
   dc-a: {}
 

@@ -88,7 +88,7 @@ jobs:
       - name: Validate every profile and the three-DC layout
         working-directory: deploy/compose
         run: |
-          for p in single replication galera all faults elle; do
+          for p in single replication galera all faults elle connectors; do
             docker compose --profile "$p" config --quiet
           done
           ./3dc.sh config --quiet
@@ -271,3 +271,64 @@ jobs:
           docker rm -f sprig-ci-toxiproxy || true
           docker compose -f deploy/compose/compose.yaml --profile faults down --timeout 10 || true
           deploy/compose/3dc.sh down -v --timeout 10
+
+  # ------------------------------------------------------- M0.2 gate ----
+  # Milestone M0.2's "done when" (chapter 48): the tier 1 connectors and
+  # sysbench pass through the gateway on 3306 (persona mysql) and 3307
+  # (persona mariadb), and the gateway adds at most 0.5 ms at p50 over
+  # direct MariaDB. The harness is deploy/compose/connectors (README there);
+  # it already passes against MariaDB 11.8 and MySQL 8.4 directly.
+  #
+  # Disabled until the gateway serves the MySQL protocol (chapter 05, build
+  # step 13). To enable: drop `if: false` (or narrow it, e.g. to
+  # workflow_dispatch and schedule), and replace the "Start the gateway"
+  # step with however the gateway is configured then; per-target outcomes go
+  # in an overlay file named by SPRIG_CONN_EXPECTED_OVERLAY.
+  connectors:
+    name: M0.2 connector matrix and latency gate (gateway)
+    needs: [integration]
+    if: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SPRIG_TEST_DOCKER: "1"
+      SPRIG_TEST_CONNECTORS: 127.0.0.1:3306:mysql,127.0.0.1:3307:mariadb
+      SPRIG_TEST_LATENCY_TARGET: mysql://root:sprig-dev-root@127.0.0.1:3307
+      SPRIG_TEST_LATENCY_BASELINE: mysql://root:sprig-dev-root@127.0.0.1:13301
+      SPRIG_TEST_LATENCY_SAMPLES: "5000"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Compose (one node) and build the connector images
+        working-directory: deploy/compose
+        run: |
+          docker compose --profile single up -d --wait --wait-timeout 300
+          docker compose --profile connectors build --quiet
+      - run: cargo build --release --locked -p sprigdb
+      - name: Start the gateway
+        run: |
+          # Placeholder until chapter 04/05 settle the gateway's settings:
+          # listeners on 3306 (mysql) and 3307 (mariadb), backed by the
+          # Compose single node.
+          SPRIGDB_NODE_DC=dc-a target/release/sprigdb --config deploy/compose/sprigdb.dev.toml gateway \
+            > target/gateway.log 2>&1 &
+          for port in 3306 3307; do
+            timeout 60 bash -c "until (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; do sleep 1; done"
+          done
+      - name: Connector matrix and sysbench, both ports
+        run: cargo test --release --locked -p sprig-testkit --test connectors_matrix -- --ignored --nocapture
+      - name: Latency gate (3307 against direct MariaDB)
+        run: cargo test --release --locked -p sprig-testkit --test latency_gate -- --ignored --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m02-connectors
+          path: |
+            deploy/compose/connectors/results
+            target/gateway.log
+          if-no-files-found: ignore
+      - name: Stop Compose
+        if: always()
+        working-directory: deploy/compose
+        run: docker compose --profile single down -v --timeout 10

@@ -94,6 +94,13 @@ impl Credential {
         }
     }
 
+    /// The password, for clients that log in themselves (the gateway's
+    /// backend client, chapter 06). Never log it.
+    #[must_use]
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+
     /// An endpoint for `node` with this credential: TCP only (never the
     /// server's socket file, which would bypass TLS) and TLS always.
     ///
