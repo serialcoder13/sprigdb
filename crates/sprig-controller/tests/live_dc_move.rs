@@ -10,7 +10,10 @@
 //! Writers in both DCs (connection attribute `sprig_dc`) run logged
 //! transactions through their own DC's gateway: the tenant's home is the
 //! other DC for half of them (remote homes). `sprigctl tenant move dc-move
-//! --to fra1` moves the tenant, then `--to mum1` moves it back. Probe
+//! --to <the other DC>` moves the tenant; run the test again to move it
+//! back. (The cluster it left keeps the fenced source for
+//! `mover.source_retain_hours`, so a move back picks another cluster:
+//! the bed has two in mum1.) Probe
 //! sessions opened before each move check what chapter 24 promises:
 //! an idle session with a variable, a default database and a prepared
 //! statement follows transparently; one holding a temporary table gets
@@ -415,7 +418,7 @@ async fn run_move(from: &str, to: &str) -> (u64, u64, Duration, Duration) {
     (pause, duration, gap, l.max_latency)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn tenant_moves_between_data_centers_under_load() {
     if !enabled() {
         eprintln!("skipped: set SPRIG_TEST_DC_MOVE=1 with deploy/compose/dc/run.sh up");
@@ -432,7 +435,7 @@ async fn tenant_moves_between_data_centers_under_load() {
                 .tcp_port(port(&home))
                 .user(Some(format!("{TENANT}.app")))
                 .pass(Some("sprig-dev-app"))
-            .ssl_opts(tls()),
+                .ssl_opts(tls()),
         );
         let mut c = setup.get_conn().await.unwrap();
         c.query_drop("CREATE DATABASE IF NOT EXISTS dc_log")
@@ -486,19 +489,11 @@ async fn tenant_moves_between_data_centers_under_load() {
     tokio::time::sleep(Duration::from_secs(12)).await;
     let tr = sprigctl(away, &["tenant", "traffic", TENANT]);
     println!("traffic on {away} after the move: {}", tr["clients"]);
-    let second = run_move(away, &home).await;
-    assert_eq!(
-        checksum(&home).await,
-        before,
-        "filler unchanged after {away} -> {home}"
-    );
     println!(
-        "summary: {home}->{away} pause {} ms, commit after {} ms, ack gap {} ms; {away}->{home} pause {} ms, commit after {} ms, ack gap {} ms",
+        "summary: {home}->{away} pause {} ms, commit after {} ms, longest gap between acknowledged writes {} ms, longest write {} ms",
         first.0,
         first.1,
         first.2.as_millis(),
-        second.0,
-        second.1,
-        second.2.as_millis()
+        first.3.as_millis()
     );
 }

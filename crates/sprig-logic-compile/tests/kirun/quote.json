@@ -1,0 +1,28 @@
+{"namespace": "Shop", "name": "Quote",
+ "parameters": {
+   "productId": {"parameterName": "productId", "schema": {"type": ["LONG"]}},
+   "qty": {"parameterName": "qty", "schema": {"type": ["INTEGER"], "minimum": 1}}},
+ "events": {"output": {"name": "output", "parameters": {"total": {"type": ["DOUBLE"]}}},
+            "error": {"name": "error", "parameters": {"message": {"type": ["STRING"]}}}},
+ "steps": {
+  "item": {"statementName": "item", "namespace": "Sprig.Db", "name": "QueryOne",
+    "parameterMap": {
+      "sql": {"s": {"key": "s", "type": "VALUE", "value": "SELECT price, stock FROM products WHERE id = ?"}},
+      "args": {"a": {"key": "a", "type": "EXPRESSION", "expression": "Arguments.productId"}}}},
+  "enough": {"statementName": "enough", "namespace": "System", "name": "If",
+    "parameterMap": {"condition": {"c": {"key": "c", "type": "EXPRESSION",
+      "expression": "Steps.item.output.row.stock >= Arguments.qty"}}}},
+  "sum": {"statementName": "sum", "namespace": "System.Math", "name": "Add",
+    "executeIftrue": {"Steps.enough.true": true},
+    "parameterMap": {"value": {
+      "v1": {"key": "v1", "type": "EXPRESSION", "order": 1, "expression": "Steps.item.output.row.price * Arguments.qty"},
+      "v2": {"key": "v2", "type": "VALUE", "order": 2, "value": 40}}}},
+  "done": {"statementName": "done", "namespace": "System", "name": "GenerateEvent",
+    "dependentStatements": {"Steps.sum.output": true},
+    "parameterMap": {"results": {"r": {"key": "r", "type": "VALUE", "value": {"name": "total",
+      "value": {"isExpression": true, "value": "Steps.sum.output.value"}}}}}},
+  "short": {"statementName": "short", "namespace": "System", "name": "GenerateEvent",
+    "executeIftrue": {"Steps.enough.false": true},
+    "parameterMap": {"eventName": {"e": {"key": "e", "type": "VALUE", "value": "error"}},
+      "results": {"r": {"key": "r", "type": "VALUE", "value": {"name": "message",
+        "value": {"isExpression": false, "value": "not enough stock"}}}}}}}}

@@ -1,0 +1,141 @@
+function Test.Loops (n: i64 [0..50], stopAt: i64, items: json) -> events {output{total: i64, evens: i64, stoppedAt: i64, spend: f64, count: i64, down: f64}}
+  1 ctx_down: f64 := to_f64(0)
+  2 downloop_value: f64 := 2.5
+  3 downloop_to: f64 := to_f64(0)
+  4 downloop_break: bool := false
+  5 while and(gt(downloop_value, downloop_to), not(downloop_break)) (bound 5)
+  6   downloop_index: f64 := downloop_value
+  7   downloop_value: f64 := add(downloop_value, -0.5)
+  8   ctx_down: f64 := add(ctx_down, downloop_index)
+  9 ctx_evens: i64 := 0
+ 10 ctx_spend: f64 := to_f64(0)
+ 11 each_source: json := items
+ 12 each_length: i64 := coalesce(json_len(each_source), 0)
+ 13 each_value: i64 := 0
+ 14 each_break: bool := false
+ 15 while and(lt(each_value, each_length), not(each_break)) (guarded)
+ 16   each_index: i64 := each_value
+ 17   each_each: json := each_source[each_value]
+ 18   each_value: i64 := add(each_value, 1)
+ 19   ctx_spend: f64 := add(ctx_spend, mul(json_num(each_each.price), json_num(each_each.qty)))
+ 20 ctx_total: i64 := 0
+ 21 range_value: i64 := 1
+ 22 range_to: i64 := add(n, 1)
+ 23 range_break: bool := false
+ 24 while and(lt(range_value, range_to), not(range_break)) (bound 50)
+ 25   range_index: i64 := range_value
+ 26   range_value: i64 := add(range_value, 1)
+ 27   ctx_total: i64 := add(ctx_total, range_index)
+ 28   if truthy(seq(mod(range_index, 2), 0))
+ 29     ctx_evens: i64 := add(ctx_evens, 1)
+ 30 count_value: i64 := 0
+ 31 count_count: i64 := 1000
+ 32 count_break: bool := false
+ 33 while and(lt(count_value, count_count), not(count_break)) (bound 1000)
+ 34   count_index: i64 := count_value
+ 35   count_value: i64 := add(count_value, 1)
+ 36   if truthy(ge(count_index, stopAt))
+ 37     count_break: bool := true
+ 38 emit output {total: ctx_total, evens: ctx_evens, stoppedAt: count_value, spend: ctx_spend, count: json_len(items), down: ctx_down}
+
+-- cost 0 reads [] writes [] guarded 1
+
+CREATE OR REPLACE PACKAGE __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR);
+END;
+
+CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
+    v VARCHAR(128) := LEFT(msg, 128);
+  BEGIN
+    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+  END;
+END;
+
+CREATE OR REPLACE PROCEDURE __sprig_l44_v1 (
+    p_n IN BIGINT,
+    p_stopat IN BIGINT,
+    p_items IN LONGTEXT,
+    p__event OUT VARCHAR(64),
+    p__result OUT LONGTEXT
+  )
+  SQL SECURITY INVOKER
+AS
+  v_ctx_down DOUBLE;
+  v_downloop_break BOOLEAN;
+  v_downloop_value DOUBLE;
+  v_downloop_to DOUBLE;
+  v_downloop_index DOUBLE;
+  v_ctx_evens BIGINT;
+  v_ctx_spend DOUBLE;
+  v_each_break BOOLEAN;
+  v_each_source LONGTEXT;
+  v_each_length BIGINT;
+  v_each_value BIGINT;
+  v_each_each LONGTEXT;
+  v_each_index BIGINT;
+  v_ctx_total BIGINT;
+  v_range_break BOOLEAN;
+  v_range_value BIGINT;
+  v_range_to BIGINT;
+  v_range_index BIGINT;
+  v_count_break BOOLEAN;
+  v_count_value BIGINT;
+  v_count_count BIGINT;
+  v_count_index BIGINT;
+  v__guard0 BIGINT := 0;
+BEGIN
+  v_ctx_down := (0 + 0e0);
+  v_downloop_value := 2.5e0;
+  v_downloop_to := (0 + 0e0);
+  v_downloop_break := FALSE;
+  WHILE (COALESCE(((COALESCE((v_downloop_value > v_downloop_to), 0) <> 0) AND (COALESCE((NOT (COALESCE(v_downloop_break, 0) <> 0)), 0) <> 0)), 0) <> 0) LOOP
+    v_downloop_index := v_downloop_value;
+    v_downloop_value := (v_downloop_value + (-5e-1));
+    v_ctx_down := (v_ctx_down + v_downloop_index);
+  END LOOP;
+  v_ctx_evens := 0;
+  v_ctx_spend := (0 + 0e0);
+  v_each_source := p_items;
+  v_each_length := COALESCE(JSON_LENGTH(v_each_source), 0);
+  v_each_value := 0;
+  v_each_break := FALSE;
+  WHILE (COALESCE(((COALESCE((v_each_value < v_each_length), 0) <> 0) AND (COALESCE((NOT (COALESCE(v_each_break, 0) <> 0)), 0) <> 0)), 0) <> 0) LOOP
+    v__guard0 := v__guard0 + 1;
+    IF v__guard0 > 100000 THEN __sprig_l44_v1_lib.fail(39864, 'loop budget: more than 100000 iterations'); END IF;
+    v_each_index := v_each_value;
+    v_each_each := (CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_source, CONCAT('$[', v_each_value, ']'))) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_source, CONCAT('$[', v_each_value, ']')) END);
+    v_each_value := (v_each_value + 1);
+    v_ctx_spend := (v_ctx_spend + (CAST(JSON_VALUE((CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_each, '$."price"')) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_each, '$."price"') END), '$') AS DOUBLE) * CAST(JSON_VALUE((CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_each, '$."qty"')) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_each, '$."qty"') END), '$') AS DOUBLE)));
+  END LOOP;
+  v_ctx_total := 0;
+  v_range_value := 1;
+  v_range_to := (p_n + 1);
+  v_range_break := FALSE;
+  WHILE (COALESCE(((COALESCE((v_range_value < v_range_to), 0) <> 0) AND (COALESCE((NOT (COALESCE(v_range_break, 0) <> 0)), 0) <> 0)), 0) <> 0) LOOP
+    v_range_index := v_range_value;
+    v_range_value := (v_range_value + 1);
+    v_ctx_total := (v_ctx_total + v_range_index);
+    IF (COALESCE((MOD(v_range_index, 2) <=> 0), 0) <> 0) THEN
+      v_ctx_evens := (v_ctx_evens + 1);
+    END IF;
+  END LOOP;
+  v_count_value := 0;
+  v_count_count := 1000;
+  v_count_break := FALSE;
+  WHILE (COALESCE(((COALESCE((v_count_value < v_count_count), 0) <> 0) AND (COALESCE((NOT (COALESCE(v_count_break, 0) <> 0)), 0) <> 0)), 0) <> 0) LOOP
+    v_count_index := v_count_value;
+    v_count_value := (v_count_value + 1);
+    IF (COALESCE((v_count_index >= p_stopat), 0) <> 0) THEN
+      v_count_break := TRUE;
+    END IF;
+  END LOOP;
+  IF p__event IS NULL THEN
+    p__event := 'output';
+    p__result := JSON_OBJECT('total', (v_ctx_total + 0), 'evens', (v_ctx_evens + 0), 'stoppedAt', (v_count_value + 0), 'spend', (v_ctx_spend + 0e0), 'count', (JSON_LENGTH(p_items) + 0), 'down', (v_ctx_down + 0e0));
+  END IF;
+  RETURN;
+  IF p__event IS NULL THEN
+    __sprig_l44_v1_lib.fail(39866, 'No events raised');
+  END IF;
+END

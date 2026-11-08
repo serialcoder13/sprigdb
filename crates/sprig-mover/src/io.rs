@@ -219,6 +219,19 @@ pub enum CommitOutcome {
     Unknown,
 }
 
+/// The feed handoff a cutover commits with the flip (chapter 10, "The feed
+/// handoff"; chapter 38).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffPos {
+    /// `G`: the source position no write to the tenant follows.
+    pub fence: GtidPos,
+    /// `H`: the target position after the mover's last write.
+    pub start: GtidPos,
+    /// Wall-clock time of the commit attempt (ms since the Unix epoch):
+    /// the handoff's HLC floor and commit time.
+    pub at_ms: u64,
+}
+
 /// What a map says about a job's tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapState {
@@ -258,6 +271,19 @@ pub trait MapIo: Send + Sync {
     async fn release(&self, job: JobId, token: u64) -> Result<Released>;
     /// Points the map at `to` with epoch `E + 1`, if `job`/`token` holds it.
     async fn commit(&self, job: JobId, token: u64, to: &ClusterId) -> Result<CommitOutcome>;
+    /// [`Self::commit`], recording `handoff` for the change feed in the
+    /// same commit. The default records nothing (moves between data
+    /// centers, R2).
+    async fn commit_handoff(
+        &self,
+        job: JobId,
+        token: u64,
+        to: &ClusterId,
+        handoff: &HandoffPos,
+    ) -> Result<CommitOutcome> {
+        let _ = handoff;
+        self.commit(job, token, to).await
+    }
     /// Raises the epoch without moving (copy-and-swap: gateways refresh
     /// table metadata), if `job`/`token` holds the map.
     async fn bump(&self, job: JobId, token: u64) -> Result<CommitOutcome>;

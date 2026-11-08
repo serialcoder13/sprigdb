@@ -44,6 +44,9 @@
 //!   11): stuck DDL jobs finished or rolled back, missing and orphan
 //!   schemas, outside objects adopted, tombstones purged by age, clamped
 //!   setting values counted.
+//! - [`failover`]: chapter 25's DC failover: permits and observers
+//!   served from the DC lease, the global leader's decision, promotion
+//!   with its commit point, and recovery of a returning DC (R2).
 //!
 //! Not yet: the relay and peer services (R2), the latency prober, the
 //! global loops (`directory`, `tree_moves`, `dc_registry`), subtree moves,
@@ -60,6 +63,7 @@ pub mod catalog_reconciler;
 pub mod catalogs;
 pub mod dc;
 pub mod dispatch;
+pub mod failover;
 pub mod live;
 pub mod migrate;
 pub mod monitor;

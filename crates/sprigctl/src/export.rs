@@ -356,7 +356,7 @@ pub(crate) fn push_literal(out: &mut String, v: &Value, kind: Literal) {
     };
     match (v, kind) {
         (Value::NULL, _) => out.push_str("NULL"),
-        (Value::Bytes(b), Literal::Number) if b.iter().all(|c| c.is_ascii_graphic()) => {
+        (Value::Bytes(b), Literal::Number) if b.iter().all(u8::is_ascii_graphic) => {
             out.push_str(&String::from_utf8_lossy(b));
         }
         (Value::Bytes(b), Literal::Binary) => hex(out, b),
@@ -1142,6 +1142,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn checksums_ignore_row_order_and_tell_null_from_empty() {
         let a = vec![Value::Bytes(b"1".to_vec()), Value::NULL];
         let b = vec![Value::Bytes(b"2".to_vec()), Value::Bytes(Vec::new())];

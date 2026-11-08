@@ -1,0 +1,10 @@
+suite = "txn"
+seed = 502617375
+failure = "txn 374 (None): PARTIAL commit, rows on {2} of {2, 3}, client got Some(Failed(39034))"
+
+[[plan.faults]]
+at_ms = 27055
+kind = "partition"
+a = ["g1n1"]
+b = ["b1", "g2n1", "b2", "a1", "ctl", "gw"]
+for_ms = 1027

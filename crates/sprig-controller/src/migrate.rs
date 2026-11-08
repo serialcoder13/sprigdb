@@ -216,8 +216,15 @@ impl DcMoves {
     }
 
     /// The target cluster in `to`: `asked`, or the active cluster with
-    /// the lowest id.
-    async fn target_cluster(&self, to: &DcId, asked: Option<&str>) -> Result<ClusterId> {
+    /// the lowest id. A cluster in `retained` still holds the fenced source
+    /// of an earlier move of the tenant (`mover.source_retain_hours`), whose
+    /// schemas a new copy can't take: it is skipped, or refused if asked.
+    async fn target_cluster(
+        &self,
+        to: &DcId,
+        asked: Option<&str>,
+        retained: &HashSet<ClusterId>,
+    ) -> Result<ClusterId> {
         let reg = ClusterRegistry::new(
             TierView::over(&self.store, Tier::Global),
             TierView::over(&self.store, Tier::Dc(to.clone())),
@@ -233,7 +240,12 @@ impl DcMoves {
         match asked {
             Some(a) => {
                 let id = ClusterId::new(a).map_err(|e| refused(format!("--cluster {a}: {e}")))?;
-                if active.contains(&id) {
+                if retained.contains(&id) {
+                    Err(refused(format!(
+                        "{id} still holds the retained source of the tenant's last move; \
+                         choose another cluster"
+                    )))
+                } else if active.contains(&id) {
                     Ok(id)
                 } else {
                     Err(refused(format!("{id} isn't an active cluster of {to}")))
@@ -241,8 +253,12 @@ impl DcMoves {
             }
             None => active
                 .into_iter()
-                .next()
-                .ok_or_else(|| refused(format!("{to} has no active cluster"))),
+                .find(|c| !retained.contains(c))
+                .ok_or_else(|| {
+                    refused(format!(
+                        "{to} has no active cluster without a retained copy of the tenant"
+                    ))
+                }),
         }
     }
 
@@ -307,7 +323,8 @@ impl DcMoves {
                 active_only: true,
             })
             .await?;
-        if let Some(j) = open.first() {
+        // A committed job that only retains its source doesn't block.
+        if let Some(j) = open.iter().find(|j| !j.state.is_committed()) {
             return Err(refused(format!(
                 "mover job {} of tenant {name} is still open",
                 j.id.0
@@ -317,7 +334,14 @@ impl DcMoves {
             .load(tenant)
             .await?;
         let from_cluster = Placement::of(&map)?.cluster;
-        let to_cluster = self.target_cluster(&to, req.cluster.as_deref()).await?;
+        let retained: HashSet<ClusterId> = open
+            .iter()
+            .filter(|j| j.state.is_committed())
+            .filter_map(|j| j.source.clone())
+            .collect();
+        let to_cluster = self
+            .target_cluster(&to, req.cluster.as_deref(), &retained)
+            .await?;
         let budget = req
             .max_pause_ms
             .unwrap_or_else(|| self.setting(&WRITE_PAUSE_TARGET_MS))

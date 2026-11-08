@@ -34,6 +34,14 @@ MariaDB):
   called from a view, and an event are all refused by MariaDB, and every
   routine, trigger, event and view of both tenants is defined by its own
   tenant's account;
+- grants on dropped tables (`auth.grants_on_drop`, tenant A, both
+  personas): a user holding `SELECT, INSERT, CREATE, DROP` on one table
+  runs `DROP TABLE` then `CREATE TABLE`, as `mysqldump` restores do. With
+  `keep` (the default) its access continues, also when the administrator
+  re-creates the table and across `DROP DATABASE` / `CREATE DATABASE`;
+  with `drop` its `CREATE TABLE` and any access to a table the
+  administrator re-creates get 1142; a database value wins over the
+  tenant's;
 - propagation: a session on the second gateway reads a table, the
   administrator revokes the grant (table level, then database level while
   the session is `USE`d into it) on the first, and the session polls until
@@ -42,6 +50,15 @@ MariaDB):
 Results go to `results/` (`report.jsonl`, one line per check;
 `suite.log`; `gateway-2.log`).
 
+To run it against your own gateways and tenants instead of the shared
+development ones, set `SPRIG_M05_TENANTS` (`"acme globex"`),
+`SPRIG_M05_PASSWORD`, `SPRIG_M05_MYSQL_PORT` and `SPRIG_M05_MARIADB_PORT`
+(the first gateway, already running), `SPRIG_M05_GW2_CONFIG` and
+`SPRIG_M05_GW2_PORT` (the second, which the script starts), and
+`SPRIG_M05_BIN`.
+
 Measured on 8 November 2026 (laptop, Docker Desktop, debug build, two
 gateways): 301 checks, 0 failures; a `REVOKE` was refused on the second
-gateway 112 to 186 ms after it was sent.
+gateway 112 to 186 ms after it was sent. With the grants-on-drop cases
+(pluggable authorization, the same day): 333 checks, 0 failures; a
+`REVOKE` was refused on the second gateway 36 to 37 ms after it was sent.

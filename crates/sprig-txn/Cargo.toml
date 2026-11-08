@@ -8,5 +8,22 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+metrics.workspace = true
+mysql_async.workspace = true
+sprig-common.workspace = true
+sprig-settings.workspace = true
+# Chapter 19's lookup sessions (`DistTxn` implements `LookupSessions`).
+sprig-shard.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# The deterministic simulation (chapter 46) and the MariaDB model.
+sprig-testkit.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

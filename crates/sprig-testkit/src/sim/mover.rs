@@ -29,6 +29,10 @@
 //! 6. A committed cutover's hold ends within `mover.cutover_max_hold_ms`
 //!    plus the hold grace.
 //! 7. Every job ends `done` or `rolled_back`.
+//! 8. The feed handoff: a feed consumer reading across the move, crashing
+//!    and resuming, durably sees every committed change of the tenant
+//!    exactly once, in commit order, none of the mover's copies, and no
+//!    physical name ([`feed`]).
 
 #![allow(clippy::many_single_char_names)] // keys, values, tables: k, v, t
 
@@ -42,6 +46,7 @@ use sprig_common::ids::{ClusterId, JobId, TenantId};
 use sprig_common::time::Clock;
 use sprig_common::{CancellationToken, Result, SprigCode, SprigError};
 use sprig_meta::{Cmp, Op, Record, Tier, Txn};
+use sprig_mover::HandoffPos;
 use sprig_mover::io::{
     ChangeStream, CommitOutcome, Counter, Fenced, JobEnv, Load, MapIo, MapState, Released,
     SourceIo, TargetIo,
@@ -60,6 +65,8 @@ use tokio::sync::Notify;
 
 use super::{SimClock, SimRng, World};
 use crate::faults::Node;
+
+mod feed;
 
 /// The tenant moved.
 const TENANT: TenantId = TenantId(1);
@@ -143,6 +150,17 @@ enum Entry {
 
 type Rows = BTreeMap<String, BTreeMap<i64, String>>;
 
+/// One binlog group of the target model.
+#[derive(Debug, Clone)]
+enum TgtEntry {
+    /// A mover apply: rows and the job's position row, in one transaction.
+    Apply(Vec<ModelChange>),
+    /// A client's write after the cutover.
+    Client(ModelChange),
+    /// DDL the mover ran (table creation).
+    Ddl(String),
+}
+
 /// The two clusters.
 #[derive(Debug, Default)]
 struct Db {
@@ -154,6 +172,7 @@ struct Db {
     dropped: bool,
     versions: BTreeSet<(String, i64, String)>,
     tgt: Rows,
+    tgt_binlog: Vec<TgtEntry>,
     tgt_pos: Option<PosRow>,
     /// Client acknowledgements, by time: (on target, at).
     last_src_ack: Option<Duration>,
@@ -564,6 +583,10 @@ impl TargetIo for SimTarget {
         let mut db = lock(&self.db);
         for t in tables {
             db.tgt.entry(t.name.clone()).or_default();
+            db.tgt_binlog.push(TgtEntry::Ddl(format!(
+                "CREATE TABLE IF NOT EXISTS `{SCHEMA}`.`{}` (k BIGINT PRIMARY KEY, v TEXT)",
+                t.name
+            )));
         }
         Ok(())
     }
@@ -605,11 +628,13 @@ impl TargetIo for SimTarget {
         {
             let mut db = lock(&self.db);
             Self::check_token(&db, token)?;
+            let mut logged = Vec::new();
             for op in ops {
                 match op {
                     ApplyOp::Upsert { table, rows } => {
                         for r in rows {
                             let Some((k, v)) = parse_row(r) else { continue };
+                            logged.push((table.name.clone(), None, Some((k, v.clone()))));
                             if !db.versions.contains(&(table.name.clone(), k, v.clone())) {
                                 self.world.fail(format!(
                                     "invariant 2: the target got {}.{k} = {v:?}, a version the \
@@ -624,11 +649,13 @@ impl TargetIo for SimTarget {
                         for kv in keys {
                             if let Some(k) = key_of(Some(kv)) {
                                 db.tgt.entry(table.name.clone()).or_default().remove(&k);
+                                logged.push((table.name.clone(), Some((k, String::new())), None));
                             }
                         }
                     }
                 }
             }
+            db.tgt_binlog.push(TgtEntry::Apply(logged));
             if let Some(p) = db.tgt_pos.as_mut() {
                 p.gtid_pos = pos.clone();
                 p.copy = copy.clone();
@@ -696,7 +723,12 @@ impl TargetIo for SimTarget {
 
     async fn finalize(&self, _triggers: &[String]) -> Result<GtidPos> {
         self.call(self.rates.target_err_before, "finalize").await?;
-        Ok(GtidPos::new())
+        let n = lock(&self.db).tgt_binlog.len() as u64;
+        Ok(if n == 0 {
+            GtidPos::new()
+        } else {
+            GtidPos::from_gtids([feed::tgt_gtid(n)])
+        })
     }
 
     async fn unfinalize(&self, _triggers: &[String]) -> Result<()> {
@@ -710,12 +742,15 @@ impl TargetIo for SimTarget {
             rows.clear();
         }
         db.tgt_pos = None;
+        db.tgt_binlog.push(TgtEntry::Apply(Vec::new()));
         self.world.record("target reset");
         Ok(())
     }
 
     async fn forget(&self, _job: JobId) -> Result<()> {
-        lock(&self.db).tgt_pos = None;
+        let mut db = lock(&self.db);
+        db.tgt_pos = None;
+        db.tgt_binlog.push(TgtEntry::Apply(Vec::new()));
         Ok(())
     }
 
@@ -750,6 +785,37 @@ impl MapIo for CheckedMaps {
     }
 
     async fn commit(&self, job: JobId, token: u64, to: &ClusterId) -> Result<CommitOutcome> {
+        self.before_commit();
+        let o = self.inner.commit(job, token, to).await?;
+        self.after_commit(o);
+        Ok(o)
+    }
+
+    async fn commit_handoff(
+        &self,
+        job: JobId,
+        token: u64,
+        to: &ClusterId,
+        handoff: &HandoffPos,
+    ) -> Result<CommitOutcome> {
+        self.before_commit();
+        let o = self.inner.commit_handoff(job, token, to, handoff).await?;
+        self.after_commit(o);
+        Ok(o)
+    }
+
+    async fn bump(&self, job: JobId, token: u64) -> Result<CommitOutcome> {
+        self.inner.bump(job, token).await
+    }
+
+    async fn read(&self) -> Result<MapState> {
+        self.inner.read().await
+    }
+}
+
+impl CheckedMaps {
+    /// Invariants 3 and 4, just before the commit point.
+    fn before_commit(&self) {
         {
             let db = lock(&self.db);
             if !db.fenced {
@@ -767,7 +833,10 @@ impl MapIo for CheckedMaps {
                 }
             }
         }
-        let o = self.inner.commit(job, token, to).await?;
+    }
+
+    /// Invariant 6, once committed.
+    fn after_commit(&self, o: CommitOutcome) {
         if o == CommitOutcome::Committed {
             let held = self
                 .held_at
@@ -784,15 +853,6 @@ impl MapIo for CheckedMaps {
             }
             self.world.record(format!("map committed after {held:?}"));
         }
-        Ok(o)
-    }
-
-    async fn bump(&self, job: JobId, token: u64) -> Result<CommitOutcome> {
-        self.inner.bump(job, token).await
-    }
-
-    async fn read(&self) -> Result<MapState> {
-        self.inner.read().await
     }
 }
 
@@ -902,6 +962,7 @@ impl ClientWrite<'_> {
                 return true;
             }
             let r = d.tgt.entry(t.clone()).or_default();
+            let before = r.get(&k).cloned().map(|b| (k, b));
             match self.v {
                 None => {
                     r.remove(&k);
@@ -909,6 +970,11 @@ impl ClientWrite<'_> {
                 Some(v) => {
                     r.insert(k, v.to_owned());
                 }
+            }
+            let after = self.v.map(|v| (k, v.to_owned()));
+            if before.is_some() || after.is_some() {
+                d.tgt_binlog
+                    .push(TgtEntry::Client((t.clone(), before, after)));
             }
             d.first_tgt_ack.get_or_insert(self.at);
         }
@@ -1112,6 +1178,28 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
         )));
     }
 
+    // A feed consumer reads the tenant's feed across the move.
+    let feed_clusters = Arc::new(feed::SimClusters {
+        db: db.clone(),
+        notify: notify.clone(),
+        world: world.clone(),
+        drop: rates.stream_drop,
+        src: src.clone(),
+        tgt: tgt.clone(),
+    });
+    let feed_goal: feed::Goal = Arc::default();
+    let feed_log: Arc<Mutex<feed::FeedLog>> = Arc::default();
+    let feed_stop = CancellationToken::new();
+    let mut feed_task = tokio::spawn(feed::consumer(
+        world.clone(),
+        feed_clusters,
+        tier.clone(),
+        sc.faults,
+        feed_goal.clone(),
+        feed_log.clone(),
+        feed_stop.clone(),
+    ));
+
     // Faults: crash the owning worker at a chosen state, partition a
     // worker from etcd, purge the binlog.
     let crash_states = [
@@ -1204,6 +1292,30 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
     if let Some((f, _)) = partitioned {
         world.net().heal(f);
     }
+    // The feed consumer catches up with the final owner's binlog.
+    let goal = {
+        let d = lock(&db);
+        match end_state.state {
+            JobState::Done => Some((tgt.clone(), d.tgt_binlog.len() as u64)),
+            JobState::RolledBack => Some((src.clone(), d.binlog.len() as u64)),
+            _ => None,
+        }
+    };
+    let feed_done = match goal {
+        Some(g) => {
+            *feed_goal.lock().unwrap_or_else(PoisonError::into_inner) = Some(g);
+            notify.notify_waiters();
+            tokio::time::timeout(Duration::from_secs(600), &mut feed_task)
+                .await
+                .is_ok()
+        }
+        None => false,
+    };
+    feed_stop.cancel();
+    feed_task.abort();
+    let history = sprig_feed::ownership::history(&admin, TENANT, 0)
+        .await
+        .map_err(|e| e.to_string())?;
     let maps = TenantMaps::new(admin);
     let (m, _) = maps.load(TENANT).await.map_err(|e| e.to_string())?;
     let p = Placement::of(&m).map_err(|e| e.to_string())?;
@@ -1255,9 +1367,118 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
             }
         }
     }
+    check_feed(
+        &d,
+        end_state.state,
+        &history,
+        feed_done,
+        &feed_log.lock().unwrap_or_else(PoisonError::into_inner),
+    )?;
     let failures = world.failures();
     if let Some(f) = failures.first() {
         return Err(f.clone());
+    }
+    Ok(())
+}
+
+/// Invariant 8: the consumer's durable events are exactly the tenant's
+/// committed client changes, in order.
+fn check_feed(
+    d: &Db,
+    end: JobState,
+    history: &[sprig_feed::Handoff],
+    done: bool,
+    log: &feed::FeedLog,
+) -> std::result::Result<(), String> {
+    if !done {
+        return Err(format!(
+            "invariant 8: the feed didn't catch up (error {:?}, token {:?})",
+            log.error, log.token
+        ));
+    }
+    match (end, history) {
+        (JobState::Done, [h]) => {
+            let fence = h.fence().map_err(|e| e.to_string())?;
+            let start = h.start().map_err(|e| e.to_string())?;
+            let f = fence.get(DOMAIN).map_or(0, |g| g.seq);
+            let s = start.get(feed::TGT_DOMAIN).map_or(0, |g| g.seq);
+            // Nothing of the tenant's after G on the source, nothing of a
+            // client's up to H on the target.
+            if d.binlog
+                .iter()
+                .skip(usize::try_from(f).unwrap_or(0))
+                .any(|e| {
+                    matches!(e, Entry::Rows(_))
+                        || matches!(e, Entry::Ddl(sql) if !sql.contains("__sprig_"))
+                })
+            {
+                return Err(format!("invariant 8: the source changed after G = {f}"));
+            }
+            if d.tgt_binlog
+                .iter()
+                .take(usize::try_from(s).unwrap_or(0))
+                .any(|e| matches!(e, TgtEntry::Client(_)))
+            {
+                return Err(format!(
+                    "invariant 8: a client wrote the target before H = {s}"
+                ));
+            }
+        }
+        (JobState::RolledBack, []) => {}
+        (e, h) => {
+            return Err(format!(
+                "invariant 8: the job ended {e} with {} handoff records",
+                h.len()
+            ));
+        }
+    }
+    let mut expected = Vec::new();
+    for e in &d.binlog {
+        match e {
+            Entry::Rows(c) => {
+                for (t, b, a) in c {
+                    expected.push(feed::row_text(t, b.as_ref(), a.as_ref()));
+                }
+            }
+            Entry::Ddl(sql) if !sql.contains("__sprig_") => expected.push(feed::ddl_text(sql)),
+            _ => {}
+        }
+    }
+    if end == JobState::Done {
+        for e in &d.tgt_binlog {
+            if let TgtEntry::Client((t, b, a)) = e {
+                expected.push(feed::row_text(t, b.as_ref(), a.as_ref()));
+            }
+        }
+    }
+    let got: Vec<&str> = log.seen.iter().map(|s| s.what.as_str()).collect();
+    if let Some(i) = (0..expected.len().max(got.len()))
+        .find(|i| expected.get(*i).map(String::as_str) != got.get(*i).copied())
+    {
+        return Err(format!(
+            "invariant 8: event {i} of the feed is {:?}, expected {:?} ({} expected, {} \
+             received, {} consumer restarts)",
+            got.get(i),
+            expected.get(i),
+            expected.len(),
+            got.len(),
+            log.restarts
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for (i, s) in log.seen.iter().enumerate() {
+        if !ids.insert(s.id.clone()) {
+            return Err(format!("invariant 8: event id {:?} delivered twice", s.id));
+        }
+        if i > 0 {
+            let p = &log.seen[i - 1];
+            let same_txn = (p.id.0.as_str(), p.id.1) == (s.id.0.as_str(), s.id.1);
+            if (same_txn && p.clamp != s.clamp) || (!same_txn && p.clamp >= s.clamp) {
+                return Err(format!(
+                    "invariant 8: clamps out of order: {p:?} then {s:?}"
+                ));
+            }
+        }
     }
     Ok(())
 }

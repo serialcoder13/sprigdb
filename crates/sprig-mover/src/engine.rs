@@ -19,14 +19,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sprig_binlog::GtidPos;
-use sprig_common::ids::JobId;
+use sprig_common::ids::{ClusterId, JobId};
 use sprig_common::time::Clock;
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::api::{CutoverMode, JobKind, JobState, VerifyMode};
-use crate::io::{ChangeStream, CommitOutcome, JobEnv, Released};
+use crate::io::{ChangeStream, CommitOutcome, HandoffPos, JobEnv, Released};
 use crate::model::{
     ApplyOp, CopyState, KeyBytes, KeyPart, PosRow, Row, RowChange, SourceTxn, StreamItem,
     TableCopy, TableId, TableMeta, Watermark, WmKind, XaPhase,
@@ -126,6 +126,8 @@ pub struct Engine {
     /// position just before each: while any waits, the persisted position
     /// stays at the oldest one's, so a restart reads the group again.
     xa_open: Vec<(String, GtidPos, Vec<RowChange>)>,
+    /// The feed handoff of the cutover attempt in progress (`G`, `H`).
+    handoff: Option<HandoffPos>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -199,6 +201,7 @@ impl Engine {
             failures: 0,
             copied_since: (now, 0),
             xa_open: Vec::new(),
+            handoff: None,
         }
     }
 
@@ -624,7 +627,12 @@ impl Engine {
                         let wm_hit = self.ingest(txn).await?;
                         let full = self.pending_rows >= self.settings.apply_batch_rows;
                         if wm_hit || full {
-                            self.flush(false).await?;
+                            // A watermark is reached only once the target
+                            // committed up to it: with nothing else pending
+                            // (an idle tenant, or writers paused), commit the
+                            // position alone, or the copy waits forever
+                            // (found by chapter 24's move tests).
+                            self.flush(wm_hit).await?;
                         }
                         Ok(())
                     }
@@ -1240,6 +1248,7 @@ impl Engine {
         let s = self.settings.clone();
         let swap = self.claim.rec.kind == JobKind::CopySwapDdl;
         let to = self.claim.rec.spec.targets[0].cluster.clone();
+        self.handoff = None;
         self.claim
             .save(|r| {
                 r.state = JobState::CuttingOver;
@@ -1301,7 +1310,12 @@ impl Engine {
             let counters = self.env.source.counters().await?;
             self.env.target.raise_counters(&counters).await?;
             if !swap {
-                self.env.target.finalize(&triggers).await?;
+                let h = self.env.target.finalize(&triggers).await?;
+                self.handoff = Some(HandoffPos {
+                    fence: fenced.pos.clone(),
+                    start: h,
+                    at_ms: wall_ms(self.clock.wall()),
+                });
                 // 7. Stale gateways can't read the source either.
                 self.env.source.fence_reads(&fenced.receipt).await?;
             }
@@ -1321,7 +1335,7 @@ impl Engine {
                 return Ok(CommitOutcome::Committed);
             }
             self.claim.check_lease()?;
-            let mut o = self.env.maps.commit(self.job, self.token, &to).await?;
+            let mut o = self.commit_map(&to).await?;
             while o == CommitOutcome::Unknown {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 o = self.settle_unknown().await?;
@@ -1361,6 +1375,20 @@ impl Engine {
         }
     }
 
+    /// The commit point: the flip, with the feed handoff when this attempt
+    /// read `H` (chapter 10, "The feed handoff").
+    async fn commit_map(&self, to: &ClusterId) -> Result<CommitOutcome> {
+        match &self.handoff {
+            Some(h) => {
+                self.env
+                    .maps
+                    .commit_handoff(self.job, self.token, to, h)
+                    .await
+            }
+            None => self.env.maps.commit(self.job, self.token, to).await,
+        }
+    }
+
     /// After an `Unknown` commit: read the map until the outcome is known.
     async fn settle_unknown(&mut self) -> Result<CommitOutcome> {
         let m = self.env.maps.read().await?;
@@ -1371,7 +1399,7 @@ impl Engine {
             // Still held by us: the commit didn't land; try it again.
             self.claim.check_lease()?;
             let to = self.claim.rec.spec.targets[0].cluster.clone();
-            return self.env.maps.commit(self.job, self.token, &to).await;
+            return self.commit_map(&to).await;
         }
         Ok(CommitOutcome::Rejected)
     }

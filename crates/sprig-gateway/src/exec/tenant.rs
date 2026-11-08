@@ -441,6 +441,13 @@ impl PassSession {
         let sandbox = ts.principal.must_change_password;
         let (user, host) = (ts.principal.user.clone(), ts.principal.host.clone());
 
+        // Chapter 41: `CREATE FUNCTION | PROCEDURE ... LANGUAGE kirun |
+        // javascript` compiles and deploys through `sprig-logic` (R7).
+        if !sandbox && sprig_logic::is_declaration(&String::from_utf8_lossy(text)) {
+            let s = status(self.status());
+            return self.tenant_logic(cx, text, s, out).await;
+        }
+
         // Own password change (allowed in sandbox mode).
         if let Some(pc) = password::parse(text, &lex, &user, &host)
             && !pc.other_account
@@ -841,18 +848,10 @@ impl PassSession {
             .await?;
         match route {
             Route::Done(step) => Ok(step),
+            // Chapter 17: through the router when the tenant has shards.
             Route::Forward(sql, mapper) => {
-                self.forward(
-                    cx,
-                    Bytes::from(sql),
-                    Some(&original),
-                    more,
-                    format,
-                    mapper,
-                    &*map,
-                    out,
-                )
-                .await
+                self.routed(cx, sql, &original, more, format, mapper, &*map, out)
+                    .await
             }
         }
     }
@@ -1016,11 +1015,13 @@ impl PassSession {
             user,
             lower_case_table_names: lctn,
         };
-        // Chapter 29: a dropped routine's privileges go with it.
-        let routines = self
+        // Chapter 29: what a DROP removes goes to the authorization
+        // engine (routine grants go with the routine; table and database
+        // grants per auth.grants_on_drop).
+        let dropped = self
             .tenant
             .as_deref()
-            .map(|ts| crate::tenant::authz::dropped_routines(ts, &stmt, current.as_deref()))
+            .map(|ts| crate::tenant::authz::dropped_objects(ts, &stmt, current.as_deref()))
             .unwrap_or_default();
         self.tenant_bs(cx);
         let Some(bs) = self.bs.as_mut() else {
@@ -1031,12 +1032,11 @@ impl PassSession {
             svc.ddl.execute(&req, &exec).await
         };
         if result.as_ref().is_ok_and(|o| o.version.is_some())
-            && !routines.is_empty()
+            && !dropped.is_empty()
             && let Some(ts) = self.tenant.as_deref()
         {
-            // The rows grant nothing once the routine is gone; every
-            // gateway reloads the tenant at the new auth version.
-            let _ = crate::tenant::authz::forget_dropped(ts, &routines).await;
+            // Every gateway reloads the tenant at the new auth version.
+            crate::tenant::authz::objects_dropped(ts, &dropped).await;
         }
         match result {
             Ok(outcome) => {
@@ -1185,7 +1185,11 @@ impl PassSession {
     }
 
     /// Sends `err` as the statement's ERR packet.
-    async fn fail(&mut self, out: &mut dyn ResultSink, err: &SprigError) -> Result<Step> {
+    pub(super) async fn fail(
+        &mut self,
+        out: &mut dyn ResultSink,
+        err: &SprigError,
+    ) -> Result<Step> {
         let shown = SprigError {
             kind: err.kind,
             message: err.message.clone(),
@@ -1203,7 +1207,7 @@ impl PassSession {
     /// through `mapper`. `logical`: the client's text of a single
     /// statement, which workload capture fingerprints (chapter 12).
     #[allow(clippy::too_many_arguments)]
-    async fn forward(
+    pub(super) async fn forward(
         &mut self,
         cx: &mut ExecCtx<'_>,
         sql: Bytes,

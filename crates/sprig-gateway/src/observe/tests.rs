@@ -124,8 +124,8 @@ async fn every_statement_gets_a_root_span_with_its_result() {
     c.disconnect().await.unwrap();
     mgr.shutdown(Duration::from_secs(1)).await;
 
-    let traces = tracer.recent();
-    let roots: Vec<_> = traces.iter().filter_map(|t| t.root()).collect();
+    let kept = tracer.recent();
+    let roots: Vec<_> = kept.iter().filter_map(|t| t.root()).collect();
     assert!(roots.iter().all(|r| r.name == "gateway.request"));
     let attr = |r: &sprig_common::telemetry::trace::SpanRecord, k: &str| {
         r.attributes
@@ -145,7 +145,7 @@ async fn every_statement_gets_a_root_span_with_its_result() {
     assert_eq!(attr(failed[0], "protocol").as_deref(), Some("mysql"));
     assert_eq!(attr(failed[0], "request").as_deref(), Some("query"));
     // No SQL text anywhere in a span.
-    for t in &traces {
+    for t in &kept {
         for s in &t.spans {
             for (_, v) in &s.attributes {
                 assert!(!v.contains("nowhere"), "{s:?}");

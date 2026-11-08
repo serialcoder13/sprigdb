@@ -12,6 +12,10 @@
 #   deploy/compose/dc/run.sh latency   # round trips between the DC subnets
 #   deploy/compose/dc/run.sh down      # stop processes, remove containers
 #
+# Clusters: mum1-single (the tenant's first home), mum1-single-b (where the
+# tests move it back: mum1-single keeps the fenced source for
+# mover.source_retain_hours), fra1-galera.
+#
 # Ports (127.0.0.1): gateway mum1 MySQL 22306, MariaDB 22307, HTTP 22318;
 # gateway fra1 MySQL 22316, MariaDB 22317, HTTP 22322; controllers' Admin
 # API mum1 22326, fra1 22327. Tenant dc-move (homed in mum1 at first),
@@ -43,7 +47,7 @@ proxy_base() { case $1 in mum1) echo 3441 ;; fra1) echo 3442 ;; esac; }
 dial_map() {
     local b
     b=$(proxy_base "$1")
-    echo "10.10.1.21:3306=127.0.0.1:${b}1,10.10.2.21:3306=127.0.0.1:${b}2"
+    echo "10.10.1.21:3306=127.0.0.1:${b}1,10.10.2.21:3306=127.0.0.1:${b}2,10.10.1.22:3306=127.0.0.1:${b}3"
 }
 seed() { echo "http://127.0.0.1:$(proxy_base "$1")9"; }
 
@@ -183,7 +187,7 @@ up() {
     [[ -x $bin/sprigdb && -x $bin/sprigctl ]] || die "no $bin/sprigdb: cargo build -p sprigdb -p sprigctl first"
     [[ -s $certs/server.pem ]] || die "no dev certificates in $certs"
     configs
-    compose up -d --wait netem mum1-etcd mum1-db-1 fra1-db-1 proxy-mum1 proxy-fra1
+    compose up -d --wait netem mum1-etcd mum1-db-1 mum1-db-2 fra1-db-1 proxy-mum1 proxy-fra1
     (umask 077 && printf '[sprig_ctl]\nuser = "root"\npassword = "sprig-dev-root"\ntls = "skip_verify"\n[sprig_repl]\nuser = "root"\npassword = "sprig-dev-root"\ntls = "skip_verify"\n' >"$state/creds.toml")
     for dc in mum1 fra1; do
         set_setting "$dc" tls.bundles.default.cert_path "\"$root/$certs/server.pem\""
@@ -195,10 +199,19 @@ up() {
     done
     start ctl-mum1
     wait_leader mum1
+    # Brief rule 8b: this deployment's tenant ids start at 22306 x 100,000,
+    # so they never meet another deployment's on any MariaDB server.
+    local next
+    next=$(curl -fsS -X POST "$etcd/v3/kv/range" -d "$(jq -cn --arg k /sprig/g/ids/tenant '{key: ($k|@base64)}')" \
+        | jq -r '.kvs[0].value // empty' | base64 -d | jq -r '.next')
+    if [[ -n $next && $next -lt 2230600000 ]]; then
+        etcd_put /sprig/g/ids/tenant '{"v":1,"next":2230600000}'
+    fi
     ctl mum1 dc register fra1 --tags jurisdiction=EU >/dev/null 2>&1 || true
     start ctl-fra1
     wait_leader fra1
     register_cluster mum1 mum1-single single 10.10.1.21:3306
+    register_cluster mum1 mum1-single-b single 10.10.1.22:3306
     register_cluster fra1 fra1-galera galera 10.10.2.21:3306
     start worker-mum1
     start worker-fra1
@@ -208,7 +221,7 @@ up() {
     cid=$(ctl mum1 -o json cluster list | jq -r '.clusters[] | select(.name == "mum1-single") | .cluster_id')
     ctl mum1 tenant create "$tenant" --cluster "$cid" >/dev/null 2>&1 || true
     ctl mum1 tenant user add "$tenant" app --password sprig-dev-app --native --if-not-exists >/dev/null
-    ctl mum1 settings set auth.mysql_native_password true --scope "tenant:$tenant" --reason dc-test >/dev/null
+    ctl mum1 settings set auth.mysql_native_password true --scope "tenant:$tenant" --reason dc-test >/dev/null 2>&1 || true
     say "up: tenant $tenant on $cid; mysql -h127.0.0.1 -P22307 -u $tenant.app -psprig-dev-app"
 }
 

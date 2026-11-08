@@ -25,17 +25,22 @@
 //!   pass, run here against `MemStore` and, when `SPRIG_TEST_ETCD` names an
 //!   etcd, against `EtcdStore`.
 //!
-//! Not yet: discovery (step 9).
+//! - [`dclease`] and [`permit`]: DC leases, the permits gateways, agents
+//!   and workers hold under them, and the watchdog (chapter 25, step 7).
+//!
+//! Discovery (step 9) is [`discovery`].
 
 pub mod bootstrap;
 pub mod cache;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
+pub mod dclease;
 pub mod discovery;
 pub mod elect;
 pub mod etcd;
 pub mod key;
 pub mod mem;
+pub mod permit;
 pub mod record;
 pub mod session;
 pub mod view;

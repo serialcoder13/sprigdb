@@ -19,7 +19,7 @@
 //!   own series: the `tenant` label (its id) on
 //!   `sprig_gateway_statements_total` and
 //!   `sprig_gateway_query_duration_seconds`; every other statement has
-//!   `tenant=""`, which PromQL treats as no label, so the series count
+//!   `tenant=""`, which `PromQL` treats as no label, so the series count
 //!   stays bounded by the busy tenants.
 //! - **Traces.** Each request runs inside a `gateway.request` span (target
 //!   [`TARGET`]) carrying the tenant id, protocol and request kind, and an

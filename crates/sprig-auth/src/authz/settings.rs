@@ -1,6 +1,7 @@
 //! The `auth.*` keys chapter 29's R0 part reads (chapter 29,
-//! "Configuration"). Scopes "tree": tenant (and every ancestor), dc and
-//! global, resolved through the tenant's snapshot. All live.
+//! "Configuration"), resolved through the tenant's snapshot. Scopes
+//! "tree" (tenant and every ancestor, dc, global), except
+//! `auth.grants_on_drop` (database, tenant, global).
 
 use std::borrow::Cow;
 
@@ -73,3 +74,52 @@ pub static GRANTS_ON_DROP: Setting<Cow<'static, str>> = Setting {
     doc: "keep (grants survive DROP TABLE / DROP DATABASE and apply again to a re-created table, as MySQL) or drop (deleted with it)",
 };
 sprig_settings::register!(GRANTS_ON_DROP);
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use sprig_common::ids::{DbId, DcId, TenantId};
+    use sprig_settings::{AnySetting, Level, MemSettings, Registry, SettingCtx, Value};
+
+    use super::*;
+
+    #[test]
+    fn grants_on_drop_resolves_database_over_tenant_over_global() {
+        let reg = Registry::new([&GRANTS_ON_DROP as &dyn AnySetting, &AUTHORIZER]).unwrap();
+        let mut m = MemSettings::new(&reg);
+        let dc = DcId::new("dc-a").unwrap();
+        let tenant = SettingCtx::process(&dc).for_tenant(TenantId(42), &[]);
+        let shop = tenant.with_db(DbId(1));
+        let crm = tenant.with_db(DbId(2));
+        let drop = Value::Str("drop".into());
+        let keep = Value::Str("keep".into());
+        let key = GRANTS_ON_DROP.key;
+        // The default is MySQL's.
+        assert_eq!(m.get(&GRANTS_ON_DROP, &shop), "keep");
+        m.set_value(Level::Global, &shop, key, &drop).unwrap();
+        assert_eq!(m.get(&GRANTS_ON_DROP, &crm), "drop");
+        m.set_value(Level::Tenant, &shop, key, &keep).unwrap();
+        assert_eq!(m.get(&GRANTS_ON_DROP, &crm), "keep");
+        m.set_value(Level::Database, &shop, key, &drop).unwrap();
+        assert_eq!(m.get(&GRANTS_ON_DROP, &shop), "drop");
+        assert_eq!(m.get(&GRANTS_ON_DROP, &crm), "keep");
+        // Not per DC, and only the two values.
+        assert!(m.set_value(Level::Dc, &shop, key, &drop).is_err());
+        assert!(
+            m.set_value(Level::Tenant, &shop, key, &Value::Str("purge".into()))
+                .is_err()
+        );
+        // Only the MySQL engine exists.
+        assert_eq!(m.get(&AUTHORIZER, &tenant), "mysql_grants");
+        assert!(
+            m.set_value(
+                Level::Tenant,
+                &tenant,
+                AUTHORIZER.key,
+                &Value::Str("supabase".into())
+            )
+            .is_err()
+        );
+    }
+}

@@ -1,0 +1,66 @@
+function Test.Strings (name: str, n: i64) -> events {output{greeting: str, len: i64, upper: str, lower: str, hasA: bool, startsAb: bool, endsZ: bool, posB: i64, joined: str, same: bool, before: bool}}
+  1 cat_value: str := concat(concat(name, "-"), num_str(mul(n, 2)))
+  2 en_result: bool := ends_with(name, "z")
+  3 has_result: bool := contains(name, "a")
+  4 len_result: i64 := len(name)
+  5 low_result: str := lower(name)
+  6 pos_result: i64 := index_of(name, "b")
+  7 st_result: bool := starts_with(name, "Ab")
+  8 up_result: str := upper(name)
+  9 emit output {greeting: concat(concat(concat(concat(concat("Hi ", name), "! #"), num_str(n)), " "), num_str(div(n, 4))), len: len_result, upper: up_result, lower: low_result, hasA: has_result, startsAb: st_result, endsZ: en_result, posB: pos_result, joined: cat_value, same: seq(name, "abc"), before: lt(name, "b")}
+
+-- cost 0 reads [] writes [] guarded 0
+
+CREATE OR REPLACE PACKAGE __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR);
+  FUNCTION num_str(x IN DOUBLE) RETURN VARCHAR;
+END;
+
+CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
+    v VARCHAR(128) := LEFT(msg, 128);
+  BEGIN
+    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+  END;
+  FUNCTION num_str(x IN DOUBLE) RETURN VARCHAR AS
+  BEGIN
+    RETURN CASE WHEN x IS NULL THEN NULL
+                WHEN x = FLOOR(x) AND ABS(x) < 9007199254740992
+                THEN CAST(CAST(x AS SIGNED) AS CHAR) ELSE CAST(x AS CHAR) END;
+  END;
+END;
+
+CREATE OR REPLACE PROCEDURE __sprig_l44_v1 (
+    p_name IN LONGTEXT CHARACTER SET utf8mb4,
+    p_n IN BIGINT,
+    p__event OUT VARCHAR(64),
+    p__result OUT LONGTEXT
+  )
+  SQL SECURITY INVOKER
+AS
+  v_cat_value LONGTEXT CHARACTER SET utf8mb4;
+  v_en_result BOOLEAN;
+  v_has_result BOOLEAN;
+  v_len_result BIGINT;
+  v_low_result LONGTEXT CHARACTER SET utf8mb4;
+  v_pos_result BIGINT;
+  v_st_result BOOLEAN;
+  v_up_result LONGTEXT CHARACTER SET utf8mb4;
+BEGIN
+  v_cat_value := CONCAT(COALESCE(CONCAT(COALESCE(p_name, 'null'), COALESCE('-', 'null')), 'null'), COALESCE(COALESCE(CAST((p_n * 2) AS CHAR), 'null'), 'null'));
+  v_en_result := ((RIGHT(p_name, CHAR_LENGTH('z'))) COLLATE utf8mb4_bin = ('z') COLLATE utf8mb4_bin);
+  v_has_result := (LOCATE(('a') COLLATE utf8mb4_bin, (p_name) COLLATE utf8mb4_bin) > 0);
+  v_len_result := CHAR_LENGTH(p_name);
+  v_low_result := LOWER(p_name);
+  v_pos_result := (LOCATE(('b') COLLATE utf8mb4_bin, (p_name) COLLATE utf8mb4_bin) - 1);
+  v_st_result := ((LEFT(p_name, CHAR_LENGTH('Ab'))) COLLATE utf8mb4_bin = ('Ab') COLLATE utf8mb4_bin);
+  v_up_result := UPPER(p_name);
+  IF p__event IS NULL THEN
+    p__event := 'output';
+    p__result := JSON_OBJECT('greeting', CONCAT(COALESCE(CONCAT(COALESCE(CONCAT(COALESCE(CONCAT(COALESCE(CONCAT(COALESCE('Hi ', 'null'), COALESCE(p_name, 'null')), 'null'), COALESCE('! #', 'null')), 'null'), COALESCE(COALESCE(CAST(p_n AS CHAR), 'null'), 'null')), 'null'), COALESCE(' ', 'null')), 'null'), COALESCE(COALESCE(__sprig_l44_v1_lib.num_str((p_n * 1e0 / 4)), 'null'), 'null')), 'len', (v_len_result + 0), 'upper', v_up_result, 'lower', v_low_result, 'hasA', JSON_EXTRACT(CASE WHEN v_has_result IS NULL THEN 'null' WHEN v_has_result THEN 'true' ELSE 'false' END, '$'), 'startsAb', JSON_EXTRACT(CASE WHEN v_st_result IS NULL THEN 'null' WHEN v_st_result THEN 'true' ELSE 'false' END, '$'), 'endsZ', JSON_EXTRACT(CASE WHEN v_en_result IS NULL THEN 'null' WHEN v_en_result THEN 'true' ELSE 'false' END, '$'), 'posB', (v_pos_result + 0), 'joined', v_cat_value, 'same', JSON_EXTRACT(CASE WHEN ((p_name) COLLATE utf8mb4_bin <=> ('abc') COLLATE utf8mb4_bin) IS NULL THEN 'null' WHEN ((p_name) COLLATE utf8mb4_bin <=> ('abc') COLLATE utf8mb4_bin) THEN 'true' ELSE 'false' END, '$'), 'before', JSON_EXTRACT(CASE WHEN ((p_name) COLLATE utf8mb4_bin < ('b') COLLATE utf8mb4_bin) IS NULL THEN 'null' WHEN ((p_name) COLLATE utf8mb4_bin < ('b') COLLATE utf8mb4_bin) THEN 'true' ELSE 'false' END, '$'));
+  END IF;
+  RETURN;
+  IF p__event IS NULL THEN
+    __sprig_l44_v1_lib.fail(39866, 'No events raised');
+  END IF;
+END

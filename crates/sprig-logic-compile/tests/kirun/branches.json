@@ -1,0 +1,32 @@
+{"namespace": "Test", "name": "Branches",
+ "parameters": {
+   "score": {"parameterName": "score", "schema": {"type": ["INTEGER", "NULL"]}},
+   "vip": {"parameterName": "vip", "schema": {"type": ["BOOLEAN"]}}},
+ "events": {"output": {"name": "output", "parameters": {"grade": {"type": ["STRING"]}, "bonus": {"type": ["INTEGER"]}}},
+            "error": {"name": "error", "parameters": {"message": {"type": ["STRING"]}}}},
+ "steps": {
+  "known": {"statementName": "known", "namespace": "System", "name": "If",
+    "parameterMap": {"condition": {"c": {"type": "EXPRESSION", "expression": "Arguments.score != null"}}}},
+  "missing": {"statementName": "missing", "namespace": "System", "name": "GenerateEvent",
+    "executeIftrue": {"Steps.known.false": true},
+    "parameterMap": {"eventName": {"e": {"type": "VALUE", "value": "error"}},
+      "results": {"r": {"type": "VALUE", "value": {"name": "message", "value": {"isExpression": false, "value": "no score"}}}}}},
+  "high": {"statementName": "high", "namespace": "System", "name": "If",
+    "executeIftrue": {"Steps.known.true": true},
+    "parameterMap": {"condition": {"c": {"type": "EXPRESSION", "expression": "Arguments.score >= 90"}}}},
+  "extra": {"statementName": "extra", "namespace": "System.Math", "name": "Add",
+    "executeIftrue": {"Arguments.vip": true},
+    "dependentStatements": {"Steps.known.true": true},
+    "parameterMap": {"value": {"a": {"type": "EXPRESSION", "order": 1, "expression": "Arguments.score"},
+                               "b": {"type": "VALUE", "order": 2, "value": 5}}}},
+  "a": {"statementName": "a", "namespace": "System", "name": "GenerateEvent",
+    "executeIftrue": {"Steps.high.true": true},
+    "dependentStatements": {"Steps.extra.output": true},
+    "parameterMap": {"results": {
+      "r": {"type": "VALUE", "order": 1, "value": {"name": "grade", "value": {"isExpression": false, "value": "A"}}},
+      "s": {"type": "VALUE", "order": 2, "value": {"name": "bonus", "value": {"isExpression": true, "value": "Steps.extra.output.value"}}}}}},
+  "b": {"statementName": "b", "namespace": "System", "name": "GenerateEvent",
+    "executeIftrue": {"Steps.high.false": true},
+    "parameterMap": {"results": {
+      "r": {"type": "VALUE", "order": 1, "value": {"name": "grade", "value": {"isExpression": true, "value": "Arguments.score >= 50 ? 'pass' : 'fail'"}}},
+      "s": {"type": "VALUE", "order": 2, "value": {"name": "bonus", "value": {"isExpression": true, "value": "0"}}}}}}}}

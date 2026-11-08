@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::many_single_char_names,
+    clippy::format_collect,
+    clippy::too_many_lines
+)]
 
 use sprig_meta::MemStore;
 

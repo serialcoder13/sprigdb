@@ -8,5 +8,18 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# Embedded `Sprig.Db.*` SQL is parsed, checked and re-rendered (chapter 41,
+# "Embedded data access").
+sqlparser.workspace = true
+sprig-common.workspace = true
+
+[dev-dependencies]
+# The differential test runs compiled routines on the Compose single node.
+mysql_async.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
 [lints]
 workspace = true

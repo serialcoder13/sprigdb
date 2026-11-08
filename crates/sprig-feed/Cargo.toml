@@ -8,5 +8,26 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+metrics.workspace = true
+mysql_async.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-binlog.workspace = true
+sprig-catalog.workspace = true
+sprig-common.workspace = true
+sprig-meta.workspace = true
+sprig-shard.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# The live handoff test moves a tenant with the real mover.
+sprig-cluster.workspace = true
+sprig-mover.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
+
 [lints]
 workspace = true

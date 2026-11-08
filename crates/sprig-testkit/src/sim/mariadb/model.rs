@@ -25,6 +25,9 @@ mod more_errno {
     pub(super) const TABLE_EXISTS: u16 = 1050;
     pub(super) const UNKNOWN_THREAD: u16 = 1094;
     pub(super) const XAER_DUPID: u16 = 1440;
+    /// `ER_NOT_SUPPORTED_YET`: "XA transactions with Galera replication"
+    /// (spike-xa).
+    pub(super) const NOT_SUPPORTED_YET: u16 = 1235;
     pub(super) const COMMANDS_OUT_OF_SYNC: u16 = 2014;
 }
 
@@ -1474,6 +1477,10 @@ impl Model {
 
     fn xa_start(&mut self, conn: ConnId, x: &str) -> Step {
         let server = self.conn(conn).server.clone();
+        if self.servers[&server].galera.is_some() {
+            // Galera has no XA (spike-xa: error 1235).
+            return err(more_errno::NOT_SUPPORTED_YET);
+        }
         if let Some(t) = self.txn_of(conn) {
             return err(if t.xa.is_some() {
                 errno::XAER_RMFAIL

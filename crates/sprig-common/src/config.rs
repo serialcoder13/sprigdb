@@ -184,6 +184,14 @@ pub struct GatewayConfig {
     /// "Registration records"). Unset: the hostname.
     #[serde(default)]
     pub advertise_addr: Option<String>,
+    /// Development and test hook (chapter 17, R1): the JSON file describing
+    /// tenants' sharded and reference tables, their groups and shards
+    /// (format in `sprig_router::TopologyFile`), until chapter 15's table
+    /// groups reach the catalog. Re-read within a second of a change.
+    /// Unset: the router routes nothing and every statement is relayed as
+    /// before.
+    #[serde(default)]
+    pub router_topology_file: Option<PathBuf>,
 }
 
 /// `[gateway] login_mode`.

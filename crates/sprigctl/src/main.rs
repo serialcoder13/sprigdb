@@ -31,6 +31,8 @@
 //!   [`index`]; `sprigctl explain decision|placement` (chapter 11 step
 //!   7): see [`placement`].
 //!
+//! - `sprigctl logic compile|deploy|list|show` (chapter 41, R7): see
+//!   [`logic`].
 //! - `sprigctl check no-restart` (chapter 47 step 6): settings, listener
 //!   and certificate changes under load with no restart; see [`check`].
 //!
@@ -49,6 +51,7 @@ mod dcmove;
 mod export;
 mod gateway;
 mod index;
+mod logic;
 mod mover;
 mod placement;
 mod render;
@@ -75,11 +78,6 @@ use crate::cluster::RegisterFlags;
 const GROUPS: &[(&str, &str, &[&str])] = &[
     ("feed", "Change feeds", &["list", "show", "lag"]),
     ("search", "Search indexes", &["list", "show", "rebuild"]),
-    (
-        "logic",
-        "Logic functions",
-        &["deploy", "list", "show", "logs", "rollback", "dead-letters"],
-    ),
     (
         "space",
         "Spaces and shares",
@@ -384,7 +382,8 @@ fn cli() -> Command {
         .subcommand(mover::shard_group())
         .subcommand(mover::job_group())
         .subcommand(gateway::group())
-        .subcommand(check::group());
+        .subcommand(check::group())
+        .subcommand(logic::group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -433,6 +432,7 @@ fn main() -> ExitCode {
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "shard" => name == "move",
+        "logic" => logic::implemented(&name),
         _ => false,
     };
     if !implemented {
@@ -473,6 +473,9 @@ fn main() -> ExitCode {
                     }
                 }),
             "gateway" => gateway::run(&client, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "logic" => logic::run(sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "shard" | "job" => mover::run(&client, group, sub, output(&matches))

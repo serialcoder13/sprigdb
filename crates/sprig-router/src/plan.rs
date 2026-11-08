@@ -1,0 +1,314 @@
+//! Plans: what the executor runs on which shards and how it combines the
+//! answers (chapter 17's `Plan`, in the forms R1 builds so far).
+
+use std::sync::Arc;
+
+use crate::reject::Rejection;
+use crate::topology::Group;
+
+/// One statement for one shard (or one cluster).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// The cluster that runs it.
+    pub cluster: String,
+    /// The shard (0 for reference-only and unsharded statements).
+    pub shard: u32,
+    /// The SQL, with physical names for that shard.
+    pub sql: String,
+}
+
+/// A column of a shard result: one of the statement's own (visible)
+/// columns, or one the router appended (hidden, counted from the first
+/// hidden column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColRef {
+    /// The statement's column at this position.
+    Visible(usize),
+    /// The router's hidden column at this position among the hidden ones.
+    Hidden(usize),
+}
+
+impl ColRef {
+    /// The index in a row of `ncols` columns of which `hidden` are hidden.
+    #[must_use]
+    pub fn index(self, ncols: usize, hidden: usize) -> usize {
+        match self {
+            Self::Visible(i) => i,
+            Self::Hidden(j) => ncols - hidden + j,
+        }
+    }
+}
+
+/// A value and, for strings, its weights at levels 1 to 3 and its
+/// collation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyCols {
+    /// The value.
+    pub value: ColRef,
+    /// `WEIGHT_STRING(e LEVEL 1..3)`, then `COLLATION(e)`: column
+    /// definitions carry the connection's collation, not the expression's.
+    pub weights: [ColRef; 4],
+}
+
+/// One `ORDER BY` item of an ordered merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortKey {
+    /// Value and weights.
+    pub cols: KeyCols,
+    /// `DESC`.
+    pub desc: bool,
+}
+
+/// How a multi-shard read combines its shards' rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadKind {
+    /// Concatenate.
+    Scatter,
+    /// Merge on sort keys.
+    Merge,
+    /// Combine partial aggregates by group.
+    Aggregate,
+}
+
+impl ReadKind {
+    /// Snake-case name for metrics and EXPLAIN.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scatter => "scatter",
+            Self::Merge => "merge",
+            Self::Aggregate => "aggregate",
+        }
+    }
+}
+
+/// An aggregate function the gateway finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggFunc {
+    /// `COUNT(*)`, `COUNT(e)`: sum of counts.
+    Count,
+    /// `SUM(e)`.
+    Sum,
+    /// `MIN(e)`.
+    Min,
+    /// `MAX(e)`.
+    Max,
+    /// `AVG(e)`: from hidden `SUM(e)` and `COUNT(e)`.
+    Avg,
+}
+
+/// One aggregate call: where its partials are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AggCall {
+    /// The function.
+    pub func: AggFunc,
+    /// The partial (COUNT, SUM, MIN, MAX: the call itself; AVG: hidden
+    /// `SUM`).
+    pub value: ColRef,
+    /// AVG's hidden `COUNT`.
+    pub count: Option<ColRef>,
+    /// MIN and MAX: weights and collation of the partial, for strings.
+    pub weights: Option<[ColRef; 4]>,
+    /// AVG: the visible column whose definition gives the result scale.
+    pub scale_from: Option<ColRef>,
+}
+
+/// What a visible column of an aggregate plan holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutCol {
+    /// The value of the group's first row (group expressions, constants).
+    First,
+    /// The final value of aggregate `i`.
+    Agg(usize),
+}
+
+/// An operand of the gateway's HAVING evaluator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operand {
+    /// Aggregate `i`'s final value.
+    Agg(usize),
+    /// A column of the group's first row.
+    Col(ColRef),
+    /// A numeric literal.
+    Num(String),
+    /// `NULL`.
+    Null,
+}
+
+/// The gateway's HAVING expressions (numbers only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pred {
+    /// `a AND b`.
+    And(Box<Pred>, Box<Pred>),
+    /// `a OR b`.
+    Or(Box<Pred>, Box<Pred>),
+    /// `NOT a`.
+    Not(Box<Pred>),
+    /// A comparison: `=`, `<>`, `<`, `<=`, `>`, `>=`.
+    Cmp(CmpOp, Operand, Operand),
+    /// `IS [NOT] NULL`.
+    IsNull(Operand, bool),
+}
+
+/// A comparison operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    /// `=`.
+    Eq,
+    /// `<>`.
+    Ne,
+    /// `<`.
+    Lt,
+    /// `<=`.
+    Le,
+    /// `>`.
+    Gt,
+    /// `>=`.
+    Ge,
+}
+
+/// Where a final sort key of an aggregate plan comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalSort {
+    /// A group key (by its position in [`AggPlan::groups`]).
+    Group(usize, bool),
+    /// An aggregate's final value.
+    Agg(usize, bool),
+}
+
+/// Split aggregation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggPlan {
+    /// Group keys; empty for a scalar aggregate.
+    pub groups: Vec<KeyCols>,
+    /// Aggregate calls.
+    pub aggs: Vec<AggCall>,
+    /// Per visible column.
+    pub outputs: Vec<OutCol>,
+    /// HAVING.
+    pub having: Option<Pred>,
+    /// ORDER BY over final values; empty: by group keys, as MariaDB's
+    /// `GROUP BY` sorts.
+    pub order: Vec<FinalSort>,
+}
+
+/// A read over several shards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadPlan {
+    /// How shards' rows combine.
+    pub kind: ReadKind,
+    /// One statement per shard.
+    pub targets: Vec<Target>,
+    /// Hidden columns appended to each statement's select list.
+    pub hidden: usize,
+    /// Merge order.
+    pub order: Vec<SortKey>,
+    /// Aggregation.
+    pub agg: Option<AggPlan>,
+    /// Rows skipped in the gateway.
+    pub offset: u64,
+    /// Rows returned, after the offset.
+    pub limit: Option<u64>,
+    /// The `LIMIT` each shard got, for EXPLAIN.
+    pub pushed_limit: Option<u64>,
+    /// The group, for EXPLAIN.
+    pub group: u32,
+}
+
+/// Where an output column of a lookup join comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinCol {
+    /// The outer side's visible column.
+    Outer(usize),
+    /// The inner side's visible column.
+    Inner(usize),
+}
+
+/// A batched lookup join between two groups (chapter 17, "Lookup joins").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupJoinPlan {
+    /// The outer side, a read with its own order.
+    pub outer: ReadPlan,
+    /// The outer join column `x` and its weights.
+    pub outer_key: KeyCols,
+    /// The inner table's group.
+    pub inner_group: Arc<Group>,
+    /// The inner join column is the inner table's key: keys go to their
+    /// shards; else every key to every shard.
+    pub inner_by_key: bool,
+    /// The inner statement, with `\u{1}S` for the shard schema and
+    /// `\u{1}K` for the `IN` list.
+    pub inner_template: String,
+    /// Hidden columns of the inner statement (`y` and its weights).
+    pub inner_hidden: usize,
+    /// The inner join column `y` and its weights.
+    pub inner_key: KeyCols,
+    /// `LEFT JOIN`: outer rows without a match get NULLs.
+    pub left: bool,
+    /// The statement's columns.
+    pub outputs: Vec<JoinCol>,
+    /// Rows skipped after the join.
+    pub offset: u64,
+    /// Rows returned after the join.
+    pub limit: Option<u64>,
+    /// Keys per `IN` list.
+    pub batch: usize,
+}
+
+/// What a write's OK packet sums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteKind {
+    /// `INSERT`: `Records: r  Duplicates: d  Warnings: w`.
+    Insert,
+    /// `UPDATE`: `Rows matched: m  Changed: c  Warnings: w`.
+    Update,
+    /// `DELETE`: no info.
+    Delete,
+}
+
+/// A write over several shards of one cluster, in one transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritePlan {
+    /// Statement kind.
+    pub kind: WriteKind,
+    /// One statement per shard, in the order rows were written.
+    pub targets: Vec<Target>,
+    /// Rows the client's statement listed (multi-row `INSERT` info).
+    pub rows: u64,
+}
+
+/// A plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plan {
+    /// The statement touches no table the router knows: the caller runs
+    /// it as before.
+    NotRouted,
+    /// One statement on one cluster, relayed.
+    Pass(Target),
+    /// A read over several shards.
+    Read(ReadPlan),
+    /// A lookup join.
+    LookupJoin(Box<LookupJoinPlan>),
+    /// A write over several shards.
+    Write(WritePlan),
+    /// `EXPLAIN FORMAT=SPRIG`: the plan of the statement.
+    Explain(Box<Plan>),
+    /// No exact plan.
+    Reject(Rejection),
+}
+
+impl Plan {
+    /// Snake-case kind for metrics (`sprig_router_statements_total{plan}`).
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::NotRouted => "not_routed",
+            Self::Pass(_) => "pass",
+            Self::Read(r) => r.kind.as_str(),
+            Self::LookupJoin(_) => "lookup_join",
+            Self::Write(_) => "write",
+            Self::Explain(_) => "explain",
+            Self::Reject(_) => "reject",
+        }
+    }
+}

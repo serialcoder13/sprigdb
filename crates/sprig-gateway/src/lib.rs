@@ -190,6 +190,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         Arc::clone(&sessions),
         clock.clone(),
     )?;
+    // Chapter 17 (R1): the router's interim topology file, if configured.
+    exec::router::init(rctx.config.gateway.router_topology_file.as_deref());
     let mut executor = exec::PassThrough::new(
         Arc::clone(&backends),
         exec::ExecSettingsSource::Live {

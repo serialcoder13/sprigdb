@@ -1,0 +1,28 @@
+suite = "dc_failover"
+seed = 933854460
+failure = "fra1 is suspect 60 s after healing, not active again"
+
+[[plan.faults]]
+at_ms = 96802
+kind = "partition"
+a = ["fra1-c1", "fra1-c2", "fra1-gw", "fra1-agent"]
+b = ["etcd"]
+for_ms = 10006
+
+[[plan.faults]]
+at_ms = 108010
+kind = "pause"
+node = "wit1-c1"
+for_ms = 32110
+
+[[plan.faults]]
+at_ms = 113785
+kind = "pause"
+node = "fra1-c1"
+for_ms = 28697
+
+[[plan.faults]]
+at_ms = 113785
+kind = "pause"
+node = "fra1-c2"
+for_ms = 28697

@@ -22,7 +22,12 @@
 //! It prints the fleet before and after, every move with its decision, the
 //! rejected moves' reasons and `explain placement` / `explain decision`.
 
-#![allow(clippy::unwrap_used, clippy::too_many_lines, clippy::print_stdout)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::print_stdout,
+    clippy::many_single_char_names
+)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
@@ -493,7 +498,7 @@ async fn skewed_fleet_evens_out_without_oscillating() {
             .into_iter()
             .find(|j| j["tenant"].as_u64() == Some(pid))
             .unwrap();
-        println!("  job: {}", job);
+        println!("  job: {job}");
         home3 = fleet().1;
         assert_eq!(home3[p], to, "{p} not on {to} after the operator move");
     }

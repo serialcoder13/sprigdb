@@ -1,0 +1,12 @@
+{"namespace": "Test", "name": "Guarded",
+ "parameters": {"n": {"parameterName": "n", "schema": {"type": ["INTEGER"]}},
+                "d": {"parameterName": "d", "schema": {"type": ["INTEGER"]}}},
+ "events": {"output": {"name": "output", "parameters": {"steps": {"type": ["INTEGER"]}, "ratio": {"type": ["DOUBLE"]}}}},
+ "steps": {
+  "loop": {"statementName": "loop", "namespace": "System.Loop", "name": "CountLoop",
+    "parameterMap": {"count": {"x": {"type": "EXPRESSION", "expression": "Arguments.n"}}}},
+  "out": {"statementName": "out", "namespace": "System", "name": "GenerateEvent",
+    "dependentStatements": {"Steps.loop.output": true},
+    "parameterMap": {"results": {
+      "r1": {"type": "VALUE", "order": 1, "value": {"name": "steps", "value": {"isExpression": true, "value": "Steps.loop.output.value"}}},
+      "r2": {"type": "VALUE", "order": 2, "value": {"name": "ratio", "value": {"isExpression": true, "value": "Arguments.n / Arguments.d"}}}}}}}}

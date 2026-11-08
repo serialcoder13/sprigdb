@@ -24,6 +24,9 @@ serde_json.workspace = true
 sprig-balancer.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
+# `sprigctl logic` (chapter 41).
+sprig-logic = { path = "../sprig-logic" }
+sprig-logic-compile = { path = "../sprig-logic-compile" }
 sprig-controller.workspace = true
 sprig-meta.workspace = true
 # `sprigctl shard move` and `sprigctl job` (chapter 10).

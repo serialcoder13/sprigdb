@@ -21,7 +21,9 @@
 //!   fragments, `QUERY` (and compressed), `XID`, `XA_PREPARE`,
 //!   `ANNOTATE_ROWS`, heartbeats and incidents;
 //! - [`Value`]: every MariaDB column type decoded from a row image,
-//!   including compressed columns.
+//!   including compressed columns;
+//! - [`annotate`]: the SprigDB statement comment the change feed reads
+//!   from `ANNOTATE_ROWS` events (chapter 38, build step 1).
 //!
 //! Not here: TLS to the source (the wire client lives here until
 //! `sprig-proto-mysql` exists), authentication plugins other than
@@ -30,6 +32,7 @@
 //! encrypted binlog files read directly ([`BinlogFile`] refuses them: only
 //! the server holds the key).
 
+pub mod annotate;
 pub mod consts;
 pub mod gtid;
 pub mod table_map;
@@ -42,6 +45,7 @@ mod file;
 mod protocol;
 mod stream;
 
+pub use annotate::{OpHint, SprigComment, parse_comment};
 pub use event::{
     Decoder, Event, EventHeader, GtidFlags, QueryStatus, RowChange, RowsKind, TableFilter, XaId,
 };

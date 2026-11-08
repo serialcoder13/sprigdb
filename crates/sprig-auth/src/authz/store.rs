@@ -191,6 +191,10 @@ pub enum PrivTarget {
     },
 }
 
+/// The columns [`AuthzStore::keep_by_name`] copies: grantee tenant, kind
+/// and id, level, column, actions, granted by (user, tenant).
+type KeptRow = (u64, String, u32, String, String, u64, Option<u32>, u64);
+
 /// `name_pattern` of a [`PrivTarget::Named`] row: `` `db`.`t` ``.
 #[must_use]
 pub fn named_pattern(db_key: &str, name_key: &str) -> String {
@@ -233,10 +237,11 @@ impl PrivTarget {
         match self {
             PrivTarget::Tenant => Level::Tenant,
             PrivTarget::Database(_) => Level::Database,
-            PrivTarget::Object { .. } => Level::Object,
-            PrivTarget::Column { .. } => Level::Column,
-            PrivTarget::Named { column: None, .. } => Level::Object,
-            PrivTarget::Named { column: Some(_), .. } => Level::Column,
+            PrivTarget::Object { .. } | PrivTarget::Named { column: None, .. } => Level::Object,
+            PrivTarget::Column { .. }
+            | PrivTarget::Named {
+                column: Some(_), ..
+            } => Level::Column,
         }
     }
 
@@ -654,7 +659,7 @@ impl AuthzStore {
         db_key: &str,
         name_key: &str,
     ) -> Result<bool> {
-        let rows: Vec<(u64, String, u32, String, String, u64, Option<u32>, u64)> = q
+        let rows: Vec<KeptRow> = q
             .exec(
                 format!(
                     "SELECT grantee_tenant_id, grantee_kind, grantee_id, level, column_name, \
@@ -716,22 +721,19 @@ impl AuthzStore {
             "DELETE FROM {} WHERE level IN ('object','column') AND object_id = 0 AND ",
             self.privileges
         );
-        match name_key {
-            Some(n) => {
-                q.exec_drop(
-                    format!("{base}name_pattern = ?"),
-                    (named_pattern(db_key, n),),
-                )
-                .await
-            }
-            None => {
-                let prefix = format!("`{}`.", db_key.replace('`', "``"));
-                q.exec_drop(
-                    format!("{base}LEFT(name_pattern, CHAR_LENGTH(?)) = ?"),
-                    (prefix.as_str(), prefix.as_str()),
-                )
-                .await
-            }
+        if let Some(n) = name_key {
+            q.exec_drop(
+                format!("{base}name_pattern = ?"),
+                (named_pattern(db_key, n),),
+            )
+            .await
+        } else {
+            let prefix = format!("`{}`.", db_key.replace('`', "``"));
+            q.exec_drop(
+                format!("{base}LEFT(name_pattern, CHAR_LENGTH(?)) = ?"),
+                (prefix.as_str(), prefix.as_str()),
+            )
+            .await
         }
         .map_err(map_err)
     }
@@ -946,6 +948,18 @@ impl AuthzStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_patterns_round_trip() {
+        for (d, t) in [("shop", "orders"), ("a`b", "c.d"), ("x", "``"), ("", "t")] {
+            let p = named_pattern(d, t);
+            assert_eq!(parse_named(&p), Some((d.to_owned(), t.to_owned())), "{p}");
+        }
+        assert_eq!(named_pattern("shop", "orders"), "`shop`.`orders`");
+        assert_eq!(parse_named("shop"), None);
+        assert_eq!(parse_named("`shop`.`t`x"), None);
+        assert_eq!(parse_named(""), None);
+    }
 
     #[test]
     fn legacy_bits_match_the_migration() {

@@ -13,6 +13,10 @@ async-trait.workspace = true
 axum.workspace = true
 futures.workspace = true
 gethostname.workspace = true
+# Chapter 25: clients of the internal failover services (permits, observers).
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
@@ -45,6 +49,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 sprig-meta = { workspace = true, features = ["conformance"] }
+# Chapter 25's DC failover simulation (tests/sim_dc_failover.rs).
+sprig-testkit.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

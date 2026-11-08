@@ -29,9 +29,12 @@ mod capture;
 mod dc;
 mod follow;
 pub mod relay;
+pub(crate) mod router;
 pub mod settings;
 pub mod split;
 pub mod stmt;
+// Chapter 41: logic declarations (R7).
+mod logic;
 mod tenant;
 
 use std::sync::Arc;

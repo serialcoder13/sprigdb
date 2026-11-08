@@ -281,6 +281,28 @@ sprig_codes! {
     /// The automatic index's state doesn't allow the action (approve a
     /// non-recommendation, drop a pinned one, ...), or it changed meanwhile.
     AutoIndexStateInvalid = 39202, "ER_SPRIG_AUTO_INDEX_STATE_INVALID", "SprigAutoIndexStateInvalid", SQLSTATE_GENERAL, false;
+    /// A distribution-key part has a type that can't be a key, or the
+    /// values don't match the key's parts (chapter 15).
+    UnsupportedKeyType = 39400, "ER_SPRIG_UNSUPPORTED_KEY_TYPE", "SprigUnsupportedKeyType", SQLSTATE_GENERAL, false;
+    /// A string key uses a collation outside chapter 15's supported set.
+    UnsupportedKeyCollation = 39401, "ER_SPRIG_UNSUPPORTED_KEY_COLLATION", "SprigUnsupportedKeyCollation", SQLSTATE_GENERAL, false;
+    /// No cached shard map for the group and etcd unreachable (chapter 15).
+    ShardMapUnavailable = 39403, "ER_SPRIG_SHARD_MAP_UNAVAILABLE", "SprigShardMapUnavailable", SQLSTATE_CONNECTION, true;
+    /// A key value can't be normalized under its group's key: a string not
+    /// valid in its character set or not convertible to the key's, a number
+    /// that doesn't parse. The router scatters such a value (chapter 15).
+    KeyValueUnroutable = 39405, "ER_SPRIG_KEY_VALUE_UNROUTABLE", "SprigKeyValueUnroutable", SQLSTATE_GENERAL, false;
+    /// No ID block can be fetched: the catalog cluster is unreachable and
+    /// the cached blocks are used up (chapter 19).
+    IdBlockUnavailable = 39460, "ER_SPRIG_ID_BLOCK_UNAVAILABLE", "SprigIdBlockUnavailable", SQLSTATE_GENERAL, true;
+    /// A lookup shard is unreachable for a claim (chapter 19).
+    LookupUnavailable = 39461, "ER_SPRIG_LOOKUP_UNAVAILABLE", "SprigLookupUnavailable", SQLSTATE_CONNECTION, true;
+    /// The router has no exact plan for the statement across shards; the
+    /// message names a reason code (chapter 17, "Statements R1 rejects").
+    StatementNotDistributable = 39420, "ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE", "SprigStatementNotDistributable", SQLSTATE_GENERAL, false;
+    /// A statement's rows held in the gateway passed
+    /// `router.max_statement_memory_mb` (chapter 17).
+    RouterMemoryLimit = 39422, "ER_SPRIG_ROUTER_MEMORY_LIMIT", "SprigRouterMemoryLimit", SQLSTATE_GENERAL, false;
     /// Too many failed logins from this address: it is refused for
     /// `auth.ip_block_seconds` before the greeting (chapter 14, "Rate
     /// limits").
@@ -332,9 +354,40 @@ sprig_codes! {
     TenantTreeBusy = 39509, "ER_SPRIG_TENANT_TREE_BUSY", "SprigTenantTreeBusy", SQLSTATE_GENERAL, true;
     /// The provisioner doesn't support the operation (chapter 27).
     ProvisionerUnsupported = 39510, "ER_SPRIG_PROVISIONER_UNSUPPORTED", "SprigProvisionerUnsupported", SQLSTATE_GENERAL, false;
+    /// The tenant's home DC holds no valid DC lease (its permit lapsed or
+    /// was refused): writes are refused, reads continue; retry after the
+    /// tenant is re-routed (chapter 25).
+    DcFenced = 39501, "ER_SPRIG_DC_FENCED", "SprigDcFenced", SQLSTATE_GENERAL, true;
+    /// A manual failover can't run: the old home is healthy, the target is
+    /// not allowed or lacks a unit, or data loss wasn't accepted (chapter 25).
+    FailoverRefused = 39505, "ER_SPRIG_FAILOVER_REFUSED", "SprigFailoverRefused", SQLSTATE_GENERAL, false;
+    /// A cluster failover stopped before promoting: the loss estimate is
+    /// over the RPO, two replicas diverge, the writer isn't confirmed down,
+    /// or `failover.mode` is manual; an operator decides (chapter 25).
+    FailoverBlocked = 39512, "ER_SPRIG_FAILOVER_BLOCKED", "SprigFailoverBlocked", SQLSTATE_GENERAL, false;
+    /// A write reached a copy that stays fenced after an outage (a
+    /// returning server or DC); retry after re-routing (chapter 25).
+    RecoveryFenced = 39530, "ER_SPRIG_RECOVERY_FENCED", "SprigRecoveryFenced", SQLSTATE_GENERAL, true;
+    /// A returning DC admits new connections in steps; retry after the
+    /// jittered delay in the message (chapter 25).
+    AdmissionBackoff = 39531, "ER_SPRIG_ADMISSION_BACKOFF", "SprigAdmissionBackoff", SQLSTATE_CONNECTION, true;
     /// An external cluster failed its registration prechecks; the message
     /// lists every missing item (chapter 27). Not yet in Appendix E.
     ClusterPrecheckFailed = 39511, "ER_SPRIG_CLUSTER_PRECHECK_FAILED", "SprigClusterPrecheckFailed", SQLSTATE_GENERAL, false;
+    /// A write would add a second cluster without XA to a transaction
+    /// under `txn.non_xa_policy = reject`; the statement didn't run
+    /// (chapter 18).
+    CrossClusterWriteRejected = 39440, "ER_SPRIG_CROSS_CLUSTER_WRITE_REJECTED", "SprigCrossClusterWriteRejected", SQLSTATE_GENERAL, false;
+    /// A distributed commit's outcome is unknown; the connection is then
+    /// closed (chapter 18).
+    CommitOutcomeUnknown = 39441, "ER_SPRIG_COMMIT_OUTCOME_UNKNOWN", "SprigCommitOutcomeUnknown", SQLSTATE_CONNECTION, false;
+    /// A best-effort commit committed only some clusters (chapter 18).
+    PartialCommit = 39442, "ER_SPRIG_PARTIAL_COMMIT", "SprigPartialCommit", SQLSTATE_GENERAL, false;
+    /// A distributed transaction was rolled back; retry it (chapter 18).
+    DtxRolledBack = 39443, "ER_SPRIG_DTX_ROLLED_BACK", "SprigDtxRolledBack", SQLSTATE_RETRY, true;
+    /// A transaction would touch more clusters than `txn.max_branches`
+    /// (chapter 18).
+    TooManyBranches = 39444, "ER_SPRIG_TOO_MANY_BRANCHES", "SprigTooManyBranches", SQLSTATE_GENERAL, false;
     /// A tenant move between data centers can't start: the tenant is
     /// pinned, not active, already homed in the target, already moving,
     /// or the target has no cluster for it (chapter 24).
@@ -367,6 +420,49 @@ sprig_codes! {
     /// An Admin API request has no valid credential (chapter 37). Not yet
     /// in Appendix E.
     AdminUnauthenticated = 39793, "ER_SPRIG_ADMIN_UNAUTHENTICATED", "SprigAdminUnauthenticated", SQLSTATE_GENERAL, false;
+    /// A change feed start is older than all history the feed can read
+    /// (chapter 38).
+    FeedHistoryLost = 39800, "ER_SPRIG_FEED_HISTORY_LOST", "SprigFeedHistoryLost", SQLSTATE_GENERAL, false;
+    /// A resume token is malformed or belongs to another tenant (chapter 38).
+    FeedBadResumeToken = 39801, "ER_SPRIG_FEED_BAD_RESUME_TOKEN", "SprigFeedBadResumeToken", SQLSTATE_GENERAL, false;
+    /// A cluster's binlog settings fail the change feed's requirements
+    /// (chapter 38, "Binlog requirements").
+    FeedSourceUnsupported = 39802, "ER_SPRIG_FEED_SOURCE_UNSUPPORTED", "SprigFeedSourceUnsupported", SQLSTATE_GENERAL, false;
+    /// A feed subscription by that name already exists (chapter 38).
+    FeedSubscriptionExists = 39804, "ER_SPRIG_FEED_SUBSCRIPTION_EXISTS", "SprigFeedSubscriptionExists", SQLSTATE_GENERAL, false;
+    /// No feed subscription by that name (chapter 38).
+    FeedSubscriptionNotFound = 39805, "ER_SPRIG_FEED_SUBSCRIPTION_NOT_FOUND", "SprigFeedSubscriptionNotFound", SQLSTATE_GENERAL, false;
+    /// An internal feed consumer is behind all history and must start from
+    /// a snapshot (chapter 38).
+    FeedSnapshotRequired = 39808, "ER_SPRIG_FEED_SNAPSHOT_REQUIRED", "SprigFeedSnapshotRequired", SQLSTATE_GENERAL, false;
+    /// Statement-format DML in a shard schema: the feed can't decode it
+    /// (chapter 38).
+    FeedStatementEvent = 39810, "ER_SPRIG_FEED_STATEMENT_EVENT", "SprigFeedStatementEvent", SQLSTATE_GENERAL, false;
+    /// The tenant's map moved to another cluster but the move's handoff
+    /// record isn't readable yet; the feed waits (chapter 38).
+    FeedHandoffPending = 39813, "ER_SPRIG_FEED_HANDOFF_PENDING", "SprigFeedHandoffPending", SQLSTATE_GENERAL, true;
+    /// Unknown function, version or binding (chapter 41).
+    LogicNotFound = 39860, "ER_SPRIG_LOGIC_NOT_FOUND", "SprigLogicNotFound", SQLSTATE_GENERAL, false;
+    /// Parse or type error at deploy, with its location (chapter 41).
+    LogicSyntax = 39861, "ER_SPRIG_LOGIC_SYNTAX", "SprigLogicSyntax", SQLSTATE_GENERAL, false;
+    /// The code runs in no tier (chapter 41).
+    LogicUnsupported = 39862, "ER_SPRIG_LOGIC_UNSUPPORTED", "SprigLogicUnsupported", SQLSTATE_GENERAL, false;
+    /// A budget ran out; the message names it (chapter 41).
+    LogicBudgetExceeded = 39864, "ER_SPRIG_LOGIC_BUDGET_EXCEEDED", "SprigLogicBudgetExceeded", SQLSTATE_GENERAL, false;
+    /// The code threw an error (chapter 41).
+    LogicUserError = 39865, "ER_SPRIG_LOGIC_USER_ERROR", "SprigLogicUserError", SQLSTATE_GENERAL, false;
+    /// Type error, overflow, division by zero, `sqlOne` with many rows
+    /// (chapter 41).
+    LogicRuntimeError = 39866, "ER_SPRIG_LOGIC_RUNTIME_ERROR", "SprigLogicRuntimeError", SQLSTATE_GENERAL, false;
+    /// `SPRIG_TIER = 'mariadb'` but placement refuses (chapter 41).
+    LogicTierUnavailable = 39868, "ER_SPRIG_LOGIC_TIER_UNAVAILABLE", "SprigLogicTierUnavailable", SQLSTATE_GENERAL, false;
+    /// Concurrent deploys of one module (chapter 41).
+    LogicVersionConflict = 39869, "ER_SPRIG_LOGIC_VERSION_CONFLICT", "SprigLogicVersionConflict", SQLSTATE_GENERAL, true;
+    /// Arguments don't match the signature (chapter 41).
+    LogicSignatureMismatch = 39874, "ER_SPRIG_LOGIC_SIGNATURE_MISMATCH", "SprigLogicSignatureMismatch", SQLSTATE_GENERAL, false;
+    /// The function was placed in the engine tier, whose runtime this
+    /// build doesn't have yet (chapter 41, as built).
+    LogicEngineUnavailable = 39876, "ER_SPRIG_LOGIC_ENGINE_UNAVAILABLE", "SprigLogicEngineUnavailable", SQLSTATE_GENERAL, false;
     /// The audit spool is full (`audit.spool_max_mb`): admin API mutations
     /// and account statements fail closed (chapter 47).
     AuditUnavailable = 39970, "ER_SPRIG_AUDIT_UNAVAILABLE", "SprigAuditUnavailable", SQLSTATE_GENERAL, true;
@@ -449,12 +545,16 @@ const fn is_retryable_errno(errno: u16) -> bool {
     matches!(errno, 1205 | 1213)
 }
 
+#[allow(clippy::too_many_lines)] // one arm per status group
 fn sprig_protocol(code: SprigCode) -> ProtocolError {
     use tonic::Code;
     // Errors with a standard MongoDB equivalent use it (chapter 30).
     let (mongo_code, mongo_code_name, mongo_labels): (i32, &'static str, &'static [&str]) =
         match code {
             SprigCode::GatewayDraining => (91, "ShutdownInProgress", &["RetryableWriteError"]),
+            SprigCode::DcFenced | SprigCode::RecoveryFenced => {
+                (10107, "NotWritablePrimary", &["RetryableWriteError"])
+            }
             _ => (i32::from(code.number()), code.mongo_code_name(), &[]),
         };
     // gRPC and HTTP follow chapter 37's table.
@@ -463,9 +563,14 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SettingUnknown
         | SprigCode::SettingScopeNotAllowed
         | SprigCode::SettingBadValue
-        | SprigCode::AdminRequestInvalid => (Code::InvalidArgument, 400),
+        | SprigCode::AdminRequestInvalid
+        | SprigCode::LogicSyntax
+        | SprigCode::LogicSignatureMismatch
+        | SprigCode::FeedBadResumeToken => (Code::InvalidArgument, 400),
         SprigCode::SettingLocked
         | SprigCode::BinlogUnsupported
+        | SprigCode::FeedSourceUnsupported
+        | SprigCode::FeedStatementEvent
         | SprigCode::ClusterCapabilityRequired
         | SprigCode::ProvisionerUnsupported
         | SprigCode::ClusterPrecheckFailed
@@ -474,7 +579,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ReservedName
         | SprigCode::NameRewriteUnsupported
         | SprigCode::MetadataTooLarge
-        | SprigCode::ResultTooLarge => (Code::FailedPrecondition, 400),
+        | SprigCode::ResultTooLarge
+        | SprigCode::StatementNotDistributable
+        | SprigCode::UnsupportedKeyType
+        | SprigCode::UnsupportedKeyCollation
+        | SprigCode::KeyValueUnroutable => (Code::FailedPrecondition, 400),
         SprigCode::GatewayDraining
         | SprigCode::ListenerRetired
         | SprigCode::MetaUnavailable
@@ -491,6 +600,13 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ForwardFailed
         | SprigCode::JobLeaseLost
         | SprigCode::SessionMoved
+        | SprigCode::DcFenced
+        | SprigCode::RecoveryFenced
+        | SprigCode::AdmissionBackoff
+        | SprigCode::FeedHandoffPending
+        | SprigCode::ShardMapUnavailable
+        | SprigCode::IdBlockUnavailable
+        | SprigCode::LookupUnavailable
         | SprigCode::MoveSourceDiverged => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
@@ -501,7 +617,16 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SessionStateLost
         | SprigCode::ShardMoved
         | SprigCode::ShardLocked
+        | SprigCode::LogicUserError
+        | SprigCode::LogicRuntimeError
+        | SprigCode::LogicVersionConflict
         | SprigCode::MoveCutoverAborted => (Code::Aborted, 409),
+        SprigCode::CrossClusterWriteRejected | SprigCode::TooManyBranches => {
+            (Code::FailedPrecondition, 400)
+        }
+        SprigCode::CommitOutcomeUnknown | SprigCode::DtxRolledBack | SprigCode::PartialCommit => {
+            (Code::Aborted, 409)
+        }
         SprigCode::CatalogFormatTooNew => (Code::FailedPrecondition, 500),
         SprigCode::BinlogCorrupt | SprigCode::MoveVerifyFailed | SprigCode::ImportVerifyFailed => {
             (Code::DataLoss, 500)
@@ -510,8 +635,12 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::ClusterNotFound
         | SprigCode::UnknownDc
         | SprigCode::AutoIndexNotFound
+        | SprigCode::FeedSubscriptionNotFound
+        | SprigCode::LogicNotFound
         | SprigCode::JobNotFound => (Code::NotFound, 404),
-        SprigCode::ClusterExists | SprigCode::TenantExists => (Code::AlreadyExists, 409),
+        SprigCode::ClusterExists | SprigCode::TenantExists | SprigCode::FeedSubscriptionExists => {
+            (Code::AlreadyExists, 409)
+        }
         SprigCode::ClusterStateInvalid
         | SprigCode::AutoIndexStateInvalid
         | SprigCode::TenantNotReady
@@ -520,6 +649,13 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::MoveTargetIncompatible
         | SprigCode::MoveUnsupported
         | SprigCode::TenantMoveRefused
+        | SprigCode::FailoverRefused
+        | SprigCode::FailoverBlocked
+        | SprigCode::FeedHistoryLost
+        | SprigCode::FeedSnapshotRequired
+        | SprigCode::LogicUnsupported
+        | SprigCode::LogicTierUnavailable
+        | SprigCode::LogicEngineUnavailable
         | SprigCode::JobStateInvalid => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
@@ -529,7 +665,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit
         | SprigCode::AdmissionTimeout
-        | SprigCode::MemoryLimit => (Code::ResourceExhausted, 429),
+        | SprigCode::MemoryLimit
+        | SprigCode::LogicBudgetExceeded
+        | SprigCode::RouterMemoryLimit => (Code::ResourceExhausted, 429),
         SprigCode::PlacementUnavailable => (Code::ResourceExhausted, 503),
         SprigCode::RequestTooLarge => (Code::InvalidArgument, 413),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),

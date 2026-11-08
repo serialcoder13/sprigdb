@@ -1,0 +1,6 @@
+suite = "txn"
+seed = 605754836
+failure = "dtid 0000000000000002000000000000001f: abort recorded but rows on [1, 3]"
+
+[plan]
+faults = []

@@ -32,6 +32,9 @@ use super::privilege::{Action, ActionSet};
 use super::state::AuthzState;
 use super::store::{Grantee, PrivTarget};
 
+/// Finds the live table or view with a (database key, name key).
+pub type Relations<'a> = dyn Fn(&str, &str) -> Option<(DbId, ObjectId)> + 'a;
+
 /// What a check is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target<'a> {
@@ -109,7 +112,7 @@ impl CompiledPrivileges {
     #[must_use]
     pub fn compile_at(
         state: &AuthzState,
-        relation: &dyn Fn(&str, &str) -> Option<(DbId, ObjectId)>,
+        relation: &Relations<'_>,
         user: UserId,
         active: &[RoleId],
     ) -> Self {

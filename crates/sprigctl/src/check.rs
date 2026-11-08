@@ -20,6 +20,7 @@
 //! `deploy/compose/m07/soak.sh` (chapter 04 step 11); this runner is the
 //! quick check an operator can run against any gateway.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -367,9 +368,8 @@ async fn write_setting(
 
 fn get_query(scope: &ScopeRef) -> String {
     match scope {
-        ScopeRef::Global => String::new(),
+        ScopeRef::Global | ScopeRef::Dc(None) => String::new(),
         ScopeRef::Dc(Some(d)) => format!("?dc={d}"),
-        ScopeRef::Dc(None) => String::new(),
         ScopeRef::Cluster(c) => format!("?cluster={c}"),
         ScopeRef::Tenant(t) => format!("?tenant={}", escape(t)),
         ScopeRef::Database { tenant, db } => {
@@ -385,7 +385,7 @@ fn get_query(scope: &ScopeRef) -> String {
 }
 
 /// `sprigctl check no-restart`.
-#[allow(clippy::too_many_lines)] // the run, step by step
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the run, step by step
 pub(crate) async fn no_restart(
     c: &AdminClient,
     group: &ArgMatches,
@@ -613,17 +613,19 @@ pub(crate) async fn no_restart(
     print(out, &report, |r| {
         let mut s = String::new();
         for st in &r.steps {
-            s.push_str(&format!(
-                "{} {}: {}; restored {}; {} failures, {} reconnects\n",
+            let _ = writeln!(
+                s,
+                "{} {}: {}; restored {}; {} failures, {} reconnects",
                 if st.ok { "PASS" } else { "FAIL" },
                 st.change,
                 st.observed,
                 st.restored,
                 st.failures,
                 st.reconnects
-            ));
+            );
         }
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             "process pid {} started {}: {}; {} statements, {} failed, {} reconnects{}\n{}\n",
             r.pid,
             r.started_unix_ms,
@@ -641,9 +643,9 @@ pub(crate) async fn no_restart(
                 ""
             },
             if r.passed { "PASS" } else { "FAIL" }
-        ));
+        );
         if let Some(e) = &last {
-            s.push_str(&format!("last error: {e}\n"));
+            let _ = writeln!(s, "last error: {e}");
         }
         s
     });

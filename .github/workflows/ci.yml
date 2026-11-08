@@ -93,6 +93,16 @@ jobs:
           done
           ./3dc.sh config --quiet
 
+  telemetry:
+    name: S0 alert rules and dashboards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Chapter 47: promtool unit tests of every alert rule, and dashboards
+      # that match their generator and name only emitted metrics.
+      - run: deploy/alerts/test.sh
+      - run: python3 deploy/dashboards/gen.py --check
+
   # ---------------------------------------------------------------- S1 ----
   # A short libFuzzer run of every cargo-fuzz target (chapter 46 step 4):
   # the wire codec (sprig-proto-mysql/fuzz) and the SQL layer (sprig-sql/fuzz:

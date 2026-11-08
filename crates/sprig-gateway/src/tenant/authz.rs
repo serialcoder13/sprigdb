@@ -30,6 +30,16 @@
 //! retired (MariaDB keeps a connection's database privileges until its
 //! next `USE`).
 //!
+//! **Engines.** Every decision goes through the tenant's authorization
+//! engine (`auth.authorizer`, [`sprig_auth::authz::Authorizer`]): a
+//! session picks it up when it first compiles and keeps it. An engine this
+//! build doesn't know allows nothing.
+//!
+//! **Dropped objects.** A `DROP` of tables, views, routines or a database
+//! hands what it dropped, with `auth.grants_on_drop` resolved at each
+//! object's database, to the engine ([`objects_dropped`]), then waits for
+//! the change like an account statement does.
+//!
 //! **Migration.** A tenant whose catalog predates the `authz` module is
 //! migrated by the first session that reads it (every existing user keeps
 //! `ALL` and `SPRIG_TENANT_ADMIN`; see `sprig_auth::authz::store`).
@@ -44,15 +54,23 @@ use sprig_auth::TenantAuth;
 use sprig_auth::authz::account_sql::{
     self, AccountCtx, Outcome, db_denied, routine_denied, table_denied,
 };
+use sprig_auth::authz::authorizer::{
+    self as engines, Dropped, SettingsDenied, SettingsOp, Subject, row_filter_unsupported,
+};
 use sprig_auth::authz::backend::{self, BackendKey};
 use sprig_auth::authz::definers;
-use sprig_auth::authz::settings::{ACTIVATE_ALL_ROLES_ON_LOGIN, UNSAFE_PRIVILEGE_ACTION};
+use sprig_auth::authz::settings::{
+    ACTIVATE_ALL_ROLES_ON_LOGIN, AUTHORIZER, GRANTS_ON_DROP, UNSAFE_PRIVILEGE_ACTION,
+};
 use sprig_auth::authz::stmt::AccountStmt;
-use sprig_auth::authz::{Action, ActionSet, AuthzState, CompiledPrivileges, ObjectType, Target};
+use sprig_auth::authz::{
+    Action, ActionSet, Authorizer, AuthzState, CompiledPrivileges, ObjectType, SessionGrants,
+    Target,
+};
 use sprig_catalog::ddl::{database_key, object_key};
 use sprig_catalog::store::{DbState, Namespace, ObjectKind, ObjectState};
 use sprig_catalog::{Freshness, TenantCatalog};
-use sprig_common::ids::{ClusterId, RoleId, TenantId};
+use sprig_common::ids::{ClusterId, DbId, RoleId, TenantId};
 use sprig_common::{Result, SprigError};
 use sprig_proto_mysql::Persona;
 use sprig_sql::access::{self, Need};
@@ -68,7 +86,20 @@ type Gate = Arc<tokio::sync::Mutex<()>>;
 
 /// A compiled set and what it was compiled at: auth and catalog
 /// versions, active roles.
-type Compiled = (u64, u64, Vec<RoleId>, Arc<CompiledPrivileges>);
+type Compiled = (u64, u64, Vec<RoleId>, Arc<dyn SessionGrants>);
+
+/// The engine `auth.authorizer` names for `cat`'s tenant; `None` for a
+/// name this build doesn't know (logged; such a tenant gets nothing).
+fn engine_for(svc: &TenantServices, cat: &TenantCatalog) -> Option<Arc<dyn Authorizer>> {
+    let name = svc
+        .settings
+        .get(&AUTHORIZER, &cat.setting_ctx(&svc.dc), Some(&cat.settings));
+    let e = engines::by_name(&name);
+    if e.is_none() {
+        tracing::error!(tenant = %cat.tenant, authorizer = %name, "unknown authorization engine: the tenant's sessions are refused everything");
+    }
+    e
+}
 
 /// The process-wide half: per-user account settings and what was applied.
 #[derive(Default)]
@@ -156,8 +187,10 @@ impl AuthzServices {
         let Some(auth) = TenantAuth::of(cat) else {
             return Ok(());
         };
-        let state = AuthzState::of(cat).cloned().unwrap_or_default();
-        let want = backend::desired(cat, &state, auth);
+        let Some(engine) = engine_for(svc, cat) else {
+            return Ok(());
+        };
+        let want = engine.backend_grants(cat, auth);
         let hash = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             want.hash(&mut h);
@@ -189,6 +222,7 @@ impl AuthzServices {
         if full {
             // Stored code created as sprig_ctl before definers were the
             // session's account (chapter 29, "Definers of stored code").
+            let state = AuthzState::of(cat).cloned().unwrap_or_default();
             let to = definers::wanted(cat, &state, auth);
             match definers::migrate(&mut conn, cat.tenant, &to).await {
                 Ok(r) => {
@@ -226,6 +260,9 @@ pub struct SessionAuthz {
     /// roles, or all with `auth.activate_all_roles_on_login`).
     active: Mutex<Option<Vec<RoleId>>>,
     compiled: Mutex<Option<Compiled>>,
+    /// The engine, from the first compile on (`None` before, and for an
+    /// unknown `auth.authorizer`).
+    engine: std::sync::OnceLock<Option<Arc<dyn Authorizer>>>,
 }
 
 impl SessionAuthz {
@@ -247,34 +284,42 @@ impl SessionAuthz {
     }
 }
 
+/// The session's engine (read from `auth.authorizer` once).
+fn session_engine(ts: &TenantSession, cat: &TenantCatalog) -> Option<Arc<dyn Authorizer>> {
+    ts.authz
+        .engine
+        .get_or_init(|| engine_for(ts.services(), cat))
+        .clone()
+}
+
+/// Nothing at all: the rights of a session whose engine is unknown.
+fn nothing() -> Arc<dyn SessionGrants> {
+    Arc::new(CompiledPrivileges::default())
+}
+
 /// The session's privileges at `cat` (compiled once per snapshot and
 /// active-role set). Active roles no longer granted drop out.
 #[must_use]
-pub fn privileges(ts: &TenantSession, cat: &TenantCatalog) -> Arc<CompiledPrivileges> {
+pub fn privileges(ts: &TenantSession, cat: &TenantCatalog) -> Arc<dyn SessionGrants> {
     let Some(user) = ts.principal.user_id else {
         return Arc::new(CompiledPrivileges::everything());
     };
-    let state = AuthzState::of(cat).cloned().unwrap_or_default();
+    let Some(engine) = session_engine(ts, cat) else {
+        return nothing();
+    };
     let active = {
         let mut a = lock(&ts.authz.active);
-        if a.is_none() {
-            let all = ts.services().settings.get(
+        let all = || {
+            ts.services().settings.get(
                 &ACTIVATE_ALL_ROLES_ON_LOGIN,
                 &cat.setting_ctx(&ts.services().dc),
                 Some(&cat.settings),
-            );
-            *a = Some(if all {
-                state.granted_roles(user)
-            } else {
-                state.default_roles(user)
-            });
+            )
+        };
+        if a.is_none() {
+            *a = Some(engine.active_roles(cat, user, None, all()));
         }
-        let granted = state.granted_roles(user);
-        a.iter()
-            .flatten()
-            .copied()
-            .filter(|r| granted.contains(r))
-            .collect::<Vec<RoleId>>()
+        engine.active_roles(cat, user, a.as_deref(), false)
     };
     let mut g = lock(&ts.authz.compiled);
     if let Some((a, c, roles, p)) = &*g
@@ -285,7 +330,13 @@ pub fn privileges(ts: &TenantSession, cat: &TenantCatalog) -> Arc<CompiledPrivil
         return Arc::clone(p);
     }
     metrics::counter!("sprig_auth_compiles_total").increment(1);
-    let p = Arc::new(CompiledPrivileges::compile(&state, user, &active));
+    let p = engine.session(
+        cat,
+        &Subject {
+            user,
+            roles: &active,
+        },
+    );
     *g = Some((cat.auth_version, cat.version, active, Arc::clone(&p)));
     p
 }
@@ -317,6 +368,8 @@ pub async fn account_statement(
         return Err(account_sql::need_privilege("CREATE USER"));
     };
     let compiled = privileges(ts, cat);
+    let engine =
+        session_engine(ts, cat).ok_or_else(|| account_sql::need_privilege("CREATE USER"))?;
     let svc = Arc::clone(ts.services());
     let ctx = cat.setting_ctx(&svc.dc);
     let hashing = sprig_auth::admin::Hashing {
@@ -357,13 +410,13 @@ pub async fn account_statement(
             persona,
             current_db: current,
             lower_case_table_names: lctn,
-            privileges: &compiled,
+            privileges: &*compiled,
             active_roles: &active,
             hashing,
             unsafe_error,
             clock: &*svc.clock,
         };
-        account_sql::execute(&actx, stmt).await?
+        engine.account_statement(&actx, stmt).await?
     };
     match outcome {
         Outcome::Ok {
@@ -433,7 +486,7 @@ pub struct CheckCtx<'a> {
     /// The snapshot.
     pub cat: &'a TenantCatalog,
     /// The session's privileges.
-    pub p: &'a CompiledPrivileges,
+    pub p: &'a dyn SessionGrants,
     /// The persona.
     pub persona: Persona,
     /// The user name.
@@ -471,19 +524,13 @@ impl CheckCtx<'_> {
             return Ok(());
         };
         let okey = object_key(ObjectKind::Table, name, self.lctn);
-        let target = match self
-            .cat
-            .object(row.db_id, Namespace::Relation, &okey)
-            .filter(|o| o.state == ObjectState::Active)
-        {
-            Some(o) => Target::Object {
-                db_key: &key,
-                db: row.db_id,
-                object: o.object_id,
-            },
-            None => Target::Database { db_key: &key },
-        };
-        if any.iter().any(|a| self.p.allows(a, target)) {
+        let target = self.relation(&key, row.db_id, &okey);
+        if let Some(a) = any.iter().find(|a| self.p.allows(*a, target)) {
+            // The row-level hook: no engine filters rows yet, and a
+            // filter this gateway can't inject must not be skipped.
+            if self.p.row_filter(target, a).is_some() {
+                return Err(row_filter_unsupported(name));
+            }
             return Ok(());
         }
         let cmd = any.iter().next().map_or("SELECT", Action::command);
@@ -495,6 +542,23 @@ impl CheckCtx<'_> {
             &db,
             name,
         ))
+    }
+
+    /// Table or view `name_key` of database `db`: the live object, else
+    /// its name (grants held by name count).
+    fn relation<'k>(&self, db_key: &'k str, db: DbId, name_key: &'k str) -> Target<'k> {
+        match self
+            .cat
+            .object(db, Namespace::Relation, name_key)
+            .filter(|o| o.state == ObjectState::Active)
+        {
+            Some(o) => Target::Object {
+                db_key,
+                db,
+                object: o.object_id,
+            },
+            None => Target::Named { db_key, name_key },
+        }
     }
 
     fn database(&self, db: Option<&str>, action: Action) -> Result<()> {
@@ -577,6 +641,20 @@ impl CheckCtx<'_> {
                     if self.p.allows(*action, Target::Database { db_key: &key }) {
                         return Ok(());
                     }
+                    // MySQL accepts a table-level grant for the table
+                    // being created (CREATE on `db.t`), including one
+                    // kept from a dropped table of that name.
+                    let okey = object_key(ObjectKind::Table, o, self.lctn);
+                    if let Some(row) = self
+                        .cat
+                        .database(&key)
+                        .filter(|r| r.state == DbState::Active)
+                        && self
+                            .p
+                            .allows(*action, self.relation(&key, row.db_id, &okey))
+                    {
+                        return Ok(());
+                    }
                     Err(table_denied(
                         self.persona,
                         action.command(),
@@ -626,7 +704,7 @@ fn call_target(text: &[u8], lex: LexOptions) -> Option<(Option<String>, String)>
 /// # Errors
 /// The MySQL error the statement is refused with.
 pub fn check(cx: &CheckCtx<'_>, sp: &StmtPlan, original: &[u8], lex: &LexOptions) -> Result<()> {
-    if cx.p.everything {
+    if cx.p.unrestricted() {
         return Ok(());
     }
     check_text(cx, sp.info.kind, original, *lex)?;
@@ -635,7 +713,7 @@ pub fn check(cx: &CheckCtx<'_>, sp: &StmtPlan, original: &[u8], lex: &LexOptions
     {
         let key = database_key(logical, cx.lctn);
         let id = cx.cat.database(&key).map(|d| d.db_id);
-        if !cx.p.any_in_database(&key, id) {
+        if !cx.p.sees_database(&key, id) {
             return Err(db_denied(cx.user, cx.host, logical));
         }
     }
@@ -651,7 +729,7 @@ pub fn check(cx: &CheckCtx<'_>, sp: &StmtPlan, original: &[u8], lex: &LexOptions
 /// relations of a `SELECT`, `INSERT`, `REPLACE`, `UPDATE` or `DELETE`, and
 /// the procedure of a `CALL`.
 fn check_text(cx: &CheckCtx<'_>, kind: StmtKind, original: &[u8], lex: LexOptions) -> Result<()> {
-    if cx.p.everything {
+    if cx.p.unrestricted() {
         return Ok(());
     }
     match kind {
@@ -686,7 +764,7 @@ pub struct Recheck {
     text: bytes::Bytes,
     lex: LexOptions,
     current: Option<String>,
-    compiled: Arc<CompiledPrivileges>,
+    compiled: Arc<dyn SessionGrants>,
 }
 
 impl Recheck {
@@ -730,7 +808,7 @@ pub fn recheck(ts: &TenantSession, persona: Persona, rc: &Recheck) -> Result<()>
     let temp = |db: Option<&str>, name: &str| ts.is_temp(db, name);
     let cx = CheckCtx {
         cat: &cat,
-        p: &p,
+        p: &*p,
         persona,
         user: &ts.principal.user,
         host: &ts.principal.host,
@@ -752,10 +830,10 @@ pub fn recheck(ts: &TenantSession, persona: Persona, rc: &Recheck) -> Result<()>
 pub fn filter_databases(
     ans: &mut LocalAnswer,
     cat: &TenantCatalog,
-    p: &CompiledPrivileges,
+    p: &dyn SessionGrants,
     lctn: bool,
 ) {
-    if p.everything || p.tenant.has(Action::ShowDatabases) {
+    if p.sees_all_databases() {
         return;
     }
     ans.rows.retain(|r| {
@@ -768,7 +846,7 @@ pub fn filter_databases(
         }
         let key = database_key(&name, lctn);
         let id = cat.database(&key).map(|d| d.db_id);
-        p.any_in_database(&key, id)
+        p.sees_database(&key, id)
     });
 }
 
@@ -793,7 +871,7 @@ pub fn check_session(
     let temp = |db: Option<&str>, name: &str| ts.is_temp(db, name);
     let cx = CheckCtx {
         cat: &cat,
-        p: &p,
+        p: &*p,
         persona,
         user: &ts.principal.user,
         host: &ts.principal.host,
@@ -810,86 +888,102 @@ pub fn check_session(
     r
 }
 
-/// The routines a `DROP PROCEDURE` or `DROP FUNCTION` names that hold
-/// privilege rows. MySQL 8.4 and MariaDB 11.8 revoke a routine's
-/// privileges when it is dropped, but keep table, column and database
-/// privileges through `DROP TABLE` and `DROP DATABASE` (measured on both),
-/// so only routines are cleaned up (chapter 29, "Privileges of dropped
-/// objects").
+/// What a `DROP` statement removes, with `auth.grants_on_drop` resolved
+/// at each object's database (chapter 29, "Privileges of dropped
+/// objects"), read from the session's snapshot before the statement runs.
+/// Objects that don't exist (`IF EXISTS`) and temporary tables aren't
+/// listed.
 #[must_use]
-pub fn dropped_routines(
+pub fn dropped_objects(
     ts: &TenantSession,
     stmt: &sprig_catalog::ddl::DdlStatement,
     current: Option<&str>,
-) -> Vec<(sprig_common::ids::DbId, sprig_common::ids::ObjectId)> {
-    let sprig_catalog::ddl::DdlStatement::DropObjects { kind, names, .. } = stmt else {
-        return Vec::new();
-    };
-    let ns = match kind {
-        ObjectKind::Procedure => Namespace::Procedure,
-        ObjectKind::Function => Namespace::Function,
-        _ => return Vec::new(),
-    };
+) -> Vec<Dropped> {
+    use sprig_catalog::ddl::DdlStatement;
     let Some(cat) = ts.catalog().cloned() else {
         return Vec::new();
     };
-    let Some(state) = AuthzState::of(&cat) else {
-        return Vec::new();
-    };
+    let svc = ts.services();
     let lctn = ts.lower_case_table_names();
-    let mut out = Vec::new();
-    for n in names {
-        let Some(db) = n.db.as_deref().or(current) else {
-            continue;
-        };
-        let Some(d) = cat.database(&database_key(db, lctn)) else {
-            continue;
-        };
-        let Some(o) = cat.object(d.db_id, ns, &object_key(*kind, &n.name, lctn)) else {
-            continue;
-        };
-        let held = state.rows().privileges.iter().any(|p| {
-            matches!(p.target, sprig_auth::authz::PrivTarget::Object { db, object }
-                if db == d.db_id && object == o.object_id)
-        });
-        if held {
-            out.push((d.db_id, o.object_id));
-        }
+    let keep = |db: sprig_common::ids::DbId| {
+        svc.settings.get(
+            &GRANTS_ON_DROP,
+            &cat.setting_ctx(&svc.dc).with_db(db),
+            Some(&cat.settings),
+        ) != "drop"
+    };
+    let live_db = |name: &str| {
+        cat.database(&database_key(name, lctn))
+            .filter(|d| d.state == DbState::Active)
+            .cloned()
+    };
+    match stmt {
+        DdlStatement::DropDatabase { name, .. } => live_db(name)
+            .map(|d| Dropped::Database {
+                db: d.db_id,
+                db_key: d.name_key.clone(),
+                keep: keep(d.db_id),
+            })
+            .into_iter()
+            .collect(),
+        DdlStatement::DropObjects { kind, names, .. } => names
+            .iter()
+            .filter(|n| !ts.is_temp(n.db.as_deref().or(current), &n.name))
+            .filter_map(|n| {
+                let d = live_db(n.db.as_deref().or(current)?)?;
+                let o = cat
+                    .object(d.db_id, kind.namespace(), &object_key(*kind, &n.name, lctn))
+                    .filter(|o| o.state == ObjectState::Active)?;
+                Some(Dropped::Object {
+                    db: d.db_id,
+                    db_key: d.name_key.clone(),
+                    object: o.object_id,
+                    name_key: o.name_key.clone(),
+                    namespace: o.namespace,
+                    keep: keep(d.db_id),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
     }
-    out
 }
 
-/// Deletes the privilege rows of routines a `DROP` removed (see
-/// [`dropped_routines`]); the new auth version, if any. Failures are
-/// logged: rows of a dropped routine grant nothing.
-pub async fn forget_dropped(
-    ts: &TenantSession,
-    ids: &[(sprig_common::ids::DbId, sprig_common::ids::ObjectId)],
-) -> Option<u64> {
-    let mut version = None;
-    for (db, object) in ids {
-        match sprig_auth::authz::account_sql::forget_object(
-            &ts.services().catalog,
-            ts.tenant,
-            *db,
-            *object,
-        )
-        .await
-        {
-            Ok(v) => version = v.or(version),
-            Err(e) => {
-                tracing::warn!(tenant = %ts.tenant, %object, error = %e, "privileges of a dropped routine not removed");
+/// Hands what a successful `DROP` removed to the tenant's engine (see
+/// [`dropped_objects`]); if it changed grants, waits until this gateway's
+/// snapshot has the change and MariaDB's grants follow, so the session's
+/// next statement sees it. Failures are logged: the objects are gone.
+pub async fn objects_dropped(ts: &TenantSession, dropped: &[Dropped]) {
+    if dropped.is_empty() {
+        return;
+    }
+    let Some(cat) = ts.catalog().cloned() else {
+        return;
+    };
+    let Some(engine) = session_engine(ts, &cat) else {
+        return;
+    };
+    let svc = Arc::clone(ts.services());
+    match engine.objects_dropped(&svc.catalog, &cat, dropped).await {
+        Ok(Some(v)) => {
+            if let Some(c) = await_auth(&svc, ts.tenant, v).await {
+                let cluster = ts.principal.backend.cluster.clone();
+                if let Err(e) = svc.authz.ensure(&svc, &c, &cluster).await {
+                    tracing::warn!(tenant = %ts.tenant, error = %e, "backend grants after a DROP not applied yet");
+                }
             }
         }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(tenant = %ts.tenant, error = %e, "grants of dropped objects not updated");
+        }
     }
-    version
 }
 
 /// Which databases a session may see in `SHOW DATABASES` (all its forms)
 /// and `information_schema`: those it holds any privilege in, or all with
 /// the tenant-scoped `SHOW DATABASES` privilege.
 #[derive(Debug, Clone)]
-pub struct DbVisibility(Option<(Arc<CompiledPrivileges>, bool)>);
+pub struct DbVisibility(Option<(Arc<dyn SessionGrants>, bool)>);
 
 impl DbVisibility {
     /// The session's, at its installed snapshot.
@@ -899,7 +993,7 @@ impl DbVisibility {
             return Self(None);
         };
         let p = privileges(ts, &cat);
-        if p.everything || p.tenant.has(Action::ShowDatabases) {
+        if p.sees_all_databases() {
             return Self(None);
         }
         Self(Some((p, ts.lower_case_table_names())))
@@ -910,7 +1004,7 @@ impl DbVisibility {
     pub fn allows(&self, db: &sprig_sql::names::LogicalDb) -> bool {
         match &self.0 {
             None => true,
-            Some((p, lctn)) => p.any_in_database(&database_key(&db.name, *lctn), Some(db.id)),
+            Some((p, lctn)) => p.sees_database(&database_key(&db.name, *lctn), Some(db.id)),
         }
     }
 }
@@ -922,7 +1016,7 @@ pub fn filter_session_databases(ts: &TenantSession, ans: &mut LocalAnswer) {
     };
     let p = privileges(ts, &cat);
     let lctn = ts.lower_case_table_names();
-    filter_databases(ans, &cat, &p, lctn);
+    filter_databases(ans, &cat, &*p, lctn);
 }
 
 /// Chapter 29's settings privileges (build step 4):
@@ -954,75 +1048,45 @@ pub fn settings_check(
         return Ok(());
     };
     let p = privileges(ts, &cat);
-    if p.everything || p.tenant_admin() {
-        return Ok(());
-    }
-    if descendant {
-        return Err(account_sql::need_privilege("SPRIG_TENANT_ADMIN"));
-    }
     let lctn = ts.lower_case_table_names();
-    let admin = p.tenant.has(Action::SettingsAdmin);
-    match target {
-        sprig_catalog::Target::Tenant => {
-            if show || admin {
-                Ok(())
-            } else {
-                Err(account_sql::need_privilege("SPRIG_SETTINGS_ADMIN"))
-            }
-        }
-        _ if bounds && !show => {
-            if admin {
-                Ok(())
-            } else {
-                Err(account_sql::need_privilege("SPRIG_SETTINGS_ADMIN"))
-            }
-        }
-        sprig_catalog::Target::Database(id) => {
-            let name = db.unwrap_or_default();
-            let key = database_key(name, lctn);
-            let ok = if show {
-                p.any_in_database(&key, Some(id))
-            } else {
-                p.allows(Action::Alter, Target::Database { db_key: &key })
-            };
-            if ok {
-                Ok(())
-            } else {
-                Err(db_denied(&ts.principal.user, &ts.principal.host, name))
-            }
-        }
-        sprig_catalog::Target::Object(o) => {
-            let name = db.unwrap_or_default();
-            let key = database_key(name, lctn);
-            let dbid = cat
+    let name = db.unwrap_or_default();
+    let key = database_key(name, lctn);
+    let op = match target {
+        _ if descendant => SettingsOp::Descendant,
+        sprig_catalog::Target::Tenant => SettingsOp::Tenant { show },
+        _ if bounds && !show => SettingsOp::Bounds,
+        sprig_catalog::Target::Database(id) => SettingsOp::Database {
+            db_key: &key,
+            db: id,
+            show,
+        },
+        sprig_catalog::Target::Object(o) => SettingsOp::Object {
+            db_key: &key,
+            db: cat
                 .objects
                 .get(o)
-                .map_or(sprig_common::ids::DbId(0), |r| r.db_id);
-            let ok = if show {
-                p.any_on_object(&key, dbid, o)
-            } else {
-                p.allows(
-                    Action::Alter,
-                    Target::Object {
-                        db_key: &key,
-                        db: dbid,
-                        object: o,
-                    },
-                )
-            };
-            if ok {
-                Ok(())
-            } else {
-                Err(table_denied(
-                    persona,
-                    if show { "SELECT" } else { "ALTER" },
-                    &ts.principal.user,
-                    &ts.principal.client_ip.to_string(),
-                    name,
-                    table.unwrap_or_default(),
-                ))
-            }
+                .map_or(sprig_common::ids::DbId(0), |r| r.db_id),
+            object: o,
+            show,
+        },
+    };
+    match p.settings(op) {
+        Ok(()) => Ok(()),
+        Err(SettingsDenied::TenantAdmin) => Err(account_sql::need_privilege("SPRIG_TENANT_ADMIN")),
+        Err(SettingsDenied::SettingsAdmin) => {
+            Err(account_sql::need_privilege("SPRIG_SETTINGS_ADMIN"))
         }
+        Err(SettingsDenied::Target) => match op {
+            SettingsOp::Object { .. } => Err(table_denied(
+                persona,
+                if show { "SELECT" } else { "ALTER" },
+                &ts.principal.user,
+                &ts.principal.client_ip.to_string(),
+                name,
+                table.unwrap_or_default(),
+            )),
+            _ => Err(db_denied(&ts.principal.user, &ts.principal.host, name)),
+        },
     }
 }
 
@@ -1038,10 +1102,20 @@ pub fn settings_visible(
 ) -> bool {
     let p = privileges(ts, cat);
     let key = database_key(db, ts.lower_case_table_names());
-    match object {
-        None => p.any_in_database(&key, Some(db_id)),
-        Some(o) => p.any_on_object(&key, db_id, o),
-    }
+    let op = match object {
+        None => SettingsOp::Database {
+            db_key: &key,
+            db: db_id,
+            show: true,
+        },
+        Some(o) => SettingsOp::Object {
+            db_key: &key,
+            db: db_id,
+            object: o,
+            show: true,
+        },
+    };
+    p.settings(op).is_ok()
 }
 
 #[cfg(test)]

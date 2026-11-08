@@ -224,8 +224,7 @@ pub trait Authorizer: Send + Sync + std::fmt::Debug {
     ///
     /// # Errors
     /// The statement's MySQL error, or the catalog's.
-    async fn account_statement(&self, cx: &AccountCtx<'_>, stmt: &AccountStmt)
-    -> Result<Outcome>;
+    async fn account_statement(&self, cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>;
 
     /// `dropped` were dropped; `cat` is the snapshot from before the drop.
     /// Returns the auth version the engine's change committed at, if it
@@ -296,7 +295,11 @@ impl SessionGrants for CompiledPrivileges {
                 }
             }
         };
-        if ok { Ok(()) } else { Err(SettingsDenied::Target) }
+        if ok {
+            Ok(())
+        } else {
+            Err(SettingsDenied::Target)
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -363,11 +366,7 @@ impl Authorizer for MysqlGrants {
         backend::desired(cat, state_of(cat), auth)
     }
 
-    async fn account_statement(
-        &self,
-        cx: &AccountCtx<'_>,
-        stmt: &AccountStmt,
-    ) -> Result<Outcome> {
+    async fn account_statement(&self, cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome> {
         account_sql::execute(cx, stmt).await
     }
 
@@ -588,4 +587,402 @@ pub fn row_filter_unsupported(table: &str) -> SprigError {
              which this gateway can't apply yet"
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::sync::OnceLock;
+    use std::time::SystemTime;
+
+    use sprig_catalog::cache::Loaded;
+    use sprig_catalog::{
+        DatabaseRow, ExtState, ObjectFlags, ObjectKind, ObjectRow, Snapshot, Versions,
+    };
+    use sprig_common::ids::{GroupId, TenantId};
+    use sprig_settings::{AnySetting, Registry};
+
+    use super::*;
+    use crate::authz::privilege::ActionSet;
+    use crate::authz::store::{AuthzRows, Grantee, PrivRow};
+
+    fn registry() -> &'static Registry {
+        static R: OnceLock<Registry> = OnceLock::new();
+        R.get_or_init(|| {
+            Registry::new([&crate::authz::settings::GRANTS_ON_DROP as &dyn AnySetting]).unwrap()
+        })
+    }
+
+    fn db(id: u32, name: &str, state: DbState) -> DatabaseRow {
+        DatabaseRow {
+            db_id: DbId(id),
+            name: name.to_owned(),
+            name_key: name.to_owned(),
+            default_charset: "utf8mb4".to_owned(),
+            default_collation: "utf8mb4_uca1400_ai_ci".to_owned(),
+            default_group_id: GroupId(0),
+            state,
+            options: serde_json::json!({ "shards": [1] }),
+            created_at: SystemTime::UNIX_EPOCH,
+            created_by: None,
+            changed_version: 1,
+        }
+    }
+
+    fn obj(id: u64, db: u32, name: &str, kind: ObjectKind) -> ObjectRow {
+        ObjectRow {
+            object_id: ObjectId(id),
+            db_id: DbId(db),
+            namespace: kind.namespace(),
+            name: name.to_owned(),
+            name_key: name.to_owned(),
+            kind,
+            parent_id: None,
+            state: ObjectState::Active,
+            schema_version: 1,
+            flags: ObjectFlags::empty(),
+            pending_job_id: None,
+            created_at: SystemTime::UNIX_EPOCH,
+            changed_version: 1,
+        }
+    }
+
+    const APP: UserId = UserId(7);
+
+    fn grant(target: PrivTarget, a: &[Action]) -> PrivRow {
+        PrivRow {
+            priv_id: 0,
+            grantee: Grantee::User(APP),
+            target,
+            actions: ActionSet::of(a),
+        }
+    }
+
+    fn named(db: &str, t: &str, column: Option<&str>) -> PrivTarget {
+        PrivTarget::Named {
+            db_key: db.into(),
+            name_key: t.into(),
+            column: column.map(str::to_owned),
+        }
+    }
+
+    /// `shop` (1) with table `orders` (10) and procedure `p` (11); the
+    /// rows given.
+    fn catalog(objects: Vec<ObjectRow>, privileges: Vec<PrivRow>) -> TenantCatalog {
+        let state = AuthzState::new(AuthzRows {
+            privileges,
+            ..AuthzRows::default()
+        });
+        TenantCatalog::build(
+            registry(),
+            TenantId(42),
+            Loaded {
+                snapshot: Snapshot {
+                    versions: Versions {
+                        catalog: 1,
+                        auth: 1,
+                        purged: 0,
+                    },
+                    since: None,
+                    databases: vec![db(1, "shop", DbState::Active)],
+                    objects,
+                    settings: Vec::new(),
+                },
+                ext: vec![(
+                    crate::authz::store::MODULE,
+                    Arc::new(state) as Arc<dyn ExtState>,
+                )],
+            },
+        )
+    }
+
+    fn shop_objects() -> Vec<ObjectRow> {
+        vec![
+            obj(10, 1, "orders", ObjectKind::Table),
+            obj(11, 1, "p", ObjectKind::Procedure),
+        ]
+    }
+
+    fn orders_grants() -> Vec<PrivRow> {
+        vec![
+            grant(
+                PrivTarget::Object {
+                    db: DbId(1),
+                    object: ObjectId(10),
+                },
+                &[Action::Select, Action::Create],
+            ),
+            grant(
+                PrivTarget::Object {
+                    db: DbId(1),
+                    object: ObjectId(11),
+                },
+                &[Action::Execute],
+            ),
+            grant(PrivTarget::Database("shop".into()), &[Action::Insert]),
+        ]
+    }
+
+    fn table_dropped(keep: bool) -> Dropped {
+        Dropped::Object {
+            db: DbId(1),
+            db_key: "shop".into(),
+            object: ObjectId(10),
+            name_key: "orders".into(),
+            namespace: Namespace::Relation,
+            keep,
+        }
+    }
+
+    #[test]
+    fn keep_holds_table_grants_by_name_and_drop_deletes_them() {
+        let cat = catalog(shop_objects(), orders_grants());
+        let state = state_of(&cat);
+        assert_eq!(
+            drop_plan(state, &cat, &[table_dropped(true)]),
+            vec![DropOp::KeepByName {
+                db: DbId(1),
+                object: ObjectId(10),
+                db_key: "shop".into(),
+                name_key: "orders".into(),
+            }]
+        );
+        assert_eq!(
+            drop_plan(state, &cat, &[table_dropped(false)]),
+            vec![DropOp::ForgetObject {
+                db: DbId(1),
+                object: ObjectId(10),
+            }]
+        );
+        // A routine's grants go with it in either mode.
+        for keep in [true, false] {
+            let p = Dropped::Object {
+                db: DbId(1),
+                db_key: "shop".into(),
+                object: ObjectId(11),
+                name_key: "p".into(),
+                namespace: Namespace::Procedure,
+                keep,
+            };
+            assert_eq!(
+                drop_plan(state, &cat, &[p]),
+                vec![DropOp::ForgetObject {
+                    db: DbId(1),
+                    object: ObjectId(11),
+                }]
+            );
+        }
+        // Nothing held: nothing written.
+        let bare = catalog(shop_objects(), Vec::new());
+        assert!(drop_plan(state_of(&bare), &bare, &[table_dropped(true)]).is_empty());
+    }
+
+    #[test]
+    fn drop_mode_also_deletes_grants_held_by_that_name() {
+        let mut rows = orders_grants();
+        rows.push(grant(named("shop", "orders", None), &[Action::Update]));
+        let cat = catalog(shop_objects(), rows);
+        let plan = drop_plan(state_of(&cat), &cat, &[table_dropped(false)]);
+        assert!(plan.contains(&DropOp::ForgetNamed {
+            db_key: "shop".into(),
+            name_key: Some("orders".into()),
+        }));
+        // keep leaves them.
+        let plan = drop_plan(state_of(&cat), &cat, &[table_dropped(true)]);
+        assert!(!plan.iter().any(|o| matches!(o, DropOp::ForgetNamed { .. })));
+    }
+
+    #[test]
+    fn dropping_a_database() {
+        let mut rows = orders_grants();
+        rows.push(grant(named("shop", "old", None), &[Action::Select]));
+        let cat = catalog(shop_objects(), rows);
+        let state = state_of(&cat);
+        let keep = drop_plan(
+            state,
+            &cat,
+            &[Dropped::Database {
+                db: DbId(1),
+                db_key: "shop".into(),
+                keep: true,
+            }],
+        );
+        assert_eq!(
+            keep,
+            vec![
+                DropOp::KeepByName {
+                    db: DbId(1),
+                    object: ObjectId(10),
+                    db_key: "shop".into(),
+                    name_key: "orders".into(),
+                },
+                DropOp::ForgetObject {
+                    db: DbId(1),
+                    object: ObjectId(11),
+                },
+            ]
+        );
+        let drop = drop_plan(
+            state,
+            &cat,
+            &[Dropped::Database {
+                db: DbId(1),
+                db_key: "shop".into(),
+                keep: false,
+            }],
+        );
+        assert_eq!(
+            drop,
+            vec![
+                DropOp::ForgetDatabase {
+                    db: DbId(1),
+                    db_key: "shop".into(),
+                },
+                DropOp::ForgetNamed {
+                    db_key: "shop".into(),
+                    name_key: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn grants_held_by_name_apply_to_a_table_created_again() {
+        // `orders` was dropped with keep: SELECT, INSERT and CREATE on it
+        // by name, and UPDATE on its column `note`.
+        let rows = vec![
+            grant(
+                named("shop", "orders", None),
+                &[Action::Select, Action::Insert, Action::Create],
+            ),
+            grant(named("shop", "orders", Some("note")), &[Action::Update]),
+        ];
+        let engine = MysqlGrants;
+        let subject = Subject {
+            user: APP,
+            roles: &[],
+        };
+        // Before it exists: CREATE on the name, the database is listed,
+        // nothing else in it.
+        let gone = catalog(Vec::new(), rows.clone());
+        let g = engine.session(&gone, &subject);
+        let by_name = Target::Named {
+            db_key: "shop",
+            name_key: "orders",
+        };
+        assert!(g.allows(Action::Create, by_name));
+        assert!(g.allows(Action::Select, by_name));
+        assert!(!g.allows(
+            Action::Create,
+            Target::Named {
+                db_key: "shop",
+                name_key: "other",
+            }
+        ));
+        assert!(!g.allows(Action::Create, Target::Database { db_key: "shop" }));
+        assert!(g.sees_database("shop", Some(DbId(1))));
+        assert!(!g.sees_database("crm", None));
+        // Created again (a new object id): the grants are on it.
+        let again = catalog(vec![obj(20, 1, "orders", ObjectKind::Table)], rows);
+        let g = engine.session(&again, &subject);
+        let t = Target::Object {
+            db_key: "shop",
+            db: DbId(1),
+            object: ObjectId(20),
+        };
+        assert!(g.allows(Action::Select, t));
+        assert!(g.allows(Action::Insert, t));
+        assert!(g.allows(Action::Update, t), "through the column grant");
+        assert!(!g.allows(Action::Delete, t));
+        let c = g.as_any().downcast_ref::<CompiledPrivileges>().unwrap();
+        assert!(c.columns.contains_key(&(ObjectId(20), "note".into())));
+        assert!(c.named.is_empty());
+    }
+
+    #[test]
+    fn backend_grants_follow_the_name() {
+        use crate::authz::backend::BackendTarget;
+        let auth = TenantAuth::build(
+            vec![crate::cache::tests::row(APP.0, "app", "%", 1)],
+            &[],
+            Vec::new(),
+        );
+        let acct = backend::account(TenantId(42), APP);
+        let tables = |cat: &TenantCatalog| -> Vec<(String, ActionSet)> {
+            MysqlGrants
+                .backend_grants(cat, &auth)
+                .get(&acct)
+                .unwrap()
+                .iter()
+                .filter_map(|(t, a)| match t {
+                    BackendTarget::Table(_, n) | BackendTarget::Column(_, n, _) => {
+                        Some((n.clone(), *a))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        // Held by name with CREATE, no table: MariaDB gets the grant (it
+        // accepts one on a missing table only with CREATE), so the user
+        // can create the table again.
+        let with_create = vec![grant(
+            named("shop", "orders", None),
+            &[Action::Select, Action::Create],
+        )];
+        let gone = catalog(Vec::new(), with_create.clone());
+        assert_eq!(
+            tables(&gone),
+            vec![(
+                "orders".to_owned(),
+                ActionSet::of(&[Action::Select, Action::Create])
+            )]
+        );
+        // Without CREATE: nothing until the table exists.
+        let select_only = vec![grant(named("shop", "orders", None), &[Action::Select])];
+        assert!(tables(&catalog(Vec::new(), select_only.clone())).is_empty());
+        let again = vec![obj(20, 1, "orders", ObjectKind::Table)];
+        assert_eq!(
+            tables(&catalog(again, select_only)),
+            vec![("orders".to_owned(), ActionSet::of(&[Action::Select]))]
+        );
+    }
+
+    #[test]
+    fn settings_privileges_map_as_before() {
+        let cat = catalog(shop_objects(), orders_grants());
+        let g = MysqlGrants.session(
+            &cat,
+            &Subject {
+                user: APP,
+                roles: &[],
+            },
+        );
+        assert_eq!(
+            g.settings(SettingsOp::Descendant),
+            Err(SettingsDenied::TenantAdmin)
+        );
+        assert_eq!(
+            g.settings(SettingsOp::Tenant { show: false }),
+            Err(SettingsDenied::SettingsAdmin)
+        );
+        assert_eq!(g.settings(SettingsOp::Tenant { show: true }), Ok(()));
+        assert_eq!(
+            g.settings(SettingsOp::Bounds),
+            Err(SettingsDenied::SettingsAdmin)
+        );
+        let db = |show| SettingsOp::Database {
+            db_key: "shop",
+            db: DbId(1),
+            show,
+        };
+        assert_eq!(g.settings(db(true)), Ok(()));
+        assert_eq!(g.settings(db(false)), Err(SettingsDenied::Target));
+        assert!(g.row_filter(Target::Tenant, Action::Select).is_none());
+        assert!(!g.unrestricted());
+        assert!(!g.sees_all_databases());
+        assert_eq!(MysqlGrants.name(), MYSQL_GRANTS);
+        assert!(by_name(MYSQL_GRANTS).is_some());
+        assert!(by_name("supabase").is_none());
+    }
 }

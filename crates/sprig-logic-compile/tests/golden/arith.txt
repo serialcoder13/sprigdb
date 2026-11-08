@@ -1,0 +1,42 @@
+function Test.Arith (a: i64, b: i64, x: f64) -> events {output{sum: i64, prod: i64, quot: f64, idiv: i64, rem: i64, mix: f64, neg: i64, pick: str, safe: f64, big: bool, rounded: f64, maxv: f64}}
+  1 mx_value: f64 := max(a, mul(b, 1.5), -2)
+  2 rnd_value: f64 := round(div(a, 4))
+  3 emit output {sum: add(a, b), prod: sub(mul(a, b), 3), quot: div(a, b), idiv: idiv(a, b), rem: mod(a, b), mix: add(mul(x, a), 1.5), neg: neg(sub(a, mul(2, b))), pick: cond(truthy(gt(a, b)), "a", "b"), safe: coalesce(x, 0.25), big: or(ge(a, 100), not(sne(b, 7))), rounded: rnd_value, maxv: mx_value}
+
+-- cost 0 reads [] writes [] guarded 0
+
+CREATE OR REPLACE PACKAGE __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR);
+END;
+
+CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
+    v VARCHAR(128) := LEFT(msg, 128);
+  BEGIN
+    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+  END;
+END;
+
+CREATE OR REPLACE PROCEDURE __sprig_l44_v1 (
+    p_a IN BIGINT,
+    p_b IN BIGINT,
+    p_x IN DOUBLE,
+    p__event OUT VARCHAR(64),
+    p__result OUT LONGTEXT
+  )
+  SQL SECURITY INVOKER
+AS
+  v_mx_value DOUBLE;
+  v_rnd_value DOUBLE;
+BEGIN
+  v_mx_value := GREATEST(p_a, (p_b * 1.5e0), (-2));
+  v_rnd_value := (FLOOR((p_a * 1e0 / 4) + 5e-1) + 0e0);
+  IF p__event IS NULL THEN
+    p__event := 'output';
+    p__result := JSON_OBJECT('sum', ((p_a + p_b) + 0), 'prod', (((p_a * p_b) - 3) + 0), 'quot', ((p_a * 1e0 / p_b) + 0e0), 'idiv', (CAST(FLOOR(p_a * 1e0 / p_b) AS SIGNED) + 0), 'rem', (MOD(p_a, p_b) + 0), 'mix', (((p_x * p_a) + 1.5e0) + 0e0), 'neg', ((-(p_a - (2 * p_b))) + 0), 'pick', (CASE WHEN (COALESCE((p_a > p_b), 0) <> 0) THEN 'a' ELSE 'b' END), 'safe', (COALESCE(p_x, 2.5e-1) + 0e0), 'big', JSON_EXTRACT(CASE WHEN ((COALESCE((p_a >= 100), 0) <> 0) OR (COALESCE((NOT (COALESCE((NOT (p_b <=> 7)), 0) <> 0)), 0) <> 0)) IS NULL THEN 'null' WHEN ((COALESCE((p_a >= 100), 0) <> 0) OR (COALESCE((NOT (COALESCE((NOT (p_b <=> 7)), 0) <> 0)), 0) <> 0)) THEN 'true' ELSE 'false' END, '$'), 'rounded', (v_rnd_value + 0e0), 'maxv', (v_mx_value + 0e0));
+  END IF;
+  RETURN;
+  IF p__event IS NULL THEN
+    __sprig_l44_v1_lib.fail(39866, 'No events raised');
+  END IF;
+END

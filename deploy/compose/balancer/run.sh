@@ -6,10 +6,18 @@
 # (sprigdb-dev-bl-etcd, 127.0.0.1:18379, 256 MB), so its balancer only ever
 # sees the bl- tenants, over the Compose stack's three MariaDB clusters
 # (single, primary + replicas, Galera), registered with 1 GB of declared
-# storage each. Tenant ids start at 970000001, far above the shared dev
-# deployment's, so schema and account names (t<id>_*) never collide; the
-# ids this bed made are kept in .state/tenant_ids, and down sweeps only
-# those.
+# storage each. Tenant ids start at 1830600001 (the brief's rule 8b: the
+# bed's MySQL port, 18306, times 100,000), so schema and account names
+# (t<id>_*) don't collide with other deployments'.
+#
+# Cleanup touches only what this bed made, by exact name (rule 8a): up
+# records each tenant's id, incarnation and users in .state/owned, and the
+# mover jobs' ids go to .state/jobs; down drops the tenants through this
+# bed's own gateway and controller, then removes, on each cluster, only a
+# catalog `t<id>_sprig` whose comment carries that tenant's incarnation
+# (a mover's retained source copy, say) with the shard schemas its
+# `databases` table names, and the accounts `t<id>_u<n>` of the users it
+# recorded. Never a pattern or an id range.
 #
 #   deploy/compose/balancer/run.sh up     # etcd, controller, worker, gateway, tenants
 #   deploy/compose/balancer/run.sh down   # drop the tenants, stop, remove etcd
@@ -32,10 +40,10 @@ printf '*\n' >"$state/.gitignore"
 bin=${CARGO_TARGET_DIR:-target}/debug
 etcd=http://127.0.0.1:18379
 admin=http://127.0.0.1:18480
-dc=dc-bl
+dc="dc-bl"
 container=sprigdb-dev-bl-etcd
 pw=sprig-dev-app
-first_tenant_id=990000001
+first_tenant_id=1830600001
 # name|topology|ports
 clusters=(
     "bl-single|single|13301"
@@ -183,10 +191,12 @@ TOML
         ctl tenant show "$t" >/dev/null 2>&1 || ctl tenant create "$t" --cluster "$cl" >/dev/null
         ctl tenant user add "$t" app --password "$pw" --native --if-not-exists >/dev/null
         ctl settings set auth.mysql_native_password true --scope "tenant:$t" >/dev/null || true
-        local id
+        local id inc
         id=$(ctl -o json tenant show "$t" | jq -r .tenant_id)
-        grep -qx "$id" "$state/tenant_ids" 2>/dev/null || echo "$id" >>"$state/tenant_ids"
-        say "tenant $t ($id) on $cl"
+        inc=$(etcd_get "/sprig/g/tenants/$id" | jq -r .incarnation)
+        # id incarnation name users(user ids, comma-separated)
+        grep -q "^$id " "$state/owned" 2>/dev/null || echo "$id $inc $t 1" >>"$state/owned"
+        say "tenant $t ($id, incarnation $inc) on $cl"
     done
     for _ in $(seq 60); do
         nc -z 127.0.0.1 18306 2>/dev/null && break
@@ -195,36 +205,46 @@ TOML
     say "up: mysql -h127.0.0.1 -P18306 -u bl-01.app -p$pw"
 }
 
-# Leftover t<id>_* schemas and t<id>_u* accounts of this bed's tenant ids
-# (and no one else's), on every node that takes writes.
-sweep() {
-    local port q id
-    [[ -s $state/tenant_ids ]] || return 0
-    local ids
-    # shellcheck disable=SC2207 # one number per line
-    ids=($(cat "$state/tenant_ids"))
-    for port in 13301 13311 13321; do
-        for id in "${ids[@]}"; do
-            [[ $id =~ ^[0-9]+$ ]] || continue
-            q="SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 't${id}\\_%'"
-            for s in $(mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -N -B -e "$q" 2>/dev/null); do
-                mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -e "DROP DATABASE \`$s\`" 2>/dev/null &&
-                    say "dropped $s on :$port"
-            done
-            q="SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user LIKE 't${id}\\_u%'"
-            for u in $(mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -N -B -e "$q" 2>/dev/null); do
-                mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -e "DROP USER $u" 2>/dev/null &&
-                    say "dropped user $u on :$port"
+root_sql() { # port sql
+    mysql -h127.0.0.1 -P"$1" -uroot -psprig-dev-root -N -B -e "$2" </dev/null 2>/dev/null
+}
+
+# What this bed's tenants left on the clusters after their deletion, by
+# exact name only (see the header): catalogs whose comment carries the
+# recorded incarnation, the shard schemas those catalogs list, and the
+# recorded users' accounts.
+leftovers() {
+    [[ -s $state/owned ]] || return 0
+    local port id inc name users comment db u
+    while read -r id inc name users; do
+        [[ $id =~ ^[0-9]+$ && $inc =~ ^[0-9a-f]+$ ]] || continue
+        for port in 13301 13311 13321; do
+            comment=$(root_sql "$port" "SELECT schema_comment FROM information_schema.schemata \
+                WHERE schema_name = 't${id}_sprig'") || true
+            if [[ -n $comment && $comment == *"$inc"* ]]; then
+                for db in $(root_sql "$port" "SELECT CONCAT('t${id}_d', db_id, '_g', default_group_id, \
+                    '_s', default_group_id) FROM \`t${id}_sprig\`.\`databases\`"); do
+                    root_sql "$port" "DROP DATABASE IF EXISTS \`$db\`" && say "dropped $db on :$port"
+                done
+                root_sql "$port" "DROP DATABASE \`t${id}_sprig\`" && say "dropped t${id}_sprig ($name) on :$port"
+            fi
+            for u in ${users//,/ }; do
+                [[ $u =~ ^[0-9]+$ ]] || continue
+                if [[ -n $(root_sql "$port" "SELECT 1 FROM mysql.user WHERE user = 't${id}_u${u}'") ]]; then
+                    root_sql "$port" "DROP USER 't${id}_u${u}'@'%'" && say "dropped user t${id}_u${u} on :$port"
+                fi
             done
         done
-    done
+    done <"$state/owned"
 }
 
 # The mover's rows of this bed's jobs in __sprig_sys (chapter 10's
 # watermark, position and XA tables), on every writer.
 forget_jobs() {
     local ids port tbl
-    ids=$(ctl -o json job list 2>/dev/null | jq -r '[.jobs[].id | gsub("-"; "") | "UNHEX(\"" + . + "\")"] | join(",")')
+    ctl -o json job list 2>/dev/null | jq -r '.jobs[].id' >>"$state/jobs" || true
+    ids=$(sort -u "$state/jobs" | grep -E '^[0-9a-f-]{36}$' |
+        sed 's/-//g; s/.*/UNHEX("&")/' | paste -sd, -)
     [[ -n $ids ]] || return 0
     for port in 13301 13311 13321; do
         for tbl in __sprig_watermark __sprig_mover_pos __sprig_mover_xa; do
@@ -237,6 +257,9 @@ forget_jobs() {
 
 down() {
     if running controller; then
+        # No new moves while tenants go.
+        setting balancer.mode '"off"'
+        sleep 2
         forget_jobs
         for tc in "${tenants[@]}"; do
             t=${tc%%:*}
@@ -251,23 +274,27 @@ down() {
             done
             ctl tenant delete "$t" --yes >/dev/null 2>&1 || say "tenant $t not deleted"
         done
-        sleep 5
+        for _ in $(seq 60); do
+            [[ $(ctl -o json tenant list 2>/dev/null | jq '.tenants | length') == 0 ]] && break
+            sleep 2
+        done
     fi
     stop gateway
     stop worker
     stop controller
-    sweep
+    forget_jobs # again: a job may have written rows after the first pass
+    leftovers
     docker rm -f "$container" >/dev/null 2>&1 && say "etcd $container removed (with every job record)"
-    rm -f "$state/tenant_ids"
+    rm -f "$state/owned" "$state/jobs"
 }
 
 case ${1:-} in
 up) up ;;
 down) down ;;
-sweep) sweep ;;
+leftovers) leftovers ;;
 ctl)
     shift
     ctl "$@"
     ;;
-*) die "usage: $0 up|down|sweep|ctl …" ;;
+*) die "usage: $0 up|down|leftovers|ctl …" ;;
 esac

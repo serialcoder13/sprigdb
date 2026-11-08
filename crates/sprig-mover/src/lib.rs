@@ -50,7 +50,7 @@ pub use api::{
     CutoverMode, DdlTransform, HashRange, JobFilter, JobKind, JobSpec, JobState, JobStatus, Mover,
     Progress, Routing, SourceSpec, TargetSpec, VerifyMode,
 };
-pub use io::{ChangeStream, CommitOutcome, JobEnv, MapIo, SourceIo, TargetIo};
+pub use io::{ChangeStream, CommitOutcome, HandoffPos, JobEnv, MapIo, SourceIo, TargetIo};
 pub use record::{Claim, JobRecord, JobStore, MetaMover};
 pub use settings::MoverSettings;
 pub use worker::{EnvFactory, JobRuntime, WorkerOpts};

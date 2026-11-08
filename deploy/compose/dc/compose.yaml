@@ -7,6 +7,7 @@
 # | netem      | -    | host         | one-way delays between DC subnets       |
 # | mum1-etcd  | mum1 | 10.10.1.10   | the one etcd of single-etcd mode        |
 # | mum1-db-1  | mum1 | 10.10.1.21   | cluster mum1: single node               |
+# | mum1-db-2  | mum1 | 10.10.1.22   | cluster mum1-b: single node (moves back)|
 # | fra1-db-1  | fra1 | 10.10.2.21   | cluster fra1: Galera (one node)         |
 # | proxy-mum1 | mum1 | 10.10.1.240  | where mum1's processes dial from        |
 # | proxy-fra1 | fra1 | 10.10.2.240  | where fra1's processes dial from        |
@@ -18,7 +19,7 @@
 # mum1-fra1 round trip (60 ms by default), a mum1 process doesn't.
 #
 # Host ports (127.0.0.1): proxy-mum1 34411 mum1-db-1, 34412 fra1-db-1,
-# 34419 etcd; proxy-fra1 34421, 34422, 34429. The base file publishes the
+# 34413 mum1-db-2, 34419 etcd; proxy-fra1 34421, 34422, 34423, 34429. The base file publishes the
 # nodes and etcd directly too (34106, 34206, 34179), for checks.
 #
 # Each MariaDB here is capped at 768 MB, each proxy at 64 MB.
@@ -31,6 +32,19 @@ services:
     # A single node: no semi-sync master (it would wait for replicas that
     # aren't started).
     command: [--server-id=101, --gtid-domain-id=1, --innodb-buffer-pool-size=64M, --max-connections=400]
+    mem_limit: 768m
+    memswap_limit: 1g
+
+  # A second, standalone cluster in mum1: a move back can't land on the
+  # cluster that still retains the tenant's fenced source
+  # (mover.source_retain_hours).
+  mum1-db-2:
+    command: [--server-id=102, --gtid-domain-id=4, --innodb-buffer-pool-size=64M, --max-connections=400]
+    environment:
+      MARIADB_MASTER_HOST: ""
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    depends_on: !reset {}
     mem_limit: 768m
     memswap_limit: 1g
 
@@ -47,6 +61,7 @@ services:
     ports:
       - "127.0.0.1:34411:3401"
       - "127.0.0.1:34412:3402"
+      - "127.0.0.1:34413:3403"
       - "127.0.0.1:34419:3409"
     mem_limit: 64m
 
@@ -59,5 +74,6 @@ services:
     ports:
       - "127.0.0.1:34421:3401"
       - "127.0.0.1:34422:3402"
+      - "127.0.0.1:34423:3403"
       - "127.0.0.1:34429:3409"
     mem_limit: 64m

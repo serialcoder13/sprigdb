@@ -8,5 +8,27 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-common.workspace = true
+# Column definitions of shard results (chapter 05's codec).
+sprig-proto-mysql.workspace = true
+# Chapter 15: key normalization, routing_hash, collations.
+sprig-shard.workspace = true
+# Statement ASTs (chapter 17, "Pipeline": sqlparser-rs).
+sqlparser.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# The differential suite (chapter 46) talks to the gateway and to a
+# reference MariaDB.
+mysql_async.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

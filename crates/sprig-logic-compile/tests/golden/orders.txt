@@ -1,0 +1,70 @@
+function Shop.PlaceOrder (orderId: i64, productId: i64, qty: i64) -> events {output{left: i64, orders: json, changed: i64}, error{message: str}}
+  1 take_affected := db.exec("UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?", [qty, productId, qty])
+  2 if truthy(seq(take_affected, 1))
+  3   add_affected := db.exec("INSERT INTO orders (id, product_id, qty, note) VALUES (?, ?, ?, CONCAT('it''s ', ?))", [orderId, productId, qty, concat("order ", num_str(orderId))])
+  4   (left_found, left_stock) := db.sql_one("SELECT stock FROM products WHERE id = ?", [productId])
+  5   list_rows := db.sql("SELECT id, qty, note FROM orders WHERE product_id = ? ORDER BY id", [productId])
+  6   emit output {left: left_stock, orders: list_rows, changed: take_affected}
+  7 else
+  8   emit error {message: concat("out of stock for ", num_str(productId))}
+
+-- cost 4 reads ["orders", "products"] writes ["orders", "products"] guarded 0
+
+CREATE OR REPLACE PACKAGE __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR);
+END;
+
+CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
+    v VARCHAR(128) := LEFT(msg, 128);
+  BEGIN
+    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+  END;
+END;
+
+CREATE OR REPLACE PROCEDURE __sprig_l44_v1 (
+    p_orderid IN BIGINT,
+    p_productid IN BIGINT,
+    p_qty IN BIGINT,
+    p__event OUT VARCHAR(64),
+    p__result OUT LONGTEXT
+  )
+  SQL SECURITY INVOKER
+AS
+  v_take_affected BIGINT;
+  v_add_affected BIGINT;
+  v_left_found BOOLEAN;
+  v_left_stock BIGINT;
+  v_list_rows LONGTEXT;
+BEGIN
+  UPDATE products SET stock = stock - (p_qty) WHERE id = (p_productid) AND stock >= (p_qty);
+  v_take_affected := ROW_COUNT();
+  IF (COALESCE((v_take_affected <=> 1), 0) <> 0) THEN
+    INSERT INTO orders (id, product_id, qty, note) VALUES ((p_orderid), (p_productid), (p_qty), CONCAT('it''s ', (CONCAT(COALESCE('order ', 'null'), COALESCE(COALESCE(CAST(p_orderid AS CHAR), 'null'), 'null')))));
+    v_add_affected := ROW_COUNT();
+    BEGIN
+      SELECT q.`stock` INTO v_left_stock FROM (SELECT stock FROM products WHERE id = (p_productid)) q;
+      v_left_found := TRUE;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN v_left_found := FALSE; v_left_stock := NULL;
+      WHEN TOO_MANY_ROWS THEN __sprig_l44_v1_lib.fail(39866, 'Sprig.Db.QueryOne at step left returned more than one row');
+    END;
+    v_list_rows := JSON_ARRAY();
+    FOR r_list_rows IN (SELECT id, qty, note FROM orders WHERE product_id = (p_productid) ORDER BY id) LOOP
+      v_list_rows := JSON_ARRAY_APPEND(v_list_rows, '$', JSON_OBJECT('id', (r_list_rows.`id` + 0), 'qty', (r_list_rows.`qty` + 0), 'note', r_list_rows.`note`));
+    END LOOP;
+    IF p__event IS NULL THEN
+      p__event := 'output';
+      p__result := JSON_OBJECT('left', (v_left_stock + 0), 'orders', JSON_EXTRACT(v_list_rows, '$'), 'changed', (v_take_affected + 0));
+    END IF;
+    RETURN;
+  ELSE
+    IF p__event IS NULL THEN
+      p__event := 'error';
+      p__result := JSON_OBJECT('message', CONCAT(COALESCE('out of stock for ', 'null'), COALESCE(COALESCE(CAST(p_productid AS CHAR), 'null'), 'null')));
+    END IF;
+  END IF;
+  IF p__event IS NULL THEN
+    __sprig_l44_v1_lib.fail(39866, 'No events raised');
+  END IF;
+END

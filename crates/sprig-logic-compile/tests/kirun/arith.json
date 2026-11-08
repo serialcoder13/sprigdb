@@ -1,0 +1,32 @@
+{"namespace": "Test", "name": "Arith",
+ "parameters": {
+   "a": {"parameterName": "a", "schema": {"type": ["INTEGER"]}},
+   "b": {"parameterName": "b", "schema": {"type": ["INTEGER"]}},
+   "x": {"parameterName": "x", "schema": {"type": ["DOUBLE", "NULL"]}}},
+ "events": {"output": {"name": "output", "parameters": {
+   "sum": {"type": ["INTEGER"]}, "prod": {"type": ["INTEGER"]}, "quot": {"type": ["DOUBLE"]},
+   "idiv": {"type": ["INTEGER"]}, "rem": {"type": ["INTEGER"]}, "mix": {"type": ["DOUBLE"]},
+   "neg": {"type": ["INTEGER"]}, "pick": {"type": ["STRING"]}, "safe": {"type": ["DOUBLE"]},
+   "big": {"type": ["BOOLEAN"]}, "rounded": {"type": ["DOUBLE"]}, "maxv": {"type": ["DOUBLE"]}}}},
+ "steps": {
+  "rnd": {"statementName": "rnd", "namespace": "System.Math", "name": "Round",
+    "parameterMap": {"value": {"v": {"type": "EXPRESSION", "expression": "Arguments.a / 4"}}}},
+  "mx": {"statementName": "mx", "namespace": "System.Math", "name": "Maximum",
+    "parameterMap": {"value": {
+      "v1": {"type": "EXPRESSION", "order": 1, "expression": "Arguments.a"},
+      "v2": {"type": "EXPRESSION", "order": 2, "expression": "Arguments.b * 1.5"},
+      "v3": {"type": "VALUE", "order": 3, "value": -2}}}},
+  "out": {"statementName": "out", "namespace": "System", "name": "GenerateEvent",
+    "parameterMap": {"results": {
+      "r1": {"type": "VALUE", "order": 1, "value": {"name": "sum", "value": {"isExpression": true, "value": "Arguments.a + Arguments.b"}}},
+      "r2": {"type": "VALUE", "order": 2, "value": {"name": "prod", "value": {"isExpression": true, "value": "Arguments.a * Arguments.b - 3"}}},
+      "r3": {"type": "VALUE", "order": 3, "value": {"name": "quot", "value": {"isExpression": true, "value": "Arguments.a / Arguments.b"}}},
+      "r4": {"type": "VALUE", "order": 4, "value": {"name": "idiv", "value": {"isExpression": true, "value": "Arguments.a // Arguments.b"}}},
+      "r5": {"type": "VALUE", "order": 5, "value": {"name": "rem", "value": {"isExpression": true, "value": "Arguments.a % Arguments.b"}}},
+      "r6": {"type": "VALUE", "order": 6, "value": {"name": "mix", "value": {"isExpression": true, "value": "Arguments.x * Arguments.a + 1.5"}}},
+      "r7": {"type": "VALUE", "order": 7, "value": {"name": "neg", "value": {"isExpression": true, "value": "-(Arguments.a - 2 * Arguments.b)"}}},
+      "r8": {"type": "VALUE", "order": 8, "value": {"name": "pick", "value": {"isExpression": true, "value": "Arguments.a > Arguments.b ? 'a' : 'b'"}}},
+      "r9": {"type": "VALUE", "order": 9, "value": {"name": "safe", "value": {"isExpression": true, "value": "Arguments.x ?? 0.25"}}},
+      "r10": {"type": "VALUE", "order": 10, "value": {"name": "big", "value": {"isExpression": true, "value": "Arguments.a >= 100 or not (Arguments.b != 7)"}}},
+      "r11": {"type": "VALUE", "order": 11, "value": {"name": "rounded", "value": {"isExpression": true, "value": "Steps.rnd.output.value"}}},
+      "r12": {"type": "VALUE", "order": 12, "value": {"name": "maxv", "value": {"isExpression": true, "value": "Steps.mx.output.value"}}}}}}}}

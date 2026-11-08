@@ -1,0 +1,59 @@
+function Shop.Quote (productId: i64, qty: i64 [1..]) -> events {output{total: f64}, error{message: str}}
+  1 (item_found, item_price, item_stock) := db.sql_one("SELECT price, stock FROM products WHERE id = ?", [productId])
+  2 if truthy(ge(item_stock, qty))
+  3   sum_value: f64 := add(mul(item_price, qty), 40)
+  4   emit output {total: sum_value}
+  5 else
+  6   emit error {message: "not enough stock"}
+
+-- cost 1 reads ["products"] writes [] guarded 0
+
+CREATE OR REPLACE PACKAGE __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR);
+END;
+
+CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
+  PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
+    v VARCHAR(128) := LEFT(msg, 128);
+  BEGIN
+    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+  END;
+END;
+
+CREATE OR REPLACE PROCEDURE __sprig_l44_v1 (
+    p_productid IN BIGINT,
+    p_qty IN BIGINT,
+    p__event OUT VARCHAR(64),
+    p__result OUT LONGTEXT
+  )
+  SQL SECURITY INVOKER
+AS
+  v_item_found BOOLEAN;
+  v_item_price DOUBLE;
+  v_item_stock BIGINT;
+  v_sum_value DOUBLE;
+BEGIN
+  BEGIN
+    SELECT q.`price`, q.`stock` INTO v_item_price, v_item_stock FROM (SELECT price, stock FROM products WHERE id = (p_productid)) q;
+    v_item_found := TRUE;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN v_item_found := FALSE; v_item_price := NULL; v_item_stock := NULL;
+    WHEN TOO_MANY_ROWS THEN __sprig_l44_v1_lib.fail(39866, 'Sprig.Db.QueryOne at step item returned more than one row');
+  END;
+  IF (COALESCE((v_item_stock >= p_qty), 0) <> 0) THEN
+    v_sum_value := ((v_item_price * p_qty) + 40);
+    IF p__event IS NULL THEN
+      p__event := 'output';
+      p__result := JSON_OBJECT('total', (v_sum_value + 0e0));
+    END IF;
+    RETURN;
+  ELSE
+    IF p__event IS NULL THEN
+      p__event := 'error';
+      p__result := JSON_OBJECT('message', 'not enough stock');
+    END IF;
+  END IF;
+  IF p__event IS NULL THEN
+    __sprig_l44_v1_lib.fail(39866, 'No events raised');
+  END IF;
+END

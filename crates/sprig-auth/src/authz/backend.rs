@@ -270,6 +270,7 @@ pub type BackendState = BTreeMap<String, BTreeMap<BackendTarget, ActionSet>>;
 /// The grants every live user's account should hold (see the module
 /// docs). Accounts of users without any privilege are present, empty.
 #[must_use]
+#[allow(clippy::too_many_lines)] // one arm per privilege level
 pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> BackendState {
     let tenant = cat.tenant;
     let mut out = BackendState::new();
@@ -573,10 +574,7 @@ pub fn plan(
             let del = had.minus(*set);
             // MariaDB refuses a table grant on a missing table (1146)
             // unless the list includes CREATE; repeating CREATE is harmless.
-            if !add.is_empty()
-                && matches!(t, BackendTarget::Table(..))
-                && set.has(Action::Create)
-            {
+            if !add.is_empty() && matches!(t, BackendTarget::Table(..)) && set.has(Action::Create) {
                 add = add.with(Action::Create);
             }
             if !add.is_empty() {
@@ -729,6 +727,27 @@ mod tests {
         // Converged: nothing to do.
         let (none, _) = plan(&want, &want, &k, false);
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn table_grants_repeat_create() {
+        // MariaDB grants on a missing table only with CREATE in the list.
+        let k = BackendKey::new(b"0123456789abcdef").unwrap_or_else(|_| unreachable!());
+        let t = BackendTarget::Table("t1_d1_g1_s1".into(), "orders".into());
+        let mut want = BackendState::new();
+        want.entry("t1_u1".into())
+            .or_default()
+            .insert(t.clone(), ActionSet::of(&[Action::Select, Action::Create]));
+        let mut have = BackendState::new();
+        have.entry("t1_u1".into())
+            .or_default()
+            .insert(t, ActionSet::of(&[Action::Create]));
+        let (stmts, _) = plan(&want, &have, &k, false);
+        let text: Vec<&str> = stmts.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            text,
+            vec!["GRANT SELECT, CREATE ON `t1_d1_g1_s1`.`orders` TO 't1_u1'@'%'"]
+        );
     }
 
     #[test]

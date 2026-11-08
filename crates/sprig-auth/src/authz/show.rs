@@ -127,7 +127,11 @@ pub fn render(
                     *e = e.union(p.actions);
                 }
                 Some(c) => {
-                    let e = columns.entry(key).or_default().entry(c.clone()).or_default();
+                    let e = columns
+                        .entry(key)
+                        .or_default()
+                        .entry(c.clone())
+                        .or_default();
                     *e = e.union(p.actions);
                 }
             }

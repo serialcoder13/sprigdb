@@ -21,12 +21,45 @@
 //!   of a move between DCs (chapter 24): both DCs' maps and the directory
 //!   entry in one transaction (single-etcd mode).
 //!
-//! Not yet (R1): table groups in the catalog, normalization, collation
-//! weights, `routing_hash`, data-group maps with many ranges, `_sprig_rk`.
+//! R1 (chapters 15 and 19):
+//!
+//! - [`key`], [`normalize`], [`collation`], [`hash`]: key specs and
+//!   values, canonical bytes, collation weights computed in Rust, and
+//!   `routing_hash` (`xxh3_64`);
+//! - [`shardmap`]: data-group maps with many ranges, the routing lookup,
+//!   the etcd store and the gateways' watched cache;
+//! - [`groups`]: table groups and members in the catalog (the `sharding`
+//!   catalog module), `colocation_safe`;
+//! - [`rk`]: the `_sprig_rk` column's statements;
+//! - [`reference`]: reference-table copy states and read decisions;
+//! - [`ids`]: ID blocks for `AUTO_INCREMENT` (chapter 19);
+//! - [`lookup`]: unique and automatic lookup indexes, the consistent-lookup
+//!   claim and release, routing through lookups, build and orphan scan
+//!   (chapter 19).
 
+pub mod collation;
+pub mod groups;
+pub mod hash;
 pub mod home;
+pub mod ids;
+pub mod key;
+pub mod lookup;
 pub mod map;
 pub mod names;
+pub mod normalize;
+pub mod reference;
+pub mod rk;
+pub mod shardmap;
 
+pub use collation::{Charset, Collation, CollationId};
+pub use hash::{hash_key, routing_hash};
+pub use key::{
+    DateTimeParts, DecimalRef, GroupKind, KeyClass, KeySpec, KeyValue, KeyValueOwned,
+    MemberRouting, RoutingHash, pad_binary,
+};
 pub use map::{Hold, Placement, TenantMaps};
 pub use names::{catalog_schema, reference_schema, shard_schema, tenant_schemas};
+pub use normalize::{NormOutcome, Normalizer, StdNormalizer};
+pub use shardmap::{
+    RangeEntry, Routed, ShardMap, ShardMapCache, ShardMapStore, route_in_list, route_key,
+};

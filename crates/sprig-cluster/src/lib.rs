@@ -21,7 +21,10 @@
 //!   choice ([`driver::galera`]);
 //! - [`fence`]: `RevokeKill` and `Rename` shard fences, receipts, unfence;
 //! - [`sys`]: the internal schema `__sprig_sys`;
-//! - [`settings`]: the `cluster.*` keys these steps use.
+//! - [`settings`]: the `cluster.*` keys these steps use;
+//! - [`failover`]: chapter 25's cluster failover per topology (primary +
+//!   replicas, Galera quorum, single node, external) and the flapping
+//!   damper.
 //!
 //! Step 9, the Admin API's `Clusters` service and `sprigctl cluster`, is in
 //! `sprig-controller::admin` and `sprigctl`; the controller's `registry`
@@ -32,10 +35,11 @@
 //! controller's `registry` loop (it calls [`probe::Prober::probe_cluster`],
 //! which has no `sprig_repl` endpoint; registration runs it), live
 //! tuning through the agent and operator (step 12, R2; [`tuning`] has
-//! steps 10 and 11), and failover hooks with the `read_only`
-//! self-fence (step 13, R2).
+//! steps 10 and 11). Failover (step 13) is [`failover`], as plain
+//! functions rather than `FailoverHooks` (see there).
 
 pub mod driver;
+pub mod failover;
 pub mod fence;
 pub mod health;
 pub mod probe;

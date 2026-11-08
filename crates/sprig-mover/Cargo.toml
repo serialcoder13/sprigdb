@@ -19,6 +19,8 @@ sprig-binlog.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
+# The feed handoff record the cutover commits (chapter 38).
+sprig-feed.workspace = true
 sprig-meta.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true

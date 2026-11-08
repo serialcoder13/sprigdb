@@ -8,11 +8,13 @@
 
 use sprig_catalog::placement::ShardMap;
 use sprig_common::ids::{ClusterId, JobId, TenantId};
-use sprig_common::{ErrorKind, Result, SprigCode};
+use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
+use sprig_feed::ownership::{self, Handoff};
+use sprig_meta::{Cmp, Op, Record, Txn};
 use sprig_shard::TenantMaps;
 use sprig_shard::map::{self, Placement};
 
-use crate::io::{CommitOutcome, MapIo, MapState, Released};
+use crate::io::{CommitOutcome, HandoffPos, MapIo, MapState, Released};
 
 /// One tenant's map, as a job's [`MapIo`].
 #[derive(Debug, Clone)]
@@ -136,6 +138,75 @@ impl MapIo for TenantMapIo {
         }
     }
 
+    /// The flip and the feed's handoff record in one etcd transaction, so
+    /// no reader sees the new owner without knowing where the source's
+    /// changes end and the target's begin (chapter 38, "Ownership").
+    async fn commit_handoff(
+        &self,
+        job: JobId,
+        token: u64,
+        to: &ClusterId,
+        h: &HandoffPos,
+    ) -> Result<CommitOutcome> {
+        let me = holder(job, token);
+        let store = self.maps.store().clone();
+        let tier = store.tier().clone();
+        let attempt = async {
+            for _ in 0..8 {
+                let (mut m, rev) = self.maps.load(self.tenant).await?;
+                if already_moved(&m, job)? {
+                    return Ok(false); // a retry after a lost reply
+                }
+                let from = Placement::of(&m)?.cluster;
+                map::flip(&mut m, &me, to)?;
+                map::validate(&m)?;
+                let rec = Handoff {
+                    tenant: self.tenant,
+                    group: m.group_id,
+                    map_version: m.map_version,
+                    from_cluster: from,
+                    fence_pos: h.fence.to_string(),
+                    to_cluster: to.clone(),
+                    start_pos: h.start.to_string(),
+                    hlc_floor: sprig_feed::hlc::floor_at(h.at_ms),
+                    job_id: me.clone(),
+                    committed_at_ms: h.at_ms,
+                };
+                let key = ShardMap::catalog_key(&tier, self.tenant)?;
+                let r = store
+                    .txn(Txn {
+                        when: vec![Cmp::ModRev(key.clone(), rev)],
+                        then: vec![
+                            Op::Put {
+                                key,
+                                value: Record::new(m).encode()?,
+                                lease: None,
+                            },
+                            ownership::put(&tier, &rec)?,
+                        ],
+                        otherwise: Vec::new(),
+                    })
+                    .await?;
+                if r.succeeded {
+                    return Ok(true);
+                }
+            }
+            Err(SprigError::new(
+                SprigCode::CatalogConflict,
+                format!("tenant {}'s shard map kept changing", self.tenant),
+            ))
+        };
+        match attempt.await {
+            Ok(_) => Ok(CommitOutcome::Committed),
+            Err(e) if rejected(&e) => Ok(CommitOutcome::Rejected),
+            Err(e) if e.retryable => {
+                tracing::warn!(job = %me, error = %e, "commit outcome unknown");
+                Ok(CommitOutcome::Unknown)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     async fn bump(&self, job: JobId, token: u64) -> Result<CommitOutcome> {
         let me = holder(job, token);
         let r = self
@@ -229,5 +300,56 @@ mod tests {
         io.hold(other, 1, u64::MAX).await.unwrap();
         assert_eq!(io.release(job, 9).await.unwrap(), Released::NotHeld);
         assert_eq!(io.release(other, 1).await.unwrap(), Released::Ours);
+    }
+
+    #[tokio::test]
+    async fn the_flip_records_the_feed_handoff() {
+        let io = setup().await;
+        let job = JobId::new_v7();
+        let to = ClusterId::new("dc-a-c2").unwrap();
+        let h = HandoffPos {
+            fence: "1-101-40".parse().unwrap(),
+            start: "2-201-77".parse().unwrap(),
+            at_ms: 5_000,
+        };
+        io.hold(job, 1, u64::MAX).await.unwrap();
+        assert_eq!(
+            io.commit_handoff(job, 1, &to, &h).await.unwrap(),
+            CommitOutcome::Committed
+        );
+        // A retry after a lost reply neither flips nor records twice.
+        assert_eq!(
+            io.commit_handoff(job, 1, &to, &h).await.unwrap(),
+            CommitOutcome::Committed
+        );
+        let hist = ownership::history(io.maps.store(), TenantId(3), 0)
+            .await
+            .unwrap();
+        assert_eq!(hist.len(), 1);
+        let r = &hist[0];
+        assert_eq!(r.from_cluster, ClusterId::new("dc-a-c1").unwrap());
+        assert_eq!(
+            (r.to_cluster.clone(), r.fence_pos.as_str()),
+            (to, "1-101-40")
+        );
+        assert_eq!(r.start_pos, "2-201-77");
+        assert_eq!(r.hlc_floor, 6 << 32);
+        let (m, _) = io.maps.load(TenantId(3)).await.unwrap();
+        assert_eq!(r.map_version, m.map_version);
+        // Without the hold, nothing is recorded.
+        let other = JobId::new_v7();
+        assert_eq!(
+            io.commit_handoff(other, 1, &ClusterId::new("dc-a-c3").unwrap(), &h)
+                .await
+                .unwrap(),
+            CommitOutcome::Rejected
+        );
+        assert_eq!(
+            ownership::history(io.maps.store(), TenantId(3), 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

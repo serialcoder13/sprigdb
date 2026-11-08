@@ -34,6 +34,16 @@
 //! never appears, and every routine, trigger, event and view of both
 //! tenants has one of its own tenant's accounts as definer.
 //!
+//! **Grants on dropped tables** (`auth.grants_on_drop`): in tenant A, on
+//! both personas, `m05_dump` holds `SELECT, INSERT, CREATE, DROP` on
+//! `m05_shop.dump_t` and runs what `mysqldump` restores and migration tools
+//! run, `DROP TABLE` then `CREATE TABLE`. With `keep` (the default, at the
+//! tenant or the database) its access continues, also when the
+//! administrator re-creates the table, and also across `DROP DATABASE`
+//! and `CREATE DATABASE` (`m05_dumpdb`); with `drop` (at the database, or
+//! at the tenant without a database value) the `CREATE TABLE`, and any
+//! access to a table the administrator re-creates, get 1142.
+//!
 //! **Propagation.** With `SPRIG_TEST_M05_SECOND` (a second gateway's
 //! MariaDB-persona `host:port`), a session on the second gateway reads a
 //! table, the administrator revokes the grant on the first, and the
@@ -166,10 +176,11 @@ async fn admin(c: &mut Conn, sql: &str) {
 /// Builds one tenant's objects and users (idempotent: drops first).
 async fn setup(c: &mut Conn, marker: &str) {
     for s in [
-        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep",
+        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep, m05_dump",
         "DROP ROLE IF EXISTS m05_r",
         "DROP DATABASE IF EXISTS m05_shop",
         "DROP DATABASE IF EXISTS m05_crm",
+        "DROP DATABASE IF EXISTS m05_dumpdb",
         "CREATE DATABASE m05_shop",
         "CREATE DATABASE m05_crm",
         "CREATE TABLE m05_shop.orders (id INT PRIMARY KEY, total INT, note VARCHAR(40))",
@@ -210,10 +221,11 @@ async fn setup(c: &mut Conn, marker: &str) {
 
 async fn teardown(c: &mut Conn) {
     for s in [
-        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep",
+        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep, m05_dump",
         "DROP ROLE IF EXISTS m05_r",
         "DROP DATABASE IF EXISTS m05_shop",
         "DROP DATABASE IF EXISTS m05_crm",
+        "DROP DATABASE IF EXISTS m05_dumpdb",
     ] {
         let _ = run(c, s).await;
     }
@@ -357,6 +369,25 @@ async fn schema_with(backend: &mut Conn, table: &str, marker: &str) -> Option<St
         }
     }
     None
+}
+
+/// Polls until this gateway resolves `auth.grants_on_drop` at `m05_shop`
+/// to `want` (a settings change reaches the gateway's other sessions
+/// through its catalog watch, a few milliseconds after the statement).
+async fn wait_grants_on_drop(c: &mut Conn, want: &str) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        let (_, text, _) = run(
+            c,
+            "SHOW SPRIG SETTINGS LIKE 'auth.grants_on_drop' FOR DATABASE m05_shop",
+        )
+        .await;
+        if text.split('|').nth(4) == Some(want) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("auth.grants_on_drop never became {want}");
 }
 
 /// Polls `sql` on `c` until it fails with `code`; the time it took.
@@ -726,6 +757,226 @@ async fn m05_isolation_suite() {
             );
         }
         let _ = backend.disconnect().await;
+    }
+
+    // auth.grants_on_drop: a mysqldump-style DROP TABLE + CREATE TABLE by a
+    // user holding a table grant (tenant A, both personas).
+    {
+        let prefix = tenant_prefix(&a_url);
+        let login = format!("{prefix}m05_dump");
+        let mut adm = Conn::new(opts(&a_url, None, None)).await.unwrap();
+        // Another session of the administrator sees settings as the
+        // gateway's other sessions do (its own session reads its writes).
+        let mut probe = Conn::new(opts(&a_url, None, None)).await.unwrap();
+        admin(
+            &mut adm,
+            &format!("CREATE USER m05_dump IDENTIFIED BY '{PW}'"),
+        )
+        .await;
+        let grant = "GRANT SELECT, INSERT, CREATE, DROP ON m05_shop.dump_t TO m05_dump";
+        let mut step =
+            |persona: Persona, what: &str, got: Option<u16>, want: Option<u16>, msg: &str| {
+                checks += 1;
+                let ok = got == want;
+                report.line(&serde_json::json!({
+                    "tenant": "A", "persona": format!("{persona:?}"), "user": "m05_dump",
+                    "sql": what, "expected": want, "got": got, "message": msg, "pass": ok,
+                }));
+                if !ok {
+                    failures.push(format!(
+                        "grants_on_drop {persona:?}: {what}: expected {want:?}, got {got:?} {msg}"
+                    ));
+                }
+            };
+        for (persona, hp) in &endpoints {
+            let persona = *persona;
+            for s in [
+                "DROP TABLE IF EXISTS m05_shop.dump_t",
+                "CREATE TABLE m05_shop.dump_t (id INT PRIMARY KEY)",
+                grant,
+            ] {
+                admin(&mut adm, s).await;
+            }
+            let mut c = Conn::new(opts(&a_url, Some(hp), Some((&login, PW))))
+                .await
+                .unwrap();
+            // keep (the default): the restore works and access continues.
+            for (sql, want) in [
+                ("INSERT INTO m05_shop.dump_t VALUES (1)", None),
+                ("DROP TABLE m05_shop.dump_t", None),
+                ("CREATE TABLE m05_shop.dump_t (id INT PRIMARY KEY)", None),
+                ("INSERT INTO m05_shop.dump_t VALUES (2)", None),
+                ("SELECT COUNT(*) FROM m05_shop.dump_t", None),
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(persona, &format!("keep: {sql}"), got, want, &msg);
+            }
+            let (got, text, msg) = run(&mut c, "SHOW GRANTS").await;
+            let listed = text.contains("`dump_t`");
+            step(
+                persona,
+                "keep: SHOW GRANTS lists dump_t",
+                got.or((!listed).then_some(0)),
+                None,
+                &msg,
+            );
+            // The administrator restores it: the grant applies again.
+            admin(&mut adm, "DROP TABLE m05_shop.dump_t").await;
+            admin(
+                &mut adm,
+                "CREATE TABLE m05_shop.dump_t (id INT PRIMARY KEY)",
+            )
+            .await;
+            for sql in [
+                "INSERT INTO m05_shop.dump_t VALUES (3)",
+                "SELECT COUNT(*) FROM m05_shop.dump_t",
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(
+                    persona,
+                    &format!("keep, re-created by the admin: {sql}"),
+                    got,
+                    None,
+                    &msg,
+                );
+            }
+            // drop at the database: the grant goes with the table.
+            admin(
+                &mut adm,
+                "ALTER DATABASE m05_shop SPRIG SET (auth.grants_on_drop = 'drop')",
+            )
+            .await;
+            wait_grants_on_drop(&mut probe, "drop").await;
+            for (sql, want) in [
+                ("DROP TABLE m05_shop.dump_t", None),
+                (
+                    "CREATE TABLE m05_shop.dump_t (id INT PRIMARY KEY)",
+                    Some(1142),
+                ),
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(persona, &format!("drop: {sql}"), got, want, &msg);
+            }
+            admin(
+                &mut adm,
+                "CREATE TABLE m05_shop.dump_t (id INT PRIMARY KEY)",
+            )
+            .await;
+            for sql in [
+                "SELECT COUNT(*) FROM m05_shop.dump_t",
+                "INSERT INTO m05_shop.dump_t VALUES (4)",
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(
+                    persona,
+                    &format!("drop, re-created by the admin: {sql}"),
+                    got,
+                    Some(1142),
+                    &msg,
+                );
+            }
+            // Scope precedence: tenant drop, database keep -> keep; the
+            // database value reset -> the tenant's drop.
+            admin(&mut adm, grant).await;
+            admin(
+                &mut adm,
+                "ALTER TENANT SPRIG SET (auth.grants_on_drop = 'drop')",
+            )
+            .await;
+            admin(
+                &mut adm,
+                "ALTER DATABASE m05_shop SPRIG SET (auth.grants_on_drop = 'keep')",
+            )
+            .await;
+            wait_grants_on_drop(&mut probe, "keep").await;
+            for (sql, want) in [
+                ("DROP TABLE m05_shop.dump_t", None),
+                ("CREATE TABLE m05_shop.dump_t (id INT PRIMARY KEY)", None),
+                ("SELECT COUNT(*) FROM m05_shop.dump_t", None),
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(
+                    persona,
+                    &format!("tenant drop, database keep: {sql}"),
+                    got,
+                    want,
+                    &msg,
+                );
+            }
+            admin(
+                &mut adm,
+                "ALTER DATABASE m05_shop SPRIG RESET (auth.grants_on_drop)",
+            )
+            .await;
+            wait_grants_on_drop(&mut probe, "drop").await;
+            for (sql, want) in [
+                ("DROP TABLE m05_shop.dump_t", None),
+                (
+                    "CREATE TABLE m05_shop.dump_t (id INT PRIMARY KEY)",
+                    Some(1142),
+                ),
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(persona, &format!("tenant drop: {sql}"), got, want, &msg);
+            }
+            admin(&mut adm, "ALTER TENANT SPRIG RESET (auth.grants_on_drop)").await;
+            wait_grants_on_drop(&mut probe, "keep").await;
+            // keep across DROP DATABASE and CREATE DATABASE.
+            for s in [
+                "DROP DATABASE IF EXISTS m05_dumpdb",
+                "CREATE DATABASE m05_dumpdb",
+                "CREATE TABLE m05_dumpdb.t (id INT PRIMARY KEY)",
+                "GRANT SELECT, INSERT, CREATE ON m05_dumpdb.t TO m05_dump",
+                "DROP DATABASE m05_dumpdb",
+                "CREATE DATABASE m05_dumpdb",
+            ] {
+                admin(&mut adm, s).await;
+            }
+            // Another session sees the re-created database once the
+            // gateway's catalog watch delivers it (milliseconds); until
+            // then it may still see the old one.
+            let t0 = Instant::now();
+            let mut got = Some(0);
+            let mut msg = String::new();
+            while t0.elapsed() < Duration::from_secs(5) {
+                (got, _, msg) = run(&mut c, "CREATE TABLE m05_dumpdb.t (id INT PRIMARY KEY)").await;
+                if got.is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            println!(
+                "grants_on_drop ({persona:?}): CREATE TABLE in the re-created database accepted \
+                 {:?} after CREATE DATABASE returned",
+                t0.elapsed()
+            );
+            step(
+                persona,
+                "keep across DROP DATABASE: CREATE TABLE m05_dumpdb.t (id INT PRIMARY KEY)",
+                got,
+                None,
+                &msg,
+            );
+            for sql in [
+                "INSERT INTO m05_dumpdb.t VALUES (1)",
+                "SELECT COUNT(*) FROM m05_dumpdb.t",
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(
+                    persona,
+                    &format!("keep across DROP DATABASE: {sql}"),
+                    got,
+                    None,
+                    &msg,
+                );
+            }
+            admin(&mut adm, "DROP DATABASE m05_dumpdb").await;
+            let _ = c.disconnect().await;
+        }
+        let _ = run(&mut adm, "DROP TABLE IF EXISTS m05_shop.dump_t").await;
+        let _ = run(&mut adm, "DROP USER m05_dump").await;
+        let _ = adm.disconnect().await;
+        let _ = probe.disconnect().await;
     }
 
     // Propagation to a second gateway.

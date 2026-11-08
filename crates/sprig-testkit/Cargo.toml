@@ -20,6 +20,8 @@ sprig-common.workspace = true
 sprig-meta.workspace = true
 # The mover's simulation (chapter 10 build step 9).
 sprig-mover.workspace = true
+# The feed handoff in the mover's simulation (chapter 38 build step 10).
+sprig-feed.workspace = true
 sprig-shard.workspace = true
 serde.workspace = true
 serde_json.workspace = true

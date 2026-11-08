@@ -2107,6 +2107,9 @@ dependencies = [
  "axum",
  "futures",
  "gethostname",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "metrics",
  "mysql_async",
  "serde",
@@ -2124,6 +2127,7 @@ dependencies = [
  "sprig-settings",
  "sprig-shard",
  "sprig-sql",
+ "sprig-testkit",
  "sprig-workload",
  "tokio",
  "tracing",
@@ -2141,6 +2145,23 @@ version = "0.0.1"
 [[package]]
 name = "sprig-feed"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "metrics",
+ "mysql_async",
+ "serde",
+ "serde_json",
+ "sprig-binlog",
+ "sprig-catalog",
+ "sprig-cluster",
+ "sprig-common",
+ "sprig-meta",
+ "sprig-mover",
+ "sprig-shard",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "sprig-gateway"
@@ -2169,9 +2190,11 @@ dependencies = [
  "sprig-catalog",
  "sprig-cluster",
  "sprig-common",
+ "sprig-logic",
  "sprig-meta",
  "sprig-proto-mysql",
  "sprig-provision",
+ "sprig-router",
  "sprig-settings",
  "sprig-shard",
  "sprig-sql",
@@ -2207,10 +2230,30 @@ version = "0.0.1"
 [[package]]
 name = "sprig-logic"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "mysql_async",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sprig-catalog",
+ "sprig-common",
+ "sprig-logic-compile",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "sprig-logic-compile"
 version = "0.0.1"
+dependencies = [
+ "mysql_async",
+ "serde",
+ "serde_json",
+ "sprig-common",
+ "sqlparser",
+ "tokio",
+]
 
 [[package]]
 name = "sprig-logic-js"
@@ -2248,6 +2291,7 @@ dependencies = [
  "sprig-catalog",
  "sprig-cluster",
  "sprig-common",
+ "sprig-feed",
  "sprig-meta",
  "sprig-provision",
  "sprig-settings",
@@ -2333,6 +2377,21 @@ version = "0.0.1"
 [[package]]
 name = "sprig-router"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "metrics",
+ "mysql_async",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sprig-common",
+ "sprig-proto-mysql",
+ "sprig-shard",
+ "sqlparser",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "sprig-search"
@@ -2358,11 +2417,20 @@ dependencies = [
 name = "sprig-shard"
 version = "0.0.1"
 dependencies = [
+ "arc-swap",
+ "async-trait",
+ "flate2",
+ "mysql_async",
+ "proptest",
+ "serde",
  "serde_json",
  "sprig-catalog",
  "sprig-common",
  "sprig-meta",
  "tokio",
+ "tokio-util",
+ "tracing",
+ "twox-hash",
 ]
 
 [[package]]
@@ -2404,6 +2472,7 @@ dependencies = [
  "sprig-binlog",
  "sprig-catalog",
  "sprig-common",
+ "sprig-feed",
  "sprig-meta",
  "sprig-mover",
  "sprig-shard",
@@ -2414,6 +2483,18 @@ dependencies = [
 [[package]]
 name = "sprig-txn"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "metrics",
+ "mysql_async",
+ "sprig-common",
+ "sprig-settings",
+ "sprig-shard",
+ "sprig-testkit",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "sprig-types"
@@ -2477,6 +2558,8 @@ dependencies = [
  "sprig-cluster",
  "sprig-common",
  "sprig-controller",
+ "sprig-logic",
+ "sprig-logic-compile",
  "sprig-meta",
  "sprig-mover",
  "sprig-provision",
