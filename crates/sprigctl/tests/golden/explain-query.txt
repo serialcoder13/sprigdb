@@ -1,0 +1,50 @@
+fingerprint 9c41d2e07b3a5f18 in tenant acme (evidence since 2026-10-26T07:33:20Z)
+  shop.orders: index sprig_auto_1f00d5aa (customer_id, created_at desc) is recommended: sprigctl index approve 2 --tenant acme rolls it out, sprigctl index reject turns it down
+  no candidate on shop.events: a predicate wraps its column in LOWER(), so no index can serve it
+  1 earlier evaluation also recorded candidates for it
+
+candidate 11 on shop.orders (customer_id, created_at desc), primary, run 7: recommended
+  selectivity:   customer_id 8.30e-6 (avg_frequency)
+  parts from:    eq, order
+  entries/run:   858
+  cost:          B 190500 ms/h, Wc 7200 ms/h, net 183300 ms/h, 2.2 GiB, build 112 s
+  note:          variant: eq + order, LIMIT
+  gate min_net        pass  net 183300 ms/h (B 190500 - Wc 7200) vs auto_index.min_net_ms_per_hour 100
+  gate benefit_ratio  pass  B 190500 vs 2 x Wc 7200 (auto_index.min_benefit_ratio)
+  gate build_time     pass  build 112 s vs auto_index.max_build_hours 6
+  gate payback        pass  build load 5600 ms vs net x auto_index.payback_hours 4399200 ms
+  gate improvement    pass  every primary fingerprint predicted to improve by 30% or more
+  validation:    111 replica on mum1-c7/n2: accepted, target p95 405 -> 11.2 ms (97.2% better), worst regression 3.1% (51aa02c4e9d0f337), 260 statements (3 noisy)
+  index:         2 sprig_auto_1f00d5aa (recommended)
+
+shop.events (run 7): no candidate: a predicate wraps its column in LOWER(), so no index can serve it
+  note:          events.source uses a case-insensitive collation; WHERE source = ? can use an index
+
+candidate 9 on shop.orders (customer_id, created_at desc), primary, run 5: rejected: its benefit is less than auto_index.min_benefit_ratio times its write cost
+  selectivity:   customer_id 8.30e-6 (avg_frequency)
+  parts from:    eq, order
+  entries/run:   858
+  cost:          B 1650 ms/h, Wc 40000 ms/h, net -38350 ms/h, 2.2 GiB, build 112 s
+  note:          variant: eq + order, LIMIT
+  gate min_net        FAIL  net -38350 ms/h (B 1650 - Wc 40000) vs auto_index.min_net_ms_per_hour 100
+  gate benefit_ratio  FAIL  B 1650 vs 2 x Wc 40000 (auto_index.min_benefit_ratio)
+  gate build_time     pass  build 112 s vs auto_index.max_build_hours 6
+  gate payback        FAIL  build load 5600 ms vs net x auto_index.payback_hours -920400 ms
+  gate improvement    -     not recorded
+
+policy of shop.orders: on: validate, then roll out (a large-scan candidate on a table above auto_index.scan_recommend_above_gb stops at recommended)
+  auto_index.cooldown_hours              24 (default)
+  auto_index.max_build_hours             6 (default)
+  auto_index.max_per_table               5 (default)
+  auto_index.max_storage_pct             20 (default)
+  auto_index.min_benefit_ratio           2 (default)
+  auto_index.min_examined_per_returned   100 (default)
+  auto_index.min_improvement_pct         30 (default)
+  auto_index.min_net_ms_per_hour         100 (default)
+  auto_index.min_runs                    50 (default)
+  auto_index.mode                        'on' (default)
+  auto_index.p95_threshold_ms            100 (default)
+  auto_index.payback_hours               24 (default)
+  auto_index.recommend_validate          true (default)
+  auto_index.recreate_block_days         14 (default)
+  auto_index.top_n                       10 (default)

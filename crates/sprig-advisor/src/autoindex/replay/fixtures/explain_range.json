@@ -1,0 +1,19 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 17.2002178,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "t",
+          "access_type": "ALL",
+          "loops": 1,
+          "rows": 98901,
+          "cost": 17.2002178,
+          "filtered": 100,
+          "attached_condition": "t.a between 5000 and 5100"
+        }
+      }
+    ]
+  }
+}

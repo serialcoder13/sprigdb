@@ -29,7 +29,7 @@ use sprig_catalog::{Freshness, TenantCatalog, TenantPin};
 use sprig_common::ids::TenantId;
 use sprig_common::{Result, SprigError};
 use sprig_settings::{OwnedCtx, Settings};
-use sprig_sql::names::{MemoryNameMap, NameMap, Purpose, SystemSchema};
+use sprig_sql::names::{MemoryNameMap, NameMap, Purpose, SystemSchema, Visibility};
 use tokio::task::JoinHandle;
 
 use super::TenantServices;
@@ -66,6 +66,10 @@ pub struct TenantSession {
     pub warnings: Option<Vec<LocalWarning>>,
     /// The current logical database before the backend session exists.
     pub current: Option<String>,
+    /// `SET @sprig_show_auto_indexes = 1` (chapter 13): automatic indexes
+    /// shown in `SHOW INDEX`, `SHOW CREATE TABLE` and `STATISTICS`, and
+    /// droppable. Kept by the gateway, never sent to MariaDB.
+    pub show_auto_indexes: bool,
     long_data_max: Arc<AtomicU64>,
     watch: Option<JoinHandle<()>>,
 }
@@ -110,6 +114,7 @@ impl TenantSession {
             temp: BTreeSet::new(),
             warnings: None,
             current: None,
+            show_auto_indexes: false,
             long_data_max: Arc::new(AtomicU64::new(LONG_DATA_MAX_BYTES.default)),
             watch: None,
         })
@@ -295,5 +300,16 @@ impl TenantSession {
     pub fn reset(&mut self) {
         self.temp.clear();
         self.warnings = None;
+        self.show_auto_indexes = false;
+    }
+
+    /// What the session may see of internal objects: the persona's
+    /// defaults and `@sprig_show_auto_indexes`.
+    #[must_use]
+    pub fn visibility(&self, persona: sprig_proto_mysql::packets::Persona) -> Visibility {
+        Visibility {
+            auto_indexes: self.show_auto_indexes,
+            ..Visibility::for_persona(persona)
+        }
     }
 }

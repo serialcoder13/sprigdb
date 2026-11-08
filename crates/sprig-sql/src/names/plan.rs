@@ -263,6 +263,13 @@ fn plan_statement(
                     )));
                 }
             }
+            // Chapter 13's reserved index names (step 12).
+            if info.kind == StmtKind::Ddl
+                && !ctx.rewrite.internal
+                && let Some(ch) = super::autoindex::index_changes(&text, &lex_opts)
+            {
+                super::autoindex::check_reserved(&ch, ctx.vis)?;
+            }
             if info.kind == StmtKind::Ddl
                 && let Some(action) = create_like(&text, &tokens)
             {

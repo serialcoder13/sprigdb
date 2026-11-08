@@ -1,0 +1,3 @@
+fingerprint 9c41d2e07b3a5f18 in tenant acme (evidence since 2026-10-26T07:33:20Z)
+  no candidate recorded for 9c41d2e07b3a5f18 since 2026-10-26T07:33:20Z
+  it didn't qualify (not auto_index.min_runs runs with a p95 above auto_index.p95_threshold_ms, not among the auto_index.top_n by total time, no large scans), or no evaluation has run since it did

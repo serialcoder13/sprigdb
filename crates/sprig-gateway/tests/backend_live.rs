@@ -1850,3 +1850,78 @@ async fn clients_cannot_change_the_gateways_session_tracking() {
         s.close().await;
     }
 }
+
+/// Chapter 12's probes (build step 5): `Handler_read_*` deltas on the
+/// statement's own connection, less the reading's own cost, give the rows
+/// a scan, a range read and a point lookup examined; pinned sessions are
+/// never probed, so their diagnostics survive.
+#[tokio::test]
+async fn probes_measure_rows_examined_on_the_same_connection() {
+    let u = need!(
+        skip::MARIADB_SINGLE,
+        "probes_measure_rows_examined_on_the_same_connection"
+    );
+    let rig = rig(
+        TopologyKind::SingleNode,
+        &u[0].user,
+        &u[0].pass,
+        &[u[0].addr.clone()],
+        fast_settings(),
+    );
+    let db = unique_ident("sprig_bt");
+    let mut a = rig.session(Persona::MariaDb);
+    ok(&mut a, &format!("CREATE DATABASE {db}")).await;
+    ok(&mut a, &format!("USE {db}")).await;
+    ok(
+        &mut a,
+        "CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL, w INT NOT NULL, KEY by_v (v))",
+    )
+    .await;
+    ok(
+        &mut a,
+        "INSERT INTO t WITH RECURSIVE s (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s \
+         WHERE n < 1000) SELECT n, n % 100, n FROM s",
+    )
+    .await;
+
+    let probed = |r: &Res| r.out.examined.expect("a probe ran");
+    // Not asked: no probe.
+    let r = ok(&mut a, "SELECT COUNT(*) FROM t WHERE w > 0").await;
+    assert_eq!(r.out.examined, None);
+    // A full scan, twice (the first probe of a connection calibrates).
+    for _ in 0..2 {
+        a.probe_next_statement();
+        let r = ok(&mut a, "SELECT COUNT(*) FROM t WHERE w > 0").await;
+        assert_eq!(r.cell(0, 0), Some("1000"));
+        let x = probed(&r);
+        assert!((1000..=1002).contains(&x), "full scan examined {x}");
+    }
+    // A range read on by_v: 20 rows.
+    a.probe_next_statement();
+    let r = ok(&mut a, "SELECT id FROM t WHERE v BETWEEN 1 AND 2").await;
+    assert_eq!(r.rows.len(), 20);
+    let x = probed(&r);
+    assert!((20..=22).contains(&x), "range read examined {x}");
+    // A point lookup.
+    a.probe_next_statement();
+    let r = ok(&mut a, "SELECT w FROM t WHERE id = 5").await;
+    assert_eq!(probed(&r), 1);
+    // A write: rows read to find what to change.
+    a.probe_next_statement();
+    let r = ok(&mut a, "UPDATE t SET w = w + 1 WHERE v = 3").await;
+    assert_eq!(r.out.affected_rows, 10);
+    let x = probed(&r);
+    assert!((10..=12).contains(&x), "update examined {x}");
+
+    // In a transaction the session is pinned: no probe, and ROW_COUNT()
+    // still answers for the client's statement.
+    ok(&mut a, "BEGIN").await;
+    a.probe_next_statement();
+    let r = ok(&mut a, "UPDATE t SET w = w + 1 WHERE v = 4").await;
+    assert_eq!(r.out.examined, None);
+    let rc = ok(&mut a, "SELECT ROW_COUNT()").await;
+    assert_eq!(rc.cell(0, 0), Some("10"));
+    ok(&mut a, "COMMIT").await;
+
+    ok(&mut a, &format!("DROP DATABASE {db}")).await;
+}

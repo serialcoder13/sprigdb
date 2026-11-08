@@ -582,8 +582,11 @@ impl Directory {
                 })
                 .await?;
             if r.succeeded {
-                tracing::warn!(from = next, to = used + 1,
-                    "tenant ids raised past an id already in use on a cluster");
+                tracing::warn!(
+                    from = next,
+                    to = used + 1,
+                    "tenant ids raised past an id already in use on a cluster (an earlier tenant's schemas)"
+                );
                 return Ok(());
             }
         }

@@ -1,0 +1,33 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.038839976
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 16.3108548,
+    "r_loops": 1,
+    "r_total_time_ms": 10.54924606,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "t",
+          "access_type": "ALL",
+          "loops": 1,
+          "r_loops": 1,
+          "rows": 100000,
+          "r_rows": 100000,
+          "cost": 16.3108548,
+          "r_table_time_ms": 8.177671319,
+          "r_other_time_ms": 2.364524309,
+          "r_engine_stats": {
+            "pages_accessed": 1223
+          },
+          "filtered": 100,
+          "r_total_filtered": 0.101,
+          "attached_condition": "t.a between 5000 and 5100",
+          "r_filtered": 0.101
+        }
+      }
+    ]
+  }
+}

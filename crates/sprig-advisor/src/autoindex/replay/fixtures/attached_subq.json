@@ -1,0 +1,76 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.217437113
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.1818884,
+    "r_loops": 1,
+    "r_total_time_ms": 13.25131521,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "t",
+          "access_type": "range",
+          "possible_keys": ["sprig_auto_0000000c"],
+          "key": "sprig_auto_0000000c",
+          "key_length": "4",
+          "used_key_parts": ["c"],
+          "loops": 1,
+          "r_loops": 1,
+          "rows": 99,
+          "r_index_rows": 99,
+          "r_rows": 99,
+          "cost": 0.1818884,
+          "r_table_time_ms": 0.094826277,
+          "r_other_time_ms": 0.078264011,
+          "r_engine_stats": {
+            "pages_accessed": 301
+          },
+          "filtered": 100,
+          "r_total_filtered": 9.090909091,
+          "index_condition": "t.c < 100",
+          "r_icp_filtered": 100,
+          "attached_condition": "t.a > (subquery#2)",
+          "r_filtered": 9.090909091
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "subquery_cache": {
+          "r_loops": 99,
+          "r_hit_ratio": 0,
+          "query_block": {
+            "select_id": 2,
+            "cost": 0.3411288,
+            "r_loops": 99,
+            "r_total_time_ms": 13.04439117,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "u",
+                  "access_type": "ALL",
+                  "loops": 1,
+                  "r_loops": 99,
+                  "rows": 2000,
+                  "r_rows": 2000,
+                  "cost": 0.3411288,
+                  "r_table_time_ms": 9.275286524,
+                  "r_other_time_ms": 3.752792692,
+                  "r_engine_stats": {
+                    "pages_accessed": 594
+                  },
+                  "filtered": 100,
+                  "r_total_filtered": 0.004545455,
+                  "attached_condition": "u.t_id = t.`id`",
+                  "r_filtered": 0.004545455
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

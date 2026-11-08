@@ -1,0 +1,51 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.312138235
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.008536036,
+    "r_loops": 1,
+    "r_total_time_ms": 0.090278955,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "t",
+          "access_type": "index_merge",
+          "possible_keys": ["sprig_auto_0000000c", "sprig_auto_0000000a"],
+          "key_length": "4,4",
+          "index_merge": {
+            "union": [
+              {
+                "range": {
+                  "key": "sprig_auto_0000000a",
+                  "used_key_parts": ["a"]
+                }
+              },
+              {
+                "range": {
+                  "key": "sprig_auto_0000000c",
+                  "used_key_parts": ["c"]
+                }
+              }
+            ]
+          },
+          "loops": 1,
+          "r_loops": 1,
+          "rows": 2,
+          "r_rows": 2,
+          "cost": 0.008536036,
+          "r_table_time_ms": 0.01126401,
+          "r_other_time_ms": 0.009303238,
+          "r_engine_stats": {
+            "pages_accessed": 14
+          },
+          "filtered": 100,
+          "r_total_filtered": 100,
+          "attached_condition": "t.a = 5 or t.c = 7",
+          "r_filtered": 100
+        }
+      }
+    ]
+  }
+}

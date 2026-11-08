@@ -97,6 +97,19 @@ proptest = { version = "1.7", default-features = false, features = ["std"] }
 sprig-sql = { path = "crates/sprig-sql" }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 
+# sprig-workload (chapter 12, M0.4: fingerprints, shapes, the recorder). No new
+# third-party crates: it uses serde, serde_json, sqlparser, twox-hash (xxh3_64
+# digests) and proptest from above.
+sprig-workload = { path = "crates/sprig-workload" }
+# Sealed parameter samples (chapter 12 step 6): AES-256-GCM and HKDF-SHA256
+# from ring, already in the tree through rustls (Apache-2.0 AND ISC).
+ring = "0.17"
+# sprig-advisor (chapter 13): the controller serves its store through the Admin API.
+sprig-advisor = { path = "crates/sprig-advisor" }
+# sprig-balancer (chapter 11, M0.6): placement, the decision log, the fleet
+# simulator's planner.
+sprig-balancer = { path = "crates/sprig-balancer" }
+
 [workspace.lints.rust]
 # `deny`, not `forbid`, so vetted spots can opt out with a `SAFETY:` comment
 # (chapter 03). The only one so far: linkme's link sections in sprig-settings.

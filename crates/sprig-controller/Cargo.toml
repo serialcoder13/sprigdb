@@ -16,6 +16,9 @@ metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Chapter 13: the automatic-indexing store behind `sprigctl index` and
+# `sprigctl explain query` (autoindex_admin).
+sprig-advisor.workspace = true
 sprig-auth.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
@@ -23,6 +26,12 @@ sprig-common.workspace = true
 sprig-meta.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true
+# Chapter 07's rewriter and the persona's lexer: validation replays sampled
+# statements in the shards' physical names (chapter 13).
+sprig-proto-mysql.workspace = true
+sprig-sql.workspace = true
+# Chapter 12's workload tables: bootstrap migrates them; the rollup loop.
+sprig-workload.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true

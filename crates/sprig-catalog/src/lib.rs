@@ -70,7 +70,8 @@ pub mod version;
 
 pub use ancestry::{AncestorRows, AncestryReport, AncestryState};
 pub use cache::{
-    CacheConfig, CatalogExtension, CatalogSource, DirectoryFeed, DirectoryWatch, ExtState,
+    CacheConfig, CatalogExtension, CatalogLoaded, CatalogSource, DirectoryFeed, DirectoryWatch,
+    ExtState,
     ExtensionStates, Freshness, MariaSource, Node, SnapshotTx, TenantCache, TenantCatalog,
     TenantPin, TenantRef,
 };

@@ -35,6 +35,8 @@ login_mode = "catalog"
 accounts_file = "deploy/compose/gateway-accounts.dev.toml"
 # catalog mode: the backend account tenant sessions use (interim, chapter 14).
 backends_file = "deploy/compose/gateway-backends.dev.toml"
+# Chapter 12's sealed parameter samples: the development master secret.
+workload_key_file = "deploy/compose/workload-keys.dev"
 
 [telemetry]
 bootstrap_log_level = "info"

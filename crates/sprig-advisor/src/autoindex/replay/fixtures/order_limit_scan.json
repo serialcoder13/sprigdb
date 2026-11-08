@@ -1,0 +1,45 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.0456401
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 16.3108548,
+    "r_loops": 1,
+    "r_total_time_ms": 7.759192486,
+    "nested_loop": [
+      {
+        "read_sorted_file": {
+          "r_rows": 10,
+          "filesort": {
+            "sort_key": "t.c",
+            "r_loops": 1,
+            "r_total_time_ms": 7.729447155,
+            "r_limit": 10,
+            "r_used_priority_queue": true,
+            "r_output_rows": 11,
+            "r_sort_mode": "sort_key,rowid",
+            "table": {
+              "table_name": "t",
+              "access_type": "ALL",
+              "loops": 1,
+              "r_loops": 1,
+              "rows": 100000,
+              "r_rows": 100000,
+              "cost": 16.3108548,
+              "r_table_time_ms": 5.627916622,
+              "r_other_time_ms": 1.992728539,
+              "r_engine_stats": {
+                "pages_accessed": 1253
+              },
+              "filtered": 100,
+              "r_total_filtered": 1,
+              "attached_condition": "t.d = 1",
+              "r_filtered": 1
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,2 @@
+approve sprig_auto_1f00d5aa on shop.orders (tenant acme): recommended -> rolling_out
+handed to rollout: it is built shard by shard in the build window, then observed

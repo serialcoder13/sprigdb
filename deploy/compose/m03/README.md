@@ -118,6 +118,7 @@ Persona `mysql` uses `mysqldump` 8.4 and persona `mariadb` uses `mariadb-dump` 1
 | `dump_leaks` | No physical name anywhere in that dump |
 | `dump_definers` | No `DEFINER` names a backend account |
 | `dump_all` | `--all-databases`: the tenant's own databases, nothing of the other tenant's, and no physical name |
+| `dump_listed` | The workaround for `mysqldump`'s `--all-databases` (below): `--databases` with every database `SHOW DATABASES` lists, the system schemas left out. The same assertions as `dump_all` |
 | `restore` | A dump of `shop` alone (no `CREATE DATABASE` or `USE`), restored into the new logical database `shop_restored` of the same tenant. Row counts and `SHOW CREATE TABLE` are equal for 4 tables, and the procedure and the view are there |
 
 ### Isolation (`sql/suite.sh isolation`)
@@ -150,7 +151,8 @@ This is a Rust test (ignored by default, gated on environment variables like the
   - table exists, drop unknown, `SHOW CREATE` of an unknown table;
   - the broken view (1356);
   - syntax errors that echo the statement;
-  - an ambiguous column.
+  - an ambiguous column;
+  - `information_schema.SPRIG_SETTINGS` inside `CREATE VIEW` and `CREATE TABLE ... SELECT` (39051 through the gateway, chapter 07 rule 9; reading it is fine).
 - **The other tenant's names:** its vault (use, select, `SHOW TABLES FROM`) and its database.
 - **Prepared statements:** the prepare response carries column definitions, and a prepare fails on an unknown table.
 - **Physical names typed by hand:** `USE`, `SELECT`, `SHOW TABLES FROM` and a backquoted form. The names are the cluster's real `t<id>_...` schemas with `SPRIG_M03_BACKEND`, or made-up ones otherwise. The reply must not echo them.
@@ -184,7 +186,7 @@ This test uses chapter 08's SQL (build step 8) and the key `reads.max_replica_la
 
 | Check | What it asserts |
 |---|---|
-| `object_scope` | After `ALTER TABLE m03_settings.hot SPRIG SET (reads.max_replica_lag_ms = <v>)`, every observer reads `<v>` with an object-scope source within 5 s. The observers are a second session on the same endpoint, plus each URL in `SPRIG_TEST_M03_OBSERVERS`. They read `information_schema.SPRIG_SETTINGS` (`VALUE`, `SOURCE_SCOPE`), or `SHOW SPRIG SETTINGS LIKE ... FOR TABLE` if the view isn't there. The detail gives the latency per observer |
+| `object_scope` | After `ALTER TABLE m03_settings.hot SPRIG SET (reads.max_replica_lag_ms = <v>)` (`<v>` from 1001 to 51001, never the default 1000 or the value read before), every observer reads `<v>` with an object-scope source within 5 s. The observers are a second session on the same endpoint, plus each URL in `SPRIG_TEST_M03_OBSERVERS`. They read `information_schema.SPRIG_SETTINGS` (`VALUE`, `SOURCE_SCOPE`), or `SHOW SPRIG SETTINGS LIKE ... FOR TABLE` if the view isn't there. The detail gives the latency per observer |
 | `object_only` | `m03_settings.cold` doesn't read `<v>` |
 | `out_of_bounds` | `SET (... = 86400001)` is refused with 39080 (`ER_SPRIG_SETTING_OUT_OF_BOUNDS`), and the value stays `<v>` |
 | `scope_bounds` | `ALTER DATABASE m03_settings SPRIG SET BOUNDS (... MAX <v+1000>)`, then a table value of `<v+2000>`, is refused with 39080. Then `RESET BOUNDS` |
@@ -205,19 +207,21 @@ Today, `gateway-dev.sh` can't start one next to the first on the same etcd. The 
 `expected.txt` lists every outcome other than `pass`, by mode, persona, suite, connector and check, with the reason. It works like `../connectors/expected.toml`: an unexpected pass counts as a difference too. Today's entries are:
 
 - **Hibernate with MySQL Connector/J, `schema_validate`: fail (both modes).** `DatabaseMetaData.getSQLKeywords()` reads `information_schema.KEYWORDS WHERE RESERVED = 1`, which MariaDB lacks, so Hibernate can't resolve a dialect. On 3306 the gateway must answer that view, which is chapter 28's translator (M0.5). The rest of the check passes after a restart without validation.
+- **`mysqldump`'s `dump_all` on persona `mysql`: fail (both modes).** `mysqldump` 8.4 dumps the `mysql` database first. It holds back every database `SHOW DATABASES` lists until it reaches `mysql`, and if `mysql` never comes it writes nothing and still exits 0. Neither a tenant (through either port) nor a plain MariaDB user sees `mysql`, and MySQL 8.4 does the same for a user who can't see it. `dump_listed` checks the workaround, `--databases` with the `SHOW DATABASES` list. See `decisions/mysql-persona-gaps.md` row 12 in the design repository.
 - **Baseline only:**
   - The leak checks are n/a: no physical names exist.
   - The settings checks are n/a: MariaDB has no `SPRIG SET`.
-  - Persona `mysql`, `dump_all` fails: `mysqldump` 8.4's `--all-databases` writes no database from MariaDB 11.8 for a plain user (and only one for root), while `--databases` works. Through the gateway's 3306, which stands for MySQL 8.4, it must pass.
 
-## Baseline results (8 November 2026, MariaDB 11.8.9 on 13301)
+## Results (8 November 2026, MariaDB 11.8.9 on 13301)
 
-| Persona | Checks | Pass | Expected fail | n/a | Differences |
-|---|---|---|---|---|---|
-| `mariadb` | 64 | 54 | 0 | 10 | 0 |
-| `mysql` | 76 | 62 | 4 | 10 | 0 |
+| Mode | Persona | Checks | Pass | Expected fail | n/a | Differences |
+|---|---|---|---|---|---|---|
+| baseline | `mariadb` | 66 | 56 | 0 | 10 | 0 |
+| baseline | `mysql` | 78 | 64 | 4 | 10 | 0 |
+| gateway (13307) | `mariadb` | 66 | 66 | 0 | 0 | 0 |
+| gateway (13306) | `mysql` | 78 | 74 | 4 | 0 | 0 |
 
-The n/a checks are `dump_leaks`, `isolation_leaks` and the leak suite's `leaks` for each tenant, plus the four settings checks. The expected failures on persona `mysql` are Connector/J's `schema_validate` and `mysqldump`'s `dump_all`, once per tenant. A full run takes 14 to 19 s.
+In baseline the n/a checks are `dump_leaks`, `isolation_leaks` and the leak suite's `leaks` for each tenant, plus the four settings checks. The expected failures on persona `mysql` are Connector/J's `schema_validate` and `mysqldump`'s `dump_all`, once per tenant. The gateway runs used `SPRIG_M03_BACKEND`. A full run takes 15 to 25 s.
 
 ## Memory and containers
 

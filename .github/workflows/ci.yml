@@ -392,3 +392,57 @@ jobs:
         run: |
           deploy/compose/gateway-dev.sh down || true
           docker compose --project-directory deploy/compose --profile single down -v --timeout 10
+
+  # Milestone M0.4's "done when" (chapter 48): chapter 13's scenario suite on
+  # the three reference topologies (an index proposed, validated and built
+  # for each worked example; the ORDER BY ... LIMIT trap rejected and its
+  # covering retry built; a user index retiring ours; an unused automatic
+  # index dropped while user and migrated indexes stay) and the drift suite
+  # (Flyway, Hibernate and the dumps see no sprig_auto_). The harness is
+  # deploy/compose/m04 (README there).
+  #
+  # Disabled: it needs all three topologies (about 7 GB with the Compose
+  # memory caps) and 30 to 40 minutes. To enable: drop `if: false`, or
+  # narrow it to workflow_dispatch and schedule.
+  m04:
+    name: M0.4 automatic indexing scenarios (gateway, three topologies)
+    needs: [integration]
+    if: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SPRIG_TEST_STRICT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Compose (etcd and every topology) and build the m03 images
+        working-directory: deploy/compose
+        run: |
+          docker compose --profile all up -d --wait --wait-timeout 600
+          docker compose --profile m03 pull --quiet m03-flyway
+          docker compose --profile m03 build --quiet m03-hibernate m03-mysql-cli m03-mariadb-cli
+      - run: cargo build --locked -p sprigdb -p sprigctl
+      - run: cargo test --locked -p sprig-testkit --test m04_scenarios --no-run
+      - name: Start the gateway and the m04 tenants
+        run: |
+          deploy/compose/gateway-dev.sh up
+          deploy/compose/m04/run.sh setup
+      - name: Scenarios, one topology at a time
+        run: deploy/compose/m04/run.sh all
+      - name: Drift suite
+        run: SPRIG_M03_BUILD=0 deploy/compose/m04/run.sh drift
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m04-scenarios
+          path: |
+            deploy/compose/m04/results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          deploy/compose/m04/run.sh teardown || true
+          deploy/compose/gateway-dev.sh down || true
+          docker compose --project-directory deploy/compose --profile all down -v --timeout 10

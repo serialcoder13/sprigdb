@@ -2,9 +2,11 @@
 //! 23, "Configuration"), declared next to the code (chapter 03, "Declaring
 //! a key"), and a typed snapshot of them.
 //!
-//! The three slot keys belong to chapters 10, 13 and 25; they are declared
-//! here until `sprig-mover`, `sprig-advisor` and the recovery loops exist,
-//! and move to those crates then.
+//! The three slot keys belong to chapters 10, 13 and 25; the copy and
+//! recovery keys are declared here until `sprig-mover` and the recovery
+//! loops exist, and move to those crates then. The build key,
+//! `auto_index.max_builds_per_cluster`, is `sprig-advisor`'s
+//! ([`MAX_BUILDS_PER_CLUSTER`]), registered there once.
 //!
 //! Until the etcd mirror of settings lands (chapter 23 step 8), the role
 //! runs on [`ControlSettings::default`]; the runtime reads the snapshot
@@ -12,6 +14,7 @@
 
 use std::time::Duration;
 
+pub use sprig_advisor::autoindex::settings::MAX_BUILDS_PER_CLUSTER;
 use sprig_common::ids::DcId;
 use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx};
 
@@ -71,13 +74,6 @@ key! {
     /// `mover.max_copies_per_cluster` (chapter 10): the `copy` slot pool.
     MAX_COPIES_PER_CLUSTER: u32 = "mover.max_copies_per_cluster", 2, Scopes::OPERATIONAL, 1, 64, 10,
     "Concurrent copies reading or writing one cluster"
-}
-key! {
-    /// `auto_index.max_builds_per_cluster` (chapter 13): the `build` slot
-    /// pool. Chapter 13 accepts every scope; the scheduler resolves it per
-    /// cluster.
-    MAX_BUILDS_PER_CLUSTER: u32 = "auto_index.max_builds_per_cluster", 1, Scopes::ALL, 1, 64, 13,
-    "Concurrent index builds per cluster"
 }
 key! {
     /// `recovery.max_rebuilds_per_cluster` (chapter 25): the `recovery`

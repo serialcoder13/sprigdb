@@ -156,6 +156,11 @@ pub struct StmtOutcome {
     pub route: RouteKind,
     /// Whether the session now holds its connection.
     pub pinned: bool,
+    /// Rows of the last resultset.
+    pub rows: u64,
+    /// Rows examined, when a `Handler_read_*` probe ran around the
+    /// statement ([`BackendSession::probe_next_statement`]).
+    pub examined: Option<u64>,
 }
 
 /// The statement in flight.
@@ -176,6 +181,8 @@ struct Current {
     tracked: TrackedChanges,
     rows: u64,
     resultset: bool,
+    /// The first `Handler_read_*` reading of a probe.
+    probe: Option<u64>,
 }
 
 impl Current {
@@ -247,6 +254,8 @@ pub struct BackendSession {
     /// The error the next statement reports: an abandoned statement took
     /// the session's transaction or pinned state with its connection.
     deferred: Option<SprigError>,
+    /// Probe the next statement's rows examined.
+    probe_next: bool,
 }
 
 impl std::fmt::Debug for BackendSession {
@@ -300,6 +309,7 @@ impl BackendSession {
             cur: None,
             inflight: None,
             deferred: None,
+            probe_next: false,
         }
     }
 
@@ -399,6 +409,22 @@ impl BackendSession {
     /// A cursor closed.
     pub fn close_cursor(&mut self) {
         self.pins.close_cursor();
+    }
+
+    /// Measures the rows the next statement (`query` or `execute`)
+    /// examines (chapter 12, "Sampling rows examined"): the connection's
+    /// `Handler_read_*` sum is read before it runs and after it ends, on
+    /// the same connection, and the difference less the reading's own
+    /// cost lands in [`StmtOutcome::examined`].
+    ///
+    /// Only statements that leave the connection free are measured *(the
+    /// reading after would replace the diagnostics a pinned session reads
+    /// next: `ROW_COUNT()`, `FOUND_ROWS()`, `SHOW WARNINGS`)*: in a
+    /// transaction or with pinned state, no probe runs. The reading after
+    /// comes once the release captures are done. A probe that fails is
+    /// dropped; the statement's result is never affected.
+    pub fn probe_next_statement(&mut self) {
+        self.probe_next = true;
     }
 
     /// Runs one text statement (`COM_QUERY`). On success the statement's
@@ -572,6 +598,8 @@ impl BackendSession {
             node: node.clone(),
             route: cur.route,
             pinned,
+            rows: cur.rows,
+            examined: None,
         };
         if cur.failed {
             let o = outcome(&cur, false);
@@ -674,8 +702,20 @@ impl BackendSession {
             self.held = Some((cur.lease, route));
             return Ok(o);
         }
-        let o = outcome(&cur, false);
-        let ok = self.capture(&mut cur).await;
+        let mut o = outcome(&cur, false);
+        let mut ok = self.capture(&mut cur).await;
+        if let Some(before) = cur.probe.filter(|_| ok && cur.error.is_none()) {
+            match cur.lease.conn().probe_end(before).await {
+                Ok(n) => {
+                    o.examined = Some(n);
+                    metrics::counter!("sprig_workload_probes_run_total").increment(1);
+                }
+                Err(e) => {
+                    tracing::debug!(node = %node, error = %e, "Handler_read_* probe failed; not measuring");
+                    ok = !e.is_connection_lost();
+                }
+            }
+        }
         let limits = self.backends.limits(&self.target.cluster);
         self.backends.pools.release(
             cur.lease,
@@ -1110,6 +1150,8 @@ impl BackendSession {
         let mut sync_retried = false;
         let mut io_retried = false;
         let text = matches!(req, Req::Text(_));
+        let probe = std::mem::take(&mut self.probe_next)
+            && matches!(req, Req::Text(_) | Req::Binary { .. });
         loop {
             let (mut lease, route, wait) = match self.held.take() {
                 Some((l, _)) => (l, RouteKind::Pinned, Wait::None),
@@ -1130,6 +1172,23 @@ impl BackendSession {
                 drop(lease);
                 continue;
             }
+            // The probe's first reading, on a connection that will be free
+            // again after the statement (see `probe_next_statement`).
+            let probe_before = if probe && route != RouteKind::Pinned && self.pins.is_empty() {
+                match conn.probe_start().await {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::debug!(node = %node_key, error = %e, "Handler_read_* probe failed; not measuring");
+                        if e.is_connection_lost() {
+                            drop(lease);
+                            continue;
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let base = Arc::clone(&conn.baseline);
             let (prefix, next_applied) =
                 match state::sync_prefix(&conn.applied, &base, &self.vars, info, 0) {
@@ -1364,6 +1423,7 @@ impl BackendSession {
                 tracked: TrackedChanges::default(),
                 rows: 0,
                 resultset: false,
+                probe: probe_before,
             };
             let first = match outgoing {
                 // A prepare has no response beyond what prepare_cached read.

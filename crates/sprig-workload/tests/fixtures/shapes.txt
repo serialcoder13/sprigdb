@@ -1,0 +1,180 @@
+# Golden corpus of the shape extractor (chapter 12, "Extracting predicates
+# and columns"). See tests/golden.rs. Tables known to the test resolver:
+# shop.orders, shop.customers, shop.order_items, shop.products, shop.events,
+# billing.invoices.
+
+@ mysql db=shop
+in: SELECT o.id, o.total, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.customer_id = 42 AND o.status IN ('open','hold') AND o.created_at >= '2026-01-01' AND LOWER(o.email) = 'x' ORDER BY o.created_at DESC LIMIT 20
+shape: {"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"c","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"o","col":"customer_id","op":"eq","args":[0]},{"t":"o","col":"status","op":"in","list":true,"args":[1]},{"t":"o","col":"created_at","op":"range","lo":true,"hi":false,"args":[2]},{"t":"o","col":"email","op":"unsargable","why":"function:LOWER"}],"joins":[{"l":["c","id"],"r":["o","customer_id"],"op":"eq","kind":"inner"}],"order_by":[{"t":"o","col":"created_at","dir":"desc"}],"group_by":[],"select":{"c":["name"],"o":["id","total"]},"limit":true,"writes":null,"or_groups":0,"limit_arg":4}
+in: SELECT c FROM orders WHERE id = 5
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["c"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id BETWEEN 1 AND 100
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"range","lo":true,"hi":true,"args":[0,1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id NOT BETWEEN 1 AND 100
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"ne","args":[0,1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE total > 5 AND total <= 10
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"total","op":"range","lo":true,"hi":false,"args":[0]},{"t":"orders","col":"total","op":"range","lo":false,"hi":true,"args":[1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE 5 < total
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"total","op":"range","lo":true,"hi":false,"args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id IN (1, 2, 3)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"in","list":true,"args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id IN (?)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"in","list":true,"args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id NOT IN (1, 2)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"ne","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE status = 'a' OR status = 'b'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"status","op":"in","list":false,"args":[0,1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE status = 'a' OR status IN ('b', 'c')
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"status","op":"in","list":false,"args":[0,1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE status = 'a' OR email = 'b'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"status","op":"unsargable","why":"or"},{"t":"orders","col":"email","op":"unsargable","why":"or"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":1}
+in: SELECT * FROM orders WHERE customer_id = 1 AND (status = 'a' OR total > 3)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"customer_id","op":"eq","args":[0]},{"t":"orders","col":"status","op":"unsargable","why":"or"},{"t":"orders","col":"total","op":"unsargable","why":"or"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":1}
+in: SELECT * FROM orders WHERE email LIKE 'kiran%'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"email","op":"prefix","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE email LIKE '%kiran%'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"email","op":"unsargable","why":"leading_wildcard","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE email LIKE ?
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"email","op":"like","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE email LIKE CONCAT('%', ?)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"email","op":"unsargable","why":"leading_wildcard","args":[0,1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE email NOT LIKE 'a%'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"email","op":"ne","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE note IS NULL AND email IS NOT NULL
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"note","op":"is_null"},{"t":"orders","col":"email","op":"not_null"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE LOWER(email) = 'a'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"email","op":"unsargable","why":"function:LOWER"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE DATE(created_at) = '2026-01-01'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"created_at","op":"unsargable","why":"function:DATE"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE total + 1 > 5
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"total","op":"unsargable","why":"expression"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE status = 5
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"status","op":"unsargable","why":"type_conversion"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE email COLLATE utf8mb4_bin = 'A'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"email","op":"unsargable","why":"collation"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE CAST(total AS CHAR) = '1'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"total","op":"unsargable","why":"function:CAST"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE status <> 'x' AND NOT (id = 3)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"status","op":"ne","args":[0]},{"t":"orders","col":"id","op":"ne","args":[1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id <=> ?
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE created_at > NOW() - INTERVAL 1 DAY
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"created_at","op":"range","lo":true,"hi":false,"args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE customer_id = (SELECT id FROM customers WHERE name = 'x')
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"customers","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"orders","col":"customer_id","op":"eq"},{"t":"customers","col":"name","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"customers":["id"],"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT id FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE country = 'IN')
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"customers","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"customers","col":"country","op":"eq","args":[0]}],"joins":[{"l":["orders","customer_id"],"r":["customers","id"],"op":"eq","kind":"semi"}],"order_by":[],"group_by":[],"select":{"customers":["id"],"orders":["id"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT id FROM orders WHERE customer_id NOT IN (SELECT id FROM customers)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"customers","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[],"joins":[{"l":["orders","customer_id"],"r":["customers","id"],"op":"eq","kind":"anti"}],"order_by":[],"group_by":[],"select":{"customers":["id"],"orders":["id"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders o WHERE EXISTS (SELECT 1 FROM order_items i WHERE i.order_id = o.id AND i.qty > 10)
+shape: {"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"i","object_id":1202,"db":"shop","table":"order_items","db_id":1}],"predicates":[{"t":"i","col":"qty","op":"range","lo":true,"hi":false,"args":[1]}],"joins":[{"l":["i","order_id"],"r":["o","id"],"op":"eq","kind":"semi"}],"order_by":[],"group_by":[],"select":{"o":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders o, customers c WHERE o.customer_id = c.id AND c.name = 'x'
+shape: {"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"c","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"c","col":"name","op":"eq","args":[0]}],"joins":[{"l":["o","customer_id"],"r":["c","id"],"op":"eq","kind":"inner"}],"order_by":[],"group_by":[],"select":{"c":["*"],"o":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders o LEFT JOIN order_items i ON i.order_id = o.id AND i.qty > 1 WHERE o.status = 'a'
+shape: {"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"i","object_id":1202,"db":"shop","table":"order_items","db_id":1}],"predicates":[{"t":"i","col":"qty","op":"range","lo":true,"hi":false,"args":[0]},{"t":"o","col":"status","op":"eq","args":[1]}],"joins":[{"l":["i","order_id"],"r":["o","id"],"op":"eq","kind":"left"}],"order_by":[],"group_by":[],"select":{"i":["*"],"o":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders o RIGHT JOIN customers c ON c.id = o.customer_id
+shape: {"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"c","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[],"joins":[{"l":["c","id"],"r":["o","customer_id"],"op":"eq","kind":"right"}],"order_by":[],"group_by":[],"select":{"c":["*"],"o":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders JOIN customers USING (id)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"customers","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[],"joins":[{"l":["orders","id"],"r":["customers","id"],"op":"eq","kind":"inner"}],"order_by":[],"group_by":[],"select":{"customers":["*"],"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders o JOIN order_items i ON i.order_id = o.id AND i.price > o.total
+shape: {"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"i","object_id":1202,"db":"shop","table":"order_items","db_id":1}],"predicates":[],"joins":[{"l":["i","order_id"],"r":["o","id"],"op":"eq","kind":"inner"},{"l":["i","price"],"r":["o","total"],"op":"range","kind":"inner"}],"order_by":[],"group_by":[],"select":{"i":["*"],"o":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT name, email FROM customers WHERE country = 'IN' AND created_at > ? ORDER BY created_at DESC, name LIMIT 10
+shape: {"v":1,"type":"select","tables":[{"alias":"customers","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"customers","col":"country","op":"eq","args":[0]},{"t":"customers","col":"created_at","op":"range","lo":true,"hi":false,"args":[1]}],"joins":[],"order_by":[{"t":"customers","col":"created_at","dir":"desc"},{"t":"customers","col":"name","dir":"asc"}],"group_by":[],"select":{"customers":["email","name"]},"limit":true,"writes":null,"or_groups":0,"limit_arg":2}
+in: SELECT customer_id, COUNT(*), SUM(total) FROM orders WHERE created_at BETWEEN ? AND ? GROUP BY customer_id
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"created_at","op":"range","lo":true,"hi":true,"args":[0,1]}],"joins":[],"order_by":[],"group_by":[{"t":"orders","col":"customer_id"}],"select":{"orders":["customer_id","total"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT status, COUNT(*) AS n FROM orders GROUP BY status ORDER BY n DESC
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[{"t":"orders","col":"status"}],"select":{"orders":["status"]},"limit":false,"writes":null,"or_groups":0,"order_by_expr":true}
+in: SELECT id, total FROM orders ORDER BY 2 DESC, 1
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[{"t":"orders","col":"total","dir":"desc"},{"t":"orders","col":"id","dir":"asc"}],"group_by":[],"select":{"orders":["id","total"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT id FROM orders ORDER BY total * 2
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["id"]},"limit":false,"writes":null,"or_groups":0,"order_by_expr":true}
+in: SELECT * FROM (SELECT * FROM orders WHERE total > 5) d WHERE d.id = 3
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"d","object_id":null,"table":"d","derived":true}],"predicates":[{"t":"orders","col":"total","op":"range","lo":true,"hi":false,"args":[0]},{"t":"d","col":"id","op":"eq","args":[1]}],"joins":[],"order_by":[],"group_by":[],"select":{"d":["*"],"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: WITH big AS (SELECT customer_id FROM orders WHERE total > 100) SELECT c.name FROM customers c JOIN big b ON b.customer_id = c.id
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"c","object_id":1188,"db":"shop","table":"customers","db_id":1},{"alias":"b","object_id":null,"table":"big","derived":true}],"predicates":[{"t":"orders","col":"total","op":"range","lo":true,"hi":false,"args":[0]}],"joins":[{"l":["b","customer_id"],"r":["c","id"],"op":"eq","kind":"inner"}],"order_by":[],"group_by":[],"select":{"c":["name"],"orders":["customer_id"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT id FROM orders WHERE status = 'a' UNION ALL SELECT id FROM orders WHERE status = 'b'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"orders#2","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"status","op":"eq","args":[0]},{"t":"orders#2","col":"status","op":"eq","args":[1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["id"],"orders#2":["id"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM products WHERE JSON_VALUE(doc, '$.size') = 'L'
+shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db":"shop","table":"products","db_id":1}],"predicates":[{"t":"products","col":"doc","op":"json_path","path":"$.size","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"products":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM products WHERE doc->>'$.color' = 'red'
+shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db":"shop","table":"products","db_id":1}],"predicates":[{"t":"products","col":"doc","op":"json_path","path":"$.color","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"products":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM products WHERE JSON_UNQUOTE(JSON_EXTRACT(doc, '$.c')) = 'x'
+shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db":"shop","table":"products","db_id":1}],"predicates":[{"t":"products","col":"doc","op":"json_path","path":"$.c","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"products":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM products WHERE MATCH (name) AGAINST ('shoe')
+shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db":"shop","table":"products","db_id":1}],"predicates":[{"t":"products","col":"name","op":"fulltext"}],"joins":[],"order_by":[],"group_by":[],"select":{"products":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT id FROM products ORDER BY VEC_DISTANCE_EUCLIDEAN(emb, VEC_FromText('[1,2]')) LIMIT 5
+shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db":"shop","table":"products","db_id":1}],"predicates":[{"t":"products","col":"emb","op":"vector","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"products":["id"]},"limit":true,"writes":null,"or_groups":0,"order_by_expr":true,"limit_arg":1}
+in: SELECT * FROM orders WHERE (customer_id, status) IN ((1, 'a'), (2, 'b'))
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"customer_id","op":"in","list":true,"args":[0]},{"t":"orders","col":"status","op":"in","list":true,"args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id = -5
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id = 1 FOR UPDATE
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM unknown_table WHERE a = 1
+shape: {"v":1,"type":"select","tables":[{"alias":"unknown_table","object_id":null,"db":"shop","table":"unknown_table"}],"predicates":[{"t":"unknown_table","col":"a","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"unknown_table":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM billing.invoices WHERE due_date < ? AND state = ? ORDER BY due_date LIMIT 10
+shape: {"v":1,"type":"select","tables":[{"alias":"invoices","object_id":2001,"db":"billing","table":"invoices","db_id":1}],"predicates":[{"t":"invoices","col":"due_date","op":"range","lo":false,"hi":true,"args":[0]},{"t":"invoices","col":"state","op":"eq","args":[1]}],"joins":[],"order_by":[{"t":"invoices","col":"due_date","dir":"asc"}],"group_by":[],"select":{"invoices":["*"]},"limit":true,"writes":null,"or_groups":0,"limit_arg":2}
+in: UPDATE orders SET status = 'paid', total = total * 1.1 WHERE id = 5
+shape: {"v":1,"type":"update","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[2]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["total"]},"limit":false,"writes":{"kind":"update","targets":["orders"],"set":[{"t":"orders","col":"status"},{"t":"orders","col":"total"}]},"or_groups":0}
+in: UPDATE orders SET status = 'closed' WHERE created_at < ? ORDER BY id LIMIT 1000
+shape: {"v":1,"type":"update","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"created_at","op":"range","lo":false,"hi":true,"args":[1]}],"joins":[],"order_by":[{"t":"orders","col":"id","dir":"asc"}],"group_by":[],"select":{},"limit":true,"writes":{"kind":"update","targets":["orders"],"set":[{"t":"orders","col":"status"}]},"or_groups":0,"limit_arg":2}
+in: UPDATE orders o JOIN customers c ON c.id = o.customer_id SET o.status = 'vip' WHERE c.country = 'IN'
+shape: {"v":1,"type":"update","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"c","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"c","col":"country","op":"eq","args":[1]}],"joins":[{"l":["c","id"],"r":["o","customer_id"],"op":"eq","kind":"inner"}],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":{"kind":"update","targets":["o"],"set":[{"t":"o","col":"status"}]},"or_groups":0}
+in: DELETE FROM orders WHERE status = 'void' AND created_at < ?
+shape: {"v":1,"type":"delete","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"status","op":"eq","args":[0]},{"t":"orders","col":"created_at","op":"range","lo":false,"hi":true,"args":[1]}],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":{"kind":"delete","targets":["orders"],"set":[],"all_columns":true},"or_groups":0}
+in: DELETE o FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.name = 'x'
+shape: {"v":1,"type":"delete","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"c","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"c","col":"name","op":"eq","args":[0]}],"joins":[{"l":["c","id"],"r":["o","customer_id"],"op":"eq","kind":"inner"}],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":{"kind":"delete","targets":["o"],"set":[],"all_columns":true},"or_groups":0}
+in: INSERT INTO orders (id, status) VALUES (1, 'a'), (2, 'b')
+shape: {"v":1,"type":"insert","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":{"kind":"insert","targets":["orders"],"set":[{"t":"orders","col":"id"},{"t":"orders","col":"status"}]},"or_groups":0}
+in: INSERT INTO orders VALUES (1, 2, 'a', NOW(), 5)
+shape: {"v":1,"type":"insert","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":{"kind":"insert","targets":["orders"],"set":[],"all_columns":true},"or_groups":0}
+in: INSERT INTO orders (id, status) VALUES (1, 'a') ON DUPLICATE KEY UPDATE status = VALUES(status), total = total + 1
+shape: {"v":1,"type":"insert","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":{"kind":"upsert","targets":["orders"],"set":[{"t":"orders","col":"id"},{"t":"orders","col":"status"},{"t":"orders","col":"total"}]},"or_groups":0}
+in: INSERT INTO orders SET id = 1, status = 'open'
+shape: {"v":1,"type":"insert","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":{"kind":"insert","targets":["orders"],"set":[{"t":"orders","col":"id"},{"t":"orders","col":"status"}]},"or_groups":0}
+in: INSERT INTO billing.invoices (order_id, amount) SELECT id, total FROM orders WHERE status = 'paid'
+shape: {"v":1,"type":"insert","tables":[{"alias":"invoices","object_id":2001,"db":"billing","table":"invoices","db_id":1},{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"status","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["id","total"]},"limit":false,"writes":{"kind":"insert","targets":["invoices"],"set":[{"t":"invoices","col":"order_id"},{"t":"invoices","col":"amount"}]},"or_groups":0}
+in: REPLACE INTO orders (id, status) VALUES (1, 'x')
+shape: {"v":1,"type":"replace","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":{"kind":"replace","targets":["orders"],"set":[{"t":"orders","col":"id"},{"t":"orders","col":"status"}]},"or_groups":0}
+in: SELECT o.id FROM orders o WHERE o.customer_id = ? AND o.status IN (?, ?) ORDER BY o.created_at DESC LIMIT ?
+shape: {"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"o","col":"customer_id","op":"eq","args":[0]},{"t":"o","col":"status","op":"in","list":true,"args":[1]}],"joins":[],"order_by":[{"t":"o","col":"created_at","dir":"desc"}],"group_by":[],"select":{"o":["id"]},"limit":true,"writes":null,"or_groups":0,"limit_arg":2}
+in: SELECT * FROM orders WHERE id = 1 AND id = 1
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]},{"t":"orders","col":"id","op":"eq","args":[1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE active
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"active","op":"ne"}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE 1 = 1
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT id FROM orders WHERE customer_id = 1 AND id > (SELECT MAX(order_id) FROM order_items)
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"order_items","object_id":1202,"db":"shop","table":"order_items","db_id":1}],"predicates":[{"t":"orders","col":"customer_id","op":"eq","args":[0]},{"t":"orders","col":"id","op":"range","lo":true,"hi":false}],"joins":[],"order_by":[],"group_by":[],"select":{"order_items":["order_id"],"orders":["id"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders o1 JOIN orders o2 ON o2.customer_id = o1.customer_id WHERE o1.id = 1
+shape: {"v":1,"type":"select","tables":[{"alias":"o1","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"o2","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"o1","col":"id","op":"eq","args":[0]}],"joins":[{"l":["o2","customer_id"],"r":["o1","customer_id"],"op":"eq","kind":"inner"}],"order_by":[],"group_by":[],"select":{"o1":["*"],"o2":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SET @a = 1
+shape: {"v":1,"type":"set","tables":[],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":null,"or_groups":0}
+in: CREATE TABLE t (id INT)
+shape: {"v":1,"type":"ddl","tables":[{"alias":"t","object_id":null,"db":"shop","table":"t"}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":null,"or_groups":0}
+in: CREATE USER 'bob' IDENTIFIED BY 'x'
+shape: {"v":1,"type":"ddl","tables":[],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":null,"or_groups":0}
+in: SELECT 'unterminated
+shape: {"v":1,"type":"select","tables":[],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id = 1 /* comment */ AND status = 'a' -- tail
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]},{"t":"orders","col":"status","op":"eq","args":[1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT /*+ NO_INDEX(orders) */ * FROM orders WHERE id = 1
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: /*!40000 SELECT * FROM orders WHERE id = 1 */
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20) AND status = 'a'
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"in","list":true,"args":[0]},{"t":"orders","col":"status","op":"eq","args":[1]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+
+# Statements over 12 levels of nesting take the lexer fallback.
+in: SELECT * FROM orders WHERE id = ((((((((((((((1))))))))))))))
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[],"joins":[],"order_by":[],"group_by":[],"select":{},"limit":false,"writes":null,"or_groups":0,"partial":true}
+
+@ mysql db=shop ltn
+in: SELECT O.ID FROM Orders O WHERE O.Status = 'a'
+shape: {"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"o","col":"status","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"o":["id"]},"limit":false,"writes":null,"or_groups":0}
+
+@ mysql nodb
+in: SELECT * FROM shop.orders WHERE id = 1
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
+in: SELECT * FROM orders WHERE id = 1
+shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":null,"table":"orders"}],"predicates":[{"t":"orders","col":"id","op":"eq","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}

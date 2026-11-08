@@ -26,6 +26,9 @@ toml.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+# Rows for the automatic-indexing golden tests, turned into views by the
+# controller's `autoindex_admin::view`.
+sprig-advisor.workspace = true
 mysql_async.workspace = true
 
 [lints]

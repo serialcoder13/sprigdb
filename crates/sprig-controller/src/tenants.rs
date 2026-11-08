@@ -57,11 +57,11 @@
 //! the shard map, and finally the entry and its name.
 //!
 //! **Ids are never reused** (chapter 23). Besides the directory's counter,
-//! a new tenant's id is raised past every catalog schema already on the
-//! DC's active clusters, so a counter that was lost (a deployment rebuilt
-//! over clusters that kept an earlier tenant's `t<id>_sprig`) can't hand
-//! out an id whose catalog exists. The owner mark is the backstop for a
-//! cluster that couldn't be read then.
+//! a new tenant's id is raised past every schema shaped like a tenant's
+//! (`t<id>_sprig`, `t<id>_d...`) already on the DC's active clusters, so a
+//! counter that was lost (a deployment rebuilt over clusters that kept an
+//! earlier tenant's schemas) can't hand out an id whose schemas exist. The
+//! owner mark is the backstop for a cluster that couldn't be read then.
 //!
 //! Where this differs from the book: chapter 08 runs bootstrap as a job
 //! (`tenant_bootstrap`) through the scheduler; here the Admin API call runs
@@ -75,8 +75,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use sprig_catalog::bootstrap::{
-    BootstrapProgress, BootstrapStep, CatalogClaim, catalog_ids, catalog_owner, claim_catalog,
-    create_catalog, drop_catalog, read_progress, write_progress,
+    BootstrapProgress, BootstrapStep, CatalogClaim, catalog_owner, claim_catalog, create_catalog,
+    drop_catalog, read_progress, tenant_schema_ids, write_progress,
 };
 use sprig_catalog::migrate::MigrateOpts;
 use sprig_catalog::placement::ShardMap;
@@ -329,7 +329,7 @@ where
                     self.dc
                 )));
             }
-            self.reserve_ids_past_catalogs().await?;
+            self.reserve_ids_past_tenant_schemas().await?;
             let new = NewTenant {
                 name: req.name.clone(),
                 parent: parent_id,
@@ -453,14 +453,14 @@ where
         })
     }
 
-    /// Raises the directory's id counter past every catalog schema on the
-    /// DC's active clusters (module docs). A cluster that can't be read in
+    /// Raises the directory's id counter past every schema shaped like a
+    /// tenant's on the DC's active clusters (module docs). A cluster that can't be read in
     /// 5 s is skipped with a warning: the owner mark still keeps its
     /// schemas from being adopted.
     ///
     /// # Errors
     /// The directory's errors.
-    async fn reserve_ids_past_catalogs(&self) -> Result<()> {
+    async fn reserve_ids_past_tenant_schemas(&self) -> Result<()> {
         // The naming around the id: `t` and `_sprig` in production.
         let probe = TenantId(u64::MAX);
         let name = self.locator.schema(probe);
@@ -471,15 +471,15 @@ where
         for c in self.locator.pools().placeable().await? {
             let found = tokio::time::timeout(Duration::from_secs(5), async {
                 let pool = self.locator.pools().writer(&c).await?;
-                catalog_ids(&pool, prefix, suffix).await
+                tenant_schema_ids(&pool, prefix, suffix).await
             })
             .await;
             match found {
                 Ok(Ok(ids)) => highest = ids.into_iter().fold(highest, u64::max),
                 Ok(Err(e)) => tracing::warn!(cluster = %c, error = %e,
-                    "couldn't list catalog schemas before allocating a tenant id"),
+                    "couldn't list tenant schemas before allocating a tenant id"),
                 Err(_) => tracing::warn!(cluster = %c,
-                    "listing catalog schemas before allocating a tenant id timed out"),
+                    "listing tenant schemas before allocating a tenant id timed out"),
             }
         }
         if highest > 0 {

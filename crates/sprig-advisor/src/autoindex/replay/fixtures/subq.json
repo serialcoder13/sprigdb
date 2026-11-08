@@ -1,0 +1,62 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.09157223
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 5.40234297,
+    "r_loops": 1,
+    "r_total_time_ms": 0.754646957,
+    "nested_loop": [
+      {
+        "duplicates_removal": [
+          {
+            "table": {
+              "table_name": "u",
+              "access_type": "ALL",
+              "loops": 1,
+              "r_loops": 1,
+              "rows": 2000,
+              "r_rows": 2000,
+              "cost": 0.3368548,
+              "r_table_time_ms": 0.091113326,
+              "r_other_time_ms": 0.040592155,
+              "r_engine_stats": {
+                "pages_accessed": 6
+              },
+              "filtered": 100,
+              "r_total_filtered": 14.3,
+              "attached_condition": "u.v = 2",
+              "r_filtered": 14.3
+            }
+          },
+          {
+            "table": {
+              "table_name": "t",
+              "access_type": "ref",
+              "possible_keys": ["sprig_auto_0000000c", "sprig_auto_0000000a"],
+              "key": "sprig_auto_0000000a",
+              "key_length": "4",
+              "used_key_parts": ["a"],
+              "ref": ["__sprig_test_replay_fx.u.t_id"],
+              "loops": 2000,
+              "r_loops": 286,
+              "rows": 1,
+              "r_rows": 1,
+              "cost": 4.7183872,
+              "r_table_time_ms": 0.571711089,
+              "r_other_time_ms": 0.046849938,
+              "r_engine_stats": {
+                "pages_accessed": 1443
+              },
+              "filtered": 0.050000001,
+              "r_total_filtered": 100,
+              "attached_condition": "t.c > 10",
+              "r_filtered": 100
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -34,6 +34,12 @@
 //! - [`tenants`]: tenant bootstrap and deletion, and the
 //!   `tenant_bootstrap` loop that finishes or fails them (chapter 08 step
 //!   9); [`catalogs`]: how the controller reaches tenant catalogs;
+//! - [`autoindex_admin`]: the Admin API's automatic-indexing calls behind
+//!   `sprigctl index` and `sprigctl explain query` (chapter 13 step 13);
+//! - [`autoindex_loop`]: the `auto_index` loop, evaluate → validate → roll
+//!   out → observe per tenant (chapter 13 steps 10 and 11), with
+//!   [`autoindex_env`], its view of catalogs, objects, settings and
+//!   clusters;
 //! - [`catalog_reconciler`]: the `catalog_reconciler` loop (chapter 08 step
 //!   11): stuck DDL jobs finished or rolled back, missing and orphan
 //!   schemas, outside objects adopted, tombstones purged by age, clamped
@@ -44,6 +50,11 @@
 //! the decision log (chapter 11), and the Admin API's other services.
 
 pub mod admin;
+pub mod autoindex_admin;
+pub mod autoindex_env;
+pub mod autoindex_loop;
+pub mod autoindex_validate;
+pub mod autoindex_workload;
 pub mod catalog_reconciler;
 pub mod catalogs;
 pub mod dc;
@@ -57,6 +68,7 @@ pub mod tenants;
 pub mod tree;
 pub mod tree_settings;
 pub mod users;
+pub mod workload_rollup;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -164,8 +176,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     ));
     // Tenant catalogs: found through their shard maps, changed with
     // versions allocated in the directory (chapter 08).
-    let pools: Arc<dyn ClusterPools> =
-        Arc::new(RegistryPools::new(registry, Some(Arc::clone(&monitor))));
+    let pools: Arc<dyn ClusterPools> = Arc::new(RegistryPools::new(
+        registry.clone(),
+        Some(Arc::clone(&monitor)),
+    ));
     let locator = ShardMapLocator::new(Arc::clone(&stores.dc), pools, default_naming());
     let versioner = Versioner::new(
         MariaBackend::new(Arc::new(locator.clone())).with_clock(Arc::clone(&clock)),
@@ -191,18 +205,111 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Directory::new(Arc::clone(&stores.global)),
         Arc::clone(&clock),
     ));
+    let indexes = Arc::new(autoindex_admin::AutoIndexService::new(
+        Directory::new(Arc::clone(&stores.global)),
+        Arc::new(locator.clone()),
+        versioner.clone(),
+        settings.live.clone(),
+        Arc::clone(&clock),
+    ));
     let users = Arc::new(users::TenantUsers::new(
         Directory::new(Arc::clone(&stores.global)),
         Arc::new(locator.clone()),
         versioner.clone(),
         Arc::clone(&clock),
     ));
+    // Chapter 13's automatic indexing: evaluation, validation, builds and
+    // observation on the DC leader (no worker job runtime yet), reading
+    // chapter 12's workload store in the tenants' catalogs.
+    let jobs = autoindex_loop::JobShardLocks::new(Arc::clone(&stores.dc));
+    let catalog_locator: Arc<dyn sprig_catalog::CatalogLocator> = Arc::new(locator.clone());
+    let workload_store: Arc<dyn sprig_workload::store::WorkloadStore> = Arc::new(
+        sprig_workload::store::CatalogWorkloadStore::new(Arc::clone(&catalog_locator)),
+    );
+    let keyring: Option<Arc<dyn sprig_workload::keyring::TenantKeyring>> =
+        if let Some(p) = &cfg.controller.workload_key_file {
+            let k = sprig_workload::keyring::MasterKeyring::from_file(p)?;
+            tracing::info!(versions = ?k.versions(), "workload sample keys loaded");
+            Some(Arc::new(k))
+        } else {
+            tracing::info!(
+                "no [controller] workload_key_file: automatic-index validation uses \
+                 estimates and a canary only"
+            );
+            None
+        };
+    let ai_clock: Arc<dyn Clock> = match &cfg.controller.autoindex_test_clock_file {
+        Some(f) => {
+            tracing::warn!(file = %f.display(), "auto_index runs on a test clock");
+            Arc::new(autoindex_env::SkewClock::new(Arc::clone(&clock), f.clone()))
+        }
+        None => Arc::clone(&clock),
+    };
+    let ai_env = Arc::new(autoindex_env::ControllerEnv::new(
+        dc.clone(),
+        locator.clone(),
+        registry.clone(),
+        Some(Arc::clone(&monitor)),
+        Some(settings.live.clone()),
+        jobs.clone(),
+    ));
+    let ai_eval = autoindex_env::EvalShim::new(
+        Arc::clone(&ai_env),
+        Arc::clone(&ai_clock),
+        Arc::new(autoindex_workload::StoreSource::new(Arc::clone(
+            &workload_store,
+        ))),
+        Arc::new(sprig_advisor::autoindex::store::LogDecisions),
+    );
+    let marker: Arc<dyn sprig_advisor::autoindex::validate::NodeMarker> =
+        Arc::new(autoindex_validate::LogMarker);
+    let auto_index = autoindex_loop::AutoIndexLoop::new(
+        ai_env,
+        autoindex_loop::AutoIndexHooks {
+            candidates: Arc::new(ai_eval),
+            validation: Arc::new(autoindex_validate::SampleValidation::new(
+                Arc::clone(&catalog_locator),
+                registry,
+                keyring.clone(),
+                Arc::clone(&marker),
+            )),
+            workload: Arc::new(autoindex_workload::ObserveSource::new(
+                workload_store,
+                catalog_locator,
+                keyring,
+                Arc::clone(&ai_clock),
+            )),
+            locks: Arc::new(jobs),
+            mover: None,
+            marker,
+            decisions: Arc::new(sprig_advisor::autoindex::store::LogDecisions),
+        },
+        Directory::new(Arc::clone(&stores.global)),
+        dc.clone(),
+        Arc::clone(&ai_clock),
+        // Passes every minute at most; evaluation is paced by
+        // auto_index.eval_interval_minutes (resolved per tenant).
+        autoindex_loop::Cadence {
+            eval_every: Duration::from_secs(60),
+            max_requeue: Duration::from_secs(60),
+            ..autoindex_loop::Cadence::default()
+        },
+    );
+    // Chapter 12's rollup and retention of the workload tables.
+    let workload_rollup = workload_rollup::WorkloadRollup::new(
+        Directory::new(Arc::clone(&stores.global)),
+        Arc::new(locator.clone()),
+        dc.clone(),
+        Some(settings.live.clone()),
+        Arc::clone(&clock),
+    );
     let tenants = Arc::new(TenantService::new(
         Arc::clone(&stores.dc),
         locator,
         Arc::clone(&tree),
-        // Chapter 14's verifier tables with the core catalog.
-        Arc::new(users::AuthHooks),
+        // Chapter 14's verifier tables and chapter 13's automatic-indexing
+        // tables with the core catalog.
+        Arc::new(autoindex_loop::WithAutoIndex(users::AuthHooks)),
         Arc::clone(&clock),
         Some(settings.live.clone()),
     )?);
@@ -215,6 +322,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(tree_loop))
         .with_loop(Loop::new(TenantLifecycle::new(Arc::clone(&tenants))))
         .with_loop(Loop::new(reconciler))
+        .with_loop(Loop::new(auto_index))
+        .with_loop(Loop::new(workload_rollup))
         .global_candidate(cfg.controller.global_candidate);
 
     let token = cfg
@@ -231,7 +340,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         AdminService::new(stores, monitor, rt.status(), Arc::clone(&clock))
             .with_tenants(tenants)
             .with_users(users)
-            .with_settings(settings_admin),
+            .with_settings(settings_admin)
+            .with_indexes(indexes),
     );
     let admin = tokio::spawn(http::serve(
         listener,

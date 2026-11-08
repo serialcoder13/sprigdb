@@ -1,0 +1,4 @@
+ID  TABLE        NAME                 COLUMNS                       STATE              NET MS/H  SIZE
+1   shop.orders  sprig_auto_5be0c2a1  customer_id, created_at desc  active             183300    2.2 GiB
+2   shop.orders  sprig_auto_1f00d5aa  customer_id, created_at desc  recommended        183300    2.2 GiB
+3   shop.events  sprig_auto_0badc0de  account_id, kind              dropped (no_gain)  860       70.0 MiB

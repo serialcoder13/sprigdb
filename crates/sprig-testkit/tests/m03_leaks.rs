@@ -614,6 +614,26 @@ const CORPUS: &[(&str, &str, Expect)] = &[
         "SELECT id FROM {db}.child JOIN {db}.parent ON 1 = 1",
         Expect::Err,
     ),
+    // SprigDB's settings view is literal rows: never stored in a definition
+    // (chapter 07 rule 9: 39051 through the gateway; MariaDB has no such
+    // table, so baseline fails too). Reading it is fine (an error in
+    // baseline). A procedure body isn't checked here: plain MariaDB would
+    // store it unchecked.
+    (
+        "settings view",
+        "SELECT SETTING_NAME, VALUE FROM information_schema.SPRIG_SETTINGS LIMIT 3",
+        Expect::Any,
+    ),
+    (
+        "err settings view in a view",
+        "CREATE VIEW {db}.v_settings AS SELECT * FROM information_schema.SPRIG_SETTINGS",
+        Expect::Err,
+    ),
+    (
+        "err settings view in create select",
+        "CREATE TABLE {db}.t_settings AS SELECT * FROM information_schema.SPRIG_SETTINGS",
+        Expect::Err,
+    ),
     // The other tenant's names (the same logical names through the gateway:
     // only its private database differs)
     ("other: use vault", "USE {other_vault}", Expect::Err),

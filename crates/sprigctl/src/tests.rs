@@ -745,4 +745,5 @@ async fn tenant_calls_over_the_admin_api() {
 
 // --- Settings (chapter 08 steps 7-8, chapter 23 step 8, chapter 47) --------
 
+mod index_cli;
 mod settings_cli;

@@ -55,6 +55,7 @@ pub mod reads;
 pub mod session;
 pub mod tenant;
 pub mod tls;
+pub mod workload;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -83,6 +84,7 @@ use crate::tls::CertStore;
 /// `Internal` if the setting registry is invalid (a bug); 39998 for
 /// unreadable `[tls]` files; 39500 if no etcd seed answers at start-up
 /// (chapter 23: refuse to start).
+#[allow(clippy::too_many_lines)] // start-up and drain, step by step
 pub async fn run(ctx: RoleContext) -> Result<()> {
     let role = Role::Gateway;
     let registry = Registry::global()?;
@@ -133,8 +135,16 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     if let Some(t) = &tenants {
         executor = executor.with_tenants(Arc::clone(t));
     }
+    // Workload capture (chapter 12, M0.4): the hook and its flusher.
+    let (workload, flusher) = workload::start(
+        &ctx.config,
+        &live,
+        tenants.as_ref(),
+        clock.clone(),
+        ctx.shutdown.clone(),
+    )?;
     // The MySQL and MariaDB front ends (chapter 05): requests pass the
-    // workload hook (chapter 12, a no-op until M0.4) into the executor.
+    // workload hook (chapter 12) into the executor.
     let mysql = mysql::MySqlStack::start(
         mysql::StackConfig {
             login,
@@ -142,7 +152,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             dc: dc.clone(),
             hostname: ctx.config.node.id(),
             clock: clock.clone(),
-            executor: pipeline::with_workload(Arc::new(executor), Arc::new(pipeline::NoWorkload)),
+            executor: pipeline::with_workload(Arc::new(executor), workload),
         },
         ctx.shutdown.clone(),
     )?;
@@ -188,6 +198,10 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     mysql.join().await;
     for t in login_tasks {
         let _ = t.await;
+    }
+    // Drain step 5: the flusher's last flush, before the catalog pools close.
+    if let Some(f) = flusher {
+        let _ = f.await;
     }
     if let Some(t) = tenants {
         t.locator.close().await;

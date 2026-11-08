@@ -237,7 +237,26 @@ struct Inner {
     pins: Mutex<HashMap<TenantId, usize>>,
     tick: AtomicU64,
     bytes: AtomicUsize,
+    /// The catalog load feed ([`TenantCache::loads`]).
+    loads: broadcast::Sender<CatalogLoaded>,
 }
+
+/// One published load of a tenant's catalog: what the catalog load feed
+/// ([`TenantCache::loads`]) carries. Chapter 14's auth change feed
+/// (revocation) and chapter 29's privilege cache follow it, the way
+/// settings watches follow [`TenantNotify`].
+#[derive(Debug, Clone)]
+pub struct CatalogLoaded {
+    /// The tenant.
+    pub tenant: TenantId,
+    /// The snapshot it replaced; `None` on the tenant's first load here.
+    pub prev: Option<Arc<TenantCatalog>>,
+    /// The new snapshot.
+    pub current: Arc<TenantCatalog>,
+}
+
+/// How many loads the feed buffers per subscriber before it lags.
+const LOAD_FEED_CAPACITY: usize = 1024;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -332,6 +351,7 @@ impl TenantCache {
             pins: Mutex::new(HashMap::new()),
             tick: AtomicU64::new(0),
             bytes: AtomicUsize::new(0),
+            loads: broadcast::channel(LOAD_FEED_CAPACITY).0,
         });
         let stop = CancellationToken::new();
         tokio::spawn(run(
@@ -388,6 +408,18 @@ impl TenantCache {
                 Ok(())
             },
         )
+    }
+
+    /// The catalog load feed: every snapshot this cache publishes, with the
+    /// one it replaced, in load order per tenant. Tenants pinned by sessions
+    /// here reload as soon as their directory entry moves, so a change
+    /// reaches their subscribers within the global tier's watch delay plus
+    /// one load. A subscriber that falls more than 1024 loads behind gets
+    /// `Lagged` and should re-read what it follows from
+    /// [`cached`](Self::cached).
+    #[must_use]
+    pub fn loads(&self) -> broadcast::Receiver<CatalogLoaded> {
+        self.inner.loads.subscribe()
     }
 
     /// `tenant`'s catalog, as fresh as `fresh` requires (see
@@ -966,6 +998,14 @@ fn finish(
                 None => cat.settings.rows().map(|(_, k, _)| k).collect(),
             };
             n.tenant_loaded(&cat.settings, &changed);
+        }
+        if !same {
+            // No receivers is fine: nothing follows the feed.
+            let _ = inner.loads.send(CatalogLoaded {
+                tenant: slot.tenant,
+                prev,
+                current: cat,
+            });
         }
         inner.enforce(Some(slot.tenant));
     }

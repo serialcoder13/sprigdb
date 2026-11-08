@@ -696,7 +696,9 @@ async fn live_catalog_schemas_are_never_reused() {
             let a = env.create("a", None, None).await.unwrap();
             assert_eq!(a.tenant.state, "active");
             assert_eq!(a.tenant.tenant_id, TenantId(2));
-            let mark_a = mark_of(&mut conn, env.locator.schema(TenantId(2))).await.unwrap();
+            let mark_a = mark_of(&mut conn, env.locator.schema(TenantId(2)))
+                .await
+                .unwrap();
             assert!(mark_a.starts_with("sprig tenant 2 "), "{mark_a}");
 
             // 2. The counter behind anyway (the entry is made directly, as

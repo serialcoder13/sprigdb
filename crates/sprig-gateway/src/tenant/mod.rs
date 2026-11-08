@@ -22,6 +22,7 @@
 //! executor's session (see [`crate::exec`]).
 
 pub mod aliases;
+pub mod autoindex;
 pub mod backends;
 pub mod ddl;
 pub mod locator;

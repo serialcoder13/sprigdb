@@ -1,0 +1,25 @@
+index:         sprig_auto_5be0c2a1 (1)
+tenant:        acme
+table:         shop.orders
+kind:          btree (sql)
+columns:       customer_id, created_at desc
+state:         active since 2026-10-26T09:33:20Z
+estimate:      B 190500 ms/h, Wc 7200 ms/h, net 183300 ms/h, 2.2 GiB
+shards:        17 built
+ddl:           ALTER TABLE `shop`.`orders` ADD INDEX `sprig_auto_5be0c2a1` (`customer_id`, `created_at` DESC)
+fingerprints:
+  FINGERPRINT       ROLE     RUNS   P95 MS  MEAN MS
+  9c41d2e07b3a5f18  primary  18240  412     260
+candidate:     11 (run 7): recommended
+  selectivity:   customer_id 8.30e-6 (avg_frequency)
+  parts from:    eq, order
+  entries/run:   858
+  cost:          B 190500 ms/h, Wc 7200 ms/h, net 183300 ms/h, 2.2 GiB, build 112 s
+  note:          variant: eq + order, LIMIT
+validation:    111 replica on mum1-c7/n2: accepted, target p95 405 -> 11.2 ms (97.2% better), worst regression 3.1% (51aa02c4e9d0f337), 260 statements (3 noisy)
+history:
+  2026-10-26T07:33:20Z  candidate   candidate 11 in evaluation run 7: recommended
+  2026-10-26T07:53:20Z  validation  replica validation on n2 started
+  2026-10-26T08:13:20Z  validation  accepted
+  2026-10-26T08:33:20Z  index       sprig_auto_5be0c2a1 recorded
+  2026-10-26T09:33:20Z  state       now active

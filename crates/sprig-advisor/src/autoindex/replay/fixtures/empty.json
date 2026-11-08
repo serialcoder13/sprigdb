@@ -1,0 +1,38 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.056111458
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.001792605,
+    "r_loops": 1,
+    "r_total_time_ms": 0.010179328,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "t",
+          "access_type": "ref",
+          "possible_keys": ["sprig_auto_0000000a"],
+          "key": "sprig_auto_0000000a",
+          "key_length": "4",
+          "used_key_parts": ["a"],
+          "ref": ["const"],
+          "loops": 1,
+          "r_loops": 1,
+          "rows": 1,
+          "r_rows": 0,
+          "cost": 0.001792605,
+          "r_table_time_ms": 0.004505604,
+          "r_other_time_ms": 0.002211083,
+          "r_engine_stats": {
+            "pages_accessed": 4
+          },
+          "filtered": 100,
+          "r_total_filtered": 100,
+          "r_filtered": 100,
+          "using_index": true
+        }
+      }
+    ]
+  }
+}

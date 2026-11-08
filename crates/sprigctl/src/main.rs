@@ -18,7 +18,11 @@
 //! - `sprigctl settings list|describe|get|set|reset|bounds|lock|unlock`
 //!   (alias `config`; chapter 08 steps 7-8, chapter 23 step 8, chapter 47
 //!   step 5): see where a value comes from and change it at any of the six
-//!   scopes (see [`settings`]).
+//!   scopes (see [`settings`]);
+//! - `sprigctl index list|show|recommendations|approve|reject|drop|pin|unpin`
+//!   and `sprigctl explain query <fingerprint>` (chapter 13 step 13): see
+//!   [`index`]. `explain decision` and `explain placement` wait for
+//!   chapter 11's decision log.
 //!
 //! Every other command group parses and prints "not implemented yet",
 //! exiting with status 1.
@@ -30,6 +34,7 @@
 
 mod client;
 mod cluster;
+mod index;
 mod render;
 mod settings;
 
@@ -53,17 +58,7 @@ use crate::cluster::RegisterFlags;
 /// guide, 5.10).
 const GROUPS: &[(&str, &str, &[&str])] = &[
     ("shard", "Shards", &["list", "split", "merge", "move"]),
-    (
-        "index",
-        "Automatic indexes",
-        &["list", "show", "drop", "freeze"],
-    ),
     ("job", "Jobs", &["list", "show", "cancel"]),
-    (
-        "explain",
-        "Explain a query fingerprint, a decision or a tenant's placement",
-        &["query", "decision", "placement"],
-    ),
     ("feed", "Change feeds", &["list", "show", "lag"]),
     ("search", "Search indexes", &["list", "show", "rebuild"]),
     (
@@ -361,7 +356,9 @@ fn cli() -> Command {
         .subcommand(dc_group())
         .subcommand(cluster_group())
         .subcommand(tenant_group())
-        .subcommand(settings::group());
+        .subcommand(settings::group())
+        .subcommand(index::group())
+        .subcommand(index::explain_group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -406,7 +403,8 @@ fn main() -> ExitCode {
     };
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
-        "dc" | "cluster" | "settings" => true,
+        "dc" | "cluster" | "settings" | "index" => true,
+        "explain" => name == "query",
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         _ => false,
     };
@@ -430,6 +428,12 @@ fn main() -> ExitCode {
             "dc" => run_dc(&client, &matches, sub).await,
             "tenant" => run_tenant(&client, &matches, sub).await,
             "settings" => settings::run(&client, &matches, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "index" => index::run(&client, &matches, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "explain" => index::explain(&client, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             _ => run_cluster(&client, &matches, sub).await,

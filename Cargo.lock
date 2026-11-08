@@ -1929,6 +1929,23 @@ dependencies = [
 [[package]]
 name = "sprig-advisor"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "metrics",
+ "mysql_async",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sprig-catalog",
+ "sprig-cluster",
+ "sprig-common",
+ "sprig-settings",
+ "sprig-workload",
+ "tokio",
+ "tracing",
+ "twox-hash",
+]
 
 [[package]]
 name = "sprig-agent"
@@ -1973,6 +1990,21 @@ dependencies = [
 [[package]]
 name = "sprig-balancer"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "metrics",
+ "mysql_async",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sprig-catalog",
+ "sprig-common",
+ "sprig-meta",
+ "sprig-settings",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "sprig-binlog"
@@ -2058,13 +2090,17 @@ dependencies = [
  "mysql_async",
  "serde",
  "serde_json",
+ "sprig-advisor",
  "sprig-auth",
  "sprig-catalog",
  "sprig-cluster",
  "sprig-common",
  "sprig-meta",
+ "sprig-proto-mysql",
  "sprig-provision",
  "sprig-settings",
+ "sprig-sql",
+ "sprig-workload",
  "tokio",
  "tracing",
  "uuid",
@@ -2093,6 +2129,7 @@ dependencies = [
  "metrics",
  "mysql_async",
  "rcgen",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
@@ -2106,6 +2143,7 @@ dependencies = [
  "sprig-settings",
  "sprig-sql",
  "sprig-testkit",
+ "sprig-workload",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -2325,6 +2363,25 @@ dependencies = [
 [[package]]
 name = "sprig-workload"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "metrics",
+ "mysql_async",
+ "proptest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sprig-catalog",
+ "sprig-common",
+ "sprig-proto-mysql",
+ "sprig-settings",
+ "sprig-sql",
+ "sqlparser",
+ "tokio",
+ "tracing",
+ "twox-hash",
+ "zeroize",
+]
 
 [[package]]
 name = "sprigctl"
@@ -2338,6 +2395,7 @@ dependencies = [
  "mysql_async",
  "serde",
  "serde_json",
+ "sprig-advisor",
  "sprig-cluster",
  "sprig-common",
  "sprig-controller",

@@ -26,8 +26,11 @@ baseline  *        settings   -                  object_scope     n/a     MariaD
 baseline  *        settings   -                  out_of_bounds    n/a     MariaDB has no SPRIG SET (it answers 1064)
 baseline  *        settings   -                  scope_bounds     n/a     MariaDB has no SPRIG SET (it answers 1064)
 baseline  *        settings   -                  object_only      n/a     MariaDB has no SPRIG SET (it answers 1064)
-# mysqldump 8.4's --all-databases writes no database at all from MariaDB 11.8
-# for a plain user (and only one for root), while --databases works. On
-# 3306 the gateway stands for MySQL 8.4, where it works, so through the
-# gateway this stays `pass`.
-baseline  mysql    dump       -                  dump_all         fail    mysqldump 8.4 --all-databases dumps nothing from MariaDB 11.8
+# mysqldump 8.4's --all-databases dumps the `mysql` database first: it holds
+# back every database SHOW DATABASES lists until it reaches `mysql`, and if
+# `mysql` never comes it writes nothing and still says "Dump completed".
+# Neither a tenant through the gateway nor a plain MariaDB user sees
+# `mysql`, and MySQL 8.4 behaves the same for a user who can't see it
+# (decisions/mysql-persona-gaps.md row 12). dump_listed passes with the
+# workaround, --databases with SHOW DATABASES's list.
+*         mysql    dump       -                  dump_all         fail    mysqldump 8.4 --all-databases dumps nothing unless SHOW DATABASES lists mysql

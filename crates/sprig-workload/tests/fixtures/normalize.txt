@@ -1,0 +1,536 @@
+# Golden corpus of the SQL normalizer (chapter 12, "SQL fingerprints").
+# See tests/golden.rs for the format. Rewrite with SPRIG_BLESS=1 and review.
+
+# sysbench oltp_* (sysbench 1.0 lua scripts)
+@ mysql db=sbtest
+in: SELECT c FROM sbtest1 WHERE id=5012
+out: SELECT c FROM sbtest.sbtest1 WHERE id = ?
+in: SELECT c FROM sbtest7 WHERE id=1
+out: SELECT c FROM sbtest.sbtest7 WHERE id = ?
+in: SELECT c FROM sbtest1 WHERE id BETWEEN 4996 AND 5095
+out: SELECT c FROM sbtest.sbtest1 WHERE id BETWEEN ? AND ?
+in: SELECT SUM(k) FROM sbtest1 WHERE id BETWEEN 4996 AND 5095
+out: SELECT SUM(k) FROM sbtest.sbtest1 WHERE id BETWEEN ? AND ?
+in: SELECT c FROM sbtest1 WHERE id BETWEEN 4996 AND 5095 ORDER BY c
+out: SELECT c FROM sbtest.sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c
+in: SELECT DISTINCT c FROM sbtest1 WHERE id BETWEEN 4996 AND 5095 ORDER BY c
+out: SELECT DISTINCT c FROM sbtest.sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c
+in: UPDATE sbtest1 SET k=k+1 WHERE id=5012
+out: UPDATE sbtest.sbtest1 SET k = k + ? WHERE id = ?
+in: UPDATE sbtest1 SET c='83868641912-28773972837-60736120486-75162659906' WHERE id=5012
+out: UPDATE sbtest.sbtest1 SET c = ? WHERE id = ?
+in: DELETE FROM sbtest1 WHERE id=5012
+out: DELETE FROM sbtest.sbtest1 WHERE id = ?
+in: INSERT INTO sbtest1 (id, k, c, pad) VALUES (5012, 4993, '83868641912-28773972837', '67847967377-48000963322')
+out: INSERT INTO sbtest.sbtest1 (id, k, c, pad) VALUES (...)
+in: INSERT INTO sbtest1(k, c, pad) VALUES(4993, '838', '678'),(5011, '111', '222'),(4402, '333', '444')
+out: INSERT INTO sbtest.sbtest1 (k, c, pad) VALUES (...)
+in: SELECT id, k, c, pad FROM sbtest1 WHERE k IN (4993, 5011, 4402, 5003, 4999, 5022, 4981, 5040, 4955, 5100)
+out: SELECT id, k, c, pad FROM sbtest.sbtest1 WHERE k IN (...)
+in: SELECT count(k) FROM sbtest1 WHERE k BETWEEN 4993 AND 5003 OR k BETWEEN 5011 AND 5021
+out: SELECT COUNT(k) FROM sbtest.sbtest1 WHERE k BETWEEN ? AND ? OR k BETWEEN ? AND ?
+in: BEGIN
+out: BEGIN
+in: COMMIT
+out: COMMIT
+in: START TRANSACTION READ ONLY
+out: START TRANSACTION READ ONLY
+in: ROLLBACK
+out: ROLLBACK
+
+# Hibernate 6 (MySQL dialect)
+@ mysql db=shop
+in: select o1_0.id,o1_0.created_at,o1_0.customer_id,o1_0.status,o1_0.total from orders o1_0 where o1_0.customer_id=? and o1_0.status in (?,?) order by o1_0.created_at desc limit ?
+out: SELECT o1_0.id, o1_0.created_at, o1_0.customer_id, o1_0.status, o1_0.total FROM shop.orders o1_0 WHERE o1_0.customer_id = ? AND o1_0.status IN (...) ORDER BY o1_0.created_at DESC LIMIT ?
+in: select c1_0.id,c1_0.email,c1_0.name from customers c1_0 where c1_0.id=?
+out: SELECT c1_0.id, c1_0.email, c1_0.name FROM shop.customers c1_0 WHERE c1_0.id = ?
+in: insert into orders (created_at,customer_id,status,total) values (?,?,?,?)
+out: INSERT INTO shop.orders (created_at, customer_id, status, total) VALUES (...)
+in: update orders set status=?,total=? where id=?
+out: UPDATE shop.orders SET status = ?, total = ? WHERE id = ?
+in: delete from order_items where order_id=?
+out: DELETE FROM shop.order_items WHERE order_id = ?
+in: select count(*) from orders o1_0 join customers c1_0 on c1_0.id=o1_0.customer_id where c1_0.country=?
+out: SELECT COUNT(*) FROM shop.orders o1_0 JOIN shop.customers c1_0 ON c1_0.id = o1_0.customer_id WHERE c1_0.country = ?
+in: select o1_0.id from orders o1_0 where o1_0.id=? for update
+out: SELECT o1_0.id FROM shop.orders o1_0 WHERE o1_0.id = ? FOR UPDATE
+
+# Django 5 (backquoted, LIMIT 21)
+@ mysql db=shop
+in: SELECT `shop_order`.`id`, `shop_order`.`status`, `shop_order`.`total` FROM `shop_order` WHERE `shop_order`.`customer_id` = 17 ORDER BY `shop_order`.`created_at` DESC LIMIT 21
+out: SELECT shop_order.id, shop_order.status, shop_order.total FROM shop.shop_order WHERE shop_order.customer_id = ? ORDER BY shop_order.created_at DESC LIMIT ?
+in: SELECT `auth_user`.`id`, `auth_user`.`password`, `auth_user`.`last_login`, `auth_user`.`username` FROM `auth_user` WHERE `auth_user`.`username` = 'kiran' LIMIT 21
+out: SELECT auth_user.id, auth_user.password, auth_user.last_login, auth_user.username FROM shop.auth_user WHERE auth_user.username = ? LIMIT ?
+in: SELECT (1) AS `a` FROM `django_session` WHERE `django_session`.`session_key` = 'x9a8b7' LIMIT 1
+out: SELECT (?) AS a FROM shop.django_session WHERE django_session.session_key = ? LIMIT ?
+in: UPDATE `django_session` SET `session_data` = 'e30:1t2', `expire_date` = '2026-11-22 10:00:00.000000' WHERE `django_session`.`session_key` = 'x9a8b7'
+out: UPDATE shop.django_session SET session_data = ?, expire_date = ? WHERE django_session.session_key = ?
+in: INSERT INTO `django_admin_log` (`action_time`, `user_id`, `object_repr`) VALUES ('2026-11-08 10:00:00.000000', 1, 'Order object (5)')
+out: INSERT INTO shop.django_admin_log (action_time, user_id, object_repr) VALUES (...)
+in: SELECT `shop_order`.`id` FROM `shop_order` WHERE `shop_order`.`status` IN ('open', 'hold') AND `shop_order`.`total` > 100.50
+out: SELECT shop_order.id FROM shop.shop_order WHERE shop_order.status IN (...) AND shop_order.total > ?
+in: SELECT COUNT(*) AS `__count` FROM `shop_order` WHERE `shop_order`.`email` LIKE '%@example.com'
+out: SELECT COUNT(*) AS __count FROM shop.shop_order WHERE shop_order.email LIKE %?
+in: SELECT `shop_order`.`id` FROM `shop_order` WHERE `shop_order`.`email` LIKE 'kiran%'
+out: SELECT shop_order.id FROM shop.shop_order WHERE shop_order.email LIKE ?
+
+# Rails 7 / ActiveRecord
+@ mysql db=shop
+in: SELECT `users`.* FROM `users` WHERE `users`.`id` = 42 LIMIT 1
+out: SELECT users.* FROM shop.users WHERE users.id = ? LIMIT ?
+in: SELECT `orders`.* FROM `orders` WHERE `orders`.`user_id` IN (1, 2, 3, 4, 5)
+out: SELECT orders.* FROM shop.orders WHERE orders.user_id IN (...)
+in: SELECT 1 AS one FROM `users` WHERE `users`.`email` = BINARY 'a@b.c' LIMIT 1
+out: SELECT ? AS one FROM shop.users WHERE users.email = BINARY ? LIMIT ?
+in: INSERT INTO `orders` (`user_id`, `total`, `created_at`, `updated_at`) VALUES (42, 19.99, '2026-11-08 10:00:00.123456', '2026-11-08 10:00:00.123456')
+out: INSERT INTO shop.orders (user_id, total, created_at, updated_at) VALUES (...)
+in: UPDATE `orders` SET `orders`.`status` = 'paid', `orders`.`updated_at` = '2026-11-08 10:00:01' WHERE `orders`.`id` = 7
+out: UPDATE shop.orders SET orders.status = ?, orders.updated_at = ? WHERE orders.id = ?
+in: SELECT `schema_migrations`.`version` FROM `schema_migrations` ORDER BY `schema_migrations`.`version` ASC
+out: SELECT schema_migrations.version FROM shop.schema_migrations ORDER BY schema_migrations.version ASC
+
+# Laravel Eloquent, Sequelize, TypeORM, Prisma, SQLAlchemy, GORM, Doctrine
+@ mysql db=shop
+in: select * from `products` where `category` = ? and `products`.`deleted_at` is null order by `price` asc limit 15 offset 30
+out: SELECT * FROM shop.products WHERE category = ? AND products.deleted_at IS NULL ORDER BY price ASC LIMIT ? OFFSET ?
+in: SELECT `id`, `name`, `price` FROM `products` AS `Product` WHERE `Product`.`price` >= 10 AND `Product`.`price` <= 20
+out: SELECT id, name, price FROM shop.products AS Product WHERE Product.price >= ? AND Product.price <= ?
+in: SELECT `Order`.`id` AS `Order_id`, `Order`.`total` AS `Order_total` FROM `orders` `Order` WHERE `Order`.`id` IN (?, ?, ?)
+out: SELECT `Order`.id AS Order_id, `Order`.total AS Order_total FROM shop.orders `Order` WHERE `Order`.id IN (...)
+in: SELECT `t0`.`id`, `t0`.`email` FROM `shop`.`customers` AS `t0` WHERE `t0`.`email` = ? LIMIT ? OFFSET ?
+out: SELECT t0.id, t0.email FROM shop.customers AS t0 WHERE t0.email = ? LIMIT ? OFFSET ?
+in: SELECT customers.id, customers.name FROM customers WHERE customers.created_at >= %s
+out: SELECT customers.id, customers.name FROM shop.customers WHERE customers.created_at >= % s
+in: SELECT * FROM `orders` WHERE customer_id = 3 AND `orders`.`deleted_at` IS NULL ORDER BY `orders`.`id` LIMIT 1
+out: SELECT * FROM shop.orders WHERE customer_id = ? AND orders.deleted_at IS NULL ORDER BY orders.id LIMIT ?
+in: SELECT o0_.id AS id_0, o0_.total AS total_1 FROM orders o0_ WHERE o0_.status = ?
+out: SELECT o0_.id AS id_0, o0_.total AS total_1 FROM shop.orders o0_ WHERE o0_.status = ?
+in: INSERT INTO `products` (`sku`,`name`,`price`) VALUES (?,?,?),(?,?,?) ON DUPLICATE KEY UPDATE `name`=VALUES(`name`),`price`=VALUES(`price`)
+out: INSERT INTO shop.products (sku, name, price) VALUES (...) ON DUPLICATE KEY UPDATE name = VALUES (name), price = VALUES (price)
+in: INSERT INTO products (sku, name) VALUES ('a', 'b') AS new ON DUPLICATE KEY UPDATE name = new.name
+out: INSERT INTO shop.products (sku, name) VALUES (...) AS new ON DUPLICATE KEY UPDATE name = new.name
+
+# mysqldump 8.4 and mariadb-dump
+@ mysql db=shop
+in: /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */
+out: SET @old_character_set_client = @@character_set_client
+in: /*!50503 SET NAMES utf8mb4 */
+out: SET NAMES utf8mb4
+in: /*!40103 SET TIME_ZONE='+00:00' */
+out: SET time_zone = ?
+in: /*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */
+out: SET @old_unique_checks = @@unique_checks, unique_checks = ?
+in: /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */
+out: SET @old_sql_notes = @@sql_notes, sql_notes = ?
+in: DROP TABLE IF EXISTS `orders`
+out: DROP TABLE IF EXISTS shop.orders
+in: /*!40101 SET @saved_cs_client     = @@character_set_client */
+out: SET @saved_cs_client = @@character_set_client
+in: LOCK TABLES `orders` WRITE
+out: LOCK TABLES shop.orders WRITE
+in: /*!40000 ALTER TABLE `orders` DISABLE KEYS */
+out: ALTER TABLE shop.orders DISABLE KEYS
+in: INSERT INTO `orders` VALUES (1,17,'open','2026-01-01 00:00:00',10.50),(2,18,'hold','2026-01-02 00:00:00',99.00),(3,17,'paid','2026-01-03 00:00:00',-1.25)
+out: INSERT INTO shop.orders VALUES (...)
+in: /*!40000 ALTER TABLE `orders` ENABLE KEYS */
+out: ALTER TABLE shop.orders ENABLE KEYS
+in: UNLOCK TABLES
+out: UNLOCK TABLES
+in: CREATE TABLE `orders` (⏎  `id` bigint NOT NULL AUTO_INCREMENT,⏎  `status` varchar(16) NOT NULL DEFAULT 'open',⏎  PRIMARY KEY (`id`),⏎  KEY `by_status` (`status`)⏎) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+out: CREATE TABLE shop.orders (id BIGINT NOT NULL auto_increment, status VARCHAR (?) NOT NULL DEFAULT ?, PRIMARY KEY (id), KEY BY_STATUS(status)) ENGINE = innodb DEFAULT CHARSET = utf8mb4
+
+# mariadb-dump on the MariaDB persona
+@ mariadb db=shop
+in: /*M!999999\- enable the sandbox mode */
+out: 
+in: /*!40101 SET NAMES utf8mb4 */
+out: SET NAMES utf8mb4
+in: /*M!100616 SET @OLD_NOTE_VERBOSITY=@@NOTE_VERBOSITY, NOTE_VERBOSITY=0 */
+out: SET @old_note_verbosity = @@note_verbosity, note_verbosity = ?
+in: SELECT /*M!100100 1, */ 2
+out: SELECT ?, ?
+
+# The same on the MySQL persona: /*M! is a comment
+@ mysql db=shop
+in: /*M!100616 SET @OLD_NOTE_VERBOSITY=@@NOTE_VERBOSITY, NOTE_VERBOSITY=0 */
+out: 
+in: SELECT /*M!100100 1, */ 2
+out: SELECT ?
+in: SELECT /*!80000 1, */ 2
+out: SELECT ?, ?
+in: SELECT /*!99999 1, */ 2
+out: SELECT ?
+
+# Comments
+@ mysql db=shop
+in: SELECT /* web:42 */ o.id, o.Total FROM `orders` o WHERE o.customer_id = 42 AND o.status IN ('open','hold') ORDER BY o.created_at DESC LIMIT 20
+out: SELECT o.id, o.total FROM shop.orders o WHERE o.customer_id = ? AND o.status IN (...) ORDER BY o.created_at DESC LIMIT ?
+in: SELECT 1 -- trailing
+out: SELECT ?
+in: SELECT 1 # hash comment⏎FROM dual
+out: SELECT ? FROM DUAL
+in: SELECT 1--1
+out: SELECT ? - ?
+in: SELECT 1 /* a */ + /* b */ 2
+out: SELECT ? + ?
+in: /* leading */ SELECT * FROM orders
+out: SELECT * FROM shop.orders
+in: SELECT * FROM orders WHERE id = 1;
+out: SELECT * FROM shop.orders WHERE id = ?
+
+# Optimizer hints
+@ mysql db=shop
+in: SELECT /*+ MAX_EXECUTION_TIME(1000) */ * FROM orders
+out: SELECT /*+ MAX_EXECUTION_TIME(?) */ * FROM shop.orders
+in: SELECT /*+ BKA(o) NO_ICP(c idx_x) */ o.id FROM orders o JOIN customers c ON c.id = o.customer_id
+out: SELECT /*+ BKA(o) NO_ICP(c idx_x) */ o.id FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id
+in: SELECT /*+ SET_VAR(sort_buffer_size = 16M) */ name FROM customers ORDER BY name
+out: SELECT /*+ SET_VAR(sort_buffer_size = 16M) */ name FROM shop.customers ORDER BY name
+in: INSERT /*+ SET_VAR(foreign_key_checks=OFF) */ INTO orders (id) VALUES (1)
+out: INSERT /*+ SET_VAR(foreign_key_checks = OFF) */ INTO shop.orders (id) VALUES (...)
+in: UPDATE /*+ NO_MERGE(t) */ orders SET total = 0 WHERE id = 3
+out: UPDATE /*+ NO_MERGE(t) */ shop.orders SET total = ? WHERE id = ?
+
+# Literals
+@ mysql db=shop
+in: SELECT 1, 1.5, .5, 1e5, 1E-3, -1, - 2, +3, 0x1F, 0b101, X'0A', x'ff', B'01', 'str', "dq", N'nat'
+out: SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+in: SELECT 'a' 'b' 'c'
+out: SELECT ?
+in: SELECT _utf8mb4'x', _binary 'y', _latin1 X'41'
+out: SELECT ?, ?, ?
+in: SELECT DATE '2026-11-08', TIME '10:00:00', TIMESTAMP '2026-11-08 10:00:00'
+out: SELECT ?, ?, ?
+in: SELECT TRUE, FALSE, NULL
+out: SELECT ?, ?, NULL
+in: SELECT * FROM orders WHERE id = -5 AND total > -1.5 AND total < - 3
+out: SELECT * FROM shop.orders WHERE id = ? AND total > ? AND total < ?
+in: SELECT a - 1, a-1, a - -1, (1) - 2, f(-3), x * -4, -x
+out: SELECT a - ?, a - ?, a - ?, (?) - ?, F(?), x * ?, - x
+in: SELECT * FROM orders WHERE note = 'it''s' AND email = 'a\'b'
+out: SELECT * FROM shop.orders WHERE note = ? AND email = ?
+in: SELECT * FROM orders WHERE created_at > NOW() - INTERVAL 7 DAY
+out: SELECT * FROM shop.orders WHERE created_at > NOW() - INTERVAL ? DAY
+in: SELECT * FROM orders LIMIT 10, 20
+out: SELECT * FROM shop.orders LIMIT ?, ?
+in: SELECT * FROM orders WHERE status IS NULL AND note IS NOT NULL
+out: SELECT * FROM shop.orders WHERE status IS NULL AND note IS NOT NULL
+in: SELECT * FROM orders WHERE id <=> 5
+out: SELECT * FROM shop.orders WHERE id <=> ?
+
+# IN lists, VALUES rows and tuples
+@ mysql db=shop
+in: SELECT * FROM orders WHERE id IN (1)
+out: SELECT * FROM shop.orders WHERE id IN (...)
+in: SELECT * FROM orders WHERE id IN (1, 2, 3)
+out: SELECT * FROM shop.orders WHERE id IN (...)
+in: SELECT * FROM orders WHERE id in(1,2,3)
+out: SELECT * FROM shop.orders WHERE id IN (...)
+in: SELECT * FROM orders WHERE id NOT IN (1, 2)
+out: SELECT * FROM shop.orders WHERE id NOT IN (...)
+in: SELECT * FROM orders WHERE id IN (1, NULL)
+out: SELECT * FROM shop.orders WHERE id IN (...)
+in: SELECT * FROM orders WHERE id IN (-1, +2, 3)
+out: SELECT * FROM shop.orders WHERE id IN (...)
+in: SELECT * FROM orders WHERE id IN (?, ?, ?)
+out: SELECT * FROM shop.orders WHERE id IN (...)
+in: SELECT * FROM orders WHERE id IN (1, id + 1)
+out: SELECT * FROM shop.orders WHERE id IN (?, id + ?)
+in: SELECT * FROM orders WHERE id IN (SELECT order_id FROM order_items WHERE qty > 2)
+out: SELECT * FROM shop.orders WHERE id IN (SELECT order_id FROM shop.order_items WHERE qty > ?)
+in: SELECT * FROM orders WHERE (customer_id, status) IN ((1, 'a'), (2, 'b'), (3, 'c'))
+out: SELECT * FROM shop.orders WHERE (customer_id, status) IN (...)
+in: SELECT * FROM orders WHERE (customer_id, status) IN ((1, 'a'))
+out: SELECT * FROM shop.orders WHERE (customer_id, status) IN (...)
+in: SELECT * FROM orders WHERE (customer_id, status) = (1, 'a')
+out: SELECT * FROM shop.orders WHERE (customer_id, status) = (?, ?)
+in: INSERT INTO orders (id, total) VALUES (1, 2)
+out: INSERT INTO shop.orders (id, total) VALUES (...)
+in: INSERT INTO orders (id, total) VALUES (1, 2), (3, 4), (5, 6)
+out: INSERT INTO shop.orders (id, total) VALUES (...)
+in: INSERT INTO orders (id, total) VALUE (1, 2), (3, 4)
+out: INSERT INTO shop.orders (id, total) VALUE (...)
+in: INSERT INTO orders (id, created_at) VALUES (1, NOW()), (2, NOW())
+out: INSERT INTO shop.orders (id, created_at) VALUES (...)
+in: INSERT INTO orders VALUES ROW(1, 2), ROW(3, 4)
+out: INSERT INTO shop.orders VALUES (...)
+in: REPLACE INTO orders (id, total) VALUES (1, 2), (3, 4)
+out: REPLACE INTO shop.orders (id, total) VALUES (...)
+in: INSERT INTO orders (id, total) VALUES (1, 2) ON DUPLICATE KEY UPDATE total = VALUES(total) + 1
+out: INSERT INTO shop.orders (id, total) VALUES (...) ON DUPLICATE KEY UPDATE total = VALUES (total) + ?
+in: VALUES ROW(1, 2), ROW(3, 4)
+out: VALUES (...)
+in: SELECT * FROM (VALUES ROW(1, 'a'), ROW(2, 'b')) AS t (id, name)
+out: SELECT * FROM (VALUES (...)) AS t (id, name)
+
+# Joins, subqueries, CTEs, unions, windows
+@ mysql db=shop
+in: SELECT o.id, c.name FROM orders o INNER JOIN customers c ON c.id = o.customer_id LEFT OUTER JOIN order_items i ON i.order_id = o.id WHERE c.country = 'IN'
+out: SELECT o.id, c.name FROM shop.orders o INNER JOIN shop.customers c ON c.id = o.customer_id LEFT OUTER JOIN shop.order_items i ON i.order_id = o.id WHERE c.country = ?
+in: SELECT * FROM orders o, customers c WHERE o.customer_id = c.id AND c.name = 'x'
+out: SELECT * FROM shop.orders o, shop.customers c WHERE o.customer_id = c.id AND c.name = ?
+in: SELECT * FROM orders STRAIGHT_JOIN customers ON customers.id = orders.customer_id
+out: SELECT * FROM shop.orders STRAIGHT_JOIN shop.customers ON customers.id = orders.customer_id
+in: SELECT * FROM orders NATURAL JOIN customers
+out: SELECT * FROM shop.orders NATURAL JOIN shop.customers
+in: SELECT * FROM orders JOIN customers USING (id)
+out: SELECT * FROM shop.orders JOIN shop.customers USING (id)
+in: SELECT * FROM (orders o JOIN customers c ON c.id = o.customer_id) WHERE o.id = 1
+out: SELECT * FROM (shop.orders o JOIN shop.customers c ON c.id = o.customer_id) WHERE o.id = ?
+in: SELECT * FROM billing.invoices i JOIN shop.orders o ON o.id = i.order_id
+out: SELECT * FROM billing.invoices i JOIN shop.orders o ON o.id = i.order_id
+in: SELECT (SELECT MAX(total) FROM orders o2 WHERE o2.customer_id = c.id) AS biggest FROM customers c
+out: SELECT (SELECT MAX(total) FROM shop.orders o2 WHERE o2.customer_id = c.id) AS biggest FROM shop.customers c
+in: SELECT * FROM orders o WHERE EXISTS (SELECT 1 FROM order_items i WHERE i.order_id = o.id AND i.qty > 10)
+out: SELECT * FROM shop.orders o WHERE EXISTS (SELECT ? FROM shop.order_items i WHERE i.order_id = o.id AND i.qty > ?)
+in: SELECT * FROM orders o WHERE NOT EXISTS (SELECT 1 FROM order_items i WHERE i.order_id = o.id)
+out: SELECT * FROM shop.orders o WHERE NOT EXISTS (SELECT ? FROM shop.order_items i WHERE i.order_id = o.id)
+in: SELECT d.c, d.n FROM (SELECT customer_id AS c, COUNT(*) AS n FROM orders GROUP BY customer_id) AS d WHERE d.n > 5
+out: SELECT d.c, d.n FROM (SELECT customer_id AS c, COUNT(*) AS n FROM shop.orders GROUP BY customer_id) AS d WHERE d.n > ?
+in: WITH big AS (SELECT customer_id FROM orders WHERE total > 100) SELECT * FROM customers c JOIN big ON big.customer_id = c.id
+out: WITH big AS (SELECT customer_id FROM shop.orders WHERE total > ?) SELECT * FROM shop.customers c JOIN big ON big.customer_id = c.id
+in: WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 10) SELECT n FROM r
+out: WITH RECURSIVE r (n) AS (SELECT ? UNION ALL SELECT n + ? FROM r WHERE n < ?) SELECT n FROM r
+in: WITH x AS (SELECT id FROM orders) UPDATE orders SET total = 0 WHERE id IN (SELECT id FROM x)
+out: WITH x AS (SELECT id FROM shop.orders) UPDATE shop.orders SET total = ? WHERE id IN (SELECT id FROM x)
+in: SELECT id FROM orders WHERE status = 'a' UNION SELECT id FROM orders WHERE status = 'b' ORDER BY id LIMIT 5
+out: SELECT id FROM shop.orders WHERE status = ? UNION SELECT id FROM shop.orders WHERE status = ? ORDER BY id LIMIT ?
+in: SELECT id, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC) AS rn FROM orders
+out: SELECT id, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC) AS rn FROM shop.orders
+in: SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id WITH ROLLUP HAVING SUM(total) > 1000
+out: SELECT customer_id, SUM(total) FROM shop.orders GROUP BY customer_id WITH ROLLUP HAVING SUM(total) > ?
+in: SELECT * FROM orders o LEFT JOIN LATERAL (SELECT * FROM order_items i WHERE i.order_id = o.id LIMIT 1) AS f ON TRUE
+out: SELECT * FROM shop.orders o LEFT JOIN LATERAL (SELECT * FROM shop.order_items i WHERE i.order_id = o.id LIMIT ?) AS f ON ?
+
+# Functions, JSON, full text, spatial, vectors
+@ mariadb db=shop
+in: SELECT COUNT(*), count(DISTINCT customer_id), MAX(total), IFNULL(note, ''), COALESCE(a, b, 0) FROM orders
+out: SELECT COUNT(*), COUNT(DISTINCT customer_id), MAX(total), IFNULL(note, ?), COALESCE(a, b, ?) FROM shop.orders
+in: SELECT IF(total > 10, 'big', 'small'), LEFT(note, 3), RIGHT(note, 2), REPLACE(note, 'a', 'b') FROM orders
+out: SELECT IF(total > ?, ?, ?), LEFT(note, ?), RIGHT(note, ?), REPLACE(note, ?, ?) FROM shop.orders
+in: SELECT * FROM orders WHERE LOWER(email) = 'a@b.c'
+out: SELECT * FROM shop.orders WHERE LOWER(email) = ?
+in: SELECT * FROM orders WHERE DATE(created_at) = '2026-11-08'
+out: SELECT * FROM shop.orders WHERE DATE(created_at) = ?
+in: SELECT * FROM orders WHERE CAST(total AS CHAR) = '10'
+out: SELECT * FROM shop.orders WHERE CAST(total AS CHAR) = ?
+in: SELECT JSON_VALUE(doc, '$.color') FROM products WHERE JSON_VALUE(doc, '$.size') = 'L'
+out: SELECT JSON_VALUE(doc, '$.color') FROM shop.products WHERE JSON_VALUE(doc, '$.size') = ?
+in: SELECT doc->>'$.color', doc->'$.size' FROM products WHERE JSON_EXTRACT(doc, '$.tags[0]') = 'new'
+out: SELECT doc ->> '$.color', doc -> '$.size' FROM shop.products WHERE JSON_EXTRACT(doc, '$.tags[0]') = ?
+in: SELECT * FROM products WHERE JSON_CONTAINS(doc, '"red"', '$.colors')
+out: SELECT * FROM shop.products WHERE JSON_CONTAINS(doc, ?, ?)
+in: SELECT * FROM products WHERE MATCH (name) AGAINST ('red shoes' IN BOOLEAN MODE)
+out: SELECT * FROM shop.products WHERE MATCH(name) AGAINST(? IN BOOLEAN MODE)
+in: SELECT * FROM shops WHERE ST_Contains(area, ST_GeomFromText('POINT(1 2)'))
+out: SELECT * FROM shop.shops WHERE ST_CONTAINS(area, ST_GEOMFROMTEXT(?))
+in: SELECT id FROM products ORDER BY VEC_DISTANCE_COSINE(emb, VEC_FromText('[0.1,0.2,0.3]')) LIMIT 10
+out: SELECT id FROM shop.products ORDER BY VEC_DISTANCE_COSINE(emb, VEC_FROMTEXT(?)) LIMIT ?
+in: SELECT name COLLATE utf8mb4_bin FROM customers WHERE name COLLATE utf8mb4_bin = 'A'
+out: SELECT name COLLATE utf8mb4_bin FROM shop.customers WHERE name COLLATE utf8mb4_bin = ?
+in: SELECT CASE WHEN total > 100 THEN 'a' WHEN total > 10 THEN 'b' ELSE 'c' END FROM orders
+out: SELECT CASE WHEN total > ? THEN ? WHEN total > ? THEN ? ELSE ? END FROM shop.orders
+in: SELECT * FROM orders WHERE note REGEXP '^a[0-9]+'
+out: SELECT * FROM shop.orders WHERE note REGEXP ?
+
+# Writes
+@ mysql db=shop
+in: UPDATE orders o JOIN customers c ON c.id = o.customer_id SET o.status = 'vip' WHERE c.country = 'IN'
+out: UPDATE shop.orders o JOIN shop.customers c ON c.id = o.customer_id SET o.status = ? WHERE c.country = ?
+in: UPDATE orders SET status = 'closed' WHERE created_at < '2025-01-01' ORDER BY id LIMIT 1000
+out: UPDATE shop.orders SET status = ? WHERE created_at < ? ORDER BY id LIMIT ?
+in: DELETE FROM orders WHERE status = 'void' LIMIT 100
+out: DELETE FROM shop.orders WHERE status = ? LIMIT ?
+in: DELETE o FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.name = 'x'
+out: DELETE o FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id WHERE c.name = ?
+in: DELETE FROM o USING orders o JOIN customers c ON c.id = o.customer_id WHERE c.name = 'x'
+out: DELETE FROM shop.o USING shop.orders o JOIN shop.customers c ON c.id = o.customer_id WHERE c.name = ?
+in: INSERT INTO orders SET id = 1, status = 'open'
+out: INSERT INTO shop.orders SET id = ?, status = ?
+in: INSERT IGNORE INTO orders (id) VALUES (1)
+out: INSERT IGNORE INTO shop.orders (id) VALUES (...)
+in: INSERT INTO archive.orders SELECT * FROM orders WHERE created_at < '2025-01-01'
+out: INSERT INTO archive.orders SELECT * FROM shop.orders WHERE created_at < ?
+in: INSERT LOW_PRIORITY orders (id) VALUES (1)
+out: INSERT LOW_PRIORITY shop.orders (id) VALUES (...)
+in: REPLACE orders SET id = 1
+out: REPLACE shop.orders SET id = ?
+in: TRUNCATE TABLE orders
+out: TRUNCATE TABLE shop.orders
+in: TRUNCATE orders
+out: TRUNCATE shop.orders
+in: LOAD DATA LOCAL INFILE '/tmp/o.csv' INTO TABLE orders FIELDS TERMINATED BY ','
+out: LOAD data LOCAL INFILE ? INTO TABLE shop.orders FIELDS TERMINATED BY ?
+
+# DDL and administration
+@ mysql db=shop
+in: CREATE TABLE IF NOT EXISTS t1 (id INT PRIMARY KEY, name VARCHAR(20) DEFAULT 'x')
+out: CREATE TABLE IF NOT EXISTS shop.t1 (id INT PRIMARY KEY, name VARCHAR (?) DEFAULT ?)
+in: CREATE TEMPORARY TABLE tmp_ids (id BIGINT)
+out: CREATE TEMPORARY TABLE shop.tmp_ids (id BIGINT)
+in: ALTER TABLE orders ADD INDEX by_customer (customer_id, created_at), ALGORITHM=INPLACE, LOCK=NONE
+out: ALTER TABLE shop.orders ADD INDEX BY_CUSTOMER(customer_id, created_at), ALGORITHM = inplace, LOCK = none
+in: CREATE INDEX by_status ON orders (status)
+out: CREATE INDEX by_status ON shop.orders (status)
+in: DROP TABLE IF EXISTS a, b, shop.c
+out: DROP TABLE IF EXISTS shop.a, shop.b, shop.c
+in: RENAME TABLE a TO b, c TO d
+out: RENAME TABLE shop.a TO shop.b, shop.c TO shop.d
+in: CREATE TABLE copy LIKE orders
+out: CREATE TABLE shop.copy LIKE shop.orders
+in: CREATE VIEW v AS SELECT id FROM orders WHERE total > 5
+out: CREATE VIEW v AS SELECT id FROM shop.orders WHERE total > ?
+in: SHOW TABLES FROM shop LIKE 'ord%'
+out: SHOW TABLES FROM shop LIKE ?
+in: SHOW CREATE TABLE orders
+out: SHOW CREATE TABLE orders
+in: SHOW FULL PROCESSLIST
+out: SHOW FULL PROCESSLIST
+in: SHOW SESSION STATUS LIKE 'Handler_read%'
+out: SHOW SESSION status LIKE ?
+in: DESCRIBE orders
+out: DESCRIBE shop.orders
+in: EXPLAIN SELECT * FROM orders WHERE id = 1
+out: EXPLAIN SELECT * FROM shop.orders WHERE id = ?
+in: EXPLAIN FORMAT=JSON SELECT * FROM orders WHERE id = 1
+out: EXPLAIN format = json SELECT * FROM shop.orders WHERE id = ?
+in: ANALYZE TABLE orders
+out: ANALYZE TABLE shop.orders
+in: USE shop
+out: USE shop
+in: SET autocommit = 0
+out: SET AUTOCOMMIT = ?
+in: SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ZERO_DATE'
+out: SET SESSION sql_mode = ?
+in: SET @a = 5, @@session.max_execution_time = 1000
+out: SET @a = ?, @@session.max_execution_time = ?
+in: SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci
+out: SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci
+in: SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+out: SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+in: CALL shop.price_cart(42, 'EUR')
+out: CALL shop.PRICE_CART(?, ?)
+in: PREPARE s FROM 'SELECT * FROM orders WHERE id = ?'
+out: PREPARE s FROM ?
+in: EXECUTE s USING @a
+out: EXECUTE s USING @a
+in: XA START 'xid1'
+out: XA START ?
+in: SAVEPOINT sp1
+out: SAVEPOINT sp1
+in: SELECT * FROM orders WHERE id = 1 LOCK IN SHARE MODE
+out: SELECT * FROM shop.orders WHERE id = ? LOCK IN SHARE MODE
+in: SELECT * FROM orders WHERE id = 1 FOR UPDATE SKIP LOCKED
+out: SELECT * FROM shop.orders WHERE id = ? FOR UPDATE SKIP LOCKED
+in: KILL QUERY 1179649
+out: KILL query ?
+in: DO SLEEP(1)
+out: DO SLEEP(?)
+
+# Passwords: literals dropped, never sampled
+@ mysql db=shop
+in: CREATE USER 'bob'@'%' IDENTIFIED BY 'secret'
+out: CREATE user ? @'%' IDENTIFIED BY ?
+in: ALTER USER CURRENT_USER() IDENTIFIED BY 'n3w'
+out: ALTER user CURRENT_USER() IDENTIFIED BY ?
+in: SET PASSWORD = 'n3w'
+out: SET password = ?
+in: SET PASSWORD FOR 'bob'@'%' = 'n3w'
+out: SET password FOR ? @'%' = ?
+in: CHANGE REPLICATION SOURCE TO SOURCE_PASSWORD = 'x', SOURCE_HOST = 'h'
+out: CHANGE replication source TO source_password = ?, source_host = ?
+
+# sql_mode: ANSI_QUOTES (double quotes are identifiers)
+@ mysql db=shop ansi
+in: SELECT "id", "Total" FROM "orders" WHERE "status" = 'open'
+out: SELECT id, total FROM shop.orders WHERE status = ?
+in: SELECT "o"."id" FROM "shop"."orders" "o"
+out: SELECT o.id FROM shop.orders o
+
+# sql_mode: NO_BACKSLASH_ESCAPES
+@ mysql db=shop nbe
+in: SELECT * FROM orders WHERE note = 'a\' AND email LIKE '\%x'
+out: SELECT * FROM shop.orders WHERE note = ? AND email LIKE ?
+
+# Without NO_BACKSLASH_ESCAPES the same text is one string
+@ mysql db=shop
+in: SELECT * FROM orders WHERE note = 'a\' AND email LIKE '\%x'
+out: <unparsed>
+
+# LIKE: a fixed prefix and a leading wildcard are different fingerprints
+@ mysql db=shop
+in: SELECT * FROM orders WHERE email LIKE 'kiran%'
+out: SELECT * FROM shop.orders WHERE email LIKE ?
+in: SELECT * FROM orders WHERE email LIKE '%kiran%'
+out: SELECT * FROM shop.orders WHERE email LIKE %?
+in: SELECT * FROM orders WHERE email LIKE '_iran'
+out: SELECT * FROM shop.orders WHERE email LIKE %?
+in: SELECT * FROM orders WHERE email LIKE '\_iran'
+out: SELECT * FROM shop.orders WHERE email LIKE ?
+in: SELECT * FROM orders WHERE email NOT LIKE '%x'
+out: SELECT * FROM shop.orders WHERE email NOT LIKE %?
+in: SELECT * FROM orders WHERE email LIKE ?
+out: SELECT * FROM shop.orders WHERE email LIKE ?
+in: SELECT * FROM orders WHERE email LIKE CONCAT('%', ?, '%')
+out: SELECT * FROM shop.orders WHERE email LIKE CONCAT(?, ?, ?)
+
+# Names: qualification, quoting, case
+@ mysql db=shop
+in: SELECT ID, Name FROM Customers C WHERE C.Name = 'x'
+out: SELECT id, name FROM shop.Customers C WHERE C.name = ?
+in: SELECT `select`.`from`, `Order`.`Group` FROM `select`, `order` AS `Order`
+out: SELECT `select`.`from`, `Order`.`group` FROM shop.`select`, shop.`order` AS `Order`
+in: SELECT * FROM `my db`.`my table` WHERE `col 1` = 1
+out: SELECT * FROM `my db`.`my table` WHERE `col 1` = ?
+in: SELECT * FROM `odd``name`
+out: SELECT * FROM shop.`odd``name`
+in: SELECT * FROM `123`
+out: SELECT * FROM shop.`123`
+in: SELECT `status`, status, `year`, year FROM orders
+out: SELECT status, status, `year`, YEAR FROM shop.orders
+in: SELECT * FROM shop.orders
+out: SELECT * FROM shop.orders
+in: SELECT * FROM other.orders
+out: SELECT * FROM other.orders
+in: SELECT * FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'shop'
+out: SELECT * FROM information_schema.`TABLES` WHERE table_schema = ?
+in: SELECT t.1col FROM t
+out: SELECT t.`1col` FROM shop.t
+in: SELECT * FROM orders AS o1, orders AS o2
+out: SELECT * FROM shop.orders AS o1, shop.orders AS o2
+in: SELECT * FROM orders o WHERE o.`id` = 1
+out: SELECT * FROM shop.orders o WHERE o.id = ?
+in: SELECT ünïcode, Straße FROM München
+out: SELECT ünïcode, straße FROM shop.München
+
+# No current database
+@ mysql nodb
+in: SELECT * FROM orders WHERE id = 1
+out: SELECT * FROM orders WHERE id = ?
+in: SELECT * FROM shop.orders WHERE id = 1
+out: SELECT * FROM shop.orders WHERE id = ?
+in: SELECT 1
+out: SELECT ?
+
+# lower_case_table_names = 1
+@ mysql db=Shop ltn
+in: SELECT O.ID FROM Orders O JOIN Shop.Customers C ON C.ID = O.Customer_ID
+out: SELECT o.id FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id
+in: SELECT * FROM `MyTable` AS `MT`
+out: SELECT * FROM shop.mytable AS mt
+
+# lower_case_table_names = 0 keeps the case of tables and aliases
+@ mysql db=Shop
+in: SELECT O.ID FROM Orders O JOIN Shop.Customers C ON C.ID = O.Customer_ID
+out: SELECT O.id FROM Shop.Orders O JOIN Shop.Customers C ON C.id = O.customer_id
+in: SELECT * FROM `MyTable` AS `MT`
+out: SELECT * FROM Shop.MyTable AS MT
+
+# Statements that can't be lexed whole
+@ mysql db=shop
+in: SELECT 'unterminated
+out: <unparsed>
+in: SELECT `unterminated
+out: <unparsed>
+in: SELECT 1 /* unterminated
+out: <unparsed>

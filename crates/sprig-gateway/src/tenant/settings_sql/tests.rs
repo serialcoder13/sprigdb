@@ -100,5 +100,8 @@ fn a_refused_statement_never_builds_the_rows() {
 fn the_too_large_message_reads_as_one_sentence() {
     let m = too_large().message;
     assert!(!m.contains("  "), "{m:?}");
-    assert!(m.ends_with("rows; use SHOW SPRIG SETTINGS ... FOR TABLE or FOR DATABASE"), "{m:?}");
+    assert!(
+        m.ends_with("rows; use SHOW SPRIG SETTINGS ... FOR TABLE or FOR DATABASE"),
+        "{m:?}"
+    );
 }

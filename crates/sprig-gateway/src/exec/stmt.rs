@@ -69,6 +69,9 @@ pub(crate) struct Stmt {
     /// settings, a local answer), kept as the client's text and planned
     /// again at each execute. Never prepared on a backend.
     pub deferred: Option<Bytes>,
+    /// Tenant sessions: the client's text (logical names), which workload
+    /// capture fingerprints (chapter 12).
+    pub logical: Option<Bytes>,
 }
 
 impl Stmt {
@@ -88,6 +91,7 @@ impl Stmt {
             session_status: false,
             mapper: None,
             deferred: None,
+            logical: None,
         }
     }
 
@@ -108,6 +112,7 @@ impl Stmt {
             session_status: false,
             mapper: None,
             deferred: Some(sql.clone()),
+            logical: None,
             sql,
         }
     }

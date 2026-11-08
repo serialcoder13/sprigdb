@@ -24,6 +24,9 @@ deployment_id = "sprigdb-dev"
 # The first controller to start writes the deployment id, dcs/dc-a (active)
 # and ids/tenant, once; later starts find them and only verify the id.
 bootstrap = true
+# Chapter 12's sealed parameter samples, the gateway's file: automatic-index
+# validation opens the samples it replays with it (chapter 13).
+workload_key_file = "deploy/compose/workload-keys.dev"
 
 [telemetry]
 bootstrap_log_level = "info"

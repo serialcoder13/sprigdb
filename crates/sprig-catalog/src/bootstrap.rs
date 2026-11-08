@@ -131,37 +131,55 @@ pub async fn claim_catalog(pool: &Pool, schema: &str, owner: &str) -> Result<Cat
     match created {
         Ok(()) => Ok(CatalogClaim::Created),
         // 1007: another run created it first; judge its mark.
-        Err(mysql_async::Error::Server(e)) if e.code == 1007 => {
-            Ok(judge(catalog_owner(pool, schema).await?.unwrap_or_default()))
-        }
+        Err(mysql_async::Error::Server(e)) if e.code == 1007 => Ok(judge(
+            catalog_owner(pool, schema).await?.unwrap_or_default(),
+        )),
         Err(e) => Err(map_err(e)),
     }
 }
 
-/// The tenant ids of the catalog schemas on `pool`'s server named
-/// `<prefix><id><suffix>` (`t<id>_sprig` in production).
+/// The tenant id in a schema name shaped like a tenant's: the catalog
+/// `<prefix><id><suffix>` (`t<id>_sprig`) or, when `suffix` starts with a
+/// separator such as `_`, any `<prefix><id>_...` (the data schemas
+/// `t<id>_d<n>_g<n>_s<n>`). `None` for other names.
+#[must_use]
+pub fn tenant_id_of(name: &str, prefix: &str, suffix: &str) -> Option<u64> {
+    let rest = name.strip_prefix(prefix)?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let (id, tail) = rest.split_at(digits);
+    let shaped = tail == suffix
+        || suffix
+            .chars()
+            .next()
+            .is_some_and(|sep| !sep.is_ascii_alphanumeric() && tail.starts_with(sep));
+    if id.is_empty() || !shaped {
+        return None;
+    }
+    id.parse().ok()
+}
+
+/// The tenant ids of every schema on `pool`'s server shaped like a
+/// tenant's ([`tenant_id_of`]): an earlier tenant's catalog or data
+/// schemas, which a new tenant's id must stay above.
 ///
 /// # Errors
 /// 39070 or a backend error.
-pub async fn catalog_ids(pool: &Pool, prefix: &str, suffix: &str) -> Result<Vec<u64>> {
-    let like = |s: &str| {
-        s.replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    };
+pub async fn tenant_schema_ids(pool: &Pool, prefix: &str, suffix: &str) -> Result<Vec<u64>> {
+    let like = prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
     let mut conn = pool.get_conn().await.map_err(map_err)?;
     let names: Vec<String> = conn
         .exec(
             "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE ?",
-            (format!("{}%{}", like(prefix), like(suffix)),),
+            (format!("{like}%"),),
         )
         .await
         .map_err(map_err)?;
     Ok(names
         .iter()
-        .filter_map(|n| n.strip_prefix(prefix)?.strip_suffix(suffix))
-        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
-        .filter_map(|id| id.parse().ok())
+        .filter_map(|n| tenant_id_of(n, prefix, suffix))
         .collect())
 }
 
@@ -289,4 +307,26 @@ pub async fn drop_catalog(pool: &Pool, store: &Store) -> Result<()> {
     conn.query_drop(format!("DROP DATABASE IF EXISTS {}", quote(store.schema())))
         .await
         .map_err(map_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tenant_ids_come_from_schemas_shaped_like_a_tenants() {
+        let id = |n: &str| tenant_id_of(n, "t", "_sprig");
+        assert_eq!(id("t1_sprig"), Some(1));
+        assert_eq!(id("t42_d1_g1_s1"), Some(42));
+        assert_eq!(id("t7_anything"), Some(7));
+        for other in ["t1", "t_sprig", "tx1_sprig", "test", "t1x_sprig", "sprig"] {
+            assert_eq!(id(other), None, "{other}");
+        }
+        // A naming without a separator after the id: only its catalogs.
+        let test = |n: &str| tenant_id_of(n, "__sprig_test_tenant_9_ab_", "");
+        assert_eq!(test("__sprig_test_tenant_9_ab_3"), Some(3));
+        assert_eq!(test("__sprig_test_tenant_9_ab_3_x"), None);
+        assert_eq!(test("__sprig_test_tenant_9_ab_"), None);
+        assert_eq!(literal("it's a \\ test"), "'it''s a \\\\ test'");
+    }
 }

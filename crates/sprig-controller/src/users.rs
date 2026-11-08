@@ -28,16 +28,19 @@ use sprig_common::{Result, SprigCode, SprigError};
 use crate::tenants::BootstrapHooks;
 use crate::tree::{Directory, TenantState};
 
-/// Bootstrap hooks that migrate chapter 14's `auth` module with the core
-/// catalog, so a new tenant's catalog has its `users` and `verifiers`
-/// tables (gateways load them into every snapshot).
+/// Bootstrap hooks that migrate chapter 14's `auth` module (and chapter
+/// 12's `workload` module) with the core catalog, so a new tenant's
+/// catalog has its `users` and `verifiers` tables (gateways load them into
+/// every snapshot) and its workload tables.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AuthHooks;
 
 #[async_trait::async_trait]
 impl BootstrapHooks for AuthHooks {
     fn modules(&self) -> Vec<Module> {
-        vec![AUTH_MODULE]
+        // Chapter 12's workload tables too: gateways write them from a
+        // tenant's first statement.
+        vec![AUTH_MODULE, sprig_workload::store::WORKLOAD_MODULE]
     }
 }
 

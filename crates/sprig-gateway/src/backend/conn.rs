@@ -266,6 +266,10 @@ pub struct BackendConn {
     pub baseline: Arc<Baseline>,
     /// `@@global.max_prepared_stmt_count` at connect.
     pub max_prepared: u64,
+    /// What one [`HANDLER_READS_SQL`] adds to the counters it reads,
+    /// measured on this connection's first probe (chapter 12, "Sampling
+    /// rows examined").
+    pub probe_cost: Option<u64>,
     init_sql: Arc<str>,
     gateway_sql: Arc<str>,
     budget: Arc<PreparedBudget>,
@@ -291,6 +295,13 @@ fn text(v: Option<&Bytes>) -> String {
     v.map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_default()
 }
+
+/// The `Handler_read_*` counters of the connection's own thread, summed
+/// (chapter 12, "Sampling rows examined"): one row, one value. Reading
+/// them bumps some of them by a constant, measured per connection.
+pub const HANDLER_READS_SQL: &str = "SELECT SUM(VARIABLE_VALUE) FROM information_schema.SESSION_STATUS \
+     WHERE VARIABLE_NAME IN ('HANDLER_READ_FIRST', 'HANDLER_READ_KEY', 'HANDLER_READ_LAST', \
+     'HANDLER_READ_NEXT', 'HANDLER_READ_PREV', 'HANDLER_READ_RND', 'HANDLER_READ_RND_NEXT')";
 
 /// Opens and initializes a backend connection.
 ///
@@ -360,6 +371,7 @@ pub async fn connect(
         node: spec.node.clone(),
         baseline: Arc::new(baseline),
         max_prepared,
+        probe_cost: None,
         init_sql,
         gateway_sql,
         budget,
@@ -460,6 +472,63 @@ impl BackendConn {
             out.push((name.clone(), v));
         }
         Ok(out)
+    }
+
+    /// The connection's `Handler_read_*` sum ([`HANDLER_READS_SQL`]).
+    ///
+    /// # Errors
+    /// Connection errors; the server's ERR; `Unexpected` for a value that
+    /// isn't a number.
+    pub async fn handler_reads(&mut self) -> Result<u64, ClientError> {
+        let row = self.client.query_first(HANDLER_READS_SQL).await?;
+        let v = row
+            .and_then(|r| r.into_iter().next().flatten())
+            .and_then(|b| {
+                let t = std::str::from_utf8(&b).ok()?.trim().to_owned();
+                // SUM over a string column comes back as a DOUBLE's text.
+                t.parse::<u64>().ok().or_else(|| {
+                    t.parse::<f64>()
+                        .ok()
+                        .filter(|f| f.is_finite() && *f >= 0.0)
+                        .map(|f| {
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let n = f as u64;
+                            n
+                        })
+                })
+            })
+            .ok_or_else(|| ClientError::Unexpected("Handler_read_* sum".to_owned()))?;
+        self.client.take_changes();
+        Ok(v)
+    }
+
+    /// The first reading of a probe: on the connection's first probe it
+    /// reads twice, and the difference is the probe's own cost
+    /// ([`BackendConn::probe_cost`]).
+    ///
+    /// # Errors
+    /// As [`BackendConn::handler_reads`].
+    pub async fn probe_start(&mut self) -> Result<u64, ClientError> {
+        let first = self.handler_reads().await?;
+        if self.probe_cost.is_some() {
+            return Ok(first);
+        }
+        let second = self.handler_reads().await?;
+        self.probe_cost = Some(second.saturating_sub(first));
+        Ok(second)
+    }
+
+    /// Rows examined since `before` ([`BackendConn::probe_start`]'s
+    /// reading): the second reading minus the first, minus the first
+    /// reading's own cost.
+    ///
+    /// # Errors
+    /// As [`BackendConn::handler_reads`].
+    pub async fn probe_end(&mut self, before: u64) -> Result<u64, ClientError> {
+        let after = self.handler_reads().await?;
+        Ok(after
+            .saturating_sub(before)
+            .saturating_sub(self.probe_cost.unwrap_or(0)))
     }
 
     /// `SHOW WARNINGS` (a capture before release).

@@ -201,10 +201,10 @@ c_dump_definers() {
   echo "definers: ${defs:-none}"
 }
 
-# Everything the tenant can see: only its own databases.
-c_dump_all() {
-  dump "$U" --all-databases >"$WORK/all.sql" || { echo "$DUMP --all-databases failed: $(err)"; return 1; }
-  local f=$WORK/all.sql dbs bad=
+# A dump of everything the tenant can see ($1): its own databases, nothing
+# of the other tenant's, and (gateway) no physical name.
+check_all_dump() {
+  local f=$1 dbs bad=
   dbs=$(grep -a -o -E '^CREATE DATABASE /\*!32312 IF NOT EXISTS\*/ `[^`]+`' "$f" | sed -E 's/.*`(.*)`/\1/' | sort | tr '\n' ' ')
   for x in "$SHOP" "$CRM" "$VAULT"; do [[ " $dbs " == *" $x "* ]] || bad+="$x missing; "; done
   [[ " $dbs " == *" $OVAULT "* ]] && bad+="the other tenant's $OVAULT is there; "
@@ -218,6 +218,37 @@ c_dump_all() {
   fi
   [[ -z $bad ]] || { echo "$bad (databases: $dbs)"; return 1; }
   echo "databases: $dbs($(wc -c <"$f" | tr -d ' ') bytes)"
+}
+
+# Everything the tenant can see: only its own databases. mysqldump 8.4
+# holds back every database until SHOW DATABASES lists `mysql`, which it
+# dumps first, and writes nothing if `mysql` never comes (MySQL 8.4 does
+# the same for a user who can't see `mysql`; decisions/mysql-persona-gaps.md
+# row 12). dump_listed checks the workaround.
+c_dump_all() {
+  dump "$U" --all-databases >"$WORK/all.sql" || { echo "$DUMP --all-databases failed: $(err)"; return 1; }
+  if [[ $DUMP == mysqldump ]] && ! grep -a -q -E '^CREATE DATABASE ' "$WORK/all.sql"; then
+    local listed
+    listed=$(sql "$U" <<<"SHOW DATABASES") || { err; return 1; }
+    if ! grep -q -x -F mysql <<<"$listed"; then
+      echo "mysqldump 8.4 wrote no database: it dumps only after SHOW DATABASES lists \`mysql\`, and this user's doesn't (${listed//$'\n'/ })"
+      return 1
+    fi
+  fi
+  check_all_dump "$WORK/all.sql"
+}
+
+# The workaround for mysqldump's --all-databases: --databases with every
+# database SHOW DATABASES lists, the system schemas left out.
+c_dump_listed() {
+  local listed dbs=()
+  listed=$(sql "$U" <<<"SHOW DATABASES") || { err; return 1; }
+  while read -r d; do
+    case $d in information_schema | performance_schema | mysql | sys | "") ;; *) dbs+=("$d") ;; esac
+  done <<<"$listed"
+  [[ ${#dbs[@]} -gt 0 ]] || { echo "SHOW DATABASES listed no database of the tenant"; return 1; }
+  dump "$U" --databases "${dbs[@]}" >"$WORK/listed.sql" || { echo "$DUMP --databases ${dbs[*]} failed: $(err)"; return 1; }
+  check_all_dump "$WORK/listed.sql"
 }
 
 # The shop database alone (no CREATE DATABASE or USE), restored into a new
@@ -346,6 +377,7 @@ for pair in "$M03_USER_A $M03_USER_B" "$M03_USER_B $M03_USER_A"; do
       run dump "$T" c_dump_leaks
       run dump "$T" c_dump_definers
       run dump "$T" c_dump_all
+      run dump "$T" c_dump_listed
       run dump "$T" c_restore
       ;;
     isolation)

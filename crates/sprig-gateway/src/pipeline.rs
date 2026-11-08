@@ -285,6 +285,11 @@ pub trait SessionExec: Send {
 
     /// The session ends (quit, error, drain): roll back and release.
     async fn close(&mut self) {}
+
+    /// Statement capture for this session ([`WorkloadHook::capture`]): an
+    /// executor that sees statements fingerprints and records them through
+    /// it (chapter 12). Executors that don't ignore it.
+    fn attach_capture(&mut self, _capture: crate::workload::SessionCapture) {}
 }
 
 /// The client side of a response, as an executor sees it.
@@ -411,8 +416,11 @@ pub trait ResultSink: Send {
 /// the layers"; chapter 12). The front end's request passes through
 /// [`WorkloadHook::begin`] before the executor runs it and
 /// [`WorkloadHook::end`] after; [`with_workload`] puts a hook in front of
-/// any executor. M0.2 has only [`NoWorkload`]; chapter 12's recorder
-/// (fingerprints, latency, rows) implements this in M0.4.
+/// any executor. [`NoWorkload`] records nothing;
+/// [`crate::workload::GatewayWorkload`] (M0.4) hands each session a
+/// [`crate::workload::SessionCapture`] ([`WorkloadHook::capture`]), which
+/// the executor calls per statement, where it knows the statement's
+/// logical text, its backend connection and its rows.
 pub trait WorkloadHook: Send + Sync + 'static {
     /// A request is about to run.
     fn begin(&self, session: &Session, req: &Request) -> WorkloadToken;
@@ -420,6 +428,12 @@ pub trait WorkloadHook: Send + Sync + 'static {
     /// The request finished. A request whose future was dropped (`KILL
     /// QUERY`, a client hang-up) never reaches `end`.
     fn end(&self, token: WorkloadToken, outcome: &WorkloadOutcome<'_>);
+
+    /// A new session's statement capture, attached to its executor
+    /// ([`SessionExec::attach_capture`]); `None` captures nothing.
+    fn capture(&self) -> Option<crate::workload::SessionCapture> {
+        None
+    }
 }
 
 /// What [`WorkloadHook::begin`] hands to [`WorkloadHook::end`].
@@ -470,8 +484,12 @@ struct Hooked {
 
 impl Executor for Hooked {
     fn open(&self, login: &LoginInfo) -> Box<dyn SessionExec> {
+        let mut inner = self.exec.open(login);
+        if let Some(c) = self.hook.capture() {
+            inner.attach_capture(c);
+        }
         Box::new(HookedSession {
-            inner: self.exec.open(login),
+            inner,
             hook: Arc::clone(&self.hook),
         })
     }
@@ -514,6 +532,10 @@ impl SessionExec for HookedSession {
 
     async fn close(&mut self) {
         self.inner.close().await;
+    }
+
+    fn attach_capture(&mut self, capture: crate::workload::SessionCapture) {
+        self.inner.attach_capture(capture);
     }
 }
 

@@ -25,6 +25,7 @@
 //! The [`BackendSession`] opens at the first request, when the client's
 //! capabilities and collation are known (the pool key depends on them).
 
+mod capture;
 pub mod relay;
 pub mod settings;
 pub mod split;
@@ -48,7 +49,7 @@ use sprig_proto_mysql::{Caps, ColumnDef, Persona, StatusFlags};
 use self::relay::{Infile, NamesOut, Relay, Relayed, backend_error, protocol_error, relay};
 pub use self::settings::{ExecSettings, ExecSettingsSource};
 use self::stmt::{Stmt, Stmts, bulk_payload, execute_payload};
-use crate::backend::{BackendSession, BackendStmt, Backends, SessionOpts, StmtInfo};
+use crate::backend::{BackendSession, BackendStmt, Backends, SessionOpts, StmtInfo, StmtOutcome};
 use crate::pipeline::{
     Abandon, EndOfRows, ExecCtx, ExecSummary, Executor, LoginInfo, PreparedMeta, Request,
     ResultSink, RowFormat, SessionExec, StmtRef,
@@ -114,6 +115,8 @@ impl Executor for PassThrough {
             stmts: Stmts::default(),
             tenant,
             subst: Vec::new(),
+            wl: None,
+            wl_multi: false,
         })
     }
 }
@@ -132,6 +135,10 @@ pub struct PassSession {
     /// Columns the name rewrite's substitutions renamed (`DATABASE()`
     /// became `'shop'`): the next forwarded statement gives them back.
     subst: Vec<split::Renamed>,
+    /// Workload capture (chapter 12), for tenant sessions.
+    wl: Option<crate::workload::SessionCapture>,
+    /// The current `COM_QUERY` holds several statements: none is probed.
+    wl_multi: bool,
 }
 
 impl std::fmt::Debug for PassSession {
@@ -257,11 +264,17 @@ impl PassSession {
     /// completed can't be reported any more (another packet would break
     /// the protocol), so it is only logged.
     async fn finish(&mut self, finished: bool) -> Result<Option<StatusFlags>> {
+        Ok(self.finish_outcome(finished).await?.map(|o| o.status))
+    }
+
+    /// [`PassSession::finish`] with the whole outcome (rows, rows
+    /// examined), for workload capture.
+    async fn finish_outcome(&mut self, finished: bool) -> Result<Option<StmtOutcome>> {
         let Some(bs) = self.bs.as_mut() else {
             return Ok(None);
         };
         match bs.finish().await {
-            Ok(o) => Ok(Some(o.status)),
+            Ok(o) => Ok(Some(o)),
             Err(e) if finished => {
                 tracing::warn!(error = %e, "backend statement failed after its response was sent");
                 Ok(None)
@@ -369,6 +382,8 @@ impl PassSession {
     ) -> Result<ExecSummary> {
         let persona = self.persona;
         let backend_caps = self.backend_caps(cx);
+        // One statement per execute: probes allowed (chapter 12).
+        self.wl_multi = false;
         let s = self.stmts.get_mut(stmt)?;
         if let Some(text) = s.deferred.clone() {
             // A statement the gateway answers itself, planned again now.
@@ -389,6 +404,7 @@ impl PassSession {
             });
         }
         let mut mapper = s.mapper.clone();
+        let logical = s.logical.clone();
         let values = s.params_for_backend(params, persona)?;
         if params.new_params_bound {
             s.types = Some(values.iter().map(|p| p.param_type).collect());
@@ -406,6 +422,14 @@ impl PassSession {
             "execute parameters"
         );
         let _ = self.bs(cx);
+        // Workload capture (chapter 12): fingerprinted from the logical
+        // text the client prepared; cursors are left out (their rows come
+        // with later fetches).
+        let pending = match &logical {
+            Some(l) if !cursor => self.wl_start(l),
+            _ => None,
+        };
+        self.wl_probe(pending.as_ref());
         let Some(bs) = self.bs.as_mut() else {
             return Err(SprigError::internal("no backend session"));
         };
@@ -425,6 +449,13 @@ impl PassSession {
         if let Err(e) = bs.execute(&info, &sql, &mut build).await {
             if cursor {
                 bs.close_cursor();
+            }
+            if let Some(l) = &logical {
+                let ran = capture::Ran {
+                    errored: true,
+                    ..capture::Ran::default()
+                };
+                self.wl_finish(cx, pending, l, &ran);
             }
             return Err(e);
         }
@@ -451,7 +482,37 @@ impl PassSession {
             _ => None,
         };
         let relayed = relay(bs, out, &r, names.as_mut()).await;
-        let status = self.finish(out.finished()).await;
+        let outcome = self.finish_outcome(out.finished()).await;
+        if let Some(l) = &logical {
+            let rendered: Vec<_> = if pending
+                .as_ref()
+                .is_some_and(crate::workload::Pending::wants_sample)
+            {
+                let nbe = self.lex_opts().0.no_backslash_escapes;
+                params
+                    .params
+                    .iter()
+                    .filter(|p| p.name.is_empty())
+                    .map(|p| match &p.value {
+                        sprig_proto_mysql::command::ParamValue::Value(v) => {
+                            crate::workload::sample_value(v, nbe)
+                        }
+                        sprig_proto_mysql::command::ParamValue::LongData => {
+                            crate::workload::sample_value(&sprig_proto_mysql::Value::Null, nbe)
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let ran = capture::Ran {
+                outcome: outcome.as_ref().ok().and_then(Option::as_ref),
+                errored: relayed.as_ref().map_or(true, |r| r.errored),
+                params: &rendered,
+            };
+            self.wl_finish(cx, pending, l, &ran);
+        }
+        let status = outcome.map(|o| o.map(|o| o.status));
         let opened = matches!(
             relayed,
             Ok(Relayed {
@@ -715,6 +776,9 @@ impl SessionExec for PassSession {
         if let Some(ts) = self.tenant.as_deref_mut() {
             ts.reset();
         }
+        if let Some(wl) = self.wl.as_mut() {
+            wl.reset();
+        }
         match self.bs.as_mut() {
             Some(bs) => bs.reset().await,
             None => Ok(()),
@@ -739,6 +803,13 @@ impl SessionExec for PassSession {
                 }
                 bs.close().await;
             }
+        }
+    }
+
+    fn attach_capture(&mut self, capture: crate::workload::SessionCapture) {
+        // Tenant sessions only: accounts-file logins have no catalog.
+        if self.tenant.is_some() {
+            self.wl = Some(capture);
         }
     }
 

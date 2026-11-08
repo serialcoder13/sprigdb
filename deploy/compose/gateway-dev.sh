@@ -20,6 +20,7 @@
 #
 #   deploy/compose/gateway-dev.sh up       # build, start, register, configure
 #   deploy/compose/gateway-dev.sh status
+#   deploy/compose/gateway-dev.sh restart  # restart both processes, keeping tenants
 #   deploy/compose/gateway-dev.sh tls required|optional|off
 #   deploy/compose/gateway-dev.sh down     # stop, and undo what up wrote to etcd
 #
@@ -101,6 +102,7 @@ settings=(
     listener.mysql.tls listener.mariadb.tls
     tls.bundles.default.cert_path tls.bundles.default.key_path
     listener.http.enabled listener.https.enabled
+    workload.flush_seconds
 )
 
 say() { echo "gateway-dev: $*"; }
@@ -451,6 +453,9 @@ up() {
     set_setting tls.bundles.default.key_path "\"$root/$certs/server-key.pem\""
     set_setting listener.http.enabled false
     set_setting listener.https.enabled false
+    # Workload statistics reach the tenants' catalogs within seconds, not
+    # 15 minutes (chapter 12, workload.flush_seconds).
+    set_setting workload.flush_seconds 10
 
     start gateway deploy/compose/sprigdb.gateway.dev.toml gateway
     wait_ready gateway "$gw_ready"
@@ -567,6 +572,26 @@ status() {
     if running controller; then ctl cluster list || true; fi
 }
 
+# Stops and starts the controller and the gateway with the binaries up
+# recorded (rebuild them first), keeping tenants, clusters and settings: a
+# code change, or process settings the gateway reads only at start (chapter
+# 12's recorder settings), take effect. The controller inherits the
+# environment, so SPRIGDB_CONTROLLER_* overrides apply.
+restart() {
+    [[ -d $state ]] || die "not up (no $state/)"
+    stop gateway
+    stop controller
+    start controller deploy/compose/sprigdb.dev.toml controller
+    wait_ready controller "$ctl_ready"
+    start gateway deploy/compose/sprigdb.gateway.dev.toml gateway
+    wait_ready gateway "$gw_ready"
+    for _ in $(seq 1 20); do
+        listening "$mysql_port" && listening "$mariadb_port" && break
+        sleep 0.5
+    done
+    say "restarted"
+}
+
 tls() {
     case ${1:-} in required | optional | off) ;; *) die "usage: $0 tls required|optional|off" ;; esac
     set_setting listener.mysql.tls "\"$1\""
@@ -578,6 +603,7 @@ case ${1:-} in
     up) up ;;
     down) down ;;
     status) status ;;
+    restart) restart ;;
     tls) tls "${2:-}" ;;
-    *) die "usage: $0 up|down|status|tls required|optional|off" ;;
+    *) die "usage: $0 up|down|status|restart|tls required|optional|off" ;;
 esac

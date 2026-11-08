@@ -26,6 +26,7 @@ use super::types::{
     SetBoundsRequest, SetSettingRequest, SettingOp, SettingWrite,
 };
 use super::{AdminService, invalid};
+use crate::autoindex_admin::view::{Action as IndexAction, IndexActionRequest};
 
 /// The routes' shared state.
 struct App {
@@ -55,6 +56,19 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
         )
         .route("/admin/v1/tenants/{name}/settings", get(tenant_settings))
         .route("/admin/v1/tenants/{name}/users", post(create_user))
+        .route("/admin/v1/tenants/{name}/indexes", get(list_indexes))
+        .route(
+            "/admin/v1/tenants/{name}/indexes/{index}",
+            get(get_index).post(index_method),
+        )
+        .route(
+            "/admin/v1/tenants/{name}/recommendations",
+            get(list_recommendations),
+        )
+        .route(
+            "/admin/v1/tenants/{name}/queries/{fingerprint}",
+            get(explain_query),
+        )
         .route("/admin/v1/settings", get(list_setting_keys))
         .route(
             "/admin/v1/settings/{key}",
@@ -548,6 +562,87 @@ async fn setting_method(
             }
         };
         app.svc.write_setting(key, w).await
+    };
+    respond(r.await)
+}
+
+async fn list_indexes(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    uri: Uri,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.list_indexes(&name, query(&uri)?, false).await
+    };
+    respond(r.await)
+}
+
+async fn list_recommendations(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    uri: Uri,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.list_indexes(&name, query(&uri)?, true).await
+    };
+    respond(r.await)
+}
+
+async fn get_index(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath((name, index)): UrlPath<(String, String)>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.get_index(&name, &index).await
+    };
+    respond(r.await)
+}
+
+/// `{index}:approve`, `:reject`, `:drop`, `:pin`, `:unpin` (and chapter
+/// 13's and 37's names `:apply`, `:dismiss`, `:freeze`, `:unfreeze`).
+async fn index_method(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath((name, index)): UrlPath<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let Some((index, action)) = index
+            .rsplit_once(':')
+            .and_then(|(i, m)| Some((i, IndexAction::parse(m)?)))
+        else {
+            return Err(invalid(format!(
+                "POST /admin/v1/tenants/{name}/indexes/{index}: expected {{index}}:approve, \
+                 :reject, :drop, :pin or :unpin"
+            )));
+        };
+        let req: IndexActionRequest = parse(&body, true)?;
+        app.svc.index_action(&name, index, action, &req).await
+    };
+    respond(r.await)
+}
+
+/// `{fingerprint}:explain`.
+async fn explain_query(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath((name, fp)): UrlPath<(String, String)>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let Some((fp, "explain")) = fp.rsplit_once(':') else {
+            return Err(invalid(format!(
+                "GET /admin/v1/tenants/{name}/queries/{fp}: expected {{fingerprint}}:explain"
+            )));
+        };
+        app.svc.explain_query(&name, fp).await
     };
     respond(r.await)
 }

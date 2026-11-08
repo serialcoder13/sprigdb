@@ -149,6 +149,17 @@ pub struct GatewayConfig {
     /// settings: a second gateway in the same DC (development, tests).
     #[serde(default)]
     pub listen_override: std::collections::BTreeMap<String, String>,
+    /// Chapter 12's sealed parameter samples: the file of versioned master
+    /// secrets the tenants' workload data keys derive from (format in
+    /// `sprig_workload::keyring`). Unset: no samples are captured, and
+    /// statistics continue.
+    #[serde(default)]
+    pub workload_key_file: Option<PathBuf>,
+    /// Turns chapter 12's workload capture off on this gateway (the hook
+    /// records nothing, as before M0.4): an operator's kill switch, and the
+    /// baseline of the overhead measurement.
+    #[serde(default)]
+    pub workload_capture_off: bool,
 }
 
 /// `[gateway] login_mode`.
@@ -198,6 +209,19 @@ pub struct ControllerConfig {
     /// one, `admin_addr` must be a loopback address.
     #[serde(default)]
     pub admin_token_file: Option<PathBuf>,
+    /// Chapter 12's sealed parameter samples: the same file of versioned
+    /// master secrets as the gateway's `[gateway] workload_key_file`, from
+    /// which automatic-index validation opens the samples it replays
+    /// (chapter 13). Unset: validation has no samples and falls back to
+    /// estimates and a canary.
+    #[serde(default)]
+    pub workload_key_file: Option<PathBuf>,
+    /// Development and scenario tests only: a file holding whole seconds by
+    /// which the automatic-indexing loop's clock runs ahead (chapter 13's
+    /// observation periods in minutes instead of days). Unset in
+    /// production.
+    #[serde(default)]
+    pub autoindex_test_clock_file: Option<PathBuf>,
 }
 
 impl Default for ControllerConfig {
@@ -208,6 +232,8 @@ impl Default for ControllerConfig {
             global_candidate: false,
             admin_addr: default_admin_addr(),
             admin_token_file: None,
+            workload_key_file: None,
+            autoindex_test_clock_file: None,
         }
     }
 }
@@ -483,6 +509,7 @@ mod tests {
         assert!(d.meta.deployment_id.is_empty());
         assert_eq!(d.controller.admin_addr.to_string(), "127.0.0.1:7480");
         assert!(d.controller.admin_token_file.is_none());
+        assert!(d.controller.workload_key_file.is_none());
         let admin = ProcessConfig::from_toml_and_env(
             "[node]\ndc = \"mum1\"\n",
             env(&[("SPRIGDB_CONTROLLER_ADMIN_ADDR", "0.0.0.0:7481")]),

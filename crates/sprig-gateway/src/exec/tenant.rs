@@ -43,7 +43,7 @@ use sprig_sql::lex::{LexOptions, TokenKind};
 use sprig_sql::names::{
     AccountInfo, Action, DdlKind, DdlName, DdlTarget, EditKind, Engine, LocalAnswer, NameError,
     NameMap, OutputCtx, PlanCtx, Purpose, ResultMapper, RewriteCtx, ShowKind, StmtKind, StmtPlan,
-    SystemSchema, Visibility, create_like_sql, plan,
+    SystemSchema, create_like_sql, plan,
 };
 use sprig_sql::settings_stmt;
 
@@ -56,6 +56,7 @@ use crate::pipeline::{
     EndOfRows, ExecCtx, ExecSummary, PreparedMeta, ResultSink, RowFormat, RowValues,
 };
 use crate::tenant::BACKEND_VERSION;
+use crate::tenant::autoindex;
 use crate::tenant::ddl::GatewayDdl;
 use crate::tenant::names::{Accounts, TenantSessions};
 use crate::tenant::password;
@@ -366,7 +367,7 @@ impl PassSession {
     /// The lexer options of the session: the persona, and `sql_mode`'s
     /// `ANSI_QUOTES` and `NO_BACKSLASH_ESCAPES` as the session last set
     /// them.
-    fn lex_opts(&self) -> (LexOptions, bool) {
+    pub(super) fn lex_opts(&self) -> (LexOptions, bool) {
         let mut lex = LexOptions::for_persona(self.persona);
         let mut ignore_space = false;
         if let Some(mode) = self.bs.as_ref().and_then(|b| b.vars().vars.get("sql_mode")) {
@@ -436,6 +437,7 @@ impl PassSession {
         }
         let n = pieces.len();
         let mut summary = ExecSummary::default();
+        self.wl_multi = n > 1;
         for (i, piece) in pieces.into_iter().enumerate() {
             let step = self
                 .tenant_text(cx, &piece, attrs, i + 1 < n, RowFormat::Text, out)
@@ -524,6 +526,21 @@ impl PassSession {
         // 8.4 sets them in executable comments): accepted and ignored on
         // the MySQL persona, until chapter 28's emulated variables.
         if self.persona == Persona::MySql84 && mysql_only_set(text, lex) {
+            let s = status(self.status());
+            out.ok(OkPacket::new(s)).await?;
+            return Ok(Step {
+                errored: false,
+                status: Some(s),
+            });
+        }
+
+        // `SET @sprig_show_auto_indexes` (chapter 13): the gateway's.
+        if let Some(ts) = self.tenant.as_deref_mut()
+            && let Some(r) = autoindex::session_flag(ts, text, &lex)
+        {
+            if let Err(e) = r {
+                return self.fail(out, &e).await;
+            }
             let s = status(self.status());
             out.ok(OkPacket::new(s)).await?;
             return Ok(Step {
@@ -631,7 +648,7 @@ impl PassSession {
                 rw.ignore_space = ignore_space;
                 rw.lower_case_table_names = ts.lower_case_table_names();
                 let pctx = PlanCtx::new(rw, &ts.services().columns)
-                    .vis(Visibility::for_persona(self.persona))
+                    .vis(ts.visibility(self.persona))
                     .sessions(&sessions);
                 plan(text, &pctx)
             };
@@ -713,7 +730,7 @@ impl PassSession {
                 ResultMapper::relay()
             };
             return self
-                .forward(cx, Bytes::from(sql), more, format, mapper, &*map, out)
+                .forward(cx, Bytes::from(sql), None, more, format, mapper, &*map, out)
                 .await;
         }
         let Some(sp) = p.statements.into_iter().next() else {
@@ -722,6 +739,7 @@ impl PassSession {
                 .forward(
                     cx,
                     text.clone(),
+                    None,
                     more,
                     format,
                     ResultMapper::relay(),
@@ -759,8 +777,17 @@ impl PassSession {
         match route {
             Route::Done(step) => Ok(step),
             Route::Forward(sql, mapper) => {
-                self.forward(cx, Bytes::from(sql), more, format, mapper, &*map, out)
-                    .await
+                self.forward(
+                    cx,
+                    Bytes::from(sql),
+                    Some(&original),
+                    more,
+                    format,
+                    mapper,
+                    &*map,
+                    out,
+                )
+                .await
             }
         }
     }
@@ -879,9 +906,15 @@ impl PassSession {
         let lctn = ts.lower_case_table_names();
         let map = ts.map();
         let ctl = match svc.locator.ctl_pool(&self.target.cluster).await {
-            Ok(p) => MariaExecutor::new(p),
+            Ok(p) => p,
             Err(e) => return Ok(Route::Done(self.fail(out, &e).await?)),
         };
+        // Chapter 13's 64-index rule: room for the user's indexes.
+        let (lex, _) = self.lex_opts();
+        if let Some(ts) = self.tenant.as_deref() {
+            autoindex::make_room(ts, &ctl, target, original, &lex).await;
+        }
+        let ctl = MariaExecutor::new(ctl);
         let req = DdlRequest {
             tenant,
             statement: stmt.clone(),
@@ -1061,12 +1094,14 @@ impl PassSession {
     }
 
     /// Sends `sql` (rewritten) to the backend and relays the response
-    /// through `mapper`.
+    /// through `mapper`. `logical`: the client's text of a single
+    /// statement, which workload capture fingerprints (chapter 12).
     #[allow(clippy::too_many_arguments)]
     async fn forward(
         &mut self,
         cx: &mut ExecCtx<'_>,
         sql: Bytes,
+        logical: Option<&[u8]>,
         more: bool,
         format: RowFormat,
         mut mapper: ResultMapper,
@@ -1090,6 +1125,8 @@ impl PassSession {
         let backend_caps = self.backend_caps(cx);
         let mysql = self.persona == Persona::MySql84;
         self.tenant_bs(cx);
+        let pending = logical.and_then(|l| self.wl_start(l));
+        self.wl_probe(pending.as_ref());
         let Some(bs) = self.bs.as_mut() else {
             return Err(SprigError::internal("no backend session"));
         };
@@ -1123,10 +1160,18 @@ impl PassSession {
             aliases: aliases.as_ref(),
         };
         let relayed = relay(bs, out, &r, Some(&mut names)).await?;
-        let status = self.finish(out.finished()).await?;
+        let outcome = self.finish_outcome(out.finished()).await?;
+        if let Some(l) = logical {
+            let ran = super::capture::Ran {
+                outcome: outcome.as_ref(),
+                errored: relayed.errored,
+                params: &[],
+            };
+            self.wl_finish(cx, pending, l, &ran);
+        }
         Ok(Step {
             errored: relayed.errored,
-            status: status.or(relayed.status),
+            status: outcome.map(|o| o.status).or(relayed.status),
         })
     }
 
@@ -1242,7 +1287,7 @@ impl PassSession {
             user: &ts.principal.user,
         };
         let pctx = PlanCtx::new(rw, &ts.services().columns)
-            .vis(Visibility::for_persona(self.persona))
+            .vis(ts.visibility(self.persona))
             .sessions(&sessions);
         let p = plan(&sql, &pctx)?;
         let [sp] = p.statements.as_slice() else {
@@ -1298,6 +1343,7 @@ impl PassSession {
             if let Ok(s) = self.stmts.get_mut(meta.stmt) {
                 s.mapper = Some(mapper);
                 s.columns.clone_from(&meta.columns);
+                s.logical = Some(sql.clone());
             }
         }
         Ok(summary)

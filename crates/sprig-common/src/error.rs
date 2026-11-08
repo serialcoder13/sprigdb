@@ -222,6 +222,12 @@ sprig_codes! {
     /// draining a cluster that isn't active (chapter 09). Not yet in
     /// Appendix E.
     ClusterStateInvalid = 39106, "ER_SPRIG_CLUSTER_STATE_INVALID", "SprigClusterStateInvalid", SQLSTATE_GENERAL, false;
+    /// A mover cutover moved the shard while a transaction was open: the
+    /// gateway rolled it back (sent inside a 1213; chapter 10).
+    ShardMoved = 39110, "ER_SPRIG_SHARD_MOVED", "SprigShardMoved", SQLSTATE_RETRY, true;
+    /// The move's target cluster lacks a capability the shard uses
+    /// (chapter 10, "Preparing").
+    MoveTargetIncompatible = 39111, "ER_SPRIG_MOVE_TARGET_INCOMPATIBLE", "SprigMoveTargetIncompatible", SQLSTATE_GENERAL, false;
     /// A binlog event failed its checksum or doesn't parse (chapter 10). Not
     /// yet in Appendix E.
     BinlogCorrupt = 39112, "ER_SPRIG_BINLOG_CORRUPT", "SprigBinlogCorrupt", SQLSTATE_GENERAL, false;
@@ -232,16 +238,59 @@ sprig_codes! {
     /// an unknown checksum algorithm, an encrypted binlog file or an
     /// authentication plugin it lacks (chapter 10). Not yet in Appendix E.
     BinlogUnsupported = 39114, "ER_SPRIG_BINLOG_UNSUPPORTED", "SprigBinlogUnsupported", SQLSTATE_GENERAL, false;
+    /// No mover job by that id in the data center (chapter 10).
+    JobNotFound = 39130, "ER_SPRIG_JOB_NOT_FOUND", "SprigJobNotFound", SQLSTATE_GENERAL, false;
+    /// Another job holds a lock on the shard (chapter 10, "Job record").
+    ShardLocked = 39131, "ER_SPRIG_SHARD_LOCKED", "SprigShardLocked", SQLSTATE_GENERAL, true;
+    /// The job's state doesn't allow the request, such as cancelling a job
+    /// after its cutover committed (chapter 10).
+    JobStateInvalid = 39132, "ER_SPRIG_JOB_STATE_INVALID", "SprigJobStateInvalid", SQLSTATE_GENERAL, false;
+    /// The worker lost the job: its lease ended or a newer owner raised
+    /// the fencing token (chapter 10, "Jobs and workers").
+    JobLeaseLost = 39133, "ER_SPRIG_JOB_LEASE_LOST", "SprigJobLeaseLost", SQLSTATE_GENERAL, true;
+    /// The source's binlog no longer holds the position the job needs
+    /// (purged, or a failover lost transactions the target already has):
+    /// the copy restarts (chapter 10, "Failure handling").
+    MoveSourceDiverged = 39134, "ER_SPRIG_MOVE_SOURCE_DIVERGED", "SprigMoveSourceDiverged", SQLSTATE_GENERAL, true;
+    /// A cutover attempt was aborted (over budget, fence failed, commit
+    /// rejected); the sources stay authoritative and the job retries
+    /// (chapter 10, "Cutover").
+    MoveCutoverAborted = 39135, "ER_SPRIG_MOVE_CUTOVER_ABORTED", "SprigMoveCutoverAborted", SQLSTATE_GENERAL, true;
+    /// Verification found the target different from the source after
+    /// `mover.verify_max_repairs` repairs (chapter 10, "Verification").
+    MoveVerifyFailed = 39136, "ER_SPRIG_MOVE_VERIFY_FAILED", "SprigMoveVerifyFailed", SQLSTATE_GENERAL, false;
+    /// The source changed in a way the mover can't follow: statement-based
+    /// DML in a moved schema, a table without a primary key, or DDL during
+    /// a cutover (chapter 10, "Filtering and routing").
+    MoveUnsupported = 39137, "ER_SPRIG_MOVE_UNSUPPORTED", "SprigMoveUnsupported", SQLSTATE_GENERAL, false;
     /// No cluster can take the placement (chapter 11; tenant bootstrap's
     /// interim placement in chapter 08).
     PlacementUnavailable = 39120, "ER_SPRIG_PLACEMENT_UNAVAILABLE", "SprigPlacementUnavailable", SQLSTATE_GENERAL, true;
+    /// No automatic index (or recommendation) by that id or name in the
+    /// tenant (chapter 13, `sprigctl index`).
+    AutoIndexNotFound = 39201, "ER_SPRIG_AUTO_INDEX_NOT_FOUND", "SprigAutoIndexNotFound", SQLSTATE_GENERAL, false;
+    /// The automatic index's state doesn't allow the action (approve a
+    /// non-recommendation, drop a pinned one, ...), or it changed meanwhile.
+    AutoIndexStateInvalid = 39202, "ER_SPRIG_AUTO_INDEX_STATE_INVALID", "SprigAutoIndexStateInvalid", SQLSTATE_GENERAL, false;
+    /// Too many failed logins from this address: it is refused for
+    /// `auth.ip_block_seconds` before the greeting (chapter 14, "Rate
+    /// limits").
+    LoginRateLimited = 39300, "ER_SPRIG_LOGIN_RATE_LIMITED", "SprigLoginRateLimited", SQLSTATE_GENERAL, true;
     /// Logins can't be decided now: the tenant's credentials can't be
     /// loaded (catalog or directory unreachable), or hashing is saturated
     /// (chapter 14).
     AuthUnavailable = 39301, "ER_SPRIG_AUTH_UNAVAILABLE", "SprigAuthUnavailable", SQLSTATE_CONNECTION, true;
     /// The tenant, or a tenant above it in the tree, is suspended; logins
     /// are refused (chapter 14).
+    /// The login came to a data center outside the tenant's allowed ones
+    /// and `residency.deny_remote_access` is on (chapter 14, "Credential
+    /// residency").
+    RemoteAccessDenied = 39302, "ER_SPRIG_REMOTE_ACCESS_DENIED", "SprigRemoteAccessDenied", SQLSTATE_GENERAL, false;
     TenantSuspended = 39303, "ER_SPRIG_TENANT_SUSPENDED", "SprigTenantSuspended", SQLSTATE_GENERAL, false;
+    /// The session's account was dropped or locked, or its tenant
+    /// suspended, while it was connected; the session closes
+    /// (`auth.close_sessions_on_revoke`, chapter 14).
+    SessionRevoked = 39306, "ER_SPRIG_SESSION_REVOKED", "SprigSessionRevoked", SQLSTATE_CONNECTION, false;
     /// The tenant name is taken (chapter 29; the `tenant-names/` guard of
     /// chapter 23).
     TenantExists = 39360, "ER_SPRIG_TENANT_EXISTS", "SprigTenantExists", SQLSTATE_GENERAL, false;
@@ -387,17 +436,33 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::CatalogConflict | SprigCode::TenantTreeBusy => (Code::Aborted, 409),
         SprigCode::CatalogFormatTooNew => (Code::FailedPrecondition, 500),
         SprigCode::BinlogCorrupt => (Code::DataLoss, 500),
+        SprigCode::ShardMoved | SprigCode::ShardLocked | SprigCode::MoveCutoverAborted => {
+            (Code::Aborted, 409)
+        }
+        SprigCode::MoveTargetIncompatible
+        | SprigCode::MoveUnsupported
+        | SprigCode::JobStateInvalid => (Code::FailedPrecondition, 409),
+        SprigCode::JobNotFound => (Code::NotFound, 404),
+        SprigCode::JobLeaseLost | SprigCode::MoveSourceDiverged => (Code::Unavailable, 503),
+        SprigCode::MoveVerifyFailed => (Code::DataLoss, 500),
         SprigCode::BackendProtocol => (Code::Internal, 502),
         SprigCode::ClusterFenceFailed | SprigCode::OutcomeUnknown | SprigCode::SessionStateLost => {
             (Code::Aborted, 409)
         }
-        SprigCode::ClusterNotFound | SprigCode::UnknownDc => (Code::NotFound, 404),
+        SprigCode::ClusterNotFound | SprigCode::UnknownDc | SprigCode::AutoIndexNotFound => {
+            (Code::NotFound, 404)
+        }
         SprigCode::ClusterExists | SprigCode::TenantExists => (Code::AlreadyExists, 409),
         SprigCode::ClusterStateInvalid
+        | SprigCode::AutoIndexStateInvalid
         | SprigCode::TenantNotReady
         | SprigCode::TenantHasChildren
         | SprigCode::TenantDepthExceeded => (Code::FailedPrecondition, 409),
-        SprigCode::TenantSuspended => (Code::PermissionDenied, 403),
+        SprigCode::TenantSuspended | SprigCode::RemoteAccessDenied => {
+            (Code::PermissionDenied, 403)
+        }
+        SprigCode::LoginRateLimited => (Code::ResourceExhausted, 429),
+        SprigCode::SessionRevoked => (Code::Unauthenticated, 401),
         SprigCode::PlacementUnavailable => (Code::ResourceExhausted, 503),
         SprigCode::AdminUnauthenticated => (Code::Unauthenticated, 401),
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),

@@ -18,6 +18,9 @@
 //! - [`output`]: column-definition and message mapping (build step 7).
 //! - [`hide`]: what a session may see, the `SHOW CREATE TABLE` line
 //!   filter and `CREATE TABLE ... LIKE` (build step 8).
+//! - [`autoindex`]: chapter 13's side of hiding: reserved `sprig_auto_`
+//!   index names, `@sprig_show_auto_indexes` and the 64-index rule
+//!   (chapter 13 step 12).
 //! - [`result`]: the [`ResultMapper`] a forwarded statement's result goes
 //!   through.
 //! - [`plan`](mod@plan): the whole flow for a client's text, one
@@ -26,6 +29,7 @@
 //! Not here yet: `performance_schema`, `sys` and `mysql` (step 6),
 //! `DEFINER` mapping beyond output (step 9), the `SPRIG_` views (step 11).
 
+pub mod autoindex;
 pub mod ddl;
 pub mod hide;
 pub mod infoschema;
@@ -36,6 +40,10 @@ pub mod result;
 pub mod rewrite;
 pub mod show;
 
+pub use autoindex::{
+    ExistingIndex, IndexChanges, MAX_INDEXES_PER_TABLE, check_reserved, index_changes, make_room,
+    session_flag,
+};
 pub use ddl::{AlterOp, DdlKind, DdlName, DdlTarget};
 pub use hide::{Visibility, create_like_sql, filter_create_table};
 pub use infoschema::{ColumnRegistry, InfoSchemaCtx, TableClass, rewrite_information_schema};

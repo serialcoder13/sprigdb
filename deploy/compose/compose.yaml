@@ -133,10 +133,23 @@ services:
     <<: *mariadb
     profiles: [galera, all]
     hostname: galera-1
-    # Bootstraps a new cluster. After `down` without -v, galera-1 may refuse
-    # to bootstrap (safe_to_bootstrap: 0); reset with `down -v`.
+    # Bootstraps a new cluster only when it should: on a fresh volume (no
+    # grastate.dat) or when Galera marked this node safe_to_bootstrap: 1 (it
+    # was the last to leave). Otherwise it joins the running cluster, so a
+    # restarted or recreated galera-1 rejoins instead of refusing to start or
+    # splitting the cluster. If every node is down and galera-1 wasn't the
+    # last one, start the node with safe_to_bootstrap: 1 first, or reset the
+    # cluster with `down -v`.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - >-
+        g=/var/lib/mysql/grastate.dat;
+        if [ ! -s "$$g" ] || grep -q '^safe_to_bootstrap: *1' "$$g"; then
+        set -- --wsrep-new-cluster "$$@"; fi;
+        exec docker-entrypoint.sh mariadbd "$$@"
+      - galera-1
     command:
-      - --wsrep-new-cluster
       - --server-id=301
       - --gtid-domain-id=301
       - --wsrep-gtid-domain-id=3

@@ -575,8 +575,8 @@ fn too_large() -> SprigError {
 /// The statements a text referencing `information_schema.SPRIG_SETTINGS`
 /// may hold: ones that run now and keep no text. First words, upper case.
 const RUNS_NOW: &[&str] = &[
-    "SELECT", "WITH", "TABLE", "VALUES", "(", "INSERT", "REPLACE", "UPDATE", "DELETE", "DO",
-    "SET", "EXPLAIN", "DESCRIBE", "DESC",
+    "SELECT", "WITH", "TABLE", "VALUES", "(", "INSERT", "REPLACE", "UPDATE", "DELETE", "DO", "SET",
+    "EXPLAIN", "DESCRIBE", "DESC",
 ];
 
 /// Chapter 07 rule 9: the view is literal rows, so inlining it where
@@ -592,7 +592,7 @@ fn refuse_stored(text: &[u8], sig: &[&sprig_sql::lex::Token]) -> Option<SprigErr
     use sprig_sql::lex::{TokenKind, ident_value};
     let word = |t: &sprig_sql::lex::Token| -> String {
         if t.kind == TokenKind::Word {
-            String::from_utf8_lossy(ident_value(t.bytes(text))).to_ascii_uppercase()
+            String::from_utf8_lossy(&ident_value(t.bytes(text))).to_ascii_uppercase()
         } else {
             String::from_utf8_lossy(t.bytes(text)).into_owned()
         }
