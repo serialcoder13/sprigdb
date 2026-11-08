@@ -106,7 +106,7 @@ This is Spring Data JPA (Spring Boot 3.5.7, Hibernate 6.6.33) with `ddl-auto=val
 | `write` | A JPA insert, `CALL shop.place_order` through `StoredProcedureQuery`, a JPQL join, and the cross-database view |
 | `native_query` | `SELECT DATABASE()` and an unqualified `SELECT` |
 
-Persona `mariadb` runs `hibernate-mariadb` (MariaDB Connector/J 3.5.11). Persona `mysql` runs it too, plus `hibernate` (MySQL Connector/J 9.7.0), whose `schema_validate` is an expected failure (below).
+Persona `mariadb` runs `hibernate-mariadb` (MariaDB Connector/J 3.5.11). Persona `mysql` runs it too, plus `hibernate` (MySQL Connector/J 9.7.0), whose `schema_validate` is an expected failure in baseline mode only (below).
 
 ### Dumps (`sql/suite.sh dump`, the connector matrix's CLI images)
 
@@ -206,7 +206,7 @@ Today, `gateway-dev.sh` can't start one next to the first on the same etcd. The 
 
 `expected.txt` lists every outcome other than `pass`, by mode, persona, suite, connector and check, with the reason. It works like `../connectors/expected.toml`: an unexpected pass counts as a difference too. Today's entries are:
 
-- **Hibernate with MySQL Connector/J, `schema_validate`: fail (both modes).** `DatabaseMetaData.getSQLKeywords()` reads `information_schema.KEYWORDS WHERE RESERVED = 1`, which MariaDB lacks, so Hibernate can't resolve a dialect. On 3306 the gateway must answer that view, which is chapter 28's translator (M0.5). The rest of the check passes after a restart without validation.
+- **Hibernate with MySQL Connector/J, `schema_validate`: fail (baseline only).** `DatabaseMetaData.getSQLKeywords()` reads `information_schema.KEYWORDS WHERE RESERVED = 1`, which MariaDB lacks, so Hibernate can't resolve a dialect. The rest of the check passes after a restart without validation. Through the gateway's 3306, chapter 28's translator (M0.5) answers `KEYWORDS` with MySQL 8.4's list and the check passes.
 - **`mysqldump`'s `dump_all` on persona `mysql`: fail (both modes).** `mysqldump` 8.4 dumps the `mysql` database first. It holds back every database `SHOW DATABASES` lists until it reaches `mysql`, and if `mysql` never comes it writes nothing and still exits 0. Neither a tenant (through either port) nor a plain MariaDB user sees `mysql`, and MySQL 8.4 does the same for a user who can't see it. `dump_listed` checks the workaround, `--databases` with the `SHOW DATABASES` list. See `decisions/mysql-persona-gaps.md` row 12 in the design repository.
 - **Baseline only:**
   - The leak checks are n/a: no physical names exist.
@@ -221,7 +221,9 @@ Today, `gateway-dev.sh` can't start one next to the first on the same etcd. The 
 | gateway (13307) | `mariadb` | 66 | 66 | 0 | 0 | 0 |
 | gateway (13306) | `mysql` | 78 | 74 | 4 | 0 | 0 |
 
-In baseline the n/a checks are `dump_leaks`, `isolation_leaks` and the leak suite's `leaks` for each tenant, plus the four settings checks. The expected failures on persona `mysql` are Connector/J's `schema_validate` and `mysqldump`'s `dump_all`, once per tenant. The gateway runs used `SPRIG_M03_BACKEND`. A full run takes 15 to 25 s.
+After M0.5 (8 November 2026, a gateway on 16306 and 16307 in catalog mode, tenants `translator` and `translatorb`): persona `mysql` 78 checks, 76 pass, 2 expected failures (`dump_all`), 0 differences; persona `mariadb` 66 checks, 66 pass. Hibernate with MySQL Connector/J now validates on 3306.
+
+In baseline the n/a checks are `dump_leaks`, `isolation_leaks` and the leak suite's `leaks` for each tenant, plus the four settings checks. The expected failures on persona `mysql` are Connector/J's `schema_validate` (baseline only since M0.5) and `mysqldump`'s `dump_all`, once per tenant. The gateway runs used `SPRIG_M03_BACKEND`. A full run takes 15 to 25 s.
 
 ## Memory and containers
 

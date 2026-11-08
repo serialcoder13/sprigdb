@@ -31,7 +31,7 @@ use crate::model::{
     ApplyOp, CopyState, KeyBytes, KeyPart, PosRow, Row, RowChange, SourceTxn, StreamItem,
     TableCopy, TableId, TableMeta, Watermark, WmKind, XaPhase,
 };
-use crate::record::{Claim, CutoverStep, wall_ms};
+use crate::record::{Claim, CutoverStep, VerifyCursor, wall_ms};
 use crate::settings::MoverSettings;
 
 /// The job's only stream in R0.
@@ -324,7 +324,6 @@ impl Engine {
                 ));
             }
         }
-        self.env.target.prepare(&tables, &objects).await?;
         let init = PosRow {
             token: self.token,
             gtid_pos: p0,
@@ -335,7 +334,10 @@ impl Engine {
                     .collect(),
             },
         };
-        let row = self.env.target.claim(self.job, self.token, &init).await?;
+        // The position row first: it marks the target schemas as this
+        // job's, so a retry after a half-done prepare isn't refused.
+        let row = self.env.target.reserve(self.job, self.token, &init).await?;
+        self.env.target.prepare(&tables, &objects).await?;
         self.applied = row.gtid_pos.clone();
         self.read = row.gtid_pos;
         self.copy = row.copy;
@@ -399,6 +401,8 @@ impl Engine {
             .save(|r| {
                 r.state = JobState::Preparing;
                 r.progress.restarts += 1;
+                r.verify_progress.clear();
+                r.verified = false;
                 r.progress.tables_done = 0;
                 r.progress.rows_copied = 0;
                 r.error = Some(msg);
@@ -930,13 +934,11 @@ impl Engine {
         loop {
             let reason = self.throttle_reason().await?;
             let Some(reason) = reason else { return Ok(()) };
-            metrics::counter!("sprig_mover_throttled_seconds_total", "reason" => reason)
-                .increment(0);
             let t0 = self.clock.now();
             self.pump(Until::For(Duration::from_millis(100)), None)
                 .await?;
             let waited = self.clock.now().saturating_duration_since(t0);
-            metrics::counter!("sprig_mover_throttled_millis_total", "reason" => reason)
+            metrics::counter!("sprig_mover_throttled_milliseconds_total", "reason" => reason)
                 .increment(u64::try_from(waited.as_millis()).unwrap_or(0));
             if self.cancelled() {
                 return Ok(());
@@ -1022,9 +1024,16 @@ impl Engine {
             crate::api::VerifyMode::Sample { pct } => Some(u64::from(pct.clamp(1, 100))),
             _ => None,
         };
+        // Where verification got to survives errors and worker changes:
+        // under steady faults it must still finish.
         let tables = self.tables.clone();
         for t in tables {
-            let mut after: Option<Row> = None;
+            let id = t.id().0;
+            let mut after: Option<Row> = match self.claim.rec.verify_progress.get(&id) {
+                Some(VerifyCursor::Done) => continue,
+                Some(VerifyCursor::After(k)) => Some(k.iter().map(KeyPart::to_value).collect()),
+                None => None,
+            };
             let mut chunk = 0u64;
             loop {
                 self.check_cancel(false).await?;
@@ -1034,12 +1043,20 @@ impl Engine {
                 chunk += 1;
                 let check = sample.is_none_or(|pct| (chunk * 37) % 100 < pct);
                 let next = self.verify_chunk(&t, after.as_ref(), check).await?;
+                let cursor = match &next {
+                    Some(last) => {
+                        VerifyCursor::After(last.iter().map(KeyPart::from_value).collect())
+                    }
+                    None => VerifyCursor::Done,
+                };
+                self.claim.rec.verify_progress.insert(id.clone(), cursor);
                 match next {
                     Some(last) => after = Some(last),
                     None => break,
                 }
                 self.maybe_save().await?;
             }
+            self.claim.save(|_| {}).await?;
         }
         self.claim
             .save(|r| {
@@ -1237,7 +1254,13 @@ impl Engine {
         let until_ms = wall_ms(self.clock.wall())
             + u64::try_from((s.cutover_max_hold + s.hold_grace).as_millis()).unwrap_or(u64::MAX);
         let triggers = self.env.source.triggers().await?;
-        let r: Result<CommitOutcome> = async {
+        // The whole attempt runs under a hard deadline: whatever step
+        // overruns (a stalled fence, a slow commit), the hold ends by
+        // `mover.cutover_max_hold_ms`. A step cut short is undone by the
+        // abort: the planned receipt unfences a half-done fence, and the
+        // release decides an interrupted commit.
+        let budget = end.saturating_duration_since(self.clock.now());
+        let attempt = async {
             // 1. Hold.
             self.claim.check_lease()?;
             self.env.maps.hold(self.job, self.token, until_ms).await?;
@@ -1304,8 +1327,11 @@ impl Engine {
                 o = self.settle_unknown().await?;
             }
             Ok(o)
-        }
-        .await;
+        };
+        let r: Result<CommitOutcome> = match tokio::time::timeout(budget, attempt).await {
+            Ok(r) => r,
+            Err(_) => Err(aborted("the cutover ran over mover.cutover_max_hold_ms")),
+        };
         let held = self.clock.now().saturating_duration_since(t0);
         let held_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX);
         metrics::histogram!("sprig_mover_cutover_hold_seconds").record(held.as_secs_f64());
@@ -1506,9 +1532,9 @@ impl Engine {
     }
 
     async fn cleaning(&mut self) -> Result<Step> {
-        if self.claim.rec.kind == JobKind::MoveShard {
-            self.env.source.drop_schemas().await?;
-        }
+        // A move drops the retained source schemas; a copy-and-swap the
+        // swapped-out table.
+        self.env.source.drop_schemas().await?;
         self.env.target.forget(self.job).await?;
         self.claim.finish(JobState::Done, None).await?;
         tracing::info!(job = %self.job.0, "job done");

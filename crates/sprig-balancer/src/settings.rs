@@ -116,8 +116,14 @@ key! {
 }
 key! {
     /// `balancer.min_gain_pct`.
-    MIN_GAIN_PCT: u32 = "balancer.min_gain_pct", 1, PROCESS, 0, 100, 11,
-    "Smallest gain worth a move, in points"
+    MIN_GAIN_PCT: u32 = "balancer.min_gain_pct", 0, PROCESS, 0, 100, 11,
+    "Optional floor: smallest relief of the source worth a move, in points (0: none)"
+}
+key! {
+    /// `balancer.benefit_cost_ratio`: a move is made when its benefit is at
+    /// least this many times its cost (see `crate::judge`).
+    BENEFIT_COST_RATIO: f64 = "balancer.benefit_cost_ratio", 2.0, PROCESS, 1, 100, 11,
+    "A move's benefit must be at least this many times its cost"
 }
 key! {
     /// `balancer.shard_cooldown_hours`.
@@ -317,8 +323,10 @@ pub struct BalancerSettings {
     pub spread: f64,
     /// Conditions must hold this long.
     pub sustain: Duration,
-    /// `min_gain_pct` as a ratio.
+    /// `min_gain_pct` as a ratio (0: no floor).
     pub min_gain: f64,
+    /// `benefit_cost_ratio`.
+    pub benefit_cost_ratio: f64,
     /// Moves at once per DC.
     pub max_concurrent_moves_per_dc: u32,
     /// Score weights.
@@ -347,6 +355,7 @@ impl Default for BalancerSettings {
             spread: pct(SPREAD_PCT.default),
             sustain: Duration::from_secs(SUSTAIN_MINUTES.default * 60),
             min_gain: pct(MIN_GAIN_PCT.default),
+            benefit_cost_ratio: BENEFIT_COST_RATIO.default,
             max_concurrent_moves_per_dc: MAX_CONCURRENT_MOVES_PER_DC.default,
             weight_cowrite: WEIGHT_COWRITE.default,
             weight_xa: WEIGHT_XA.default,
@@ -378,6 +387,7 @@ impl BalancerSettings {
             spread: pct(s.get(&SPREAD_PCT, ctx)),
             sustain: Duration::from_secs(s.get(&SUSTAIN_MINUTES, ctx) * 60),
             min_gain: pct(s.get(&MIN_GAIN_PCT, ctx)),
+            benefit_cost_ratio: s.get(&BENEFIT_COST_RATIO, ctx),
             max_concurrent_moves_per_dc: s.get(&MAX_CONCURRENT_MOVES_PER_DC, ctx),
             weight_cowrite: s.get(&WEIGHT_COWRITE, ctx),
             weight_xa: s.get(&WEIGHT_XA, ctx),

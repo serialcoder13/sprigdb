@@ -14,7 +14,13 @@
 //! gateway 2's. The client plays a load balancer: it sends each request to
 //! a gateway whose `/readyz` answered 200 in the last check.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    missing_docs
+)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -55,7 +61,10 @@ async fn call(c: &Http, method: &str, url: &str, body: &str) -> (u16, serde_json
         Ok(r) => {
             let st = r.status().as_u16();
             let b = r.into_body().collect().await.unwrap().to_bytes();
-            (st, serde_json::from_slice(&b).unwrap_or(serde_json::Value::Null))
+            (
+                st,
+                serde_json::from_slice(&b).unwrap_or(serde_json::Value::Null),
+            )
         }
         Err(e) => (0, serde_json::Value::String(e.to_string())),
     }
@@ -92,8 +101,17 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
     let (g1_mysql, g1_http, g1_tel) = (u[0].clone(), u[1].clone(), u[2].clone());
     let (_g2_mysql, g2_http, g2_tel) = (u[3].clone(), u[4].clone(), u[5].clone());
     let c: Http = Client::builder(TokioExecutor::new()).build_http();
-    assert!(ready(&c, &g1_tel).await && ready(&c, &g2_tel).await, "both gateways ready");
-    let (st, list) = call(&c, "GET", &format!("http://{g2_http}/admin/v1/gateways"), "").await;
+    assert!(
+        ready(&c, &g1_tel).await && ready(&c, &g2_tel).await,
+        "both gateways ready"
+    );
+    let (st, list) = call(
+        &c,
+        "GET",
+        &format!("http://{g2_http}/admin/v1/gateways"),
+        "",
+    )
+    .await;
     assert_eq!(st, 200, "{list}");
     let ids: Vec<String> = list["gateways"]
         .as_array()
@@ -106,7 +124,10 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|g| g["listeners"]["http"].as_u64().map(|p| p.to_string()) == g1_http.rsplit_once(':').map(|(_, p)| p.to_owned()))
+        .find(|g| {
+            g["listeners"]["http"].as_u64().map(|p| p.to_string())
+                == g1_http.rsplit_once(':').map(|(_, p)| p.to_owned())
+        })
         .map(|g| g["gateway_id"].as_str().unwrap().to_owned())
         .expect("gateway 1's record");
 
@@ -118,7 +139,13 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
         let r: Option<i64> = long.query_first("SELECT SLEEP(4)").await.unwrap();
         (r, started.elapsed())
     });
-    let (st, t) = call(&c, "POST", &format!("http://{g1_http}/v1/databases/-/transactions"), "{}").await;
+    let (st, t) = call(
+        &c,
+        "POST",
+        &format!("http://{g1_http}/v1/databases/-/transactions"),
+        "{}",
+    )
+    .await;
     assert_eq!(st, 200, "{t}");
     let handle = t["name"].as_str().unwrap().to_owned();
 
@@ -130,12 +157,20 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
     let to_g1_after = Arc::new(AtomicU64::new(0));
     let drained_at = Arc::new(std::sync::Mutex::new(None::<Instant>));
     let lb = {
-        let (stop, ok, failed, to_g1_after, drained_at) =
-            (stop.clone(), ok.clone(), failed.clone(), to_g1_after.clone(), drained_at.clone());
+        let (stop, ok, failed, to_g1_after, drained_at) = (
+            stop.clone(),
+            ok.clone(),
+            failed.clone(),
+            to_g1_after.clone(),
+            drained_at.clone(),
+        );
         let c = c.clone();
-        let targets = [(g1_http.clone(), g1_tel.clone()), (g2_http.clone(), g2_tel.clone())];
+        let targets = [
+            (g1_http.clone(), g1_tel.clone()),
+            (g2_http.clone(), g2_tel.clone()),
+        ];
         tokio::spawn(async move {
-            let mut up = vec![true, true];
+            let mut up = [true, true];
             let mut checked = Instant::now();
             let mut i = 0usize;
             while !stop.load(Ordering::Relaxed) {
@@ -150,7 +185,12 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
-                if k == 0 && drained_at.lock().unwrap().is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
+                if k == 0
+                    && drained_at
+                        .lock()
+                        .unwrap()
+                        .is_some_and(|t| t.elapsed() > Duration::from_millis(500))
+                {
                     to_g1_after.fetch_add(1, Ordering::Relaxed);
                 }
                 let url = format!("http://{}/v1/databases/-/sql:execute", targets[k].0);
@@ -168,7 +208,13 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Drain gateway 1 through gateway 2 (the peer service carries it).
-    let (st, r) = call(&c, "POST", &format!("http://{g2_http}/admin/v1/gateways/{g1_id}:drain"), "").await;
+    let (st, r) = call(
+        &c,
+        "POST",
+        &format!("http://{g2_http}/admin/v1/gateways/{g1_id}:drain"),
+        "",
+    )
+    .await;
     assert_eq!(st, 200, "{r}");
     assert_eq!(r["started"], true);
     *drained_at.lock().unwrap() = Some(Instant::now());
@@ -187,9 +233,21 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
     // The open transaction finishes on gateway 1, through gateway 2: the
     // call is forwarded to the handle's owner.
     let body = serde_json::json!({"sql": "SELECT 42", "transaction": handle}).to_string();
-    let (st, r) = call(&c, "POST", &format!("http://{g2_http}/v1/databases/-/sql:execute"), &body).await;
+    let (st, r) = call(
+        &c,
+        "POST",
+        &format!("http://{g2_http}/v1/databases/-/sql:execute"),
+        &body,
+    )
+    .await;
     assert_eq!(st, 200, "forwarded call during the drain: {r}");
-    let (st, r) = call(&c, "POST", &format!("http://{g2_http}/v1/{handle}:commit"), "{}").await;
+    let (st, r) = call(
+        &c,
+        "POST",
+        &format!("http://{g2_http}/v1/{handle}:commit"),
+        "{}",
+    )
+    .await;
     assert_eq!(st, 200, "forwarded commit: {r}");
     // The long statement finishes.
     let (v, took) = long_task.await.unwrap();
@@ -209,7 +267,13 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
     // Its registration goes when it exits.
     let mut gone = None;
     while t0.elapsed() < Duration::from_secs(60) {
-        let (_, list) = call(&c, "GET", &format!("http://{g2_http}/admin/v1/gateways"), "").await;
+        let (_, list) = call(
+            &c,
+            "GET",
+            &format!("http://{g2_http}/admin/v1/gateways"),
+            "",
+        )
+        .await;
         let present = list["gateways"]
             .as_array()
             .is_some_and(|a| a.iter().any(|g| g["gateway_id"] == g1_id.as_str()));
@@ -230,6 +294,14 @@ async fn a_draining_gateway_finishes_its_work_and_new_requests_go_elsewhere() {
         to_g1_after.load(Ordering::Relaxed)
     );
     assert!(gone.is_some(), "gateway 1 never deregistered");
-    assert_eq!(failed.load(Ordering::Relaxed), 0, "requests failed during the drain");
-    assert_eq!(to_g1_after.load(Ordering::Relaxed), 0, "new requests reached the draining gateway");
+    assert_eq!(
+        failed.load(Ordering::Relaxed),
+        0,
+        "requests failed during the drain"
+    );
+    assert_eq!(
+        to_g1_after.load(Ordering::Relaxed),
+        0,
+        "new requests reached the draining gateway"
+    );
 }

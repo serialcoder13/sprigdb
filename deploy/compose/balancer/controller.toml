@@ -1,0 +1,24 @@
+# The balancer's live test bed (milestone M0.6, chapter 11): a deployment
+# of its own, `sprigdb-bl`, on its own etcd (container sprigdb-dev-bl-etcd,
+# 127.0.0.1:18379), over the Compose stack's three MariaDB clusters. Its own
+# etcd keeps its balancer from ever planning moves of other tenants of the
+# shared dev deployment. run.sh starts it; the worker runs this file with
+# SPRIGDB_NODE_ID=bl-wkr-1 and its own telemetry port.
+[node]
+dc = "dc-bl"
+id = "bl-ctl-1"
+
+[meta]
+dc_seeds = ["http://127.0.0.1:18379"]
+global_seeds = []
+deployment_id = "sprigdb-bl"
+
+[controller]
+bootstrap = true
+admin_addr = "127.0.0.1:18480"
+workload_key_file = "deploy/compose/workload-keys.dev"
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "pretty"
+bootstrap_addr = "127.0.0.1:18180"

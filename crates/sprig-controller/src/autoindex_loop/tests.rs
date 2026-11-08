@@ -157,8 +157,12 @@ impl ValidationHook for AcceptAll {
     }
 }
 
-/// The target fingerprint runs fast now; usage samples don't use the index.
-struct Workload;
+/// The target fingerprint runs fast now, from a day after the start; its
+/// sample is a primary-key lookup, which never uses the index.
+struct Workload {
+    schema: String,
+    reads_from: SystemTime,
+}
 
 #[async_trait::async_trait]
 impl WorkloadSource for Workload {
@@ -167,17 +171,15 @@ impl WorkloadSource for Workload {
         _t: TenantId,
         _o: ObjectId,
         _s: SystemTime,
-        _u: SystemTime,
+        u: SystemTime,
     ) -> Result<Option<BTreeMap<Fingerprint, FpLatency>>> {
+        let runs = if u > self.reads_from { 5000 } else { 0 };
         Ok(Some(
             [(
                 TARGET,
                 FpLatency {
-                    runs: 5000,
-                    p95_ms: 11.0,
-                    mean_ms: 8.0,
                     uses_index: Some(true),
-                    write: false,
+                    ..FpLatency::read(runs, 11.0, 8.0)
                 },
             )]
             .into(),
@@ -190,7 +192,11 @@ impl WorkloadSource for Workload {
         _n: usize,
         _since: SystemTime,
     ) -> Result<Option<Vec<UsageSample>>> {
-        Ok(Some(Vec::new()))
+        Ok(Some(vec![UsageSample {
+            fingerprint: TARGET,
+            schema: self.schema.clone(),
+            sql: "SELECT id FROM orders WHERE id = 1".into(),
+        }]))
     }
 }
 
@@ -219,6 +225,7 @@ async fn one_tenant_from_candidate_to_drop() {
         DDL_CANDIDATES,
         DDL_VALIDATIONS,
         DDL_INDEX_ORIGINS,
+        sprig_advisor::autoindex::store::DDL_INDEX_USAGE,
     ] {
         c.query_drop(ddl).await.unwrap();
     }
@@ -265,9 +272,11 @@ async fn one_tenant_from_candidate_to_drop() {
                     min_improvement_pct: 30.0,
                     max_regression_pct: 10.0,
                     observe_days: 7,
-                    unused_drop_days: 30,
-                    ignore_before_drop_hours: 24,
                     recreate_block_days: 14,
+                    usage_sample_reads: 1000,
+                    min_usage_ratio: 0.05,
+                    retire_user_indexes: Mode::On,
+                    maintenance_cost_ms: 0.05,
                 },
                 rollout,
                 observe: ObserveSettings::default(),
@@ -280,7 +289,10 @@ async fn one_tenant_from_candidate_to_drop() {
                 schema: schema.clone(),
             }),
             validation: Arc::new(AcceptAll),
-            workload: Arc::new(Workload),
+            workload: Arc::new(Workload {
+                schema: schema.clone(),
+                reads_from: SystemTime::now() + Duration::from_secs(86_400),
+            }),
             locks: Arc::new(NoMover),
             mover: None,
             marker: Arc::new(NoMarker),
@@ -337,7 +349,8 @@ async fn one_tenant_from_candidate_to_drop() {
             rep.observed
         );
 
-        // 31 days unused (usage samples never read it): ignored, then dropped.
+        // 5,000 reads that never use it (decision O1: judged by reads, the
+        // clock only moves the cadence): ignored, then 5,000 more and dropped.
         let t40 = t0 + Duration::from_secs(40 * 86_400);
         let rep = tenant_pass(&env, &hooks, &slots, TENANT, t40, &mut mem, &cadence)
             .await

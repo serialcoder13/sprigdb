@@ -411,6 +411,7 @@ impl PassSession {
         }
         let mut mapper = s.mapper.clone();
         let logical = s.logical.clone();
+        let recheck = s.recheck.clone();
         let values = s.params_for_backend(params, persona)?;
         if params.new_params_bound {
             s.types = Some(values.iter().map(|p| p.param_type).collect());
@@ -427,6 +428,14 @@ impl PassSession {
             types = ?values.iter().map(|p| p.param_type).collect::<Vec<_>>(),
             "execute parameters"
         );
+        // Chapter 29: privileges are checked again at each execute, as on
+        // MySQL, when they changed since the prepare.
+        if let Some(rc) = &recheck
+            && let Some(ts) = self.tenant.as_deref_mut()
+        {
+            ts.refresh().await?;
+            crate::tenant::authz::recheck(ts, persona, rc)?;
+        }
         let _ = self.bs(cx);
         // Workload capture (chapter 12): fingerprinted from the logical
         // text the client prepared; cursors are left out (their rows come

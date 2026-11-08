@@ -19,6 +19,7 @@ fn report(stuck: Vec<ClusterId>, approvals: Vec<ApprovalNeeded>) -> PlanReport {
         notes: Vec::new(),
         approvals,
         stuck,
+        rejected: Vec::new(),
     }
 }
 

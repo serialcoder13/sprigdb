@@ -151,7 +151,7 @@ fn other_mysql_shapes() {
 }
 
 #[test]
-fn keywords_carry_reserved_on_both_ports() {
+fn keywords_carry_reserved_on_3306() {
     let my = rewrite(
         "SELECT WORD FROM INFORMATION_SCHEMA.KEYWORDS WHERE RESERVED=1 ORDER BY WORD",
         Persona::MySql84,
@@ -162,16 +162,15 @@ fn keywords_carry_reserved_on_both_ports() {
         "SELECT WORD FROM (SELECT `WORD`, `RESERVED` FROM JSON_TABLE('[[\"ACCESSIBLE\",1],"
     ));
     assert!(my.ends_with(") AS `KEYWORDS` WHERE RESERVED=1 ORDER BY WORD"));
-    let ma = rewrite(
-        "SELECT k.word FROM information_schema.keywords k WHERE k.reserved = 1",
-        Persona::MariaDb,
-    )
-    .unwrap()
-    .unwrap();
-    assert!(ma.contains(
-        "FROM information_schema.KEYWORDS AS `_sprig_k` LEFT JOIN JSON_TABLE('[\"ACCESSIBLE\","
-    ));
-    assert!(ma.ends_with(") k WHERE k.reserved = 1"));
+    // 3307 relays MariaDB's own table, as MariaDB 11.8 has it.
+    assert_eq!(
+        rewrite(
+            "SELECT k.word FROM information_schema.keywords k",
+            Persona::MariaDb,
+        )
+        .unwrap(),
+        None
+    );
     assert_eq!(keywords::MYSQL84.len(), 734);
     assert_eq!(keywords::MYSQL84.iter().filter(|(_, r)| *r).count(), 262);
 }

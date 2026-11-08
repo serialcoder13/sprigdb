@@ -60,7 +60,9 @@ pub(super) async fn run(
     active: Arc<Active>,
     fe: Arc<dyn Frontend>,
     ctx: Arc<GatewayContext>,
+    permit: Option<crate::limits::ConnPermit>,
 ) {
+    let _permit = permit;
     let name = active.spec.name;
     let _open = OpenGuard::new(name);
     let close = active.group.close.clone();
@@ -153,6 +155,35 @@ async fn prepare(
         close_soon: active.group.soft.clone(),
         acceptor,
     })
+}
+
+/// Refuses a connection over `gateway.max_connections`: the MySQL family
+/// gets ERR 1040 in place of the greeting, plaintext HTTP a 503; the rest
+/// are closed.
+pub(super) async fn refuse_too_many(mut sock: TcpStream, protocol: Protocol, tls: TlsMode) {
+    match protocol {
+        Protocol::MySql84 | Protocol::MariaDb => {
+            let p = sprig_proto_mysql::ErrPacket::new(1040, *b"08004", "Too many connections")
+                .encode(sprig_proto_mysql::Caps::empty());
+            let mut frame = Vec::with_capacity(p.len() + 4);
+            let len = u32::try_from(p.len()).unwrap_or(0).to_le_bytes();
+            frame.extend_from_slice(&len[..3]);
+            frame.push(0);
+            frame.extend_from_slice(&p);
+            let _ = sock.write_all(&frame).await;
+        }
+        Protocol::Http if tls != TlsMode::Required => {
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain\r\n\
+                      retry-after: 1\r\ncontent-length: 21\r\nconnection: close\r\n\r\n\
+                      Too many connections\n",
+                )
+                .await;
+        }
+        _ => {}
+    }
+    let _ = sock.shutdown().await;
 }
 
 /// Answers a plaintext HTTP request on a `required` listener with 400.

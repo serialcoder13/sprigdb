@@ -9,10 +9,12 @@
 //! gateway, the protocol and the outcome, never a secret: passwords,
 //! scrambles and verifiers never reach this module.
 //!
-//! Chapter 47's audit pipeline (retention in an allowed DC, export) isn't
-//! built yet. Until it is, [`LogAudit`] writes each event as one JSON line
-//! through `tracing` with target `sprig_audit`, so a log shipper can split
-//! them from the rest; [`MemoryAudit`] keeps them for tests. Both sides of a
+//! [`LogAudit`] writes each event as one JSON line through `tracing` with
+//! target `sprig_audit`, so a log shipper can split them from the rest,
+//! and hands it to the process's chapter 47 audit pipeline
+//! ([`sprig_common::audit`]) when one is installed (`[audit] spool_dir`),
+//! which spools it and ships it to the audit sink; [`MemoryAudit`] keeps
+//! them for tests. Both sides of a
 //! change from above are recorded by emitting the event once per stream
 //! ([`AuditEvent::streams`]): the target tenant's and the actor's.
 
@@ -21,6 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use sprig_common::audit as pipeline;
 use sprig_common::ids::{TenantId, UserId};
 
 /// Who made an account change, when it wasn't the account itself.
@@ -183,8 +186,10 @@ pub trait AuditSink: Send + Sync + 'static {
 }
 
 /// Writes each event as one JSON line through `tracing` (target
-/// `sprig_audit`, level info), once per stream (field `stream`), and counts
-/// it in `sprig_auth_audit_events_total` (`event`).
+/// `sprig_audit`, level info), once per stream (field `stream`), records it
+/// in the process's audit pipeline once per stream (a tenant's stream, or
+/// the platform's for an event without a tenant), and counts it in
+/// `sprig_auth_audit_events_total` (`event`).
 #[derive(Debug, Clone, Default)]
 pub struct LogAudit {
     gateway: Option<String>,
@@ -209,11 +214,14 @@ impl AuditSink for LogAudit {
         metrics::counter!("sprig_auth_audit_events_total", "event" => e.event).increment(1);
         let json = e.to_json();
         let streams = e.streams();
+        let body = serde_json::to_value(&e).unwrap_or(serde_json::Value::Null);
         if streams.is_empty() {
             tracing::info!(target: "sprig_audit", stream = "deployment", "{json}");
+            pipeline::record(pipeline::AuditStream::Platform, e.event, body.clone());
         }
         for s in streams {
             tracing::info!(target: "sprig_audit", stream = %s, "{json}");
+            pipeline::record(pipeline::AuditStream::Tenant(s), e.event, body.clone());
         }
     }
 }

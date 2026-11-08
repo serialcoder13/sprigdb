@@ -483,3 +483,28 @@ async fn guarded_writes_fail_once_the_guard_breaks() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn reads_reach_another_dcs_records() {
+    // Single-etcd mode: both DC tiers in one store (chapter 24).
+    let global = MemStore::new(Tier::Global);
+    let a = MemStore::new(Tier::Dc(DcId::new("dc-a").unwrap()));
+    let b = a.with_tier(Tier::Dc(DcId::new("dc-b").unwrap()));
+    let reg_a = ClusterRegistry::new(Arc::new(global.clone()), Arc::new(a)).unwrap();
+    let reg_b = ClusterRegistry::new(Arc::new(global), Arc::new(b)).unwrap();
+    let stored = reg_b.register(registration("b1")).await.unwrap();
+    let id = stored.body().cluster_id.clone();
+    assert_eq!(dc_of(&id).unwrap().as_str(), "dc-b");
+    let seen = reg_a.get(&id).await.unwrap().unwrap();
+    assert_eq!(seen.body().cluster_id, id);
+    // A cluster of this DC that doesn't exist is still None.
+    assert!(
+        reg_a
+            .get(&ClusterId::new("dc-a-c9").unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(dc_of(&ClusterId::new("plain").unwrap()).is_none());
+    assert!(dc_of(&ClusterId::new("dc-a-cx").unwrap()).is_none());
+}

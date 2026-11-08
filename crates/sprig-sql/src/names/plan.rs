@@ -86,6 +86,14 @@ impl<'a> PlanCtx<'a> {
         self.sessions = Some(sessions);
         self
     }
+
+    /// With the databases the user may see (chapter 29): `SHOW DATABASES`
+    /// in every form and `information_schema` list only those.
+    #[must_use]
+    pub fn visible(mut self, f: &'a (dyn Fn(&LogicalDb) -> bool + Sync)) -> Self {
+        self.visible = Some(f);
+        self
+    }
 }
 
 /// What to do with one statement.

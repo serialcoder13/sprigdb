@@ -45,7 +45,10 @@ fn defaults_resolve_to_kirans_values() {
     assert_eq!(p.budget.max_storage_pct, 20.0);
     assert_eq!(p.observe.min_improvement_pct, 30.0);
     assert_eq!(p.observe.max_regression_pct, 10.0);
-    assert_eq!(p.observe.unused_drop_days, 30);
+    assert_eq!(p.observe.usage_sample_reads, 100_000);
+    assert_eq!(p.observe.min_usage_ratio, 0.05);
+    assert_eq!(p.observe.retire_user_indexes, Mode::On);
+    assert_eq!(p.observe.maintenance_cost_ms, 0.05);
     assert_eq!(p.cost.build_rate_bytes_per_sec, 20e6);
     assert_eq!(p.generation.max_key_bytes, 512);
     assert!(p.used.values().all(|u| u.source == ScopeKind::Default));
@@ -91,6 +94,102 @@ fn chapter_08_example_tightened_bounds_clamp_the_object() {
             .budget
             .max_per_table,
         6
+    );
+}
+
+/// Decision O1's keys at global, tenant, database and object scope: the
+/// most specific wins, and each scope only reaches its own objects.
+#[test]
+fn usage_keys_resolve_most_specific_first() {
+    let mut s = mem();
+    let dc = dc();
+    let ctx = SettingCtx::process(&dc)
+        .for_tenant(TENANT, &[])
+        .with_db(DB)
+        .with_object(OBJ);
+    let other_obj = ctx.with_object(ObjectId(9));
+    let other_db = ctx.with_db(DbId(2)).with_object(ObjectId(10));
+    let tenant_only = SettingCtx::process(&dc).for_tenant(TENANT, &[]);
+    let other_tenant = SettingCtx::process(&dc)
+        .for_tenant(TenantId(43), &[])
+        .with_db(DB)
+        .with_object(OBJ);
+    let reads = "auto_index.usage_sample_reads";
+    let ratio = "auto_index.min_usage_ratio";
+    let user = "auto_index.retire_user_indexes";
+    let get = |s: &MemSettings<'_>, c: &SettingCtx<'_>| {
+        let o = ObjectPolicy::resolve(s, c).unwrap();
+        (
+            o.observe.usage_sample_reads,
+            o.observe.min_usage_ratio,
+            o.observe.retire_user_indexes,
+            o.used[reads].source,
+        )
+    };
+    // Global ("system").
+    s.set_value(Level::Global, &ctx, reads, &Value::Int(50_000))
+        .unwrap();
+    s.set_value(Level::Global, &ctx, ratio, &Value::Float(0.10))
+        .unwrap();
+    s.set_value(Level::Global, &ctx, user, &Value::from("recommend"))
+        .unwrap();
+    assert_eq!(
+        get(&s, &ctx),
+        (50_000, 0.10, Mode::Recommend, ScopeKind::Global)
+    );
+    assert_eq!(get(&s, &other_tenant).0, 50_000);
+    // Tenant beats global.
+    s.set_value(Level::Tenant, &ctx, reads, &Value::Int(20_000))
+        .unwrap();
+    s.set_value(Level::Tenant, &ctx, user, &Value::from("off"))
+        .unwrap();
+    assert_eq!(get(&s, &ctx), (20_000, 0.10, Mode::Off, ScopeKind::Tenant));
+    assert_eq!(get(&s, &tenant_only).0, 20_000);
+    assert_eq!(
+        get(&s, &other_tenant),
+        (50_000, 0.10, Mode::Recommend, ScopeKind::Global)
+    );
+    // Database beats tenant, for that database's tables only.
+    s.set_value(Level::Database, &ctx, reads, &Value::Int(5_000))
+        .unwrap();
+    s.set_value(Level::Database, &ctx, user, &Value::from("on"))
+        .unwrap();
+    assert_eq!(get(&s, &ctx), (5_000, 0.10, Mode::On, ScopeKind::Database));
+    assert_eq!(
+        get(&s, &other_obj),
+        (5_000, 0.10, Mode::On, ScopeKind::Database)
+    );
+    assert_eq!(
+        get(&s, &other_db),
+        (20_000, 0.10, Mode::Off, ScopeKind::Tenant)
+    );
+    // Object beats database, for that table only.
+    s.set_value(Level::Object, &ctx, reads, &Value::Int(400))
+        .unwrap();
+    s.set_value(Level::Object, &ctx, ratio, &Value::Float(0.01))
+        .unwrap();
+    s.set_value(Level::Object, &ctx, user, &Value::from("recommend"))
+        .unwrap();
+    assert_eq!(
+        get(&s, &ctx),
+        (400, 0.01, Mode::Recommend, ScopeKind::Object)
+    );
+    assert_eq!(
+        get(&s, &other_obj),
+        (5_000, 0.10, Mode::On, ScopeKind::Database)
+    );
+    // Out of bounds is refused: a ratio is a fraction, reads at least 1.
+    assert!(
+        s.set_value(Level::Object, &ctx, ratio, &Value::Float(5.0))
+            .is_err()
+    );
+    assert!(
+        s.set_value(Level::Object, &ctx, reads, &Value::Int(0))
+            .is_err()
+    );
+    assert!(
+        s.set_value(Level::Object, &ctx, user, &Value::from("maybe"))
+            .is_err()
     );
 }
 

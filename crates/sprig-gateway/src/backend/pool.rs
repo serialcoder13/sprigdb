@@ -324,8 +324,15 @@ impl BackendPools {
                         Some(d) => pool.pop_bucket(d).or_else(|| pool.pop_any()),
                         None => pool.pop_any(),
                     };
-                    let Some(c) = c else { break };
-                    if c.conn.age() > limits.max_lifetime || !c.conn.client.is_idle() {
+                    let Some(mut c) = c else { break };
+                    // A connection the server closed while it sat idle
+                    // (KILL CONNECTION, a restart) is never handed out: a
+                    // statement sent on it would fail without reaching the
+                    // server (chapter 06, "Failure handling").
+                    if c.conn.age() > limits.max_lifetime
+                        || !c.conn.client.is_idle()
+                        || c.conn.client.closed_while_idle()
+                    {
                         pool.open = pool.open.saturating_sub(1);
                         if let Some(n) = inner.nodes.get_mut(&node_key) {
                             n.open = n.open.saturating_sub(1);

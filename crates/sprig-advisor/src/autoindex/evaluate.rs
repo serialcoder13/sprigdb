@@ -784,12 +784,42 @@ impl Evaluator {
         let from = now
             .checked_sub(Duration::from_secs(u64::from(window_hours) * 3600))
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        let entries = cx.workload.window(cx.tenant, from, now).await?;
+        let mut entries = cx.workload.window(cx.tenant, from, now).await?;
 
         // Every object the window references, with its settings.
         let mut objects: BTreeSet<ObjectId> = BTreeSet::new();
         for e in &entries {
             objects.extend(e.window.shape.object_ids());
+        }
+        // A fingerprint an index now serves is judged on its runs since
+        // that index was built, not the whole window: the slow runs from
+        // before the build would otherwise propose redundant variants
+        // beside it (M0.4, cooldown_hours = 0).
+        let mut cut: BTreeMap<Fingerprint, SystemTime> = BTreeMap::new();
+        for o in &objects {
+            for r in cx.store.indexes_on(*o).await? {
+                if !matches!(
+                    r.state,
+                    IndexState::Observing | IndexState::Active | IndexState::Frozen
+                ) {
+                    continue;
+                }
+                let built = super::observe::built_at(&r);
+                if built <= from {
+                    continue;
+                }
+                for fp in r
+                    .baseline
+                    .keys()
+                    .filter_map(|k| k.parse::<Fingerprint>().ok())
+                {
+                    let t = cut.entry(fp).or_insert(built);
+                    *t = (*t).max(built);
+                }
+            }
+        }
+        if !cut.is_empty() {
+            entries = since_served(cx, entries, &cut, now).await?;
         }
         let mut metas: BTreeMap<ObjectId, ObjectMeta> = BTreeMap::new();
         let mut policies: BTreeMap<ObjectId, ObjectPolicy> = BTreeMap::new();
@@ -1511,6 +1541,33 @@ struct Written<'a, 'b> {
 /// Records why a fingerprint got no candidate on a table: a
 /// [`CandidateRow::skipped`] row (what `sprigctl explain query` reads) and
 /// a decision.
+/// `entries` with each fingerprint of `cut` replaced by its runs since
+/// its time there (the build of the index serving it).
+///
+/// # Errors
+/// The workload store's.
+async fn since_served(
+    cx: &EvalCx<'_>,
+    entries: Vec<super::qualify::SourcedWindow>,
+    cut: &BTreeMap<Fingerprint, SystemTime>,
+    now: SystemTime,
+) -> Result<Vec<super::qualify::SourcedWindow>> {
+    let mut out: Vec<super::qualify::SourcedWindow> = entries
+        .into_iter()
+        .filter(|e| !cut.contains_key(&e.window.id))
+        .collect();
+    let times: BTreeSet<SystemTime> = cut.values().copied().collect();
+    for t in times {
+        let later = cx.workload.window(cx.tenant, t, now).await?;
+        out.extend(
+            later
+                .into_iter()
+                .filter(|e| cut.get(&e.window.id) == Some(&t)),
+        );
+    }
+    Ok(out)
+}
+
 async fn record_skip(
     cx: &EvalCx<'_>,
     run_id: u64,

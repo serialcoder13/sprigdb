@@ -26,11 +26,16 @@
 //! 4. **A user-created equivalent retires ours** (`v`): after `(a)` is
 //!    built, the user creates `(a, b)`: ours is retired as `superseded`.
 //! 5. **Unused, user and migrated indexes** (`u`): `(a)` is built, then its
-//!    query stops; on the test clock 8 days later the indexes are active,
-//!    40 days later the unused one is retired as `unused`, and 42 days
-//!    later dropped. The user index and the migrated one (an
-//!    `index_origins` row, as a dump replay records it in R4) are never
-//!    touched.
+//!    query stops; after 400 reads that don't use it (decision O1, by reads,
+//!    never days) it is ignored, and after 400 more dropped as `unused`.
+//!    The user index and the migrated one (an `index_origins` row, as a
+//!    dump replay records it in R4) are untouched: `retire_user_indexes` is
+//!    `off` on `u` here.
+//!
+//! [`usage_based_removal_on_one_topology`] is decision O1's own scenario:
+//! automatic and user indexes removed by reads, `recommend`, the primary
+//! key, `UNIQUE` and foreign-key indexes never touched, and
+//! `sprigctl index restore`.
 //!
 //! Worked example 4 is a MongoDB collection (R5) and is not in M0.4.
 //!
@@ -130,6 +135,7 @@ async fn catalog(c: &Cfg) -> Conn {
         .unwrap()
 }
 
+#[allow(dead_code)] // the clock no longer decides removal (decision O1)
 fn set_clock(c: &Cfg, secs: u64) {
     std::fs::write(&c.clock_file, format!("{secs}\n")).unwrap();
     println!(
@@ -858,46 +864,53 @@ async fn chapter_13_scenarios_on_one_topology() {
     assert_eq!(sup.drop_reason.as_deref(), Some("superseded"));
     report["supersede"] = json!({"index": sup.name, "state": sup.state, "seconds": sup_s.round()});
 
-    // ---- Phase 3: 8 and 40 days later: unused dropped, others kept -------
+    // ---- Phase 3: unused dropped by reads (decision O1), others kept -----
     // Light traffic on u that never uses (a): primary-key reads and the
-    // user index.
+    // user index. 400 reads judge it (database scope), 400 more while it
+    // is IGNORED drop it; no clock is moved.
     load.ex1 = false;
     load.ex2 = false;
     load.trap = false;
-    let pass = |secs: u64| async move {
-        // A pass of the loop runs at least every minute.
-        tokio::time::sleep(Duration::from_secs(secs)).await;
-    };
+    ddl(
+        &mut g,
+        &format!("ALTER DATABASE {db} SPRIG SET (auto_index.usage_sample_reads = 400)"),
+    )
+    .await;
+    // The user and migrated indexes of u are left alone here (their own
+    // removal is the O1 scenario's): retire_user_indexes off on u.
+    ddl(
+        &mut g,
+        "ALTER TABLE u SPRIG SET (auto_index.retire_user_indexes = 'off')",
+    )
+    .await;
     let u_auto = done["u"].1.name.clone();
     let mut timeline = Vec::new();
-    for (day, wait) in [(8, 90), (40, 90), (42, 90)] {
-        set_clock(&c, day * DAY);
-        let t3 = Instant::now();
-        while t3.elapsed() < Duration::from_secs(wait) {
-            round(&mut g, &mut rng, &mut load, n, &mut first).await;
-            pass(1).await;
-        }
+    let t3 = Instant::now();
+    let mut last = String::new();
+    while t3.elapsed() < Duration::from_secs(15 * 60) {
+        round(&mut g, &mut rng, &mut load, n, &mut first).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let rows = auto_rows(&c, &db).await;
-        let states: BTreeMap<String, String> = rows
-            .iter()
-            .map(|r| {
-                (
-                    format!("{}.{}", r.table, r.name),
-                    format!(
-                        "{}{}",
-                        r.state,
-                        r.drop_reason
-                            .as_ref()
-                            .map(|d| format!(" ({d})"))
-                            .unwrap_or_default()
-                    ),
-                )
-            })
-            .collect();
-        println!("[day {day}] {states:?}");
-        timeline.push(json!({"day": day, "states": states}));
+        let Some(r) = rows.iter().find(|r| r.name == u_auto) else {
+            continue;
+        };
+        let state = format!(
+            "{}{}",
+            r.state,
+            r.drop_reason
+                .as_ref()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default()
+        );
+        if state != last {
+            println!("[{:.0} s] u.{u_auto}: {state}", t3.elapsed().as_secs_f64());
+            timeline.push(json!({"seconds": t3.elapsed().as_secs(), "state": state}));
+            last = state;
+        }
+        if r.state == "dropped" {
+            break;
+        }
     }
-    set_clock(&c, 0);
     report["unused"] = json!(timeline);
     let rows = auto_rows(&c, &db).await;
     let u_row = rows.iter().find(|r| r.name == u_auto).unwrap();
@@ -930,6 +943,453 @@ async fn chapter_13_scenarios_on_one_topology() {
     if let Some(p) = skip::var("SPRIG_TEST_M04_REPORT") {
         std::fs::write(&p, serde_json::to_string_pretty(&report).unwrap()).unwrap();
     }
+    if skip::var("SPRIG_TEST_M04_KEEP").as_deref() != Some("1") {
+        ddl(&mut g, &format!("DROP DATABASE {db}")).await;
+    }
+    ddl(
+        &mut g,
+        "SPRIG RESET (auto_index.window_hours, auto_index.eval_interval_minutes, \
+         auto_index.p95_threshold_ms, auto_index.max_new_per_day, auto_index.rollout_pause_minutes, \
+         auto_index.cooldown_hours)",
+    )
+    .await;
+    let _ = g.disconnect().await;
+}
+
+// ---- Decision O1: index removal judged by usage, never by days ----------
+
+/// An `index_usage` row: a user or migrated index under decision O1.
+#[derive(Debug, Clone)]
+struct UsageRowT {
+    table: String,
+    name: String,
+    state: String,
+    drop_reason: Option<String>,
+    observed: Json,
+}
+
+async fn usage_rows(c: &Cfg, db: &str) -> Vec<UsageRowT> {
+    let s = format!("t{}_sprig", c.tenant_id);
+    let mut q = catalog(c).await;
+    let rows: Vec<Row> = q
+        .exec(
+            format!(
+                "SELECT o.name, u.index_name, u.state, u.drop_reason, CAST(u.observed AS CHAR) \
+                 FROM `{s}`.index_usage u JOIN `{s}`.objects o ON o.object_id = u.object_id \
+                 JOIN `{s}`.`databases` d ON d.db_id = o.db_id WHERE d.name = ? \
+                 ORDER BY o.name, u.index_name"
+            ),
+            (db,),
+        )
+        .await
+        .unwrap_or_default();
+    let _ = q.disconnect().await;
+    rows.into_iter()
+        .map(|mut r| UsageRowT {
+            table: r.take(0).unwrap(),
+            name: r.take(1).unwrap(),
+            state: r.take(2).unwrap(),
+            drop_reason: r.take(3).unwrap(),
+            observed: serde_json::from_str(&r.take::<String, _>(4).unwrap()).unwrap_or(Json::Null),
+        })
+        .collect()
+}
+
+/// `observed` of an automatic index row.
+async fn auto_observed(c: &Cfg, name: &str) -> Json {
+    let s = format!("t{}_sprig", c.tenant_id);
+    let mut q = catalog(c).await;
+    let v: Option<Option<String>> = q
+        .exec_first(
+            format!("SELECT CAST(observed AS CHAR) FROM `{s}`.auto_indexes WHERE name = ?"),
+            (name,),
+        )
+        .await
+        .unwrap();
+    let _ = q.disconnect().await;
+    v.flatten()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Json::Null)
+}
+
+/// Index name → IGNORED, on the shard (the catalog node is the writer).
+async fn shard_indexes(c: &Cfg, schema: &str, table: &str) -> BTreeMap<String, bool> {
+    let mut q = catalog(c).await;
+    let rows: Vec<(String, String)> = q
+        .exec(
+            "SELECT DISTINCT INDEX_NAME, IGNORED FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+            (schema, table),
+        )
+        .await
+        .unwrap();
+    let _ = q.disconnect().await;
+    rows.into_iter().map(|(n, i)| (n, i == "YES")).collect()
+}
+
+fn sprigctl(c: &Cfg, args: &[&str]) -> (bool, String) {
+    let bin = skip::var("SPRIG_TEST_M04_SPRIGCTL").unwrap_or_else(|| "sprigctl".into());
+    let out = std::process::Command::new(bin)
+        .args(args)
+        .env("SPRIGCTL_TENANT", &c.tenant)
+        .output()
+        .expect("sprigctl runs");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    println!("[sprigctl {}] {}", args.join(" "), text.trim());
+    (out.status.success(), text)
+}
+
+/// Decision O1, live: an automatic index and a user index that serve no
+/// reads are made `IGNORED`, watched for `usage_sample_reads` reads and
+/// dropped; a used user index, the primary key, a `UNIQUE` index and a
+/// foreign key's index are never touched; `retire_user_indexes =
+/// recommend` only recommends; `sprigctl index restore` brings a retiring
+/// index back and recreates a dropped one. Once `(a)`'s query stops, its
+/// remembered savings protect it (the periodic-job rule) until writes to
+/// `a`, at 10 ms per entry change on `u`, cost more. No clock is moved: every
+/// decision is by reads. `usage_sample_reads` is 400 at database scope
+/// and 200 on table `x` (object scope wins); `retire_user_indexes` is `on`
+/// at database scope and `recommend` on table `w` (the dev stack may hold
+/// `recommend` at global scope, for other tenants' sake).
+#[tokio::test]
+#[ignore = "needs the dev gateway and a controller with decision O1 (deploy/compose/m04/run.sh o1)"]
+async fn usage_based_removal_on_one_topology() {
+    let Some(c) = cfg() else { return };
+    let db = unique_ident("o1");
+    println!(
+        "[setup] topology {} tenant {} db {db}",
+        c.topology, c.tenant
+    );
+    let mut g = gw(&c, None).await;
+    ddl(
+        &mut g,
+        "SPRIG SET (auto_index.window_hours = 1, auto_index.eval_interval_minutes = 1, \
+         auto_index.p95_threshold_ms = 5, auto_index.max_new_per_day = 50, \
+         auto_index.rollout_pause_minutes = 0, auto_index.cooldown_hours = 1)",
+    )
+    .await;
+    ddl(&mut g, &format!("CREATE DATABASE {db}")).await;
+    g.query_drop(format!("USE {db}")).await.unwrap();
+    for sql in [
+        "CREATE TABLE p (id INT PRIMARY KEY, name VARCHAR(20) NOT NULL) ENGINE=InnoDB",
+        "CREATE TABLE u (id INT PRIMARY KEY, a INT NOT NULL, b INT NOT NULL, c INT NOT NULL, \
+         p_id INT NOT NULL, pad VARCHAR(100) NOT NULL, UNIQUE KEY uq_u_c (c), KEY ix_u_p (p_id), \
+         KEY idx_u_b (b), KEY idx_u_old (pad(10)), \
+         CONSTRAINT fk_u_p FOREIGN KEY (p_id) REFERENCES p (id)) ENGINE=InnoDB",
+        "CREATE TABLE w (id INT PRIMARY KEY, b INT NOT NULL, pad VARCHAR(100) NOT NULL, \
+         KEY idx_w_old (b)) ENGINE=InnoDB",
+        "CREATE TABLE x (id INT PRIMARY KEY, b INT NOT NULL, pad VARCHAR(100) NOT NULL, \
+         KEY idx_x_old (b)) ENGINE=InnoDB",
+    ] {
+        ddl(&mut g, sql).await;
+    }
+    ddl(
+        &mut g,
+        &format!(
+            "ALTER DATABASE {db} SPRIG SET (auto_index.usage_sample_reads = 400, \
+             auto_index.retire_user_indexes = 'on')"
+        ),
+    )
+    .await;
+    ddl(
+        &mut g,
+        "ALTER TABLE w SPRIG SET (auto_index.retire_user_indexes = 'recommend')",
+    )
+    .await;
+    ddl(
+        &mut g,
+        "ALTER TABLE x SPRIG SET (auto_index.usage_sample_reads = 200)",
+    )
+    .await;
+    let schema = physical(&c, &db).await;
+    fill(&c, &schema, "p", 3000, "SELECT seq, CONCAT('p', seq)").await;
+    fill(
+        &c,
+        &schema,
+        "u",
+        30_000,
+        "SELECT seq, seq % 3000, seq % 100, seq, 1 + seq % 3000, REPEAT('u', 60)",
+    )
+    .await;
+    for t in ["w", "x"] {
+        fill(
+            &c,
+            &schema,
+            t,
+            10_000,
+            "SELECT seq, seq % 100, REPEAT('w', 60)",
+        )
+        .await;
+    }
+    let t0 = Instant::now();
+    let mut rng = Gen(0x0123_4567_89ab_cdef);
+    let mut a_query = true;
+    let mut timeline: Vec<Json> = Vec::new();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    let mut note = |key: String, state: String, extra: Json, t: f64| {
+        if seen.get(&key) != Some(&state) {
+            println!("[{t:>4.0} s] {key}: {state} {extra}");
+            timeline.push(json!({"t_s": t.round(), "index": key, "state": state, "detail": extra}));
+            seen.insert(key, state);
+        }
+    };
+    let mut u_auto: Option<String> = None;
+    let mut restored_x = false;
+    let mut last_poll = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(25 * 60);
+    let mut writes = 0u64;
+    let mut reads = 0u64;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "O1 scenario timed out (see the log)"
+        );
+        // Load: u's reads by b (idx_u_b) and by id; by a until its index
+        // exists and has served a while; writes; w and x by id.
+        for _ in 0..4 {
+            if a_query {
+                g.query_drop(format!("SELECT id, b FROM u WHERE a = {}", rng.next(3000)))
+                    .await
+                    .tolerate();
+            }
+            g.query_drop(format!(
+                "SELECT COUNT(*) FROM u WHERE b = {}",
+                rng.next(100)
+            ))
+            .await
+            .tolerate();
+            g.query_drop(format!(
+                "SELECT pad FROM u WHERE id = {}",
+                1 + rng.next(30_000)
+            ))
+            .await
+            .tolerate();
+            g.query_drop(format!(
+                "SELECT pad FROM w WHERE id = {}",
+                1 + rng.next(10_000)
+            ))
+            .await
+            .tolerate();
+            g.query_drop(format!(
+                "SELECT pad FROM x WHERE id = {}",
+                1 + rng.next(10_000)
+            ))
+            .await
+            .tolerate();
+            reads += 4 + u64::from(a_query);
+        }
+        g.query_drop(format!(
+            "UPDATE u SET pad = REPEAT('v', 60) WHERE id = {}",
+            1 + rng.next(30_000)
+        ))
+        .await
+        .tolerate();
+        writes += 1;
+        if !a_query {
+            // Writes to `a` once its query stopped: (a) now only costs.
+            g.query_drop(format!(
+                "UPDATE u SET a = {} WHERE id = {}",
+                rng.next(3000),
+                1 + rng.next(30_000)
+            ))
+            .await
+            .tolerate();
+            writes += 1;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if last_poll.elapsed() < Duration::from_secs(5) {
+            continue;
+        }
+        last_poll = Instant::now();
+        let t = t0.elapsed().as_secs_f64();
+        let autos = auto_rows(&c, &db).await;
+        if u_auto.is_none()
+            && let Some(r) = autos.iter().find(|r| {
+                r.table == "u"
+                    && built(r)
+                    && parts(&r.definition).first().map(String::as_str) == Some("a")
+            })
+        {
+            u_auto = Some(r.name.clone());
+        }
+        for r in autos.iter().filter(|r| r.table == "u") {
+            let o = auto_observed(&c, &r.name).await;
+            note(
+                format!("u.{} (auto)", r.name),
+                format!(
+                    "{}{}",
+                    r.state,
+                    r.drop_reason
+                        .as_ref()
+                        .map(|d| format!(" ({d})"))
+                        .unwrap_or_default()
+                ),
+                json!({"usage": o["usage"]["last"], "retire_reads": o["retire"]["reads"]}),
+                t,
+            );
+        }
+        let users = usage_rows(&c, &db).await;
+        for r in &users {
+            note(
+                format!("{}.{} (user)", r.table, r.name),
+                format!(
+                    "{}{}",
+                    r.state,
+                    r.drop_reason
+                        .as_ref()
+                        .map(|d| format!(" ({d})"))
+                        .unwrap_or_default()
+                ),
+                json!({"usage": r.observed["usage"]["last"], "retire_reads": r.observed["retire"]["reads"]}),
+                t,
+            );
+        }
+        // Once (a) has served for a minute, its query stops.
+        if a_query
+            && let Some(name) = &u_auto
+            && autos.iter().any(|r| &r.name == name && built(r))
+            && auto_observed(&c, name).await["usage"]["verdict"] == "keep"
+        {
+            println!(
+                "[{t:>4.0} s] (a) kept by usage; its query stops now, writes to a begin, \
+                 and an entry change costs 10 ms on u"
+            );
+            a_query = false;
+            // The query (a) served is remembered (a periodic job, as far as
+            // the rule knows) and still in the workload store, so its
+            // savings count until the writes cost more (decision O1).
+            ddl(
+                &mut g,
+                "ALTER TABLE u SPRIG SET (auto_index.maintenance_cost_ms = 10)",
+            )
+            .await;
+        }
+        // x's unused index is retiring: restore it (x keeps being read).
+        let state_of = |t: &str, n: &str| {
+            users
+                .iter()
+                .find(|r| r.table == t && r.name == n)
+                .map(|r| r.state.clone())
+        };
+        if !restored_x && state_of("x", "idx_x_old").as_deref() == Some("retiring") {
+            assert_eq!(
+                shard_indexes(&c, &schema, "x").await.get("idx_x_old"),
+                Some(&true)
+            );
+            let (ok, out) = sprigctl(&c, &["index", "restore", &format!("{db}.x.idx_x_old")]);
+            assert!(ok, "restore x: {out}");
+            assert_eq!(
+                shard_indexes(&c, &schema, "x").await.get("idx_x_old"),
+                Some(&false)
+            );
+            restored_x = true;
+        }
+        let u_done = u_auto
+            .as_ref()
+            .is_some_and(|n| autos.iter().any(|r| &r.name == n && r.state == "dropped"))
+            && state_of("u", "idx_u_old").as_deref() == Some("dropped");
+        if u_done && restored_x && state_of("w", "idx_w_old").as_deref() == Some("recommended") {
+            break;
+        }
+    }
+    let t_end = t0.elapsed().as_secs_f64();
+    println!("[{t_end:>4.0} s] {reads} reads, {writes} writes through the gateway");
+
+    // Restore of a dropped user index: recreated from its definition, pinned.
+    let (ok, out) = sprigctl(&c, &["index", "restore", &format!("{db}.u.idx_u_old")]);
+    assert!(ok, "restore u: {out}");
+    let (_, listing) = sprigctl(&c, &["index", "list", "--db", &db, "--all"]);
+
+    // Keep loading a little: pinned ones stay.
+    for _ in 0..300 {
+        g.query_drop(format!(
+            "SELECT pad FROM x WHERE id = {}",
+            1 + rng.next(10_000)
+        ))
+        .await
+        .tolerate();
+        g.query_drop(format!(
+            "SELECT pad FROM u WHERE id = {}",
+            1 + rng.next(30_000)
+        ))
+        .await
+        .tolerate();
+    }
+    tokio::time::sleep(Duration::from_secs(70)).await;
+
+    let users = usage_rows(&c, &db).await;
+    let st = |t: &str, n: &str| {
+        users
+            .iter()
+            .find(|r| r.table == t && r.name == n)
+            .map(|r| r.state.clone())
+    };
+    let u_ix = shard_indexes(&c, &schema, "u").await;
+    let x_ix = shard_indexes(&c, &schema, "x").await;
+    let w_ix = shard_indexes(&c, &schema, "w").await;
+    let autos = auto_rows(&c, &db).await;
+    let u_auto = u_auto.expect("(a) built on u");
+    let a_row = autos.iter().find(|r| r.name == u_auto).unwrap();
+    let report = json!({
+        "topology": c.topology,
+        "tenant": c.tenant,
+        "seconds": t_end.round(),
+        "reads": reads,
+        "writes": writes,
+        "timeline": timeline,
+        "final": {
+            "auto": {"index": u_auto, "state": a_row.state, "drop_reason": a_row.drop_reason,
+                     "observed": auto_observed(&c, &u_auto).await},
+            "user": users.iter().map(|r| json!({"table": r.table, "index": r.name,
+                     "state": r.state, "drop_reason": r.drop_reason})).collect::<Vec<_>>(),
+            "u_indexes_ignored": u_ix, "w_indexes_ignored": w_ix, "x_indexes_ignored": x_ix,
+        },
+        "sprigctl_index_list": listing,
+    });
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    if let Some(p) = skip::var("SPRIG_TEST_M04_REPORT") {
+        std::fs::write(&p, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    }
+
+    // The automatic index: ignored, watched by reads, dropped as unused.
+    assert_eq!(a_row.state, "dropped");
+    assert_eq!(a_row.drop_reason.as_deref(), Some("unused"));
+    assert!(!u_ix.contains_key(&u_auto));
+    assert!(
+        timeline.iter().any(
+            |e| e["index"] == format!("u.{u_auto} (auto)") && e["state"] == "retiring (unused)"
+        ),
+        "{timeline:#?}"
+    );
+    // The used user index stays visible; the protected ones never get a
+    // row and are never ignored.
+    assert_eq!(st("u", "idx_u_b").as_deref(), Some("serving"));
+    for p in ["PRIMARY", "uq_u_c", "ix_u_p", "idx_u_b"] {
+        assert_eq!(u_ix.get(p), Some(&false), "u.{p}: {u_ix:?}");
+        if p != "idx_u_b" {
+            assert!(st("u", p).is_none(), "u.{p} has a row");
+        }
+    }
+    // The unused user index: retiring, then dropped; restore recreated it.
+    assert!(
+        timeline
+            .iter()
+            .any(|e| e["index"] == "u.idx_u_old (user)" && e["state"] == "dropped (unused)"),
+        "{timeline:#?}"
+    );
+    assert_eq!(st("u", "idx_u_old").as_deref(), Some("pinned"));
+    assert_eq!(u_ix.get("idx_u_old"), Some(&false));
+    // recommend: only recommended, still visible.
+    assert_eq!(st("w", "idx_w_old").as_deref(), Some("recommended"));
+    assert_eq!(w_ix.get("idx_w_old"), Some(&false));
+    // Restored while retiring: visible and pinned, through more reads.
+    assert_eq!(st("x", "idx_x_old").as_deref(), Some("pinned"));
+    assert_eq!(x_ix.get("idx_x_old"), Some(&false));
+
     if skip::var("SPRIG_TEST_M04_KEEP").as_deref() != Some("1") {
         ddl(&mut g, &format!("DROP DATABASE {db}")).await;
     }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sprig_advisor::autoindex::cost::BUILD_LOAD_SHARE;
 use sprig_advisor::autoindex::model::{IndexDef, KeyPart, PartSource, Role};
 use sprig_advisor::autoindex::policy::{Mode, ObjectPolicy};
+use sprig_advisor::autoindex::store::usage::{UsageRow, UserIndexState};
 use sprig_advisor::autoindex::store::{
     AutoIndexRow, CandidateRow, CandidateStatus, IndexState, ValidationRow,
 };
@@ -116,6 +117,11 @@ pub struct IndexView {
     pub created_at: String,
     /// Last state change.
     pub state_changed_at: String,
+    /// `user` or `migrated` for an index the user created or migrated whose
+    /// removal automatic indexing manages (decision O1); absent for
+    /// automatic indexes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// A validation (`auto_index_validations`), without per-statement
@@ -475,6 +481,139 @@ pub fn index_view(r: &AutoIndexRow, names: &ObjectNames, cand: Option<&Candidate
         last_used_at: r.last_used_at.map(time),
         created_at: time(r.created_at),
         state_changed_at: time(r.state_changed_at),
+        origin: None,
+    }
+}
+
+/// The view of a user or migrated index's `index_usage` row (decision O1):
+/// no id (it is named by `[<db>.][<table>.]<name>`), no estimates.
+#[must_use]
+pub fn user_index_view(r: &UsageRow, names: &ObjectNames) -> IndexView {
+    let (db, table) = names.of(r.object);
+    let columns = r
+        .definition
+        .find('(')
+        .zip(r.definition.rfind(')'))
+        .filter(|(a, b)| a < b)
+        .map(|(a, b)| {
+            r.definition[a + 1..b]
+                .split(',')
+                .map(|c| c.trim().replace('`', ""))
+                .collect()
+        })
+        .unwrap_or_default();
+    IndexView {
+        index_id: 0,
+        db: db.clone(),
+        table: table.clone(),
+        object_id: r.object.0,
+        name: r.index_name.clone(),
+        model: "sql".into(),
+        kind: "btree".into(),
+        columns,
+        ddl: (!r.definition.is_empty()).then(|| {
+            format!(
+                "ALTER TABLE {}.{} ADD {}",
+                quote(&db),
+                quote(&table),
+                r.definition
+            )
+        }),
+        state: r.state.to_string(),
+        prior_state: None,
+        drop_reason: r.drop_reason.clone(),
+        est_benefit_ms_h: 0.0,
+        est_write_ms_h: 0.0,
+        est_net_ms_h: 0.0,
+        est_bytes: 0,
+        actual_bytes: None,
+        shards: BTreeMap::new(),
+        fingerprints: Vec::new(),
+        observed: Some(r.observed.clone()),
+        candidate_id: 0,
+        validation_id: None,
+        last_used_at: None,
+        created_at: time(r.created_at),
+        state_changed_at: time(r.state_changed_at),
+        origin: Some(r.origin.as_str().to_owned()),
+    }
+}
+
+/// What `restore`, `pin` or `unpin` does to a user or migrated index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserPlan {
+    /// Move to `to`, running `ddl` on every shard first (`NOT IGNORED`,
+    /// or adding it back).
+    Move {
+        /// The state the row must still be in.
+        from: UserIndexState,
+        /// The new state.
+        to: UserIndexState,
+        /// What to run on each shard.
+        ddl: UserDdl,
+        /// What happens next, for the operator.
+        message: String,
+    },
+    /// Nothing to do.
+    Noop(String),
+    /// Refused (39202): why.
+    Refuse(String),
+}
+
+/// The shard statement of a [`UserPlan::Move`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserDdl {
+    /// None.
+    None,
+    /// `ALTER INDEX x NOT IGNORED`.
+    Visible,
+    /// `ADD <saved definition>`.
+    Recreate,
+}
+
+/// What `a` does to a user or migrated index in state `r.state`.
+#[must_use]
+pub fn plan_user_action(r: &UsageRow, a: Action) -> UserPlan {
+    use UserIndexState as U;
+    let s = r.state;
+    let refuse = |why: &str| UserPlan::Refuse(format!("{} is {s}: {why}", r.index_name));
+    let pinned =
+        "pinned: visible, and never removed by automatic indexing until sprigctl index unpin";
+    match a {
+        Action::Restore | Action::Pin => match s {
+            U::Pinned => UserPlan::Noop(format!("{} is already pinned", r.index_name)),
+            U::Retiring => UserPlan::Move {
+                from: s,
+                to: U::Pinned,
+                ddl: UserDdl::Visible,
+                message: format!("made visible again (NOT IGNORED) and {pinned}"),
+            },
+            U::Dropped if a == Action::Restore => UserPlan::Move {
+                from: s,
+                to: U::Pinned,
+                ddl: UserDdl::Recreate,
+                message: format!("recreated from its saved definition and {pinned}"),
+            },
+            U::Dropped => refuse("it was dropped; restore it instead"),
+            U::Serving | U::Recommended => UserPlan::Move {
+                from: s,
+                to: U::Pinned,
+                ddl: UserDdl::None,
+                message: pinned.into(),
+            },
+        },
+        Action::Unpin => match s {
+            U::Pinned => UserPlan::Move {
+                from: s,
+                to: U::Serving,
+                ddl: UserDdl::None,
+                message: "unpinned: judged by its usage again from now".into(),
+            },
+            _ => UserPlan::Noop(format!("{} isn't pinned", r.index_name)),
+        },
+        Action::Approve | Action::Reject | Action::Drop => refuse(
+            "a user or migrated index is only restored, pinned or unpinned here;              drop it with DROP INDEX",
+        ),
     }
 }
 
@@ -966,6 +1105,9 @@ pub enum Action {
     Pin,
     /// Restore the state it was pinned in (`freeze --off`).
     Unpin,
+    /// Make a retiring (`IGNORED`) index visible again, or recreate a user
+    /// index dropped for disuse, and pin it (decision O1).
+    Restore,
 }
 
 impl Action {
@@ -978,6 +1120,7 @@ impl Action {
             Action::Drop => "drop",
             Action::Pin => "pin",
             Action::Unpin => "unpin",
+            Action::Restore => "restore",
         }
     }
 
@@ -990,6 +1133,7 @@ impl Action {
             "drop" => Action::Drop,
             "pin" | "freeze" => Action::Pin,
             "unpin" | "unfreeze" => Action::Unpin,
+            "restore" => Action::Restore,
             _ => return None,
         })
     }
@@ -1012,6 +1156,9 @@ pub enum Plan {
     },
     /// Restore the pinned state.
     Unfreeze,
+    /// `retiring → active`, `NOT IGNORED` on every shard, then
+    /// `active → frozen` (decision O1's restore).
+    Restore,
     /// Nothing to do: it already is so.
     Noop(String),
     /// Refused (39202): why.
@@ -1085,6 +1232,23 @@ pub fn plan_action(r: &AutoIndexRow, a: Action) -> Plan {
         Action::Unpin => match s {
             S::Frozen => Plan::Unfreeze,
             _ => Plan::Noop(format!("{} isn't pinned", r.name)),
+        },
+        Action::Restore => match s {
+            S::Retiring => Plan::Restore,
+            S::Observing | S::Active => Plan::Move {
+                from: s,
+                to: S::Frozen,
+                drop_reason: None,
+                message: format!(
+                    "visible already; pinned in {s}: never removed until sprigctl index unpin"
+                ),
+            },
+            S::Frozen => Plan::Noop(format!("{} is already pinned", r.name)),
+            S::Dropped | S::Dropping => refuse(
+                "an automatic index isn't recreated by hand; evaluation proposes it again \
+                 when a query needs it",
+            ),
+            _ => refuse("only a retiring (IGNORED) or serving index can be restored"),
         },
     }
 }

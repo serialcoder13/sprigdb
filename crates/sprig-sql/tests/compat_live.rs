@@ -245,7 +245,7 @@ async fn checks(c: &mut MysqlClient) {
     let v = view(c, my, "SELECT * FROM information_schema.SCHEMATA").await;
     assert_eq!(v.0.last().map(String::as_str), Some("DEFAULT_ENCRYPTION"));
 
-    // Keywords: MySQL's list on 3306, MariaDB's with RESERVED on 3307.
+    // Keywords: MySQL 8.4's list on 3306.
     let v = view(
         c,
         my,
@@ -253,15 +253,6 @@ async fn checks(c: &mut MysqlClient) {
     )
     .await;
     assert_eq!(v.1.len(), 262);
-    let v = view(
-        c,
-        Persona::MariaDb,
-        "SELECT WORD, RESERVED FROM information_schema.KEYWORDS WHERE WORD IN ('SELECT', 'ACCOUNT')",
-    )
-    .await;
-    let mut rows: Vec<String> = v.1.iter().map(|r| s(r).join("|")).collect();
-    rows.sort();
-    assert_eq!(rows, ["ACCOUNT|0", "SELECT|1"]);
 
     // mysqldump 8.4's query, collations and character sets.
     let v = view(

@@ -445,10 +445,17 @@ pub(crate) async fn relay(
                                 out.raw_row(row).await?;
                             }
                         }
-                        RowFormat::Binary => match n.scrub_binary(&p.payload, &cols) {
-                            Some(row) => out.raw_row(row).await?,
-                            None => out.raw_row(p.payload).await?,
-                        },
+                        RowFormat::Binary => {
+                            let row = n.scrub_binary(&p.payload, &cols).unwrap_or(p.payload);
+                            // SHOW STATUS prepared (Prisma's raw queries):
+                            // the client's own connection rows.
+                            let row = r
+                                .conn_status
+                                .filter(|_| want == 2)
+                                .and_then(|cs| cs.rewrite_binary(&row, &defs, r.backend_caps))
+                                .unwrap_or(row);
+                            out.raw_row(row).await?;
+                        }
                     }
                     continue;
                 }

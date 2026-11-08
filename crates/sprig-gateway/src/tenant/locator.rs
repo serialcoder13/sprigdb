@@ -34,6 +34,8 @@ use crate::backend::Backends;
 
 /// Connections per cluster for catalog work and database DDL.
 const POOL_MAX: usize = 4;
+/// How long an idle `sprig_ctl` connection stays open.
+const IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Finds tenants' catalogs and data clusters (see the module docs).
 pub struct GatewayLocator {
@@ -182,7 +184,17 @@ impl GatewayLocator {
         let constraints = PoolConstraints::new(0, POOL_MAX).unwrap_or_default();
         let pool = Pool::new(
             OptsBuilder::from_opts(ep.opts)
-                .pool_opts(PoolOpts::new().with_constraints(constraints)),
+                // Idle connections are kept (up to POOL_MAX) for a minute.
+                // With mysql_async's default TTL of 0, every connection
+                // returned to a pool with a minimum of 0 is closed, so each
+                // catalog read or login-state write opened a new connection
+                // (found in M0.7: thousands of TIME_WAIT sockets per minute
+                // under HTTP load, one per request).
+                .pool_opts(
+                    PoolOpts::new()
+                        .with_constraints(constraints)
+                        .with_inactive_connection_ttl(IDLE_TTL),
+                ),
         );
         let old = self
             .pools

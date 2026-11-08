@@ -126,7 +126,11 @@ async fn kill(
             return match peers.kill(id, query_only, tenant, user).await {
                 Ok(crate::peer::KillOutcome::Done) => sink.ok(OkPacket::new(env.status)).await,
                 Ok(crate::peer::KillOutcome::NotOwner) => sink.error(&not_owner()).await,
-                Ok(crate::peer::KillOutcome::Unknown) | Err(_) => sink.error(&unknown()).await,
+                Ok(crate::peer::KillOutcome::Unknown) => sink.error(&unknown()).await,
+                Err(e) => {
+                    tracing::warn!(%id, error = %e, "KILL through the peer service failed");
+                    sink.error(&unknown()).await
+                }
             };
         }
         return sink.error(&unknown()).await;

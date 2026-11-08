@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde_json.workspace = true
 sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true

@@ -24,6 +24,7 @@
 pub mod constraints;
 pub mod decisions;
 pub mod explain;
+pub mod judge;
 pub mod load;
 pub mod model;
 pub mod mover;

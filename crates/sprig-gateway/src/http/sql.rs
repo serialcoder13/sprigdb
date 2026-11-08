@@ -249,6 +249,8 @@ pub struct SqlEngine {
     pub(crate) peers: Option<Arc<crate::peer::Peers>>,
     pub(crate) txns: TxnRegistry,
     pub(crate) draining: Arc<AtomicBool>,
+    /// Memory charges for buffered results (chapter 04 step 7).
+    pub(crate) limiter: Option<Arc<crate::limits::Limiter>>,
 }
 
 impl std::fmt::Debug for SqlEngine {
@@ -265,6 +267,14 @@ fn interrupted() -> SprigError {
 }
 
 impl SqlEngine {
+    /// A memory charge for what `caller`'s buffered reply holds.
+    #[must_use]
+    pub fn charge(&self, caller: &Caller) -> Option<crate::limits::MemCharge> {
+        self.limiter
+            .as_ref()
+            .map(|l| l.charge(caller.principal.tenant, &caller.principal.user))
+    }
+
     /// The values requests use now.
     #[must_use]
     pub fn settings(&self) -> ApiSettings {
@@ -652,9 +662,11 @@ impl SqlEngine {
                 .cloned()
                 .collect();
             for e in overdue {
-                e.expired.store(true, Ordering::SeqCst);
-                self.txns.remember_expired(e.handle.session);
+                // The idle deadline doesn't run while a call does: a busy
+                // handle expires only at its lifetime.
                 if let Ok(mut guard) = e.live.try_lock() {
+                    e.expired.store(true, Ordering::SeqCst);
+                    self.txns.remember_expired(e.handle.session);
                     let live = guard.take();
                     drop(guard);
                     self.close_entry(&e, live).await;
@@ -662,6 +674,8 @@ impl SqlEngine {
                 } else if now >= e.deadline {
                     // A call is running past the lifetime: stop it; the
                     // call closes the handle when it returns.
+                    e.expired.store(true, Ordering::SeqCst);
+                    self.txns.remember_expired(e.handle.session);
                     e.session.flags().kill_query();
                 }
             }
@@ -686,13 +700,21 @@ impl SqlEngine {
 ///
 /// # Errors
 /// The run's error; 39785 past `max_bytes`.
-pub async fn collect(mut rx: mpsc::Receiver<Item>, max_bytes: usize) -> Result<ExecuteResponse> {
+pub async fn collect(
+    mut rx: mpsc::Receiver<Item>,
+    max_bytes: usize,
+    mut charge: Option<crate::limits::MemCharge>,
+) -> Result<ExecuteResponse> {
     let mut parts: Vec<QueryResponse> = Vec::new();
     let mut size = 0usize;
     while let Some(item) = rx.recv().await {
         match item {
             Item::Part(p) => {
-                size += prost::Message::encoded_len(&p);
+                let n = prost::Message::encoded_len(&p);
+                size += n;
+                if let Some(c) = charge.as_mut() {
+                    c.grow(n)?;
+                }
                 if size > max_bytes {
                     return Err(SprigError::new(
                         SprigCode::ResultTooLarge,

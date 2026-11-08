@@ -38,6 +38,19 @@ fn registry_records_become_placement_views() {
     );
 }
 
+#[test]
+fn gateway_counters_become_rates() {
+    let g = GatewayLoad::from_sums(600, 1_200_000, 300, 1_000, 1_060);
+    assert_eq!(g.statements_per_sec, 10.0);
+    assert_eq!(g.busy_ms_per_sec, 20.0);
+    assert_eq!(g.write_rows_per_sec, 5.0);
+    // Too short a span to say anything.
+    assert_eq!(
+        GatewayLoad::from_sums(600, 1, 1, 1_055, 1_060),
+        GatewayLoad::default()
+    );
+}
+
 /// Live: `SPRIG_TEST_MARIADB_SINGLE`. Two registered clusters (both the
 /// Compose single node), three tenants' catalogs mapped to the first, a
 /// planning run, and `explain placement`. Schemas `t917000N_placement`

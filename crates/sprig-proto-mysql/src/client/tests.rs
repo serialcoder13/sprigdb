@@ -385,3 +385,27 @@ async fn closed_connection_breaks_the_client() {
     ));
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn closed_while_idle_sees_a_server_that_left() {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let (client, task) = connect_with(auth::NATIVE, |mut s| {
+        tokio::spawn(async move {
+            let _ = recv(&mut s).await;
+            reply(&mut s, ok_with(StatusFlags::AUTOCOMMIT, &[])).await;
+            // Idle until told, then gone (KILL CONNECTION, a restart).
+            let _ = rx.await;
+            drop(s);
+        })
+    })
+    .await;
+    let mut c = client.unwrap();
+    assert!(!c.closed_while_idle(), "a live idle connection");
+    assert!(c.is_idle());
+    tx.send(()).unwrap();
+    task.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(c.closed_while_idle());
+    assert!(c.is_broken());
+    assert!(!c.is_idle());
+}

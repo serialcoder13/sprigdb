@@ -35,7 +35,7 @@ SPRIG_TEST_M05_B="mysql://globex.app:$pw@127.0.0.1:13307" \
 SPRIG_TEST_M05_MYSQL_PORT=13306 \
 SPRIG_TEST_M05_SECOND=127.0.0.1:13317 \
 SPRIG_TEST_M05_BACKEND=mysql://root:sprig-dev-root@127.0.0.1:13301 \
-SPRIG_TEST_M05_REPORT="$results/report.jsonl" \
+SPRIG_TEST_M05_REPORT="$PWD/$results/report.jsonl" \
     cargo test -q --locked -p sprig-testkit --test m05_isolation -- --ignored --nocapture 2>&1 |
     tee "$results/suite.log"
 exit "${PIPESTATUS[0]}"

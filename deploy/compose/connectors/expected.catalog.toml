@@ -1,0 +1,39 @@
+# Expected outcomes for the connector matrix through the gateway in catalog
+# (tenant) mode, merged over expected.toml with SPRIG_CONN_EXPECTED_OVERLAY.
+# A tenant user, a database the tenant created first, and no server setup:
+#
+#   mysql -h 127.0.0.1 -P 13306 -u acme.app -psprig-dev-app --ssl-mode=REQUIRED \
+#     -e 'CREATE DATABASE IF NOT EXISTS sprig_conn'
+#   SPRIG_CONN_USER=acme.app SPRIG_CONN_PASSWORD=sprig-dev-app SPRIG_CONN_SETUP=0 \
+#   SPRIG_CONN_EXPECTED_OVERLAY=deploy/compose/connectors/expected.catalog.toml \
+#     deploy/compose/connectors/run.sh 127.0.0.1 13306 mysql \
+#     hibernate hibernate-mariadb sqlalchemy-pymysql sqlalchemy-mysqlclient prisma
+#
+# Checked on 8 November 2026 for the ORMs above, on both ports and both TLS
+# modes (milestone M0.5, chapter 28's R0 translator). The other connectors
+# keep expected.gateway.toml's entries until they are run in this mode.
+#
+# 3306: Hibernate with both Connector/Js, SQLAlchemy and Prisma pass every
+# check. The translator answers information_schema.KEYWORDS with MySQL 8.4's
+# list, reports JSON columns as json (information_schema, SHOW COLUMNS, SHOW
+# CREATE TABLE, type 245 in result metadata), rewrites CAST(? AS JSON), and
+# reads a foreign key's default rule as NO ACTION (decisions/mysql-persona-gaps.md
+# rows 2, 3 and 6).
+#
+# 3307 behaves as MariaDB 11.8 does: expected.toml's [mariadb.hibernate] and
+# [mariadb.hibernate-mariadb] schema_validate failures stand (MariaDB's JSON
+# is LONGTEXT, and its KEYWORDS has no RESERVED column).
+
+[mysql."*"]
+# D7: performance_schema is off on the MariaDB backends (R4).
+conn_attrs = "skip"
+
+[mysql.mysql-connector-j]
+# D8 (expected.gateway.toml): needs the R4 translator.
+prepared_biginteger = "fail"
+
+[mysql.mariadb-dump]
+# Behind the gateway the backend is MariaDB, so the restore works.
+restore = "pass"
+checksum = "pass"
+objects = "pass"

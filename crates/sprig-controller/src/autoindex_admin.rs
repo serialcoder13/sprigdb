@@ -12,6 +12,7 @@
 //! | `Indexes.Reject` (`Dismiss`) | `POST .../indexes/{index}:reject` |
 //! | `Indexes.Drop` | `POST .../indexes/{index}:drop` |
 //! | `Indexes.Pin` (`Freeze`), `Unpin` | `POST .../indexes/{index}:pin`, `:unpin` |
+//! | `Indexes.Restore` | `POST .../indexes/{index}:restore` |
 //! | `Explain.ExplainQuery` | `GET /admin/v1/tenants/{name}/queries/{fingerprint}:explain` |
 //!
 //! `{index}` is an `auto_indexes.index_id`, or a name: `sprig_auto_<hex>`,
@@ -33,6 +34,16 @@
 //!   step removes it from every shard (also blocked from re-creation).
 //! - **pin** / **unpin**: chapter 13's `freeze` and `freeze --off`: any
 //!   live state → `frozen` (the prior state kept) and back.
+//! - **restore** (decision O1): a `retiring` index is made visible again
+//!   (`NOT IGNORED` on every shard) and pinned; a serving one is pinned. For
+//!   a user or migrated index (an `index_usage` row, named by
+//!   `[<db>.][<table>.]<name>`) a dropped one is recreated from its saved
+//!   definition first. Pinned user indexes are never judged again until
+//!   `unpin`. Restore runs the shard statements itself, so the service
+//!   needs the loop's [`AutoIndexEnv`] (`with_env`).
+//!
+//! `list` also shows user and migrated indexes whose removal is under way
+//! or recommended, or that were removed or pinned (with `origin`).
 //!
 //! Every action is logged as a `decision` event (chapter 11's `decisions`
 //! table doesn't exist yet), with the actor (`op:<actor>`) and reason.
@@ -56,25 +67,30 @@ use std::time::{Duration, SystemTime};
 
 use mysql_async::Conn;
 use serde::{Deserialize, Serialize};
+use sprig_advisor::autoindex::observe::{self, user};
 use sprig_advisor::autoindex::policy::{Layered, ObjectPolicy};
+use sprig_advisor::autoindex::rollout::ShardTable;
+use sprig_advisor::autoindex::rollout::node::ignore_sql;
+use sprig_advisor::autoindex::store::usage::{UsageRow, UserIndexState};
 use sprig_advisor::autoindex::store::{
     AUTOINDEX_MODULE, AutoIndexRow, AutoIndexStore, CandidateRow, DecisionLog, IndexDecision,
-    LogDecisions, StateChange,
+    IndexState, LogDecisions, StateChange,
 };
 use sprig_catalog::cache::{Loaded, TenantCatalog};
 use sprig_catalog::ddl::backend::DdlBackend;
 use sprig_catalog::migrate::MigrateOpts;
 use sprig_catalog::{CatalogLocator, MariaCatalog, Migrator};
-use sprig_common::ids::{DcId, Fingerprint, TenantId};
+use sprig_common::ids::{DcId, Fingerprint, ObjectId, TenantId};
 use sprig_common::time::Clock;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_settings::{LiveSettings, Registry};
 
 use crate::admin::invalid;
+use crate::autoindex_loop::AutoIndexEnv;
 use crate::tree::{Directory, TenantState};
 use view::{
     Action, Evidence, IndexActionRequest, IndexActionResponse, IndexDetail, ListIndexesResponse,
-    ObjectNames, Plan, QueryExplanation,
+    ObjectNames, Plan, QueryExplanation, UserDdl, UserPlan,
 };
 
 /// How far back `explain` reads candidates: `workload.retention_days`'s
@@ -228,6 +244,49 @@ pub fn resolve_index<'r>(
     }
 }
 
+/// The `index_usage` row a `[<db>.][<table>.]<name>` reference names,
+/// `None` when none does.
+///
+/// # Errors
+/// 39792 when it names several (on several tables).
+pub fn resolve_user_index(
+    rows: &[UsageRow],
+    names: &ObjectNames,
+    reference: &str,
+) -> Result<Option<UsageRow>> {
+    let parts: Vec<&str> = reference.rsplitn(3, '.').collect();
+    let (name, table, db) = match parts.as_slice() {
+        [n] => (*n, None, None),
+        [n, t] => (*n, Some(*t), None),
+        [n, t, d] => (*n, Some(*t), Some(*d)),
+        _ => return Ok(None),
+    };
+    let found: Vec<&UsageRow> = rows
+        .iter()
+        .filter(|r| r.index_name.eq_ignore_ascii_case(name))
+        .filter(|r| {
+            let (d, t) = names.of(r.object);
+            table.is_none_or(|x| x.eq_ignore_ascii_case(&t))
+                && db.is_none_or(|x| x.eq_ignore_ascii_case(&d))
+        })
+        .collect();
+    match found.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some((*one).clone())),
+        many => Err(invalid(format!(
+            "{reference:?} names {} indexes ({}); use <db>.<table>.<name>",
+            many.len(),
+            many.iter()
+                .map(|r| {
+                    let (d, t) = names.of(r.object);
+                    format!("{d}.{t}.{}", r.index_name)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 /// Filters `rows` by `q`.
 ///
 /// # Errors
@@ -275,6 +334,7 @@ pub struct AutoIndexService {
     live: LiveSettings,
     decisions: Arc<dyn DecisionLog>,
     clock: Arc<dyn Clock>,
+    env: Option<Arc<dyn AutoIndexEnv>>,
 }
 
 impl std::fmt::Debug for AutoIndexService {
@@ -312,7 +372,163 @@ impl AutoIndexService {
             live,
             decisions: Arc::new(LogDecisions),
             clock,
+            env: None,
         }
+    }
+
+    /// The same service reaching shards through `env` (for `restore`).
+    #[must_use]
+    pub fn with_env(mut self, env: Arc<dyn AutoIndexEnv>) -> Self {
+        self.env = Some(env);
+        self
+    }
+
+    /// Runs one statement per shard of `object` (`restore`).
+    async fn on_shards(
+        &self,
+        t: &TenantRead,
+        object: ObjectId,
+        sql: impl Fn(&ShardTable) -> Result<String>,
+    ) -> Result<()> {
+        let env = self.env.as_ref().ok_or_else(|| {
+            invalid("this controller can't reach the tenant's clusters; restore on the DC leader")
+        })?;
+        let envs = env.objects(t.id, &[object].into()).await?;
+        let o = envs
+            .get(&object)
+            .ok_or_else(|| invalid(format!("table {} has no shards", object.0)))?;
+        let w = o
+            .view
+            .nodes
+            .writer()
+            .ok_or_else(|| invalid("the cluster has no writer now; try again"))?;
+        for sh in &o.shards {
+            observe::run_ddl(w, &sql(sh)?, &o.rollout)
+                .await
+                .map_err(|e| {
+                    SprigError::new(
+                        SprigCode::AutoIndexStateInvalid,
+                        format!("on {}: {e}", sh.shard),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    /// `act` on a user or migrated index (decision O1).
+    #[allow(clippy::too_many_lines)] // plan, shard statement, state, decision
+    async fn act_user(
+        &self,
+        t: &mut TenantRead,
+        r: &UsageRow,
+        action: Action,
+        req: &IndexActionRequest,
+    ) -> Result<IndexActionResponse> {
+        let now = self.clock.wall();
+        let (changed, message, to) = match view::plan_user_action(r, action) {
+            UserPlan::Refuse(why) => {
+                return Err(SprigError::new(SprigCode::AutoIndexStateInvalid, why));
+            }
+            UserPlan::Noop(m) => (false, m, r.state),
+            UserPlan::Move {
+                from,
+                to,
+                ddl,
+                message,
+            } => {
+                let name = r.index_name.clone();
+                match ddl {
+                    UserDdl::None => {}
+                    UserDdl::Visible => {
+                        self.on_shards(t, r.object, |sh| user::ignore_user_sql(sh, &name, false))
+                            .await?;
+                    }
+                    UserDdl::Recreate => {
+                        let clause = r.definition.clone();
+                        self.on_shards(t, r.object, |sh| user::add_user_sql(sh, &name, &clause))
+                            .await?;
+                    }
+                }
+                if to == UserIndexState::Serving {
+                    let mut us: observe::UsageState = serde_json::from_value(
+                        r.observed.get("usage").cloned().unwrap_or_default(),
+                    )
+                    .unwrap_or_default();
+                    us.since_ms = sprig_advisor::autoindex::rollout::unix_ms(now);
+                    us.reads = 0;
+                    let mut o = r.observed.clone();
+                    if let Some(m) = o.as_object_mut() {
+                        m.insert(
+                            "usage".into(),
+                            serde_json::to_value(&us).unwrap_or_default(),
+                        );
+                    }
+                    t.store
+                        .set_usage_observed(&mut t.conn, r.object, &name, &o)
+                        .await?;
+                }
+                let reason = (to == UserIndexState::Pinned).then_some("operator");
+                if !t
+                    .store
+                    .set_usage_state(&mut t.conn, r.object, &name, from, to, reason, now)
+                    .await?
+                {
+                    return Err(SprigError::new(
+                        SprigCode::AutoIndexStateInvalid,
+                        format!("{name} changed while the call ran (it was {from}); look again"),
+                    ));
+                }
+                (true, message, to)
+            }
+        };
+        let after = t
+            .store
+            .usage_rows(&mut t.conn, Some(r.object))
+            .await?
+            .into_iter()
+            .find(|x| x.index_name == r.index_name)
+            .unwrap_or_else(|| r.clone());
+        if changed {
+            let actor = format!(
+                "op:{}",
+                req.actor
+                    .as_deref()
+                    .filter(|a| !a.is_empty())
+                    .unwrap_or("admin")
+            );
+            let (db, table) = t.names.of(r.object);
+            let d = IndexDecision {
+                tenant: t.id,
+                kind: "index.restore",
+                subject_type: "index",
+                subject_id: format!("{}/{}", r.object, r.index_name),
+                mode: "applied",
+                outcome: "succeeded",
+                reason_code: format!("operator:{}", action.as_str()),
+                summary: format!(
+                    "{actor} {} {} ({}) on {db}.{table}: {} -> {to}",
+                    action.as_str(),
+                    r.index_name,
+                    r.origin.as_str(),
+                    r.state
+                ),
+                evidence: serde_json::json!({"actor": actor, "reason": req.reason}),
+                alternatives: None,
+                at: now,
+            };
+            if let Err(e) = self.decisions.record(&d).await {
+                tracing::warn!(error = %e, "an index decision wasn't recorded");
+            }
+        }
+        Ok(IndexActionResponse {
+            tenant: t.name.clone(),
+            action: action.as_str().to_owned(),
+            changed,
+            from: r.state.to_string(),
+            to: to.to_string(),
+            message,
+            index: view::user_index_view(&after, &t.names),
+        })
     }
 
     /// The same service recording decisions in `log`.
@@ -421,6 +637,7 @@ impl AutoIndexService {
                 Action::Drop => "index.drop",
                 Action::Pin => "index.pin",
                 Action::Unpin => "index.unpin",
+                Action::Restore => "index.restore",
             },
             subject_type: "index",
             subject_id: format!("{}/{}", before.object, before.name),
@@ -454,17 +671,39 @@ impl AutoIndexService {
 }
 
 #[async_trait::async_trait]
+#[allow(clippy::too_many_lines)] // `act`: every plan, restore included
 impl AutoIndexAdmin for AutoIndexService {
     async fn list(&self, tenant: &str, q: &ListIndexesQuery) -> Result<ListIndexesResponse> {
         let mut t = self.tenant(tenant).await?;
         let rows = t.store.list_indexes(&mut t.conn, true).await?;
         let picked = filter_rows(&rows, &t.names, q, false)?;
+        let mut indexes: Vec<_> = picked
+            .into_iter()
+            .map(|r| view::index_view(r, &t.names, None))
+            .collect();
+        // User and migrated indexes under decision O1: those whose removal
+        // is under way, recommended, done (with `all`) or pinned.
+        let all = q.all.unwrap_or(false);
+        for r in t.store.usage_rows(&mut t.conn, None).await? {
+            let shown = match r.state {
+                UserIndexState::Serving => false,
+                UserIndexState::Dropped => all || q.state.as_deref() == Some("dropped"),
+                _ => true,
+            };
+            let (d, tb) = t.names.of(r.object);
+            if shown
+                && q.state.as_deref().is_none_or(|s| s == r.state.as_str())
+                && q.db.as_deref().is_none_or(|x| x.eq_ignore_ascii_case(&d))
+                && q.table
+                    .as_deref()
+                    .is_none_or(|x| x.eq_ignore_ascii_case(&tb))
+            {
+                indexes.push(view::user_index_view(&r, &t.names));
+            }
+        }
         Ok(ListIndexesResponse {
             tenant: t.name.clone(),
-            indexes: picked
-                .into_iter()
-                .map(|r| view::index_view(r, &t.names, None))
-                .collect(),
+            indexes,
         })
     }
 
@@ -492,7 +731,17 @@ impl AutoIndexAdmin for AutoIndexService {
     ) -> Result<IndexActionResponse> {
         let mut t = self.tenant(tenant).await?;
         let rows = t.store.list_indexes(&mut t.conn, true).await?;
-        let r = resolve_index(&rows, &t.names, index)?.clone();
+        let r = match resolve_index(&rows, &t.names, index) {
+            Ok(r) => r.clone(),
+            Err(e) if e.code() == Some(SprigCode::AutoIndexNotFound) => {
+                let users = t.store.usage_rows(&mut t.conn, None).await?;
+                let Some(u) = resolve_user_index(&users, &t.names, index)? else {
+                    return Err(e);
+                };
+                return self.act_user(&mut t, &u, action, req).await;
+            }
+            Err(e) => return Err(e),
+        };
         let now = self.clock.wall();
         let conflict = || {
             SprigError::new(
@@ -536,6 +785,49 @@ impl AutoIndexAdmin for AutoIndexService {
                 Some(s) => (true, format!("unpinned; back to {s}")),
                 None => return Err(conflict()),
             },
+            Plan::Restore => {
+                // Out of retiring first, so the observer can't drop it
+                // meanwhile; then visible; then pinned. A failed statement
+                // leaves it active, and the drift reconciler makes it
+                // visible.
+                let change = |from, to| StateChange {
+                    from,
+                    to,
+                    at: now,
+                    drop_reason: None,
+                };
+                if !t
+                    .store
+                    .set_state(
+                        &mut t.conn,
+                        r.index_id,
+                        &change(IndexState::Retiring, IndexState::Active),
+                    )
+                    .await?
+                {
+                    return Err(conflict());
+                }
+                let name = r.name.clone();
+                self.on_shards(&t, r.object, |sh| ignore_sql(sh, &name, false))
+                    .await?;
+                if !t
+                    .store
+                    .set_state(
+                        &mut t.conn,
+                        r.index_id,
+                        &change(IndexState::Active, IndexState::Frozen),
+                    )
+                    .await?
+                {
+                    return Err(conflict());
+                }
+                (
+                    true,
+                    "made visible again (NOT IGNORED) and pinned: never removed until \
+                     sprigctl index unpin"
+                        .to_owned(),
+                )
+            }
         };
         let after = t
             .store

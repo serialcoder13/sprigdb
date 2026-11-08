@@ -296,7 +296,7 @@ async fn run_local(
             if rpc == "Sql.Query" && ndjson {
                 return Ok((200, Local::Stream(ndjson_response(rx))));
             }
-            let reply = collect(rx, api.max_buffered).await?;
+            let reply = collect(rx, api.max_buffered, engine.charge(caller)).await?;
             if rpc == "Sql.Query" {
                 let parts = split_parts(&reply);
                 return Ok((200, Local::Json(Value::Array(parts))));

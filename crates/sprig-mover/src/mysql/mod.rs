@@ -189,7 +189,11 @@ impl ClusterAccess {
             OptsBuilder::from_opts(self.writer.opts.clone())
                 .setup(setup.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
                 .client_found_rows(true)
-                .pool_opts(PoolOpts::new().with_constraints(constraints)),
+                .pool_opts(
+                    PoolOpts::new()
+                        .with_constraints(constraints)
+                        .with_inactive_connection_ttl(Duration::from_secs(60)),
+                ),
         )
     }
 
@@ -217,6 +221,12 @@ pub struct MysqlEnvFactory {
     registry: ClusterRegistry,
     maps: TenantMaps,
     settings: MoverSettings,
+    /// Node addresses replaced before discovery (`host:port` → `host:port`):
+    /// fault tests route a cluster's writer through a proxy.
+    addr_overrides: std::collections::HashMap<String, String>,
+    /// The one etcd, for moves between DCs (chapter 24): set by
+    /// [`Self::with_home_changes`].
+    home_store: Option<Arc<dyn sprig_meta::MetaStore>>,
 }
 
 impl std::fmt::Debug for MysqlEnvFactory {
@@ -234,14 +244,40 @@ impl MysqlEnvFactory {
             registry,
             maps,
             settings,
+            addr_overrides: std::collections::HashMap::new(),
+            home_store: None,
         }
+    }
+
+    /// Runs moves between DCs too (chapter 24): a job whose source and
+    /// target clusters are in different DCs commits with a home change
+    /// ([`crate::home::HomeMapIo`]) on `store`, any tier of the one etcd
+    /// (single-etcd mode).
+    #[must_use]
+    pub fn with_home_changes(mut self, store: Arc<dyn sprig_meta::MetaStore>) -> Self {
+        self.home_store = Some(store);
+        self
+    }
+
+    /// Reaches the node at `from` (`host:port`, as registered) through `to`
+    /// instead: fault tests put a proxy in between.
+    #[must_use]
+    pub fn with_addr_override(mut self, from: &str, to: &str) -> Self {
+        self.addr_overrides.insert(from.to_owned(), to.to_owned());
+        self
     }
 
     async fn access(&self, id: &ClusterId) -> Result<ClusterAccess> {
         let stored = self.registry.get(id).await?.ok_or_else(|| {
             SprigError::new(SprigCode::ClusterNotFound, format!("no cluster {id}"))
         })?;
-        ClusterAccess::discover(stored.body()).await
+        let mut rec = stored.body().clone();
+        for n in &mut rec.nodes {
+            if let Some(to) = self.addr_overrides.get(&n.addr) {
+                n.addr.clone_from(to);
+            }
+        }
+        ClusterAccess::discover(&rec).await
     }
 }
 
@@ -269,14 +305,27 @@ impl EnvFactory for MysqlEnvFactory {
             swap.is_some(),
         ));
         let target = Arc::new(MysqlTarget::new(tgt, rec.job_id, swap, source.clone()));
+        let from = sprig_cluster::registry::dc_of(&s.cluster);
+        let to = sprig_cluster::registry::dc_of(&t.cluster);
+        let maps: Arc<dyn crate::io::MapIo> = match (&self.home_store, from, to) {
+            (Some(store), Some(from), Some(to)) if from != to => Arc::new(
+                crate::home::HomeMapIo::new(store.clone(), rec.tenant_id, from, to),
+            ),
+            _ => Arc::new(TenantMapIo::new(self.maps.clone(), rec.tenant_id)),
+        };
         Ok(JobEnv {
             source,
             target,
-            maps: Arc::new(TenantMapIo::new(self.maps.clone(), rec.tenant_id)),
+            maps,
         })
     }
 
-    fn settings(&self, _rec: &JobRecord) -> MoverSettings {
-        self.settings.clone()
+    fn settings(&self, rec: &JobRecord) -> MoverSettings {
+        let mut s = self.settings.clone();
+        // A move between DCs brings its own budget (chapter 24).
+        if let Some(ms) = rec.spec.max_hold_ms {
+            s.cutover_max_hold = std::time::Duration::from_millis(ms);
+        }
+        s
     }
 }

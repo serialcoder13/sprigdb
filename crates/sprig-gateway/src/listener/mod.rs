@@ -616,8 +616,18 @@ async fn accept_loop(
                 let Some(fe) = shared.frontends.0.get(&a.spec.protocol).cloned() else {
                     continue;
                 };
+                // gateway.max_connections (chapter 04 step 7).
+                let mut permit = None;
+                if let Some(l) = &shared.ctx.limits {
+                    let Some(p) = l.try_connection() else {
+                        metrics::counter!("sprig_gateway_connections_rejected_total", "listener" => a.spec.name, "reason" => "max_connections").increment(1);
+                        tokio::spawn(conn::refuse_too_many(sock, a.spec.protocol, a.spec.tls));
+                        continue;
+                    };
+                    permit = Some(p);
+                }
                 let tracker = a.group.tracker.clone();
-                tracker.spawn(conn::run(sock, peer, a, fe, shared.ctx.clone()));
+                tracker.spawn(conn::run(sock, peer, a, fe, shared.ctx.clone(), permit));
             }
             Err(e) => {
                 // EMFILE and friends: count, back off briefly (chapter 04).

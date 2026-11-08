@@ -241,7 +241,9 @@ pub fn resolve_object(
         ..d
     };
     let observe = ObserveSettings {
-        usage_every: secs(num(src, k::USAGE_CHECK_HOURS.key, object_ctx, 6.0) * 3600.0),
+        // Reads are counted as often as the advisor evaluates (decision
+        // O1): a cadence, never a period of disuse.
+        usage_every: secs(num(src, k::EVAL_INTERVAL_MINUTES.key, object_ctx, 60.0) * 60.0),
         ..ObserveSettings::default()
     };
     Ok((policy, rollout, observe))

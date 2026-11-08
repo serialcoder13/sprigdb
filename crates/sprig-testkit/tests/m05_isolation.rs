@@ -22,6 +22,18 @@
 //! audited: every backend account of a tenant is granted only on that
 //! tenant's schemas, never globally.
 //!
+//! `m05_writer` lists databases every way (`SHOW DATABASES`, `LIKE`,
+//! `WHERE`, `information_schema.SCHEMATA`) and sees only `m05_shop`, and a
+//! statement prepared before a `REVOKE` is refused (1142) at its next
+//! execute. With the backend, tenant A's administrator also tries to break
+//! out through stored code (chapter 29, "Definers of stored code"): a
+//! `SQL SECURITY DEFINER` procedure running dynamic SQL against B's shard
+//! schema, B's catalog and `mysql.user`, a trigger and a function called
+//! from a view reading `mysql.user`, and an event (created, then altered)
+//! whose body copies B's rows; every call is refused by MariaDB, B's marker
+//! never appears, and every routine, trigger, event and view of both
+//! tenants has one of its own tenant's accounts as definer.
+//!
 //! **Propagation.** With `SPRIG_TEST_M05_SECOND` (a second gateway's
 //! MariaDB-persona `host:port`), a session on the second gateway reads a
 //! table, the administrator revokes the grant on the first, and the
@@ -154,7 +166,7 @@ async fn admin(c: &mut Conn, sql: &str) {
 /// Builds one tenant's objects and users (idempotent: drops first).
 async fn setup(c: &mut Conn, marker: &str) {
     for s in [
-        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop",
+        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep",
         "DROP ROLE IF EXISTS m05_r",
         "DROP DATABASE IF EXISTS m05_shop",
         "DROP DATABASE IF EXISTS m05_crm",
@@ -198,7 +210,7 @@ async fn setup(c: &mut Conn, marker: &str) {
 
 async fn teardown(c: &mut Conn) {
     for s in [
-        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop",
+        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep",
         "DROP ROLE IF EXISTS m05_r",
         "DROP DATABASE IF EXISTS m05_shop",
         "DROP DATABASE IF EXISTS m05_crm",
@@ -428,6 +440,78 @@ async fn m05_isolation_suite() {
         }
     }
 
+    // Database lists in every form show only databases the user holds a
+    // privilege in, and a REVOKE between prepare and execute refuses the
+    // execute (MySQL checks at each execute).
+    for (tname, url) in &tenants {
+        let prefix = tenant_prefix(url);
+        for (persona, hp) in &endpoints {
+            let login = format!("{prefix}m05_writer");
+            let mut c = Conn::new(opts(url, Some(hp), Some((&login, PW))))
+                .await
+                .unwrap();
+            for sql in [
+                "SHOW DATABASES",
+                "SHOW DATABASES LIKE 'm05%'",
+                "SHOW DATABASES WHERE `Database` LIKE 'm05%'",
+                "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA",
+            ] {
+                checks += 1;
+                let (got, text, msg) = run(&mut c, sql).await;
+                let ok = got.is_none() && text.contains("m05_shop") && !text.contains("m05_crm");
+                report.line(&serde_json::json!({
+                    "tenant": tname, "persona": format!("{persona:?}"), "user": "m05_writer",
+                    "sql": sql, "got": got, "message": msg, "rows": text, "pass": ok,
+                }));
+                if !ok {
+                    failures.push(format!(
+                        "{tname} {persona:?} m05_writer: {sql}: {got:?} {msg} [{text}]"
+                    ));
+                }
+            }
+            let _ = c.disconnect().await;
+        }
+        let mut adm = Conn::new(opts(url, None, None)).await.unwrap();
+        admin(
+            &mut adm,
+            &format!("CREATE USER m05_prep IDENTIFIED BY '{PW}'"),
+        )
+        .await;
+        for (persona, hp) in &endpoints {
+            admin(&mut adm, "GRANT SELECT ON m05_shop.orders TO m05_prep").await;
+            let login = format!("{prefix}m05_prep");
+            let mut c = Conn::new(opts(url, Some(hp), Some((&login, PW))))
+                .await
+                .unwrap();
+            let st = c
+                .prep("SELECT COUNT(*) FROM m05_shop.orders WHERE id > ?")
+                .await
+                .unwrap();
+            let first: std::result::Result<Option<u64>, _> = c.exec_first(&st, (0,)).await;
+            admin(&mut adm, "REVOKE SELECT ON m05_shop.orders FROM m05_prep").await;
+            let second: std::result::Result<Option<u64>, _> = c.exec_first(&st, (0,)).await;
+            let code = match &second {
+                Err(mysql_async::Error::Server(e)) => Some(e.code),
+                Ok(_) => None,
+                Err(_) => Some(0),
+            };
+            checks += 1;
+            let ok = first.is_ok() && code == Some(1142);
+            report.line(&serde_json::json!({
+                "tenant": tname, "persona": format!("{persona:?}"), "user": "m05_prep",
+                "sql": "EXECUTE after REVOKE", "expected": 1142, "got": code, "pass": ok,
+            }));
+            if !ok {
+                failures.push(format!(
+                    "{tname} {persona:?}: execute after REVOKE: first {first:?}, then {second:?}"
+                ));
+            }
+            let _ = c.disconnect().await;
+        }
+        let _ = run(&mut adm, "DROP USER m05_prep").await;
+        let _ = adm.disconnect().await;
+    }
+
     // Across tenants: A's administrator against B's physical names.
     if let Some(burl) = skip::var(BACKEND) {
         let mut backend = Conn::new(opts(&burl, None, None))
@@ -473,6 +557,118 @@ async fn m05_isolation_suite() {
             if text.contains(&b_schema) || text.contains(markers[1]) {
                 failures.push(format!("{p} shows tenant B"));
             }
+        }
+
+        // Stored code must not run with more than its creator's rights:
+        // the gateway never sees dynamic SQL in a body, nor what a
+        // trigger, event or a function called from a view reads, so
+        // MariaDB must refuse it through the definer, a tenant account
+        // (chapter 29, "Definers of stored code").
+        let b_tid = b_schema
+            .strip_prefix('t')
+            .and_then(|s| s.split('_').next())
+            .unwrap()
+            .to_owned();
+        let b_catalog = format!("t{b_tid}_sprig");
+        for s in [
+            "CREATE TABLE m05_shop.loot (v TEXT)",
+            "CREATE DEFINER = `root`@`localhost` PROCEDURE m05_shop.m05_leak(IN q TEXT) \
+             SQL SECURITY DEFINER BEGIN SET @m05_q = q; PREPARE m05_s FROM @m05_q; \
+             EXECUTE m05_s; DEALLOCATE PREPARE m05_s; END",
+            "CREATE FUNCTION m05_shop.m05_users() RETURNS INT READS SQL DATA \
+             RETURN (SELECT COUNT(*) FROM mysql.user)",
+            "CREATE VIEW m05_shop.m05_v AS SELECT m05_shop.m05_users() AS n",
+            "CREATE TRIGGER m05_shop.m05_trg AFTER INSERT ON m05_shop.items FOR EACH ROW \
+             SET @m05_n = (SELECT COUNT(*) FROM mysql.user)",
+        ] {
+            admin(&mut a, s).await;
+        }
+        // Split so no text the gateway sees names B's schemas.
+        let (b_head, b_tail) = b_schema.split_at(2);
+        let (c_head, c_tail) = b_catalog.split_at(2);
+        let event = format!(
+            "CREATE EVENT m05_shop.m05_ev ON SCHEDULE EVERY 1 HOUR DO BEGIN \
+             SET @m05_q = CONCAT('INSERT INTO loot SELECT note FROM ', '{b_head}', '{b_tail}.orders'); \
+             PREPARE m05_s FROM @m05_q; EXECUTE m05_s; END"
+        );
+        admin(&mut a, &event).await;
+        admin(&mut a, "ALTER EVENT m05_shop.m05_ev COMMENT 'm05'").await;
+        let breakouts = [
+            format!(
+                "CALL m05_shop.m05_leak(CONCAT('SELECT * FROM ', '{b_head}', '{b_tail}.orders'))"
+            ),
+            format!(
+                "CALL m05_shop.m05_leak(CONCAT('SELECT * FROM ', '{c_head}', '{c_tail}.users'))"
+            ),
+            "CALL m05_shop.m05_leak('SELECT * FROM mysql.user')".to_owned(),
+            "CALL m05_shop.m05_leak('CREATE USER m05_escape')".to_owned(),
+            "SELECT * FROM m05_shop.m05_v".to_owned(),
+            "INSERT INTO m05_shop.items VALUES (77, 1)".to_owned(),
+        ];
+        for p in &breakouts {
+            checks += 1;
+            let (got, text, msg) = run(&mut a, p).await;
+            // 1356: MariaDB's refusal of a view whose function lacks rights.
+            let ok = matches!(got, Some(1142 | 1227 | 1044 | 1356))
+                && !text.contains(markers[1])
+                && !msg.contains(markers[1]);
+            report
+                .line(&serde_json::json!({"breakout": p, "got": got, "message": msg, "pass": ok}));
+            if !ok {
+                failures.push(format!(
+                    "stored-code break-out {p}: got {got:?} {msg} {text}"
+                ));
+            }
+        }
+        // Every stored program and view of both tenants has one of its own
+        // tenant's accounts as definer.
+        let definers: Vec<(String, String, String)> = backend
+            .query(
+                "SELECT ROUTINE_SCHEMA, ROUTINE_NAME, DEFINER FROM information_schema.ROUTINES \
+                 UNION ALL SELECT TRIGGER_SCHEMA, TRIGGER_NAME, DEFINER FROM information_schema.TRIGGERS \
+                 UNION ALL SELECT EVENT_SCHEMA, EVENT_NAME, DEFINER FROM information_schema.EVENTS \
+                 UNION ALL SELECT TABLE_SCHEMA, TABLE_NAME, DEFINER FROM information_schema.VIEWS",
+            )
+            .await
+            .unwrap();
+        let mut seen = 0usize;
+        for schema in [&a_schema, &b_schema] {
+            let tid = schema
+                .strip_prefix('t')
+                .and_then(|s| s.split('_').next())
+                .unwrap();
+            let own = format!("t{tid}_u");
+            for (sch, name, definer) in definers
+                .iter()
+                .filter(|(s, _, _)| s.starts_with(&format!("t{tid}_d")))
+            {
+                seen += 1;
+                checks += 1;
+                if !definer.starts_with(&own) {
+                    failures.push(format!("{sch}.{name} runs as {definer}"));
+                }
+            }
+        }
+        println!(
+            "stored code: {} break-outs refused, {seen} definers audited",
+            breakouts.len()
+        );
+        let leaked: Option<u64> = backend
+            .exec_first(
+                format!("SELECT COUNT(*) FROM `{a_schema}`.loot WHERE v LIKE ?"),
+                (format!("%{}%", markers[1]),),
+            )
+            .await
+            .unwrap();
+        checks += 1;
+        if leaked.unwrap_or(0) > 0 {
+            failures.push("tenant B's marker reached tenant A's loot table".into());
+        }
+        for s in [
+            "DROP EVENT m05_shop.m05_ev",
+            "DROP TRIGGER m05_shop.m05_trg",
+        ] {
+            let _ = run(&mut a, s).await;
         }
         let _ = a.disconnect().await;
 

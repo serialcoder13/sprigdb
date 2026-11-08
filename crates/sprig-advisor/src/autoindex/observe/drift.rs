@@ -14,6 +14,8 @@
 //!                                               dropped (drift)
 //!   rolling_out row marked built, index gone  → shard back to pending
 //!   retiring row's index not IGNORED          → IGNORED again
+//!   observing or active row's index IGNORED   → NOT IGNORED (a restore's
+//!                                               statement that failed)
 //! replicas (primary + replicas): a sprig_auto_* index whose definition
 //!   differs from the writer's is reported, never written
 //! ```
@@ -43,6 +45,8 @@ pub struct DriftReport {
     pub shards_reset: Vec<String>,
     /// `IGNORED` re-applied, as `shard/name`.
     pub ignored_reapplied: Vec<String>,
+    /// Serving indexes found `IGNORED` and made visible, as `shard/name`.
+    pub visible_again: Vec<String>,
     /// Replicas whose index differs from the writer's (reported only).
     pub replica_mismatch: Vec<String>,
     /// Statements that failed (retried next time).
@@ -147,6 +151,15 @@ pub async fn reconcile_object<Q: Queryable + Send>(
                     {
                         match run_on_writer(cx, t, &ignore_sql(t, name, true)?).await {
                             Ok(()) => rep.ignored_reapplied.push(format!("{}/{name}", t.shard)),
+                            Err(e) => rep.errors.push(format!("{}/{name}: {e}", t.shard)),
+                        }
+                    }
+                    // A serving row's index left IGNORED (a restore whose
+                    // statement failed): visible again.
+                    if matches!(r.state, IndexState::Observing | IndexState::Active) && idx.ignored
+                    {
+                        match run_on_writer(cx, t, &ignore_sql(t, name, false)?).await {
+                            Ok(()) => rep.visible_again.push(format!("{}/{name}", t.shard)),
                             Err(e) => rep.errors.push(format!("{}/{name}: {e}", t.shard)),
                         }
                     }

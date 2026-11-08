@@ -17,9 +17,14 @@
 //!   releases it; [`map::TenantMaps`] reads and writes it with
 //!   compare-and-put on the key's `mod_revision`.
 //!
+//! - [`home`]: a tenant's home DC in the directory, and the commit point
+//!   of a move between DCs (chapter 24): both DCs' maps and the directory
+//!   entry in one transaction (single-etcd mode).
+//!
 //! Not yet (R1): table groups in the catalog, normalization, collation
 //! weights, `routing_hash`, data-group maps with many ranges, `_sprig_rk`.
 
+pub mod home;
 pub mod map;
 pub mod names;
 

@@ -183,6 +183,10 @@ struct Current {
     resultset: bool,
     /// The first `Handler_read_*` reading of a probe.
     probe: Option<u64>,
+    /// The statement is a `USE`: it may run on a connection whose default
+    /// schema differs from the session's, so a failed one leaves that
+    /// connection dirty.
+    sets_schema: bool,
 }
 
 impl Current {
@@ -219,6 +223,19 @@ impl Current {
 }
 
 /// A request to run.
+/// Whether a connection must be closed after a statement: a `USE` that
+/// left the connection's default schema different from the session's
+/// (it failed on a connection that had another one).
+fn dirty_after_use(sets_schema: bool, conn: Option<&str>, session: Option<&str>) -> bool {
+    sets_schema && conn != session
+}
+
+/// Whether `sql` is a `USE <schema>` statement.
+fn is_use(sql: &[u8]) -> bool {
+    let t = sql.trim_ascii_start();
+    t.len() > 4 && t[..3].eq_ignore_ascii_case(b"USE") && t[3].is_ascii_whitespace()
+}
+
 enum Req<'a> {
     Text(&'a [u8]),
     Binary {
@@ -285,6 +302,17 @@ fn conn_fatal(code: u16) -> bool {
     // 1927 ER_CONNECTION_KILLED, 1053 ER_SERVER_SHUTDOWN, 1152
     // ER_ABORTING_CONNECTION, 4031 (idle disconnect).
     matches!(code, 1927 | 1053 | 1152 | 4031)
+}
+
+/// 1213 (40001): the connection was lost and the open transaction rolled
+/// back, so the client retries it as it would after a deadlock.
+fn trx_rolled_back() -> SprigError {
+    SprigError::standard(
+        1213,
+        *b"40001",
+        "Deadlock found when trying to get lock; try restarting transaction \
+         (the backend connection was lost and the transaction rolled back)",
+    )
 }
 
 fn internal(e: &ClientError) -> SprigError {
@@ -623,6 +651,25 @@ impl BackendSession {
         }
         self.vars.apply(&observed);
         cur.lease.conn().applied.apply(&observed);
+        if observed.charset_changed() {
+            // Tracking names the character set only: read the collation
+            // back (chapter 06, "Login collation").
+            let set_names = cur.stmt.sets_names();
+            let conn = cur.lease.conn();
+            match conn.capture_collation().await {
+                Ok(coll) => {
+                    conn.applied.charset_changed(&observed, &coll, set_names);
+                    self.vars.charset_changed(&observed, &coll, set_names);
+                }
+                Err(e) => {
+                    tracing::warn!(node = %node, error = %e, "reading collation_connection failed; closing the connection");
+                    let o = outcome(&cur, false);
+                    drop(cur);
+                    self.connection_gone();
+                    return Ok(o);
+                }
+            }
+        }
         let unexplained = observed.unexplained && !cur.stmt.expects_state_change();
         if !observed.untracked.is_empty() || unexplained {
             if !self.pins.reasons().contains(&PinReason::Untracked) {
@@ -682,6 +729,21 @@ impl BackendSession {
         }
 
         let route = cur.route;
+        if dirty_after_use(
+            cur.sets_schema,
+            cur.lease.conn().applied.schema.as_deref(),
+            self.vars.schema.as_deref(),
+        ) {
+            // A failed `USE` (unknown database, access denied, killed) on a
+            // connection that had another default schema: the connection
+            // still has it and the session doesn't, so it must not serve
+            // this session again, or anyone: close it.
+            tracing::debug!(node = %node, "a USE failed on a connection with another default schema; closing it");
+            self.pins.lose_connection();
+            let o = outcome(&cur, false);
+            drop(cur);
+            return Ok(o);
+        }
         if route.reader() && !self.pins.is_empty() {
             // State appeared on a reader: it can't follow the session to the
             // writer. Drop that connection and keep the session conservative.
@@ -844,12 +906,7 @@ impl BackendSession {
                 "the backend connection holding this session's state was lost",
             ))
         } else if in_trx {
-            Some(SprigError::standard(
-                1213,
-                *b"40001",
-                "Deadlock found when trying to get lock; try restarting transaction \
-                 (the backend connection was lost and the transaction rolled back)",
-            ))
+            Some(trx_rolled_back())
         } else {
             None
         };
@@ -910,12 +967,34 @@ impl BackendSession {
                 "the backend connection was lost while sending the result",
             ),
             Some(c) => SprigError::new(c, "the backend connection was lost"),
-            None => SprigError::standard(
-                1213,
-                *b"40001",
-                "Deadlock found when trying to get lock; try restarting transaction \
-                 (the backend connection was lost and the transaction rolled back)",
-            ),
+            None => trx_rolled_back(),
+        }
+    }
+
+    /// The error for a held connection the server closed before this
+    /// statement was sent (chapter 06, "Failure handling"): nothing ran, so
+    /// only what the connection held is lost. 1213 for an open transaction
+    /// (rolled back), 39033 for other pinned state.
+    fn lost_unsent(&mut self, node: &NodeKey) -> SprigError {
+        let lost_state = self.pins.holds_state();
+        self.pins.lose_connection();
+        self.held = None;
+        self.pending_capture.clear();
+        let kind = if lost_state {
+            "state_lost"
+        } else {
+            "transaction_rolled_back"
+        };
+        tracing::debug!(node = %node, kind, "held backend connection lost between statements");
+        metrics::counter!("sprig_backend_failures_total", "cluster" => self.target.cluster.to_string(), "kind" => kind)
+            .increment(1);
+        if lost_state {
+            SprigError::new(
+                SprigCode::SessionStateLost,
+                "the backend connection holding this session's state was lost",
+            )
+        } else {
+            trx_rolled_back()
         }
     }
 
@@ -1150,11 +1229,32 @@ impl BackendSession {
         let mut sync_retried = false;
         let mut io_retried = false;
         let text = matches!(req, Req::Text(_));
+        // `USE x` sets the schema itself, so any pooled connection serves
+        // it, including one that already has a default schema.
+        let sets_schema = matches!(req, Req::Text(sql) if is_use(sql));
+        // Running it twice changes nothing: a lost connection retries it
+        // (chapter 06, "Failure handling").
+        let harmless = info.class == StmtClass::Read || matches!(req, Req::Prepare { .. });
         let probe = std::mem::take(&mut self.probe_next)
             && matches!(req, Req::Text(_) | Req::Binary { .. });
         loop {
             let (mut lease, route, wait) = match self.held.take() {
-                Some((l, _)) => (l, RouteKind::Pinned, Wait::None),
+                Some((mut l, _)) => {
+                    if l.conn().client.closed_while_idle() {
+                        // The server closed the held connection between
+                        // statements (KILL CONNECTION, a restart): this
+                        // statement never reached it.
+                        let node = l.key().node_key();
+                        drop(l);
+                        tracing::debug!(node = %node, "held backend connection closed while idle");
+                        if self.pins.in_transaction() || self.pins.holds_state() {
+                            return Err(self.lost_unsent(&node));
+                        }
+                        // Only the session mode held it: the state replays.
+                        continue;
+                    }
+                    (l, RouteKind::Pinned, Wait::None)
+                }
                 None => {
                     self.route_lease(&view, info, &settings, force_writer, &mut exclude, deadline)
                         .await?
@@ -1166,9 +1266,13 @@ impl BackendSession {
             if self.vars.schema.is_none()
                 && conn.applied.schema.is_some()
                 && route != RouteKind::Pinned
+                && !sets_schema
             {
                 // MariaDB can't unset the default schema: this connection can't
                 // serve a session without one. New connections have none.
+                // (Before M0.7 this also dropped the connection for the
+                // session's own `USE`, so every session opened with a default
+                // database closed a pooled connection and opened a new one.)
                 drop(lease);
                 continue;
             }
@@ -1190,6 +1294,7 @@ impl BackendSession {
                 None
             };
             let base = Arc::clone(&conn.baseline);
+            self.vars.settle_login(&base);
             let (prefix, next_applied) =
                 match state::sync_prefix(&conn.applied, &base, &self.vars, info, 0) {
                     Ok(x) => x,
@@ -1343,6 +1448,7 @@ impl BackendSession {
                     drop(lease);
                     if let Some(r) = self.retry_after_loss(
                         info,
+                        harmless,
                         route,
                         &node_key,
                         &e,
@@ -1424,6 +1530,7 @@ impl BackendSession {
                 rows: 0,
                 resultset: false,
                 probe: probe_before,
+                sets_schema,
             };
             let first = match outgoing {
                 // A prepare has no response beyond what prepare_cached read.
@@ -1451,7 +1558,7 @@ impl BackendSession {
                 Ok(Some(RespPacket { kind: PacketKind::Err(e), .. })) if conn_fatal(e.code)
             );
             if fatal_first
-                && info.class == StmtClass::Read
+                && harmless
                 && route != RouteKind::Pinned
                 && self.pins.is_empty()
                 && !io_retried
@@ -1478,6 +1585,7 @@ impl BackendSession {
                     drop(cur);
                     if let Some(r) = self.retry_after_loss(
                         info,
+                        harmless,
                         route,
                         &node_key,
                         &e,
@@ -1494,12 +1602,14 @@ impl BackendSession {
     }
 
     /// A connection lost before the statement's first packet: a plain read
-    /// of an unpinned session retries once elsewhere (`None`); anything else
+    /// or a prepare (`harmless`: running it twice changes nothing) of an
+    /// unpinned session retries once elsewhere (`None`); anything else
     /// fails with the mapped error.
     #[allow(clippy::too_many_arguments)]
     fn retry_after_loss(
         &mut self,
         info: &StmtInfo,
+        harmless: bool,
         route: RouteKind,
         node: &NodeKey,
         e: &ClientError,
@@ -1509,14 +1619,16 @@ impl BackendSession {
     ) -> Option<SprigError> {
         tracing::debug!(node = %node, error = %e, "backend connection lost before the first packet");
         self.backends.note_failure(node, "io");
-        let retry = info.class == StmtClass::Read
-            && route != RouteKind::Pinned
-            && self.pins.is_empty()
-            && !*io_retried;
+        let retry = harmless && route != RouteKind::Pinned && self.pins.is_empty() && !*io_retried;
         if retry {
             *io_retried = true;
             exclude.push(node.node.clone());
             return None;
+        }
+        if harmless && (in_trx || self.pins.holds_state()) {
+            // A prepare never changes data: only what the connection held
+            // is lost, never the outcome of a write.
+            return Some(self.lost_unsent(node));
         }
         Some(self.lost(info, in_trx, false, node))
     }
@@ -1659,5 +1771,37 @@ async fn consume_statement(
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod use_tests {
+    use super::{dirty_after_use, is_use};
+
+    #[test]
+    fn use_statements_are_recognized() {
+        for (sql, yes) in [
+            (&b"USE shop"[..], true),
+            (b"  use\tshop", true),
+            (b"USE", false),
+            (b"USER()", false),
+            (b"SELECT 1", false),
+            (b"used", false),
+        ] {
+            assert_eq!(is_use(sql), yes, "{}", String::from_utf8_lossy(sql));
+        }
+    }
+
+    #[test]
+    fn a_failed_use_on_another_schema_closes_the_connection() {
+        // USE missing on a connection that had t1_a: the connection keeps
+        // t1_a, the session has none: close it.
+        assert!(dirty_after_use(true, Some("t1_a"), None));
+        // USE t1_b succeeded: both agree.
+        assert!(!dirty_after_use(true, Some("t1_b"), Some("t1_b")));
+        // USE failed on a connection without a schema, for a session without one.
+        assert!(!dirty_after_use(true, None, None));
+        // Not a USE: the routing guard handles schema mismatches.
+        assert!(!dirty_after_use(false, Some("t1_a"), None));
     }
 }

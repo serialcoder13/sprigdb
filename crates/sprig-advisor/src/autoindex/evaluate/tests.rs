@@ -67,7 +67,7 @@ impl Env {
         self.settings.set_value(level, &ctx, key, &v).unwrap();
     }
 
-    fn cx<'a>(&'a self, src: &'a StaticSource) -> EvalCx<'a> {
+    fn cx<'a>(&'a self, src: &'a dyn WorkloadSource) -> EvalCx<'a> {
         EvalCx {
             tenant: TENANT,
             settings: &self.settings,
@@ -797,4 +797,84 @@ fn sample_values_map_to_params() {
     assert_eq!(f.limit, Some(20));
     assert_eq!(f.in_list_max, Some(2));
     assert_eq!(f.samples, fp_example1().samples);
+}
+
+/// Windows by `from`: the full window before `cut`, only `after` from it.
+struct SplitSource {
+    cut: SystemTime,
+    before: Vec<SourcedWindow>,
+    after: Vec<SourcedWindow>,
+}
+
+#[async_trait::async_trait]
+impl WorkloadSource for SplitSource {
+    async fn window(
+        &self,
+        _tenant: TenantId,
+        from: SystemTime,
+        _to: SystemTime,
+    ) -> Result<Vec<SourcedWindow>> {
+        Ok(if from < self.cut {
+            self.before.clone()
+        } else {
+            self.after.clone()
+        })
+    }
+    fn watch(&self, _tenant: TenantId, _fp: Fingerprint) {}
+}
+
+/// M0.4 follow-up: an index built inside the window that serves example
+/// 1's fingerprint is judged on the runs since its build, so the slow runs
+/// from before it don't propose redundant variants beside it.
+#[tokio::test]
+async fn a_served_fingerprint_counts_only_runs_since_its_index() {
+    use sprig_common::time::Clock;
+    let env = example1();
+    let now = env.clock.wall();
+    let built = now - Duration::from_secs(600);
+    let fp = fp_example1().id;
+    let b = IndexDef::btree(ORDERS, &["customer_id", "created_at"]);
+    let mut row = auto_row(&b, IndexState::Active, 500.0, built);
+    row.baseline.insert(
+        fp.to_string(),
+        Baseline {
+            runs: 1000,
+            p95_ms: 400.0,
+            mean_ms: 260.0,
+        },
+    );
+    env.store.add_index(row.clone());
+    // Since the build the fingerprint hasn't run slow: no runs at all here.
+    let after: Vec<SourcedWindow> = env
+        .windows
+        .iter()
+        .filter(|w| w.window.id != fp)
+        .cloned()
+        .collect();
+    let src = SplitSource {
+        cut: built,
+        before: env.windows.clone(),
+        after,
+    };
+    let ev = env.evaluator.evaluate(&env.cx(&src)).await.unwrap();
+    assert!(
+        ev.qualified.iter().all(|q| q.fp != fp),
+        "qualified on runs from before its index: {:?}",
+        ev.qualified
+    );
+    assert!(ev.tables.iter().all(|t| t.queued.is_empty()));
+    // An index built before the window began changes nothing: the window
+    // is the fingerprint's runs.
+    let env = example1();
+    let mut old = row;
+    old.state_changed_at = now - Duration::from_secs(48 * 3600);
+    old.created_at = old.state_changed_at;
+    env.store.add_index(old);
+    let src = SplitSource {
+        cut: now,
+        before: env.windows.clone(),
+        after: Vec::new(),
+    };
+    let ev = env.evaluator.evaluate(&env.cx(&src)).await.unwrap();
+    assert!(ev.qualified.iter().any(|q| q.fp == fp));
 }

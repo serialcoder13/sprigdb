@@ -10,7 +10,7 @@ listed in `src/lib.rs`.
 |---|---|
 | `lexer` | `lex::lex` on both personas with `ANSI_QUOTES` and `NO_BACKSLASH_ESCAPES`: tokens cover every byte in order; `neutralize_edits` offsets land on a `!`; `expand_for_mariadb` output lexes |
 | `rewriter` | `names::plan` for a tenant with awkward database names and a sharded database, both engines, `lower_case_table_names`; each forwarded statement lexes and unrewrites, and its `ResultMapper` runs over rows made of the input |
-| `compat` | `compat::vars::rewrite_reads`, `schema::describe_target`, `schema::mysql_create_table`, `schema::show_columns_sql`, the collation map, `errmap::to_mysql`, and `meta::mysql_column` on decoded column definitions |
+| `compat` | `compat::mysql_text_rewrites` (executable comments, `CAST(? AS JSON)`), `compat::vars::rewrite_reads`, `schema::describe_target`, `schema::mysql_create_table`, `schema::show_columns_sql`, the collation map, `errmap::to_mysql`, and `meta::mysql_column` on decoded column definitions |
 
 The first input byte picks the settings: bit 0 the persona (MySQL, MariaDB),
 bit 1 `ANSI_QUOTES`, bit 2 `NO_BACKSLASH_ESCAPES`, bit 3 the AST engine,

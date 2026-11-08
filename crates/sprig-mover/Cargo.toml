@@ -29,6 +29,9 @@ twox-hash.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# Toxiproxy faults in the live tests (sprig-testkit depends on this crate
+# for its simulation; a dev-dependency cycle is fine).
+sprig-testkit.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

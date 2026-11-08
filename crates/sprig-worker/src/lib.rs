@@ -48,11 +48,12 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     );
     let registry = ClusterRegistry::new(global, dc.clone())?;
     let settings = MoverSettings::default();
-    let factory = Arc::new(MysqlEnvFactory::new(
-        registry,
-        TenantMaps::new(dc.clone()),
-        settings.clone(),
-    ));
+    // Moves between DCs (chapter 24) commit on the one etcd of R0's
+    // single-etcd mode: this DC's tier reaches the others.
+    let factory = Arc::new(
+        MysqlEnvFactory::new(registry, TenantMaps::new(dc.clone()), settings.clone())
+            .with_home_changes(dc.clone()),
+    );
     let store = JobStore::new(dc, Arc::new(SystemClock));
     let worker = cfg
         .node

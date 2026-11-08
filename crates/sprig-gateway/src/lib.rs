@@ -50,6 +50,7 @@ pub mod exec;
 pub mod frontend;
 pub mod http;
 pub mod lifecycle;
+pub mod limits;
 pub mod listener;
 pub mod mysql;
 pub mod peer;
@@ -204,7 +205,16 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     )?;
     // Every front end's requests pass the workload hook (chapter 12) into
     // the one executor.
-    let shared_exec = pipeline::with_workload(Arc::new(executor), workload);
+    // Admission (chapter 04 step 7) in front of everything, so a statement
+    // waiting for a slot holds no backend connection.
+    let limiter = limits::Limiter::new(limits::LimitSource::Live {
+        live: live.clone(),
+        dc: dc.clone(),
+    });
+    let shared_exec = limits::limited(
+        pipeline::with_workload(Arc::new(executor), workload),
+        Arc::clone(&limiter),
+    );
     // The MySQL and MariaDB front ends (chapter 05).
     let mysql = mysql::MySqlStack::start(
         mysql::StackConfig {
@@ -235,6 +245,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         peers: Some(Arc::clone(&peers)),
         txns: http::sql::TxnRegistry::default(),
         draining: lifecycle.flag(),
+        limiter: Some(Arc::clone(&limiter)),
     });
     let txn_reaper = tokio::spawn(Arc::clone(&engine).reap(stop.clone()));
     let drain_lc = lifecycle.clone();
@@ -276,7 +287,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             Arc::new(
                 GatewayContext::with_sessions(clock.clone(), Arc::clone(&sessions))
                     .with_backends(Arc::clone(&backends))
-                    .with_peers(Arc::clone(&peers)),
+                    .with_peers(Arc::clone(&peers))
+                    .with_limits(Arc::clone(&limiter)),
             ),
         )
         .with_bind_overrides(binds),

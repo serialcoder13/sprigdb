@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::float_cmp, clippy::cast_precision_loss)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
 
 use super::*;
 
@@ -71,10 +76,23 @@ fn fleet_report() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
     let avoid = std::env::var("SPRIG_FLEET_AVOID_MOVE_BACK").map_or(true, |v| v != "0");
+    let scenario = std::env::var("SPRIG_FLEET_SCENARIO").unwrap_or_default();
     let base = FleetConfig {
         avoid_move_back: avoid,
-        ..FleetConfig::skewed(0)
+        ..match scenario.as_str() {
+            "big" => FleetConfig::big_clusters_small_tenants(0),
+            "huge" => FleetConfig::huge_tenants(0),
+            _ => FleetConfig::skewed(0),
+        }
     };
+    println!(
+        "scenario: {}",
+        if scenario.is_empty() {
+            "skewed"
+        } else {
+            &scenario
+        }
+    );
     let started = std::time::Instant::now();
     let rs = run_many(&base, 1..seeds + 1);
     let n = rs.len() as f64;

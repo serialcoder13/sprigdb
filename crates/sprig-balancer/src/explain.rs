@@ -30,6 +30,10 @@ pub struct ShardLine {
     pub busy_ms_per_sec: f64,
     /// Rows written per second.
     pub write_rows_per_sec: f64,
+    /// Statements per second, as the gateways recorded them (0 when
+    /// unknown).
+    #[serde(default)]
+    pub statements_per_sec: f64,
     /// Pinned.
     pub pinned: bool,
     /// Locked by a job (moving).
@@ -104,6 +108,7 @@ pub fn explain_placement(
             size_bytes: s.load.storage_bytes,
             busy_ms_per_sec: s.load.busy_ms_per_sec,
             write_rows_per_sec: s.load.write_rows_per_sec,
+            statements_per_sec: 0.0,
             pinned: s.pinned,
             locked: s.locked,
             cooldown_until: (s.cooldown_until > now).then_some(s.cooldown_until),
@@ -165,15 +170,22 @@ pub fn explain_placement(
         }
         for m in &r.moves {
             if m.tenant == tenant {
-                reasoning.push(format!(
-                    "move {} from {} to {}: {}, gain {:.2}, {:.1} GB",
-                    m.shards[0],
-                    m.from,
-                    m.to,
-                    m.reason.code(),
-                    m.gain,
-                    m.size_bytes / GB
-                ));
+                reasoning.push(if m.why.is_empty() {
+                    format!(
+                        "move {} from {} to {}: {}, gain {:.2}, {:.1} GB",
+                        m.shards[0],
+                        m.from,
+                        m.to,
+                        m.reason.code(),
+                        m.gain,
+                        m.size_bytes / GB
+                    )
+                } else {
+                    m.why.clone()
+                });
+                for c in m.considered.iter().filter(|c| c.tenant == tenant) {
+                    reasoning.push(c.why.clone());
+                }
             } else if holding.contains(&m.from) {
                 reasoning.push(format!(
                     "best move off {} was another tenant's shard, gain {:.2}",
@@ -187,6 +199,9 @@ pub fn explain_placement(
             if about_me {
                 reasoning.push(n.text.clone());
             }
+        }
+        for c in r.rejected.iter().filter(|c| c.tenant == tenant) {
+            reasoning.push(c.why.clone());
         }
         for a in &r.approvals {
             if a.shard.tenant == tenant {
@@ -227,7 +242,7 @@ pub fn placement_text(e: &PlacementExplanation) -> String {
     let _ = writeln!(s, "tenant {}  balancer.mode {}", e.tenant, e.mode);
     let _ = writeln!(
         s,
-        "\nSHARD                CLUSTER        SIZE_GB  BUSY_MS/S  WRITES/S  STATE"
+        "\nSHARD                CLUSTER        SIZE_GB  STMTS/S  BUSY_MS/S  WRITES/S  STATE"
     );
     for l in &e.shards {
         let state = if l.locked {
@@ -241,10 +256,11 @@ pub fn placement_text(e: &PlacementExplanation) -> String {
         };
         let _ = writeln!(
             s,
-            "{:<20} {:<14} {:>7.2} {:>10.1} {:>9.1}  {state}",
+            "{:<20} {:<14} {:>7.3} {:>8.1} {:>10.1} {:>9.1}  {state}",
             l.shard,
             l.cluster,
             l.size_bytes / GB,
+            l.statements_per_sec,
             l.busy_ms_per_sec,
             l.write_rows_per_sec
         );

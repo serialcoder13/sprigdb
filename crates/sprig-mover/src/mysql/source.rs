@@ -452,9 +452,25 @@ impl SourceIo for MysqlSource {
         tables: Arc<Vec<Arc<TableMeta>>>,
     ) -> Result<Box<dyn ChangeStream>> {
         let schemas = self.schemas().await?;
+        // On Galera the job's position keeps only the cluster's domain. A
+        // node's own domains (writes made with wsrep off) must still be in
+        // the connect state, or the node would send their whole history:
+        // start them where the node is now; they never carry tenant rows.
+        let mut from = from.clone();
+        if let Some(d) = self.access.domain {
+            let mut c = self.conn().await?;
+            let p: Option<String> = c
+                .query_first("SELECT @@gtid_binlog_pos")
+                .await
+                .map_err(|e| db_err("read @@gtid_binlog_pos", &e))?;
+            let now: GtidPos = p.unwrap_or_default().parse()?;
+            for g in now.iter().filter(|g| g.domain != d) {
+                from.update(*g);
+            }
+        }
         let s = MysqlStream::connect(
             &self.access.repl,
-            from,
+            &from,
             self.server_id,
             self.job,
             schemas,

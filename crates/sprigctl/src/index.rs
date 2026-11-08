@@ -11,10 +11,15 @@
 //! sprigctl index drop <index> --tenant acme [--reason ...] --yes
 //! sprigctl index pin <index> --tenant acme [--off]                 (alias freeze)
 //! sprigctl index unpin <index> --tenant acme
+//! sprigctl index restore <index> --tenant acme                     (decision O1)
 //! sprigctl explain query <fingerprint> --tenant acme
 //! ```
 //!
-//! `<index>` is an id from `index list`, or `[<db>.][<table>.]sprig_auto_<hex>`.
+//! `<index>` is an id from `index list`, or `[<db>.][<table>.]sprig_auto_<hex>`;
+//! a user or migrated index that automatic indexing retired, recommended for
+//! removal or pinned is named `[<db>.][<table>.]<name>`. `restore` makes a
+//! retiring (`IGNORED`) index visible again, or recreates a user index
+//! dropped for disuse from its saved definition, and pins it.
 //! `--tenant` may come from `SPRIGCTL_TENANT`. Writes record
 //! `op:<actor>` (`--actor`, `SPRIGCTL_ACTOR`, then `USER`).
 
@@ -40,9 +45,10 @@ fn tenant() -> Arg {
 }
 
 fn index_arg() -> Arg {
-    Arg::new("index")
-        .required(true)
-        .help("An index id from `index list`, or [<db>.][<table>.]sprig_auto_<hex>")
+    Arg::new("index").required(true).help(
+        "An index id from `index list`, [<db>.][<table>.]sprig_auto_<hex>, or a user \
+             index as [<db>.][<table>.]<name>",
+    )
 }
 
 fn filters(c: Command) -> Command {
@@ -136,6 +142,11 @@ pub(crate) fn group() -> Command {
             "unpin",
             "Let automatic indexing manage a pinned index again",
         ))
+        .subcommand(write_cmd(
+            "restore",
+            "Make a retiring (IGNORED) index visible again, or recreate a user index dropped \
+             for disuse, and pin it",
+        ))
 }
 
 /// `sprigctl explain`: `query` here; `decision` and `placement` in
@@ -212,6 +223,7 @@ pub(crate) fn action_of(cmd: &str, sub: &ArgMatches) -> &'static str {
         "drop" => "drop",
         "pin" | "freeze" if sub.get_flag("off") => "unpin",
         "pin" | "freeze" => "pin",
+        "restore" => "restore",
         _ => "unpin",
     }
 }
@@ -245,7 +257,7 @@ pub(crate) async fn run(
             let index = sub.get_one::<String>("index").cloned().unwrap_or_default();
             let action = action_of(cmd, sub);
             if m.get_flag("dry-run") {
-                println!("would {action} automatic index {index} of tenant {tenant}");
+                println!("would {action} index {index} of tenant {tenant}");
                 return Ok(());
             }
             if action == "drop" {
@@ -345,9 +357,11 @@ pub(crate) fn index_list(r: &ListIndexesResponse, recommendations: bool) -> Stri
                 } else {
                     i.columns.join(", ")
                 },
-                match &i.drop_reason {
-                    Some(d) => format!("{} ({d})", i.state),
-                    None => i.state.clone(),
+                match (&i.drop_reason, &i.origin) {
+                    (Some(d), Some(o)) => format!("{} ({d}; {o} index)", i.state),
+                    (None, Some(o)) => format!("{} ({o} index)", i.state),
+                    (Some(d), None) => format!("{} ({d})", i.state),
+                    (None, None) => i.state.clone(),
                 },
                 ms(i.est_net_ms_h),
                 bytes(i.actual_bytes.unwrap_or(i.est_bytes)),

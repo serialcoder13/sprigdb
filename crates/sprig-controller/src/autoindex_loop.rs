@@ -13,6 +13,9 @@
 //!     3. each `rolling_out` row: rollout::driver::advance  — one shard build at
 //!        a time per tenant, one per cluster slot across the DC
 //!     4. each serving, retiring, dropping or failed row: observe::step
+//!     4b. every user_every, each table read in the last hour or holding a
+//!         retiring or recommended user index: observe::user::object_pass
+//!         (decision O1: user and migrated indexes judged by usage)
 //!     5. every drift_every, each object with live rows: observe::drift
 //!   requeue after the soonest of: a rollout's next try, the next observation,
 //!   the next evaluation (bounded to [min_requeue, max_requeue])
@@ -50,6 +53,7 @@ use std::time::{Duration, SystemTime};
 
 use mysql_async::Conn;
 use sprig_advisor::autoindex::model::AutoIndexId;
+use sprig_advisor::autoindex::observe::user::UserStep;
 use sprig_advisor::autoindex::observe::{
     self, ObserveCx, ObserveSettings, ObserveStep, WorkloadSource, drift,
 };
@@ -250,6 +254,9 @@ pub struct Cadence {
     pub min_requeue: Duration,
     /// The longest requeue.
     pub max_requeue: Duration,
+    /// User and migrated indexes' usage pass (decision O1); each index is
+    /// counted at most every `usage_every` of its table.
+    pub user_every: Duration,
 }
 
 impl Default for Cadence {
@@ -259,6 +266,7 @@ impl Default for Cadence {
             drift_every: Duration::from_secs(3600),
             min_requeue: Duration::from_secs(5),
             max_requeue: Duration::from_secs(600),
+            user_every: Duration::from_secs(60),
         }
     }
 }
@@ -271,6 +279,8 @@ pub struct Memory {
     pub last_eval: Option<SystemTime>,
     /// The last drift reconcile.
     pub last_drift: Option<SystemTime>,
+    /// The last pass over user and migrated indexes.
+    pub last_user: Option<SystemTime>,
 }
 
 /// What one pass did.
@@ -288,6 +298,8 @@ pub struct PassReport {
     pub observed: Vec<(AutoIndexId, ObserveStep)>,
     /// Drift reconciles, by object.
     pub drift: Vec<(ObjectId, drift::DriftReport)>,
+    /// User and migrated index steps, by object and index.
+    pub user: Vec<(ObjectId, String, UserStep)>,
     /// Errors that didn't stop the pass.
     pub errors: Vec<String>,
     /// When to come back.
@@ -487,6 +499,18 @@ pub async fn tenant_pass(
         }
     }
 
+    // 4b. User and migrated indexes (decision O1).
+    let user_due = memory
+        .last_user
+        .is_none_or(|t| now < t || now.duration_since(t).unwrap_or_default() >= cadence.user_every);
+    if user_due {
+        memory.last_user = Some(now);
+        if let Err(e) = user_pass(env, hooks, &store, &mut q, tenant, now, &mut rep).await {
+            rep.errors.push(format!("user indexes: {e}"));
+        }
+    }
+    soon(&mut rep, cadence.user_every);
+
     // 5. Drift.
     let drift_due = memory.last_drift.is_none_or(|t| {
         now < t || now.duration_since(t).unwrap_or_default() >= cadence.drift_every
@@ -517,6 +541,69 @@ pub async fn tenant_pass(
     soon(&mut rep, cadence.drift_every);
     let _ = q.disconnect().await;
     Ok(rep)
+}
+
+/// Step 4b: the user and migrated indexes of every table read in the last
+/// hour, and of every table holding a retiring or recommended one.
+async fn user_pass(
+    env: &dyn AutoIndexEnv,
+    hooks: &AutoIndexHooks,
+    store: &AutoIndexStore,
+    q: &mut Conn,
+    tenant: TenantId,
+    now: SystemTime,
+    rep: &mut PassReport,
+) -> Result<()> {
+    use sprig_advisor::autoindex::store::usage::UserIndexState;
+    let since = now
+        .checked_sub(Duration::from_secs(3600))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut objects: BTreeSet<ObjectId> = hooks
+        .workload
+        .objects_read(tenant, since, now)
+        .await?
+        .unwrap_or_default();
+    objects.extend(
+        store
+            .usage_objects_in(q, &[UserIndexState::Retiring, UserIndexState::Recommended])
+            .await?,
+    );
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let envs = env.objects(tenant, &objects).await?;
+    for (object, o) in &envs {
+        let mut rules = o.rules;
+        if o.mode == Mode::Off {
+            // Automatic indexing off for the table: nothing is judged, and
+            // an index left IGNORED is made visible again.
+            rules.retire_user_indexes = Mode::Off;
+        }
+        let cx = ObserveCx {
+            tenant,
+            view: &o.view,
+            shards: &o.shards,
+            rules: &rules,
+            settings: &o.observe,
+            ddl: &o.rollout,
+            workload: &*hooks.workload,
+            decisions: &*hooks.decisions,
+            now,
+        };
+        match observe::user::object_pass(store, q, &cx, *object).await {
+            Ok(steps) => {
+                for (name, st) in steps {
+                    if let UserStep::Failed(e) = &st {
+                        rep.errors
+                            .push(format!("{}/{name}: user index: {e}", object.0));
+                    }
+                    rep.user.push((*object, name, st));
+                }
+            }
+            Err(e) => rep.errors.push(format!("{}: user indexes: {e}", object.0)),
+        }
+    }
+    Ok(())
 }
 
 /// Moves a validated row: accepted → `rolling_out` or `recommended`;

@@ -61,7 +61,15 @@ pub trait ClusterPools: Send + Sync + 'static {
 
 fn pool_for(opts: mysql_async::Opts) -> Pool {
     let constraints = PoolConstraints::new(0, POOL_MAX).unwrap_or_default();
-    Pool::new(OptsBuilder::from_opts(opts).pool_opts(PoolOpts::new().with_constraints(constraints)))
+    // Keep idle connections for a minute: with mysql_async's default TTL of
+    // 0, a pool with a minimum of 0 closes every connection returned to it.
+    Pool::new(
+        OptsBuilder::from_opts(opts).pool_opts(
+            PoolOpts::new()
+                .with_constraints(constraints)
+                .with_inactive_connection_ttl(std::time::Duration::from_secs(60)),
+        ),
+    )
 }
 
 /// [`ClusterPools`] over the DC's cluster registry: credentials from the

@@ -222,9 +222,12 @@ impl StmtCache {
 }
 
 /// The statement cache's key: the default schema the statement is
-/// prepared under (none: `0`; else `1`, the name, `0`), then the SQL text.
-fn stmt_key(schema: Option<&str>, sql: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(sql.len() + schema.map_or(1, |s| s.len() + 2));
+/// prepared under (none: `0`; else `1`, the name, `0`), the parse context
+/// ([`super::state::AppliedState::parse_context`]) and `0`, then the SQL
+/// text.
+fn stmt_key(schema: Option<&str>, context: &str, sql: &[u8]) -> Vec<u8> {
+    let mut key =
+        Vec::with_capacity(sql.len() + context.len() + 1 + schema.map_or(1, |s| s.len() + 2));
     match schema {
         None => key.push(0),
         Some(s) => {
@@ -233,6 +236,8 @@ fn stmt_key(schema: Option<&str>, sql: &[u8]) -> Vec<u8> {
             key.push(0);
         }
     }
+    key.extend_from_slice(context.as_bytes());
+    key.push(0);
     key.extend_from_slice(sql);
     key
 }
@@ -404,7 +409,8 @@ impl BackendConn {
     /// # Errors
     /// The server's ERR for a bad statement; connection errors.
     pub async fn prepare_cached(&mut self, sql: &[u8]) -> Result<&mut BackendStmt, ClientError> {
-        let key = stmt_key(self.applied.schema.as_deref(), sql);
+        let context = self.applied.parse_context(&self.baseline);
+        let key = stmt_key(self.applied.schema.as_deref(), &context, sql);
         if self.stmt_cache.get_mut(&key).is_none() {
             while self.budget.over() {
                 let Some(old) = self.stmt_cache.pop_lru() else {
@@ -622,6 +628,25 @@ impl BackendConn {
         Ok(out)
     }
 
+    /// `@@collation_connection`, after a statement changed the character
+    /// sets (session tracking reports the character set's name only). It
+    /// leaves the statement's warnings in place.
+    ///
+    /// # Errors
+    /// Connection errors; the server's ERR.
+    pub async fn capture_collation(&mut self) -> Result<String, ClientError> {
+        let row = self
+            .client
+            .query_first("SELECT @@session.collation_connection")
+            .await?;
+        self.client.take_changes();
+        Ok(text(
+            row.as_ref()
+                .and_then(|r| r.first())
+                .and_then(Option::as_ref),
+        ))
+    }
+
     /// `COM_RESET_CONNECTION`, then the initialization again: the
     /// connection is back at the baseline, with no statements, user
     /// variables or temporary tables.
@@ -647,10 +672,17 @@ mod tests {
     #[test]
     fn statement_keys_include_the_schema() {
         let sql = b"SELECT v FROM t";
-        assert_ne!(stmt_key(Some("a"), sql), stmt_key(Some("b"), sql));
-        assert_ne!(stmt_key(None, sql), stmt_key(Some("a"), sql));
-        assert_eq!(stmt_key(Some("a"), sql), stmt_key(Some("a"), sql));
+        assert_ne!(stmt_key(Some("a"), "", sql), stmt_key(Some("b"), "", sql));
+        assert_ne!(stmt_key(None, "", sql), stmt_key(Some("a"), "", sql));
+        assert_eq!(stmt_key(Some("a"), "", sql), stmt_key(Some("a"), "", sql));
+        // A statement prepared under other character sets or another
+        // sql_mode parses differently: its literals keep the collation
+        // they were prepared with.
+        assert_ne!(stmt_key(Some("a"), "x", sql), stmt_key(Some("a"), "y", sql));
         // The separator keeps schema and text apart.
-        assert_ne!(stmt_key(Some("ab"), b"c"), stmt_key(Some("a"), b"bc"));
+        assert_ne!(
+            stmt_key(Some("ab"), "", b"c"),
+            stmt_key(Some("a"), "", b"bc")
+        );
     }
 }

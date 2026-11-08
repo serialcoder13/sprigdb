@@ -8,14 +8,17 @@
 //! - [`config`]: process configuration from `sprigdb.toml`;
 //! - [`time`]: the [`time::Clock`] every component reads time through;
 //! - [`telemetry`]: tracing setup, metrics and health endpoints;
-//! - [`names`]: physical MariaDB schema, account and internal names (chapter 07).
+//! - [`names`]: physical MariaDB schema, account and internal names (chapter 07);
+//! - [`audit`]: the audit spool, shipper and sinks (chapter 47).
 //!
 //! Not here yet: `certwatch` (chapter 23 step 9).
 
+pub mod audit;
 pub mod config;
 pub mod error;
 pub mod ids;
 pub mod names;
+pub mod net;
 pub mod telemetry;
 pub mod time;
 

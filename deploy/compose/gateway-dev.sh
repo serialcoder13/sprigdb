@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs a controller and a gateway on the host against the Compose stack
+# Runs a controller, a worker and a gateway on the host against the Compose stack
 # (milestones M0.2 and M0.3), so real MySQL and MariaDB clients can log in to
 # the gateway and run statements on a registered cluster.
 #
@@ -21,7 +21,7 @@
 #
 #   deploy/compose/gateway-dev.sh up       # build, start, register, configure
 #   deploy/compose/gateway-dev.sh status
-#   deploy/compose/gateway-dev.sh restart  # restart both processes, keeping tenants
+#   deploy/compose/gateway-dev.sh restart  # restart the processes, keeping tenants
 #   deploy/compose/gateway-dev.sh tls required|optional|off
 #   deploy/compose/gateway-dev.sh down     # stop, and undo what up wrote to etcd
 #
@@ -68,6 +68,7 @@ mariadb_port=${mariadb_port:-${SPRIG_GATEWAY_MARIADB_PORT:-13307}}
 admin_port=${admin_port:-${SPRIG_ADMIN_PORT:-7480}}
 ctl_telemetry_port=${ctl_telemetry_port:-${SPRIG_CTL_TELEMETRY_PORT:-9180}}
 gw_telemetry_port=${gw_telemetry_port:-${SPRIG_GW_TELEMETRY_PORT:-9190}}
+wk_telemetry_port=${wk_telemetry_port:-${SPRIG_WK_TELEMETRY_PORT:-9185}}
 login_mode=${login_mode:-${SPRIG_GATEWAY_LOGIN_MODE:-catalog}}
 case $login_mode in catalog | accounts_file) ;; *) echo "gateway-dev: SPRIG_GATEWAY_LOGIN_MODE must be catalog or accounts_file" >&2; exit 1 ;; esac
 # The tenants catalog mode creates, each with the user app.
@@ -85,6 +86,7 @@ bin=$(cat "$state/bin" 2>/dev/null || echo "${CARGO_TARGET_DIR:-target}/$profile
 admin=http://127.0.0.1:$admin_port
 ctl_ready=http://127.0.0.1:$ctl_telemetry_port/readyz
 gw_ready=http://127.0.0.1:$gw_telemetry_port/readyz
+wk_ready=http://127.0.0.1:$wk_telemetry_port/readyz
 
 # Registration order fixes the ids (numbers are allocated max + 1 across the
 # deployment), and gateway-accounts.dev.toml names these ids:
@@ -181,9 +183,11 @@ start() {
     fi
     # One previous log is kept; a trace-level gateway log grows fast.
     if [[ -f $state/$name.log ]]; then mv -f "$state/$name.log" "$state/$name.log.1"; fi
-    local telemetry=$ctl_telemetry_port
+    local telemetry=$ctl_telemetry_port extra=()
     if [[ $role == gateway ]]; then telemetry=$gw_telemetry_port; fi
-    SPRIGDB_META_DC_SEEDS="[\"$etcd\"]" \
+    # The worker reads the controller's config under its own node id.
+    if [[ $role == worker ]]; then telemetry=$wk_telemetry_port; extra=(SPRIGDB_NODE_ID=wkr-1); fi
+    env ${extra[@]+"${extra[@]}"} SPRIGDB_META_DC_SEEDS="[\"$etcd\"]" \
         SPRIGDB_GATEWAY_LOGIN_MODE="$login_mode" \
         SPRIGDB_CONTROLLER_ADMIN_ADDR="127.0.0.1:$admin_port" \
         SPRIGDB_TELEMETRY_BOOTSTRAP_ADDR="127.0.0.1:$telemetry" \
@@ -403,7 +407,8 @@ up() {
     echo '*' >"$state/.gitignore"
     printf '%s\n' "etcd=$etcd" "mysql_port=$mysql_port" "mariadb_port=$mariadb_port" \
         "admin_port=$admin_port" "ctl_telemetry_port=$ctl_telemetry_port" \
-        "gw_telemetry_port=$gw_telemetry_port" "login_mode=$login_mode" >"$state/env"
+        "gw_telemetry_port=$gw_telemetry_port" "wk_telemetry_port=$wk_telemetry_port" \
+        "login_mode=$login_mode" >"$state/env"
 
     # Ports held by anything other than our processes.
     local port
@@ -442,6 +447,11 @@ up() {
     has_leader || die "no DC leader for $dc after 30 s; see $state/controller.log"
 
     register_clusters
+
+    # The worker runs the mover's jobs: tenant moves from sprigctl shard
+    # move and from the balancer in auto mode (chapters 10 and 11).
+    start worker deploy/compose/sprigdb.dev.toml worker
+    wait_ready worker "$wk_ready"
 
     make_certs
     local tls=${SPRIG_GATEWAY_TLS:-optional}
@@ -507,6 +517,7 @@ down() {
     fi
     if running gateway && running controller; then remove_tenants; fi
     stop gateway
+    stop worker
     stop controller
 
     local n=0 created
@@ -550,7 +561,7 @@ down() {
 
 status() {
     local name port
-    for name in controller gateway; do
+    for name in controller worker gateway; do
         if running "$name"; then
             say "$name running (pid $(pid_of "$name"))"
         else
@@ -581,9 +592,12 @@ status() {
 restart() {
     [[ -d $state ]] || die "not up (no $state/)"
     stop gateway
+    stop worker
     stop controller
     start controller deploy/compose/sprigdb.dev.toml controller
     wait_ready controller "$ctl_ready"
+    start worker deploy/compose/sprigdb.dev.toml worker
+    wait_ready worker "$wk_ready"
     start gateway deploy/compose/sprigdb.gateway.dev.toml gateway
     wait_ready gateway "$gw_ready"
     for _ in $(seq 1 20); do

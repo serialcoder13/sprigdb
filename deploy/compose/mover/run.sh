@@ -12,6 +12,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 state=deploy/compose/mover/.state
 mkdir -p "$state"
+printf '*\n' >"$state/.gitignore"
 target=${CARGO_TARGET_DIR:-target}
 bin=$target/debug
 admin=${SPRIG_ADMIN:-http://127.0.0.1:7480}
@@ -32,6 +33,7 @@ up)
     fi
     ctl tenant user add "$tenant" app --password "$pw" --native --if-not-exists >/dev/null
     ctl settings set auth.mysql_native_password true --scope "tenant:$tenant" >/dev/null || true
+    ctl -o json tenant show "$tenant" | jq -r .tenant_id >"$state/tenant_id"
     for _ in $(seq 60); do
         nc -z 127.0.0.1 17306 2>/dev/null && break
         sleep 1

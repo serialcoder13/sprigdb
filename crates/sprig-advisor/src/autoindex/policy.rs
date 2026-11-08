@@ -11,8 +11,9 @@
 //! came from, for the decision log.
 //!
 //! - **Per object**: mode, trigger thresholds, `max_per_table`,
-//!   `max_storage_pct`, the improvement and regression limits, observe and
-//!   drop periods. A table with `mode = off` gets nothing even when its
+//!   `max_storage_pct`, the improvement and regression limits, the observe
+//!   period, and decision O1's usage rule (`usage_sample_reads`,
+//!   `min_usage_ratio`, `retire_user_indexes`). A table with `mode = off` gets nothing even when its
 //!   tenant is `on`.
 //! - **Shared cluster resources** ([`SharedLimits`]):
 //!   `max_builds_per_cluster`, `build_window` and
@@ -173,12 +174,19 @@ pub struct ObserveRules {
     pub max_regression_pct: f64,
     /// `auto_index.observe_days`.
     pub observe_days: u32,
-    /// `auto_index.unused_drop_days`.
-    pub unused_drop_days: u32,
-    /// `auto_index.ignore_before_drop_hours`.
-    pub ignore_before_drop_hours: u32,
     /// `auto_index.recreate_block_days`.
     pub recreate_block_days: u32,
+    /// `auto_index.usage_sample_reads`: reads per usage judgement and per
+    /// `IGNORED` watch (decision O1).
+    pub usage_sample_reads: u64,
+    /// `auto_index.min_usage_ratio`, a fraction (0.05).
+    pub min_usage_ratio: f64,
+    /// `auto_index.retire_user_indexes`: `on` removes user and migrated
+    /// indexes by the same rule, `recommend` only recommends it, `off`
+    /// leaves them alone.
+    pub retire_user_indexes: Mode,
+    /// `auto_index.maintenance_cost_ms`: the write side of the value check.
+    pub maintenance_cost_ms: f64,
 }
 
 /// Every `auto_index.*` value for one object, resolved at the object.
@@ -276,9 +284,11 @@ impl ObjectPolicy {
             min_improvement_pct: r.get(&k::MIN_IMPROVEMENT_PCT)?,
             max_regression_pct: r.get(&k::MAX_REGRESSION_PCT)?,
             observe_days: r.get(&k::OBSERVE_DAYS)?,
-            unused_drop_days: r.get(&k::UNUSED_DROP_DAYS)?,
-            ignore_before_drop_hours: r.get(&k::IGNORE_BEFORE_DROP_HOURS)?,
             recreate_block_days: r.get(&k::RECREATE_BLOCK_DAYS)?,
+            usage_sample_reads: r.get(&k::USAGE_SAMPLE_READS)?,
+            min_usage_ratio: r.get(&k::MIN_USAGE_RATIO)?,
+            retire_user_indexes: Mode::parse(&r.get(&k::RETIRE_USER_INDEXES)?),
+            maintenance_cost_ms: r.get(&k::MAINTENANCE_COST_MS)?,
         };
         let cost = CostParams {
             window_hours: f64::from(trigger.window_hours),

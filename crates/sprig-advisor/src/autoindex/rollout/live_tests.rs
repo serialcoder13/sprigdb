@@ -170,6 +170,7 @@ where
         DDL_CANDIDATES,
         DDL_VALIDATIONS,
         DDL_INDEX_ORIGINS,
+        crate::autoindex::store::DDL_INDEX_USAGE,
     ] {
         c.query_drop(ddl).await.unwrap();
     }
@@ -670,14 +671,16 @@ impl WorkloadSource for Fake {
     }
 }
 
-fn rules(ignore_hours: u32) -> ObserveRules {
+fn rules() -> ObserveRules {
     ObserveRules {
         min_improvement_pct: 30.0,
         max_regression_pct: 10.0,
         observe_days: 7,
-        unused_drop_days: 30,
-        ignore_before_drop_hours: ignore_hours,
         recreate_block_days: 14,
+        usage_sample_reads: 100,
+        min_usage_ratio: 0.05,
+        retire_user_indexes: crate::autoindex::policy::Mode::On,
+        maintenance_cost_ms: 0.05,
     }
 }
 
@@ -724,13 +727,15 @@ fn ocx<'a>(
 
 const DAY: Duration = Duration::from_secs(86_400);
 
-/// Unused for 30 days: ignored, then dropped after the quiet period; the
-/// user's index on the same table is never touched.
+/// Decision O1: over 200 reads (`usage_sample_reads` 100) none uses our
+/// index: ignored at once, and dropped once 100 more reads ran with
+/// nothing slower. No clock is moved. The user's indexes on the same table
+/// are never touched by this path.
 async fn unused_dropped(topo: Topo, label: &str) {
     with_env(topo, label, |env| async move {
         let rs = settings();
         let os = ObserveSettings::default();
-        let rl = rules(24);
+        let rl = rules();
         let shards = vec![env.table.clone()];
         let def = def();
         let mut q = catalog(&env).await;
@@ -765,52 +770,42 @@ async fn unused_dropped(topo: Topo, label: &str) {
             )
             .await
             .unwrap();
-        // Samples that never use our index: the plan reads idx_status.
+        // 200 reads; the sample's plan reads idx_status, never ours.
         let fake = Fake {
-            latency: Some(BTreeMap::new()),
+            latency: Some([(Fingerprint(1), FpLatency::read(200, 1.0, 0.8))].into()),
             samples: Some(vec![UsageSample {
                 fingerprint: Fingerprint(1),
                 schema: env.schema.clone(),
                 sql: "SELECT id FROM orders WHERE status = 3".into(),
             }]),
         };
-        // Day 10: checked, not used, not old enough.
-        let t10 = SystemTime::now() + 10 * DAY;
+        let now = SystemTime::now() + Duration::from_secs(60);
         let r = env.store.index(&mut q, id).await.unwrap().unwrap();
         let st = step(
             &env.store,
             &mut q,
-            &ocx(&env, &rl, &os, &rs, &shards, &fake, t10),
-            &r,
-        )
-        .await
-        .unwrap();
-        assert_eq!(st, ObserveStep::Checked, "{label}");
-        // Day 31: retired through IGNORED.
-        let t31 = SystemTime::now() + 31 * DAY;
-        let r = env.store.index(&mut q, id).await.unwrap().unwrap();
-        let st = step(
-            &env.store,
-            &mut q,
-            &ocx(&env, &rl, &os, &rs, &shards, &fake, t31),
+            &ocx(&env, &rl, &os, &rs, &shards, &fake, now),
             &r,
         )
         .await
         .unwrap();
         assert_eq!(st, ObserveStep::Retiring(DropReason::Unused), "{label}");
+        let r = env.store.index(&mut q, id).await.unwrap().unwrap();
+        let us = &r.observed.as_ref().unwrap()["usage"];
+        assert_eq!(us["last"]["reads"], 200, "{label}: {us}");
+        assert_eq!(us["last"]["served"], 0, "{label}: {us}");
         let mut n = Node::connect(env.view.nodes.writer().unwrap(), Duration::from_secs(10))
             .await
             .unwrap();
         let ix = n.indexes(&env.table).await.unwrap();
         assert!(ix[&def.name()].ignored, "{label}: not IGNORED");
-        // Quiet for 24 h: dropped.
-        let t32 = t31 + DAY + Duration::from_secs(60);
-        let r = env.store.index(&mut q, id).await.unwrap().unwrap();
+        // The next reads (the fake's 200 again) with nothing slower: dropped.
+        let later = now + Duration::from_secs(60);
         assert_eq!(r.state, IndexState::Retiring);
         let st = step(
             &env.store,
             &mut q,
-            &ocx(&env, &rl, &os, &rs, &shards, &fake, t32),
+            &ocx(&env, &rl, &os, &rs, &shards, &fake, later),
             &r,
         )
         .await
@@ -830,7 +825,7 @@ async fn unused_dropped(topo: Topo, label: &str) {
         let rep = reconcile_object(
             &env.store,
             &mut q,
-            &ocx(&env, &rl, &os, &rs, &shards, &fake, t32),
+            &ocx(&env, &rl, &os, &rs, &shards, &fake, later),
             OBJECT,
         )
         .await
@@ -849,6 +844,238 @@ async fn unused_dropped(topo: Topo, label: &str) {
     .await;
 }
 
+/// A workload store whose latencies a test changes.
+struct Scripted {
+    latency: std::sync::Mutex<BTreeMap<Fingerprint, FpLatency>>,
+    samples: Vec<UsageSample>,
+}
+
+#[async_trait::async_trait]
+impl WorkloadSource for Scripted {
+    async fn latency(
+        &self,
+        _t: TenantId,
+        _o: ObjectId,
+        _s: SystemTime,
+        _u: SystemTime,
+    ) -> sprig_common::Result<Option<BTreeMap<Fingerprint, FpLatency>>> {
+        Ok(Some(self.latency.lock().unwrap().clone()))
+    }
+    async fn samples(
+        &self,
+        _t: TenantId,
+        _o: ObjectId,
+        _n: usize,
+        _since: SystemTime,
+    ) -> sprig_common::Result<Option<Vec<UsageSample>>> {
+        Ok(Some(self.samples.clone()))
+    }
+}
+
+/// Decision O1 for user indexes: the primary key, a `UNIQUE` index and a
+/// foreign key's index are never tracked; a used one is kept; an unused
+/// one is ignored, watched by reads and dropped, then recreated from its
+/// saved definition; a rarely used one is brought back when a query it
+/// served gets slower while ignored; `recommend` only recommends; `off`
+/// brings an ignored one back.
+async fn user_indexes(topo: Topo, label: &str) {
+    use crate::autoindex::observe::user::{UserStep, add_user_sql, object_pass};
+    use crate::autoindex::policy::Mode;
+    use crate::autoindex::store::usage::UserIndexState as U;
+    with_env(topo, label, |env| async move {
+        let (rs, os) = (settings(), ObserveSettings::default());
+        let shards = vec![env.table.clone()];
+        let s = quote(&env.schema);
+        let mut c = catalog(&env).await;
+        for sql in [
+            format!("USE {s}"),
+            format!("CREATE TABLE {s}.customers (id INT PRIMARY KEY) ENGINE=InnoDB"),
+            format!("INSERT INTO {s}.customers SELECT seq FROM seq_0_to_4999"),
+            format!(
+                "ALTER TABLE {s}.orders ADD INDEX idx_status (status), ADD INDEX idx_total (total), \
+                 ADD INDEX idx_pad (pad(8)), ADD INDEX ix_cust (customer_id), \
+                 ADD UNIQUE KEY uq_id_status (id, status)"
+            ),
+            "SET SESSION foreign_key_checks = 0".to_owned(),
+            format!(
+                "ALTER TABLE {s}.orders ADD CONSTRAINT fk_cust FOREIGN KEY (customer_id) \
+                 REFERENCES {s}.customers (id)"
+            ),
+        ] {
+            c.query_drop(&sql).await.unwrap();
+        }
+        let (status, pk, pad, write) = (
+            Fingerprint(0x51),
+            Fingerprint(0x52),
+            Fingerprint(0x53),
+            Fingerprint(0x54),
+        );
+        // 400 reads: 100 by status (25%), 2 by pad (0.5%), the rest by id;
+        // 10 inserts of 1,000 rows each (10,000 entry changes, 500 ms).
+        let base: BTreeMap<Fingerprint, FpLatency> = [
+            (status, FpLatency::read(100, 2.0, 1.5)),
+            (pk, FpLatency::read(298, 0.3, 0.2)),
+            (pad, FpLatency::read(2, 0.4, 0.3)),
+            (
+                write,
+                FpLatency {
+                    write: true,
+                    affected_per_run: 1000.0,
+                    ..FpLatency::read(10, 0.5, 0.4)
+                },
+            ),
+        ]
+        .into();
+        let sample = |fp, sql: &str| UsageSample {
+            fingerprint: fp,
+            schema: env.schema.clone(),
+            sql: sql.into(),
+        };
+        let w = Scripted {
+            latency: std::sync::Mutex::new(base.clone()),
+            samples: vec![
+                sample(status, "SELECT id FROM orders WHERE status = 3"),
+                sample(pk, "SELECT pad FROM orders WHERE id = 5"),
+                sample(
+                    pad,
+                    "SELECT id FROM orders WHERE pad = 'jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj'",
+                ),
+            ],
+        };
+        let mut rl = rules();
+        rl.usage_sample_reads = 300;
+        let hour = Duration::from_secs(3600);
+        let t0 = SystemTime::now();
+        let pass = |rl: ObserveRules, at: SystemTime| {
+            let (env, os, rs, shards, w) = (&env, &os, &rs, &shards, &w);
+            async move {
+                let mut q = catalog(env).await;
+                let out = object_pass(
+                    &env.store,
+                    &mut q,
+                    &ocx(env, &rl, os, rs, shards, w, at),
+                    OBJECT,
+                )
+                .await
+                .unwrap();
+                let rows: BTreeMap<String, U> = env
+                    .store
+                    .usage_rows(&mut q, Some(OBJECT))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| (r.index_name, r.state))
+                    .collect();
+                let _ = q.disconnect().await;
+                eprintln!("[{label}] {out:?} -> {rows:?}");
+                (out, rows)
+            }
+        };
+        let ignored = |name: &'static str| {
+            let env = &env;
+            async move {
+                let mut n = Node::connect(env.view.nodes.writer().unwrap(), Duration::from_secs(10))
+                    .await
+                    .unwrap();
+                let ix = n.indexes(&env.table).await.unwrap();
+                n.close().await;
+                ix.get(name).map(|i| i.ignored)
+            }
+        };
+        // First pass: tracked from now; protected ones never get a row.
+        let (out, rows) = pass(rl, t0).await;
+        assert!(out.iter().all(|(_, s)| *s == UserStep::Tracked), "{out:?}");
+        assert_eq!(
+            rows.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["idx_pad", "idx_status", "idx_total"],
+            "{label}"
+        );
+        // Judged after 400 reads: status used, total unused, pad rare and
+        // worth less than the writes.
+        let (_, rows) = pass(rl, t0 + hour).await;
+        assert_eq!(rows["idx_status"], U::Serving);
+        assert_eq!(rows["idx_total"], U::Retiring);
+        assert_eq!(rows["idx_pad"], U::Retiring);
+        assert_eq!(ignored("idx_total").await, Some(true));
+        assert_eq!(ignored("idx_pad").await, Some(true));
+        for p in ["PRIMARY", "ix_cust", "uq_id_status", "idx_status"] {
+            assert_eq!(ignored(p).await, Some(false), "{label}: {p}");
+        }
+        // While ignored, the pad query got slower (0.4 ms → 30 ms): idx_pad
+        // is made visible again and kept; idx_total, which served nothing,
+        // is dropped after the next 300 reads.
+        w.latency
+            .lock()
+            .unwrap()
+            .insert(pad, FpLatency::read(10, 30.0, 25.0));
+        let (out, rows) = pass(rl, t0 + 2 * hour).await;
+        assert!(
+            out.iter().any(|(n, s)| n == "idx_pad" && matches!(s, UserStep::Restored(w) if w.starts_with("regressed_while_ignored"))),
+            "{out:?}"
+        );
+        assert_eq!(rows["idx_pad"], U::Serving);
+        assert_eq!(ignored("idx_pad").await, Some(false));
+        assert_eq!(rows["idx_total"], U::Dropped);
+        assert_eq!(ignored("idx_total").await, None);
+        // Restore recreates it from the saved definition.
+        let mut q = catalog(&env).await;
+        let def = env
+            .store
+            .usage_rows(&mut q, Some(OBJECT))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.index_name == "idx_total")
+            .unwrap()
+            .definition;
+        assert_eq!(def, "KEY `idx_total` (`total`)");
+        c.query_drop(add_user_sql(&env.table, "idx_total", &def).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            env.store
+                .set_usage_state(&mut q, OBJECT, "idx_total", U::Dropped, U::Pinned, Some("operator"), t0)
+                .await
+                .unwrap()
+        );
+        assert_eq!(ignored("idx_total").await, Some(false));
+        // recommend: an unused one is only recommended.
+        *w.latency.lock().unwrap() = base.clone();
+        let mut rec = rl;
+        rec.retire_user_indexes = Mode::Recommend;
+        let _ = pass(rec, t0 + 3 * hour).await;
+        let (_, rows) = pass(rec, t0 + 4 * hour).await;
+        assert_eq!(rows["idx_total"], U::Pinned, "{label}: pinned is never judged");
+        assert_eq!(rows["idx_pad"], U::Recommended);
+        assert_eq!(ignored("idx_pad").await, Some(false));
+        // on again: retired; then off brings it back.
+        let (_, rows) = pass(rl, t0 + 5 * hour).await;
+        assert_eq!(rows["idx_pad"], U::Retiring);
+        let mut off = rl;
+        off.retire_user_indexes = Mode::Off;
+        let (out, rows) = pass(off, t0 + 6 * hour).await;
+        assert!(out.iter().any(|(n, s)| n == "idx_pad" && *s == UserStep::Restored("retire_user_indexes_off".into())));
+        assert_eq!(rows["idx_pad"], U::Serving);
+        assert_eq!(ignored("idx_pad").await, Some(false));
+        for p in ["PRIMARY", "ix_cust", "uq_id_status", "idx_status"] {
+            assert_eq!(ignored(p).await, Some(false), "{label}: {p}");
+        }
+        let _ = q.disconnect().await;
+        let _ = c.disconnect().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn user_indexes_removed_by_usage_single() {
+    user_indexes(Topo::Single, "single user indexes").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn user_indexes_removed_by_usage_galera() {
+    user_indexes(Topo::Galera, "galera user indexes").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unused_index_dropped_user_index_kept_single() {
     unused_dropped(Topo::Single, "single unused").await;
@@ -863,7 +1090,7 @@ async fn unused_index_dropped_user_index_kept_galera() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unknown_usage_never_drops() {
     with_env(Topo::Single, "unknown usage", |env| async move {
-        let (rs, os, rl) = (settings(), ObserveSettings::default(), rules(24));
+        let (rs, os, rl) = (settings(), ObserveSettings::default(), rules());
         let shards = vec![env.table.clone()];
         let def = def();
         let mut q = catalog(&env).await;
@@ -894,7 +1121,7 @@ async fn unknown_usage_never_drops() {
 async fn superseded(topo: Topo, label: &str) {
     with_env(topo, label, |env| async move {
         let (rs, os) = (settings(), ObserveSettings::default());
-        let rl = rules(0); // straight to the drop
+        let rl = rules(); // superseded: straight to the drop
         let shards = vec![env.table.clone()];
         let def = def();
         let mut q = catalog(&env).await;
@@ -970,7 +1197,7 @@ async fn user_equivalent_retires_ours_galera() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drift_reconciler() {
     with_env(Topo::Replication, "drift", |env| async move {
-        let (rs, os, rl) = (settings(), ObserveSettings::default(), rules(24));
+        let (rs, os, rl) = (settings(), ObserveSettings::default(), rules());
         let shards = vec![env.table.clone()];
         let mut q = catalog(&env).await;
         let kept = def();

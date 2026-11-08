@@ -184,14 +184,6 @@ impl TargetIo for MysqlTarget {
                 .await
                 .map_err(|e| db_err("create the mover's tables", &e))?;
         }
-        let has_pos: Option<u64> = c
-            .exec_first(
-                "SELECT COUNT(*) FROM `__sprig_sys`.`__sprig_mover_pos` WHERE job_id = ?",
-                (self.job.to_bytes().to_vec(),),
-            )
-            .await
-            .map_err(|e| db_err("read the position", &e))?;
-        let resuming = has_pos.unwrap_or(0) > 0;
         if let Some(d) = &self.swap {
             let shadow = shadow_name(&d.table);
             if !self.exists(&mut c, &d.schema, &shadow).await? {
@@ -216,28 +208,6 @@ impl TargetIo for MysqlTarget {
                 })?;
             }
             return Ok(());
-        }
-        // Never write into schemas the target already had: a move's target
-        // schemas are new.
-        if !resuming {
-            for s in self.job_schemas().await? {
-                let n: Option<u64> = c
-                    .exec_first(
-                        "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
-                        (s.as_bytes().to_vec(),),
-                    )
-                    .await
-                    .map_err(|e| db_err("look up a schema", &e))?;
-                if n.unwrap_or(0) > 0 {
-                    return Err(SprigError::new(
-                        SprigCode::MoveTargetIncompatible,
-                        format!(
-                            "cluster {} already has schema {s}; drop it or move elsewhere",
-                            self.access.cluster
-                        ),
-                    ));
-                }
-            }
         }
         for q in objects.iter().filter(|q| q.starts_with("CREATE DATABASE")) {
             c.query_drop(q.as_str())
@@ -289,6 +259,53 @@ impl TargetIo for MysqlTarget {
             "some views, routines or grants couldn't be created on the target"
         );
         Ok(())
+    }
+
+    async fn reserve(&self, job: JobId, token: u64, init: &PosRow) -> Result<PosRow> {
+        let mut c = self.conn().await?;
+        for q in [
+            "CREATE DATABASE IF NOT EXISTS `__sprig_sys`",
+            sql::POS_DDL,
+            sql::XA_DDL,
+        ] {
+            c.query_drop(q)
+                .await
+                .map_err(|e| db_err("create the mover's tables", &e))?;
+        }
+        let has_pos: Option<u64> = c
+            .exec_first(
+                "SELECT COUNT(*) FROM `__sprig_sys`.`__sprig_mover_pos` WHERE job_id = ?",
+                (job.to_bytes().to_vec(),),
+            )
+            .await
+            .map_err(|e| db_err("read the position", &e))?;
+        let resuming = has_pos.unwrap_or(0) > 0;
+        if self.swap.is_none() {
+            // Never write into schemas the target already had: a move's target
+            // schemas are new.
+            if !resuming {
+                for s in self.job_schemas().await? {
+                    let n: Option<u64> = c
+                        .exec_first(
+                            "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
+                            (s.as_bytes().to_vec(),),
+                        )
+                        .await
+                        .map_err(|e| db_err("look up a schema", &e))?;
+                    if n.unwrap_or(0) > 0 {
+                        return Err(SprigError::new(
+                            SprigCode::MoveTargetIncompatible,
+                            format!(
+                                "cluster {} already has schema {s}; drop it or move elsewhere",
+                                self.access.cluster
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        drop(c);
+        self.claim(job, token, init).await
     }
 
     async fn load_pos(&self, job: JobId) -> Result<Option<PosRow>> {
@@ -398,8 +415,9 @@ impl TargetIo for MysqlTarget {
         copy: &CopyState,
     ) -> Result<()> {
         if let Some(d) = &self.swap
+            && !stmt.contains(&format!("{INTERNAL_OBJECT_PREFIX}cs_"))
             && super::sql::ddl_touches(db, stmt, std::slice::from_ref(&d.schema))
-            && stmt.contains(&d.table)
+            && super::sql::names_word(stmt, &d.table)
         {
             return Err(SprigError::new(
                 SprigCode::MoveUnsupported,

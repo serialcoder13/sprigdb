@@ -45,6 +45,7 @@ use sprig_auth::authz::account_sql::{
     self, AccountCtx, Outcome, db_denied, routine_denied, table_denied,
 };
 use sprig_auth::authz::backend::{self, BackendKey};
+use sprig_auth::authz::definers;
 use sprig_auth::authz::settings::{ACTIVATE_ALL_ROLES_ON_LOGIN, UNSAFE_PRIVILEGE_ACTION};
 use sprig_auth::authz::stmt::AccountStmt;
 use sprig_auth::authz::{Action, ActionSet, AuthzState, CompiledPrivileges, ObjectType, Target};
@@ -185,6 +186,24 @@ impl AuthzServices {
         })?;
         let started = std::time::Instant::now();
         let rep = backend::reconcile(&mut conn, cat.tenant, &want, &per_user.key, full).await?;
+        if full {
+            // Stored code created as sprig_ctl before definers were the
+            // session's account (chapter 29, "Definers of stored code").
+            let to = definers::wanted(cat, &state, auth);
+            match definers::migrate(&mut conn, cat.tenant, &to).await {
+                Ok(r) => {
+                    for o in &r.moved {
+                        tracing::warn!(tenant = %cat.tenant, %cluster, kind = o.kind.keyword(), schema = %o.schema, name = %o.name, from = %o.definer, "stored code moved off a non-tenant definer");
+                    }
+                    for (o, e) in &r.failed {
+                        tracing::error!(tenant = %cat.tenant, %cluster, kind = o.kind.keyword(), schema = %o.schema, name = %o.name, definer = %o.definer, error = %e, "stored code still has a non-tenant definer");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(tenant = %cat.tenant, %cluster, error = %e, "checking stored code definers failed");
+                }
+            }
+        }
         drop(conn);
         for acct in &rep.changed {
             svc.locator.retire_account(acct);
@@ -610,33 +629,15 @@ pub fn check(cx: &CheckCtx<'_>, sp: &StmtPlan, original: &[u8], lex: &LexOptions
     if cx.p.everything {
         return Ok(());
     }
-    match sp.info.kind {
-        StmtKind::Select
-        | StmtKind::Insert
-        | StmtKind::Replace
-        | StmtKind::Update
-        | StmtKind::Delete => {
-            if let Some(needs) = access::requirements(original, lex) {
-                for n in &needs {
-                    cx.need(n)?;
-                }
-            }
+    check_text(cx, sp.info.kind, original, *lex)?;
+    if sp.info.kind == StmtKind::Use
+        && let Some(UseTarget::Database { logical, .. }) = &sp.info.use_target
+    {
+        let key = database_key(logical, cx.lctn);
+        let id = cx.cat.database(&key).map(|d| d.db_id);
+        if !cx.p.any_in_database(&key, id) {
+            return Err(db_denied(cx.user, cx.host, logical));
         }
-        StmtKind::Call => {
-            if let Some((db, name)) = call_target(original, *lex) {
-                cx.routine(db.as_deref(), &name, ObjectType::Procedure, Action::Execute)?;
-            }
-        }
-        StmtKind::Use => {
-            if let Some(UseTarget::Database { logical, .. }) = &sp.info.use_target {
-                let key = database_key(logical, cx.lctn);
-                let id = cx.cat.database(&key).map(|d| d.db_id);
-                if !cx.p.any_in_database(&key, id) {
-                    return Err(db_denied(cx.user, cx.host, logical));
-                }
-            }
-        }
-        _ => {}
     }
     if let Some(t) = &sp.info.ddl {
         for n in access::ddl_requirements(t) {
@@ -644,6 +645,106 @@ pub fn check(cx: &CheckCtx<'_>, sp: &StmtPlan, original: &[u8], lex: &LexOptions
         }
     }
     Ok(())
+}
+
+/// The checks of [`check`] that need only the statement's text: the
+/// relations of a `SELECT`, `INSERT`, `REPLACE`, `UPDATE` or `DELETE`, and
+/// the procedure of a `CALL`.
+fn check_text(cx: &CheckCtx<'_>, kind: StmtKind, original: &[u8], lex: LexOptions) -> Result<()> {
+    if cx.p.everything {
+        return Ok(());
+    }
+    match kind {
+        StmtKind::Select
+        | StmtKind::Insert
+        | StmtKind::Replace
+        | StmtKind::Update
+        | StmtKind::Delete => {
+            if let Some(needs) = access::requirements(original, &lex) {
+                for n in &needs {
+                    cx.need(n)?;
+                }
+            }
+        }
+        StmtKind::Call => {
+            if let Some((db, name)) = call_target(original, lex) {
+                cx.routine(db.as_deref(), &name, ObjectType::Procedure, Action::Execute)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// What a prepared statement was checked with at `COM_STMT_PREPARE`, so
+/// `COM_STMT_EXECUTE` can check it again when the session's privileges
+/// changed since (MySQL checks at every execute: a `REVOKE` between
+/// prepare and execute refuses the execute).
+#[derive(Debug, Clone)]
+pub struct Recheck {
+    kind: StmtKind,
+    text: bytes::Bytes,
+    lex: LexOptions,
+    current: Option<String>,
+    compiled: Arc<CompiledPrivileges>,
+}
+
+impl Recheck {
+    /// The facts of a statement just checked at prepare; `None` for a
+    /// session without a snapshot.
+    #[must_use]
+    pub fn new(
+        ts: &TenantSession,
+        kind: StmtKind,
+        text: &[u8],
+        lex: LexOptions,
+        current: Option<&str>,
+    ) -> Option<Self> {
+        let cat = ts.catalog().cloned()?;
+        Some(Self {
+            kind,
+            text: bytes::Bytes::copy_from_slice(text),
+            lex,
+            current: current.map(str::to_owned),
+            compiled: privileges(ts, &cat),
+        })
+    }
+}
+
+/// Checks a prepared statement again at execute when the session's
+/// compiled privileges are no longer the ones it was prepared under. The
+/// names bind as at prepare (its default database then).
+///
+/// # Errors
+/// As [`check`].
+pub fn recheck(ts: &TenantSession, persona: Persona, rc: &Recheck) -> Result<()> {
+    let Some(cat) = ts.catalog().cloned() else {
+        return Ok(());
+    };
+    let p = privileges(ts, &cat);
+    if Arc::ptr_eq(&p, &rc.compiled) {
+        return Ok(());
+    }
+    let client_host = ts.principal.client_ip.to_string();
+    let lctn = ts.lower_case_table_names();
+    let temp = |db: Option<&str>, name: &str| ts.is_temp(db, name);
+    let cx = CheckCtx {
+        cat: &cat,
+        p: &p,
+        persona,
+        user: &ts.principal.user,
+        host: &ts.principal.host,
+        client_host: &client_host,
+        current: rc.current.as_deref(),
+        lctn,
+        temp: &temp,
+    };
+    let r = check_text(&cx, rc.kind, &rc.text, rc.lex);
+    if r.is_err() {
+        metrics::counter!("sprig_auth_checks_total", "protocol" => "mysql", "result" => "deny")
+            .increment(1);
+    }
+    r
 }
 
 /// `SHOW DATABASES` without the tenant-scoped `SHOW DATABASES` privilege:
@@ -707,6 +808,111 @@ pub fn check_session(
             .increment(1);
     }
     r
+}
+
+/// The routines a `DROP PROCEDURE` or `DROP FUNCTION` names that hold
+/// privilege rows. MySQL 8.4 and MariaDB 11.8 revoke a routine's
+/// privileges when it is dropped, but keep table, column and database
+/// privileges through `DROP TABLE` and `DROP DATABASE` (measured on both),
+/// so only routines are cleaned up (chapter 29, "Privileges of dropped
+/// objects").
+#[must_use]
+pub fn dropped_routines(
+    ts: &TenantSession,
+    stmt: &sprig_catalog::ddl::DdlStatement,
+    current: Option<&str>,
+) -> Vec<(sprig_common::ids::DbId, sprig_common::ids::ObjectId)> {
+    let sprig_catalog::ddl::DdlStatement::DropObjects { kind, names, .. } = stmt else {
+        return Vec::new();
+    };
+    let ns = match kind {
+        ObjectKind::Procedure => Namespace::Procedure,
+        ObjectKind::Function => Namespace::Function,
+        _ => return Vec::new(),
+    };
+    let Some(cat) = ts.catalog().cloned() else {
+        return Vec::new();
+    };
+    let Some(state) = AuthzState::of(&cat) else {
+        return Vec::new();
+    };
+    let lctn = ts.lower_case_table_names();
+    let mut out = Vec::new();
+    for n in names {
+        let Some(db) = n.db.as_deref().or(current) else {
+            continue;
+        };
+        let Some(d) = cat.database(&database_key(db, lctn)) else {
+            continue;
+        };
+        let Some(o) = cat.object(d.db_id, ns, &object_key(*kind, &n.name, lctn)) else {
+            continue;
+        };
+        let held = state.rows().privileges.iter().any(|p| {
+            matches!(p.target, sprig_auth::authz::PrivTarget::Object { db, object }
+                if db == d.db_id && object == o.object_id)
+        });
+        if held {
+            out.push((d.db_id, o.object_id));
+        }
+    }
+    out
+}
+
+/// Deletes the privilege rows of routines a `DROP` removed (see
+/// [`dropped_routines`]); the new auth version, if any. Failures are
+/// logged: rows of a dropped routine grant nothing.
+pub async fn forget_dropped(
+    ts: &TenantSession,
+    ids: &[(sprig_common::ids::DbId, sprig_common::ids::ObjectId)],
+) -> Option<u64> {
+    let mut version = None;
+    for (db, object) in ids {
+        match sprig_auth::authz::account_sql::forget_object(
+            &ts.services().catalog,
+            ts.tenant,
+            *db,
+            *object,
+        )
+        .await
+        {
+            Ok(v) => version = v.or(version),
+            Err(e) => {
+                tracing::warn!(tenant = %ts.tenant, %object, error = %e, "privileges of a dropped routine not removed");
+            }
+        }
+    }
+    version
+}
+
+/// Which databases a session may see in `SHOW DATABASES` (all its forms)
+/// and `information_schema`: those it holds any privilege in, or all with
+/// the tenant-scoped `SHOW DATABASES` privilege.
+#[derive(Debug, Clone)]
+pub struct DbVisibility(Option<(Arc<CompiledPrivileges>, bool)>);
+
+impl DbVisibility {
+    /// The session's, at its installed snapshot.
+    #[must_use]
+    pub fn of(ts: &TenantSession) -> Self {
+        let Some(cat) = ts.catalog().cloned() else {
+            return Self(None);
+        };
+        let p = privileges(ts, &cat);
+        if p.everything || p.tenant.has(Action::ShowDatabases) {
+            return Self(None);
+        }
+        Self(Some((p, ts.lower_case_table_names())))
+    }
+
+    /// Whether `db` is listed.
+    #[must_use]
+    pub fn allows(&self, db: &sprig_sql::names::LogicalDb) -> bool {
+        match &self.0 {
+            None => true,
+            Some((p, lctn)) => p.any_in_database(&database_key(&db.name, *lctn), Some(db.id)),
+        }
+    }
 }
 
 /// [`filter_databases`] for a session.

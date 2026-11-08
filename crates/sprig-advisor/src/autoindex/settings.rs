@@ -122,9 +122,23 @@ keys! {
     /// `auto_index.observe_days`.
     OBSERVE_DAYS: u32 = "auto_index.observe_days", 7, Scopes::ALL,
         HardBounds::range(1, 365), "Watch period after a build";
-    /// `auto_index.unused_drop_days`.
-    UNUSED_DROP_DAYS: u32 = "auto_index.unused_drop_days", 30, Scopes::ALL,
-        HardBounds::range(0, 3650), "Drop when unused this long";
+    /// `auto_index.usage_sample_reads`: an index is judged on its table's
+    /// reads, never on days (decision O1). It is judged once the table has
+    /// had this many reads since it was built or last judged, and an
+    /// `IGNORED` index is watched for this many reads before it is dropped.
+    USAGE_SAMPLE_READS: u64 = "auto_index.usage_sample_reads", 100_000, Scopes::ALL,
+        HardBounds::range(1, 1_000_000_000_000),
+        "Reads per usage judgement, and reads watched while IGNORED";
+    /// `auto_index.min_usage_ratio`: an index serving fewer than this share
+    /// of those reads, whose saved time is less than its write cost, is
+    /// removed (decision O1). A fraction: 0.05 is 5%.
+    MIN_USAGE_RATIO: f64 = "auto_index.min_usage_ratio", 0.05, Scopes::ALL,
+        f(0.0, 1.0), "Share of the reads an index must serve to be kept";
+    /// `auto_index.retire_user_indexes`: whether user and migrated indexes
+    /// are removed by the same rule (`on`), only recommended for removal
+    /// (`recommend`) or left alone (`off`) (decision O1).
+    RETIRE_USER_INDEXES: Text = "auto_index.retire_user_indexes", Cow::Borrowed("on"), Scopes::ALL,
+        HardBounds::one_of(MODES), "on, recommend or off for user and migrated indexes";
     /// `auto_index.eval_interval_minutes`.
     EVAL_INTERVAL_MINUTES: u32 = "auto_index.eval_interval_minutes", 60, Scopes::ALL,
         HardBounds::range(1, 10_080), "Evaluation period";
@@ -194,12 +208,6 @@ keys! {
     /// `auto_index.rollout_pause_minutes`.
     ROLLOUT_PAUSE_MINUTES: u32 = "auto_index.rollout_pause_minutes", 10, Scopes::ALL,
         HardBounds::range(0, 1440), "Between shards";
-    /// `auto_index.usage_check_hours`.
-    USAGE_CHECK_HOURS: u32 = "auto_index.usage_check_hours", 6, Scopes::ALL,
-        HardBounds::range(1, 720), "Usage tracking period";
-    /// `auto_index.ignore_before_drop_hours`.
-    IGNORE_BEFORE_DROP_HOURS: u32 = "auto_index.ignore_before_drop_hours", 24, Scopes::ALL,
-        HardBounds::range(0, 720), "Time spent IGNORED before a drop";
     /// `auto_index.recommend_validate`.
     RECOMMEND_VALIDATE: bool = "auto_index.recommend_validate", true, Scopes::ALL,
         HardBounds::NONE, "Validate in recommend mode";
@@ -259,7 +267,8 @@ mod tests {
             assert_eq!(got.owner(), 13);
             assert!(got.key().starts_with("auto_index."));
         }
-        // 52 keys in the chapter's table, plus min_storage_budget_mb (E2):
+        // The chapter's table with min_storage_budget_mb (E2) and decision
+        // O1's three usage keys, without the day-based ones O1 removed:
         // 52 here, and max_builds_per_cluster declared on its own
         // (operator-only).
         assert_eq!(ALL.len(), 52);
@@ -267,6 +276,33 @@ mod tests {
         let m = reg.get(MAX_BUILDS_PER_CLUSTER_KEY).unwrap();
         assert_eq!(m.owner(), 13);
         assert_eq!(MAX_BUILDS_PER_CLUSTER.default, 1);
+    }
+
+    #[test]
+    fn no_key_decides_by_days_of_disuse() {
+        // Decision O1: removal is judged by reads, never by days.
+        for gone in [
+            "auto_index.unused_drop_days",
+            "auto_index.drop_unused_days",
+            "auto_index.ignore_before_drop_hours",
+            "auto_index.usage_check_hours",
+        ] {
+            assert!(!ALL.iter().any(|s| s.key() == gone), "{gone}");
+        }
+        for k in [
+            &USAGE_SAMPLE_READS as &dyn sprig_settings::AnySetting,
+            &MIN_USAGE_RATIO,
+            &RETIRE_USER_INDEXES,
+        ] {
+            for scope in [
+                ScopeKind::Global,
+                ScopeKind::Tenant,
+                ScopeKind::Database,
+                ScopeKind::Object,
+            ] {
+                assert!(k.scopes().contains(scope), "{} at {scope:?}", k.key());
+            }
+        }
     }
 
     #[test]
@@ -295,7 +331,9 @@ mod tests {
         assert!((MIN_STORAGE_BUDGET_MB.default - 64.0).abs() < f64::EPSILON);
         assert!((MIN_IMPROVEMENT_PCT.default - 30.0).abs() < f64::EPSILON);
         assert!((MAX_REGRESSION_PCT.default - 10.0).abs() < f64::EPSILON);
-        assert_eq!(UNUSED_DROP_DAYS.default, 30);
+        assert_eq!(USAGE_SAMPLE_READS.default, 100_000);
+        assert!((MIN_USAGE_RATIO.default - 0.05).abs() < f64::EPSILON);
+        assert_eq!(RETIRE_USER_INDEXES.default, "on");
         assert_eq!(MODE.default, "on");
     }
 }

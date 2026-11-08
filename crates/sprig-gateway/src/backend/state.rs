@@ -23,6 +23,7 @@ use sprig_proto_mysql::client::TrackedChanges;
 use sprig_proto_mysql::resultset::column_type;
 use twox_hash::XxHash3_64;
 
+use super::charset;
 use super::classify::StmtInfo;
 
 /// How a session variable's value is written in `SET SESSION`.
@@ -253,6 +254,9 @@ pub struct AppliedState {
     pub vars: BTreeMap<String, String>,
     /// `wsrep_sync_wait` (Galera).
     pub wsrep_sync_wait: u8,
+    /// The collation the client character set holds; `None`: the pool's
+    /// ([`persona::COLLATION`], from the initialization's `SET NAMES`).
+    pub client_collation: Option<String>,
     /// The backend role (chapter 29); unused until R1.
     pub role: Option<String>,
     /// User variables known to hold these values.
@@ -274,6 +278,17 @@ pub struct SessionVars {
     /// Allowed variables the session has set (or that its persona sets at
     /// login).
     pub vars: BTreeMap<String, String>,
+    /// The collation the client character set holds (chapter 06, "Login
+    /// collation"): no variable shows it (`character_set_client` shows the
+    /// character set), but string parameters of prepared statements get
+    /// it. Only `SET NAMES` can give it a collation other than the
+    /// character set's compiled default. `None`: the pool's.
+    pub client_collation: Option<String>,
+    /// The character set of a login collation that is its compiled
+    /// default: the server's `character_set_collations` decides the
+    /// collation, known from the first connection's [`Baseline`] (see
+    /// [`SessionVars::settle_login`]).
+    pub login_charset: Option<String>,
     /// The backend role (chapter 29); unused until R1.
     pub role: Option<String>,
     /// User variables with known values.
@@ -302,30 +317,29 @@ pub mod persona {
     pub const MYSQL84_SNAPSHOT_ISOLATION: &str = "OFF";
 }
 
-/// `(character set, collation)` for a handshake collation id, mapped onto
-/// MariaDB names (the first entries of chapter 28's table); unknown ids
-/// keep the pool's `utf8mb4` baseline.
+/// The variables `SET NAMES` sets (and the login collation). MariaDB's
+/// session tracking reports a `collation_connection` change as
+/// `character_set_connection`, with the character set's name only.
+const CHARSET_VARS: &[&str] = &[
+    "character_set_client",
+    "character_set_connection",
+    "character_set_results",
+    "collation_connection",
+];
+
+/// Whether `name` is one of the character-set variables.
 #[must_use]
-pub fn collation_for(id: u16) -> Option<(&'static str, &'static str)> {
-    Some(match id {
-        8 => ("latin1", "latin1_swedish_ci"),
-        33 => ("utf8mb3", "utf8mb3_general_ci"),
-        45 => ("utf8mb4", "utf8mb4_general_ci"),
-        46 => ("utf8mb4", "utf8mb4_bin"),
-        47 => ("latin1", "latin1_bin"),
-        63 => ("binary", "binary"),
-        83 => ("utf8mb3", "utf8mb3_bin"),
-        192 => ("utf8mb3", "utf8mb3_unicode_ci"),
-        224 => ("utf8mb4", "utf8mb4_unicode_ci"),
-        // utf8mb4_0900_ai_ci: MariaDB 11.4+ maps it to uca1400.
-        255 => ("utf8mb4", "utf8mb4_uca1400_ai_ci"),
-        _ => return None,
-    })
+pub fn charset_var(name: &str) -> bool {
+    CHARSET_VARS.contains(&name)
 }
 
 impl SessionVars {
-    /// The state of a new session: the persona's `sql_mode` and the client
-    /// collation from the handshake, and the schema named at login.
+    /// The state of a new session: the persona's `sql_mode`, the character
+    /// sets MariaDB would give a direct client with the same handshake
+    /// collation (chapter 06, "Login collation"), and the schema named at
+    /// login. A compiled default collation is mapped through MariaDB 11.8's
+    /// default `character_set_collations` until [`Self::settle_login`]
+    /// learns the server's.
     #[must_use]
     pub fn login(persona: Persona, collation_id: u16, schema: Option<String>) -> Self {
         let mut vars = BTreeMap::new();
@@ -339,22 +353,65 @@ impl SessionVars {
                 persona::MYSQL84_SNAPSHOT_ISOLATION.to_owned(),
             );
         }
-        if let Some((cs, coll)) = collation_for(collation_id) {
-            for v in [
-                "character_set_client",
-                "character_set_connection",
-                "character_set_results",
-            ] {
-                vars.insert(v.to_owned(), cs.to_owned());
-            }
-            vars.insert("collation_connection".to_owned(), coll.to_owned());
-        }
-        Self {
+        let mut s = Self {
             schema,
             vars,
             ..Self::default()
+        };
+        if let Some((cs, coll)) = charset::login(collation_id, charset::DEFAULT_CHARSET_COLLATIONS)
+        {
+            s.set_names(&cs, &coll);
+            if charset::by_id(collation_id).is_some_and(|(_, primary)| primary) {
+                s.login_charset = Some(cs);
+            }
+        }
+        s
+    }
+
+    /// The state `SET NAMES cs COLLATE coll` leaves.
+    fn set_names(&mut self, cs: &str, coll: &str) {
+        for v in [
+            "character_set_client",
+            "character_set_connection",
+            "character_set_results",
+        ] {
+            self.vars.insert(v.to_owned(), cs.to_owned());
+        }
+        self.vars
+            .insert("collation_connection".to_owned(), coll.to_owned());
+        self.client_collation = Some(coll.to_owned());
+    }
+
+    /// Maps a compiled-default login collation through the server's own
+    /// `character_set_collations` (the baseline's, which is the global
+    /// value a direct login would use). Runs once, before the session's
+    /// first sync.
+    pub fn settle_login(&mut self, base: &Baseline) {
+        let Some(cs) = self.login_charset.take() else {
+            return;
+        };
+        let Some(map) = base.get("character_set_collations") else {
+            return;
+        };
+        let coll = charset::mapped(map, &cs).or_else(|| charset::compiled_default(&cs));
+        if let Some(coll) = coll {
+            self.set_names(&cs, coll);
         }
     }
+}
+
+/// The collation `SET NAMES` must give the client character set, if it
+/// differs between the session and the connection.
+fn client_names<'a>(applied: &AppliedState, session: &'a SessionVars) -> Option<&'a str> {
+    let want = session
+        .client_collation
+        .as_deref()
+        .unwrap_or(persona::COLLATION);
+    let have = applied
+        .client_collation
+        .as_deref()
+        .unwrap_or(persona::COLLATION);
+    (want != have).then_some(want)
 }
 
 /// The value `name` must have for the session: its own, else the
@@ -372,6 +429,7 @@ fn want<'a>(vars: &'a BTreeMap<String, String>, base: &'a Baseline, name: &str) 
 pub fn digest(
     schema: Option<&str>,
     vars: &BTreeMap<String, String>,
+    client_collation: Option<&str>,
     wsrep_sync_wait: u8,
     role: Option<&str>,
     base: &Baseline,
@@ -388,18 +446,43 @@ pub fn digest(
         h.write(v.as_bytes());
         h.write_u8(0xFF);
     }
+    if let Some(c) = client_collation.filter(|c| *c != persona::COLLATION) {
+        h.write(b"\0names=");
+        h.write(c.as_bytes());
+    }
     h.write_u8(wsrep_sync_wait);
     h.write(role.unwrap_or("").as_bytes());
     h.finish()
 }
 
 impl AppliedState {
+    /// The session state a statement is parsed under, for the prepared
+    /// statement cache: MariaDB fixes a prepared statement's literals in
+    /// `collation_connection` and its string parameters in the client
+    /// character set's collation at prepare time, and `sql_mode` changes
+    /// how the text parses (`ANSI_QUOTES`, `PIPES_AS_CONCAT`, ...). A
+    /// statement prepared under other values is prepared again.
+    #[must_use]
+    pub fn parse_context(&self, base: &Baseline) -> String {
+        let v = |n: &str| want(&self.vars, base, n).unwrap_or("");
+        format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}",
+            v("collation_connection"),
+            v("character_set_client"),
+            self.client_collation
+                .as_deref()
+                .unwrap_or(persona::COLLATION),
+            v("sql_mode"),
+        )
+    }
+
     /// The digest of this connection's state.
     #[must_use]
     pub fn digest(&self, base: &Baseline) -> u64 {
         digest(
             self.schema.as_deref(),
             &self.vars,
+            self.client_collation.as_deref(),
             self.wsrep_sync_wait,
             self.role.as_deref(),
             base,
@@ -414,6 +497,7 @@ impl SessionVars {
         digest(
             self.schema.as_deref(),
             &self.vars,
+            self.client_collation.as_deref(),
             wsrep_sync_wait,
             self.role.as_deref(),
             base,
@@ -451,12 +535,34 @@ pub fn sync_prefix(
             next.schema.clone_from(&applied.schema);
         }
     }
+    // The client character set's collation first: only `SET NAMES` sets
+    // it, and it sets the other three character-set variables too, which
+    // the assignments after it then adjust.
+    let mut have = applied.vars.clone();
+    let mut set_names = None;
+    if let Some(coll) = client_names(applied, session) {
+        if !charset::plain_name(coll) {
+            return Err(Unreplayable(format!("client collation {coll:?}")));
+        }
+        let cs = charset::charset_of(coll);
+        set_names = Some(format!("NAMES {cs} COLLATE {coll}"));
+        for (n, v) in [
+            ("character_set_client", cs),
+            ("character_set_connection", cs),
+            ("character_set_results", cs),
+            ("collation_connection", coll),
+        ] {
+            have.insert(n.to_owned(), v.to_owned());
+            next.vars.insert(n.to_owned(), v.to_owned());
+        }
+        next.client_collation = Some(coll.to_owned());
+    }
     let mut sets = Vec::new();
     let names: std::collections::BTreeSet<&String> =
-        session.vars.keys().chain(applied.vars.keys()).collect();
+        session.vars.keys().chain(have.keys()).collect();
     for name in names {
         let w = want(&session.vars, base, name);
-        let a = want(&applied.vars, base, name);
+        let a = want(&have, base, name);
         if w == a {
             continue;
         }
@@ -468,13 +574,21 @@ pub fn sync_prefix(
             .ok_or_else(|| Unreplayable(format!("{name} = {w:?} has no literal")))?;
         sets.push(format!("{name} = {lit}"));
         next.vars.insert(name.clone(), w.to_owned());
+        if name == "character_set_client" {
+            // Without SET NAMES the client character set takes its
+            // compiled default.
+            next.client_collation = charset::compiled_default(w).map(str::to_owned);
+        }
     }
     if applied.wsrep_sync_wait != wsrep_sync_wait {
         sets.push(format!("wsrep_sync_wait = {wsrep_sync_wait}"));
         next.wsrep_sync_wait = wsrep_sync_wait;
     }
-    if !sets.is_empty() {
-        out.push(format!("SET SESSION {}", sets.join(", ")));
+    match (set_names, sets.is_empty()) {
+        (Some(n), true) => out.push(format!("SET {n}")),
+        (Some(n), false) => out.push(format!("SET {n}, SESSION {}", sets.join(", "))),
+        (None, false) => out.push(format!("SET SESSION {}", sets.join(", "))),
+        (None, true) => {}
     }
     if session.role != applied.role {
         out.push(match &session.role {
@@ -567,6 +681,42 @@ fn tracked_schema(name: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+impl Observed {
+    /// Whether the statement changed a character-set variable: then
+    /// `collation_connection` must be read back from the connection
+    /// (tracking reports only the character set's name) and passed to
+    /// [`SessionVars::charset_changed`].
+    #[must_use]
+    pub fn charset_changed(&self) -> bool {
+        self.vars.iter().any(|(n, _)| charset_var(n))
+    }
+}
+
+/// The character-set state after a statement that changed it:
+/// `collation_connection` as read back from the connection, and the client
+/// character set's collation. `SET NAMES` gives the client character set
+/// the collation it gives the connection (its `COLLATE`, or the character
+/// set's `character_set_collations` default); any other change of
+/// `character_set_client` (`SET character_set_client`, `SET CHARACTER
+/// SET`) gives it the compiled default, as MariaDB 11.8 does.
+fn charset_changed(
+    vars: &mut BTreeMap<String, String>,
+    client: &mut Option<String>,
+    o: &Observed,
+    collation_connection: &str,
+    set_names: bool,
+) {
+    vars.insert(
+        "collation_connection".to_owned(),
+        collation_connection.to_owned(),
+    );
+    if set_names {
+        *client = Some(collation_connection.to_owned());
+    } else if let Some((_, cs)) = o.vars.iter().find(|(n, _)| n == "character_set_client") {
+        *client = charset::compiled_default(cs).map(str::to_owned);
+    }
+}
+
 impl SessionVars {
     /// Applies what tracking reported for a statement of this session.
     pub fn apply(&mut self, o: &Observed) {
@@ -576,6 +726,20 @@ impl SessionVars {
         for (n, v) in &o.vars {
             self.vars.insert(n.clone(), v.clone());
         }
+        if o.charset_changed() {
+            self.login_charset = None;
+        }
+    }
+
+    /// See [`Observed::charset_changed`].
+    pub fn charset_changed(&mut self, o: &Observed, collation_connection: &str, set_names: bool) {
+        charset_changed(
+            &mut self.vars,
+            &mut self.client_collation,
+            o,
+            collation_connection,
+            set_names,
+        );
     }
 }
 
@@ -588,6 +752,17 @@ impl AppliedState {
         for (n, v) in &o.vars {
             self.vars.insert(n.clone(), v.clone());
         }
+    }
+
+    /// See [`Observed::charset_changed`].
+    pub fn charset_changed(&mut self, o: &Observed, collation_connection: &str, set_names: bool) {
+        charset_changed(
+            &mut self.vars,
+            &mut self.client_collation,
+            o,
+            collation_connection,
+            set_names,
+        );
     }
 }
 
@@ -762,7 +937,8 @@ mod tests {
     fn login_state_per_persona() {
         let m = SessionVars::login(Persona::MySql84, 255, Some("app".into()));
         assert_eq!(m.vars["sql_mode"], persona::MYSQL84_SQL_MODE);
-        assert_eq!(m.vars["collation_connection"], "utf8mb4_uca1400_ai_ci");
+        // MySQL 8 clients send utf8mb4_0900_ai_ci (255): MariaDB keeps it.
+        assert_eq!(m.vars["collation_connection"], "utf8mb4_0900_ai_ci");
         assert_eq!(m.vars["innodb_snapshot_isolation"], "OFF");
         let d = SessionVars::login(Persona::MariaDb, 45, None);
         assert!(!d.vars.contains_key("sql_mode"));
@@ -785,6 +961,121 @@ mod tests {
                 .any(|p| p.contains("innodb_snapshot_isolation = OFF")),
             "{prefix:?}"
         );
-        assert_eq!(d.vars["collation_connection"], "utf8mb4_general_ci");
+        // 45 is utf8mb4's compiled default: character_set_collations maps it.
+        assert_eq!(d.vars["collation_connection"], "utf8mb4_uca1400_ai_ci");
+    }
+
+    fn charset_base(map: &str) -> Baseline {
+        let mut b = base();
+        for (n, v) in [
+            ("character_set_client", "utf8mb4"),
+            ("character_set_connection", "utf8mb4"),
+            ("collation_connection", persona::COLLATION),
+            ("character_set_collations", map),
+        ] {
+            b.vars.insert(n.to_owned(), v.to_owned());
+        }
+        b
+    }
+
+    #[test]
+    fn login_collation_matches_mariadb() {
+        let b = charset_base(charset::DEFAULT_CHARSET_COLLATIONS);
+        let stmt = StmtInfo::read();
+        let conn = AppliedState::default();
+        // 45 under the default mapping is exactly the pool's state.
+        let mut s = SessionVars::login(Persona::MariaDb, 45, None);
+        s.settle_login(&b);
+        assert_eq!(s.client_collation.as_deref(), Some(persona::COLLATION));
+        assert_eq!(s.digest(0, &b), conn.digest(&b));
+        let (p, _) = sync_prefix(&conn, &b, &s, &stmt, 0).unwrap();
+        assert!(p.is_empty(), "{p:?}");
+        // Another collation: SET NAMES, so the client character set holds
+        // it too, and a fresh connection gets the same.
+        let s = SessionVars::login(Persona::MariaDb, 224, None);
+        let (p, next) = sync_prefix(&conn, &b, &s, &stmt, 0).unwrap();
+        assert_eq!(
+            p,
+            vec!["SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci".to_owned()]
+        );
+        assert_eq!(next.digest(&b), s.digest(0, &b));
+        let s = SessionVars::login(Persona::MariaDb, 8, None);
+        let (p, next) = sync_prefix(&conn, &b, &s, &stmt, 0).unwrap();
+        assert_eq!(
+            p,
+            vec!["SET NAMES latin1 COLLATE latin1_swedish_ci".to_owned()]
+        );
+        assert_eq!(next.digest(&b), s.digest(0, &b));
+        // A server whose character_set_collations maps utf8mb4 elsewhere.
+        let other = charset_base("utf8mb4=utf8mb4_unicode_ci");
+        let mut s = SessionVars::login(Persona::MariaDb, 45, None);
+        s.settle_login(&other);
+        assert_eq!(s.vars["collation_connection"], "utf8mb4_unicode_ci");
+        assert_eq!(s.client_collation.as_deref(), Some("utf8mb4_unicode_ci"));
+        // And one with no mapping: the compiled default.
+        let mut s = SessionVars::login(Persona::MariaDb, 45, None);
+        s.settle_login(&charset_base(""));
+        assert_eq!(s.vars["collation_connection"], "utf8mb4_general_ci");
+    }
+
+    #[test]
+    fn character_set_changes_replay_in_order() {
+        let b = charset_base(charset::DEFAULT_CHARSET_COLLATIONS);
+        let stmt = StmtInfo::read();
+        let mut s = SessionVars::login(Persona::MariaDb, 45, None);
+        s.settle_login(&b);
+        let reported = |names: &[&str], cs: &str| Observed {
+            vars: names
+                .iter()
+                .map(|n| ((*n).to_owned(), cs.to_owned()))
+                .collect(),
+            ..Observed::default()
+        };
+        // SET NAMES utf8mb4 COLLATE utf8mb4_general_ci, then
+        // SET collation_connection = utf8mb4_unicode_ci.
+        let names = reported(
+            &[
+                "character_set_client",
+                "character_set_connection",
+                "character_set_results",
+            ],
+            "utf8mb4",
+        );
+        assert!(names.charset_changed());
+        s.apply(&names);
+        s.charset_changed(&names, "utf8mb4_general_ci", true);
+        let conn = reported(&["character_set_connection"], "utf8mb4");
+        s.apply(&conn);
+        s.charset_changed(&conn, "utf8mb4_unicode_ci", false);
+        assert_eq!(s.client_collation.as_deref(), Some("utf8mb4_general_ci"));
+        let (p, next) = sync_prefix(&AppliedState::default(), &b, &s, &stmt, 0).unwrap();
+        assert_eq!(
+            p,
+            vec![
+                "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci, SESSION collation_connection = \
+                 CONVERT(X'757466386D62345F756E69636F64655F6369' USING utf8mb4)"
+                    .to_owned()
+            ]
+        );
+        assert_eq!(next.digest(&b), s.digest(0, &b));
+        // SET character_set_client = latin1: its compiled default.
+        let client = reported(&["character_set_client"], "latin1");
+        s.apply(&client);
+        s.charset_changed(&client, "utf8mb4_unicode_ci", false);
+        assert_eq!(s.client_collation.as_deref(), Some("latin1_swedish_ci"));
+        let (p, _) = sync_prefix(&next, &b, &s, &stmt, 0).unwrap();
+        assert_eq!(
+            p,
+            vec![
+                "SET NAMES latin1 COLLATE latin1_swedish_ci, SESSION character_set_connection = \
+                 CONVERT(X'757466386D6234' USING utf8mb4), character_set_results = \
+                 CONVERT(X'757466386D6234' USING utf8mb4), collation_connection = \
+                 CONVERT(X'757466386D62345F756E69636F64655F6369' USING utf8mb4)"
+                    .to_owned()
+            ]
+        );
+        // A client collation that isn't a plain name is never pasted.
+        s.client_collation = Some("x' OR 1".into());
+        assert!(sync_prefix(&next, &b, &s, &stmt, 0).is_err());
     }
 }

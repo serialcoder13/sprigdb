@@ -133,10 +133,14 @@ async fn failures_exclude_the_target_and_moves_back_are_counted() {
             to_full: (0.1, 0.2),
             alternatives: Vec::new(),
             load: load(5.0, 0.0),
+            judgement: None,
+            why: String::new(),
+            considered: Vec::new(),
         }],
         notes: Vec::new(),
         approvals: Vec::new(),
         stuck: Vec::new(),
+        rejected: Vec::new(),
     };
     s.schedule(&plan(2, 1), &v, &auto, 4, &exec, &log, 100)
         .await;
@@ -217,4 +221,55 @@ async fn no_mover_fails_the_decision() {
     let out = s.schedule(&r, &v, &auto, 4, &NoMover, &log, 3600).await;
     assert_eq!(out[0].blocked.as_deref(), Some("submit_failed"));
     assert_eq!(log.of(r.moves[0].tenant)[0].d.outcome, Outcome::Failed);
+}
+
+#[tokio::test]
+async fn decisions_say_why_a_move_was_made_or_not() {
+    // Made: the hot fleet's move reads "moved ... because ...".
+    let mut v = hot();
+    let p = Planner::new(BalancerSettings::default());
+    let exec = Fake::default();
+    let log = MemDecisionLog::new();
+    let mut s = Scheduler::new("mum1", "ctl-1");
+    p.rebalance(&v, 0);
+    s.annotate(&mut v, 3600);
+    let r = p.rebalance(&v, 3600);
+    s.schedule(&r, &v, &auto, 4, &exec, &log, 3600).await;
+    let row = &log.of(r.moves[0].tenant)[0];
+    assert!(row.d.summary.starts_with("moved t"), "{}", row.d.summary);
+    assert!(row.d.summary.contains("because"), "{}", row.d.summary);
+    assert!(row.d.evidence["judgement"]["worth"].as_bool().unwrap());
+    assert!(
+        !row.d.alternatives.as_ref().unwrap()["considered"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // Not made: one large tenant and one tiny one on c1 at 55%, c2 at 25%
+    // (just over the spread). The large one would invert the pair; the
+    // tiny one isn't worth its cost. A rejected decision says so, once.
+    let mut v = fleet(2);
+    put(&mut v, 1, 1, 1, load(54.5, 0.0));
+    put(&mut v, 2, 2, 1, load(0.5, 0.0));
+    v.clusters.get_mut(&cid(2)).unwrap().background = load(25.0, 0.0);
+    let p = Planner::new(BalancerSettings::default());
+    let log = MemDecisionLog::new();
+    let mut s = Scheduler::new("mum1", "ctl-1");
+    p.rebalance(&v, 0);
+    let r = p.rebalance(&v, 3600);
+    assert!(r.moves.is_empty(), "{:?}", r.moves);
+    assert_eq!(r.stuck, vec![cid(1)]);
+    assert_eq!(r.rejected.len(), 1);
+    s.schedule(&r, &v, &auto, 4, &exec, &log, 3600).await;
+    s.schedule(&r, &v, &auto, 4, &exec, &log, 3660).await;
+    let rows = log.of(TenantId(2));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].d.outcome, Outcome::Rejected);
+    assert_eq!(rows[0].d.reason_code, "not_worth_it");
+    assert!(
+        rows[0].d.summary.starts_with("did not move t2/g1/s2"),
+        "{}",
+        rows[0].d.summary
+    );
 }

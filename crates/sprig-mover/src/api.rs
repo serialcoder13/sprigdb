@@ -194,6 +194,11 @@ pub struct JobSpec {
     /// Who asked (operator, `balancer`), for the decision log.
     #[serde(default)]
     pub requested_by: Option<String>,
+    /// The cutover's hold budget for this job, overriding
+    /// `mover.cutover_max_hold_ms`: a move between DCs passes the
+    /// tenant's `migration.write_pause_target_ms` (or `--max-pause-ms`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_hold_ms: Option<u64>,
 }
 
 impl JobSpec {
@@ -223,6 +228,7 @@ impl JobSpec {
             verify: VerifyMode::Full,
             decision_id: None,
             requested_by: None,
+            max_hold_ms: None,
         }
     }
 
@@ -261,6 +267,7 @@ impl JobSpec {
             verify: VerifyMode::Full,
             decision_id: None,
             requested_by: None,
+            max_hold_ms: None,
         }
     }
 
@@ -282,6 +289,13 @@ impl JobSpec {
     #[must_use]
     pub fn with_verify(mut self, mode: VerifyMode) -> Self {
         self.verify = mode;
+        self
+    }
+
+    /// The same spec with its own hold budget (see [`JobSpec::max_hold_ms`]).
+    #[must_use]
+    pub fn with_max_hold_ms(mut self, ms: u64) -> Self {
+        self.max_hold_ms = Some(ms);
         self
     }
 

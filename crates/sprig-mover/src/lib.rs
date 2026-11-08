@@ -25,6 +25,8 @@
 //!   simulation (`sprig-testkit::sim::mover`) runs the same engine;
 //! - [`mysql`]: the production source, stream and target on MariaDB;
 //! - [`maps`]: the cutover's hold and commit on chapter 15's tenant map;
+//! - [`home`]: the same for a move between data centers, whose commit is
+//!   the home change of chapter 24;
 //! - [`worker`]: the job runtime a worker role runs;
 //! - [`settings`]: the `mover.*` keys.
 //!
@@ -35,6 +37,7 @@
 
 pub mod api;
 pub mod engine;
+pub mod home;
 pub mod io;
 pub mod maps;
 pub mod model;

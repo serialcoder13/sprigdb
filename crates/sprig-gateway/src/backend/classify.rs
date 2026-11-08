@@ -59,6 +59,9 @@ pub enum Effect {
     Untracked(String),
     /// `CALL`: a routine may change anything; session tracking tells.
     Call,
+    /// `SET NAMES`: the client character set takes the collation it gives
+    /// `collation_connection` (chapter 06, "Login collation").
+    SetNames,
 }
 
 /// The facts about one statement that pools, sync and routing need.
@@ -124,6 +127,12 @@ impl StmtInfo {
         self.effects
             .iter()
             .any(|e| matches!(e, Effect::Commit | Effect::ImplicitCommit | Effect::XaEnd))
+    }
+
+    /// Whether it is `SET NAMES`.
+    #[must_use]
+    pub fn sets_names(&self) -> bool {
+        self.effects.contains(&Effect::SetNames)
     }
 
     /// Whether the statement predicts a change that session tracking may
@@ -354,7 +363,11 @@ impl StmtInfo {
 fn classify_set(toks: &[Tok], info: &mut StmtInfo) {
     let kw = |i: usize| toks.get(i).and_then(Tok::word);
     match kw(1) {
-        Some("NAMES" | "CHARACTER" | "CHARSET" | "GLOBAL") => return,
+        Some("NAMES") => {
+            info.effects.push(Effect::SetNames);
+            return;
+        }
+        Some("CHARACTER" | "CHARSET" | "GLOBAL") => return,
         Some("TRANSACTION") => {
             info.effects.push(Effect::NextTransaction);
             return;
@@ -729,7 +742,10 @@ mod tests {
                 .effects
                 .is_empty()
         );
-        assert!(c("SET NAMES utf8mb4").effects.is_empty());
+        assert_eq!(c("SET NAMES utf8mb4").effects, vec![Effect::SetNames]);
+        assert!(c("SET NAMES utf8mb4 COLLATE utf8mb4_bin").sets_names());
+        assert!(!c("SET CHARACTER SET utf8mb4").sets_names());
+        assert!(!c("SET character_set_client = utf8mb4").sets_names());
         assert_eq!(
             c("SET timestamp = 1").effects,
             vec![Effect::Untracked("SET timestamp".into())]

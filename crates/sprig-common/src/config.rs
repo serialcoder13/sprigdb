@@ -54,6 +54,25 @@ pub struct ProcessConfig {
     /// Telemetry until settings arrive from the control plane.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// The audit spool and its sink (chapter 47).
+    #[serde(default)]
+    pub audit: AuditConfig,
+}
+
+/// `[audit]`: where this process spools audit events and where its
+/// shipper writes them (chapter 47, "The audit pipeline"). Without
+/// `spool_dir` the process has no pipeline and audit events go only to
+/// the log (target `sprig_audit`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditConfig {
+    /// The local spool directory (one per process).
+    #[serde(default)]
+    pub spool_dir: Option<PathBuf>,
+    /// The sink: a directory that receives chapter 47's object-storage
+    /// layout (`audit/<stream>/<date>/...`). Required with `spool_dir`.
+    #[serde(default)]
+    pub sink_dir: Option<PathBuf>,
 }
 
 /// `[node]`: who this process is.
@@ -305,6 +324,7 @@ const SECTIONS: &[&str] = &[
     "agent",
     "operator",
     "telemetry",
+    "audit",
 ];
 
 impl ProcessConfig {

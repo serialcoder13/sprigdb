@@ -306,6 +306,10 @@ fn index_commands_parse() {
             "unpin",
         ),
         (vec!["index", "unpin", "7", "--tenant", "acme"], "unpin"),
+        (
+            vec!["index", "restore", "shop.u.idx_u_old", "--tenant", "acme"],
+            "restore",
+        ),
     ] {
         let m = matches(&args);
         let (cmd, sub) = sub_of(&m);

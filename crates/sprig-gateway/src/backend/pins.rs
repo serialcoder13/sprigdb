@@ -167,7 +167,7 @@ impl Pins {
                 Effect::XaStart => self.xa = true,
                 Effect::XaEnd => self.xa = false,
                 Effect::Untracked(_) => self.untracked = true,
-                Effect::Call => {}
+                Effect::Call | Effect::SetNames => {}
             }
         }
         let after = self.reasons();

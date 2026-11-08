@@ -36,6 +36,7 @@
 
 mod client;
 mod cluster;
+mod gateway;
 mod index;
 mod mover;
 mod placement;
@@ -362,7 +363,8 @@ fn cli() -> Command {
         .subcommand(index::group())
         .subcommand(index::explain_group())
         .subcommand(mover::shard_group())
-        .subcommand(mover::job_group());
+        .subcommand(mover::job_group())
+        .subcommand(gateway::group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -407,7 +409,7 @@ fn main() -> ExitCode {
     };
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
-        "dc" | "cluster" | "settings" | "index" | "job" => true,
+        "dc" | "cluster" | "settings" | "index" | "job" | "gateway" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "shard" => name == "move",
@@ -439,6 +441,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "explain" => index::explain(&client, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "gateway" => gateway::run(&client, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "shard" | "job" => mover::run(&client, group, sub, output(&matches))

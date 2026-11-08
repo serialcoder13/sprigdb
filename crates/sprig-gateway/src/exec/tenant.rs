@@ -234,54 +234,10 @@ pub(super) fn scrub_typed(mut e: SprigError) -> SprigError {
 /// interim): the account a tenant names is its own user (as output shows
 /// it, and as a dump restores it), which is no MariaDB account; until
 /// chapter 29's per-user backend accounts, every definer is the account the
-/// statement runs as.
+/// statement runs as (stored programs, which run as `sprig_ctl`, get the
+/// session's account explicitly: `tenant::ddl`).
 fn definer_as_current_user(sql: &[u8], lex: LexOptions) -> Vec<u8> {
-    let Ok(tokens) = sprig_sql::lex::lex(sql, &lex) else {
-        return sql.to_vec();
-    };
-    let t: Vec<_> = tokens.iter().filter(|t| !t.kind.is_trivia()).collect();
-    let mut out = Vec::with_capacity(sql.len());
-    let mut copied = 0;
-    let mut i = 0;
-    while i < t.len() {
-        let is_definer = t[i].kind == TokenKind::Word
-            && t[i].bytes(sql).eq_ignore_ascii_case(b"DEFINER")
-            && t.get(i + 1).is_some_and(|e| e.bytes(sql) == b"=");
-        if !is_definer {
-            i += 1;
-            continue;
-        }
-        let Some(user) = t.get(i + 2) else { break };
-        let mut last = i + 2;
-        let current =
-            user.kind == TokenKind::Word && user.bytes(sql).eq_ignore_ascii_case(b"CURRENT_USER");
-        if current {
-            if t.get(last + 1).is_some_and(|p| p.bytes(sql) == b"(")
-                && t.get(last + 2).is_some_and(|p| p.bytes(sql) == b")")
-            {
-                last += 2;
-            }
-        } else if matches!(
-            user.kind,
-            TokenKind::Word | TokenKind::QuotedIdent | TokenKind::String
-        ) {
-            match t.get(last + 1) {
-                // `'u'@'h'`, `` `u`@`h` ``: the host lexes as a user variable.
-                Some(h) if h.kind == TokenKind::UserVar => last += 1,
-                Some(at) if at.bytes(sql) == b"@" && t.get(last + 2).is_some() => last += 2,
-                _ => {}
-            }
-        } else {
-            i += 1;
-            continue;
-        }
-        out.extend_from_slice(&sql[copied..t[i].start as usize]);
-        out.extend_from_slice(b"DEFINER=CURRENT_USER");
-        copied = t[last].end as usize;
-        i = last + 1;
-    }
-    out.extend_from_slice(&sql[copied..]);
-    out
+    crate::tenant::ddl::replace_definers(sql, lex, b"DEFINER=CURRENT_USER").0
 }
 
 /// MySQL 8.4 session variables MariaDB lacks, which tools set and that
@@ -733,9 +689,12 @@ impl PassSession {
                     .backend_version(BACKEND_VERSION);
                 rw.ignore_space = ignore_space;
                 rw.lower_case_table_names = ts.lower_case_table_names();
+                let dbs = crate::tenant::authz::DbVisibility::of(ts);
+                let visible = |d: &sprig_sql::names::LogicalDb| dbs.allows(d);
                 let pctx = PlanCtx::new(rw, &ts.services().columns)
                     .vis(ts.visibility(self.persona))
-                    .sessions(&sessions);
+                    .sessions(&sessions)
+                    .visible(&visible);
                 plan(text, &pctx)
             };
             match r {
@@ -1046,6 +1005,7 @@ impl PassSession {
         if let Some(ts) = self.tenant.as_deref() {
             autoindex::make_room(ts, &ctl, target, original, &lex).await;
         }
+        let ctl_pool = ctl.clone();
         let ctl = MariaExecutor::new(ctl);
         let req = DdlRequest {
             tenant,
@@ -1056,14 +1016,28 @@ impl PassSession {
             user,
             lower_case_table_names: lctn,
         };
+        // Chapter 29: a dropped routine's privileges go with it.
+        let routines = self
+            .tenant
+            .as_deref()
+            .map(|ts| crate::tenant::authz::dropped_routines(ts, &stmt, current.as_deref()))
+            .unwrap_or_default();
         self.tenant_bs(cx);
         let Some(bs) = self.bs.as_mut() else {
             return Err(SprigError::internal("no backend session"));
         };
         let result = {
-            let exec = GatewayDdl::new(bs, ctl);
+            let exec = GatewayDdl::new(bs, ctl).checked_by(ctl_pool);
             svc.ddl.execute(&req, &exec).await
         };
+        if result.as_ref().is_ok_and(|o| o.version.is_some())
+            && !routines.is_empty()
+            && let Some(ts) = self.tenant.as_deref()
+        {
+            // The rows grant nothing once the routine is gone; every
+            // gateway reloads the tenant at the new auth version.
+            let _ = crate::tenant::authz::forget_dropped(ts, &routines).await;
+        }
         match result {
             Ok(outcome) => {
                 if let Some(ts) = self.tenant.as_deref_mut() {
@@ -1431,9 +1405,12 @@ impl PassSession {
             tenant: ts.tenant,
             user: &ts.principal.user,
         };
+        let dbs = crate::tenant::authz::DbVisibility::of(ts);
+        let visible = |d: &sprig_sql::names::LogicalDb| dbs.allows(d);
         let pctx = PlanCtx::new(rw, &ts.services().columns)
             .vis(ts.visibility(self.persona))
-            .sessions(&sessions);
+            .sessions(&sessions)
+            .visible(&visible);
         let p = plan(&sql, &pctx)?;
         let [sp] = p.statements.as_slice() else {
             return Err(SprigError::standard(
@@ -1456,6 +1433,13 @@ impl PassSession {
             &lex,
             current.as_deref(),
         )?;
+        let recheck = crate::tenant::authz::Recheck::new(
+            ts,
+            sp.info.kind,
+            sql.get(sp.info.range.clone()).unwrap_or(&[]),
+            lex,
+            current.as_deref(),
+        );
         let ddl_here = sp.info.ddl.as_ref().is_some_and(DdlTarget::is_catalog)
             && !temp_candidates(sp.info.ddl.as_ref().unwrap_or(&DdlTarget::Truncate {
                 name: DdlName::unqualified("", None),
@@ -1497,6 +1481,7 @@ impl PassSession {
                 s.mapper = Some(mapper);
                 s.columns.clone_from(&meta.columns);
                 s.logical = Some(sql.clone());
+                s.recheck = recheck;
             }
         }
         Ok(summary)

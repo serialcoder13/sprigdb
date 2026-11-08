@@ -11,6 +11,8 @@
 //!   `SHOW GRANTS` (steps 3 and 7's basic roles);
 //! - [`backend`]: per-user MariaDB accounts granted only on the tenant's
 //!   own shard schemas, and their reconciler (step 5);
+//! - [`definers`]: stored code runs as a tenant account, never as
+//!   `sprig_ctl`, and code created before that is moved;
 //! - [`migrate`]: bringing an existing tenant's catalog to the module.
 //!
 //! The gateway glues these to statements (`sprig-gateway`'s
@@ -21,6 +23,7 @@
 pub mod account_sql;
 pub mod backend;
 pub mod compile;
+pub mod definers;
 pub mod privilege;
 pub mod settings;
 pub mod show;

@@ -213,13 +213,25 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Directory::new(Arc::clone(&stores.global)),
         Arc::clone(&clock),
     ));
-    let indexes = Arc::new(autoindex_admin::AutoIndexService::new(
-        Directory::new(Arc::clone(&stores.global)),
-        Arc::new(locator.clone()),
-        versioner.clone(),
-        settings.live.clone(),
-        Arc::clone(&clock),
-    ));
+    let indexes = Arc::new(
+        autoindex_admin::AutoIndexService::new(
+            Directory::new(Arc::clone(&stores.global)),
+            Arc::new(locator.clone()),
+            versioner.clone(),
+            settings.live.clone(),
+            Arc::clone(&clock),
+        )
+        // `sprigctl index restore` runs its statements on the shards
+        // (decision O1).
+        .with_env(Arc::new(autoindex_env::ControllerEnv::new(
+            dc.clone(),
+            locator.clone(),
+            registry.clone(),
+            Some(Arc::clone(&monitor)),
+            Some(settings.live.clone()),
+            autoindex_loop::JobShardLocks::new(Arc::clone(&stores.dc)),
+        ))),
+    );
     let users = Arc::new(users::TenantUsers::new(
         Directory::new(Arc::clone(&stores.global)),
         Arc::new(locator.clone()),
@@ -311,8 +323,14 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Some(settings.live.clone()),
         Arc::clone(&clock),
     );
-    // Chapter 11's balancer: plans and decisions; no mover workers run
-    // jobs in this deployment yet, so `auto` runs as `recommend`.
+    // Chapter 11's balancer: plans and decisions; in `auto` mode its moves
+    // become chapter 10 jobs in the DC tier, which workers (`sprigdb
+    // worker`) claim and run. `recommend` and `dry_run` only record.
+    let move_exec: Arc<dyn sprig_balancer::MoveExecutor> = Arc::new(
+        sprig_balancer::mover::MoverExecutor::new(Arc::new(sprig_mover::MetaMover::new(
+            sprig_mover::JobStore::new(Arc::clone(&stores.dc), Arc::clone(&clock)),
+        ))),
+    );
     let balancer = Arc::new(balancer_loop::BalancerLoop::new(
         dc.clone(),
         ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?,
@@ -325,7 +343,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Directory::new(Arc::clone(&stores.global)),
         Some(settings.live.clone()),
         Arc::clone(&clock),
-        None,
+        Some(move_exec),
         cfg.node.id().clone(),
     ));
     let tenants = Arc::new(TenantService::new(

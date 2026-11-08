@@ -17,7 +17,7 @@
 //! - **rewriter**: a forwarded statement lexes, unrewrites, and its result
 //!   mapper runs over a resultset whose values are the statement's own
 //!   bytes.
-//! - **compat**: every R0 rewrite returns, and a rewritten `SELECT` lexes.
+//! - **compat**: every R0 rewrite returns, and rewritten text lexes.
 //!
 //! The first input byte picks the settings (persona, `sql_mode` flags),
 //! so every target accepts any byte string.
@@ -169,6 +169,9 @@ pub fn fuzz_compat(data: &[u8]) {
         assert!(!replaced.is_empty());
     }
     let _ = vars::version_number(&text);
+    if let Some(out) = sprig_sql::compat::mysql_text_rewrites(sql, &opts, 999_999) {
+        assert!(lex::lex(&out, &opts).is_ok());
+    }
     if let Ok(tokens) = lex::lex(sql, &opts) {
         let _ = schema::describe_target(sql, &tokens, opts.no_backslash_escapes);
     }

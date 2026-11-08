@@ -21,7 +21,7 @@
 //! the gateway builds it): R0 has one shard per database, so a database
 //! stands for its first shard schema.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -301,6 +301,24 @@ fn on_object(w: &FpWindowStats, object: ObjectId) -> bool {
     w.kind == FpKind::Sql && w.shape.object_ids().contains(&object)
 }
 
+/// The columns an `UPDATE` (or the update half of an upsert) sets, lower
+/// case; `None` for inserts, deletes and unknown column sets, which change
+/// every index.
+fn updated_columns(w: &FpWindowStats) -> Option<Vec<String>> {
+    use sprig_workload::shape::WriteKind;
+    let writes = w.shape.writes.as_ref()?;
+    if !matches!(writes.kind, WriteKind::Update) || writes.all_columns || writes.set.is_empty() {
+        return None;
+    }
+    Some(
+        writes
+            .set
+            .iter()
+            .map(|c| c.col.to_ascii_lowercase())
+            .collect(),
+    )
+}
+
 #[async_trait::async_trait]
 impl observe::WorkloadSource for ObserveSource {
     async fn latency(
@@ -323,6 +341,8 @@ impl observe::WorkloadSource for ObserveSource {
                             mean_ms: w.mean_ms(),
                             uses_index: None,
                             write: w.shape.writes.is_some(),
+                            affected_per_run: w.affected_per_run(),
+                            updated: updated_columns(w),
                         },
                     )
                 })
@@ -347,7 +367,8 @@ impl observe::WorkloadSource for ObserveSource {
             .into_iter()
             .filter(|w| on_object(w, object) && w.shape.writes.is_none())
             .collect();
-        w.sort_by(|a, b| b.total_ms().total_cmp(&a.total_ms()).then(a.id.cmp(&b.id)));
+        // The most-run first: the usage ratio counts runs (decision O1).
+        w.sort_by(|a, b| b.runs().cmp(&a.runs()).then(a.id.cmp(&b.id)));
         w.truncate(n);
         let cat = tenant_catalog(&*self.locator, tenant).await?;
         let map = name_map(&cat);
@@ -366,6 +387,49 @@ impl observe::WorkloadSource for ObserveSource {
                         sql: s.sql,
                     })
                 })
+                .collect(),
+        ))
+    }
+
+    async fn alive(
+        &self,
+        tenant: TenantId,
+        fps: &[Fingerprint],
+    ) -> Result<Option<BTreeSet<Fingerprint>>> {
+        if fps.is_empty() {
+            return Ok(Some(BTreeSet::new()));
+        }
+        let ep = self.locator.reader(tenant).await?;
+        let mut conn = ep.pool.get_conn().await.map_err(|e| {
+            SprigError::new(
+                sprig_common::SprigCode::CatalogUnavailable,
+                "catalog unavailable",
+            )
+            .with_source(e)
+        })?;
+        let t = WorkloadTables::new(ep.store.schema());
+        Ok(Some(
+            t.fingerprints(&mut conn, fps)
+                .await?
+                .into_iter()
+                .map(|r| r.id)
+                .collect(),
+        ))
+    }
+
+    async fn objects_read(
+        &self,
+        tenant: TenantId,
+        since: SystemTime,
+        until: SystemTime,
+    ) -> Result<Option<BTreeSet<ObjectId>>> {
+        Ok(Some(
+            self.store
+                .window(tenant, since, until)
+                .await?
+                .iter()
+                .filter(|w| w.kind == FpKind::Sql && w.shape.writes.is_none() && w.runs() > 0)
+                .flat_map(|w| w.shape.object_ids())
                 .collect(),
         ))
     }

@@ -108,7 +108,9 @@ impl Credential {
     /// 39998 `ER_SPRIG_CONFIG_INVALID` if the node's address isn't
     /// `host:port`.
     pub fn endpoint(&self, node: &NodeSpec) -> Result<NodeEndpoint> {
-        let (host, port) = split_addr(&node.addr)?;
+        // Development: a simulated DC's process dials through its proxy.
+        let addr = sprig_common::net::dial(&node.addr);
+        let (host, port) = split_addr(&addr)?;
         let mut ssl = SslOpts::default();
         match self.tls {
             TlsMode::Verify => {

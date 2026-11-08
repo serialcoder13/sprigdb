@@ -73,6 +73,14 @@ pub struct FleetConfig {
     /// A cluster down from one day to another (index, from day, to day):
     /// shards on it stay, it takes nothing, then it recovers.
     pub outage: Option<(u32, u32, u32)>,
+    /// Cluster capacity multiplier (1: 500 GB to 1 TB, 4,000 to 8,000 ms/s).
+    pub cluster_scale: f64,
+    /// Tenant sizes, as multiples of the mean, spread log-uniformly.
+    pub size_spread: (f64, f64),
+    /// The first this-many tenants are huge: one group of `huge_gb`.
+    pub huge: u32,
+    /// Size of a huge tenant, GB.
+    pub huge_gb: f64,
 }
 
 impl FleetConfig {
@@ -93,6 +101,37 @@ impl FleetConfig {
             copy_gb_per_min: 2.0,
             fail_rate: 0.05,
             outage: None,
+            cluster_scale: 1.0,
+            size_spread: (0.1, 2.5),
+            huge: 0,
+            huge_gb: 0.0,
+        }
+    }
+
+    /// A few large clusters (8 TB to 16 TB) and many small tenants: 3,000
+    /// tenants of 0.05 to 2 times the mean (about 0.5 to 20 GB), 20 days.
+    #[must_use]
+    pub fn big_clusters_small_tenants(seed: u64) -> Self {
+        Self {
+            clusters: 6,
+            tenants: 3000,
+            days: 20,
+            cluster_scale: 16.0,
+            size_spread: (0.05, 2.0),
+            new_tenants_per_day: 30,
+            ..Self::skewed(seed)
+        }
+    }
+
+    /// A few huge tenants among ordinary ones: 6 tenants of 150 GB (30% of
+    /// the smallest cluster each) and 120 ordinary ones.
+    #[must_use]
+    pub fn huge_tenants(seed: u64) -> Self {
+        Self {
+            tenants: 126,
+            huge: 6,
+            huge_gb: 150.0,
+            ..Self::skewed(seed)
         }
     }
 }
@@ -256,8 +295,8 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
             cluster_id(i),
             dc("mum1"),
             Capacity {
-                storage_bytes: 500.0 * GB * k,
-                busy_ms_per_sec: 4000.0 * k,
+                storage_bytes: 500.0 * GB * k * cfg.cluster_scale,
+                busy_ms_per_sec: 4000.0 * k * cfg.cluster_scale,
                 write_rows_per_sec: 0.0,
                 connections: 0.0,
                 threads: 0.0,
@@ -277,7 +316,11 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
         .map(|c| c.cap.storage_bytes / GB)
         .sum();
     // Aim the starting fleet at about 45% of total storage.
-    let per_tenant_gb = total_storage * 0.45 / f64::from(cfg.tenants.max(1));
+    let huge_total = f64::from(cfg.huge) * cfg.huge_gb;
+    let per_tenant_gb = (total_storage * 0.45 - huge_total).max(total_storage * 0.1)
+        / f64::from(cfg.tenants.saturating_sub(cfg.huge).max(1));
+    let (lo, hi) = cfg.size_spread;
+    let (huge, huge_gb) = (u64::from(cfg.huge), cfg.huge_gb);
     let new_tenant = |t: u64, rng: &SimRng, tenants: &mut BTreeMap<TenantId, TenantView>| {
         let mut tv = TenantView::new(TenantId(t));
         // A third of the tenants are pinned to the home DC.
@@ -285,10 +328,15 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
             tv.allowed_dcs = Some(BTreeSet::from([dc("mum1")]));
         }
         tenants.insert(TenantId(t), tv);
-        let groups = 1 + rng.below(3);
+        let is_huge = t <= huge;
+        let groups = if is_huge { 1 } else { 1 + rng.below(3) };
         (0..groups)
             .map(|g| {
-                let gb = log_spread(rng, per_tenant_gb / 10.0, per_tenant_gb * 2.5) / groups as f64;
+                let gb = if is_huge {
+                    huge_gb
+                } else {
+                    log_spread(rng, per_tenant_gb * lo, per_tenant_gb * hi) / groups as f64
+                };
                 let busy = gb * log_spread(rng, 1.0, 12.0);
                 (
                     ShardKey::new(

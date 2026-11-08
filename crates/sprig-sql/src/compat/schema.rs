@@ -16,12 +16,11 @@
 //!   default rule reads `NO ACTION`, not MariaDB's `RESTRICT`; the JSON checks
 //!   disappear from `CHECK_CONSTRAINTS` and `TABLE_CONSTRAINTS`, as MySQL
 //!   has none.
-//! - **Tables the persona answers** ([`local_view`]): `KEYWORDS` with
-//!   MySQL 8.4's words and `RESERVED` on 3306, and MariaDB's words plus a
-//!   `RESERVED` column on 3307 (MySQL Connector/J reads it, decision in
-//!   chapter 28); on 3306 also `COLLATIONS` and `CHARACTER_SETS` with
-//!   MySQL's names and the empty `COLUMN_STATISTICS` that `mysqldump` 8.4
-//!   reads.
+//! - **Tables the 3306 persona answers** ([`local_view`]): `KEYWORDS` with
+//!   MySQL 8.4's words and `RESERVED` (MySQL Connector/J's
+//!   `getSQLKeywords()` reads it), `COLLATIONS` and `CHARACTER_SETS` with
+//!   MySQL's names, and the empty `COLUMN_STATISTICS` that `mysqldump` 8.4
+//!   reads. 3307 relays MariaDB's tables.
 //! - **`SHOW` on 3306**: `SHOW [FULL] COLUMNS` and `DESCRIBE` become
 //!   queries over the `COLUMNS` provider ([`show_columns_sql`]), as in
 //!   MySQL 8; `SHOW CREATE TABLE` text gets MySQL's spelling
@@ -398,24 +397,17 @@ pub fn mysql_branch_filter(table: &str, phys: &str, lit: Lit<'_>) -> Option<Stri
 }
 
 /// The JSON array of MySQL 8.4's keywords for `JSON_TABLE`:
-/// `[["ACCESSIBLE",1],...]`, or only the reserved words as strings.
-fn keywords_json(reserved_only: bool) -> String {
+/// `[["ACCESSIBLE",1],...]`.
+fn keywords_json() -> String {
     let mut s = String::with_capacity(16 * keywords::MYSQL84.len());
     s.push('[');
     let mut first = true;
     for (w, r) in keywords::MYSQL84 {
-        if reserved_only && !r {
-            continue;
-        }
         if !first {
             s.push(',');
         }
         first = false;
-        if reserved_only {
-            let _ = write!(s, "\"{w}\"");
-        } else {
-            let _ = write!(s, "[\"{w}\",{}]", u8::from(*r));
-        }
+        let _ = write!(s, "[\"{w}\",{}]", u8::from(*r));
     }
     s.push(']');
     s
@@ -429,22 +421,10 @@ pub fn local_view(table: &str, persona: Persona, lit: Lit<'_>) -> Option<String>
         ("KEYWORDS", Persona::MySql84) => Some(format!(
             "SELECT `WORD`, `RESERVED` FROM JSON_TABLE({}, {} COLUMNS (`WORD` VARCHAR(128) \
              PATH {}, `RESERVED` INT PATH {})) AS `_sprig_k`",
-            lit(&keywords_json(false)),
+            lit(&keywords_json()),
             lit("$[*]"),
             lit("$[0]"),
             lit("$[1]")
-        )),
-        // 3307: MariaDB's words, plus MySQL's RESERVED column, which MySQL
-        // Connector/J reads (`getSQLKeywords`); a word is reserved when
-        // MySQL 8.4 reserves it.
-        ("KEYWORDS", Persona::MariaDb) => Some(format!(
-            "SELECT `_sprig_k`.`WORD`, IF(`_sprig_r`.`W` IS NULL, 0, 1) AS `RESERVED` \
-             FROM information_schema.KEYWORDS AS `_sprig_k` LEFT JOIN JSON_TABLE({}, {} \
-             COLUMNS (`W` VARCHAR(128) PATH {})) AS `_sprig_r` \
-             ON `_sprig_r`.`W` = CONVERT(`_sprig_k`.`WORD` USING utf8mb4)",
-            lit(&keywords_json(true)),
-            lit("$[*]"),
-            lit("$")
         )),
         ("COLUMN_STATISTICS", Persona::MySql84) => Some(
             "SELECT CAST(NULL AS CHAR(64)) AS `SCHEMA_NAME`, CAST(NULL AS CHAR(64)) AS \

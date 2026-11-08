@@ -249,6 +249,9 @@ pub(crate) struct LoggedIn {
     pub(crate) exec: Box<dyn SessionExec>,
     pub(crate) db: Option<String>,
     pub(crate) attrs: Vec<(String, String)>,
+    /// The session's place under `limits.tenant_connections` (chapter 04
+    /// step 7), held for the connection's life.
+    pub(crate) attached: Option<crate::limits::Attached>,
 }
 
 async fn connection(
@@ -260,9 +263,12 @@ async fn connection(
     let _registered = shared.cfg.hooks.register(session.handle(), &conn.listener);
     let settings = shared.cfg.settings.current();
     let timeout = conn.listener.handshake_timeout;
-    let phase =
-        tokio::time::timeout(timeout, login_phase(&shared, &settings, &mut session, conn)).await;
-    let logged_in = match phase {
+    let phase = tokio::time::timeout(
+        timeout,
+        login_phase(&shared, &ctx, &settings, &mut session, conn),
+    )
+    .await;
+    let mut logged_in = match phase {
         Err(_) => {
             tracing::debug!(session = %session.id, "connection phase timed out");
             return Ok(());
@@ -272,6 +278,7 @@ async fn connection(
             None => return Ok(()),
         },
     };
+    let _attached = logged_in.attached.take();
     dispatch::CommandLoop::new(shared, ctx, session, logged_in, settings)
         .run()
         .await
@@ -300,6 +307,7 @@ fn count_refusal(persona: Persona, r: Refusal) {
 #[allow(clippy::too_many_lines)] // the connection phase, step by step
 async fn login_phase(
     shared: &Shared,
+    ctx: &GatewayContext,
     settings: &FrontendSettings,
     session: &mut Session,
     mut conn: ClientConn,
@@ -455,6 +463,16 @@ async fn login_phase(
         },
     };
     session.set_principal(principal.clone());
+    // limits.tenant_connections (chapter 04 step 7): 39001 after login.
+    let attached = match ctx.limits.as_ref().map(|l| l.attach(principal.tenant)) {
+        Some(Err(e)) => {
+            let p = ErrPacket::from_error(persona, &e);
+            let _ = write_packet(&mut conn.stream, &mut seq, &p.encode(caps)).await;
+            return Ok(None);
+        }
+        Some(Ok(a)) => Some(a),
+        None => None,
+    };
 
     let proto = ProtoState {
         persona,
@@ -507,6 +525,7 @@ async fn login_phase(
         exec,
         db,
         attrs,
+        attached,
     }))
 }
 

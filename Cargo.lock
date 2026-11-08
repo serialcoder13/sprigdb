@@ -2077,8 +2077,14 @@ dependencies = [
 name = "sprig-common"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "axum",
+ "bytes",
  "gethostname",
+ "getrandom 0.3.4",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "metrics",
  "metrics-exporter-prometheus",
  "serde",
@@ -2245,6 +2251,7 @@ dependencies = [
  "sprig-provision",
  "sprig-settings",
  "sprig-shard",
+ "sprig-testkit",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2350,6 +2357,7 @@ dependencies = [
 name = "sprig-shard"
 version = "0.0.1"
 dependencies = [
+ "serde_json",
  "sprig-catalog",
  "sprig-common",
  "sprig-meta",

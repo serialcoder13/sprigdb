@@ -44,13 +44,25 @@ Each run makes a fresh database `m04_<random>` and sets, with `SPRIG SET` at ten
 | `events` (worked example 2) | 100,000 | F1 `account_id = ? AND kind = ? AND created_at >= ? ORDER BY created_at LIMIT 20`, F2 `COUNT(*)` on the same equalities, F3 `account_id = ? ORDER BY id DESC LIMIT 20`, F4 `LOWER(source) = ?`, inserts | `(account_id, kind, created_at)` built; F4 skipped as `function:LOWER` |
 | `t` (worked example 3, as chapter 13's `ORDER BY ... LIMIT` trap) | 100,000 | `c BETWEEN ? AND ?` (many runs); `d = 1 ORDER BY c LIMIT 10` (12 runs; `top_n = 0` on `t`, so it never qualifies itself) | `(c)` rejected for the regression; the covering retry `(c, d)` accepted and built |
 | `v` | 30,000 | `a = ?` | `(a)` built; then the user creates `(a, b)` and ours is retired as `superseded` |
-| `u` | 30,000 | `a = ?` until its index is built, then only primary-key reads and lookups by the user index | `(a)` built; on the test clock: active at day 8, retired as `unused` at day 40, dropped at day 42; the user index `idx_u_b` and the migrated `ix_u_mig` stay |
+| `u` | 30,000 | `a = ?` until its index is built, then only primary-key reads and lookups by the user index | `(a)` built; then, with `usage_sample_reads = 400` on the database, ignored after 400 reads that don't use it and dropped as `unused` after 400 more (decision O1: by reads, never days); the user index `idx_u_b` and the migrated `ix_u_mig` stay (`retire_user_indexes = off` on `u`) |
 
 Worked example 4 is a MongoDB collection (R5) and isn't part of M0.4.
 
 The migrated index is created by the test and given an `index_origins` row (`migrated`, source `mysqldump`), as a dump replay will record it once the import path exists (chapter 13 build step 17, R4).
 
 The test asserts each item and writes `results/<topology>.json`: per example the index, the seconds from the first query to the built index, every validation (method, node, verdict, reason, p95 before and after, worst regression, elapsed), the skipped rows, the supersede time and the state timeline on the test clock. The full log is `results/<topology>.log`. Variables: `SPRIG_TEST_M04_ROWS` (100,000), `SPRIG_TEST_M04_KEEP=1` keeps the database.
+
+## Decision O1's scenario (`run.sh o1 <topology>`)
+
+`usage_based_removal_on_one_topology` in the same file. A fresh database `o1_<random>` with `usage_sample_reads = 400` at database scope, 200 on table `x` (object scope wins) and `retire_user_indexes = recommend` on table `w`:
+
+| Table | Indexes | Expected |
+|---|---|---|
+| `u` (30,000 rows) | `PRIMARY`, `UNIQUE uq_u_c`, `ix_u_p` (a foreign key's), `idx_u_b` (used), `idx_u_old` (unused), and the automatic `(a)` once `a = ?` has run | `(a)` kept while used, then ignored and dropped by reads once its query stops; `idx_u_old` ignored and dropped, then recreated and pinned by `sprigctl index restore`; the rest never touched |
+| `w` (10,000) | `idx_w_old` (unused) | only recommended, never ignored |
+| `x` (10,000) | `idx_x_old` (unused) | ignored, then `sprigctl index restore` makes it visible and pins it |
+
+No clock is moved. It needs the controller to run a build with decision O1, and `SPRIG_TEST_M04_GATEWAY` may name another gateway. Results: `results/<topology>-o1.json` and `.log`.
 
 ## The drift suite (`drift.sh`)
 

@@ -28,6 +28,7 @@
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
+    clippy::many_single_char_names,
     missing_docs
 )]
 
@@ -55,7 +56,10 @@ const USER: &str = "m7a.app";
 const PASSWORD: &str = "sprig-dev-app";
 const DB: &str = "m7_soak";
 const ROWS: u32 = 1000;
-const CA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/compose/gateway-certs/ca.pem");
+const CA: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../deploy/compose/gateway-certs/ca.pem"
+);
 
 /// Counters of one protocol.
 #[derive(Default)]
@@ -102,6 +106,7 @@ struct Soak {
     rests: Stats,
     grpc: Stats,
     changes: AtomicU64,
+    admin_retries: AtomicU64,
 }
 
 fn auth() -> String {
@@ -138,7 +143,7 @@ fn connection_gone(e: &mysql_async::Error) -> bool {
 
 fn sql_for(i: u64) -> String {
     let id = (i % u64::from(ROWS)) + 1;
-    if i % 10 == 0 {
+    if i.is_multiple_of(10) {
         format!("UPDATE kv SET v = v + 1 WHERE id = {id}")
     } else {
         format!("SELECT id, v FROM kv WHERE id = {id}")
@@ -189,7 +194,8 @@ async fn wire_worker(s: Arc<Soak>, n: u64) {
 }
 
 async fn rest_worker(s: Arc<Soak>, n: u64) {
-    let client: Client<HttpConnector, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
+    let client: Client<HttpConnector, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
     let url = format!("http://{}/v1/databases/{DB}/sql:execute", s.http);
     let mut i = n * 104_729;
     while !s.stop.load(Ordering::Relaxed) {
@@ -212,8 +218,14 @@ async fn rest_worker(s: Arc<Soak>, n: u64) {
                 }
                 Ok(r) => {
                     let st = r.status();
-                    let b = r.into_body().collect().await.map(|c| c.to_bytes()).unwrap_or_default();
-                    s.rest.fail(format!("{st}: {}", String::from_utf8_lossy(&b)));
+                    let b = r
+                        .into_body()
+                        .collect()
+                        .await
+                        .map(http_body_util::Collected::to_bytes)
+                        .unwrap_or_default();
+                    s.rest
+                        .fail(format!("{st}: {}", String::from_utf8_lossy(&b)));
                     break;
                 }
                 Err(e) if tries == 1 => {
@@ -256,7 +268,9 @@ async fn rests_worker(s: Arc<Soak>, n: u64) {
         let body = serde_json::json!({ "sql": sql_for(i) }).to_string();
         let started = Instant::now();
         let r = async {
-            let tcp = tokio::net::TcpStream::connect(&s.https).await.map_err(|e| e.to_string())?;
+            let tcp = tokio::net::TcpStream::connect(&s.https)
+                .await
+                .map_err(|e| e.to_string())?;
             let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
             let stream = tls.connect(name, tcp).await.map_err(|e| e.to_string())?;
             let (mut tx, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
@@ -270,7 +284,12 @@ async fn rests_worker(s: Arc<Soak>, n: u64) {
                 .unwrap();
             let resp = tx.send_request(req).await.map_err(|e| e.to_string())?;
             let st = resp.status();
-            let b = resp.into_body().collect().await.map_err(|e| e.to_string())?.to_bytes();
+            let b = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| e.to_string())?
+                .to_bytes();
             if st.is_success() {
                 Ok(())
             } else {
@@ -316,7 +335,8 @@ async fn grpc_worker(s: Arc<Soak>, n: u64, tls: bool) {
                 transaction: String::new(),
                 multi_statements: false,
             });
-            req.metadata_mut().insert("authorization", auth().parse().unwrap());
+            req.metadata_mut()
+                .insert("authorization", auth().parse().unwrap());
             match c.execute(req).await {
                 Ok(_) => {
                     s.grpc.record(started);
@@ -334,17 +354,36 @@ async fn grpc_worker(s: Arc<Soak>, n: u64, tls: bool) {
     }
 }
 
+/// Sets `key` at dc scope through the gateway's Admin API. 39504 (a
+/// leader change, retryable by contract) and transport errors are retried
+/// for up to 30 s; the retries are counted.
 async fn admin_set(s: &Soak, key: &str, value: &serde_json::Value) {
-    let client: Client<HttpConnector, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
-    let body = serde_json::json!({"scope": "dc", "value": value, "reason": "soak", "actor": "soak"});
-    let req = hyper::Request::put(format!("http://{}/admin/v1/settings/{key}", s.http))
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(body.to_string())))
-        .unwrap();
-    let r = client.request(req).await.expect("admin call");
-    let st = r.status();
-    let b = r.into_body().collect().await.unwrap().to_bytes();
-    assert!(st.is_success(), "set {key}: {st} {}", String::from_utf8_lossy(&b));
+    let client: Client<HttpConnector, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let body =
+        serde_json::json!({"scope": "dc", "value": value, "reason": "soak", "actor": "soak"});
+    let mut last = String::new();
+    for _ in 0..60 {
+        let req = hyper::Request::put(format!("http://{}/admin/v1/settings/{key}", s.http))
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(body.to_string())))
+            .unwrap();
+        match client.request(req).await {
+            Ok(r) => {
+                let st = r.status();
+                let b = r.into_body().collect().await.unwrap().to_bytes();
+                if st.is_success() {
+                    return;
+                }
+                last = format!("{st} {}", String::from_utf8_lossy(&b));
+                assert_eq!(st.as_u16(), 503, "set {key}: {last}");
+            }
+            Err(e) => last = e.to_string(),
+        }
+        s.admin_retries.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("set {key}: {last}");
 }
 
 /// One change every `period`, round robin.
@@ -361,10 +400,20 @@ async fn changer(s: Arc<Soak>, certs: Option<String>, period: Duration) {
                 if let Some(dir) = &certs {
                     cert_b = !cert_b;
                     let name = if cert_b { "server-b" } else { "server-a" };
-                    std::fs::copy(format!("{dir}/{name}-key.pem"), format!("{dir}/server-key.pem.tmp")).unwrap();
-                    std::fs::copy(format!("{dir}/{name}.pem"), format!("{dir}/server.pem.tmp")).unwrap();
-                    std::fs::rename(format!("{dir}/server-key.pem.tmp"), format!("{dir}/server-key.pem")).unwrap();
-                    std::fs::rename(format!("{dir}/server.pem.tmp"), format!("{dir}/server.pem")).unwrap();
+                    std::fs::copy(
+                        format!("{dir}/{name}-key.pem"),
+                        format!("{dir}/server-key.pem.tmp"),
+                    )
+                    .unwrap();
+                    std::fs::copy(format!("{dir}/{name}.pem"), format!("{dir}/server.pem.tmp"))
+                        .unwrap();
+                    std::fs::rename(
+                        format!("{dir}/server-key.pem.tmp"),
+                        format!("{dir}/server-key.pem"),
+                    )
+                    .unwrap();
+                    std::fs::rename(format!("{dir}/server.pem.tmp"), format!("{dir}/server.pem"))
+                        .unwrap();
                     format!("certificate rotated to {name}")
                 } else {
                     "certificate rotation skipped (no SPRIG_SOAK_CERTS)".into()
@@ -376,12 +425,20 @@ async fn changer(s: Arc<Soak>, certs: Option<String>, period: Duration) {
                 format!("gateway.relay_buffer_kb = {v}")
             }
             2 => {
-                let v = if step % 12 == 2 { "required" } else { "optional" };
+                let v = if step % 12 == 2 {
+                    "required"
+                } else {
+                    "optional"
+                };
                 admin_set(&s, "listener.mysql.tls", &serde_json::json!(v)).await;
                 format!("listener.mysql.tls = {v}")
             }
             3 => {
-                let v = if step % 12 == 3 { "optional" } else { "required" };
+                let v = if step % 12 == 3 {
+                    "optional"
+                } else {
+                    "required"
+                };
                 admin_set(&s, "listener.https.tls", &serde_json::json!(v)).await;
                 format!("listener.https.tls = {v}")
             }
@@ -404,7 +461,10 @@ async fn changer(s: Arc<Soak>, certs: Option<String>, period: Duration) {
 
 fn rss_kb(pid: Option<&str>) -> Option<u64> {
     let pid = pid?;
-    let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", pid]).output().ok()?;
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", pid])
+        .output()
+        .ok()?;
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
@@ -415,7 +475,10 @@ async fn listeners_certificates_and_settings_change_under_load() {
         return;
     };
     let urls = skip::urls(&v);
-    let seconds: u64 = std::env::var("SPRIG_SOAK_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+    let seconds: u64 = std::env::var("SPRIG_SOAK_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
     let certs = std::env::var("SPRIG_SOAK_CERTS").ok();
     let pid = std::env::var("SPRIG_SOAK_PID").ok();
     let s = Arc::new(Soak {
@@ -428,6 +491,7 @@ async fn listeners_certificates_and_settings_change_under_load() {
         rests: Stats::default(),
         grpc: Stats::default(),
         changes: AtomicU64::new(0),
+        admin_retries: AtomicU64::new(0),
     });
     // The table.
     {
@@ -443,14 +507,21 @@ async fn listeners_certificates_and_settings_change_under_load() {
         )
         .await
         .unwrap();
-        c.query_drop(format!("CREATE DATABASE IF NOT EXISTS {DB}")).await.unwrap();
-        c.query_drop(format!("CREATE TABLE IF NOT EXISTS {DB}.kv (id INT PRIMARY KEY, v BIGINT NOT NULL)"))
+        c.query_drop(format!("CREATE DATABASE IF NOT EXISTS {DB}"))
             .await
             .unwrap();
+        c.query_drop(format!(
+            "CREATE TABLE IF NOT EXISTS {DB}.kv (id INT PRIMARY KEY, v BIGINT NOT NULL)"
+        ))
+        .await
+        .unwrap();
         let values: Vec<String> = (1..=ROWS).map(|i| format!("({i}, 0)")).collect();
-        c.query_drop(format!("INSERT IGNORE INTO {DB}.kv VALUES {}", values.join(",")))
-            .await
-            .unwrap();
+        c.query_drop(format!(
+            "INSERT IGNORE INTO {DB}.kv VALUES {}",
+            values.join(",")
+        ))
+        .await
+        .unwrap();
     }
     let mut tasks = Vec::new();
     for n in 0..8 {
@@ -465,16 +536,26 @@ async fn listeners_certificates_and_settings_change_under_load() {
     for n in 0..2 {
         tasks.push(tokio::spawn(grpc_worker(Arc::clone(&s), n, n == 1)));
     }
-    let change_period = Duration::from_secs(std::env::var("SPRIG_SOAK_CHANGE_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20));
+    let change_period = Duration::from_secs(
+        std::env::var("SPRIG_SOAK_CHANGE_SECONDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20),
+    );
     let changes = tokio::spawn(changer(Arc::clone(&s), certs, change_period));
     let start = Instant::now();
     let rss0 = rss_kb(pid.as_deref());
-    println!("minute | wire ok/rec/fail p50/p99 ms | rest | https | grpc | changes | gateway RSS MB");
+    println!(
+        "minute | wire ok/rec/fail p50/p99 ms | rest | https | grpc | changes | gateway RSS MB"
+    );
     let mut minute = 0;
     let sample = Duration::from_secs(60.min(seconds));
     let lock = Mutex::new(());
     while start.elapsed() < Duration::from_secs(seconds) {
-        tokio::time::sleep(sample.min(Duration::from_secs(seconds).saturating_sub(start.elapsed()))).await;
+        tokio::time::sleep(
+            sample.min(Duration::from_secs(seconds).saturating_sub(start.elapsed())),
+        )
+        .await;
         let _g = lock.lock().await;
         minute += 1;
         let col = |st: &Stats| {
@@ -493,7 +574,8 @@ async fn listeners_certificates_and_settings_change_under_load() {
             col(&s.rests),
             col(&s.grpc),
             s.changes.load(Ordering::Relaxed),
-            rss_kb(pid.as_deref()).map_or_else(|| "-".into(), |k| format!("{:.1}", k as f64 / 1024.0)),
+            rss_kb(pid.as_deref())
+                .map_or_else(|| "-".into(), |k| format!("{:.1}", k as f64 / 1024.0)),
         );
     }
     s.stop.store(true, Ordering::Relaxed);
@@ -501,12 +583,23 @@ async fn listeners_certificates_and_settings_change_under_load() {
         let _ = t.await;
     }
     let _ = changes.await;
+    // Put the changed settings back to the m07 stack's values.
+    for (k, v) in [
+        ("gateway.relay_buffer_kb", serde_json::json!(256)),
+        ("listener.mysql.tls", serde_json::json!("optional")),
+        ("listener.https.tls", serde_json::json!("required")),
+        ("api.stream_batch_rows", serde_json::json!(500)),
+        ("tls.min_version", serde_json::json!("1.2")),
+    ] {
+        admin_set(&s, k, &v).await;
+    }
     let total = |st: &Stats| st.ok.load(Ordering::Relaxed);
     let fails = |st: &Stats| st.failures.load(Ordering::Relaxed);
     let rss1 = rss_kb(pid.as_deref());
     println!(
-        "soak: {seconds} s, {} changes; requests wire {} rest {} https {} grpc {}; reconnects wire {} rest {} grpc {}; failures {}; RSS {:?} -> {:?} KB",
+        "soak: {seconds} s, {} changes ({} admin retries); requests wire {} rest {} https {} grpc {}; reconnects wire {} rest {} grpc {}; failures {}; RSS {:?} -> {:?} KB",
         s.changes.load(Ordering::Relaxed),
+        s.admin_retries.load(Ordering::Relaxed),
         total(&s.wire),
         total(&s.rest),
         total(&s.rests),
@@ -518,7 +611,12 @@ async fn listeners_certificates_and_settings_change_under_load() {
         rss0,
         rss1,
     );
-    for (name, st) in [("wire", &s.wire), ("rest", &s.rest), ("https", &s.rests), ("grpc", &s.grpc)] {
+    for (name, st) in [
+        ("wire", &s.wire),
+        ("rest", &s.rest),
+        ("https", &s.rests),
+        ("grpc", &s.grpc),
+    ] {
         assert_eq!(
             fails(st),
             0,

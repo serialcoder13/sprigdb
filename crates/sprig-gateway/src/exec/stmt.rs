@@ -72,6 +72,9 @@ pub(crate) struct Stmt {
     /// Tenant sessions: the client's text (logical names), which workload
     /// capture fingerprints (chapter 12).
     pub logical: Option<Bytes>,
+    /// Tenant sessions: what the statement's privileges were checked with
+    /// at prepare, checked again at execute (chapter 29).
+    pub recheck: Option<crate::tenant::authz::Recheck>,
 }
 
 impl Stmt {
@@ -92,6 +95,7 @@ impl Stmt {
             mapper: None,
             deferred: None,
             logical: None,
+            recheck: None,
         }
     }
 
@@ -113,6 +117,7 @@ impl Stmt {
             mapper: None,
             deferred: Some(sql.clone()),
             logical: None,
+            recheck: None,
             sql,
         }
     }

@@ -136,6 +136,13 @@ pub trait TargetIo: Send + Sync {
     /// Creates the internal tables, the schemas, the tables (and runs the
     /// object statements). Idempotent.
     async fn prepare(&self, tables: &[TableMeta], objects: &[String]) -> Result<()>;
+    /// Before a job's first prepare: refuses a target that already holds
+    /// the job's schemas without the job's position row (they belong to
+    /// someone else), then claims as [`Self::claim`] does. The default only
+    /// claims.
+    async fn reserve(&self, job: JobId, token: u64, init: &PosRow) -> Result<PosRow> {
+        self.claim(job, token, init).await
+    }
     /// The job's position row, if any.
     async fn load_pos(&self, job: JobId) -> Result<Option<PosRow>>;
     /// Takes ownership with `token`: inserts the position row with `init`

@@ -306,12 +306,20 @@ sprig_codes! {
     /// A tenant with children can't be dropped (chapter 29; chapter 23's
     /// delete guard).
     TenantHasChildren = 39362, "ER_SPRIG_TENANT_HAS_CHILDREN", "SprigTenantHasChildren", SQLSTATE_GENERAL, false;
+    /// A stored program wasn't recorded with the session's backend account
+    /// as its definer; the gateway dropped it again (chapter 29, "Definers
+    /// of stored code").
+    DefinerRefused = 39367, "ER_SPRIG_DEFINER_REFUSED", "SprigDefinerRefused", SQLSTATE_GENERAL, false;
     /// The control plane's store is unreachable (chapter 23).
     MetaUnavailable = 39500, "ER_SPRIG_META_UNAVAILABLE", "SprigMetaUnavailable", SQLSTATE_CONNECTION, true;
     /// This controller no longer leads (or never did): its session was lost
     /// or a guarded transaction failed its fencing-token compare. The caller
     /// steps down; it must not retry (chapter 23). Not yet in Appendix E.
     NotLeader = 39504, "ER_SPRIG_NOT_LEADER", "SprigNotLeader", SQLSTATE_GENERAL, false;
+    /// The tenant moved to another data center while the session held
+    /// state that can't follow it (temporary tables, `GET_LOCK` locks,
+    /// `LOCK TABLES`, XA); the session must reconnect (chapter 24).
+    SessionMoved = 39502, "ER_SPRIG_SESSION_MOVED", "SprigSessionMoved", SQLSTATE_CONNECTION, true;
     /// The data center isn't registered (chapter 24).
     UnknownDc = 39503, "ER_SPRIG_UNKNOWN_DC", "SprigUnknownDc", SQLSTATE_GENERAL, false;
     /// A tenant would be deeper than `tenant.max_depth` (chapter 23).
@@ -323,6 +331,10 @@ sprig_codes! {
     /// An external cluster failed its registration prechecks; the message
     /// lists every missing item (chapter 27). Not yet in Appendix E.
     ClusterPrecheckFailed = 39511, "ER_SPRIG_CLUSTER_PRECHECK_FAILED", "SprigClusterPrecheckFailed", SQLSTATE_GENERAL, false;
+    /// A tenant move between data centers can't start: the tenant is
+    /// pinned, not active, already homed in the target, already moving,
+    /// or the target has no cluster for it (chapter 24).
+    TenantMoveRefused = 39550, "ER_SPRIG_TENANT_MOVE_REFUSED", "SprigTenantMoveRefused", SQLSTATE_GENERAL, false;
     /// A transaction handle names no open transaction on its gateway
     /// (chapter 37).
     TxnHandleUnknown = 39781, "ER_SPRIG_TXN_HANDLE_UNKNOWN", "SprigTxnHandleUnknown", SQLSTATE_GENERAL, false;
@@ -351,6 +363,12 @@ sprig_codes! {
     /// An Admin API request has no valid credential (chapter 37). Not yet
     /// in Appendix E.
     AdminUnauthenticated = 39793, "ER_SPRIG_ADMIN_UNAUTHENTICATED", "SprigAdminUnauthenticated", SQLSTATE_GENERAL, false;
+    /// The audit spool is full (`audit.spool_max_mb`): admin API mutations
+    /// and account statements fail closed (chapter 47).
+    AuditUnavailable = 39970, "ER_SPRIG_AUDIT_UNAVAILABLE", "SprigAuditUnavailable", SQLSTATE_GENERAL, true;
+    /// A tenant import's checksums or grants differ from its export's
+    /// manifest (chapter 47).
+    ImportVerifyFailed = 39971, "ER_SPRIG_IMPORT_VERIFY_FAILED", "SprigImportVerifyFailed", SQLSTATE_GENERAL, false;
     /// `sprigdb.toml` or its environment overrides are invalid. Raised only at
     /// process start; never reaches a client. Not yet in Appendix E.
     ConfigInvalid = 39998, "ER_SPRIG_CONFIG_INVALID", "SprigConfigInvalid", SQLSTATE_GENERAL, false;
@@ -465,8 +483,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::BackendLost
         | SprigCode::CatalogUnavailable
         | SprigCode::AuthUnavailable
+        | SprigCode::AuditUnavailable
         | SprigCode::ForwardFailed
         | SprigCode::JobLeaseLost
+        | SprigCode::SessionMoved
         | SprigCode::MoveSourceDiverged => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
@@ -479,7 +499,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ShardLocked
         | SprigCode::MoveCutoverAborted => (Code::Aborted, 409),
         SprigCode::CatalogFormatTooNew => (Code::FailedPrecondition, 500),
-        SprigCode::BinlogCorrupt | SprigCode::MoveVerifyFailed => (Code::DataLoss, 500),
+        SprigCode::BinlogCorrupt
+        | SprigCode::MoveVerifyFailed
+        | SprigCode::ImportVerifyFailed => (Code::DataLoss, 500),
         SprigCode::BackendProtocol => (Code::Internal, 502),
         SprigCode::ClusterNotFound
         | SprigCode::UnknownDc
@@ -493,9 +515,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::TenantDepthExceeded
         | SprigCode::MoveTargetIncompatible
         | SprigCode::MoveUnsupported
+        | SprigCode::TenantMoveRefused
         | SprigCode::JobStateInvalid => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
+        | SprigCode::DefinerRefused
         | SprigCode::TxnHandleForbidden => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit

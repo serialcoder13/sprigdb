@@ -1,0 +1,27 @@
+# The balancer test bed's gateway (run.sh): MySQL persona 18306, MariaDB
+# persona 18307, in the sprigdb-bl deployment (controller.toml).
+[node]
+dc = "dc-bl"
+id = "bl-gw-1"
+
+[meta]
+dc_seeds = ["http://127.0.0.1:18379"]
+global_seeds = []
+deployment_id = "sprigdb-bl"
+
+[gateway]
+login_mode = "catalog"
+backends_file = "deploy/compose/gateway-backends.dev.toml"
+workload_key_file = "deploy/compose/workload-keys.dev"
+
+[gateway.listen_override]
+mysql = "127.0.0.1:18306"
+mariadb = "127.0.0.1:18307"
+http = "127.0.0.1:18380"
+https = "127.0.0.1:18443"
+peer = "127.0.0.1:18413"
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "pretty"
+bootstrap_addr = "127.0.0.1:18190"

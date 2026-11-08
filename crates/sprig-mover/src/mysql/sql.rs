@@ -371,6 +371,22 @@ pub fn classify(sql: &str) -> QueryKind {
     }
 }
 
+/// Whether `sql` names `word` as a whole identifier (quoted, or bare
+/// between non-identifier characters), ignoring ASCII case.
+#[must_use]
+pub fn names_word(sql: &str, word: &str) -> bool {
+    if sql.contains(&format!("`{word}`")) {
+        return true;
+    }
+    let lower = sql.to_ascii_lowercase();
+    let w = word.to_ascii_lowercase();
+    lower.match_indices(&w).any(|(i, _)| {
+        let ident =
+            |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+        !ident(lower[..i].chars().next_back()) && !ident(lower[i + w.len()..].chars().next())
+    })
+}
+
 /// Whether a DDL statement run in `db` touches one of `schemas`: it ran in
 /// one, or names one (quoted or bare).
 #[must_use]
@@ -489,6 +505,14 @@ mod tests {
         assert_eq!(classify("insert into t values (1)"), QueryKind::Dml);
         assert_eq!(classify("TRUNCATE TABLE t"), QueryKind::Ddl);
         assert_eq!(first_word("  -- c\n drop table x"), "DROP");
+    }
+
+    #[test]
+    fn names_are_matched_as_words() {
+        assert!(names_word("ALTER TABLE t ADD c INT", "t"));
+        assert!(names_word("alter table `s`.`t` add c int", "t"));
+        assert!(!names_word("ALTER TABLE tt ADD c INT", "t"));
+        assert!(!names_word("ALTER TABLE x_t ADD c INT", "t"));
     }
 
     #[test]

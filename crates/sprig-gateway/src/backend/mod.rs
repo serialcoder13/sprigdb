@@ -79,6 +79,7 @@
 //! Names pass through unchanged (decision D2): the schema a client names
 //! is the physical schema.
 
+pub mod charset;
 pub mod classify;
 pub mod cluster;
 pub mod conn;

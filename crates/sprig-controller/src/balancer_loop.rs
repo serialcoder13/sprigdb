@@ -12,13 +12,26 @@
 //! `capacity`; capability flags come from the published profile. Storage,
 //! schemas and tables per tenant come from one index-range read of
 //! `mysql.innodb_table_stats` (`database_name LIKE 't<id>\_%'`, the
-//! table's primary key prefix, never `information_schema`). Busy time,
-//! writes and connections wait for the gateways' load reports, which are
-//! not sent yet: until then only storage and the caps drive plans.
+//! table's primary key prefix, never `information_schema`).
 //!
-//! **Moves.** Without a [`MoveExecutor`] (no mover workers in this
-//! deployment yet), `auto` runs as `recommend`: decisions are written,
-//! nothing moves. With one, `auto` submits chapter 10 jobs.
+//! **Gateway load in R0.** Gateways don't send chapter 11's load reports
+//! on port 7400 yet. What they do send is chapter 12's workload
+//! statistics, flushed every `workload.flush_seconds` into each tenant's
+//! catalog (`workload_stats`: statements, statement microseconds and rows
+//! affected per fingerprint, bucket and gateway). Each run reads one
+//! aggregate of the tenant's recent buckets from the catalog it already
+//! scans (same cluster, same connection): statements per second, busy
+//! milliseconds per second and rows written per second, averaged from the
+//! oldest bucket read (at most `balancer.window_minutes` plus one hour
+//! back) to now. Connections stay unmeasured. A catalog without the
+//! workload tables reads as no load.
+//!
+//! **Moves.** The controller passes a [`MoveExecutor`] over chapter 10's
+//! job records (`sprig_balancer::mover::MoverExecutor` on
+//! `sprig_mover::MetaMover`), so `auto` submits `move_shard` jobs that
+//! workers (`sprigdb worker`) claim and run; `recommend` and `dry_run`
+//! only write decisions. Without an executor (tests), `auto` runs as
+//! `recommend`.
 //!
 //! **Settings** are resolved at DC scope (and cluster scope for the
 //! per-cluster keys); tenant-scope values wait for the catalogs' settings
@@ -62,6 +75,9 @@ struct Inner {
     book: RecommendationBook,
     last_view: Option<FleetView>,
     last_report: Option<PlanReport>,
+    /// Statements per second per tenant, from the gateways' workload
+    /// statistics, as of the last run.
+    last_qps: BTreeMap<TenantId, f64>,
 }
 
 /// The DC leader's balancer (module docs).
@@ -121,6 +137,7 @@ impl BalancerLoop {
                 book: RecommendationBook::new(),
                 last_view: None,
                 last_report: None,
+                last_qps: BTreeMap::new(),
             }),
             dc,
             registry,
@@ -179,7 +196,13 @@ impl BalancerLoop {
     /// # Errors
     /// The stores'; a cluster whose scan fails is marked stale instead.
     pub async fn view(&self) -> Result<FleetView> {
+        Ok(self.view_and_qps().await?.0)
+    }
+
+    /// The view, and each tenant's statements per second (module docs).
+    async fn view_and_qps(&self) -> Result<(FleetView, BTreeMap<TenantId, f64>)> {
         let mut v = FleetView::default();
+        let mut qps = BTreeMap::new();
         for sc in self.registry.list().await? {
             let r = sc.body();
             if r.dc_id != self.dc {
@@ -225,17 +248,21 @@ impl BalancerLoop {
                 }
             };
             for t in tenants {
-                let load = sizes.get(&t).copied().unwrap_or(LoadVector {
-                    schemas: 1.0,
-                    ..LoadVector::default()
-                });
+                let (load, q) = sizes.get(&t).copied().unwrap_or((
+                    LoadVector {
+                        schemas: 1.0,
+                        ..LoadVector::default()
+                    },
+                    0.0,
+                ));
+                qps.insert(t, q);
                 let mut tv = TenantView::new(t);
                 tv.knobs = self.tenant_knobs(t);
                 v.tenants.insert(t, tv);
                 v.add_shard(ShardView::new(ShardKey::new(t.0, 0, 0), c.clone(), load));
             }
         }
-        Ok(v)
+        Ok((v, qps))
     }
 
     fn tenant_knobs(&self, t: TenantId) -> TenantKnobs {
@@ -249,15 +276,18 @@ impl BalancerLoop {
         }
     }
 
-    /// Bytes, tables and schemas of each tenant on `c`.
+    /// Bytes, tables and schemas of each tenant on `c`, with its gateway
+    /// load (module docs) and statements per second.
     async fn scan(
         &self,
         c: &ClusterId,
         tenants: &[TenantId],
-    ) -> Result<BTreeMap<TenantId, LoadVector>> {
+    ) -> Result<BTreeMap<TenantId, (LoadVector, f64)>> {
         let pool = self.pools.writer(c).await?;
         let mut conn = pool.get_conn().await.map_err(scan_err)?;
         let page = sprig_balancer::load::page_size(&mut conn).await?;
+        let now = secs(&*self.clock);
+        let since = now.saturating_sub(self.settings().window.as_secs() + 3600);
         let mut out = BTreeMap::new();
         for t in tenants {
             let row: Option<(u64, u64, u64)> = conn
@@ -270,15 +300,21 @@ impl BalancerLoop {
                 .await
                 .map_err(scan_err)?;
             let (schemas, tables, pages) = row.unwrap_or((0, 0, 0));
+            let g = gateway_load(&mut conn, *t, since, now).await;
             #[allow(clippy::cast_precision_loss)]
             out.insert(
                 *t,
-                LoadVector {
-                    storage_bytes: (pages * page) as f64,
-                    schemas: schemas.max(1) as f64,
-                    tables: tables as f64,
-                    ..LoadVector::default()
-                },
+                (
+                    LoadVector {
+                        storage_bytes: (pages * page) as f64,
+                        schemas: schemas.max(1) as f64,
+                        tables: tables as f64,
+                        busy_ms_per_sec: g.busy_ms_per_sec,
+                        write_rows_per_sec: g.write_rows_per_sec,
+                        ..LoadVector::default()
+                    },
+                    g.statements_per_sec,
+                ),
             );
         }
         Ok(out)
@@ -291,8 +327,9 @@ impl BalancerLoop {
     pub async fn run_once(&self) -> Result<PlanReport> {
         let now = secs(&*self.clock);
         let settings = self.settings();
-        let mut view = self.view().await?;
+        let (mut view, qps) = self.view_and_qps().await?;
         let mut g = self.inner.lock().await;
+        g.last_qps = qps;
         if g.planner.settings != settings {
             let mut p = Planner::new(settings.clone());
             p.avoid_move_back = g.planner.avoid_move_back;
@@ -373,13 +410,19 @@ impl BalancerLoop {
                 now,
             ));
         };
-        Ok(explain_placement(
+        let mut e = explain_placement(
             &view,
             g.last_report.as_ref(),
             t,
             self.tenant_knobs(t).mode.as_str(),
             now,
-        ))
+        );
+        if let Some(q) = g.last_qps.get(&t) {
+            for l in &mut e.shards {
+                l.statements_per_sec = *q;
+            }
+        }
+        Ok(e)
     }
 
     /// `sprigctl explain decision <id> --tenant <name>`.
@@ -416,6 +459,68 @@ impl BalancerLoop {
     #[must_use]
     pub fn decisions(&self) -> Arc<dyn DecisionLog> {
         Arc::clone(&self.log) as Arc<dyn DecisionLog>
+    }
+}
+
+/// A tenant's load as its gateways recorded it (module docs).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GatewayLoad {
+    /// Statements per second.
+    pub statements_per_sec: f64,
+    /// Statement time, milliseconds per second.
+    pub busy_ms_per_sec: f64,
+    /// Rows written per second.
+    pub write_rows_per_sec: f64,
+}
+
+impl GatewayLoad {
+    /// Rates from summed counters over `[oldest, now]`; none under 10 s.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn from_sums(statements: u64, busy_us: u64, rows: u64, oldest: u64, now: u64) -> Self {
+        let span = now.saturating_sub(oldest);
+        if span < 10 {
+            return Self::default();
+        }
+        let s = span as f64;
+        Self {
+            statements_per_sec: statements as f64 / s,
+            busy_ms_per_sec: busy_us as f64 / 1000.0 / s,
+            write_rows_per_sec: rows as f64 / s,
+        }
+    }
+}
+
+/// Reads `tenant`'s gateway load from its catalog's `workload_stats`
+/// (buckets starting at or after `since`); no load when the catalog has
+/// no workload tables or the read fails.
+async fn gateway_load(
+    conn: &mut mysql_async::Conn,
+    tenant: TenantId,
+    since: u64,
+    now: u64,
+) -> GatewayLoad {
+    let schema = sprig_common::names::SchemaName::catalog(tenant).to_string();
+    let sql = format!(
+        "SELECT CAST(COALESCE(SUM(exec_count), 0) AS UNSIGNED), \
+         CAST(COALESCE(SUM(total_us), 0) AS UNSIGNED), \
+         CAST(COALESCE(SUM(rows_affected), 0) AS UNSIGNED), \
+         CAST(COALESCE(MIN(TIMESTAMPDIFF(SECOND, '1970-01-01', bucket_start)), 0) AS UNSIGNED) \
+         FROM {}.workload_stats WHERE bucket_start >= TIMESTAMPADD(SECOND, ?, '1970-01-01')",
+        sprig_common::names::quote(&schema)
+    );
+    match conn
+        .exec_first::<(u64, u64, u64, u64), _, _>(sql, (since,))
+        .await
+    {
+        Ok(Some((n, us, rows, oldest))) if n > 0 => {
+            GatewayLoad::from_sums(n, us, rows, oldest, now)
+        }
+        Ok(_) => GatewayLoad::default(),
+        Err(e) => {
+            tracing::debug!(%tenant, error = %e, "no gateway load for the tenant");
+            GatewayLoad::default()
+        }
     }
 }
 

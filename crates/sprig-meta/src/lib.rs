@@ -38,6 +38,7 @@ pub mod key;
 pub mod mem;
 pub mod record;
 pub mod session;
+pub mod view;
 
 use std::pin::Pin;
 use std::time::Duration;
@@ -52,6 +53,7 @@ pub use key::{Key, Tier};
 pub use mem::MemStore;
 pub use record::{Record, Versioned};
 pub use session::{Session, SessionOpts};
+pub use view::TierView;
 
 /// An etcd revision: the store's logical clock, raised by every write.
 pub type Revision = u64;

@@ -5,6 +5,7 @@
 #   deploy/compose/m04/run.sh setup              # settings, tenants, restart
 #   deploy/compose/m04/run.sh single|replication|galera
 #   deploy/compose/m04/run.sh all                # the three, one at a time
+#   deploy/compose/m04/run.sh o1 single|replication|galera  # decision O1's scenario
 #   deploy/compose/m04/run.sh drift              # drift.sh as acme.app
 #   deploy/compose/m04/run.sh teardown           # settings and tenants removed
 #
@@ -76,21 +77,24 @@ teardown() {
   deploy/compose/gateway-dev.sh restart
 }
 
-topology() { # single|replication|galera
-  local tenant catalog
+topology() { # single|replication|galera [test]
+  local tenant catalog test=${2:-chapter_13_scenarios_on_one_topology} out=$1
   case $1 in
     single) tenant=acme catalog=mysql://root:sprig-dev-root@127.0.0.1:13301 ;;
     replication) tenant=m04r catalog=mysql://root:sprig-dev-root@127.0.0.1:13311 ;;
     galera) tenant=m04g catalog=mysql://root:sprig-dev-root@127.0.0.1:13321 ;;
     *) echo "unknown topology $1" >&2; exit 2 ;;
   esac
+  [[ $test == chapter_13_scenarios_on_one_topology ]] || out=$1-o1
   mkdir -p "$results"
-  say "$1: tenant $tenant"
+  say "$1: tenant $tenant ($test)"
   docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | grep sprigdb-dev || true
-  SPRIG_TEST_M04_GATEWAY=127.0.0.1:13307 SPRIG_TEST_M04_TENANT="$tenant:$(tenant_id "$tenant")" \
+  SPRIG_TEST_M04_GATEWAY=${SPRIG_TEST_M04_GATEWAY:-127.0.0.1:13307} \
+    SPRIG_TEST_M04_TENANT="$tenant:$(tenant_id "$tenant")" \
     SPRIG_TEST_M04_CATALOG=$catalog SPRIG_TEST_M04_CLOCK_FILE=$clock SPRIG_TEST_M04_TOPOLOGY=$1 \
-    SPRIG_TEST_M04_REPORT=$root/$results/$1.json \
-    cargo test -p sprig-testkit --test m04_scenarios -- --ignored --nocapture 2>&1 | tee "$results/$1.log"
+    SPRIG_TEST_M04_REPORT=$root/$results/$out.json SPRIG_TEST_M04_SPRIGCTL=$bin/sprigctl \
+    cargo test -p sprig-testkit --test m04_scenarios "$test" -- --ignored --nocapture 2>&1 \
+    | tee "$results/$out.log"
   [[ ${PIPESTATUS[0]} == 0 ]]
 }
 
@@ -99,6 +103,7 @@ case ${1:-} in
   teardown) teardown ;;
   single | replication | galera) topology "$1" ;;
   all) for t in single replication galera; do topology "$t"; done ;;
+  o1) topology "${2:-single}" usage_based_removal_on_one_topology ;;
   drift) deploy/compose/m04/drift.sh acme.app sprig-dev-app ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 2 ;;
 esac

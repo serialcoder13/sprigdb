@@ -25,6 +25,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use crate::constraints::{
     Blocker, Feasibility, Fit, Purpose, Unit, cowrite_split_rate, feasible_in, unit_of,
 };
+use crate::judge::{JudgeInput, Judgement, judge};
 use crate::model::{ClusterState, FleetView, Fullness, LoadVector, ShardKey, Timestamp};
 use crate::settings::{BalancerMode, BalancerSettings, GB};
 
@@ -141,7 +142,8 @@ pub struct PlannedMove {
     pub reason: MoveReason,
     /// `full[from]` before minus after.
     pub gain: f64,
-    /// Gain per GB copied.
+    /// Benefit minus cost (the judgement's `net`); for forced moves, gain
+    /// per GB copied.
     pub value: f64,
     /// Bytes to copy.
     pub size_bytes: f64,
@@ -153,6 +155,35 @@ pub struct PlannedMove {
     pub alternatives: Vec<(ClusterId, f64)>,
     /// The load moving.
     pub load: LoadVector,
+    /// Benefit against cost (`crate::judge`); `None` for forced moves.
+    #[serde(default)]
+    pub judgement: Option<Judgement>,
+    /// Why, in plain words.
+    #[serde(default)]
+    pub why: String,
+    /// Other moves considered for this source, best first, with why they
+    /// lost or weren't worth it.
+    #[serde(default)]
+    pub considered: Vec<Considered>,
+}
+
+/// A move considered and not made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Considered {
+    /// The tenant.
+    pub tenant: TenantId,
+    /// The shard.
+    pub shard: ShardKey,
+    /// Source.
+    pub from: ClusterId,
+    /// Target.
+    pub to: ClusterId,
+    /// Bytes.
+    pub size_bytes: f64,
+    /// Benefit against cost.
+    pub judgement: Judgement,
+    /// Why, in plain words.
+    pub why: String,
 }
 
 /// Something the planner noticed that stopped or shaped a move.
@@ -232,6 +263,9 @@ pub struct PlanReport {
     pub approvals: Vec<ApprovalNeeded>,
     /// Hot clusters for which no feasible move was found.
     pub stuck: Vec<ClusterId>,
+    /// For stuck clusters, the best moves considered and not worth making.
+    #[serde(default)]
+    pub rejected: Vec<Considered>,
 }
 
 #[derive(Debug, Default)]
@@ -463,6 +497,7 @@ impl Planner {
             notes: Vec::new(),
             approvals: Vec::new(),
             stuck: Vec::new(),
+            rejected: Vec::new(),
         };
         let mut w = Work::new(view);
         let max_active = s.max_concurrent_moves_per_dc as usize;
@@ -512,18 +547,22 @@ impl Planner {
                 MoveReason::ClusterHot
             };
             match self.best_move(&w, &mut r, &h.cluster, reason, now) {
-                Some(m) if m.gain + 1e-9 >= s.min_gain => {
+                Some(m) => {
                     w.apply(&m);
                     r.moves.push(m);
                 }
-                Some(m) => {
+                None if r.rejected.iter().any(|c| c.from == h.cluster) => {
                     r.notes.push(note(
-                        "min_gain",
+                        "not_worth_it",
                         Some(&h.cluster),
-                        m.shards.first(),
+                        None,
                         format!(
-                            "best move {} to {} gains {:.3}, below balancer.min_gain_pct",
-                            m.shards[0], m.to, m.gain
+                            "no move off cluster {} is worth its cost: {}",
+                            h.cluster,
+                            r.rejected
+                                .iter()
+                                .find(|c| c.from == h.cluster)
+                                .map_or(String::new(), |c| c.why.clone())
                         ),
                     ));
                     r.stuck.push(h.cluster.clone());
@@ -612,13 +651,27 @@ impl Planner {
                 to_full: (w.full(to), fit.full_after),
                 alternatives: Vec::new(),
                 load: unit.load,
+                judgement: None,
+                why: format!(
+                    "moved {} from {} to {}: {}",
+                    s.key,
+                    s.cluster,
+                    to,
+                    if reason == MoveReason::Drain {
+                        "the source is draining"
+                    } else {
+                        "the tenant's residency no longer allows the source"
+                    }
+                ),
+                considered: Vec::new(),
             };
             w.apply(&m);
             r.moves.push(m);
         }
     }
 
-    /// The best move off `h`, by gain per GB copied.
+    /// The move off `h` worth making with the largest benefit minus cost
+    /// (`crate::judge`); `None` if no move is worth making.
     #[allow(clippy::too_many_lines, clippy::many_single_char_names)]
     fn best_move(
         &self,
@@ -634,6 +687,17 @@ impl Planner {
         let mut best: Option<PlannedMove> = None;
         let mut approval: Option<ApprovalNeeded> = None;
         let mut blocked_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut others: Vec<Considered> = Vec::new();
+        let hv = &view.clusters[h];
+        let busy_h = w.busiest(h);
+        #[allow(clippy::cast_precision_loss)]
+        let typical = full_h
+            / view
+                .shards
+                .values()
+                .filter(|x| &x.cluster == h)
+                .count()
+                .max(1) as f64;
         for sv in view.shards.values().filter(|x| &x.cluster == h) {
             let Some(t) = view.tenants.get(&sv.key.tenant) else {
                 continue;
@@ -672,10 +736,13 @@ impl Planner {
             let feas = feasible_in(view, &w.loads, &unit, Purpose::Rebalance, now);
             let after_h = w.full_without(h, &unit.load);
             let gain = full_h - after_h;
-            let size_gb = unit.load.storage_bytes / GB;
-            let value = gain / (size_gb + 1.0);
+            let moved_recently = sv
+                .history
+                .iter()
+                .any(|v| v.left_at + MOVE_BACK_WINDOW_SECS > now);
             let mut alts: Vec<(ClusterId, f64)> = Vec::new();
-            let mut cand: Option<(ClusterId, f64)> = None;
+            // The best target for this shard: the largest benefit − cost.
+            let mut cand: Option<(ClusterId, f64, f64, Judgement)> = None;
             for (c, fit) in &feas.ok {
                 let cv = &view.clusters[c];
                 if w.slots_used(c) >= cv.limits.copy_slots as usize {
@@ -700,16 +767,38 @@ impl Planner {
                     continue;
                 }
                 alts.push((c.clone(), fit.full_after));
-                // Among targets for one shard, the emptiest after.
-                if cand.as_ref().is_none_or(|(_, f)| fit.full_after < *f) {
-                    cand = Some((c.clone(), fit.full_after));
+                let full_c = w.full(c);
+                let j = judge(&JudgeInput {
+                    source: (full_h, after_h),
+                    target: (full_c, fit.full_after),
+                    source_target_pct: hv.limits.target,
+                    spread_pct: s.spread,
+                    typical,
+                    bytes: unit.load.storage_bytes,
+                    target_storage: cv.cap.storage_bytes,
+                    writes: unit.load.write_rows_per_sec,
+                    busiest: busy_h.max(w.busiest(c)),
+                    tenant_moved_recently: moved_recently,
+                    in_flight: w.slots_used(h) + w.slots_used(c),
+                    ratio: s.benefit_cost_ratio,
+                    min_gain: s.min_gain,
+                });
+                if cand.as_ref().is_none_or(|(_, _, _, b)| j.net > b.net) {
+                    cand = Some((c.clone(), full_c, fit.full_after, j));
                 }
             }
-            let Some((to, to_after)) = cand else {
+            let Some((to, to_before, to_after, j)) = cand else {
                 continue;
             };
+            let why = j.sentence(
+                &sv.key.to_string(),
+                h.as_str(),
+                to.as_str(),
+                unit.load.storage_bytes,
+                unit.load.write_rows_per_sec,
+            );
             if too_big {
-                if gain + 1e-9 >= s.min_gain && approval.as_ref().is_none_or(|a| gain > a.gain) {
+                if j.worth && approval.as_ref().is_none_or(|a| gain > a.gain) {
                     approval = Some(ApprovalNeeded {
                         shard: sv.key,
                         size_bytes: unit.load.storage_bytes,
@@ -721,38 +810,60 @@ impl Planner {
                 *blocked_counts.entry("size_limit").or_default() += 1;
                 continue;
             }
-            // Only moves worth making compete on value: otherwise a tiny
-            // shard (high gain per GB, gain below balancer.min_gain_pct)
-            // would hide a bigger one that clears it.
-            let worth = gain + 1e-9 >= s.min_gain;
-            let best_worth = best.as_ref().is_some_and(|b| b.gain + 1e-9 >= s.min_gain);
-            let better = match &best {
-                None => true,
-                Some(_) if worth != best_worth => worth,
-                Some(b) => {
-                    value > b.value + 1e-12
-                        || ((value - b.value).abs() <= 1e-12 && gain > b.gain + 1e-12)
-                }
+            let considered = Considered {
+                tenant: unit.tenant,
+                shard: sv.key,
+                from: h.clone(),
+                to: to.clone(),
+                size_bytes: unit.load.storage_bytes,
+                judgement: j,
+                why: why.clone(),
             };
-            if better {
-                alts.retain(|(c, _)| c != &to);
-                alts.sort_by(|a, b| a.1.total_cmp(&b.1));
-                alts.truncate(2);
-                best = Some(PlannedMove {
-                    tenant: unit.tenant,
-                    shards: unit.shards.clone(),
-                    from: h.clone(),
-                    to: to.clone(),
-                    reason,
-                    gain,
-                    value,
-                    size_bytes: unit.load.storage_bytes,
-                    from_full: (full_h, after_h),
-                    to_full: (w.full(&to), to_after),
-                    alternatives: alts,
-                    load: unit.load,
+            if !j.worth || best.as_ref().is_some_and(|b| b.value + 1e-12 >= j.net) {
+                others.push(considered);
+                continue;
+            }
+            if let Some(prev) = best.take() {
+                others.push(Considered {
+                    tenant: prev.tenant,
+                    shard: prev.shards[0],
+                    from: prev.from.clone(),
+                    to: prev.to.clone(),
+                    size_bytes: prev.size_bytes,
+                    judgement: prev.judgement.unwrap_or(j),
+                    why: prev
+                        .why
+                        .replacen("moved ", "a better move was found than moving ", 1),
                 });
             }
+            alts.retain(|(c, _)| c != &to);
+            alts.sort_by(|a, b| a.1.total_cmp(&b.1));
+            alts.truncate(2);
+            best = Some(PlannedMove {
+                tenant: unit.tenant,
+                shards: unit.shards.clone(),
+                from: h.clone(),
+                to: to.clone(),
+                reason,
+                gain,
+                value: j.net,
+                size_bytes: unit.load.storage_bytes,
+                from_full: (full_h, after_h),
+                to_full: (to_before, to_after),
+                alternatives: alts,
+                load: unit.load,
+                judgement: Some(j),
+                why,
+                considered: Vec::new(),
+            });
+        }
+        others.sort_by(|a, b| b.judgement.net.total_cmp(&a.judgement.net));
+        others.truncate(3);
+        match &mut best {
+            Some(b) => b.considered = others,
+            None => r
+                .rejected
+                .extend(others.into_iter().filter(|c| !c.judgement.worth)),
         }
         for (g, n) in blocked_counts {
             r.notes.push(note(
@@ -762,7 +873,7 @@ impl Planner {
                 format!("{n} candidate(s) on {h} skipped: {}", guardrail_text(g)),
             ));
         }
-        if best.as_ref().is_none_or(|b| b.gain + 1e-9 < s.min_gain)
+        if best.is_none()
             && let Some(a) = approval
         {
             r.approvals.push(a);
@@ -840,6 +951,15 @@ impl Work {
             .clusters
             .get(c)
             .map_or(0.0, |cv| cv.full_with(&l).value)
+    }
+
+    /// The higher of busy-time utilization and pressure on `c`.
+    fn busiest(&self, c: &ClusterId) -> f64 {
+        let l = self.loads.get(c).copied().unwrap_or_default();
+        self.view.clusters.get(c).map_or(0.0, |cv| {
+            cv.util_of(&l, crate::model::Dim::Busy)
+                .max(cv.pressure.value(cv.cap.threads))
+        })
     }
 
     fn full_without(&self, c: &ClusterId, load: &LoadVector) -> f64 {

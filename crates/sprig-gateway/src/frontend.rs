@@ -98,6 +98,9 @@ pub struct GatewayContext {
     /// The other gateways of the DC, through the peer service (chapter 04
     /// step 10): cross-gateway `KILL`. `None` without registration.
     pub peers: Option<Arc<crate::peer::Peers>>,
+    /// Connection, admission and memory limits (chapter 04 step 7); `None`
+    /// for no limits (tests of the listener layer).
+    pub limits: Option<Arc<crate::limits::Limiter>>,
 }
 
 impl GatewayContext {
@@ -116,7 +119,15 @@ impl GatewayContext {
             sessions,
             backends: None,
             peers: None,
+            limits: None,
         }
+    }
+
+    /// The same context with the gateway's limits.
+    #[must_use]
+    pub fn with_limits(mut self, limits: Arc<crate::limits::Limiter>) -> Self {
+        self.limits = Some(limits);
+        self
     }
 
     /// The same context with the peer service's clients.

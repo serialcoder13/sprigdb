@@ -175,6 +175,7 @@ pub struct Scheduler {
     last_move_off: BTreeMap<ClusterId, Timestamp>,
     tenant_moves: BTreeMap<TenantId, Vec<Timestamp>>,
     recommended: BTreeMap<ShardKey, (ClusterId, Timestamp)>,
+    rejected_seen: BTreeMap<(ShardKey, ClusterId), Timestamp>,
     in_flight: Vec<InFlight>,
     /// The thrash counters.
     pub thrash: ThrashCounters,
@@ -377,7 +378,72 @@ impl Scheduler {
             }
             out.push(sch);
         }
+        self.record_rejected(report, mode_of, log, now).await;
         out
+    }
+
+    /// Writes a `rejected` `shard.move` decision for the best moves off a
+    /// stuck cluster that weren't worth their cost, once a day per shard
+    /// and target, so `sprigctl explain decision` can say why nothing
+    /// moved.
+    async fn record_rejected(
+        &mut self,
+        report: &PlanReport,
+        mode_of: &(dyn Fn(TenantId) -> BalancerMode + Send + Sync),
+        log: &dyn DecisionLog,
+        now: Timestamp,
+    ) {
+        for c in &report.rejected {
+            let mode = match mode_of(c.tenant) {
+                BalancerMode::Off => continue,
+                BalancerMode::Auto => Mode::Applied,
+                BalancerMode::Recommend => Mode::Recommended,
+                BalancerMode::DryRun => Mode::DryRun,
+            };
+            let key = (c.shard, c.to.clone());
+            if self
+                .rejected_seen
+                .get(&key)
+                .is_some_and(|at| *at + 86_400 > now)
+            {
+                continue;
+            }
+            self.rejected_seen.insert(key, now);
+            let d = NewDecision {
+                decided_at_us: us(now),
+                component: "balancer".to_owned(),
+                kind: "shard.move".to_owned(),
+                subject_type: "shard".to_owned(),
+                subject_id: c.shard.to_string(),
+                mode,
+                outcome: Outcome::Rejected,
+                reason_code: if c.judgement.below_floor {
+                    "below_min_gain"
+                } else {
+                    "not_worth_it"
+                }
+                .to_owned(),
+                summary: c.why.clone(),
+                evidence: json!({
+                    "from": c.from.to_string(),
+                    "to": c.to.to_string(),
+                    "size_bytes": c.size_bytes,
+                    "judgement": c.judgement,
+                    "trigger": report.trigger,
+                    "spread": report.spread,
+                }),
+                alternatives: None,
+                job_id: None,
+                parent_id: None,
+                actor: self.actor.clone(),
+                dc_id: self.dc.clone(),
+            };
+            if let Err(e) = log.record(c.tenant, &d).await {
+                tracing::warn!(tenant = %c.tenant, error = %e, "rejected-move decision not written");
+            }
+            self.block("not_worth_it");
+        }
+        self.rejected_seen.retain(|_, at| *at + 86_400 > now);
     }
 
     fn moves_today(&self, t: TenantId, now: Timestamp) -> u32 {
@@ -435,36 +501,47 @@ impl Scheduler {
             mode,
             outcome,
             reason_code: m.reason.code().to_owned(),
-            summary: format!(
-                "move {} from {} to {}: {}, gain {:.3} (full {:.2} to {:.2}; target {:.2} to {:.2})",
-                m.shards[0],
-                m.from,
-                m.to,
-                m.reason.code(),
-                m.gain,
-                m.from_full.0,
-                m.from_full.1,
-                m.to_full.0,
-                m.to_full.1
-            ),
+            summary: if m.why.is_empty() {
+                format!(
+                    "move {} from {} to {}: {}, gain {:.3}",
+                    m.shards[0],
+                    m.from,
+                    m.to,
+                    m.reason.code(),
+                    m.gain
+                )
+            } else {
+                m.why.clone()
+            },
             evidence: json!({
                 "shards": shards,
                 "from": m.from.to_string(),
                 "to": m.to.to_string(),
                 "gain": m.gain,
-                "value_per_gb": m.value,
+                "net": m.value,
+                "judgement": m.judgement,
                 "size_bytes": m.size_bytes,
                 "from_full": [m.from_full.0, m.from_full.1],
                 "to_full": [m.to_full.0, m.to_full.1],
                 "trigger": r.trigger,
                 "spread": r.spread,
             }),
-            alternatives: Some(json!(
-                m.alternatives
+            alternatives: Some(json!({
+                "targets": m
+                    .alternatives
                     .iter()
                     .map(|(c, f)| json!({"cluster": c.to_string(), "full_after": f}))
-                    .collect::<Vec<_>>()
-            )),
+                    .collect::<Vec<_>>(),
+                "considered": m
+                    .considered
+                    .iter()
+                    .map(|c| json!({
+                        "shard": c.shard.to_string(), "to": c.to.to_string(),
+                        "benefit": c.judgement.benefit, "cost": c.judgement.cost,
+                        "worth": c.judgement.worth, "why": c.why,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
             job_id: None,
             parent_id: None,
             actor: self.actor.clone(),

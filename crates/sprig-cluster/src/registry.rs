@@ -204,6 +204,17 @@ pub enum RegistryChange {
 /// A stream of [`RegistryChange`]s.
 pub type RegistryStream = Pin<Box<dyn Stream<Item = Result<RegistryChange>> + Send>>;
 
+/// The data center of a cluster id, `<dc_id>-c<number>` (chapter 23,
+/// "Encoding rules"); `None` for an id of another form.
+#[must_use]
+pub fn dc_of(id: &ClusterId) -> Option<DcId> {
+    let (dc, n) = id.as_str().rsplit_once("-c")?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    DcId::new(dc).ok()
+}
+
 /// The cluster registry of one data center.
 #[derive(Clone)]
 pub struct ClusterRegistry {
@@ -463,6 +474,20 @@ impl ClusterRegistry {
     /// # Errors
     /// 39500 if etcd is unreachable; `Internal` for an undecodable record.
     pub async fn get(&self, id: &ClusterId) -> Result<Option<StoredCluster>> {
+        // Another DC's cluster (a tenant homed there, or the source of a
+        // move between DCs, chapter 24): read from that DC's tier, which
+        // single-etcd mode serves from the same etcd; the relay's
+        // `RemoteMaps` replaces this in R2.
+        if let Some(other) = dc_of(id).filter(|d| *d != self.dc_id) {
+            let tier = Tier::Dc(other);
+            let key = tier.key(&format!("clusters/{id}"))?;
+            return sprig_meta::TierView::over(&self.dc, tier)
+                .get(&key, Consistency::Linearizable)
+                .await?
+                .as_ref()
+                .map(StoredCluster::decode)
+                .transpose();
+        }
         self.dc
             .get(&self.record_key(id)?, Consistency::Linearizable)
             .await?

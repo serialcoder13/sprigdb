@@ -435,6 +435,22 @@ fn audit(key: &str, w: &SettingWrite, r: &SettingWriteResponse) {
         reason = %w.reason,
         "setting changed through the Admin API"
     );
+    // Chapter 47's pipeline (platform stream: an operator's change through
+    // the Admin API, whatever its scope).
+    sprig_common::audit::record(
+        sprig_common::audit::AuditStream::Platform,
+        "settings.changed",
+        serde_json::json!({
+            "key": key,
+            "scope": w.scope.to_string(),
+            "action": w.op.action(),
+            "old": r.previous,
+            "new": r.current,
+            "changed": r.changed,
+            "who": r.set_by,
+            "reason": w.reason,
+        }),
+    );
 }
 
 fn summary(warnings: &[SettingWarningView]) -> Option<String> {
@@ -1057,6 +1073,9 @@ where
     ) -> Result<SettingWriteResponse> {
         let def = check_key_and_scope(self.registry(), key, &w.scope)?;
         let actor = actor_of(w)?;
+        // Chapter 47: Admin API mutations fail closed while the audit
+        // spool is full.
+        sprig_common::audit::check_available()?;
         let r = if w.scope.is_etcd() {
             self.write_etcd(def, w, &guard, &format!("op:{actor}"))
                 .await?

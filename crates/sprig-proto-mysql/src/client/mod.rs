@@ -304,7 +304,8 @@ impl MysqlClient {
     /// authentication failure, or the server's ERR (1045 and the like).
     pub async fn connect(addr: &str, cfg: &ClientConfig) -> ClientResult<Self> {
         tokio::time::timeout(cfg.connect_timeout, async {
-            let tcp = TcpStream::connect(addr)
+            // Development: a simulated DC's process dials through its proxy.
+            let tcp = TcpStream::connect(&*sprig_common::net::dial(addr))
                 .await
                 .map_err(|source| ClientError::Connect {
                     addr: addr.to_owned(),
@@ -581,6 +582,29 @@ impl MysqlClient {
     #[must_use]
     pub fn is_broken(&self) -> bool {
         self.broken
+    }
+
+    /// Whether the server has closed this idle connection, or sent
+    /// something nobody asked for (a TLS alert, MariaDB's ERR 1927 before
+    /// it closes a killed connection): a poll of the stream that never
+    /// waits. Such a connection is marked broken, so a command sent on it
+    /// could never have reached the server. A connection with a response
+    /// pending isn't checked (`false`).
+    pub fn closed_while_idle(&mut self) -> bool {
+        if self.broken {
+            return true;
+        }
+        if self.expect != Expect::Idle {
+            return false;
+        }
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match self.io.poll_next_unpin(&mut cx) {
+            std::task::Poll::Pending => false,
+            std::task::Poll::Ready(_) => {
+                self.broken = true;
+                true
+            }
+        }
     }
 
     /// Sends a command. The response, if the command has one, is read with

@@ -54,6 +54,16 @@ pub enum CutoverStep {
     Committing,
 }
 
+/// Where verification of one table got to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyCursor {
+    /// Verified up to and including this key.
+    After(Vec<crate::model::KeyPart>),
+    /// Verified.
+    Done,
+}
+
 /// The job record (chapter 10, "Job record").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobRecord {
@@ -97,6 +107,9 @@ pub struct JobRecord {
     /// Verification passed (an aborted cutover doesn't verify again).
     #[serde(default)]
     pub verified: bool,
+    /// How far verification got, per table (`schema.table`).
+    #[serde(default)]
+    pub verify_progress: std::collections::BTreeMap<String, VerifyCursor>,
     /// The epoch after the commit.
     #[serde(default)]
     pub epoch: Option<u64>,
@@ -305,6 +318,7 @@ impl JobStore {
             cancel: None,
             go: false,
             verified: false,
+            verify_progress: std::collections::BTreeMap::new(),
             epoch: None,
             not_before_ms: 0,
             retain_until_ms: None,

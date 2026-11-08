@@ -619,10 +619,19 @@ impl AccountCtx<'_> {
 /// Runs `stmt` for the session in `cx`.
 ///
 /// # Errors
-/// The MySQL error the statement fails with (see the module docs), or the
-/// catalog's (39070, 39071, 39072).
+/// The MySQL error the statement fails with (see the module docs), the
+/// catalog's (39070, 39071, 39072), or 39970 for a change while the audit
+/// spool is full.
 #[allow(clippy::too_many_lines)] // one arm per statement
 pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome> {
+    // Chapter 47: account changes fail closed while the audit spool is
+    // full (39970); reads and SET ROLE don't.
+    if !matches!(
+        stmt,
+        AccountStmt::FlushPrivileges | AccountStmt::SetRole(_) | AccountStmt::ShowGrants { .. }
+    ) {
+        sprig_common::audit::check_available()?;
+    }
     let state = cx.authz();
     let mut notes = Vec::new();
     let mut version = None;

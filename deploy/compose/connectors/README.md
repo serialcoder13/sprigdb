@@ -128,6 +128,10 @@ Each reports its own checks (`[check_sets]` in `expected.toml`).
 - Persona `mariadb`: Hibernate's `schema_validate` fails with both drivers, for two reasons. With Connector/J 9.7, `DatabaseMetaData.getSQLKeywords()` reads `information_schema.KEYWORDS WHERE RESERVED = 1`, which MariaDB lacks, so Hibernate can't even resolve a dialect. With MariaDB Connector/J, MariaDBDialect expects a `json` column but MariaDB's JSON is LONGTEXT. The other Hibernate checks pass after a restart without validation.
 - Persona `mariadb`: MySQL Connector/J's `prepared_biginteger` fails. With server-side prepares, Connector/J 9.7 binds a `BigInteger` above `Long.MAX_VALUE` in a form MariaDB 11.8 rejects (1264, out of range). MySQL 8.4 accepts it, and client-side prepares work on both. The 3306 persona, which runs on MariaDB, must still pass it.
 
+## Catalog (tenant) mode
+
+`expected.catalog.toml` is the overlay for runs through the gateway in catalog mode, with a tenant user (its header shows the commands). On 8 November 2026 (milestone M0.5) Hibernate with both Connector/Js, both SQLAlchemy drivers and Prisma ran on both ports and both TLS modes: 124 checks, all as expected. On 3306 every check passes, because chapter 28's translator answers `information_schema.KEYWORDS` with MySQL 8.4's list, reports JSON columns as `json` (in `information_schema`, `SHOW COLUMNS`, `SHOW CREATE TABLE`, and as type 245 in result metadata), rewrites `CAST(? AS JSON)`, and reads a foreign key's default rule as `NO ACTION`. On 3307 the two Hibernate `schema_validate` failures are MariaDB 11.8's own, as in `expected.toml`.
+
 ## The latency gate
 
 `crates/sprig-testkit/tests/latency_gate.rs` (ignored by default) measures three workloads on one connection per endpoint: a prepared point select, the same point select as a plain query, and a prepared single-row insert. It interleaves target and baseline in batches of 100 and reports p50, p99 and max. It fails when a p50 delta exceeds `SPRIG_TEST_LATENCY_MAX_P50_DELTA_MS` (0.5), or a p99 delta exceeds `SPRIG_TEST_LATENCY_MAX_P99_DELTA_MS` when that is set.

@@ -9,8 +9,10 @@
 //! 1. read `sprigdb.toml` and `SPRIGDB_*` overrides;
 //! 2. set up logging and the Prometheus recorder;
 //! 3. bind the telemetry port (`/healthz` 200, `/readyz` 503, `/metrics`);
-//! 4. run the role, which marks itself ready;
-//! 5. on SIGTERM or SIGINT, cancel the role's shutdown token, wait for it to
+//! 4. start chapter 47's OTLP trace exporter and, with `[audit] spool_dir`,
+//!    the audit pipeline (spool and shipper to `[audit] sink_dir`);
+//! 5. run the role, which marks itself ready;
+//! 6. on SIGTERM or SIGINT, cancel the role's shutdown token, wait for it to
 //!    drain, stop the telemetry server and exit 0.
 
 use std::path::{Path, PathBuf};
@@ -85,7 +87,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(role, config)) {
+    let source = config_source(cli.config.as_deref());
+    match runtime.block_on(run(role, config, source)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!(%role, error = %e, source = ?std::error::Error::source(&e), "stopped with an error");
@@ -104,6 +107,44 @@ fn load_config(path: Option<&Path>) -> Result<ProcessConfig> {
     }
 }
 
+/// The configuration file and its text at start, for `/readyz?verbose`'s
+/// drift report.
+fn config_source(path: Option<&Path>) -> Option<(PathBuf, String)> {
+    let p = match path {
+        Some(p) => p.to_path_buf(),
+        None if Path::new(DEFAULT_CONFIG).exists() => PathBuf::from(DEFAULT_CONFIG),
+        None => return None,
+    };
+    let text = std::fs::read_to_string(&p).ok()?;
+    Some((std::path::absolute(&p).unwrap_or(p), text))
+}
+
+/// Opens, installs and starts the audit pipeline of `[audit]`, if any.
+fn start_audit(config: &ProcessConfig, stop: &CancellationToken) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    use sprig_common::audit::{self, DirSink, Pipeline};
+    let Some(spool) = &config.audit.spool_dir else {
+        return Ok(None);
+    };
+    let Some(sink_dir) = &config.audit.sink_dir else {
+        return Err(SprigError::new(
+            sprig_common::SprigCode::ConfigInvalid,
+            "[audit] spool_dir needs [audit] sink_dir",
+        ));
+    };
+    let sink = std::sync::Arc::new(DirSink::new(sink_dir, config.node.dc.clone()));
+    let p = Pipeline::open(
+        spool,
+        config.node.id(),
+        audit::DEFAULT_SPOOL_MAX_MB,
+        sink.clone(),
+        sink,
+    )?;
+    let task = p.spawn(stop.clone());
+    audit::install(p)?;
+    tracing::info!(spool = %spool.display(), sink = %sink_dir.display(), "audit pipeline started");
+    Ok(Some(task))
+}
+
 fn build_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
     let mut b = tokio::runtime::Builder::new_multi_thread();
     b.enable_all();
@@ -113,7 +154,11 @@ fn build_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime::Runti
     b.build()
 }
 
-async fn run(role: Role, config: ProcessConfig) -> Result<()> {
+async fn run(
+    role: Role,
+    config: ProcessConfig,
+    source: Option<(PathBuf, String)>,
+) -> Result<()> {
     let metrics = telemetry::install_metrics()?;
     let addr = config.telemetry.bootstrap_addr;
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -129,7 +174,23 @@ async fn run(role: Role, config: ProcessConfig) -> Result<()> {
     );
 
     let health = Health::default();
+    if let Some((path, text)) = source {
+        health.watch_config(path, text);
+    }
     let stop_telemetry = CancellationToken::new();
+    // Chapter 47: kept traces go to telemetry.otlp_endpoint once a role's
+    // settings name one (sprig_settings::ops::apply_live).
+    telemetry::trace::otlp::install(telemetry::trace::otlp::OtlpExporter::spawn(
+        None,
+        vec![
+            ("service.name".to_owned(), format!("sprigdb-{role}")),
+            ("sprig.dc".to_owned(), config.node.dc.to_string()),
+            ("sprig.node".to_owned(), config.node.id()),
+        ],
+        stop_telemetry.clone(),
+    ));
+    let stop_audit = CancellationToken::new();
+    let audit = start_audit(&config, &stop_audit)?;
     let telemetry = tokio::spawn(telemetry::serve(
         listener,
         health.clone(),
@@ -152,6 +213,12 @@ async fn run(role: Role, config: ProcessConfig) -> Result<()> {
         Role::Operator => sprig_operator::run(ctx).await,
     };
 
+    // The audit pipeline flushes and ships once more before the process
+    // exits.
+    stop_audit.cancel();
+    if let Some(a) = audit {
+        let _ = a.await;
+    }
     stop_telemetry.cancel();
     let served = telemetry
         .await

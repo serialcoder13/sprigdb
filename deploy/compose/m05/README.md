@@ -24,6 +24,16 @@ MariaDB):
 - MariaDB's grant tables (as root on the single node): every backend
   account `t<tenant>_u<user>` is granted only on its own tenant's schemas,
   never on a catalog schema, and holds no global privilege;
+- database lists in every form (`SHOW DATABASES`, `LIKE`, `WHERE`,
+  `information_schema.SCHEMATA`) show a user only databases it holds a
+  privilege in, and a statement prepared before a `REVOKE` is refused at
+  its next execute;
+- stored code can't break out (chapter 29, "Definers of stored code"):
+  tenant A's `SQL SECURITY DEFINER` procedure running dynamic SQL against
+  B's shard schema, B's catalog and `mysql.user`, a trigger, a function
+  called from a view, and an event are all refused by MariaDB, and every
+  routine, trigger, event and view of both tenants is defined by its own
+  tenant's account;
 - propagation: a session on the second gateway reads a table, the
   administrator revokes the grant (table level, then database level while
   the session is `USE`d into it) on the first, and the session polls until
@@ -33,5 +43,5 @@ Results go to `results/` (`report.jsonl`, one line per check;
 `suite.log`; `gateway-2.log`).
 
 Measured on 8 November 2026 (laptop, Docker Desktop, debug build, two
-gateways): 261 checks, 0 failures; a `REVOKE` was refused on the second
-gateway 47 to 340 ms after it was sent.
+gateways): 301 checks, 0 failures; a `REVOKE` was refused on the second
+gateway 112 to 186 ms after it was sent.

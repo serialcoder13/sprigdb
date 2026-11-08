@@ -546,6 +546,64 @@ async fn transactions_hold_a_session_across_calls() {
 }
 
 #[tokio::test]
+async fn idle_transaction_handles_expire() {
+    let Some(e) = env("idle_transaction_handles_expire") else {
+        return;
+    };
+    let auth = basic(&e);
+    let set = |v: &str| format!("{{\"scope\": \"dc\", \"value\": {v}, \"reason\": \"http_live\"}}");
+    let (s, b) = rest(
+        &e.http,
+        false,
+        "",
+        "PUT",
+        "/admin/v1/settings/api.txn.idle_timeout_ms",
+        &set("1000"),
+    )
+    .await;
+    assert_eq!(s, 200, "{}", String::from_utf8_lossy(&b));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let (s, b) = rest(
+        &e.http,
+        false,
+        &auth,
+        "POST",
+        "/v1/databases/-/transactions",
+        "{}",
+    )
+    .await;
+    assert_eq!(s, 200, "{}", String::from_utf8_lossy(&b));
+    let t: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    let handle = t["name"].as_str().unwrap().to_owned();
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let body = serde_json::json!({"sql": "SELECT 1", "transaction": handle}).to_string();
+    let (s, b) = rest(
+        &e.http,
+        false,
+        &auth,
+        "POST",
+        "/v1/databases/-/sql:execute",
+        &body,
+    )
+    .await;
+    let _ = rest(
+        &e.http,
+        false,
+        "",
+        "DELETE",
+        "/admin/v1/settings/api.txn.idle_timeout_ms?scope=dc",
+        "",
+    )
+    .await;
+    assert_eq!(s, 409, "{}", String::from_utf8_lossy(&b));
+    assert!(
+        String::from_utf8_lossy(&b).contains("39782"),
+        "{}",
+        String::from_utf8_lossy(&b)
+    );
+}
+
+#[tokio::test]
 async fn transport_and_credential_errors() {
     let Some(e) = env("transport_and_credential_errors") else {
         return;
@@ -587,4 +645,81 @@ async fn transport_and_credential_errors() {
     let (s, b) = rest(&e.http, false, "", "GET", "/v1/openapi.json", "").await;
     assert_eq!(s, 200);
     assert!(String::from_utf8_lossy(&b).contains("sql:execute"));
+}
+
+/// A failed `USE` must not leave a session on a pooled connection that
+/// still has another default schema (chapter 06: a `USE` may borrow such a
+/// connection; a failed one closes it).
+#[tokio::test]
+async fn a_failed_use_never_leaves_another_schema() {
+    let Some(e) = env("a_failed_use_never_leaves_another_schema") else {
+        return;
+    };
+    let mut admin = wire_conn(&e, None).await;
+    admin
+        .query_drop("CREATE DATABASE IF NOT EXISTS m7_use_a")
+        .await
+        .unwrap();
+    admin
+        .query_drop("CREATE TABLE IF NOT EXISTS m7_use_a.only_in_a (x INT)")
+        .await
+        .unwrap();
+    drop(admin);
+    for _ in 0..20 {
+        // Put schema A on pooled connections: sessions that USE it, then end.
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let (host, port) = e.mysql.rsplit_once(':').unwrap();
+            let opts = OptsBuilder::default()
+                .ip_or_hostname(host)
+                .tcp_port(port.parse().unwrap())
+                .user(Some(e.user.clone()))
+                .pass(Some(e.password.clone()))
+                .db_name(Some("m7_use_a"))
+                .prefer_socket(false)
+                .ssl_opts(SslOpts::default().with_danger_accept_invalid_certs(true));
+            tasks.push(tokio::spawn(async move {
+                let mut c = Conn::new(opts).await.unwrap();
+                c.query_drop("SELECT COUNT(*) FROM only_in_a")
+                    .await
+                    .unwrap();
+                c.disconnect().await.unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        // A session without a database whose USE fails.
+        let mut c = wire_conn(&e, None).await;
+        let err = c.query_drop("USE m7_missing_db").await.unwrap_err();
+        assert!(
+            matches!(&err, mysql_async::Error::Server(s) if s.code == 1049),
+            "{err}"
+        );
+        let db: Option<Option<String>> = c.query_first("SELECT DATABASE()").await.unwrap();
+        assert_eq!(db, Some(None), "the session has no database");
+        let err = c
+            .query_drop("SELECT COUNT(*) FROM only_in_a")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, mysql_async::Error::Server(s) if s.code == 1046),
+            "an unqualified name must find no database, not another schema: {err}"
+        );
+        drop(c);
+        // The same over HTTP: a call naming a missing database fails, and the
+        // next call without one sees none.
+        let auth = basic(&e);
+        let r = run_over(&e, Path::RestHttp, &auth, "SELECT 1", "m7_missing_db").await;
+        assert_eq!(r.unwrap_err().0, 1049);
+        let r = run_over(&e, Path::RestHttp, &auth, "SELECT DATABASE()", "-")
+            .await
+            .unwrap();
+        assert_eq!(r[0].rows[0][0], None);
+    }
+    let mut admin = wire_conn(&e, None).await;
+    admin
+        .query_drop("DROP DATABASE IF EXISTS m7_use_a")
+        .await
+        .unwrap();
 }

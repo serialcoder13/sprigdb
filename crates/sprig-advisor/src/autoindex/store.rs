@@ -148,6 +148,24 @@ pub const DDL_INDEX_ORIGINS: &str = "CREATE TABLE IF NOT EXISTS index_origins (
   PRIMARY KEY (object_id, index_name)
 ) ENGINE=InnoDB";
 
+/// `index_usage` (decision O1): user and migrated indexes whose removal
+/// automatic indexing manages, with the state of their usage judgement and
+/// their exact definition, so a removed one can be restored. Automatic
+/// indexes keep the same state in `auto_indexes.observed`.
+pub const DDL_INDEX_USAGE: &str = "CREATE TABLE IF NOT EXISTS index_usage (
+  object_id        BIGINT UNSIGNED NOT NULL,
+  index_name       VARCHAR(64)     NOT NULL,
+  origin           ENUM('user','migrated') NOT NULL,
+  state            ENUM('serving','recommended','retiring','dropped','pinned') NOT NULL,
+  definition       TEXT            NOT NULL,
+  observed         JSON            NOT NULL,
+  drop_reason      VARCHAR(48)     NULL,
+  created_at       DATETIME(6)     NOT NULL,
+  state_changed_at DATETIME(6)     NOT NULL,
+  PRIMARY KEY (object_id, index_name),
+  KEY by_state (state, state_changed_at)
+) ENGINE=InnoDB";
+
 /// The run id counter, `sprig.next_autoindex_run_id`, starting at 1.
 pub const INSERT_RUN_COUNTER: &str = "INSERT INTO settings
   (scope_kind, scope_id, setting_key, value, bounds, set_by, set_at, version) VALUES
@@ -155,19 +173,27 @@ pub const INSERT_RUN_COUNTER: &str = "INSERT INTO settings
   ON DUPLICATE KEY UPDATE setting_key = setting_key";
 
 /// The module's migrations.
-pub static AUTOINDEX_MIGRATIONS: &[Migration] = &[Migration {
-    format: 1,
-    phase: Phase::Expand,
-    name: "auto_indexes, auto_index_candidates, auto_index_validations, index_origins \
-           and the run counter",
-    statements: &[
-        DDL_AUTO_INDEXES,
-        DDL_CANDIDATES,
-        DDL_VALIDATIONS,
-        DDL_INDEX_ORIGINS,
-        INSERT_RUN_COUNTER,
-    ],
-}];
+pub static AUTOINDEX_MIGRATIONS: &[Migration] = &[
+    Migration {
+        format: 1,
+        phase: Phase::Expand,
+        name: "auto_indexes, auto_index_candidates, auto_index_validations, index_origins \
+               and the run counter",
+        statements: &[
+            DDL_AUTO_INDEXES,
+            DDL_CANDIDATES,
+            DDL_VALIDATIONS,
+            DDL_INDEX_ORIGINS,
+            INSERT_RUN_COUNTER,
+        ],
+    },
+    Migration {
+        format: 2,
+        phase: Phase::Expand,
+        name: "index_usage (decision O1)",
+        statements: &[DDL_INDEX_USAGE],
+    },
+];
 
 /// The module, for [`Migrator::new`](sprig_catalog::Migrator::new) and
 /// chapter 08's `BootstrapHooks.modules`.
@@ -452,7 +478,8 @@ sql_enum! {
         Regression = "regression",
         /// Observation: writes got slower and the benefit didn't cover it.
         WriteCost = "write_cost",
-        /// Unused for `unused_drop_days`.
+        /// Rarely used and costing more than it saves, over
+        /// `usage_sample_reads` reads (decision O1).
         Unused = "unused",
         /// A user index equals or extends it.
         Superseded = "superseded",
@@ -812,6 +839,7 @@ pub struct AutoIndexStore {
     candidates: String,
     validations: String,
     origins: String,
+    usage: String,
 }
 
 impl AutoIndexStore {
@@ -825,6 +853,7 @@ impl AutoIndexStore {
             candidates: format!("{q}.auto_index_candidates"),
             validations: format!("{q}.auto_index_validations"),
             origins: format!("{q}.index_origins"),
+            usage: format!("{q}.index_usage"),
             schema,
         }
     }
@@ -1906,3 +1935,4 @@ impl DecisionLog for LogDecisions {
 
 #[cfg(test)]
 mod tests;
+pub mod usage;

@@ -185,6 +185,7 @@ impl Sql for SqlSvc {
         let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
         let engine = Arc::clone(&self.0.engine);
         let max = engine.settings().max_buffered;
+        let charge = engine.charge(&c);
         let call = SqlCall {
             database: r.database,
             sql: r.sql,
@@ -192,7 +193,7 @@ impl Sql for SqlSvc {
         };
         let txn = (!r.transaction.is_empty()).then_some(r.transaction);
         tokio::spawn(async move { engine.run(&c, call, txn.as_deref(), tx).await });
-        collect(rx, max)
+        collect(rx, max, charge)
             .await
             .map(Response::new)
             .map_err(|e| st(&e))

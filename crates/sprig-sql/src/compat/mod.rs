@@ -24,8 +24,9 @@ pub mod vars;
 
 use crate::lex::{self, LexOptions, TokenKind};
 
-/// `CAST(<operand> AS JSON)` with a parameter or a string literal as the
-/// operand becomes `JSON_COMPACT(<operand>)` (chapter 28, "Queries and
+/// `CAST(<operand> AS JSON)` with a parameter, a string or number literal
+/// or `NULL` as the operand (a client-side prepared statement inlines the
+/// parameter) becomes `JSON_COMPACT(<operand>)` (chapter 28, "Queries and
 /// expressions": MariaDB has no `JSON` cast; Hibernate's `MySQLDialect`
 /// binds every JSON value this way). Other operands are left for R4's
 /// rule. `None` when nothing changes.
@@ -53,8 +54,11 @@ pub fn rewrite_json_casts(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
             && sig.get(j + 2).is_some_and(|t| {
                 matches!(
                     t.kind,
-                    TokenKind::Param | TokenKind::String | TokenKind::NationalString
-                )
+                    TokenKind::Param
+                        | TokenKind::String
+                        | TokenKind::NationalString
+                        | TokenKind::Number
+                ) || (t.kind == TokenKind::Word && t.bytes(sql).eq_ignore_ascii_case(b"NULL"))
             })
             && word(j + 3, b"AS")
             && word(j + 4, b"JSON")
@@ -124,6 +128,10 @@ mod tests {
             Some("SELECT JSON_COMPACT('[1, 2]'), CAST(c AS JSON)")
         );
         assert_eq!(r("SELECT 'CAST(? AS JSON)'"), None);
+        assert_eq!(
+            r("values (cast(null as json), CAST(1 AS JSON))").as_deref(),
+            Some("values (JSON_COMPACT(null), JSON_COMPACT(1))")
+        );
         assert_eq!(
             r("CREATE TABLE t (k int /*!80023 INVISIBLE */, j json DEFAULT (CAST('{}' AS JSON)))")
                 .as_deref(),

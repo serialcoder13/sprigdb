@@ -40,6 +40,7 @@
 
 pub mod etcd;
 pub mod explain;
+pub mod ops;
 pub mod registry;
 pub mod resolve;
 pub mod scope;

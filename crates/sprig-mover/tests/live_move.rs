@@ -44,6 +44,7 @@ use sprig_mover::{
     JobRuntime, JobSpec, JobState, JobStore, MetaMover, Mover, MoverSettings, WorkerOpts,
 };
 use sprig_shard::{Placement, TenantMaps};
+use sprig_testkit::faults::toxiproxy::{Toxic, Toxiproxy};
 
 const ROOT_PW: &str = "sprig-dev-root";
 
@@ -70,6 +71,9 @@ struct Log {
     events: Vec<(u32, u64)>,
     events_uncertain: Vec<(u32, u64)>,
     max_latency: Duration,
+    /// The longest write that met a hold or a fence: the pause a client of
+    /// the cutover saw.
+    max_cutover_latency: Duration,
     ops: u64,
 }
 
@@ -120,6 +124,9 @@ async fn writer(
         let val = (n, format!("w{me}-{n}"));
         seq += 1;
         let started = Instant::now();
+        let mut retries = 0u32;
+        let mut met_cutover = false;
+        let mut last_err: Option<String> = None;
         loop {
             if stop.is_cancelled() {
                 return;
@@ -135,6 +142,7 @@ async fn writer(
                 continue;
             };
             if p.held_at(now_ms()) {
+                met_cutover = true;
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 cached = None;
                 continue;
@@ -175,16 +183,29 @@ async fn writer(
             match res {
                 Ok(()) => {
                     let lat = started.elapsed();
+                    if lat > Duration::from_secs(1) {
+                        eprintln!(
+                            "slow write: writer {me} key {key} took {} ms ({retries} retries, last error {last_err:?}, ended on {})",
+                            lat.as_millis(),
+                            p.cluster
+                        );
+                    }
                     let mut l = log.lock().unwrap();
                     l.rows.insert(key, (!delete).then(|| val.clone()));
                     l.uncertain.remove(&key);
                     l.events.push((me, seq));
                     l.max_latency = l.max_latency.max(lat);
+                    if met_cutover {
+                        l.max_cutover_latency = l.max_cutover_latency.max(lat);
+                    }
                     l.ops += 1;
                     ops.fetch_add(1, Ordering::Relaxed);
                     break;
                 }
                 Err(e) => {
+                    retries += 1;
+                    met_cutover |= matches!(&e, mysql_async::Error::Server(s) if s.code == 1146);
+                    last_err = Some(format!("{} at +{} ms", e, started.elapsed().as_millis()));
                     let server = matches!(e, mysql_async::Error::Server(_));
                     if !server {
                         // The commit may or may not have happened.
@@ -415,8 +436,16 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
         .map(|c| ((*c).to_owned(), pool(c)))
         .collect();
     cleanup_old_runs(&dc, &pools).await;
-    let (cat, data) = setup(&pools["dc-a-c1"], tenant).await;
-    put_map(&dc, tenant, "dc-a-c1").await;
+    let first: usize = std::env::var("SPRIG_TEST_MOVER_START")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        .min(5);
+    let home = [
+        "dc-a-c1", "dc-a-c2", "dc-a-c3", "dc-a-c1", "dc-a-c3", "dc-a-c2",
+    ][first];
+    let (cat, data) = setup(&pools[home], tenant).await;
+    put_map(&dc, tenant, home).await;
 
     let settings = MoverSettings {
         copy_chunk_rows: 500,
@@ -426,13 +455,89 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
         ..MoverSettings::default()
     };
     let maps = TenantMaps::new(dc.clone());
-    let factory = Arc::new(MysqlEnvFactory::new(registry, maps.clone(), settings));
+    let mut factory = MysqlEnvFactory::new(registry, maps.clone(), settings);
+    // Fault mode: every cluster's writer through a toxiproxy proxy.
+    let faults = std::env::var("SPRIG_TEST_MOVER_FAULTS").is_ok();
+    let mut proxies = Vec::new();
+    if faults {
+        let tp = Toxiproxy::new("http://127.0.0.1:18474").unwrap();
+        for (addr, upstream) in [
+            ("127.0.0.1:13301", "single:3306"),
+            ("127.0.0.1:13311", "primary:3306"),
+            ("127.0.0.1:13321", "galera-1:3306"),
+        ] {
+            let p = tp.own_proxy("mover", upstream).await.unwrap();
+            factory = factory.with_addr_override(addr, p.host_addr());
+            proxies.push(p);
+        }
+    }
+    let factory = Arc::new(factory);
     let store = JobStore::new(dc.clone(), Arc::new(SystemClock));
     let mut opts = WorkerOpts::new("mover-live");
     opts.scan_interval = Duration::from_millis(200);
+    opts.lease = Duration::from_secs(if faults { 6 } else { 10 });
     let stop_worker = CancellationToken::new();
-    let rt = JobRuntime::new(store.clone(), factory, opts);
-    let worker = tokio::spawn(rt.run(stop_worker.clone()));
+    let start_worker = {
+        let (store, factory, opts, stop) = (
+            store.clone(),
+            factory.clone(),
+            opts.clone(),
+            stop_worker.clone(),
+        );
+        move || {
+            let rt = JobRuntime::new(store.clone(), factory.clone(), opts.clone());
+            tokio::spawn(rt.run(stop.child_token()))
+        }
+    };
+    let worker = Arc::new(Mutex::new(Some(start_worker())));
+    // Chaos: cut a writer's connections, slow one down, or crash the worker.
+    let chaos_stop = CancellationToken::new();
+    let chaos = faults.then(|| {
+        let (worker, stop) = (worker.clone(), chaos_stop.clone());
+        let names: Vec<String> = proxies.iter().map(|p| p.name().to_owned()).collect();
+        let api = proxies[0].api().clone();
+        tokio::spawn(async move {
+            let mut n = 0u64;
+            let mut events = Vec::new();
+            while !stop.is_cancelled() {
+                n += 1;
+                tokio::time::sleep(Duration::from_millis(1500 + (n * 7919) % 4000)).await;
+                let proxy = &names[usize::try_from(n % 3).unwrap()];
+                match n % 4 {
+                    0 => {
+                        let _ = api.set_enabled(proxy, false).await;
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        let _ = api.set_enabled(proxy, true).await;
+                        events.push(format!("cut {proxy} 1.5 s"));
+                    }
+                    1 => {
+                        if let Ok(id) = api.add_toxic(proxy, &Toxic::latency(80, 40)).await {
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            let _ = api.remove_toxic(proxy, &id).await;
+                        }
+                        events.push(format!("latency 80±40 ms on {proxy} 3 s"));
+                    }
+                    2 => {
+                        if let Ok(id) = api.add_toxic(proxy, &Toxic::reset_peer(500)).await {
+                            tokio::time::sleep(Duration::from_millis(800)).await;
+                            let _ = api.remove_toxic(proxy, &id).await;
+                        }
+                        events.push(format!("reset_peer on {proxy}"));
+                    }
+                    _ => {
+                        let old = worker.lock().unwrap().take();
+                        if let Some(h) = old {
+                            h.abort();
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        *worker.lock().unwrap() = Some(start_worker());
+                        events.push("worker crashed and restarted".to_owned());
+                    }
+                }
+            }
+            events
+        })
+    });
     let mover = MetaMover::new(store);
 
     let routing = Arc::new(Routing {
@@ -458,9 +563,11 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
         })
         .collect();
     let failed = Arc::new(AtomicBool::new(false));
-    let route = [
+    let full = [
         "dc-a-c1", "dc-a-c2", "dc-a-c3", "dc-a-c1", "dc-a-c3", "dc-a-c2", "dc-a-c1",
     ];
+    // SPRIG_TEST_MOVER_START=<n> starts the round at pair n.
+    let route = &full[first..];
     let mut report = Vec::new();
     let pairs: usize = std::env::var("SPRIG_TEST_MOVER_PAIRS")
         .ok()
@@ -469,7 +576,11 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
     for pair in route.windows(2).take(pairs) {
         let (from, to) = (pair[0], pair[1]);
         tokio::time::sleep(Duration::from_secs(2)).await;
-        log.lock().unwrap().max_latency = Duration::ZERO;
+        {
+            let mut l = log.lock().unwrap();
+            l.max_latency = Duration::ZERO;
+            l.max_cutover_latency = Duration::ZERO;
+        }
         let ops0 = ops.load(Ordering::Relaxed);
         let t0 = Instant::now();
         let id = mover
@@ -482,7 +593,9 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
             .unwrap();
         let st = loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let st = mover.status(&id).await.unwrap();
+            let Ok(st) = mover.status(&id).await else {
+                continue; // an etcd hiccup
+            };
             if st.state == JobState::Retaining
                 || st.state.is_terminal()
                 || st.state == JobState::Paused
@@ -496,7 +609,10 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
         };
         assert_eq!(st.state, JobState::Retaining, "move {from} → {to}: {st:?}");
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let lat = log.lock().unwrap().max_latency;
+        let (lat, cut) = {
+            let l = log.lock().unwrap();
+            (l.max_latency, l.max_cutover_latency)
+        };
         // The copied types table equals the fenced source.
         let fenced = sprig_cluster::fence::fenced_name("types");
         let a = table_digest(&pools[from], &data, &fenced).await;
@@ -507,7 +623,8 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
         }
         let line = format!(
             "{from} → {to}: {:.1} s, rows copied {}, applied {}, holds {:?} ms, attempts {}, \
-             verify mismatches {}, writes during the move {}, longest write {} ms",
+             verify mismatches {}, writes during the move {}, longest write {} ms, \
+             longest write that met the cutover {} ms",
             t0.elapsed().as_secs_f64(),
             st.progress.rows_copied,
             st.progress.rows_applied,
@@ -515,14 +632,17 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
             st.progress.cutover_attempts,
             st.progress.verify_mismatches,
             ops.load(Ordering::Relaxed) - ops0,
-            lat.as_millis()
+            lat.as_millis(),
+            cut.as_millis()
         );
         eprintln!("{line}");
         report.push(line);
         // The job drops the retained source after mover.source_retain.
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let st = mover.status(&id).await.unwrap();
+            let Ok(st) = mover.status(&id).await else {
+                continue; // an etcd hiccup
+            };
             if st.state.is_terminal() {
                 assert_eq!(st.state, JobState::Done);
                 break;
@@ -544,8 +664,17 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
         end.epoch
     );
     // Clean up.
+    chaos_stop.cancel();
+    if let Some(c) = chaos {
+        let events = c.await.unwrap();
+        eprintln!("{} injected faults: {events:?}", events.len());
+    }
     stop_worker.cancel();
-    let _ = worker.await;
+    let h = worker.lock().unwrap().take();
+    if let Some(h) = h {
+        let _ = h.await;
+    }
+    drop(proxies);
     for p in pools.values() {
         let mut c = p.get_conn().await.unwrap();
         for s in [&cat, &data] {
@@ -562,5 +691,131 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
         .await;
     r.unwrap();
     assert!(!failed.load(Ordering::Relaxed), "a copied table differed");
-    assert_eq!(end.epoch, 1 + pairs.min(6) as u64);
+    assert_eq!(end.epoch, 1 + pairs.min(route.len() - 1) as u64);
+}
+
+/// A table-scope copy-and-swap under the same load (chapter 10, "Job
+/// kinds", `copy_swap_ddl`): `sbtest1` gets a column and an index through
+/// a shadow copy, swapped in by rename inside the hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_table_is_altered_by_copy_and_swap_under_load() {
+    if std::env::var("SPRIG_TEST_MOVER_LIVE").is_err() {
+        eprintln!("skipped: set SPRIG_TEST_MOVER_LIVE=1 with the Compose stack up");
+        return;
+    }
+    let cfg = EtcdConfig::new(vec!["http://127.0.0.1:2379".into()]);
+    let dc_id = DcId::new("dc-a").unwrap();
+    let dc: Arc<dyn MetaStore> = Arc::new(EtcdStore::connect(Tier::Dc(dc_id), &cfg).await.unwrap());
+    let global: Arc<dyn MetaStore> =
+        Arc::new(EtcdStore::connect(Tier::Global, &cfg).await.unwrap());
+    let registry = ClusterRegistry::new(global, dc.clone()).unwrap();
+    let tenant = TenantId(9_100_000 + u64::from(std::process::id() % 100_000));
+    let pools: BTreeMap<String, Pool> = [("dc-a-c1".to_owned(), pool("dc-a-c1"))].into();
+    let (cat, data) = setup(&pools["dc-a-c1"], tenant).await;
+    put_map(&dc, tenant, "dc-a-c1").await;
+    let settings = MoverSettings {
+        copy_chunk_rows: 500,
+        ready_sustain: Duration::from_secs(2),
+        source_retain: Duration::from_secs(2),
+        ..MoverSettings::default()
+    };
+    let maps = TenantMaps::new(dc.clone());
+    let factory = Arc::new(MysqlEnvFactory::new(registry, maps.clone(), settings));
+    let store = JobStore::new(dc.clone(), Arc::new(SystemClock));
+    let mut opts = WorkerOpts::new("mover-swap");
+    opts.scan_interval = Duration::from_millis(200);
+    let stop_worker = CancellationToken::new();
+    let worker =
+        tokio::spawn(JobRuntime::new(store.clone(), factory, opts).run(stop_worker.clone()));
+    let mover = MetaMover::new(store);
+    let routing = Arc::new(Routing {
+        maps: maps.clone(),
+        tenant,
+        pools: pools.clone(),
+    });
+    let log = Arc::new(Mutex::new(Log::default()));
+    let stop = CancellationToken::new();
+    let ops = Arc::new(AtomicU64::new(0));
+    let writers: Vec<_> = (0..4)
+        .map(|i| {
+            tokio::spawn(writer(
+                routing.clone(),
+                data.clone(),
+                i,
+                4,
+                4000,
+                log.clone(),
+                stop.clone(),
+                ops.clone(),
+            ))
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let t0 = Instant::now();
+    let id = mover
+        .submit(JobSpec::copy_swap(
+            tenant,
+            ClusterId::new("dc-a-c1").unwrap(),
+            &data,
+            "sbtest1",
+            "ADD COLUMN extra INT NOT NULL DEFAULT 7, ADD KEY k_extra (extra)",
+        ))
+        .await
+        .unwrap();
+    let st = loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let st = mover.status(&id).await.unwrap();
+        if st.state.is_terminal() || st.state == JobState::Paused {
+            break st;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(300), "stuck: {st:?}");
+    };
+    let lat = log.lock().unwrap().max_latency;
+    eprintln!(
+        "copy-and-swap: {:?} in {:.1} s, holds {:?} ms, longest write {} ms, error {:?}",
+        st.state,
+        t0.elapsed().as_secs_f64(),
+        st.progress.holds_ms,
+        lat.as_millis(),
+        st.error
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop.cancel();
+    for w in writers {
+        w.await.unwrap();
+    }
+    stop_worker.cancel();
+    let _ = worker.await;
+    let l = std::mem::take(&mut *log.lock().unwrap());
+    let r = check_against_log(&pools["dc-a-c1"], &data, &l).await;
+    let mut c = pools["dc-a-c1"].get_conn().await.unwrap();
+    let extra: Option<u64> = c
+        .query_first(format!(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{data}' \
+             AND TABLE_NAME = 'sbtest1' AND COLUMN_NAME = 'extra'"
+        ))
+        .await
+        .unwrap();
+    let leftovers: Vec<String> = c
+        .query(format!(
+            "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{data}' \
+             AND TABLE_NAME LIKE '\\_\\_sprig%'"
+        ))
+        .await
+        .unwrap();
+    for s in [&cat, &data] {
+        let _ = c.query_drop(format!("DROP DATABASE IF EXISTS `{s}`")).await;
+    }
+    let key = ShardMap::catalog_key(dc.tier(), tenant).unwrap();
+    let _ = dc
+        .txn(Txn {
+            when: vec![],
+            then: vec![Op::Delete(key)],
+            otherwise: vec![],
+        })
+        .await;
+    assert_eq!(st.state, JobState::Done, "{st:?}");
+    r.unwrap();
+    assert_eq!(extra, Some(1), "the new column is missing");
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
 }
