@@ -11,7 +11,7 @@
 //!   ([`lex::versioned`]), `ANSI_QUOTES` and `NO_BACKSLASH_ESCAPES`;
 //! - [`names::map`]: the physical-name grammar and the per-tenant
 //!   [`names::NameMap`];
-//! - [`names::rewrite`]: the statement rewrite over every name position,
+//! - [`names::rewrite`](mod@names::rewrite): the statement rewrite over every name position,
 //!   by span editing, with the `DATABASE()`, account-function and
 //!   query-attribute substitutions.
 

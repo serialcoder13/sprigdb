@@ -266,6 +266,13 @@ impl StmtInfo {
             "CALL" => {
                 info.reads_all_user_vars = true;
                 info.effects.push(Effect::Call);
+                // A user variable passed as an argument may be an OUT or
+                // INOUT parameter: capture it after the call, so a read on
+                // another connection (a replica, a Galera node) sees the
+                // routine's value.
+                for v in info.reads_user_vars.clone() {
+                    push_unique(&mut info.assigns_user_vars, &v);
+                }
             }
             _ => {}
         }
@@ -592,6 +599,13 @@ fn tokenize(sql: &[u8]) -> Vec<Tok> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_arguments_are_captured_as_assignments() {
+        let i = StmtInfo::classify(b"CALL p(1, @b, @c)");
+        assert!(i.reads_all_user_vars);
+        assert_eq!(i.assigns_user_vars, ["b", "c"]);
+    }
 
     fn c(s: &str) -> StmtInfo {
         StmtInfo::classify(s.as_bytes())

@@ -404,15 +404,12 @@ impl Lexer<'_> {
             _ => (TokenKind::BlockComment, start + 2),
         };
         self.pos = body_start;
-        match find(&self.src[self.pos..], b"*/") {
-            Some(i) => {
-                self.pos += i + 2;
-                kind
-            }
-            None => {
-                self.pos = self.src.len();
-                TokenKind::Unterminated
-            }
+        if let Some(i) = find(&self.src[self.pos..], b"*/") {
+            self.pos += i + 2;
+            kind
+        } else {
+            self.pos = self.src.len();
+            TokenKind::Unterminated
         }
     }
 
@@ -464,22 +461,19 @@ impl Lexer<'_> {
             }
             return TokenKind::SysVar;
         }
-        match self.peek(0) {
-            Some(q @ (b'`' | b'\'' | b'"')) => {
-                let backslash = q != b'`' && !self.opts.no_backslash_escapes;
-                if self.quoted(q, TokenKind::UserVar, backslash) == TokenKind::Unterminated {
-                    TokenKind::Unterminated
-                } else {
-                    TokenKind::UserVar
-                }
-            }
-            _ => {
-                // User variable names may hold `.`, `_` and `$`.
-                while self.peek(0).is_some_and(|c| is_ident_byte(c) || c == b'.') {
-                    self.pos += 1;
-                }
+        if let Some(q @ (b'`' | b'\'' | b'"')) = self.peek(0) {
+            let backslash = q != b'`' && !self.opts.no_backslash_escapes;
+            if self.quoted(q, TokenKind::UserVar, backslash) == TokenKind::Unterminated {
+                TokenKind::Unterminated
+            } else {
                 TokenKind::UserVar
             }
+        } else {
+            // User variable names may hold `.`, `_` and `$`.
+            while self.peek(0).is_some_and(|c| is_ident_byte(c) || c == b'.') {
+                self.pos += 1;
+            }
+            TokenKind::UserVar
         }
     }
 
@@ -624,12 +618,12 @@ pub fn ident_value(tok: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// string.
 #[must_use]
 pub fn string_value(tok: &[u8], no_backslash_escapes: bool) -> Option<Vec<u8>> {
-    let q = *tok.first()?;
-    if !matches!(q, b'\'' | b'"') || tok.len() < 2 || tok[tok.len() - 1] != q {
+    let quote = *tok.first()?;
+    if !matches!(quote, b'\'' | b'"') || tok.len() < 2 || tok[tok.len() - 1] != quote {
         return None;
     }
     let inner = &tok[1..tok.len() - 1];
-    let mut v = Vec::with_capacity(inner.len());
+    let mut out = Vec::with_capacity(inner.len());
     let mut i = 0;
     while i < inner.len() {
         let c = inner[i];
@@ -637,9 +631,9 @@ pub fn string_value(tok: &[u8], no_backslash_escapes: bool) -> Option<Vec<u8>> {
             let e = inner[i + 1];
             // `\%` and `\_` keep the backslash (LIKE patterns).
             if matches!(e, b'%' | b'_') {
-                v.push(b'\\');
+                out.push(b'\\');
             }
-            v.push(match e {
+            out.push(match e {
                 b'0' => 0,
                 b'b' => 8,
                 b'n' => b'\n',
@@ -649,15 +643,15 @@ pub fn string_value(tok: &[u8], no_backslash_escapes: bool) -> Option<Vec<u8>> {
                 _ => e,
             });
             i += 2;
-        } else if c == q && inner.get(i + 1) == Some(&q) {
-            v.push(q);
+        } else if c == quote && inner.get(i + 1) == Some(&quote) {
+            out.push(quote);
             i += 2;
         } else {
-            v.push(c);
+            out.push(c);
             i += 1;
         }
     }
-    Some(v)
+    Some(out)
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@
 //! cargo test -p sprig-sql --release --test bench -- --ignored --nocapture
 //! ```
 
+#![allow(clippy::unwrap_used)]
+
 mod common;
 
 use std::hint::black_box;

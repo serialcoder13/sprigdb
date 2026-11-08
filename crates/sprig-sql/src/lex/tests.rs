@@ -1,7 +1,7 @@
 use super::*;
 
-fn kinds(src: &str, opts: &LexOptions) -> Vec<(TokenKind, String)> {
-    lex(src.as_bytes(), opts)
+fn kinds(src: &str, opts: LexOptions) -> Vec<(TokenKind, String)> {
+    lex(src.as_bytes(), &opts)
         .unwrap()
         .into_iter()
         .filter(|t| t.kind != TokenKind::Whitespace)
@@ -15,7 +15,7 @@ fn kinds(src: &str, opts: &LexOptions) -> Vec<(TokenKind, String)> {
 }
 
 fn k(src: &str) -> Vec<(TokenKind, String)> {
-    kinds(src, &LexOptions::mysql84())
+    kinds(src, LexOptions::mysql84())
 }
 
 use TokenKind as T;
@@ -43,13 +43,13 @@ fn quotes_follow_sql_mode() {
     assert_eq!(k("\"a\"\"b\""), [tok(T::String, "\"a\"\"b\"")]);
     let ansi = LexOptions::mysql84().ansi_quotes(true);
     assert_eq!(
-        kinds("\"a\"\"b\"", &ansi),
+        kinds("\"a\"\"b\"", ansi),
         [tok(T::QuotedIdent, "\"a\"\"b\"")]
     );
     assert_eq!(k("'it\\'s'"), [tok(T::String, "'it\\'s'")]);
     let nbe = LexOptions::mysql84().no_backslash_escapes(true);
     assert_eq!(
-        kinds("'a\\' x", &nbe),
+        kinds("'a\\' x", nbe),
         [tok(T::String, "'a\\'"), tok(T::Word, "x")]
     );
     assert_eq!(k("'abc"), [tok(T::Unterminated, "'abc")]);
@@ -84,7 +84,7 @@ fn executable_comments_per_persona() {
     let my = LexOptions::mysql84();
     let ma = LexOptions::mariadb();
     assert_eq!(
-        kinds("/*!50001 a */", &my),
+        kinds("/*!50001 a */", my),
         [
             tok(T::ExecOpen, "/*!50001"),
             tok(T::Word, "a"),
@@ -92,15 +92,15 @@ fn executable_comments_per_persona() {
         ]
     );
     assert_eq!(
-        kinds("/*!90000 a */", &my),
+        kinds("/*!90000 a */", my),
         [tok(T::InactiveExec, "/*!90000 a */")]
     );
     assert_eq!(
-        kinds("/*M!100100 a */", &my),
+        kinds("/*M!100100 a */", my),
         [tok(T::InactiveExec, "/*M!100100 a */")]
     );
     assert_eq!(
-        kinds("/*M!100100 a */", &ma),
+        kinds("/*M!100100 a */", ma),
         [
             tok(T::ExecOpen, "/*M!100100"),
             tok(T::Word, "a"),
@@ -108,12 +108,12 @@ fn executable_comments_per_persona() {
         ]
     );
     assert_eq!(
-        kinds("/*!80016 a */", &ma),
+        kinds("/*!80016 a */", ma),
         [tok(T::InactiveExec, "/*!80016 a */")]
     );
     // A string holding */ inside a running comment is a string.
     assert_eq!(
-        kinds("/*! '*/' */", &my),
+        kinds("/*! '*/' */", my),
         [
             tok(T::ExecOpen, "/*!"),
             tok(T::String, "'*/'"),
@@ -122,7 +122,7 @@ fn executable_comments_per_persona() {
     );
     // A skipped comment ends at the first */, strings or not.
     assert_eq!(
-        kinds("/*!99999 '*/' x", &my),
+        kinds("/*!99999 '*/' x", my),
         [
             tok(T::InactiveExec, "/*!99999 '*/"),
             tok(T::Unterminated, "' x")
@@ -132,7 +132,7 @@ fn executable_comments_per_persona() {
     assert_eq!(k("*/"), [tok(T::Op, "*"), tok(T::Op, "/")]);
     // The version gate follows LexOptions::version.
     assert_eq!(
-        kinds("/*!80500 a */", &my.version(80500)),
+        kinds("/*!80500 a */", my.version(80500)),
         [
             tok(T::ExecOpen, "/*!80500"),
             tok(T::Word, "a"),

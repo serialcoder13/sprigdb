@@ -70,6 +70,9 @@ const ALLOWED: &[(&str, VarKind)] = &[
     ("default_storage_engine", VarKind::Text),
     ("default_tmp_storage_engine", VarKind::Text),
     ("character_set_collations", VarKind::Text),
+    // Decision D9: the 3306 persona turns it off (MySQL never fails a
+    // REPEATABLE READ update with 1020); a session may turn it back on.
+    ("innodb_snapshot_isolation", VarKind::Bool),
 ];
 
 /// Variables the gateway owns or that change by themselves: never replayed,
@@ -274,6 +277,9 @@ pub mod persona {
         "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION";
     /// The pool's connection collation.
     pub const COLLATION: &str = "utf8mb4_uca1400_ai_ci";
+    /// `innodb_snapshot_isolation` for the MySQL persona (decision D9); the
+    /// MariaDB persona keeps the server's default.
+    pub const MYSQL84_SNAPSHOT_ISOLATION: &str = "OFF";
 }
 
 /// `(character set, collation)` for a handshake collation id, mapped onto
@@ -305,6 +311,13 @@ impl SessionVars {
         let mut vars = BTreeMap::new();
         if persona == Persona::MySql84 {
             vars.insert("sql_mode".to_owned(), persona::MYSQL84_SQL_MODE.to_owned());
+            // D9: MySQL 8.4 has no snapshot-isolation check; MariaDB 11.8's
+            // default (ON) fails conflicting REPEATABLE READ updates with
+            // 1020, which MySQL applications don't retry.
+            vars.insert(
+                "innodb_snapshot_isolation".to_owned(),
+                persona::MYSQL84_SNAPSHOT_ISOLATION.to_owned(),
+            );
         }
         if let Some((cs, coll)) = collation_for(collation_id) {
             for v in [
@@ -697,8 +710,21 @@ mod tests {
         let m = SessionVars::login(Persona::MySql84, 255, Some("app".into()));
         assert_eq!(m.vars["sql_mode"], persona::MYSQL84_SQL_MODE);
         assert_eq!(m.vars["collation_connection"], "utf8mb4_uca1400_ai_ci");
+        assert_eq!(m.vars["innodb_snapshot_isolation"], "OFF");
         let d = SessionVars::login(Persona::MariaDb, 45, None);
         assert!(!d.vars.contains_key("sql_mode"));
+        assert!(!d.vars.contains_key("innodb_snapshot_isolation"));
+        // Replayed by value, so a session's own setting survives pooling
+        // without pinning.
+        assert_eq!(var_kind("innodb_snapshot_isolation"), Some(VarKind::Bool));
+        assert_eq!(sysvar_literal("innodb_snapshot_isolation", "ON").as_deref(), Some("ON"));
+        let mut base = Baseline::default();
+        base.vars.insert("innodb_snapshot_isolation".into(), "ON".into());
+        let (prefix, _) = sync_prefix(&AppliedState::default(), &base, &m, &StmtInfo::write(), 0).unwrap();
+        assert!(
+            prefix.iter().any(|p| p.contains("innodb_snapshot_isolation = OFF")),
+            "{prefix:?}"
+        );
         assert_eq!(d.vars["collation_connection"], "utf8mb4_general_ci");
     }
 }

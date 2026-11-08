@@ -1,0 +1,39 @@
+# Expected outcomes for the connector matrix through the gateway against
+# the Galera cluster (login app_galera), merged over expected.toml with
+# SPRIG_CONN_EXPECTED_OVERLAY. It repeats expected.gateway.toml (one overlay
+# per run) and adds what Galera itself does differently:
+#
+#   SPRIG_CONN_USER=app_galera SPRIG_CONN_PASSWORD=sprig-dev-app \
+#   SPRIG_CONN_EXPECTED_OVERLAY=deploy/compose/connectors/expected.gateway-galera.toml \
+#     deploy/compose/connectors/run.sh 127.0.0.1 13307 mariadb
+
+[mysql."*"]
+# D7 (see expected.gateway.toml).
+conn_attrs = "skip"
+
+[mysql.mysql-connector-j]
+# D8 (see expected.gateway.toml).
+prepared_biginteger = "fail"
+
+[all."*"]
+# Galera's wsrep_auto_increment_control sets auto_increment_increment to
+# the cluster size (3) and the offset per node, so a multi-row insert's ids
+# step by 3 and the first id isn't the one the check expects; straight on
+# a Galera node the same happens.
+last_insert_id = "fail"
+# The checks expect auto_increment_increment back at 1 after the reset;
+# Galera's baseline is 3, which is what the gateway restores.
+change_user = "fail"
+reset_connection = "fail"
+
+[mysql.hibernate]
+# Hibernate with MySQL Connector/J reads information_schema.KEYWORDS
+# WHERE RESERVED = 1 to resolve its dialect; MariaDB's KEYWORDS has no
+# RESERVED column. The 3306 persona answers that the MySQL way with the
+# core information_schema providers (M0.5; decisions/mysql-persona-gaps.md).
+schema_validate = "fail"
+
+[mysql.hibernate-mariadb]
+# ddl-auto=validate expects a json column; MariaDB's JSON is LONGTEXT. The
+# 3306 persona reports json for such columns in M0.5 (same decisions file).
+schema_validate = "fail"

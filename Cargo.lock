@@ -2232,6 +2232,7 @@ dependencies = [
  "futures",
  "linkme",
  "metrics",
+ "proptest",
  "serde",
  "serde_json",
  "sprig-common",

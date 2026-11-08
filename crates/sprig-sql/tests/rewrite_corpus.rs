@@ -3,6 +3,8 @@
 //! agree. `{B}` and `{C}` stand for the physical schemas of `billing` and
 //! `crm`; `=` means "unchanged".
 
+#![allow(clippy::unwrap_used, clippy::too_many_lines)]
+
 mod common;
 
 use common::{B, C, PERSONAS, acme, both, ctx, mariadb, mysql};

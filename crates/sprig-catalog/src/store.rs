@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use mysql_async::prelude::{Queryable, ToValue};
-use mysql_async::{Params, Pool, Row, TxOpts, Value};
+use mysql_async::{Params, Pool, Row, Transaction, TxOpts, Value};
 use serde_json::Value as Json;
 use sprig_common::ids::{DbId, GroupId, JobId, ObjectId, TenantId, UserId};
 use sprig_common::names::{SchemaName, quote};
@@ -1439,17 +1439,42 @@ impl Store {
     /// # Errors
     /// 39070 or a backend error; 39072 if the catalog isn't migrated.
     pub async fn snapshot(&self, pool: &Pool, since: Option<u64>) -> Result<Snapshot> {
+        let mut tx = self.begin_snapshot(pool).await?;
+        let snap = self.snapshot_in(&mut tx, since).await?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(snap)
+    }
+
+    /// Starts the consistent, read-only transaction a snapshot reads in
+    /// (`START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY` at
+    /// `REPEATABLE READ`), so the cache loader can read extension modules'
+    /// tables in the same snapshot as the core rows.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn begin_snapshot(&self, pool: &Pool) -> Result<Transaction<'static>> {
         let mut opts = TxOpts::default();
         opts.with_consistent_snapshot(true)
             .with_isolation_level(mysql_async::IsolationLevel::RepeatableRead)
             .with_readonly(true);
-        let mut tx = pool.start_transaction(opts).await.map_err(map_err)?;
-        let versions = self.versions(&mut tx).await?;
+        pool.start_transaction(opts).await.map_err(map_err)
+    }
+
+    /// [`snapshot`](Self::snapshot)'s reads, inside a transaction from
+    /// [`begin_snapshot`](Self::begin_snapshot).
+    ///
+    /// # Errors
+    /// As [`snapshot`](Self::snapshot).
+    pub async fn snapshot_in<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        since: Option<u64>,
+    ) -> Result<Snapshot> {
+        let versions = self.versions(q).await?;
         let since = since.filter(|&s| s >= versions.purged);
-        let databases = self.databases_since(&mut tx, since).await?;
-        let objects = self.objects_since(&mut tx, since).await?;
-        let settings = self.settings_since(&mut tx, since).await?;
-        tx.commit().await.map_err(map_err)?;
+        let databases = self.databases_since(q, since).await?;
+        let objects = self.objects_since(q, since).await?;
+        let settings = self.settings_since(q, since).await?;
         Ok(Snapshot {
             versions,
             since,

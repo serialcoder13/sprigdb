@@ -35,7 +35,7 @@ pub const ALICE: AccountInfo<'static> = AccountInfo {
 pub const ATTRS: &[(&str, Option<&str>)] = &[("tag", Some("v'1")), ("nul", None)];
 
 /// A session of alice in `billing`.
-pub fn ctx<'a>(map: &'a MemoryNameMap, lex: LexOptions, engine: Engine) -> RewriteCtx<'a> {
+pub fn ctx(map: &MemoryNameMap, lex: LexOptions, engine: Engine) -> RewriteCtx<'_> {
     let mut c = RewriteCtx::new(map, lex.persona)
         .lex(lex)
         .current_db(Some("billing"))

@@ -18,8 +18,9 @@
 //! ```
 //!
 //! `SPRIG_TEST_CONNECTORS_ONLY` (space- or comma-separated) runs a subset,
-//! for example `mysql2,pymysql`; `run.sh`'s own `SPRIG_CONN_*` variables
-//! pass through.
+//! for example `mysql2,pymysql`; `SPRIG_TEST_CONNECTORS_QUICK=1` passes
+//! `--quick` (drivers and SQLAlchemy, fast checks only: the per-PR run);
+//! `run.sh`'s own `SPRIG_CONN_*` variables pass through.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
@@ -41,12 +42,14 @@ fn connector_matrix() {
                 .collect()
         })
         .unwrap_or_default();
+    let quick = skip::var("SPRIG_TEST_CONNECTORS_QUICK").is_some_and(|v| v != "0");
     let script = connectors::run_script();
     let mut failed = Vec::new();
     for t in &targets {
         eprintln!("== connector matrix: {}:{} ({})", t.host, t.port, t.persona);
         let status = Command::new("bash")
             .arg(&script)
+            .args(quick.then_some("--quick"))
             .args([&t.host, &t.port.to_string(), &t.persona])
             .args(&only)
             .status()

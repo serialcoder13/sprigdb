@@ -230,7 +230,9 @@ public class App {
         String name = d.getClass().getSimpleName();
         String detail = name + " " + d.getVersion() + ", Hibernate " + org.hibernate.Version.getVersionString()
                 + (fellBack == null ? "" : " (Spring restarted with " + fellBack + ")");
-        expect(name.startsWith("MariaDB") == PERSONA.equals("mariadb"), "persona " + PERSONA + " but " + detail);
+        // Hibernate picks MariaDBDialect for MariaDB Connector/J whatever the server (even MySQL 8.4).
+        boolean wantMariaDB = PERSONA.equals("mariadb") || MARIADB_DRIVER;
+        expect(name.startsWith("MariaDB") == wantMariaDB, "persona " + PERSONA + " but " + detail);
         return detail;
     }
 

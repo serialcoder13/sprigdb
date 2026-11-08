@@ -2,6 +2,8 @@
 //! bytes; random database names round-trip; re-parsing the rewritten text
 //! gives the original AST with only schema parts changed.
 
+#![allow(clippy::unwrap_used)]
+
 mod common;
 
 use std::ops::ControlFlow;

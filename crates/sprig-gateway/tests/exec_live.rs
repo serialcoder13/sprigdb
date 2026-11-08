@@ -384,6 +384,21 @@ async fn multi_statements_and_call() {
             assert_eq!(b, [(8, "x".to_owned())], "prepared CALL {ctx}");
             r.drop_result().await.unwrap();
         }
+        // OUT and INOUT parameters into user variables, read back by a
+        // later plain read, which may run on another node (a replica, a
+        // Galera node): the gateway captures them after the call.
+        c.query_drop(
+            "CREATE PROCEDURE q(IN a INT, OUT b INT, INOUT c INT) BEGIN SET b = a * 10; SET c = c + a; END",
+        )
+        .await
+        .unwrap();
+        for _ in 0..5 {
+            c.query_drop("SET @c = 5").await.unwrap();
+            c.query_drop("CALL q(1, @b, @c)").await.unwrap();
+            let bc: Option<(Option<i64>, Option<i64>)> =
+                c.query_first("SELECT @b, @c").await.unwrap();
+            assert_eq!(bc, Some((Some(10), Some(6))), "OUT/INOUT after CALL {ctx}");
+        }
         c.disconnect().await.unwrap();
 
         // Without multi-statements: 1064, and nothing ran.
@@ -1079,6 +1094,79 @@ async fn bulk_execute_on_mariadb() {
         assert_eq!(n[0].as_deref(), Some(&b"3"[..]));
         assert_eq!(n[1].as_deref(), Some(&b"2"[..]));
         c.quit().await;
+        db.drop(&addr, topo.user).await;
+    }
+}
+
+/// Decision D9: a `REPEATABLE READ` update of a row another transaction
+/// changed after the snapshot succeeds on 3306 (MySQL has no snapshot
+/// isolation check) and fails with 1020 on 3307 (MariaDB's default); a 3306
+/// session can ask for MariaDB's behaviour, and keeps it across pooled
+/// connections. Not on Galera, whose certification answers such conflicts
+/// itself.
+#[tokio::test]
+async fn snapshot_isolation_per_persona() {
+    let Some(eps) = endpoints("snapshot_isolation_per_persona") else {
+        return;
+    };
+    for (addr, persona, topo) in matrix(&eps) {
+        if topo.user == "app_galera" {
+            continue;
+        }
+        let ctx = format!("{persona:?} {}", topo.user);
+        let db = Db::create(&addr, topo.user, "gw_snapshot").await;
+        let mut a = gw(&addr, topo.user, Some(&db.name)).await;
+        let mut b = gw(&addr, topo.user, Some(&db.name)).await;
+        a.query_drop("CREATE TABLE s (id INT PRIMARY KEY, v INT) ENGINE = InnoDB")
+            .await
+            .unwrap();
+        for (round, strict) in [(0, false), (1, true)] {
+            if strict {
+                if persona != Persona::MySql84 {
+                    break;
+                }
+                a.query_drop("SET SESSION innodb_snapshot_isolation = ON")
+                    .await
+                    .unwrap();
+                // Statements on other pooled connections in between.
+                for _ in 0..3 {
+                    let _: Option<i64> = a.query_first("SELECT 1").await.unwrap();
+                }
+            }
+            a.query_drop(format!("REPLACE INTO s VALUES ({round}, 0)"))
+                .await
+                .unwrap();
+            a.query_drop("START TRANSACTION").await.unwrap();
+            let _: Option<i64> = a
+                .query_first(format!("SELECT v FROM s WHERE id = {round}"))
+                .await
+                .unwrap();
+            b.query_drop(format!("UPDATE s SET v = v + 1 WHERE id = {round}"))
+                .await
+                .unwrap();
+            let r = a
+                .query_drop(format!("UPDATE s SET v = v + 10 WHERE id = {round}"))
+                .await;
+            let want_1020 = strict || persona == Persona::MariaDb;
+            match r {
+                Ok(()) => {
+                    assert!(!want_1020, "{ctx} round {round}: expected 1020");
+                    a.query_drop("COMMIT").await.unwrap();
+                    let v: Option<i64> = b
+                        .query_first(format!("SELECT v FROM s WHERE id = {round}"))
+                        .await
+                        .unwrap();
+                    assert_eq!(v, Some(11), "{ctx}: both updates applied");
+                }
+                Err(e) => {
+                    assert!(want_1020, "{ctx} round {round}: {e}");
+                    assert_eq!(server_code(&e), 1020, "{ctx} round {round}");
+                    a.query_drop("ROLLBACK").await.unwrap();
+                }
+            }
+        }
+        a.disconnect().await.unwrap();
+        b.disconnect().await.unwrap();
         db.drop(&addr, topo.user).await;
     }
 }

@@ -1176,7 +1176,7 @@ impl Walker<'_, '_> {
                     self.index_cache_list()?;
                     return Ok(StmtKind::Other);
                 }
-                while !self.at_end() && !(self.at(b"INTO") && self.kw(self.i + 1, b"TABLE")) {
+                while !(self.at_end() || self.at(b"INTO") && self.kw(self.i + 1, b"TABLE")) {
                     self.i += 1;
                 }
                 if !self.at_end() {
@@ -1680,7 +1680,7 @@ impl Walker<'_, '_> {
                 self.i += 2;
             }
             self.stmt_list()?;
-            self.end_of(&[])?;
+            self.end_of(&[]);
         } else if self.at(b"IF") {
             self.i += 1;
             loop {
@@ -1695,7 +1695,7 @@ impl Walker<'_, '_> {
                 }
                 break;
             }
-            self.end_of(&[b"IF"])?;
+            self.end_of(&[b"IF"]);
         } else if self.at(b"CASE") {
             self.i += 1;
             if !self.at(b"WHEN") {
@@ -1709,25 +1709,25 @@ impl Walker<'_, '_> {
             if self.eat(b"ELSE") {
                 self.stmt_list()?;
             }
-            self.end_of(&[b"CASE"])?;
+            self.end_of(&[b"CASE"]);
         } else if self.at(b"LOOP") {
             self.i += 1;
             self.stmt_list()?;
-            self.end_of(&[b"LOOP"])?;
+            self.end_of(&[b"LOOP"]);
         } else if self.at(b"WHILE") || self.at(b"FOR") {
             let kw: &'static [u8] = if self.at(b"WHILE") { b"WHILE" } else { b"FOR" };
             self.i += 1;
             self.expr(Stop::words(&[b"DO"]))?;
             self.eat(b"DO");
             self.stmt_list()?;
-            self.end_of(&[kw])?;
+            self.end_of(&[kw]);
         } else if self.at(b"REPEAT") {
             self.i += 1;
             self.stmt_list()?;
             if self.eat(b"UNTIL") {
                 self.expr(Stop::words(&[b"END"]))?;
             }
-            self.end_of(&[b"REPEAT"])?;
+            self.end_of(&[b"REPEAT"]);
         } else if self.at(b"DECLARE") {
             self.declare()?;
         } else if self.at(b"RETURN") {
@@ -1769,7 +1769,7 @@ impl Walker<'_, '_> {
     }
 
     /// `END [kw] [label]`.
-    fn end_of(&mut self, kw: &[&[u8]]) -> R {
+    fn end_of(&mut self, kw: &[&[u8]]) {
         if self.eat(b"END") {
             for k in kw {
                 self.eat(k);
@@ -1778,7 +1778,6 @@ impl Walker<'_, '_> {
                 self.i += 1; // label
             }
         }
-        Ok(())
     }
 
     fn declare(&mut self) -> R {
@@ -2114,9 +2113,9 @@ impl Walker<'_, '_> {
     }
 
     fn describe(&mut self) -> R<StmtKind> {
+        const OPTIONS: &[&[u8]] = &[b"EXTENDED", b"PARTITIONS", b"ANALYZE", b"FORMAT"];
         self.purpose = Purpose::Read;
         self.i += 1;
-        const OPTIONS: &[&[u8]] = &[b"EXTENDED", b"PARTITIONS", b"ANALYZE", b"FORMAT"];
         let stmt_next = self.subquery_at(self.i)
             || self.punct(self.i, b'(')
             || self.kw_any(

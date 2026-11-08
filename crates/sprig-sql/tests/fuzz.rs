@@ -2,6 +2,8 @@
 //! panic, and whatever rewrites keeps every byte outside its edits.
 //! `SPRIG_FUZZ_ITERS` raises the iteration count.
 
+#![allow(clippy::unwrap_used)]
+
 mod common;
 
 use sprig_proto_mysql::packets::Persona;

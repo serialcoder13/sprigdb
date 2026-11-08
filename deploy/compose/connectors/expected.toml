@@ -68,6 +68,14 @@ prepared = "n/a"          # MySQLdb interpolates parameters client-side
 reset_connection = "n/a"  # no reset-connection API (change_user is exposed)
 pool_reprepare = "n/a"    # no server-side prepared statements, no pool (sqlalchemy-* covers pools)
 
+[all.sqlalchemy-mysqlclient.required]
+# After a server-side KILL, libmariadb reports the dead TLS connection as
+# 2026 "TLS/SSL error: unexpected eof while reading". SQLAlchemy 2.0.44's
+# mysqldb dialect doesn't count 2026 as a disconnect, so pool_pre_ping
+# raises instead of reconnecting. Both servers close the socket without a
+# TLS close_notify; plaintext and PyMySQL reconnect fine.
+pool_reconnect = "fail"
+
 [all.pdo_mysql]
 change_user = "n/a"       # no change-user API (persistent connections are pinged, see pool_reprepare)
 reset_connection = "n/a"  # no reset-connection API
@@ -136,3 +144,12 @@ schema_validate = "fail"
 # version says MariaDB; against MySQL 8.4 it clears only its own state. The
 # gateway's 3306 greets as MySQL, so the same holds there.
 reset_connection = "n/a"
+
+[mysql.mariadb-dump]
+# mariadb-dump 11.8 against MySQL 8.4 writes values for the VIRTUAL generated
+# column, and MySQL refuses them on restore (3105 "The value specified for
+# generated column ... is not allowed"); MariaDB ignores such values. The
+# dump itself works.
+restore = "fail"
+checksum = "fail"
+objects = "fail"

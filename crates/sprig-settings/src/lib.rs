@@ -17,7 +17,16 @@
 //!   for resolution, key watches and apply callbacks, and
 //!   `SettingNotApplied` (chapter 23 step 8).
 //!
-//! Not yet: the catalog snapshot of tenant rows (chapter 08), memoization,
+//! - [`resolve`]: six-scope resolution (chapter 08 step 5): a tenant's
+//!   rows at one catalog version ([`TenantSettings`], built by the catalog
+//!   cache) layered over the etcd snapshot, with bounds and clamping,
+//!   memoized per (tenant snapshot version, etcd snapshot); [`Settings`],
+//!   the process-wide entry point with key watches across all six scopes
+//!   and [`ResolvedWatch`]es on resolved values; clamp reports for the
+//!   warnings of bound-tightening writes.
+//!
+//! Not yet: the ancestor-copy loop that fills ancestor rows (chapter 08
+//! step 6; resolution already walks them), tenant-scope writes (step 7),
 //! privileges and `operator_only` checks (chapter 29).
 
 pub mod etcd;
@@ -31,7 +40,11 @@ pub use etcd::{SettingChange, SettingRecord, SettingsStores, SettingsWriter, War
 #[doc(hidden)]
 pub use linkme;
 pub use registry::{AnySetting, Apply, HardBounds, Registry, Scopes, Setting};
-pub use resolve::{Bounds, Entry, Ignored, MemSettings, Resolved};
+pub use resolve::{
+    Bounds, ClampedValue, Entry, Ignored, MemSettings, OwnedCtx, Resolved, ResolvedWatch, Settings,
+    TenantNotify, TenantScope, TenantSettings, TenantSettingsBuilder, clamp_summary,
+    resolve_layered,
+};
 pub use scope::{Level, Scope, ScopeKind, SettingCtx};
 pub use value::{SettingValue, Value, ValueKind};
 pub use watch::{LiveSettings, Registration, Snapshot, not_applied};

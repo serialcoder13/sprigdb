@@ -44,20 +44,20 @@ pub type Snapshot = Arc<MemSettings<'static>>;
 /// Which keys a watch or callback follows: `listener.mysql.bind` names one
 /// key; `listener.*` every key that starts with `listener.`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Pattern {
+pub(crate) enum Pattern {
     Exact(String),
     Prefix(String),
 }
 
 impl Pattern {
-    fn parse(p: &str) -> Self {
+    pub(crate) fn parse(p: &str) -> Self {
         match p.strip_suffix('*') {
             Some(prefix) => Pattern::Prefix(prefix.to_owned()),
             None => Pattern::Exact(p.to_owned()),
         }
     }
 
-    fn matches(&self, key: &str) -> bool {
+    pub(crate) fn matches(&self, key: &str) -> bool {
         match self {
             Pattern::Exact(k) => k == key,
             Pattern::Prefix(p) => key.starts_with(p.as_str()),

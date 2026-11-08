@@ -3,10 +3,20 @@
 //!
 //! [`MemSettings`] keeps every scope's rows in memory. The etcd mirror
 //! ([`LiveSettings`](crate::watch::LiveSettings): global, dc, cluster)
-//! builds one as its snapshot; the catalog snapshot (tenant, database,
-//! object, ancestor) will feed the same resolver later.
+//! builds one as its snapshot.
+//!
+//! Six-scope resolution (chapter 08, build step 5) layers a tenant's rows
+//! over it: [`TenantSettings`] holds one tenant's tenant, database, object
+//! and ancestor rows at one catalog version (built by the catalog cache),
+//! and [`resolve_layered`] walks global, dc and cluster from the etcd
+//! snapshot, then ancestors, tenant, database and object from the tenant's
+//! rows, with one algorithm for both. [`Settings`] is the process-wide
+//! entry point: memoized resolution per (tenant snapshot version, etcd
+//! snapshot), key watches across all six scopes, and watches on resolved
+//! values ([`ResolvedWatch`]).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sprig_common::{Result, SprigCode, SprigError};
@@ -14,6 +24,26 @@ use sprig_common::{Result, SprigCode, SprigError};
 use crate::registry::{AnySetting, HardBounds, Registry, Setting};
 use crate::scope::{Level, Scope, ScopeKind, SettingCtx};
 use crate::value::{SettingValue, Value};
+
+mod live;
+mod memo;
+mod tenant;
+#[cfg(test)]
+mod tests;
+
+pub use live::{OwnedCtx, ResolvedWatch, Settings, TenantNotify};
+pub use tenant::{
+    ClampedValue, TenantScope, TenantSettings, TenantSettingsBuilder, clamp_summary,
+};
+
+/// Stamps of [`MemSettings`] contents: every store and every change to one
+/// gets a new stamp, so a memoized result can name exactly the rows it was
+/// computed from.
+static STAMPS: AtomicU64 = AtomicU64::new(1);
+
+fn next_stamp() -> u64 {
+    STAMPS.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Bounds a scope sets on narrower scopes.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -167,6 +197,7 @@ pub struct Resolved {
 pub struct MemSettings<'r> {
     registry: &'r Registry,
     rows: HashMap<(Scope, &'static str), Entry>,
+    stamp: u64,
 }
 
 impl<'r> MemSettings<'r> {
@@ -176,7 +207,23 @@ impl<'r> MemSettings<'r> {
         Self {
             registry,
             rows: HashMap::new(),
+            stamp: next_stamp(),
         }
+    }
+
+    /// Identifies these rows: unique per store, and changed by every write,
+    /// so results memoized against one stamp are never served for other
+    /// rows.
+    #[must_use]
+    pub fn stamp(&self) -> u64 {
+        self.stamp
+    }
+
+    /// The row of `key` at `scope`, if any.
+    #[must_use]
+    pub fn entry(&self, scope: &Scope, key: &str) -> Option<&Entry> {
+        let def = self.registry.get(key)?;
+        self.rows.get(&(scope.clone(), def.key()))
     }
 
     /// The registry the rows are checked against.
@@ -191,6 +238,7 @@ impl<'r> MemSettings<'r> {
     pub(crate) fn insert_row(&mut self, scope: Scope, key: &str, entry: Entry) {
         if let Some(def) = self.registry.get(key) {
             self.rows.insert((scope, def.key()), entry);
+            self.stamp = next_stamp();
         }
     }
 
@@ -207,49 +255,7 @@ impl<'r> MemSettings<'r> {
     /// 39081 if the key is unknown.
     pub fn resolve(&self, key: &str, ctx: &SettingCtx<'_>) -> Result<Resolved> {
         let def = self.def(key)?;
-        let mut r = Resolved {
-            value: def.default_value(),
-            source: ScopeKind::Default,
-            bounds: def.hard().into(),
-            clamped: false,
-            ignored: Vec::new(),
-        };
-        for (kind, scope) in chain(def, ctx) {
-            let Some(e) = self.rows.get(&(scope, def.key())) else {
-                continue;
-            };
-            if r.bounds.locked {
-                if e.value.is_some() {
-                    r.ignored.push((kind, Ignored::Locked));
-                }
-                continue;
-            }
-            if let Some(v) = &e.value {
-                match def.normalize(v) {
-                    None => r.ignored.push((kind, Ignored::WrongType)),
-                    Some(v) if !r.bounds.allowed_contains(&v) => {
-                        r.ignored.push((kind, Ignored::NotAllowed));
-                    }
-                    Some(v) => {
-                        let c = r.bounds.clamp(&v);
-                        r.clamped = c != v;
-                        r.value = c;
-                        r.source = kind;
-                    }
-                }
-            }
-            if let Some(b) = &e.bounds {
-                r.bounds = r.bounds.intersect(b);
-            }
-        }
-        // A built-in default that falls outside bounds tightened by some scope
-        // is clamped like any other value (chapter 08).
-        if r.source == ScopeKind::Default {
-            let c = r.bounds.clamp(&r.value);
-            r.clamped = c != r.value;
-            r.value = c;
-        }
-        Ok(r)
+        Ok(walk(def, ctx, |scope| self.rows.get(&(scope.clone(), def.key()))))
     }
 
     /// The typed value of `setting` in `ctx`, or its default if resolution
@@ -292,6 +298,7 @@ impl<'r> MemSettings<'r> {
             ));
         }
         self.rows.entry((scope, def.key())).or_default().value = Some(v);
+        self.stamp = next_stamp();
         Ok(())
     }
 
@@ -333,6 +340,7 @@ impl<'r> MemSettings<'r> {
             return Err(locked(key));
         }
         self.rows.entry((scope, def.key())).or_default().bounds = Some(bounds);
+        self.stamp = next_stamp();
         Ok(())
     }
 
@@ -366,17 +374,13 @@ impl<'r> MemSettings<'r> {
             if *e == Entry::default() {
                 self.rows.remove(&k);
             }
+            self.stamp = next_stamp();
         }
         Ok(())
     }
 
     fn def(&self, key: &str) -> Result<&'static dyn AnySetting> {
-        self.registry
-            .get(key)
-            .filter(|_| !key.starts_with("sprig."))
-            .ok_or_else(|| {
-                SprigError::new(SprigCode::SettingUnknown, format!("unknown setting {key}"))
-            })
+        def(self.registry, key)
     }
 
     /// Checks the key and the level, and returns the row address.
@@ -423,6 +427,109 @@ impl<'r> MemSettings<'r> {
         }
         b
     }
+}
+
+/// The declaration of `key`: 39081 if unknown or internal (`sprig.`).
+pub(crate) fn def(registry: &Registry, key: &str) -> Result<&'static dyn AnySetting> {
+    registry
+        .get(key)
+        .filter(|_| !key.starts_with("sprig."))
+        .ok_or_else(|| SprigError::new(SprigCode::SettingUnknown, format!("unknown setting {key}")))
+}
+
+/// Chapter 08's resolution of `def` in `ctx`, reading each scope's row
+/// through `entry`: walk the chain from the widest scope to the narrowest,
+/// so the nearest value wins and the bounds of every wider scope apply to
+/// it.
+///
+/// ```text
+/// value, source = def.default, default;  B = def.hard_bounds
+/// for s in chain:
+///   e = entry(s, key);  if none: continue
+///   if B.locked: record ignored(s, locked) if e.value; continue
+///   if e.value:
+///     if B.allowed and e.value not in B.allowed: record ignored(s, not_allowed)
+///     else: v = clamp(e.value, B.min, B.max); clamped = v != e.value
+///           value, source = v, s
+///   if e.bounds: B = B ∩ e.bounds
+/// if source = default: value = clamp(def.default, B.min, B.max)
+/// ```
+pub(crate) fn walk<'e>(
+    def: &dyn AnySetting,
+    ctx: &SettingCtx<'_>,
+    entry: impl Fn(&Scope) -> Option<&'e Entry>,
+) -> Resolved {
+    let mut r = Resolved {
+        value: def.default_value(),
+        source: ScopeKind::Default,
+        bounds: def.hard().into(),
+        clamped: false,
+        ignored: Vec::new(),
+    };
+    for (kind, scope) in chain(def, ctx) {
+        let Some(e) = entry(&scope) else {
+            continue;
+        };
+        if r.bounds.locked {
+            if e.value.is_some() {
+                r.ignored.push((kind, Ignored::Locked));
+            }
+            continue;
+        }
+        if let Some(v) = &e.value {
+            match def.normalize(v) {
+                None => r.ignored.push((kind, Ignored::WrongType)),
+                Some(v) if !r.bounds.allowed_contains(&v) => {
+                    r.ignored.push((kind, Ignored::NotAllowed));
+                }
+                Some(v) => {
+                    let c = r.bounds.clamp(&v);
+                    r.clamped = c != v;
+                    r.value = c;
+                    r.source = kind;
+                }
+            }
+        }
+        if let Some(b) = &e.bounds {
+            r.bounds = r.bounds.intersect(b);
+        }
+    }
+    // A built-in default that falls outside bounds tightened by some scope
+    // is clamped like any other value (chapter 08).
+    if r.source == ScopeKind::Default {
+        let c = r.bounds.clamp(&r.value);
+        r.clamped = c != r.value;
+        r.value = c;
+    }
+    r
+}
+
+/// Resolves `key` in `ctx` over two layers: global, dc and cluster rows
+/// from `etcd` (the process's mirror snapshot), and the tenant, database,
+/// object and ancestor rows of `tenant` (its catalog snapshot). Without
+/// `tenant`, or for scopes of another tenant, every row comes from `etcd`.
+/// Not memoized: [`Settings::resolve`] and [`TenantSettings::resolve`] are.
+///
+/// When `tenant` is given, the context's tenant must be `None` or the same
+/// tenant, and its ancestry is the tenant's ([`TenantSettings::ancestry`]).
+///
+/// # Errors
+/// 39081 if the key is unknown; `Internal` if `ctx` names another tenant.
+pub fn resolve_layered(
+    etcd: &MemSettings<'_>,
+    tenant: Option<&TenantSettings>,
+    key: &str,
+    ctx: &SettingCtx<'_>,
+) -> Result<Resolved> {
+    let def = def(etcd.registry, key)?;
+    let Some(ts) = tenant else {
+        return Ok(walk(def, ctx, |s| etcd.rows.get(&(s.clone(), def.key()))));
+    };
+    let ctx = ts.bind(ctx)?;
+    Ok(walk(def, &ctx, |s| {
+        ts.lookup(s, def.key())
+            .or_else(|| etcd.rows.get(&(s.clone(), def.key())))
+    }))
 }
 
 /// The chain of `ctx`, keeping the scopes `def` accepts.

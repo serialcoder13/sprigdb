@@ -147,7 +147,11 @@ c_dump() {
 
 c_restore() {
   sql <<<"CREATE DATABASE $DST DEFAULT CHARACTER SET utf8mb4" || return 1
-  sql -D "$DST" <"$WORK/dump.sql" || return 1
+  if ! sql -D "$DST" <"$WORK/dump.sql"; then
+    fail "$(grep -m1 '^ERROR' "$WORK/err")"
+    : >"$WORK/err"
+    return 1
+  fi
   echo "into $DST with $(version "$CLI")"
 }
 

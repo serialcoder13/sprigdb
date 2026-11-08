@@ -137,6 +137,35 @@ impl<'a> SettingCtx<'a> {
         }
     }
 
+    /// The same context for one cluster.
+    #[must_use]
+    pub const fn with_cluster(self, cluster: &'a ClusterId) -> Self {
+        Self {
+            cluster: Some(cluster),
+            ..self
+        }
+    }
+
+    /// The same context for database `db` of its tenant.
+    #[must_use]
+    pub const fn with_db(self, db: DbId) -> Self {
+        Self {
+            db: Some(db),
+            ..self
+        }
+    }
+
+    /// The same context for object `object` of its tenant. Set the
+    /// object's database too ([`with_db`](Self::with_db)), so the
+    /// database's rows apply.
+    #[must_use]
+    pub const fn with_object(self, object: ObjectId) -> Self {
+        Self {
+            object: Some(object),
+            ..self
+        }
+    }
+
     /// The scopes of this context, widest first, as resolution walks them:
     /// global, dc, cluster, ancestors (root first), tenant, database, object.
     pub(crate) fn chain(&self) -> Vec<(ScopeKind, Scope)> {

@@ -19,6 +19,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
+proptest.workspace = true
 serde_json.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }
 tokio = { workspace = true, features = ["test-util"] }

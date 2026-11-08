@@ -3,7 +3,7 @@
 //! - [`map`]: the physical-name grammar (from [`sprig_common::names`]) and
 //!   the per-tenant [`NameMap`] (build step 1; the catalog-backed map comes
 //!   with chapter 08 step 4).
-//! - [`rewrite`]: the statement rewrite: lexing per persona, every name
+//! - [`rewrite`](mod@rewrite): the statement rewrite: lexing per persona, every name
 //!   position, span editing (build step 2) and the substitutions for
 //!   `DATABASE()`, account functions and query attributes (build step 3).
 //!
@@ -155,10 +155,12 @@ impl NameError {
         match self {
             NameError::UnknownDatabase(_) | NameError::Reserved(_) => *b"42000",
             NameError::Missing { kind, .. } => match kind {
-                ObjectKind::Procedure | ObjectKind::Function | ObjectKind::Database => *b"42000",
+                ObjectKind::Procedure
+                | ObjectKind::Function
+                | ObjectKind::Database
+                | ObjectKind::Index => *b"42000",
                 ObjectKind::Trigger | ObjectKind::Event => *b"HY000",
                 ObjectKind::Column => *b"42S22",
-                ObjectKind::Index => *b"42000",
                 ObjectKind::Table | ObjectKind::View | ObjectKind::Sequence => *b"42S02",
             },
             NameError::UnknownColumn(_) => *b"42S22",

@@ -106,7 +106,9 @@ function cDbPull() {
     'book.cover': /^cover Bytes\? @db\.Blob$/,
     // MySQL has a JSON type; MariaDB's JSON is LONGTEXT with a json_valid() CHECK.
     'book.attrs': PERSONA === 'mysql' ? /^attrs Json\?$/ : /^attrs (Json\?|String\? @db\.LongText)$/,
-    'book.author': /^author author @relation\(fields: \[author_id\], references: \[id\], onDelete: Cascade, onUpdate: Restrict, map: "fk_book_author"\)$/,
+    // No ON UPDATE clause: MySQL reports the rule as NO ACTION, MariaDB as RESTRICT.
+    'book.author': new RegExp('^author author @relation\\(fields: \\[author_id\\], references: \\[id\\], onDelete: Cascade, '
+      + `onUpdate: ${PERSONA === 'mysql' ? 'NoAction' : 'Restrict'}, map: "fk_book_author"\\)$`),
   };
   const bad = Object.entries(want).filter(([k, re]) => !re.test(field(...k.split('.')) || ''))
     .map(([k]) => `${k}: ${field(...k.split('.'))}`);

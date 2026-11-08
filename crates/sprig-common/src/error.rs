@@ -166,6 +166,12 @@ sprig_codes! {
     SessionStateLost = 39033, "ER_SPRIG_SESSION_STATE_LOST", "SprigSessionStateLost", SQLSTATE_CONNECTION, false;
     /// The backend was lost after part of a result was sent (chapter 06).
     BackendLost = 39034, "ER_SPRIG_BACKEND_LOST", "SprigBackendLost", SQLSTATE_CONNECTION, false;
+    /// A statement creates or names a reserved name: `__sprig_` objects,
+    /// `_sprig_` columns, `t<digits>_` or system databases (chapter 07).
+    ReservedName = 39050, "ER_SPRIG_RESERVED_NAME", "SprigReservedName", SQLSTATE_GENERAL, false;
+    /// A statement holds a name position the rewriter can't map safely
+    /// (chapter 07).
+    NameRewriteUnsupported = 39051, "ER_SPRIG_NAME_REWRITE_UNSUPPORTED", "SprigNameRewriteUnsupported", SQLSTATE_GENERAL, false;
     /// The tenant's catalog writer or the global tier can't be reached, so
     /// DDL, setting and account changes fail; cached reads continue
     /// (chapter 08).
@@ -336,7 +342,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ProvisionerUnsupported
         | SprigCode::ClusterPrecheckFailed
         | SprigCode::LocalInfileRejected
-        | SprigCode::LongDataLimit => (Code::FailedPrecondition, 400),
+        | SprigCode::LongDataLimit
+        | SprigCode::ReservedName
+        | SprigCode::NameRewriteUnsupported => (Code::FailedPrecondition, 400),
         SprigCode::GatewayDraining
         | SprigCode::ListenerRetired
         | SprigCode::MetaUnavailable

@@ -453,8 +453,9 @@ pub fn unrewrite(sql: &[u8], map: &dyn NameMap, lex_opts: &LexOptions) -> Vec<u8
         let Ok(name) = std::str::from_utf8(&v) else {
             continue;
         };
-        if let Some(db) = map.logical(name) {
-            let schema: SchemaName = name.parse().expect("logical() parsed it");
+        if let Some(db) = map.logical(name)
+            && let Ok(schema) = name.parse::<SchemaName>()
+        {
             edits.push(Edit {
                 range: t.range(),
                 kind: EditKind::Schema {
