@@ -297,7 +297,8 @@ pub async fn commit(store: &Arc<dyn MetaStore>, c: &HomeChange) -> Result<HomeCo
         entry.raw.insert(
             "last_move".into(),
             json!({"at_ms": c.now_ms, "from": c.from.as_str(), "to": c.to.as_str(),
-                   "job": job_of(&c.holder), "moves_back": moves_back}),
+                   "job": job_of(&c.holder), "moves_back": moves_back,
+                   "migration": dir.migration.clone().unwrap_or(Value::Null)}),
         );
         let xkey = ShardMap::catalog_key(src.store().tier(), c.tenant)?;
         let ykey = ShardMap::catalog_key(dst.store().tier(), c.tenant)?;

@@ -55,6 +55,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+# Trace assertions in observe's tests (chapter 47).
+tracing-subscriber.workspace = true
 sprig-testkit.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }
 

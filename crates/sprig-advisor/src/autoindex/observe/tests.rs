@@ -208,12 +208,17 @@ fn the_ratio_rule() {
     let (v, m) = judge(&reads, 100.0, &BTreeMap::new(), None, &ur());
     assert_eq!(v, UsageVerdict::Remove);
     assert_eq!(m.served, 4_990);
-    // Never used at all is the extreme case, even with no writes.
+    // Never used at all is the extreme case once anything writes the table.
     let reads = [read(R, 100_000, Some(false), 0.0)];
     assert_eq!(
-        judge(&reads, 0.0, &BTreeMap::new(), None, &ur()).0,
+        judge(&reads, 1.0, &BTreeMap::new(), None, &ur()).0,
         UsageVerdict::Remove
     );
+    // A table nobody writes: 0 saved against 0 cost keeps it (strictly less
+    // removes), though the ratio is still measured and reported.
+    let (v, m) = judge(&reads, 0.0, &BTreeMap::new(), None, &ur());
+    assert_eq!(v, UsageVerdict::Keep);
+    assert_eq!((m.ratio, m.saved_ms, m.write_cost_ms), (0.0, 0.0, 0.0));
 }
 
 #[test]

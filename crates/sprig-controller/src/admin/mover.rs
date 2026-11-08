@@ -92,7 +92,10 @@ impl AdminService {
         spec.requested_by = Some("operator".to_owned());
         let m = self.mover();
         let id = m.submit(spec).await?;
-        m.status(&id).await
+        let st = m.status(&id).await?;
+        // Chapter 11: an operator move is a decision too.
+        self.record_operator_move(&st).await;
+        Ok(st)
     }
 
     /// Mover jobs, newest first; `tenant` filters by name.

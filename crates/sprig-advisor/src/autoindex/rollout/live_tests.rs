@@ -770,9 +770,23 @@ async fn unused_dropped(topo: Topo, label: &str) {
             )
             .await
             .unwrap();
-        // 200 reads; the sample's plan reads idx_status, never ours.
+        // 200 reads; the sample's plan reads idx_status, never ours; and 20
+        // inserts (an index on a table nobody writes is kept).
         let fake = Fake {
-            latency: Some([(Fingerprint(1), FpLatency::read(200, 1.0, 0.8))].into()),
+            latency: Some(
+                [
+                    (Fingerprint(1), FpLatency::read(200, 1.0, 0.8)),
+                    (
+                        Fingerprint(2),
+                        FpLatency {
+                            write: true,
+                            affected_per_run: 1.0,
+                            ..FpLatency::read(20, 0.5, 0.4)
+                        },
+                    ),
+                ]
+                .into(),
+            ),
             samples: Some(vec![UsageSample {
                 fingerprint: Fingerprint(1),
                 schema: env.schema.clone(),

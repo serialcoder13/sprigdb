@@ -124,6 +124,7 @@ impl Core {
             listener: info.listener,
             generation: info.generation,
             authorization,
+            client_dc: None,
         })
     }
 }

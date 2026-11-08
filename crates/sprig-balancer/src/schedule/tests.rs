@@ -141,6 +141,8 @@ async fn failures_exclude_the_target_and_moves_back_are_counted() {
         approvals: Vec::new(),
         stuck: Vec::new(),
         rejected: Vec::new(),
+        weights: crate::judge::Weights::default(),
+        pinned: Vec::new(),
     };
     s.schedule(&plan(2, 1), &v, &auto, 4, &exec, &log, 100)
         .await;
@@ -269,6 +271,32 @@ async fn decisions_say_why_a_move_was_made_or_not() {
     assert_eq!(rows[0].d.reason_code, "not_worth_it");
     assert!(
         rows[0].d.summary.starts_with("did not move t2/g1/s2"),
+        "{}",
+        rows[0].d.summary
+    );
+}
+
+#[tokio::test]
+async fn pinned_tenants_get_a_rejected_decision_saying_so() {
+    let mut v = hot();
+    for t in v.tenants.values_mut() {
+        t.pinned = true;
+    }
+    let p = Planner::new(BalancerSettings::default());
+    let log = MemDecisionLog::new();
+    let mut s = Scheduler::new("mum1", "ctl-1");
+    p.rebalance(&v, 0);
+    let r = p.rebalance(&v, 3600);
+    s.schedule(&r, &v, &auto, 4, &Fake::default(), &log, 3600)
+        .await;
+    s.schedule(&r, &v, &auto, 4, &Fake::default(), &log, 3660)
+        .await;
+    let rows = log.of(TenantId(100));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].d.outcome, Outcome::Rejected);
+    assert_eq!(rows[0].d.reason_code, "pinned");
+    assert!(
+        rows[0].d.summary.contains("pinned by operator"),
         "{}",
         rows[0].d.summary
     );

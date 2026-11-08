@@ -9,6 +9,16 @@
 //! "R0 placement"), so [`GatewayLocator::cluster`] is also the cluster of
 //! the session's backend target.
 //!
+//! **Remote homes (chapter 24).** A tenant's map lives in its home DC's
+//! tier. When this DC has no home map for the tenant (it was never homed
+//! here, or it moved away, leaving a `quarantined` forwarding map), the
+//! locator reads the directory entry's `home_dc` and the home DC's map
+//! from that DC's tier of the one etcd (single-etcd mode; the relay's
+//! `RemoteMaps` in R2), and follows that map from then on: holds and moves
+//! reach this gateway whatever DC the tenant is homed in. A followed map
+//! that turns `quarantined` (the tenant moved on) makes the locator read
+//! the directory again.
+//!
 //! Catalog reads and writes, and database-level DDL (`CREATE DATABASE`
 //! needs an account that may create `t<id>_d...` schemas), run as the
 //! cluster's provisioning account `sprig_ctl`, through a small
@@ -18,14 +28,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use mysql_async::{OptsBuilder, Pool, PoolConstraints, PoolOpts};
-use sprig_catalog::placement::ShardMap;
+use sprig_catalog::placement::{MapRole, ShardMap};
 use sprig_catalog::{CatalogEndpoint, CatalogLocator, Store};
 use sprig_cluster::driver::NodeConnector as _;
 use sprig_cluster::registry::ClusterRegistry;
-use sprig_common::ids::{ClusterId, ShardId, TenantId};
+use sprig_common::ids::{ClusterId, DcId, ShardId, TenantId};
 use sprig_common::names::SchemaName;
 use sprig_common::{Result, SprigCode, SprigError};
-use sprig_meta::{Consistency, MetaStore, Mirror, Record};
+use sprig_meta::{Consistency, MetaStore, Mirror, Record, Tier, TierView};
 use sprig_provision::credentials::CredentialConnector;
 use sprig_shard::Placement;
 use tokio::sync::watch;
@@ -48,6 +58,15 @@ pub struct GatewayLocator {
     /// Every tenant map in this DC tier (`shardmaps/`), fed by a watch,
     /// started at first use: holds and moves (chapter 10).
     maps: OnceLock<Mirror>,
+    /// The same for other DCs' tiers, for tenants homed there (chapter 24).
+    remote_maps: Mutex<HashMap<DcId, Mirror>>,
+    /// The global tier, for directory entries; `None`: this DC only.
+    global: Option<Arc<dyn MetaStore>>,
+    /// Where each tenant's map is followed, and traffic counts.
+    routing: Arc<crate::dc::DcRouting>,
+    /// When a tenant's home was last read again after its map turned
+    /// `quarantined` (at most once a second).
+    refreshed: Mutex<HashMap<TenantId, std::time::Instant>>,
 }
 
 impl std::fmt::Debug for GatewayLocator {
@@ -63,7 +82,12 @@ impl GatewayLocator {
     /// records from `registry`, asking `backends` for writers.
     #[must_use]
     pub fn new(dc: Arc<dyn MetaStore>, registry: ClusterRegistry, backends: Arc<Backends>) -> Self {
+        let my_dc = registry.dc().clone();
         Self {
+            remote_maps: Mutex::new(HashMap::new()),
+            global: None,
+            routing: crate::dc::DcRouting::new(my_dc),
+            refreshed: Mutex::new(HashMap::new()),
             dc,
             registry,
             backends,
@@ -72,6 +96,118 @@ impl GatewayLocator {
             ctl_users: Mutex::new(HashMap::new()),
             maps: OnceLock::new(),
         }
+    }
+
+    /// The same locator, reading tenants' home DCs from `global`'s
+    /// directory (chapter 24), with `routing` noting each home.
+    #[must_use]
+    pub fn with_homes(
+        mut self,
+        global: Arc<dyn MetaStore>,
+        routing: Arc<crate::dc::DcRouting>,
+    ) -> Self {
+        self.global = Some(global);
+        self.routing = routing;
+        self
+    }
+
+    /// The routing state (traffic counts, homes).
+    #[must_use]
+    pub fn routing(&self) -> &Arc<crate::dc::DcRouting> {
+        &self.routing
+    }
+
+    /// This gateway's DC.
+    fn my_dc(&self) -> &DcId {
+        self.routing.dc()
+    }
+
+    /// The map mirror of DC `dc`.
+    fn maps_of(&self, dc: &DcId) -> Mirror {
+        if dc == self.my_dc() {
+            return self.maps().clone();
+        }
+        self.remote_maps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(dc.clone())
+            .or_insert_with(|| {
+                let tier = Tier::Dc(dc.clone());
+                let prefix = tier.key("shardmaps/").unwrap_or_else(|_| tier.root());
+                Mirror::spawn(TierView::over(&self.dc, tier), prefix)
+            })
+            .clone()
+    }
+
+    /// `tenant`'s map in DC `dc`, from the mirror.
+    fn mirrored_map(&self, dc: &DcId, tenant: TenantId) -> Option<ShardMap> {
+        let key = ShardMap::catalog_key(&Tier::Dc(dc.clone()), tenant).ok()?;
+        let kv = self.maps_of(dc).get(&key)?;
+        Record::<ShardMap>::decode(&kv.value).ok().map(|r| r.body)
+    }
+
+    /// The DC whose map this gateway follows for `tenant`: its home as last
+    /// read, else this DC.
+    #[must_use]
+    pub fn home_of(&self, tenant: TenantId) -> DcId {
+        self.routing.home(tenant)
+    }
+
+    /// Reads `tenant`'s home DC from the directory again (a followed map
+    /// turned `quarantined`), at most once a second per tenant.
+    async fn refresh_home(&self, tenant: TenantId) {
+        let Some(global) = &self.global else {
+            return;
+        };
+        {
+            let mut r = self.refreshed.lock().unwrap_or_else(PoisonError::into_inner);
+            let now = std::time::Instant::now();
+            if r.get(&tenant)
+                .is_some_and(|t| now.duration_since(*t) < std::time::Duration::from_secs(1))
+            {
+                return;
+            }
+            r.insert(tenant, now);
+        }
+        match sprig_shard::home::read_home(&**global, tenant).await {
+            Ok(Some(e)) => {
+                if e.home_dc != self.home_of(tenant) {
+                    tracing::info!(%tenant, home = %e.home_dc, "tenant homed in another DC now; following its map there");
+                }
+                // Start the mirror early, so the next statement finds it.
+                let _ = self.maps_of(&e.home_dc);
+                self.routing.set_home(tenant, e.home_dc);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!(%tenant, error = %e, "can't read the tenant's home DC"),
+        }
+    }
+
+    /// Where `tenant`'s map points and whether a mover cutover holds it,
+    /// following its home DC (chapter 24): reads the directory again when
+    /// the followed map turned `quarantined`. `None` until a map copy has
+    /// loaded.
+    pub async fn placement_followed(&self, tenant: TenantId) -> Option<Placement> {
+        let dc = self.home_of(tenant);
+        let map = self.mirrored_map(&dc, tenant);
+        if map.as_ref().is_none_or(|m| m.role != MapRole::Home) && self.global.is_some() {
+            self.refresh_home(tenant).await;
+            let now = self.home_of(tenant);
+            if now != dc {
+                // The new home's mirror may still be loading: keep following
+                // the forwarding map meanwhile.
+                if let Some(m) = self.mirrored_map(&now, tenant) {
+                    return Placement::of(&m).ok();
+                }
+            }
+        }
+        Placement::of(&map?).ok()
+    }
+
+    /// Changes whenever a map in the DC `tenant` is followed in changes.
+    #[must_use]
+    pub fn placement_changes_for(&self, tenant: TenantId) -> watch::Receiver<u64> {
+        self.maps_of(&self.home_of(tenant)).changes()
     }
 
     fn maps(&self) -> &Mirror {
@@ -109,13 +245,27 @@ impl GatewayLocator {
     /// 39072 if the tenant has no catalog in this DC; the store's errors.
     pub async fn cluster(&self, tenant: TenantId) -> Result<ClusterId> {
         let key = ShardMap::catalog_key(self.dc.tier(), tenant)?;
-        let kv = self
-            .dc
-            .get(&key, Consistency::Serializable)
-            .await?
-            .ok_or_else(|| not_here(tenant))?;
-        let cluster = Record::<ShardMap>::decode(&kv.value)?
-            .body
+        let local = match self.dc.get(&key, Consistency::Serializable).await? {
+            Some(kv) => Some(Record::<ShardMap>::decode(&kv.value)?.body),
+            None => None,
+        };
+        let map = match local {
+            Some(m) if m.role == MapRole::Home || self.global.is_none() => {
+                self.routing.set_home(tenant, self.my_dc().clone());
+                m
+            }
+            // Not homed here (chapter 24): the directory names the home.
+            local => match self.remote_map(tenant).await {
+                Ok(m) => m,
+                // The directory or the home's tier can't be read: a
+                // forwarding map still points at the cluster.
+                Err(e) => match local {
+                    Some(m) => m,
+                    None => return Err(e),
+                },
+            },
+        };
+        let cluster = map
             .catalog_cluster()
             .cloned()
             .ok_or_else(|| not_here(tenant))?;
@@ -124,6 +274,28 @@ impl GatewayLocator {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(tenant, cluster.clone());
         Ok(cluster)
+    }
+
+    /// `tenant`'s map in its home DC, from the directory entry's
+    /// `home_dc`; notes the home.
+    async fn remote_map(&self, tenant: TenantId) -> Result<ShardMap> {
+        let Some(global) = &self.global else {
+            return Err(not_here(tenant));
+        };
+        let entry = sprig_shard::home::read_home(&**global, tenant)
+            .await?
+            .ok_or_else(|| not_here(tenant))?;
+        let home = entry.home_dc;
+        let store = TierView::over(&self.dc, Tier::Dc(home.clone()));
+        let key = ShardMap::catalog_key(store.tier(), tenant)?;
+        let kv = store
+            .get(&key, Consistency::Serializable)
+            .await?
+            .ok_or_else(|| not_here(tenant))?;
+        let map = Record::<ShardMap>::decode(&kv.value)?.body;
+        let _ = self.maps_of(&home);
+        self.routing.set_home(tenant, home);
+        Ok(map)
     }
 
     /// The cluster last read for `tenant`, without I/O. Logins call it:

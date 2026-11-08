@@ -11,7 +11,7 @@
 //!           + Σ over remembered fingerprints still in the workload but not in
 //!             this sample, saved per run × runs when last seen   (periodic jobs)
 //!   cost   := index entry changes by the sample's writes × maintenance_cost_ms
-//!   ratio < min_usage_ratio and saved <= cost  → remove (IGNORED, then dropped)
+//!   ratio < min_usage_ratio and saved < cost   → remove (IGNORED, then dropped)
 //!   else                                       → keep; the next sample starts now
 //! IGNORED: a fingerprint x served got slower than max_regression_pct (and by
 //!   more than NOISE_FLOOR_MS) → visible again and kept; once the table has had
@@ -209,7 +209,9 @@ pub fn judge(
     }
     m.ratio = f(m.served) / f(m.reads);
     let floor = rules.min_usage_ratio * f(m.reads);
-    if f(m.served) >= floor || m.saved_ms + m.periodic_saved_ms > m.write_cost_ms {
+    // Strictly less (Kiran, decision O1): an index on a table nobody
+    // writes costs no write time, so even an unused one is kept there.
+    if f(m.served) >= floor || m.saved_ms + m.periodic_saved_ms >= m.write_cost_ms {
         return (UsageVerdict::Keep, m);
     }
     if m.unknown > 0 && f(m.served + m.unknown) >= floor {

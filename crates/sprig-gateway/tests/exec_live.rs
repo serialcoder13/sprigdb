@@ -27,6 +27,7 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, OptsBuilder, Row, SslOpts, Value as MyValue};
 use sprig_proto_mysql::client::{
@@ -238,7 +239,10 @@ async fn text_and_binary_results_match_the_backend() {
                 "binary rows differ ({persona:?}, {})",
                 topo.user
             );
-            // Column metadata: names, types and flags as the server sent them.
+            // Column metadata: names, types and flags as the server sent them,
+            // except that port 3306 reports a JSON column as MySQL 8.4 does:
+            // type 245 (MYSQL_TYPE_JSON), `BLOB BINARY` (chapter 28, "Output
+            // on port 3306"); MariaDB sends a BLOB.
             let cols = |rows: &[Row]| {
                 rows[0]
                     .columns_ref()
@@ -246,7 +250,27 @@ async fn text_and_binary_results_match_the_backend() {
                     .map(|c| (c.name_str().into_owned(), c.column_type(), c.flags()))
                     .collect::<Vec<_>>()
             };
-            assert_eq!(cols(&text), cols(&direct_text));
+            let mut want = cols(&direct_text);
+            if persona == Persona::MySql84 {
+                for (name, ty, flags) in &mut want {
+                    if name == "js" {
+                        *ty = ColumnType::MYSQL_TYPE_JSON;
+                        *flags |= ColumnFlags::BLOB_FLAG | ColumnFlags::BINARY_FLAG;
+                    }
+                }
+            }
+            assert_eq!(
+                cols(&text),
+                want,
+                "column metadata ({persona:?}, {})",
+                topo.user
+            );
+            assert_eq!(
+                cols(&bin),
+                want,
+                "binary column metadata ({persona:?}, {})",
+                topo.user
+            );
         }
         c.disconnect().await.unwrap();
         db.drop(&addr, topo.user).await;
@@ -268,29 +292,83 @@ fn blob(len: usize, seed: u64) -> Vec<u8> {
 
 /// Rows above one protocol packet (16 MiB) in both directions, text and
 /// binary.
+/// What `large_multi_packet_rows` needs: `max_allowed_packet` above 16 MiB.
+const BIG_PACKET: u64 = 64 << 20;
+
+/// Opens a transaction on a backend connection whose `max_allowed_packet`
+/// is [`BIG_PACKET`]. A connection keeps the global value it was opened
+/// with, so one the gateway pooled before the test raised the global is
+/// killed (from `side`, on its own server) and the session tries again:
+/// the gateway discards a connection the server closed while it was idle
+/// (chapter 06, "Failure handling") and opens a new one.
+async fn begin_with_big_packet(c: &mut Conn, side: &mut [Conn]) {
+    let mut ids = Vec::new();
+    for s in side.iter_mut() {
+        ids.push(s.query_first::<u64, _>("SELECT @@server_id").await.unwrap());
+    }
+    for _ in 0..64 {
+        c.query_drop("BEGIN").await.unwrap();
+        let (packet, thread, server): (u64, u64, u64) = c
+            .query_first("SELECT @@max_allowed_packet, @@pseudo_thread_id, @@server_id")
+            .await
+            .unwrap()
+            .unwrap();
+        if packet >= BIG_PACKET {
+            return;
+        }
+        c.query_drop("ROLLBACK").await.unwrap();
+        let i = ids
+            .iter()
+            .position(|id| *id == Some(server))
+            .expect("the writer is one of the side servers");
+        side[i]
+            .query_drop(format!("KILL CONNECTION {thread}"))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no backend connection with max_allowed_packet {BIG_PACKET} after 64 tries");
+}
+
 #[tokio::test]
 async fn large_multi_packet_rows() {
     let Some(eps) = endpoints("large_multi_packet_rows") else {
         return;
     };
-    // The servers need max_allowed_packet above 16 MiB (new connections
-    // only: the gateway's pooled connections may predate this).
+    // The servers need max_allowed_packet above 16 MiB. Only new
+    // connections get it: begin_with_big_packet skips the gateway's older
+    // pooled ones.
+    let mut sides = Vec::new();
     for t in TOPOS {
-        if let Some(mut side) = servers(t.servers).await {
-            for s in &mut side {
-                let _ = s
-                    .query_drop("SET GLOBAL max_allowed_packet = 67108864")
-                    .await;
-            }
+        let mut side = servers(t.servers).await;
+        for s in side.iter_mut().flatten() {
+            s.query_drop(format!("SET GLOBAL max_allowed_packet = {BIG_PACKET}"))
+                .await
+                .unwrap();
         }
+        sides.push(side);
     }
     for (addr, persona, topo) in matrix(&eps) {
+        let ti = TOPOS.iter().position(|t| t.user == topo.user).unwrap();
+        let Some(side) = sides[ti].as_mut() else {
+            skip::report_missing(topo.servers, "large_multi_packet_rows");
+            continue;
+        };
         let db = Db::create(&addr, topo.user, "gw_large").await;
-        let mut c = gw(&addr, topo.user, Some(&db.name)).await;
+        // The client's own limit: otherwise mysql_async takes the value the
+        // login's backend connection reports, which may be an old one.
+        let mut c = Conn::new(
+            opts(&addr, topo.user, PASSWORD, Some(&db.name))
+                .max_allowed_packet(Some(usize::try_from(BIG_PACKET).unwrap())),
+        )
+        .await
+        .unwrap();
         c.query_drop("CREATE TABLE b (id INT PRIMARY KEY, v LONGBLOB)")
             .await
             .unwrap();
         for (id, len) in [(1u32, 4 << 20), (2, (16 << 20) + 1024)] {
+            // One transaction, so every statement stays on that connection.
+            begin_with_big_packet(&mut c, side).await;
             let data = blob(len, u64::from(id));
             c.exec_drop("INSERT INTO b VALUES (?, ?)", (id, data.clone()))
                 .await
@@ -318,6 +396,7 @@ async fn large_multi_packet_rows() {
                 .await
                 .unwrap();
             assert_eq!(len_srv, Some(len as u64));
+            c.query_drop("COMMIT").await.unwrap();
         }
         c.disconnect().await.unwrap();
         db.drop(&addr, topo.user).await;

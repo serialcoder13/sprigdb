@@ -81,6 +81,9 @@ pub struct FleetConfig {
     pub huge: u32,
     /// Size of a huge tenant, GB.
     pub huge_gb: f64,
+    /// Pin every n-th starting tenant (ids 1, n+1, 2n+1, ...) where it
+    /// starts; 0 pins none.
+    pub pin_every: u64,
 }
 
 impl FleetConfig {
@@ -105,6 +108,7 @@ impl FleetConfig {
             size_spread: (0.1, 2.5),
             huge: 0,
             huge_gb: 0.0,
+            pin_every: 0,
         }
     }
 
@@ -175,6 +179,10 @@ pub struct FleetReport {
     pub decisions: u64,
     /// Moves by reason.
     pub moves_by_reason: BTreeMap<String, u64>,
+    /// Pinned tenants.
+    pub pinned: u64,
+    /// Pinned tenants' shards that moved (must be 0).
+    pub pinned_moved: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -321,11 +329,15 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
         / f64::from(cfg.tenants.saturating_sub(cfg.huge).max(1));
     let (lo, hi) = cfg.size_spread;
     let (huge, huge_gb) = (u64::from(cfg.huge), cfg.huge_gb);
+    let (starting, pin_every) = (u64::from(cfg.tenants), cfg.pin_every);
     let new_tenant = |t: u64, rng: &SimRng, tenants: &mut BTreeMap<TenantId, TenantView>| {
         let mut tv = TenantView::new(TenantId(t));
         // A third of the tenants are pinned to the home DC.
         if t.is_multiple_of(3) {
             tv.allowed_dcs = Some(BTreeSet::from([dc("mum1")]));
+        }
+        if t <= starting && pin_every > 0 && t % pin_every == 1 % pin_every {
+            tv.pinned = true;
         }
         tenants.insert(TenantId(t), tv);
         let is_huge = t <= huge;
@@ -610,6 +622,11 @@ async fn run_async(cfg: &FleetConfig) -> FleetReport {
         })
         .count() as u64;
     report.decisions = log.all().len() as u64;
+    report.pinned = tenants.values().filter(|t| t.pinned).count() as u64;
+    report.pinned_moved = shards
+        .iter()
+        .filter(|(k, s)| tenants.get(&k.tenant).is_some_and(|t| t.pinned) && s.path.len() > 1)
+        .count() as u64;
     report
 }
 

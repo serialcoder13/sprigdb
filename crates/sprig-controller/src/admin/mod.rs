@@ -23,6 +23,8 @@
 //! | `Tenants.GetTenant` | `GET /admin/v1/tenants/{name}` |
 //! | `Tenants.DeleteTenant` | `DELETE /admin/v1/tenants/{name}` |
 //! | `Users.CreateUser` (interim) | `POST /admin/v1/tenants/{name}/users` ([`crate::users`]) |
+//! | `Tenants.ExportAccounts`, `ImportAccounts` (chapter 47) | `GET`, `POST /admin/v1/tenants/{name}/accounts` |
+//! | `Tenants.MoveTenant`, `PinTenant`, `UnpinTenant`, traffic | `/admin/v1/tenants/{name}:move`, `.../move`, `.../traffic`, `/admin/v1/traffic/reports` ([`dcmove`]) |
 //! | `Jobs.ListJobs`, `GetJob`, `CancelJob` | `/admin/v1/jobs[/{job_id}[:cancel]]` ([`jobs`]) |
 //! | `Settings.*` | `/admin/v1/settings[/{key}]`, `/admin/v1/tenants/{name}/settings` ([`crate::settings_admin`]) |
 //! | `Indexes.*`, `Explain.ExplainQuery` | `/admin/v1/tenants/{name}/indexes[/{index}[:action]]`, `.../recommendations`, `.../queries/{fingerprint}:explain` ([`crate::autoindex_admin`]) |
@@ -43,9 +45,11 @@
 //! `[controller] admin_addr` (default `127.0.0.1:7480`), authenticated by
 //! an optional bearer token (`[controller] admin_token_file`).
 
+pub mod dcmove;
 pub mod http;
 pub mod jobs;
 pub mod mover;
+pub mod placement_admin;
 pub mod types;
 
 use std::sync::Arc;
@@ -102,6 +106,7 @@ pub struct AdminService {
     settings: Option<Arc<dyn SettingsAdmin>>,
     indexes: Option<Arc<dyn AutoIndexAdmin>>,
     placement: Option<Arc<crate::balancer_loop::BalancerLoop>>,
+    moves: Option<Arc<crate::migrate::DcMoves>>,
 }
 
 impl std::fmt::Debug for AdminService {
@@ -132,6 +137,7 @@ impl AdminService {
             settings: None,
             indexes: None,
             placement: None,
+            moves: None,
         }
     }
 
@@ -217,7 +223,11 @@ impl AdminService {
         &self,
         tenant: &str,
     ) -> Result<sprig_balancer::explain::PlacementExplanation> {
-        self.placement()?.explain_placement(tenant).await
+        let mut e = self.placement()?.explain_placement(tenant).await?;
+        if e.pin.is_none() {
+            e.pin = self.pin_of(e.tenant).await;
+        }
+        Ok(e)
     }
 
     /// `Explain.ExplainDecision`: one row of a tenant's decision log.
@@ -261,6 +271,37 @@ impl AdminService {
             .as_ref()
             .ok_or_else(|| invalid("this controller doesn't manage users"))?
             .create(tenant, req)
+            .await
+    }
+
+    /// A tenant's accounts for `sprigctl tenant export` (chapter 47).
+    ///
+    /// # Errors
+    /// As [`UserAdmin::export_accounts`].
+    pub async fn export_accounts(
+        &self,
+        tenant: &str,
+    ) -> Result<sprig_auth::portable::PortableAccounts> {
+        self.users
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't manage users"))?
+            .export_accounts(tenant)
+            .await
+    }
+
+    /// Creates exported accounts for `sprigctl tenant import` (chapter 47).
+    ///
+    /// # Errors
+    /// As [`UserAdmin::import_accounts`].
+    pub async fn import_accounts(
+        &self,
+        tenant: &str,
+        accounts: sprig_auth::portable::PortableAccounts,
+    ) -> Result<crate::users::ImportAccountsResponse> {
+        self.users
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't manage users"))?
+            .import_accounts(tenant, accounts)
             .await
     }
 

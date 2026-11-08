@@ -29,9 +29,9 @@
 
 pub mod bootstrap;
 pub mod cache;
-pub mod discovery;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
+pub mod discovery;
 pub mod elect;
 pub mod etcd;
 pub mod key;

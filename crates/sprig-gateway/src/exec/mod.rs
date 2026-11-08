@@ -26,6 +26,7 @@
 //! capabilities and collation are known (the pool key depends on them).
 
 mod capture;
+mod dc;
 mod follow;
 pub mod relay;
 pub mod settings;
@@ -769,8 +770,15 @@ impl SessionExec for PassSession {
         req: Request,
         out: &mut dyn ResultSink,
     ) -> Result<ExecSummary> {
+        // Chapter 24: `SET @sprig_dc` is the gateway's, never MariaDB's.
+        if let Some(r) = self.sprig_dc_set(cx, &req, out).await {
+            return r;
+        }
         // Tenant sessions wait out a mover's hold and follow a move.
-        self.follow_tenant().await;
+        if let Err(e) = self.follow_tenant().await {
+            return Err(self.map_error(e));
+        }
+        self.count_traffic(cx, &req);
         let r = self.run_request(cx, req, out).await;
         // Tenant sessions: no error the gateway returns carries a physical
         // name (the relay maps the ones it sends itself).

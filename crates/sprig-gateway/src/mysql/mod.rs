@@ -463,6 +463,15 @@ async fn login_phase(
         },
     };
     session.set_principal(principal.clone());
+    // Chapter 24: the client's DC, from the connection attribute.
+    session.client_dc = crate::dc::hint(
+        "mysql",
+        attrs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("sprig_dc"))
+            .map(|(_, v)| v.as_str()),
+    )
+    .known();
     // limits.tenant_connections (chapter 04 step 7): 39001 after login.
     let attached = match ctx.limits.as_ref().map(|l| l.attach(principal.tenant)) {
         Some(Err(e)) => {

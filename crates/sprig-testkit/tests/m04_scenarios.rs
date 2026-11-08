@@ -880,7 +880,8 @@ async fn chapter_13_scenarios_on_one_topology() {
     // removal is the O1 scenario's): retire_user_indexes off on u.
     ddl(
         &mut g,
-        "ALTER TABLE u SPRIG SET (auto_index.retire_user_indexes = 'off')",
+        "ALTER TABLE u SPRIG SET (auto_index.retire_user_indexes = 'off', \
+         auto_index.maintenance_cost_ms = 10)",
     )
     .await;
     let u_auto = done["u"].1.name.clone();
@@ -889,6 +890,15 @@ async fn chapter_13_scenarios_on_one_topology() {
     let mut last = String::new();
     while t3.elapsed() < Duration::from_secs(15 * 60) {
         round(&mut g, &mut rng, &mut load, n, &mut first).await;
+        // Writes to a: an index on a table nobody writes is kept, and the
+        // query (a) served is remembered until they cost more (decision O1).
+        g.query_drop(format!(
+            "UPDATE u SET a = {} WHERE id = {}",
+            rng.next(3000),
+            1 + rng.next(small)
+        ))
+        .await
+        .tolerate();
         tokio::time::sleep(Duration::from_millis(200)).await;
         let rows = auto_rows(&c, &db).await;
         let Some(r) = rows.iter().find(|r| r.name == u_auto) else {
@@ -1047,7 +1057,8 @@ fn sprigctl(c: &Cfg, args: &[&str]) -> (bool, String) {
 /// reads are made `IGNORED`, watched for `usage_sample_reads` reads and
 /// dropped; a used user index, the primary key, a `UNIQUE` index and a
 /// foreign key's index are never touched; `retire_user_indexes =
-/// recommend` only recommends; `sprigctl index restore` brings a retiring
+/// recommend` only recommends; an unused index on a table nobody writes
+/// (`r`) is kept; `sprigctl index restore` brings a retiring
 /// index back and recreates a dropped one. Once `(a)`'s query stops, its
 /// remembered savings protect it (the periodic-job rule) until writes to
 /// `a`, at 10 ms per entry change on `u`, cost more. No clock is moved: every
@@ -1084,6 +1095,8 @@ async fn usage_based_removal_on_one_topology() {
          KEY idx_w_old (b)) ENGINE=InnoDB",
         "CREATE TABLE x (id INT PRIMARY KEY, b INT NOT NULL, pad VARCHAR(100) NOT NULL, \
          KEY idx_x_old (b)) ENGINE=InnoDB",
+        "CREATE TABLE r (id INT PRIMARY KEY, b INT NOT NULL, pad VARCHAR(100) NOT NULL, \
+         KEY idx_r_old (b)) ENGINE=InnoDB",
     ] {
         ddl(&mut g, sql).await;
     }
@@ -1115,7 +1128,7 @@ async fn usage_based_removal_on_one_topology() {
         "SELECT seq, seq % 3000, seq % 100, seq, 1 + seq % 3000, REPEAT('u', 60)",
     )
     .await;
-    for t in ["w", "x"] {
+    for t in ["w", "x", "r"] {
         fill(
             &c,
             &schema,
@@ -1180,7 +1193,25 @@ async fn usage_based_removal_on_one_topology() {
             ))
             .await
             .tolerate();
-            reads += 4 + u64::from(a_query);
+            g.query_drop(format!(
+                "SELECT pad FROM r WHERE id = {}",
+                1 + rng.next(10_000)
+            ))
+            .await
+            .tolerate();
+            reads += 5 + u64::from(a_query);
+        }
+        // w and x are written (their unused indexes cost something); r,
+        // read-only, never is: its unused index is kept (Kiran, O1).
+        for t in ["w", "x"] {
+            g.query_drop(format!(
+                "UPDATE {t} SET b = {} WHERE id = {}",
+                rng.next(100),
+                1 + rng.next(10_000)
+            ))
+            .await
+            .tolerate();
+            writes += 1;
         }
         g.query_drop(format!(
             "UPDATE u SET pad = REPEAT('v', 60) WHERE id = {}",
@@ -1292,7 +1323,17 @@ async fn usage_based_removal_on_one_topology() {
             .as_ref()
             .is_some_and(|n| autos.iter().any(|r| &r.name == n && r.state == "dropped"))
             && state_of("u", "idx_u_old").as_deref() == Some("dropped");
-        if u_done && restored_x && state_of("w", "idx_w_old").as_deref() == Some("recommended") {
+        let r_kept = users.iter().any(|r| {
+            r.table == "r"
+                && r.name == "idx_r_old"
+                && r.state == "serving"
+                && r.observed["usage"]["verdict"] == "keep"
+        });
+        if u_done
+            && restored_x
+            && r_kept
+            && state_of("w", "idx_w_old").as_deref() == Some("recommended")
+        {
             break;
         }
     }
@@ -1331,6 +1372,7 @@ async fn usage_based_removal_on_one_topology() {
     let u_ix = shard_indexes(&c, &schema, "u").await;
     let x_ix = shard_indexes(&c, &schema, "x").await;
     let w_ix = shard_indexes(&c, &schema, "w").await;
+    let r_ix = shard_indexes(&c, &schema, "r").await;
     let autos = auto_rows(&c, &db).await;
     let u_auto = u_auto.expect("(a) built on u");
     let a_row = autos.iter().find(|r| r.name == u_auto).unwrap();
@@ -1347,6 +1389,7 @@ async fn usage_based_removal_on_one_topology() {
             "user": users.iter().map(|r| json!({"table": r.table, "index": r.name,
                      "state": r.state, "drop_reason": r.drop_reason})).collect::<Vec<_>>(),
             "u_indexes_ignored": u_ix, "w_indexes_ignored": w_ix, "x_indexes_ignored": x_ix,
+            "r_indexes_ignored": r_ix,
         },
         "sprigctl_index_list": listing,
     });
@@ -1386,6 +1429,17 @@ async fn usage_based_removal_on_one_topology() {
     // recommend: only recommended, still visible.
     assert_eq!(st("w", "idx_w_old").as_deref(), Some("recommended"));
     assert_eq!(w_ix.get("idx_w_old"), Some(&false));
+    // A table nobody writes: its unused index is kept (0 saved against 0
+    // write cost), judged and reported with a ratio of 0.
+    assert_eq!(st("r", "idx_r_old").as_deref(), Some("serving"));
+    assert_eq!(r_ix.get("idx_r_old"), Some(&false));
+    let r_usage = &users
+        .iter()
+        .find(|r| r.table == "r" && r.name == "idx_r_old")
+        .unwrap()
+        .observed["usage"];
+    assert_eq!(r_usage["verdict"], "keep", "{r_usage}");
+    assert_eq!(r_usage["last"]["served"], 0, "{r_usage}");
     // Restored while retiring: visible and pinned, through more reads.
     assert_eq!(st("x", "idx_x_old").as_deref(), Some("pinned"));
     assert_eq!(x_ix.get("idx_x_old"), Some(&false));

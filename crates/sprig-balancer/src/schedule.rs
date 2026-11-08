@@ -443,6 +443,47 @@ impl Scheduler {
             }
             self.block("not_worth_it");
         }
+        for p in &report.pinned {
+            let mode = match mode_of(p.tenant) {
+                BalancerMode::Off => continue,
+                BalancerMode::Auto => Mode::Applied,
+                BalancerMode::Recommend => Mode::Recommended,
+                BalancerMode::DryRun => Mode::DryRun,
+            };
+            let key = (p.shard, p.cluster.clone());
+            if self
+                .rejected_seen
+                .get(&key)
+                .is_some_and(|at| *at + 86_400 > now)
+            {
+                continue;
+            }
+            self.rejected_seen.insert(key, now);
+            let d = NewDecision {
+                decided_at_us: us(now),
+                component: "balancer".to_owned(),
+                kind: "shard.move".to_owned(),
+                subject_type: "shard".to_owned(),
+                subject_id: p.shard.to_string(),
+                mode,
+                outcome: Outcome::Rejected,
+                reason_code: "pinned".to_owned(),
+                summary: p.why.clone(),
+                evidence: json!({
+                    "cluster": p.cluster.to_string(),
+                    "would_move_for": p.reason.code(),
+                    "trigger": report.trigger,
+                }),
+                alternatives: None,
+                job_id: None,
+                parent_id: None,
+                actor: self.actor.clone(),
+                dc_id: self.dc.clone(),
+            };
+            if let Err(e) = log.record(p.tenant, &d).await {
+                tracing::warn!(tenant = %p.tenant, error = %e, "pinned decision not written");
+            }
+        }
         self.rejected_seen.retain(|_, at| *at + 86_400 > now);
     }
 

@@ -46,6 +46,7 @@
 //! registration and the other `MetaStore` caches (steps 4-10).
 
 pub mod backend;
+pub mod dc;
 pub mod exec;
 pub mod frontend;
 pub mod http;
@@ -57,6 +58,7 @@ pub mod peer;
 pub mod pipeline;
 pub mod reads;
 pub mod registry;
+pub mod observe;
 pub mod session;
 pub mod tenant;
 pub mod tls;
@@ -112,6 +114,9 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         () = ctx.shutdown.cancelled() => return Ok(()),
         () = live.ready() => {}
     }
+    // Chapter 47: trace sampling, the OTLP endpoint and the audit spool
+    // limit follow their settings.
+    let _telemetry_settings = sprig_settings::ops::apply_live(&live, &dc);
 
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let certs = Arc::new(CertStore::new(clock.clone()));
@@ -211,10 +216,12 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         live: live.clone(),
         dc: dc.clone(),
     });
-    let shared_exec = limits::limited(
+    // Chapter 47's SLIs and root trace span outermost, so admission waits
+    // count in statement latency.
+    let shared_exec = observe::observed(limits::limited(
         pipeline::with_workload(Arc::new(executor), workload),
         Arc::clone(&limiter),
-    );
+    ));
     // The MySQL and MariaDB front ends (chapter 05).
     let mysql = mysql::MySqlStack::start(
         mysql::StackConfig {

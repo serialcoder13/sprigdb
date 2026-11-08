@@ -187,6 +187,9 @@ struct Current {
     /// schema differs from the session's, so a failed one leaves that
     /// connection dirty.
     sets_schema: bool,
+    /// The statement's `backend.query` trace span (chapter 47): open from
+    /// `run` until `finish` drops the statement.
+    span: Option<tracing::Span>,
 }
 
 impl Current {
@@ -520,7 +523,10 @@ impl BackendSession {
         if cur.done || cur.failed {
             return Ok(None);
         }
-        match cur.lease.conn().client.next_packet().await {
+        let waited = Instant::now();
+        let packet = cur.lease.conn().client.next_packet().await;
+        crate::observe::backend_time(waited.elapsed());
+        match packet {
             Ok(Some(p)) => {
                 cur.observe(&p);
                 cur.relayed = true;
@@ -588,6 +594,7 @@ impl BackendSession {
             return Err(SprigError::internal("finish without a statement"));
         };
         let node = cur.lease.key().node_key();
+        let draining = Instant::now();
         if !cur.failed && !cur.done {
             if let Some(p) = cur.first.take() {
                 drop(p);
@@ -617,6 +624,7 @@ impl BackendSession {
                 }
             }
         }
+        crate::observe::backend_time(draining.elapsed());
         let outcome = |cur: &Current, pinned: bool| StmtOutcome {
             status: cur.status.unwrap_or_default(),
             warnings: cur.warnings,
@@ -954,9 +962,13 @@ impl BackendSession {
         metrics::counter!("sprig_backend_failures_total", "cluster" => self.target.cluster.to_string(), "kind" => kind)
             .increment(1);
         match code {
-            Some(SprigCode::OutcomeUnknown) => SprigError::new(
+            Some(SprigCode::OutcomeUnknown) if stmt.commits() => SprigError::new(
                 SprigCode::OutcomeUnknown,
                 "the backend connection was lost during a commit; the outcome is unknown",
+            ),
+            Some(SprigCode::OutcomeUnknown) => SprigError::new(
+                SprigCode::OutcomeUnknown,
+                "the backend connection was lost while the statement ran; whether it took effect is unknown",
             ),
             Some(SprigCode::SessionStateLost) => SprigError::new(
                 SprigCode::SessionStateLost,
@@ -1209,8 +1221,34 @@ impl BackendSession {
         }
     }
 
+    /// [`run_statement`](Self::run_statement) inside a `backend.query`
+    /// span (chapter 47), adding its time to the request's backend time.
+    async fn run(&mut self, info: &StmtInfo, req: Req<'_>) -> Result<()> {
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(
+            target: sprig_common::telemetry::trace::TARGET,
+            "backend.query",
+            cluster = %self.target.cluster,
+            node = tracing::field::Empty,
+            route = tracing::field::Empty,
+            error = tracing::field::Empty,
+        );
+        let started = Instant::now();
+        let r = self.run_statement(info, req).instrument(span.clone()).await;
+        crate::observe::backend_time(started.elapsed());
+        if r.is_err() {
+            span.record("error", true);
+        }
+        if let Some(c) = self.cur.as_mut() {
+            span.record("node", tracing::field::display(c.lease.key().node_key()));
+            span.record("route", tracing::field::debug(c.route));
+            c.span = Some(span);
+        }
+        r
+    }
+
     #[allow(clippy::too_many_lines)]
-    async fn run(&mut self, info: &StmtInfo, mut req: Req<'_>) -> Result<()> {
+    async fn run_statement(&mut self, info: &StmtInfo, mut req: Req<'_>) -> Result<()> {
         if self.cur.is_some() {
             let _ = self.finish().await;
         }
@@ -1338,6 +1376,16 @@ impl BackendSession {
                             all.extend_from_slice(b"; ");
                         }
                         Wait::None => {}
+                    }
+                    // Sampled statements carry their trace context to
+                    // MariaDB (chapter 47, "Propagation"), after
+                    // fingerprinting.
+                    if let Some(tc) = sprig_common::telemetry::trace::current()
+                        && tc.sampled
+                    {
+                        all.extend_from_slice(b"/* traceparent='");
+                        all.extend_from_slice(tc.traceparent().as_bytes());
+                        all.extend_from_slice(b"' */ ");
                     }
                     all.extend_from_slice(sql);
                     conn.client.send_query(&all).await?;
@@ -1531,6 +1579,7 @@ impl BackendSession {
                 resultset: false,
                 probe: probe_before,
                 sets_schema,
+                span: None,
             };
             let first = match outgoing {
                 // A prepare has no response beyond what prepare_cached read.
@@ -1733,6 +1782,26 @@ impl BackendSession {
             let limits = self.backends.limits(&self.target.cluster);
             self.backends.pools.release(lease, Release::Discard, limits);
             self.connection_gone();
+            // Chapter 24: state that can't follow the tenant to another
+            // DC ends the session with 39502 (SQLSTATE 08S01).
+            let other_dc = sprig_cluster::registry::dc_of(&self.target.cluster)
+                != sprig_cluster::registry::dc_of(&cluster);
+            if other_dc
+                && self
+                    .deferred
+                    .as_ref()
+                    .is_some_and(|e| e.code() == Some(SprigCode::SessionStateLost))
+            {
+                self.deferred = Some(SprigError::new(
+                    SprigCode::SessionMoved,
+                    format!(
+                        "the tenant moved to data center {}; this session held state that \
+                         can't follow it (temporary tables, locks or XA): reconnect",
+                        sprig_cluster::registry::dc_of(&cluster)
+                            .map_or_else(|| "?".to_owned(), |d| d.to_string())
+                    ),
+                ));
+            }
         }
         self.causal = GtidSet::default();
         tracing::info!(from = %self.target.cluster, to = %cluster, "session follows its tenant to another cluster");

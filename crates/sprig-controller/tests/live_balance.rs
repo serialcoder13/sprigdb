@@ -253,7 +253,22 @@ async fn skewed_fleet_evens_out_without_oscillating() {
     let mut pools = BTreeMap::new();
     for (i, t) in tenants().iter().enumerate() {
         let p = pool(18307, &format!("{t}.app"), PW);
-        let mut c = p.get_conn().await.unwrap();
+        // A cluster restarted by another test may take a few seconds to be
+        // usable again.
+        let mut c = {
+            let mut tries = 0;
+            loop {
+                match p.get_conn().await {
+                    Ok(c) => break c,
+                    Err(e) if tries < 30 => {
+                        tries += 1;
+                        println!("  [{t}] waiting for the gateway: {e}");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(e) => panic!("{t}: {e}"),
+                }
+            }
+        };
         c.query_drop("CREATE DATABASE IF NOT EXISTS bl_app")
             .await
             .unwrap();

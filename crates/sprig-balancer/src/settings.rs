@@ -156,6 +156,51 @@ key! {
     "Co-writes that bind groups"
 }
 key! {
+    /// `balancer.benefit_urgency_weight` (see `crate::judge`).
+    BENEFIT_URGENCY_WEIGHT: f64 = "balancer.benefit_urgency_weight", crate::judge::URGENCY_WEIGHT, PROCESS, 0, 100, 11,
+    "How much a source's need for relief multiplies what a move sheds"
+}
+key! {
+    /// `balancer.benefit_evening_weight` (see `crate::judge`).
+    BENEFIT_EVENING_WEIGHT: f64 = "balancer.benefit_evening_weight", crate::judge::EVENING_WEIGHT, PROCESS, 0, 100, 11,
+    "How much evening the source and target counts in a move's benefit"
+}
+key! {
+    /// `balancer.cost_copy_weight` (see `crate::judge`).
+    COST_COPY_WEIGHT: f64 = "balancer.cost_copy_weight", crate::judge::COPY_WEIGHT, PROCESS, 0, 100, 11,
+    "Cost of copying a move's bytes, per share of the target's storage"
+}
+key! {
+    /// `balancer.cost_write_weight` (see `crate::judge`).
+    COST_WRITE_WEIGHT: f64 = "balancer.cost_write_weight", crate::judge::PAUSE_WEIGHT, PROCESS, 0, 100, 11,
+    "Cost of the tenant's write rate (pause, catch-up) at full rate, in typical units"
+}
+key! {
+    /// `balancer.cost_write_full_rows_per_sec` (see `crate::judge`).
+    COST_WRITE_FULL_ROWS_PER_SEC: f64 = "balancer.cost_write_full_rows_per_sec", crate::judge::PAUSE_WRITES, PROCESS, 1, 10_000_000, 11,
+    "Rows written per second at which the write-rate cost is full"
+}
+key! {
+    /// `balancer.cost_load_weight` (see `crate::judge`).
+    COST_LOAD_WEIGHT: f64 = "balancer.cost_load_weight", crate::judge::BUSY_WEIGHT, PROCESS, 0, 100, 11,
+    "Cost of copying between fully busy clusters, in typical units"
+}
+key! {
+    /// `balancer.cost_recent_move_weight` (see `crate::judge`).
+    COST_RECENT_MOVE_WEIGHT: f64 = "balancer.cost_recent_move_weight", crate::judge::RECENT_TENANT, PROCESS, 0, 100, 11,
+    "Cost of moving a tenant that moved in the last 7 days, in typical units"
+}
+key! {
+    /// `balancer.cost_running_move_weight` (see `crate::judge`).
+    COST_RUNNING_MOVE_WEIGHT: f64 = "balancer.cost_running_move_weight", crate::judge::IN_FLIGHT, PROCESS, 0, 100, 11,
+    "Cost per move already running on the source or target, in typical units"
+}
+key! {
+    /// `balancer.cost_fixed_weight` (see `crate::judge`).
+    COST_FIXED_WEIGHT: f64 = "balancer.cost_fixed_weight", crate::judge::OVERHEAD, PROCESS, 0, 100, 11,
+    "Every move's fixed cost, in typical units"
+}
+key! {
     /// `balancer.weight_cowrite`.
     WEIGHT_COWRITE: f64 = "balancer.weight_cowrite", 0.30, PROCESS, 0, 100, 11,
     "Score weight, split co-writes"
@@ -327,6 +372,8 @@ pub struct BalancerSettings {
     pub min_gain: f64,
     /// `benefit_cost_ratio`.
     pub benefit_cost_ratio: f64,
+    /// The judgement's weights.
+    pub weights: crate::judge::Weights,
     /// Moves at once per DC.
     pub max_concurrent_moves_per_dc: u32,
     /// Score weights.
@@ -356,6 +403,7 @@ impl Default for BalancerSettings {
             sustain: Duration::from_secs(SUSTAIN_MINUTES.default * 60),
             min_gain: pct(MIN_GAIN_PCT.default),
             benefit_cost_ratio: BENEFIT_COST_RATIO.default,
+            weights: crate::judge::Weights::default(),
             max_concurrent_moves_per_dc: MAX_CONCURRENT_MOVES_PER_DC.default,
             weight_cowrite: WEIGHT_COWRITE.default,
             weight_xa: WEIGHT_XA.default,
@@ -388,6 +436,17 @@ impl BalancerSettings {
             sustain: Duration::from_secs(s.get(&SUSTAIN_MINUTES, ctx) * 60),
             min_gain: pct(s.get(&MIN_GAIN_PCT, ctx)),
             benefit_cost_ratio: s.get(&BENEFIT_COST_RATIO, ctx),
+            weights: crate::judge::Weights {
+                urgency: s.get(&BENEFIT_URGENCY_WEIGHT, ctx),
+                evening: s.get(&BENEFIT_EVENING_WEIGHT, ctx),
+                copy: s.get(&COST_COPY_WEIGHT, ctx),
+                write: s.get(&COST_WRITE_WEIGHT, ctx),
+                write_full_rows_per_sec: s.get(&COST_WRITE_FULL_ROWS_PER_SEC, ctx),
+                load: s.get(&COST_LOAD_WEIGHT, ctx),
+                recent_move: s.get(&COST_RECENT_MOVE_WEIGHT, ctx),
+                running_move: s.get(&COST_RUNNING_MOVE_WEIGHT, ctx),
+                fixed: s.get(&COST_FIXED_WEIGHT, ctx),
+            },
             max_concurrent_moves_per_dc: s.get(&MAX_CONCURRENT_MOVES_PER_DC, ctx),
             weight_cowrite: s.get(&WEIGHT_COWRITE, ctx),
             weight_xa: s.get(&WEIGHT_XA, ctx),
@@ -558,6 +617,23 @@ mod tests {
         assert_eq!(
             BalancerSettings::resolve(&s, &ctx).mode,
             BalancerMode::DryRun
+        );
+        s.set_value(
+            Level::Dc,
+            &ctx,
+            "balancer.cost_fixed_weight",
+            &Value::Float(0.1),
+        )
+        .unwrap();
+        assert_eq!(BalancerSettings::resolve(&s, &ctx).weights.fixed, 0.1);
+        assert!(
+            s.set_value(
+                Level::Dc,
+                &ctx,
+                "balancer.cost_copy_weight",
+                &Value::Float(-1.0)
+            )
+            .is_err()
         );
         // Hard bounds refuse a mode that doesn't exist.
         assert!(

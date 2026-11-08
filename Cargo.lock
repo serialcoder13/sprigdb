@@ -2183,6 +2183,7 @@ dependencies = [
  "toml",
  "tonic",
  "tracing",
+ "tracing-subscriber",
  "twox-hash",
  "zeroize",
 ]
@@ -2469,7 +2470,9 @@ dependencies = [
  "mysql_async",
  "serde",
  "serde_json",
+ "sha2",
  "sprig-advisor",
+ "sprig-auth",
  "sprig-balancer",
  "sprig-cluster",
  "sprig-common",

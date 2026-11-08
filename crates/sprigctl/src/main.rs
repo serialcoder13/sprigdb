@@ -13,12 +13,17 @@
 //!   bootstraps the tenant's catalog and returns once it is active;
 //!   `delete` removes a leaf tenant (it asks for the name unless `--yes`);
 //!   `settings <name> [--all]` lists the tenant's setting rows;
+//!   `export <name> --to <dir>` and `import <dir> --into <tenant>` copy a
+//!   tenant (schemas, rows, users and grants, settings) and verify it
+//!   (chapter 47 step 8, see [`export`]);
 //!   `user add <tenant> <user> --password ...` creates a user in the
 //!   tenant's catalog (interim, until chapter 29's `CREATE USER`);
 //! - `sprigctl settings list|describe|get|set|reset|bounds|lock|unlock`
 //!   (alias `config`; chapter 08 steps 7-8, chapter 23 step 8, chapter 47
 //!   step 5): see where a value comes from and change it at any of the six
 //!   scopes (see [`settings`]);
+//! - `sprigctl tenant move <tenant> --to <dc>` and `sprigctl tenant
+//!   traffic <tenant>` (chapter 24 steps 3 and 4): see [`dcmove`];
 //! - `sprigctl shard move <tenant> --to <cluster>` and `sprigctl job
 //!   list|show|cancel|cutover` (chapter 10 step 11): see [`mover`];
 //! - `sprigctl index list|show|recommendations|approve|reject|drop|pin|unpin`
@@ -36,6 +41,8 @@
 
 mod client;
 mod cluster;
+mod dcmove;
+mod export;
 mod gateway;
 mod index;
 mod mover;
@@ -82,9 +89,10 @@ const GROUPS: &[(&str, &str, &[&str])] = &[
 ];
 
 /// `sprigctl tenant` subcommands not implemented yet.
-const TENANT_LATER: &[&str] = &["move", "pin", "unpin", "failover"];
+const TENANT_LATER: &[&str] = &["failover"];
 
 /// `sprigctl tenant`.
+#[allow(clippy::too_many_lines)]
 fn tenant_group() -> Command {
     let name = || {
         Arg::new("name")
@@ -160,6 +168,8 @@ fn tenant_group() -> Command {
                         ),
                 ),
         )
+        .subcommand(crate::export::export_command())
+        .subcommand(crate::export::import_command())
         .subcommand(
             Command::new("settings")
                 .about("The tenant's own setting rows (tenant, database and object scope)")
@@ -171,6 +181,11 @@ fn tenant_group() -> Command {
                         .help("Also its copies of its ancestors' rows"),
                 ),
         );
+    g = placement::add_pin_cmds(g);
+    // Chapter 24's moves between DCs and traffic (crate::dcmove).
+    g = g
+        .subcommand(dcmove::move_command())
+        .subcommand(dcmove::traffic_command());
     for &sub in TENANT_LATER {
         g = g.subcommand(
             Command::new(sub).arg(
@@ -695,6 +710,14 @@ async fn run_tenant(
     };
     let name = || sub.get_one::<String>("name").cloned().unwrap_or_default();
     match cmd {
+        "pin" | "unpin" => {
+            placement::run_pin(c, cmd, sub, out).await?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        "move" | "traffic" => {
+            dcmove::run(c, cmd, sub, m.get_flag("dry-run"), out).await?;
+            return Ok(ExitCode::SUCCESS);
+        }
         "create" => {
             let cluster = sub
                 .get_one::<String>("cluster")
@@ -760,6 +783,14 @@ async fn run_tenant(
         }
         "settings" => {
             settings::tenant(c, sub, out).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "export" => {
+            export::export(c, sub, out).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "import" => {
+            export::import(c, sub, out).await?;
             Ok(ExitCode::SUCCESS)
         }
         "user" => {

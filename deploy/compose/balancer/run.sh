@@ -7,7 +7,9 @@
 # sees the bl- tenants, over the Compose stack's three MariaDB clusters
 # (single, primary + replicas, Galera), registered with 1 GB of declared
 # storage each. Tenant ids start at 970000001, far above the shared dev
-# deployment's, so schema and account names (t<id>_*) never collide.
+# deployment's, so schema and account names (t<id>_*) never collide; the
+# ids this bed made are kept in .state/tenant_ids, and down sweeps only
+# those.
 #
 #   deploy/compose/balancer/run.sh up     # etcd, controller, worker, gateway, tenants
 #   deploy/compose/balancer/run.sh down   # drop the tenants, stop, remove etcd
@@ -33,7 +35,7 @@ admin=http://127.0.0.1:18480
 dc=dc-bl
 container=sprigdb-dev-bl-etcd
 pw=sprig-dev-app
-first_tenant_id=970000001
+first_tenant_id=990000001
 # name|topology|ports
 clusters=(
     "bl-single|single|13301"
@@ -127,7 +129,7 @@ up() {
         done
         say "etcd $container up on 18379"
     fi
-    cargo build -q -p sprigdb -p sprigctl
+    [[ -n ${SPRIG_BL_NO_BUILD:-} ]] || cargo build -q -p sprigdb -p sprigctl
     start controller "$here/controller.toml" controller 18180
     for _ in $(seq 1 60); do
         ctl -o json dc show "$dc" 2>/dev/null | jq -e '.leader != null' >/dev/null && break
@@ -170,6 +172,9 @@ TOML
     setting workload.bucket_minutes 1 global
     # The balancer: recommend only until the test switches it to auto.
     setting balancer.mode '"recommend"'
+    # Automatic indexing off: this bed tests placement, and in the first run
+    # its loop held the controller's connections to dc-bl-c1.
+    setting auto_index.mode '"off"'
     start worker "$here/controller.toml" worker 18185 bl-wkr-1
     start gateway "$here/gateway.toml" gateway 18190
     local t cl
@@ -178,7 +183,10 @@ TOML
         ctl tenant show "$t" >/dev/null 2>&1 || ctl tenant create "$t" --cluster "$cl" >/dev/null
         ctl tenant user add "$t" app --password "$pw" --native --if-not-exists >/dev/null
         ctl settings set auth.mysql_native_password true --scope "tenant:$t" >/dev/null || true
-        say "tenant $t ($(ctl -o json tenant show "$t" | jq -r .tenant_id)) on $cl"
+        local id
+        id=$(ctl -o json tenant show "$t" | jq -r .tenant_id)
+        grep -qx "$id" "$state/tenant_ids" 2>/dev/null || echo "$id" >>"$state/tenant_ids"
+        say "tenant $t ($id) on $cl"
     done
     for _ in $(seq 60); do
         nc -z 127.0.0.1 18306 2>/dev/null && break
@@ -187,20 +195,27 @@ TOML
     say "up: mysql -h127.0.0.1 -P18306 -u bl-01.app -p$pw"
 }
 
-# Leftover t<id>_* schemas and t<id>_u* accounts of this bed's tenant ids,
-# on every node that takes writes.
+# Leftover t<id>_* schemas and t<id>_u* accounts of this bed's tenant ids
+# (and no one else's), on every node that takes writes.
 sweep() {
-    local port q
+    local port q id
+    [[ -s $state/tenant_ids ]] || return 0
+    local ids
+    # shellcheck disable=SC2207 # one number per line
+    ids=($(cat "$state/tenant_ids"))
     for port in 13301 13311 13321; do
-        q="SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 't97000%'"
-        for s in $(mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -N -B -e "$q" 2>/dev/null); do
-            mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -e "DROP DATABASE \`$s\`" 2>/dev/null &&
-                say "dropped $s on :$port"
-        done
-        q="SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user LIKE 't97000%'"
-        for u in $(mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -N -B -e "$q" 2>/dev/null); do
-            mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -e "DROP USER $u" 2>/dev/null &&
-                say "dropped user $u on :$port"
+        for id in "${ids[@]}"; do
+            [[ $id =~ ^[0-9]+$ ]] || continue
+            q="SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 't${id}\\_%'"
+            for s in $(mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -N -B -e "$q" 2>/dev/null); do
+                mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -e "DROP DATABASE \`$s\`" 2>/dev/null &&
+                    say "dropped $s on :$port"
+            done
+            q="SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user LIKE 't${id}\\_u%'"
+            for u in $(mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -N -B -e "$q" 2>/dev/null); do
+                mysql -h127.0.0.1 -P$port -uroot -psprig-dev-root -e "DROP USER $u" 2>/dev/null &&
+                    say "dropped user $u on :$port"
+            done
         done
     done
 }
@@ -243,6 +258,7 @@ down() {
     stop controller
     sweep
     docker rm -f "$container" >/dev/null 2>&1 && say "etcd $container removed (with every job record)"
+    rm -f "$state/tenant_ids"
 }
 
 case ${1:-} in

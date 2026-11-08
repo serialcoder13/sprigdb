@@ -158,7 +158,7 @@ down() {
     stop gateway-1
     stop gateway-2
     stop controller
-    docker compose -f "$here/compose.yaml" down -v
+    docker compose -f "$here/compose.yaml" down
     rm -rf "$state"
 }
 

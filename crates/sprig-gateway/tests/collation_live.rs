@@ -284,16 +284,10 @@ async fn login_collation_and_set_names_match_mariadb() {
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
-            // The pool may hand the killed connection out once more: that
-            // statement fails with 39030 and the connection is dropped.
-            let mut again = probe(&mut c).await;
-            for _ in 0..3 {
-                if again.first().map(String::as_str) != Some("ERR 39030") {
-                    break;
-                }
-                again = probe(&mut c).await;
-            }
-            let again = as_seen(*persona, again);
+            // The gateway never hands out the killed connection: the probe
+            // runs on another one (chapter 06, "When a lost connection is
+            // retried").
+            let again = as_seen(*persona, probe(&mut c).await);
             assert_ne!(backend_thread(&mut c).await, id, "{ctx}: same connection");
             if again != want_seen {
                 failures.push(format!(

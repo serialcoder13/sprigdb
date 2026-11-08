@@ -398,3 +398,80 @@ fn plans_are_identical_whatever_the_mode() {
     assert_eq!(auto, run(BalancerMode::Recommend));
     assert_eq!(auto, run(BalancerMode::DryRun));
 }
+
+#[test]
+fn pinned_tenants_stay_put_even_when_hot_or_draining() {
+    let mut v = hot_fleet();
+    for t in v.tenants.values_mut() {
+        t.pinned = true;
+    }
+    let p = planner();
+    p.rebalance(&v, 0);
+    let r = p.rebalance(&v, 3600);
+    assert!(r.moves.is_empty());
+    assert_eq!(r.pinned.len(), 17);
+    assert!(
+        r.pinned[0].why.contains("pinned by operator"),
+        "{}",
+        r.pinned[0].why
+    );
+    // A drain reports the pinned tenant as blocked instead of moving it.
+    let mut v = fleet(2);
+    let k = put(&mut v, 1, 1, 1, load(1.0, 0.0));
+    v.clusters.get_mut(&cid(1)).unwrap().state = ClusterState::Draining;
+    let tv = v.tenants.get_mut(&TenantId(1)).unwrap();
+    tv.pinned = true;
+    tv.pin = Some(crate::pins::TenantPin {
+        tenant_id: TenantId(1),
+        cluster: cid(1),
+        pinned_by: "alice".to_owned(),
+        pinned_at: 0,
+        reason: String::new(),
+    });
+    let r = planner().rebalance(&v, 0);
+    assert!(r.moves.is_empty());
+    assert_eq!(r.pinned[0].shard, k);
+    assert_eq!(r.pinned[0].reason, MoveReason::Drain);
+    assert!(
+        r.pinned[0]
+            .why
+            .contains("pinned by operator alice to mum1-c1"),
+        "{}",
+        r.pinned[0].why
+    );
+    // Unpinned, it drains.
+    v.tenants.get_mut(&TenantId(1)).unwrap().pinned = false;
+    assert_eq!(
+        planner().rebalance(&v, 0).moves[0].reason,
+        MoveReason::Drain
+    );
+}
+
+#[test]
+fn a_changed_weight_changes_the_plan() {
+    // c1 at 55% with one large tenant (would invert the pair) and one
+    // small one; c2 at 25%. On defaults the small move isn't worth it.
+    let mut v = fleet(2);
+    put(&mut v, 1, 1, 1, load(54.5, 0.0));
+    let small = put(&mut v, 2, 2, 1, load(0.5, 0.0));
+    v.clusters.get_mut(&cid(2)).unwrap().background = load(25.0, 0.0);
+    let p = planner();
+    p.rebalance(&v, 0);
+    let r = p.rebalance(&v, 3600);
+    assert!(r.moves.is_empty());
+    assert_eq!(r.rejected[0].shard, small);
+    // A smaller fixed cost (balancer.cost_fixed_weight) makes it worth it.
+    let mut s = BalancerSettings::default();
+    s.weights.fixed = 0.01;
+    let p = Planner::new(s);
+    p.rebalance(&v, 0);
+    let r = p.rebalance(&v, 3600);
+    assert_eq!(r.moves.len(), 1);
+    assert_eq!(r.moves[0].shards[0], small);
+    assert_eq!(r.weights.fixed, 0.01);
+    assert!(
+        r.moves[0].why.starts_with("moved t2/g1/s2"),
+        "{}",
+        r.moves[0].why
+    );
+}

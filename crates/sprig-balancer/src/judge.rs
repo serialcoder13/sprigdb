@@ -54,6 +54,79 @@ pub const IN_FLIGHT: f64 = 0.25;
 /// Every move's fixed cost, in typical units.
 pub const OVERHEAD: f64 = 0.25;
 
+/// The rule's weights, each a `balancer.*` setting (dc and global scope);
+/// the defaults are the constants above.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Weights {
+    /// `balancer.benefit_urgency_weight`: how much a source's need for
+    /// relief multiplies what it sheds (urgency = 1 + this × need).
+    pub urgency: f64,
+    /// `balancer.benefit_evening_weight`: how much evening the pair counts.
+    pub evening: f64,
+    /// `balancer.cost_copy_weight`: copying cost per byte, as a share of
+    /// the target's storage.
+    pub copy: f64,
+    /// `balancer.cost_write_weight`: the write-rate cost at full rate, in
+    /// typical units.
+    pub write: f64,
+    /// `balancer.cost_write_full_rows_per_sec`: the write rate at which
+    /// the write-rate cost is full.
+    pub write_full_rows_per_sec: f64,
+    /// `balancer.cost_load_weight`: the cost of copying between fully
+    /// busy clusters, in typical units.
+    pub load: f64,
+    /// `balancer.cost_recent_move_weight`: the cost of moving a tenant
+    /// that moved in the last 7 days, in typical units.
+    pub recent_move: f64,
+    /// `balancer.cost_running_move_weight`: the cost per move in flight on
+    /// the source or target, in typical units.
+    pub running_move: f64,
+    /// `balancer.cost_fixed_weight`: every move's fixed cost, in typical
+    /// units.
+    pub fixed: f64,
+}
+
+/// `balancer.benefit_urgency_weight`'s default.
+pub const URGENCY_WEIGHT: f64 = 4.0;
+/// `balancer.benefit_evening_weight`'s default.
+pub const EVENING_WEIGHT: f64 = 0.5;
+
+impl Default for Weights {
+    fn default() -> Self {
+        Self {
+            urgency: URGENCY_WEIGHT,
+            evening: EVENING_WEIGHT,
+            copy: COPY_WEIGHT,
+            write: PAUSE_WEIGHT,
+            write_full_rows_per_sec: PAUSE_WRITES,
+            load: BUSY_WEIGHT,
+            recent_move: RECENT_TENANT,
+            running_move: IN_FLIGHT,
+            fixed: OVERHEAD,
+        }
+    }
+}
+
+impl Weights {
+    /// One line for `explain placement`.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "benefit: urgency {} evening {}; cost: copy {} writes {} (full at {} rows/s) load {} \
+             recent move {} running moves {} fixed {}",
+            self.urgency,
+            self.evening,
+            self.copy,
+            self.write,
+            self.write_full_rows_per_sec,
+            self.load,
+            self.recent_move,
+            self.running_move,
+            self.fixed
+        )
+    }
+}
+
 /// What a judgement needs.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct JudgeInput {
@@ -84,6 +157,8 @@ pub struct JudgeInput {
     pub ratio: f64,
     /// `balancer.min_gain_pct` as a ratio (0: no floor).
     pub min_gain: f64,
+    /// The weights.
+    pub weights: Weights,
 }
 
 /// A move's benefit and cost, and the verdict.
@@ -129,27 +204,28 @@ pub fn judge(i: &JudgeInput) -> Judgement {
     let gap_before = i.source.0 - i.target.0;
     let hot = excess / (1.0 - i.source_target_pct).max(0.05);
     let apart = (gap_before - i.spread_pct).max(0.0) / (1.0 - i.spread_pct).max(0.05);
-    let urgency = 1.0 + 4.0 * hot.max(apart);
+    let w = &i.weights;
+    let urgency = 1.0 + w.urgency * hot.max(apart);
     let gap_after = (i.source.1 - i.target.1).abs();
     let evening = (gap_before - gap_after).max(0.0);
-    let benefit = relief * urgency + evening / 2.0;
+    let benefit = relief * urgency + evening * w.evening;
     let storage = if i.target_storage > 0.0 {
         i.target_storage
     } else {
         DEFAULT_STORAGE_BYTES
     };
     let t = i.typical.max(1e-6);
-    let copy = COPY_WEIGHT * i.bytes / storage;
-    let pause = t * PAUSE_WEIGHT * (i.writes / PAUSE_WRITES).clamp(0.0, 1.0);
-    let busy = t * BUSY_WEIGHT * i.busiest.clamp(0.0, 1.0);
+    let copy = w.copy * i.bytes / storage;
+    let pause = t * w.write * (i.writes / w.write_full_rows_per_sec.max(1.0)).clamp(0.0, 1.0);
+    let busy = t * w.load * i.busiest.clamp(0.0, 1.0);
     #[allow(clippy::cast_precision_loss)]
     let recent = t
         * (if i.tenant_moved_recently {
-            RECENT_TENANT
+            w.recent_move
         } else {
             0.0
-        } + IN_FLIGHT * i.in_flight as f64);
-    let overhead = t * OVERHEAD;
+        } + w.running_move * i.in_flight as f64);
+    let overhead = t * w.fixed;
     let cost = copy + pause + busy + recent + overhead;
     let below_floor = relief + 1e-9 < i.min_gain;
     let worth = !below_floor && benefit + 1e-12 >= i.ratio * cost;
@@ -265,6 +341,7 @@ mod tests {
             in_flight: 0,
             ratio: 2.0,
             min_gain: 0.0,
+            weights: Weights::default(),
         }
     }
 
@@ -354,6 +431,62 @@ mod tests {
         assert!(
             j.sentence("s", "a", "b", GB, 0.0)
                 .contains("balancer.min_gain_pct")
+        );
+    }
+
+    #[test]
+    fn changed_weights_change_the_verdict() {
+        // Worth it on defaults; not once copying costs 40 times more.
+        let i = JudgeInput {
+            source: (0.60, 0.58),
+            target: (0.30, 0.32),
+            ..base()
+        };
+        assert!(judge(&i).worth);
+        let dear = JudgeInput {
+            weights: Weights {
+                copy: 10.0,
+                ..Weights::default()
+            },
+            ..i
+        };
+        let j = judge(&dear);
+        assert!(!j.worth, "{j:?}");
+        assert_eq!(j.main_cost(), "the copy");
+        // A tiny tenant rejected on defaults moves once the fixed cost is
+        // lowered.
+        let tiny = JudgeInput {
+            source: (0.50, 0.498),
+            target: (0.22, 0.222),
+            bytes: GB,
+            ..base()
+        };
+        assert!(!judge(&tiny).worth);
+        let cheap = JudgeInput {
+            weights: Weights {
+                fixed: 0.02,
+                ..Weights::default()
+            },
+            ..tiny
+        };
+        assert!(judge(&cheap).worth);
+        // A larger urgency weight lets a hot source shed a small tenant.
+        let small_hot = JudgeInput {
+            source: (0.85, 0.849),
+            target: (0.60, 0.601),
+            bytes: GB,
+            ..base()
+        };
+        assert!(!judge(&small_hot).worth);
+        assert!(
+            judge(&JudgeInput {
+                weights: Weights {
+                    urgency: 30.0,
+                    ..Weights::default()
+                },
+                ..small_hot
+            })
+            .worth
         );
     }
 }

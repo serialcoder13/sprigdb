@@ -61,12 +61,14 @@ pub mod catalogs;
 pub mod dc;
 pub mod dispatch;
 pub mod live;
+pub mod migrate;
 pub mod monitor;
 pub mod registration;
 pub mod runtime;
 pub mod settings;
 pub mod settings_admin;
 pub mod tenants;
+pub mod traffic;
 pub mod tree;
 pub mod tree_settings;
 pub mod users;
@@ -170,6 +172,9 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     let Some(settings) = live::start(&stores, &dc, &ctx.shutdown).await? else {
         return Ok(());
     };
+    // Chapter 47: trace sampling, the OTLP endpoint and the audit spool
+    // limit follow their settings.
+    let _telemetry_settings = sprig_settings::ops::apply_live(&settings.live, &dc);
     let me = LeaderRecord {
         holder: cfg.node.id(),
         dc: Some(dc.to_string()),
@@ -360,6 +365,14 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Some(settings.live.clone()),
     )?);
     let tree_loop = TreeSettings::new(tree, dc.clone(), Some(settings.live.clone()))?;
+    // Chapter 24: moves between DCs and traffic windows.
+    let moves = Arc::new(migrate::DcMoves::new(
+        dc.clone(),
+        Arc::clone(&stores.dc),
+        Arc::clone(&stores.global),
+        Arc::clone(&clock),
+        Some(settings.live.clone()),
+    ));
     let rt = Runtime::new(stores.clone(), Arc::clone(&clock), me)
         .with_settings(settings.control.clone())
         .with_loop(Loop::new(dispatch::Dispatch))
@@ -371,6 +384,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(auto_index))
         .with_loop(Loop::new(workload_rollup))
         .with_loop(Loop::new(Arc::clone(&balancer)))
+        .with_loop(Loop::new(migrate::MigrationLoop::new(Arc::clone(&moves))))
         .global_candidate(cfg.controller.global_candidate);
 
     let token = cfg
@@ -390,7 +404,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             .with_users(users)
             .with_settings(settings_admin)
             .with_indexes(indexes)
-            .with_placement(balancer),
+            .with_placement(balancer)
+            .with_moves(moves),
     );
     let admin = tokio::spawn(http::serve(
         listener,

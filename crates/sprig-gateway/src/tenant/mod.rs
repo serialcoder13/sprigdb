@@ -122,10 +122,22 @@ impl TenantServices {
         let stores = live.stores();
         let dc = stores.dc_id().clone();
         let global = Arc::clone(&stores.global);
-        let locator = Arc::new(GatewayLocator::new(
+        // Chapter 24: tenants homed in other DCs, the DC registry for
+        // client hints, and traffic reports to the home DCs.
+        let routing = crate::dc::DcRouting::new(dc.clone());
+        let locator = Arc::new(
+            GatewayLocator::new(
+                Arc::clone(&stores.dc),
+                ClusterRegistry::new(Arc::clone(&global), Arc::clone(&stores.dc))?,
+                backends,
+            )
+            .with_homes(Arc::clone(&global), Arc::clone(&routing)),
+        );
+        crate::dc::install_registry(crate::dc::DcRegistry::start(Arc::clone(&global))?);
+        drop(crate::dc::DcRouting::spawn_reporter(
+            &routing,
             Arc::clone(&stores.dc),
-            ClusterRegistry::new(Arc::clone(&global), Arc::clone(&stores.dc))?,
-            backends,
+            Some(live.clone()),
         ));
         let dyn_locator: Arc<dyn CatalogLocator> = locator.clone();
         let extensions: Vec<Arc<dyn CatalogExtension>> = vec![

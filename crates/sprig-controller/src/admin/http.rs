@@ -52,10 +52,17 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
         .route("/admin/v1/tenants", get(list_tenants).post(create_tenant))
         .route(
             "/admin/v1/tenants/{name}",
-            get(get_tenant).delete(delete_tenant),
+            get(get_tenant).delete(delete_tenant).post(tenant_method),
         )
+        .route("/admin/v1/tenants/{name}/move", get(tenant_move))
+        .route("/admin/v1/tenants/{name}/traffic", get(tenant_traffic))
+        .route("/admin/v1/traffic/reports", post(traffic_report))
         .route("/admin/v1/tenants/{name}/settings", get(tenant_settings))
         .route("/admin/v1/tenants/{name}/users", post(create_user))
+        .route(
+            "/admin/v1/tenants/{name}/accounts",
+            get(export_accounts).post(import_accounts),
+        )
         .route("/admin/v1/tenants/{name}/indexes", get(list_indexes))
         .route(
             "/admin/v1/tenants/{name}/indexes/{index}",
@@ -74,6 +81,10 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
         .route("/admin/v1/jobs", get(list_jobs))
         .route("/admin/v1/jobs/{id}", get(get_job).post(job_method))
         .route("/admin/v1/tenants/{name}/placement", get(explain_placement))
+        .route(
+            "/admin/v1/tenants/{name}/pin",
+            post(pin_tenant_cluster).delete(unpin_tenant_cluster),
+        )
         .route(
             "/admin/v1/tenants/{name}/decisions/{id}",
             get(explain_decision),
@@ -386,6 +397,62 @@ async fn move_method(
     }
 }
 
+/// `{name}:move` (chapter 24).
+async fn tenant_method(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(e) = authorize(&app, &headers) {
+        return error_response(&e);
+    }
+    match name.rsplit_once(':') {
+        Some((t, "move")) => {
+            let r = async {
+                let req: crate::migrate::MoveTenantRequest = parse_required(&body)?;
+                app.svc.move_tenant(t, req).await
+            };
+            respond(r.await)
+        }
+        _ => error_response(&invalid(format!(
+            "POST /admin/v1/tenants/{name}: expected {{name}}:move"
+        ))),
+    }
+}
+
+async fn tenant_move(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.tenant_move(&name).await
+    };
+    respond(r.await)
+}
+
+async fn tenant_traffic(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.tenant_traffic(&name).await
+    };
+    respond(r.await)
+}
+
+/// Gateways' traffic counts (chapter 24). No bearer token: counts only, on
+/// the controller's private Admin port (gateways hold no admin token).
+async fn traffic_report(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let r = parse_required::<crate::traffic::TrafficBatch>(&body)
+        .and_then(|b| app.svc.traffic_report(&b));
+    respond(r)
+}
+
 async fn list_dcs(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     let r = async {
         authorize(&app, &headers)?;
@@ -463,6 +530,31 @@ async fn create_user(
     let r = async {
         authorize(&app, &headers)?;
         app.svc.create_user(&name, parse_required(&body)?).await
+    };
+    respond(r.await)
+}
+
+async fn export_accounts(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.export_accounts(&name).await
+    };
+    respond(r.await)
+}
+
+async fn import_accounts(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.import_accounts(&name, parse_required(&body)?).await
     };
     respond(r.await)
 }
@@ -753,6 +845,36 @@ async fn explain_query(
             )));
         };
         app.svc.explain_query(&name, fp).await
+    };
+    respond(r.await)
+}
+
+async fn pin_tenant_cluster(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let req: super::placement_admin::PinRequest = if body.is_empty() {
+            super::placement_admin::PinRequest::default()
+        } else {
+            parse_required(&body)?
+        };
+        app.svc.pin_tenant_cluster(&name, req).await
+    };
+    respond(r.await)
+}
+
+async fn unpin_tenant_cluster(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.unpin_tenant_cluster(&name).await
     };
     respond(r.await)
 }

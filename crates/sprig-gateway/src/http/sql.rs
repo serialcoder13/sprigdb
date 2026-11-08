@@ -75,6 +75,9 @@ pub struct Caller {
     pub generation: u64,
     /// The `authorization` header, for forwarding.
     pub authorization: Option<String>,
+    /// The client's DC, from the `Sprig-DC` header (gRPC metadata
+    /// `sprig-dc`), when it names a registered DC (chapter 24).
+    pub client_dc: Option<sprig_common::ids::DcId>,
 }
 
 /// One statement text to run.
@@ -309,6 +312,7 @@ impl SqlEngine {
             caller.tls.clone(),
         )?;
         session.set_principal(caller.principal.clone());
+        session.client_dc = caller.client_dc.clone();
         session.set_state(SessionState::Ready);
         let proto = self.proto(caller, multi);
         let mut exec = self.executor.open(&LoginInfo {

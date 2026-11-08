@@ -60,6 +60,7 @@ pub mod handoff;
 pub mod http;
 pub mod mysql;
 pub mod policy;
+pub mod portable;
 pub mod ratelimit;
 pub mod revoke;
 pub mod settings;

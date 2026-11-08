@@ -1,0 +1,116 @@
+# SprigDB SLOs: recording rules and multi-window burn-rate alerts
+# (chapter 47, "SLOs and burn-rate alerts"; Google SRE workbook, chapter 5).
+#
+#   Availability, per DC   1 - (sprig + backend) / all statements   99.95% / 30 days
+#   Gateway overhead       share of statements under 2 ms           99%
+#
+# Burn rates: page at 14.4x over 1h and 5m, page at 6x over 6h and 30m,
+# ticket at 1x over 3d and 6h. The `dc` label comes from the scrape
+# configuration (each DC's Prometheus adds it); without it the rules
+# still work, as one DC. Tested with `promtool test rules`
+# (deploy/alerts/test.sh).
+groups:
+  - name: sprig-sli
+    interval: 30s
+    rules:
+      - record: sprig:statements:rate5m
+        expr: sum by (dc, result) (rate(sprig_gateway_statements_total[5m]))
+      # Availability: the share of statements SprigDB or MariaDB failed.
+      - record: sprig:availability_errors:ratio_rate5m
+        expr: |
+          sum by (dc) (rate(sprig_gateway_statements_total{result=~"sprig|backend"}[5m]))
+          / sum by (dc) (rate(sprig_gateway_statements_total[5m]))
+      - record: sprig:availability_errors:ratio_rate30m
+        expr: |
+          sum by (dc) (rate(sprig_gateway_statements_total{result=~"sprig|backend"}[30m]))
+          / sum by (dc) (rate(sprig_gateway_statements_total[30m]))
+      - record: sprig:availability_errors:ratio_rate1h
+        expr: |
+          sum by (dc) (rate(sprig_gateway_statements_total{result=~"sprig|backend"}[1h]))
+          / sum by (dc) (rate(sprig_gateway_statements_total[1h]))
+      - record: sprig:availability_errors:ratio_rate6h
+        expr: |
+          sum by (dc) (rate(sprig_gateway_statements_total{result=~"sprig|backend"}[6h]))
+          / sum by (dc) (rate(sprig_gateway_statements_total[6h]))
+      - record: sprig:availability_errors:ratio_rate3d
+        expr: |
+          sum by (dc) (rate(sprig_gateway_statements_total{result=~"sprig|backend"}[3d]))
+          / sum by (dc) (rate(sprig_gateway_statements_total[3d]))
+      # Gateway overhead: the share of statements with 2 ms or more in the
+      # gateway itself (time not spent waiting on MariaDB).
+      - record: sprig:overhead_slow:ratio_rate5m
+        expr: |
+          1 - sum by (dc) (rate(sprig_gateway_overhead_seconds_bucket{le="0.002"}[5m]))
+          / sum by (dc) (rate(sprig_gateway_overhead_seconds_count[5m]))
+      - record: sprig:overhead_slow:ratio_rate30m
+        expr: |
+          1 - sum by (dc) (rate(sprig_gateway_overhead_seconds_bucket{le="0.002"}[30m]))
+          / sum by (dc) (rate(sprig_gateway_overhead_seconds_count[30m]))
+      - record: sprig:overhead_slow:ratio_rate1h
+        expr: |
+          1 - sum by (dc) (rate(sprig_gateway_overhead_seconds_bucket{le="0.002"}[1h]))
+          / sum by (dc) (rate(sprig_gateway_overhead_seconds_count[1h]))
+      - record: sprig:overhead_slow:ratio_rate6h
+        expr: |
+          1 - sum by (dc) (rate(sprig_gateway_overhead_seconds_bucket{le="0.002"}[6h]))
+          / sum by (dc) (rate(sprig_gateway_overhead_seconds_count[6h]))
+      - record: sprig:overhead_slow:ratio_rate3d
+        expr: |
+          1 - sum by (dc) (rate(sprig_gateway_overhead_seconds_bucket{le="0.002"}[3d]))
+          / sum by (dc) (rate(sprig_gateway_overhead_seconds_count[3d]))
+      - record: sprig:query_duration_seconds:p99_rate5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (dc, le) (rate(sprig_gateway_query_duration_seconds_bucket[5m])))
+
+  - name: sprig-slo
+    rules:
+      - alert: SprigAvailabilityFastBurn
+        expr: |
+          (sprig:availability_errors:ratio_rate1h > 14.4 * 0.0005
+            and sprig:availability_errors:ratio_rate5m > 14.4 * 0.0005)
+          or
+          (sprig:availability_errors:ratio_rate6h > 6 * 0.0005
+            and sprig:availability_errors:ratio_rate30m > 6 * 0.0005)
+        for: 2m
+        labels: { severity: page, slo: availability }
+        annotations:
+          summary: The availability error budget is burning fast
+          runbook: chapter 47 runbook 8
+      - alert: SprigAvailabilitySlowBurn
+        expr: |
+          sprig:availability_errors:ratio_rate3d > 0.0005
+          and sprig:availability_errors:ratio_rate6h > 0.0005
+        for: 1h
+        labels: { severity: ticket, slo: availability }
+        annotations:
+          summary: The availability error budget is burning
+          runbook: chapter 47 runbook 8
+      - alert: SprigOverheadFastBurn
+        expr: |
+          (sprig:overhead_slow:ratio_rate1h > 14.4 * 0.01
+            and sprig:overhead_slow:ratio_rate5m > 14.4 * 0.01)
+          or
+          (sprig:overhead_slow:ratio_rate6h > 6 * 0.01
+            and sprig:overhead_slow:ratio_rate30m > 6 * 0.01)
+        for: 2m
+        labels: { severity: page, slo: overhead }
+        annotations:
+          summary: Gateway overhead above 2 ms is burning its budget fast
+          runbook: chapter 47 runbook 8
+      - alert: SprigOverheadSlowBurn
+        expr: |
+          sprig:overhead_slow:ratio_rate3d > 0.01
+          and sprig:overhead_slow:ratio_rate6h > 0.01
+        for: 1h
+        labels: { severity: ticket, slo: overhead }
+        annotations:
+          summary: Gateway overhead above 2 ms is burning its budget
+          runbook: chapter 47 runbook 8
+      - alert: SprigQueryLatencyHigh
+        expr: sprig:query_duration_seconds:p99_rate5m > 1
+        for: 10m
+        labels: { severity: ticket, slo: latency }
+        annotations:
+          summary: Statement p99 latency above 1 s for 10 minutes
+          runbook: chapter 47 runbook 8

@@ -28,6 +28,7 @@ pub mod judge;
 pub mod load;
 pub mod model;
 pub mod mover;
+pub mod pins;
 pub mod plan;
 pub mod ratelimit;
 pub mod recommend;

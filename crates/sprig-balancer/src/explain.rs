@@ -76,6 +76,12 @@ pub struct PlacementExplanation {
     pub clusters: Vec<ClusterLine>,
     /// The last run's reasoning that concerns the tenant.
     pub reasoning: Vec<String>,
+    /// The weights the last run judged moves with.
+    #[serde(default)]
+    pub weights: Option<crate::judge::Weights>,
+    /// The operator's pin, if the tenant is pinned.
+    #[serde(default)]
+    pub pin: Option<crate::pins::TenantPin>,
 }
 
 /// `HH:MM` UTC of `t`.
@@ -200,6 +206,9 @@ pub fn explain_placement(
                 reasoning.push(n.text.clone());
             }
         }
+        for p in r.pinned.iter().filter(|p| p.tenant == tenant) {
+            reasoning.push(p.why.clone());
+        }
         for c in r.rejected.iter().filter(|c| c.tenant == tenant) {
             reasoning.push(c.why.clone());
         }
@@ -232,6 +241,8 @@ pub fn explain_placement(
         shards,
         clusters,
         reasoning,
+        weights: last.map(|r| r.weights),
+        pin: view.tenants.get(&tenant).and_then(|t| t.pin.clone()),
     }
 }
 
@@ -240,6 +251,9 @@ pub fn explain_placement(
 pub fn placement_text(e: &PlacementExplanation) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "tenant {}  balancer.mode {}", e.tenant, e.mode);
+    if let Some(p) = &e.pin {
+        let _ = writeln!(s, "PINNED   {} since {}", p.describe(), hhmm(p.pinned_at));
+    }
     let _ = writeln!(
         s,
         "\nSHARD                CLUSTER        SIZE_GB  STMTS/S  BUSY_MS/S  WRITES/S  STATE"
@@ -281,6 +295,9 @@ pub fn placement_text(e: &PlacementExplanation) -> String {
             c.tables,
             if c.holds_tenant { "  *" } else { "" }
         );
+    }
+    if let Some(w) = &e.weights {
+        let _ = writeln!(s, "\nWEIGHTS  {}", w.line());
     }
     let _ = writeln!(s, "\nREASONING");
     for r in &e.reasoning {

@@ -1,0 +1,134 @@
+# SprigDB operational alerts (chapter 47, "SLOs and burn-rate alerts" and
+# "Runbooks"): replication lag, stuck data movement, metadata propagation,
+# the audit pipeline, certificates, etcd, cluster health and thrashing.
+# Tested with `promtool test rules` (deploy/alerts/test.sh).
+groups:
+  - name: sprig-replication
+    rules:
+      - alert: SprigReplicaLagHigh
+        expr: max by (cluster, node) (sprig_backend_replica_lag_seconds) > 30
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: A replica is more than 30 s behind; reads leave it
+          runbook: chapter 06 read routing; chapter 47 runbook 3
+      - alert: SprigReplicaLagCritical
+        expr: max by (cluster, node) (sprig_backend_replica_lag_seconds) > 300
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: A replica is more than 5 minutes behind
+          runbook: chapter 47 runbook 3
+      - alert: SprigClusterNoWriter
+        expr: max by (cluster) (sprig_cluster_health_state) == 2
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: A cluster has no writer
+          runbook: chapter 47 runbooks 1 and 2
+
+  - name: sprig-movement
+    rules:
+      # A move, split, merge or migration that stopped making progress:
+      # catch-up lag stays high, or jobs run but no row was copied or
+      # applied for an hour.
+      - alert: SprigMoverStuck
+        expr: |
+          max(sprig_mover_catchup_lag_seconds) > 600
+          or
+          (
+            sum(sprig_controller_jobs{kind=~"move_shard|split_shard|merge_shards|rekey|tenant_migration", state="running"}) > 0
+            and on ()
+            ((sum(increase(sprig_mover_copy_rows_total[1h])) or vector(0))
+              + (sum(increase(sprig_mover_apply_rows_total[1h])) or vector(0))) == 0
+          )
+        for: 15m
+        labels: { severity: page }
+        annotations:
+          summary: Data movement is stuck
+          runbook: chapter 47 runbook 4
+      - alert: SprigMetaPropagationSlow
+        expr: max(sprig_meta_cache_staleness_seconds) > 2
+        for: 5m
+        labels: { severity: ticket, slo: metadata }
+        annotations:
+          summary: Metadata caches are more than 2 s stale
+          runbook: chapter 23
+
+  - name: sprig-audit
+    rules:
+      - alert: AuditSpoolFilling
+        expr: max by (instance) (sprig_audit_spool_bytes / sprig_audit_spool_max_bytes) > 0.5
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: The audit spool is over half full; the sink is behind
+          runbook: chapter 47, The audit pipeline
+      - alert: AuditUnavailable
+        expr: max by (instance) (sprig_audit_spool_bytes / sprig_audit_spool_max_bytes) >= 1
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: The audit spool is full; admin and account changes fail with 39970
+          runbook: chapter 47, The audit pipeline
+      - alert: AuditEventsDropped
+        expr: sum by (instance) (increase(sprig_audit_dropped_total[5m])) > 0
+        labels: { severity: page }
+        annotations:
+          summary: Audit events were dropped
+          runbook: chapter 47, The audit pipeline
+
+  - name: sprig-platform
+    rules:
+      - alert: CertificateExpiring
+        expr: min by (instance, bundle) (sprig_gateway_cert_expiry_seconds) < 14 * 86400
+        for: 1h
+        labels: { severity: ticket }
+        annotations:
+          summary: A listener certificate expires within 14 days
+          runbook: chapter 04, certificates reload without a restart
+      - alert: CertificateExpiringSoon
+        expr: min by (instance, bundle) (sprig_gateway_cert_expiry_seconds) < 3 * 86400
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: A listener certificate expires within 3 days
+          runbook: chapter 04, certificates reload without a restart
+      - alert: EtcdNoLeader
+        expr: etcd_server_has_leader == 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: An etcd member has no leader
+          runbook: chapter 47 runbook 6
+      - alert: EtcdDbNearQuota
+        expr: etcd_mvcc_db_total_size_in_bytes / etcd_server_quota_backend_bytes > 0.8
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: An etcd database is above 80% of its quota
+          runbook: chapter 47 runbook 7
+      - alert: BackupMissed
+        expr: time() - max by (cluster) (sprig_backup_last_success_timestamp_seconds{kind="full"}) > 26 * 3600
+        labels: { severity: page }
+        annotations:
+          summary: A cluster has no full backup younger than 26 hours
+          runbook: chapter 47, Backups (R2)
+      - alert: SprigTracesDropped
+        expr: sum by (instance) (increase(sprig_telemetry_spans_dropped_total[15m])) > 1000
+        labels: { severity: ticket }
+        annotations:
+          summary: Trace spans are being dropped (collector down or too slow)
+          runbook: chapter 47, Failure handling
+
+  - name: sprig-thrash
+    rules:
+      - alert: SprigThrashing
+        expr: |
+          increase(sprig_balancer_moves_reverted_total[6h]) > 0
+          or increase(sprig_controller_dc_moves_reverted_total[24h]) > 0
+          or increase(sprig_balancer_split_merge_flaps_total[24h]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: An automatic loop is undoing its own decisions
+          runbook: chapter 47 runbook 11

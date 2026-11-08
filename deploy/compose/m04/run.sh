@@ -18,7 +18,8 @@
 # clock in $STATE/autoindex-clock. The single-node topology uses acme
 # (dc-a-c1).
 #
-# Variables: CARGO_TARGET_DIR (target), SPRIG_GATEWAY_DEV_STATE
+# Variables: SPRIG_M04_TENANT (another tenant on the topology's cluster),
+# CARGO_TARGET_DIR (target), SPRIG_GATEWAY_DEV_STATE
 # (deploy/compose/.gateway-dev), SPRIG_TEST_M04_ROWS (100000).
 set -euo pipefail
 
@@ -80,9 +81,9 @@ teardown() {
 topology() { # single|replication|galera [test]
   local tenant catalog test=${2:-chapter_13_scenarios_on_one_topology} out=$1
   case $1 in
-    single) tenant=acme catalog=mysql://root:sprig-dev-root@127.0.0.1:13301 ;;
-    replication) tenant=m04r catalog=mysql://root:sprig-dev-root@127.0.0.1:13311 ;;
-    galera) tenant=m04g catalog=mysql://root:sprig-dev-root@127.0.0.1:13321 ;;
+    single) tenant=${SPRIG_M04_TENANT:-acme} catalog=mysql://root:sprig-dev-root@127.0.0.1:13301 ;;
+    replication) tenant=${SPRIG_M04_TENANT:-m04r} catalog=mysql://root:sprig-dev-root@127.0.0.1:13311 ;;
+    galera) tenant=${SPRIG_M04_TENANT:-m04g} catalog=mysql://root:sprig-dev-root@127.0.0.1:13321 ;;
     *) echo "unknown topology $1" >&2; exit 2 ;;
   esac
   [[ $test == chapter_13_scenarios_on_one_topology ]] || out=$1-o1

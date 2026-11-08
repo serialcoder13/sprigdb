@@ -1,0 +1,5 @@
+[
+  {"name": "mum1-db-1", "listen": "0.0.0.0:3401", "upstream": "10.10.1.21:3306", "enabled": true},
+  {"name": "fra1-db-1", "listen": "0.0.0.0:3402", "upstream": "10.10.2.21:3306", "enabled": true},
+  {"name": "etcd", "listen": "0.0.0.0:3409", "upstream": "10.10.1.10:2379", "enabled": true}
+]

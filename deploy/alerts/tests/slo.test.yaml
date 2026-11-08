@@ -1,0 +1,93 @@
+# promtool test rules: the SLO alerts fire on the main SLIs (availability,
+# gateway overhead, latency) and stay quiet on healthy traffic.
+rule_files:
+  - ../sprig-slo.rules.yaml
+evaluation_interval: 1m
+tests:
+  # 10 of every 110 statements fail on SprigDB's side: fast burn.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_gateway_statements_total{dc="dc-a",protocol="mysql",result="ok"}'
+        values: '0+6000x120'
+      - series: 'sprig_gateway_statements_total{dc="dc-a",protocol="mysql",result="sprig"}'
+        values: '0+600x120'
+      - series: 'sprig_gateway_statements_total{dc="dc-a",protocol="mysql",result="client"}'
+        values: '0+600x120'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: SprigAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels: { severity: page, slo: availability, dc: dc-a }
+            exp_annotations:
+              summary: The availability error budget is burning fast
+              runbook: chapter 47 runbook 8
+      # Over an hour the 3-day window burns too (ticket).
+      - eval_time: 70m
+        alertname: SprigAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels: { severity: ticket, slo: availability, dc: dc-a }
+            exp_annotations:
+              summary: The availability error budget is burning
+              runbook: chapter 47 runbook 8
+
+  # Healthy: under one failure in 10,000 (below 0.05%); client errors
+  # don't count.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_gateway_statements_total{dc="dc-a",protocol="mysql",result="ok"}'
+        values: '0+6000x120'
+      - series: 'sprig_gateway_statements_total{dc="dc-a",protocol="mysql",result="backend"}'
+        values: '0+0.6x120'
+      - series: 'sprig_gateway_statements_total{dc="dc-a",protocol="mysql",result="client"}'
+        values: '0+3000x120'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: SprigAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: SprigAvailabilitySlowBurn
+        exp_alerts: []
+    promql_expr_test:
+      - expr: sprig:availability_errors:ratio_rate1h
+        eval_time: 70m
+        exp_samples:
+          - labels: 'sprig:availability_errors:ratio_rate1h{dc="dc-a"}'
+            value: 6.666222251849887E-05
+
+  # Half the statements spend 2 ms or more in the gateway: overhead burns.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_gateway_overhead_seconds_bucket{dc="dc-a",protocol="mysql",le="0.002"}'
+        values: '0+3000x120'
+      - series: 'sprig_gateway_overhead_seconds_bucket{dc="dc-a",protocol="mysql",le="+Inf"}'
+        values: '0+6000x120'
+      - series: 'sprig_gateway_overhead_seconds_count{dc="dc-a",protocol="mysql"}'
+        values: '0+6000x120'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: SprigOverheadFastBurn
+        exp_alerts:
+          - exp_labels: { severity: page, slo: overhead, dc: dc-a }
+            exp_annotations:
+              summary: Gateway overhead above 2 ms is burning its budget fast
+              runbook: chapter 47 runbook 8
+
+  # p99 statement latency between 1 s and 2.5 s for half an hour.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_gateway_query_duration_seconds_bucket{dc="dc-a",protocol="mysql",le="0.01"}'
+        values: '0+5000x60'
+      - series: 'sprig_gateway_query_duration_seconds_bucket{dc="dc-a",protocol="mysql",le="1"}'
+        values: '0+5900x60'
+      - series: 'sprig_gateway_query_duration_seconds_bucket{dc="dc-a",protocol="mysql",le="2.5"}'
+        values: '0+6000x60'
+      - series: 'sprig_gateway_query_duration_seconds_bucket{dc="dc-a",protocol="mysql",le="+Inf"}'
+        values: '0+6000x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SprigQueryLatencyHigh
+        exp_alerts:
+          - exp_labels: { severity: ticket, slo: latency, dc: dc-a }
+            exp_annotations:
+              summary: Statement p99 latency above 1 s for 10 minutes
+              runbook: chapter 47 runbook 8

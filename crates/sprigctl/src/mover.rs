@@ -81,6 +81,12 @@ pub(crate) fn shard_group() -> Command {
                         .long("wait")
                         .action(ArgAction::SetTrue)
                         .help("Return once the cutover committed or the job ended"),
+                )
+                .arg(
+                    Arg::new("pin")
+                        .long("pin")
+                        .action(ArgAction::SetTrue)
+                        .help("Then pin the tenant to the target (chapter 11)"),
                 ),
         )
         .subcommand(later("list"))
@@ -201,6 +207,12 @@ pub(crate) async fn run(
                 verify: m.get_one::<String>("verify").cloned(),
             };
             let mut j: JobStatus = c.post("/admin/v1/mover/jobs", &req).await?;
+            if m.get_flag("pin") {
+                // Pinned to the target at once, so the balancer leaves the
+                // tenant alone while it moves and after.
+                let p = crate::placement::pin(c, &req.tenant, Some(req.to.clone()), None).await?;
+                eprintln!("tenant {} {}", req.tenant, p.describe());
+            }
             if m.get_flag("wait") {
                 while !j.state.is_terminal() && !j.state.is_committed() {
                     tokio::time::sleep(Duration::from_millis(500)).await;

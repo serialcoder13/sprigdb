@@ -266,6 +266,36 @@ pub struct PlanReport {
     /// For stuck clusters, the best moves considered and not worth making.
     #[serde(default)]
     pub rejected: Vec<Considered>,
+    /// The weights the run judged moves with.
+    #[serde(default)]
+    pub weights: crate::judge::Weights,
+    /// Pinned tenants a move would have been considered for (off a hot
+    /// cluster, or by a drain or residency change), with why they stay.
+    #[serde(default)]
+    pub pinned: Vec<PinnedSkip>,
+}
+
+/// A pinned tenant left where it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PinnedSkip {
+    /// The tenant.
+    pub tenant: TenantId,
+    /// The shard.
+    pub shard: ShardKey,
+    /// Where it stays.
+    pub cluster: ClusterId,
+    /// `cluster_hot`, `spread`, `drain` or `residency_change`: what would
+    /// have moved it.
+    pub reason: MoveReason,
+    /// Why, in plain words.
+    pub why: String,
+}
+
+fn pin_text(t: Option<&crate::model::TenantView>) -> String {
+    t.and_then(|t| t.pin.as_ref()).map_or_else(
+        || "pinned by operator".to_owned(),
+        crate::pins::TenantPin::describe,
+    )
 }
 
 #[derive(Debug, Default)]
@@ -498,6 +528,8 @@ impl Planner {
             approvals: Vec::new(),
             stuck: Vec::new(),
             rejected: Vec::new(),
+            weights: s.weights,
+            pinned: Vec::new(),
         };
         let mut w = Work::new(view);
         let max_active = s.max_concurrent_moves_per_dc as usize;
@@ -582,6 +614,7 @@ impl Planner {
     }
 
     /// Residency changes and drains.
+    #[allow(clippy::too_many_lines)]
     fn forced_moves(w: &mut Work, r: &mut PlanReport, now: Timestamp, max_active: usize) {
         let view = w.view.clone();
         for s in view.shards.values() {
@@ -602,6 +635,29 @@ impl Planner {
                 continue;
             };
             if w.moved.contains_key(&s.key) || s.locked {
+                continue;
+            }
+            if s.pinned || tenant.is_some_and(|t| t.pinned) {
+                let why = format!(
+                    "did not move {} from {} ({}): {}; unpin it to let it move",
+                    s.key,
+                    s.cluster,
+                    if reason == MoveReason::Drain {
+                        "the cluster is draining"
+                    } else {
+                        "residency no longer allows the cluster"
+                    },
+                    pin_text(tenant)
+                );
+                r.notes
+                    .push(note("pinned", Some(&s.cluster), Some(&s.key), why.clone()));
+                r.pinned.push(PinnedSkip {
+                    tenant: s.key.tenant,
+                    shard: s.key,
+                    cluster: s.cluster.clone(),
+                    reason,
+                    why,
+                });
                 continue;
             }
             if w.active() >= max_active {
@@ -702,6 +758,20 @@ impl Planner {
             let Some(t) = view.tenants.get(&sv.key.tenant) else {
                 continue;
             };
+            if sv.pinned || t.pinned {
+                r.pinned.push(PinnedSkip {
+                    tenant: t.id,
+                    shard: sv.key,
+                    cluster: h.clone(),
+                    reason,
+                    why: format!(
+                        "did not move {} from {}, which needs relief: {}",
+                        sv.key,
+                        h,
+                        pin_text(Some(t))
+                    ),
+                });
+            }
             let skip = if sv.pinned || t.pinned {
                 Some("pinned")
             } else if sv.locked {
@@ -782,6 +852,7 @@ impl Planner {
                     in_flight: w.slots_used(h) + w.slots_used(c),
                     ratio: s.benefit_cost_ratio,
                     min_gain: s.min_gain,
+                    weights: s.weights,
                 });
                 if cand.as_ref().is_none_or(|(_, _, _, b)| j.net > b.net) {
                     cand = Some((c.clone(), full_c, fit.full_after, j));
@@ -884,7 +955,7 @@ impl Planner {
 
 fn guardrail_text(g: &str) -> &'static str {
     match g {
-        "pinned" => "pinned",
+        "pinned" => "pinned by operator",
         "locked" => "locked by an active job",
         "shard_cooldown" => "in shard cooldown (balancer.shard_cooldown_hours)",
         "tenant_off" => "the tenant's balancer.mode is off",

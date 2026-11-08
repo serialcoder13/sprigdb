@@ -20,6 +20,8 @@ fn report(stuck: Vec<ClusterId>, approvals: Vec<ApprovalNeeded>) -> PlanReport {
         approvals,
         stuck,
         rejected: Vec::new(),
+        weights: crate::judge::Weights::default(),
+        pinned: Vec::new(),
     }
 }
 

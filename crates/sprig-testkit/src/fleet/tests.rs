@@ -35,6 +35,20 @@ fn a_skewed_fleet_evens_out_without_oscillating() {
 }
 
 #[test]
+fn pinned_tenants_stay_put() {
+    let cfg = FleetConfig {
+        days: 4,
+        pin_every: 5,
+        ..FleetConfig::skewed(21)
+    };
+    let r = run(&cfg);
+    assert_eq!(r.pinned, 48);
+    assert_eq!(r.pinned_moved, 0, "{r:?}");
+    assert!(r.moves > 0);
+    assert!(r.violations.is_empty());
+}
+
+#[test]
 fn modes_plan_alike_and_only_auto_moves() {
     let mut cfg = FleetConfig {
         days: 2,

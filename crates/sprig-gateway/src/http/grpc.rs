@@ -60,14 +60,18 @@ async fn caller<T>(core: &Core, req: &Request<T>) -> std::result::Result<Caller,
         .get::<ConnInfo>()
         .cloned()
         .ok_or_else(|| Status::internal("no connection info"))?;
-    core.caller(
-        &info,
-        meta(req, "authorization"),
-        meta(req, TENANT_HEADER),
-        None,
-    )
-    .await
-    .map_err(|e| st(&e))
+    let mut c = core
+        .caller(
+            &info,
+            meta(req, "authorization"),
+            meta(req, TENANT_HEADER),
+            None,
+        )
+        .await
+        .map_err(|e| st(&e))?;
+    // Chapter 24: the client's DC, as gRPC metadata `sprig-dc`.
+    c.client_dc = crate::dc::hint("grpc", meta(req, "sprig-dc").as_deref()).known();
+    Ok(c)
 }
 
 /// A reply from a gateway the call was forwarded to, as the error or the

@@ -1,0 +1,144 @@
+# promtool test rules: replication lag, stuck data movement, the audit
+# pipeline, certificates, etcd and thrashing.
+rule_files:
+  - ../sprig-ops.rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'sprig_backend_replica_lag_seconds{cluster="dc-a-c2",node="n2",instance="gw-1"}'
+        values: '45x30'
+      - series: 'sprig_backend_replica_lag_seconds{cluster="dc-a-c2",node="n3",instance="gw-1"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SprigReplicaLagHigh
+        exp_alerts:
+          - exp_labels: { severity: ticket, cluster: dc-a-c2, node: n2 }
+            exp_annotations:
+              summary: A replica is more than 30 s behind; reads leave it
+              runbook: chapter 06 read routing; chapter 47 runbook 3
+      - eval_time: 10m
+        alertname: SprigReplicaLagCritical
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'sprig_backend_replica_lag_seconds{cluster="dc-a-c2",node="n2",instance="gw-1"}'
+        values: '400x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SprigReplicaLagCritical
+        exp_alerts:
+          - exp_labels: { severity: page, cluster: dc-a-c2, node: n2 }
+            exp_annotations:
+              summary: A replica is more than 5 minutes behind
+              runbook: chapter 47 runbook 3
+
+  # A move in catch-up whose lag stays above 10 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_mover_catchup_lag_seconds{instance="worker-1"}'
+        values: '900x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SprigMoverStuck
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: SprigMoverStuck
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: Data movement is stuck
+              runbook: chapter 47 runbook 4
+
+  # A running move that copied and applied nothing for an hour.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_controller_jobs{kind="move_shard",state="running"}'
+        values: '1x120'
+      - series: 'sprig_mover_copy_rows_total{instance="worker-1"}'
+        values: '500x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: SprigMoverStuck
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: Data movement is stuck
+              runbook: chapter 47 runbook 4
+
+  # The same move making progress: quiet.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_controller_jobs{kind="move_shard",state="running"}'
+        values: '1x120'
+      - series: 'sprig_mover_copy_rows_total{instance="worker-1"}'
+        values: '0+100x120'
+      - series: 'sprig_mover_catchup_lag_seconds{instance="worker-1"}'
+        values: '2x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: SprigMoverStuck
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'sprig_audit_spool_bytes{instance="gw-1"}'
+        values: '300x30'
+      - series: 'sprig_audit_spool_max_bytes{instance="gw-1"}'
+        values: '512x30'
+      - series: 'sprig_audit_dropped_total{instance="gw-2",stream="tenant"}'
+        values: '0 0 0 3 3 3'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AuditSpoolFilling
+        exp_alerts:
+          - exp_labels: { severity: ticket, instance: gw-1 }
+            exp_annotations:
+              summary: The audit spool is over half full; the sink is behind
+              runbook: chapter 47, The audit pipeline
+      - eval_time: 20m
+        alertname: AuditUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: AuditEventsDropped
+        exp_alerts:
+          - exp_labels: { severity: page, instance: gw-2 }
+            exp_annotations:
+              summary: Audit events were dropped
+              runbook: chapter 47, The audit pipeline
+
+  - interval: 1m
+    input_series:
+      - series: 'sprig_gateway_cert_expiry_seconds{instance="gw-1",bundle="default"}'
+        values: '864000x120'
+      - series: 'etcd_server_has_leader{instance="etcd-1"}'
+        values: '0x10'
+      - series: 'sprig_balancer_moves_reverted_total{instance="ctl-1",after_recovery="false"}'
+        values: '0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: CertificateExpiring
+        exp_alerts:
+          - exp_labels: { severity: ticket, instance: gw-1, bundle: default }
+            exp_annotations:
+              summary: A listener certificate expires within 14 days
+              runbook: chapter 04, certificates reload without a restart
+      - eval_time: 70m
+        alertname: CertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: EtcdNoLeader
+        exp_alerts:
+          - exp_labels: { severity: page, instance: etcd-1 }
+            exp_annotations:
+              summary: An etcd member has no leader
+              runbook: chapter 47 runbook 6
+      - eval_time: 4m
+        alertname: SprigThrashing
+        exp_alerts:
+          - exp_labels: { severity: ticket, instance: ctl-1, after_recovery: "false" }
+            exp_annotations:
+              summary: An automatic loop is undoing its own decisions
+              runbook: chapter 47 runbook 11

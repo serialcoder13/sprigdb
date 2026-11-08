@@ -187,10 +187,13 @@ async fn data(
     let auth = header(&req, "authorization");
     let tenant = header(&req, TENANT_HEADER);
     let host = header(&req, "host");
+    let client_dc = header(&req, "sprig-dc");
     let ndjson = header(&req, "accept").is_some_and(|a| a.contains("application/x-ndjson"));
     let api = core.engine.settings();
     let body = parse_json(&read_body(req, api.max_request).await?)?;
-    let caller = core.caller(info, auth, tenant, host).await?;
+    let mut caller = core.caller(info, auth, tenant, host).await?;
+    // Chapter 24: the client's DC.
+    caller.client_dc = crate::dc::hint("http", client_dc.as_deref()).known();
     let transaction = m
         .vars
         .get("transaction")

@@ -53,7 +53,10 @@
 //!    ([`WriterSelector`]).
 //! 2. **Lease** from the node's pool ([`BackendPools::acquire`]); a reader
 //!    that can't be reached is skipped, a writer is retried to the deadline
-//!    (39030); an exhausted pool fails with 39031.
+//!    (39030); an exhausted pool fails with 39031. An idle connection the
+//!    server closed (`KILL CONNECTION`, a restart) is discarded unused, so
+//!    any statement, a write too, moves to another connection; a pinned
+//!    session's held one fails with 1213 or 39033 without sending.
 //! 3. **Sync** ([`state::sync_prefix`]): `USE`, `SET SESSION`, user
 //!    variables the statement reads, `LAST_INSERT_ID`, then the wait
 //!    prefix. Text statements send prefix and statement as one
@@ -62,8 +65,8 @@
 //!    reruns the statement on the writer; a failed sync discards the
 //!    connection and retries once.
 //! 4. **First packet.** The statement's first response packet is read
-//!    before `query` returns, so a plain read whose node fails before any
-//!    packet is retried once elsewhere.
+//!    before `query` returns, so a plain read or a prepare whose node fails
+//!    before any packet is retried once elsewhere.
 //!
 //! [`BackendSession::next`] maps a lost connection to chapter 06's errors:
 //! 39032 during a commit or an autocommit write, 1213 inside a

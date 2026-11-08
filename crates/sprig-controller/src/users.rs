@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sprig_auth::admin::{self, NewUser};
+use sprig_auth::portable::PortableAccounts;
 use sprig_auth::store::AUTH_MODULE;
 use sprig_catalog::migrate::MigrateOpts;
 use sprig_catalog::{CatalogLocator, MariaCatalog, Migrator, Module};
@@ -102,6 +103,38 @@ pub trait UserAdmin: Send + Sync {
     /// # Errors
     /// As [`TenantUsers::create`].
     async fn create(&self, tenant: &str, req: CreateUserRequest) -> Result<CreateUserResponse>;
+
+    /// A tenant's accounts for an export (chapter 47): live users with
+    /// their verifier strings, and its SQL roles.
+    ///
+    /// # Errors
+    /// As [`TenantUsers::export_accounts`].
+    async fn export_accounts(&self, _tenant: &str) -> Result<PortableAccounts> {
+        Err(crate::admin::invalid("this controller doesn't export accounts"))
+    }
+
+    /// Creates exported accounts in a tenant (chapter 47).
+    ///
+    /// # Errors
+    /// As [`TenantUsers::import_accounts`].
+    async fn import_accounts(
+        &self,
+        _tenant: &str,
+        _accounts: PortableAccounts,
+    ) -> Result<ImportAccountsResponse> {
+        Err(crate::admin::invalid("this controller doesn't import accounts"))
+    }
+}
+
+/// What `POST /admin/v1/tenants/{name}/accounts` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportAccountsResponse {
+    /// Accounts created, as `'name'@'host'`.
+    pub created: Vec<String>,
+    /// Accounts that existed and were left alone.
+    pub existing: Vec<String>,
+    /// The newest auth version written.
+    pub auth_version: u64,
 }
 
 /// Creates users in tenant catalogs.
@@ -188,11 +221,107 @@ impl TenantUsers {
             auth_version: changed.auth_version,
         })
     }
+
+    async fn active(&self, tenant: &str) -> Result<TenantId> {
+        let entry = self.directory.require(tenant).await?;
+        let e = entry.body();
+        if e.state != TenantState::Active {
+            return Err(SprigError::new(
+                SprigCode::TenantNotReady,
+                format!("tenant {tenant} is {}, not active", e.state.as_str()),
+            ));
+        }
+        Ok(e.tenant_id)
+    }
+
+    /// The live users (with verifier strings) and SQL roles of the tenant
+    /// named `tenant`, for `sprigctl tenant export` (chapter 47).
+    ///
+    /// # Errors
+    /// 39072 for an unknown or inactive tenant; the catalog's errors.
+    pub async fn export_accounts(&self, tenant: &str) -> Result<PortableAccounts> {
+        let id = self.active(tenant).await?;
+        let accounts = sprig_auth::portable::export(&self.catalog, id).await?;
+        sprig_common::audit::record(
+            sprig_common::audit::AuditStream::Tenant(id),
+            "admin.accounts_exported",
+            serde_json::json!({"tenant": tenant, "users": accounts.users.len(), "roles": accounts.roles.len()}),
+        );
+        Ok(accounts)
+    }
+
+    /// Creates `accounts.users` in the tenant named `tenant` with their
+    /// verifiers unchanged (accounts that exist are left alone), for
+    /// `sprigctl tenant import`. Roles and grants are SQL, replayed
+    /// through the gateway.
+    ///
+    /// # Errors
+    /// 39072 for an unknown or inactive tenant; 39970 while the audit
+    /// spool is full; 39792 for a malformed account; the catalog's errors.
+    pub async fn import_accounts(
+        &self,
+        tenant: &str,
+        accounts: PortableAccounts,
+    ) -> Result<ImportAccountsResponse> {
+        sprig_common::audit::check_available()?;
+        let id = self.active(tenant).await?;
+        let ep = self.locator.writer(id).await?;
+        let mut conn = ep.pool.get_conn().await.map_err(|err| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(err)
+        })?;
+        Migrator::new(&[AUTH_MODULE, sprig_auth::authz::AUTHZ_MODULE])?
+            .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
+            .await?;
+        drop(conn);
+        let mut out = ImportAccountsResponse::default();
+        for a in &accounts.users {
+            let account = format!("'{}'@'{}'", a.name, a.host);
+            match sprig_auth::portable::import(&self.catalog, id, a, &*self.clock).await? {
+                Some(c) => {
+                    out.auth_version = out.auth_version.max(c.auth_version);
+                    if accounts
+                        .tenant_admins
+                        .iter()
+                        .any(|(n, h)| *n == a.name && *h == a.host)
+                    {
+                        let v = sprig_auth::authz::account_sql::grant_tenant_admin(
+                            &self.catalog,
+                            id,
+                            c.user_id,
+                        )
+                        .await?;
+                        out.auth_version = out.auth_version.max(v);
+                    }
+                    out.created.push(account);
+                }
+                None => out.existing.push(account),
+            }
+        }
+        sprig_common::audit::record(
+            sprig_common::audit::AuditStream::Tenant(id),
+            "admin.accounts_imported",
+            serde_json::json!({"tenant": tenant, "created": out.created, "existing": out.existing}),
+        );
+        tracing::info!(event = "admin.accounts_imported", tenant, created = out.created.len(), existing = out.existing.len(), "accounts imported");
+        Ok(out)
+    }
 }
 
 #[async_trait::async_trait]
 impl UserAdmin for TenantUsers {
     async fn create(&self, tenant: &str, req: CreateUserRequest) -> Result<CreateUserResponse> {
         TenantUsers::create(self, tenant, req).await
+    }
+
+    async fn export_accounts(&self, tenant: &str) -> Result<PortableAccounts> {
+        TenantUsers::export_accounts(self, tenant).await
+    }
+
+    async fn import_accounts(
+        &self,
+        tenant: &str,
+        accounts: PortableAccounts,
+    ) -> Result<ImportAccountsResponse> {
+        TenantUsers::import_accounts(self, tenant, accounts).await
     }
 }

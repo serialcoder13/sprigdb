@@ -10,6 +10,11 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+# `tenant export` and `tenant import` (chapter 47): SQL through a gateway,
+# per-table SHA-256 checksums, verifier strings from sprig-auth.
+mysql_async.workspace = true
+sha2.workspace = true
+sprig-auth.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -33,7 +38,6 @@ async-trait.workspace = true
 # Rows for the automatic-indexing golden tests, turned into views by the
 # controller's `autoindex_admin::view`.
 sprig-advisor.workspace = true
-mysql_async.workspace = true
 
 [lints]
 workspace = true

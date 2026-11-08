@@ -506,6 +506,9 @@ pub struct TenantView {
     pub non_xa_reject: bool,
     /// Pinned as a whole (`sprigctl tenant pin`).
     pub pinned: bool,
+    /// The pin, when known (`crate::pins`).
+    #[serde(default)]
+    pub pin: Option<crate::pins::TenantPin>,
     /// Its keys.
     pub knobs: TenantKnobs,
     /// Moves started in the last 24 hours.
@@ -523,6 +526,7 @@ impl TenantView {
             rpo_zero: false,
             non_xa_reject: false,
             pinned: false,
+            pin: None,
             knobs: TenantKnobs::default(),
             moves_last_day: 0,
         }

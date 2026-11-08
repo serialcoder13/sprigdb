@@ -1,0 +1,63 @@
+# Chapter 24's move tests (milestone M0.7): two simulated data centers of
+# the three-DC layout, an override of ../compose.3dc.yaml. run.sh starts
+# only what the tests need:
+#
+# | Service    | DC   | Address      | What                                   |
+# |------------|------|--------------|----------------------------------------|
+# | netem      | -    | host         | one-way delays between DC subnets       |
+# | mum1-etcd  | mum1 | 10.10.1.10   | the one etcd of single-etcd mode        |
+# | mum1-db-1  | mum1 | 10.10.1.21   | cluster mum1: single node               |
+# | fra1-db-1  | fra1 | 10.10.2.21   | cluster fra1: Galera (one node)         |
+# | proxy-mum1 | mum1 | 10.10.1.240  | where mum1's processes dial from        |
+# | proxy-fra1 | fra1 | 10.10.2.240  | where fra1's processes dial from        |
+#
+# The SprigDB processes run on the host. Each is told, through
+# SPRIG_DIAL_MAP (sprig-common::net), to reach every node through its own
+# DC's proxy, so its connections start in its DC's subnet and netem delays
+# the ones that cross DCs: a fra1 process reaching mum1-db-1 pays the
+# mum1-fra1 round trip (60 ms by default), a mum1 process doesn't.
+#
+# Host ports (127.0.0.1): proxy-mum1 34411 mum1-db-1, 34412 fra1-db-1,
+# 34419 etcd; proxy-fra1 34421, 34422, 34429. The base file publishes the
+# nodes and etcd directly too (34106, 34206, 34179), for checks.
+#
+# Each MariaDB here is capped at 768 MB, each proxy at 64 MB.
+
+services:
+  mum1-etcd:
+    mem_limit: 256m
+
+  mum1-db-1:
+    # A single node: no semi-sync master (it would wait for replicas that
+    # aren't started).
+    command: [--server-id=101, --gtid-domain-id=1, --innodb-buffer-pool-size=64M, --max-connections=400]
+    mem_limit: 768m
+    memswap_limit: 1g
+
+  fra1-db-1:
+    mem_limit: 768m
+    memswap_limit: 1g
+
+  proxy-mum1:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: [-host=0.0.0.0, -config=/config.json]
+    volumes:
+      - ./dc/proxy-mum1.json:/config.json:ro
+    networks: { wan: { ipv4_address: 10.10.1.240 } }
+    ports:
+      - "127.0.0.1:34411:3401"
+      - "127.0.0.1:34412:3402"
+      - "127.0.0.1:34419:3409"
+    mem_limit: 64m
+
+  proxy-fra1:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: [-host=0.0.0.0, -config=/config.json]
+    volumes:
+      - ./dc/proxy-fra1.json:/config.json:ro
+    networks: { wan: { ipv4_address: 10.10.2.240 } }
+    ports:
+      - "127.0.0.1:34421:3401"
+      - "127.0.0.1:34422:3402"
+      - "127.0.0.1:34429:3409"
+    mem_limit: 64m

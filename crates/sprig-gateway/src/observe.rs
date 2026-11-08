@@ -125,14 +125,14 @@ impl SessionExec for ObservedSession {
         if req.is_silent() {
             return self.inner.execute(cx, req, out).await;
         }
-        let protocol = cx.session.protocol().as_str();
+        let protocol = cx.session.protocol.as_str();
         let span = tracing::info_span!(
             target: TARGET,
             "gateway.request",
             protocol,
             request = req.name(),
             tenant = self.tenant,
-            gateway_session = cx.session.id().0,
+            gateway_session = cx.session.id.0,
             traceparent = traceparent(&req),
             result = tracing::field::Empty,
             error = tracing::field::Empty,

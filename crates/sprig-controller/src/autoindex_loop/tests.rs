@@ -175,13 +175,24 @@ impl WorkloadSource for Workload {
     ) -> Result<Option<BTreeMap<Fingerprint, FpLatency>>> {
         let runs = if u > self.reads_from { 5000 } else { 0 };
         Ok(Some(
-            [(
-                TARGET,
-                FpLatency {
-                    uses_index: Some(true),
-                    ..FpLatency::read(runs, 11.0, 8.0)
-                },
-            )]
+            [
+                (
+                    TARGET,
+                    FpLatency {
+                        uses_index: Some(true),
+                        ..FpLatency::read(runs, 11.0, 8.0)
+                    },
+                ),
+                // Inserts: an index on a table nobody writes is kept.
+                (
+                    Fingerprint(0x77),
+                    FpLatency {
+                        write: true,
+                        affected_per_run: 1.0,
+                        ..FpLatency::read(runs / 10, 0.5, 0.4)
+                    },
+                ),
+            ]
             .into(),
         ))
     }
