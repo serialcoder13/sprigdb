@@ -1,0 +1,2 @@
+ˆ•
+SELECT @@character_set_server, @@collation_server, @@collation_connection, @@character_set_collations, @@character_set_client

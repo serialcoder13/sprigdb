@@ -29,7 +29,7 @@ mod more_errno {
 }
 
 /// Whether `ER_CHECKREAD` rolls the whole transaction back, as a deadlock
-/// does (checked against 11.8 by the conformance suite).
+/// does (checked against 11.8 and 12.3 by the conformance suite).
 const CHECKREAD_ROLLS_BACK: bool = true;
 
 /// How often a replica's IO thread retries an unreachable source.
@@ -57,6 +57,7 @@ pub enum Step {
 
 /// One server's identity and settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // independent server settings
 pub struct ServerConfig {
     /// The server's name: its node on the simulated network.
     pub name: String,
@@ -74,6 +75,14 @@ pub struct ServerConfig {
     pub semisync_master: bool,
     /// `read_only` at boot (chapter 27 boots fenced).
     pub read_only_on_boot: bool,
+    /// `binlog_storage_engine = innodb` (MariaDB 12.3+): `XA PREPARE` is not
+    /// binlogged, so it takes no GTID and replicas never see the prepared
+    /// branch; `XA COMMIT` logs the whole transaction as one ordinary group
+    /// and `XA ROLLBACK` logs nothing (measured on 12.3.3). Semi-sync
+    /// `AFTER_SYNC` doesn't exist with it (chapter 09), so a prepare never
+    /// waits for an ack. Off (the classic file binlog) by default, as on
+    /// the Compose servers.
+    pub binlog_in_innodb: bool,
 }
 
 impl ServerConfig {
@@ -90,6 +99,7 @@ impl ServerConfig {
             semisync_timeout: Duration::from_secs(10),
             semisync_master: false,
             read_only_on_boot: false,
+            binlog_in_innodb: false,
         }
     }
 }
@@ -753,7 +763,8 @@ impl Model {
     fn run(&mut self, conn: ConnId, stmt: &Stmt, order: (Duration, u64)) -> Step {
         let server = self.conn(conn).server.clone();
         let xa = self.xa_state(conn);
-        // A prepared or idle XA branch accepts only XA statements.
+        // A prepared or idle XA branch accepts only XA statements and
+        // reads of variables (`@@last_gtid`, `@@gtid_binlog_pos`).
         if let Some((_, st)) = &xa
             && *st != XaState::Active
             && !matches!(
@@ -764,6 +775,7 @@ impl Model {
                     | Stmt::XaRollback(_)
                     | Stmt::XaRecover
                     | Stmt::LastGtid
+                    | Stmt::GtidBinlogPos
             )
         {
             return err(errno::XAER_RMFAIL);
@@ -1524,6 +1536,11 @@ impl Model {
             .expect("server")
             .prepared
             .insert(x.to_owned(), txn);
+        if self.servers[&server].cfg.binlog_in_innodb {
+            // Not binlogged: no GTID (`@@last_gtid` keeps its old value),
+            // nothing shipped, nothing to acknowledge.
+            return ok();
+        }
         let writes: Vec<(RowRef, Option<String>)> = self.servers[&server].txns[&txn]
             .writes
             .clone()
@@ -1602,11 +1619,14 @@ impl Model {
         if let Some(c) = self.servers[&server].txns[&txn].conn {
             self.conns.get_mut(&c).expect("conn").txn = None;
         }
-        if prepared {
-            let kind = if commit {
-                GroupKind::XaCommit(x.to_owned())
-            } else {
-                GroupKind::XaRollback(x.to_owned())
+        let innodb_binlog = self.servers[&server].cfg.binlog_in_innodb;
+        // With the binlog in InnoDB the prepare wasn't logged: a commit logs
+        // the transaction as an ordinary group, a rollback nothing.
+        if prepared && (commit || !innodb_binlog) {
+            let kind = match (commit, innodb_binlog) {
+                (true, true) => GroupKind::Commit,
+                (true, false) => GroupKind::XaCommit(x.to_owned()),
+                (false, _) => GroupKind::XaRollback(x.to_owned()),
             };
             let writes = if commit {
                 self.servers[&server].txns[&txn]

@@ -85,6 +85,7 @@ impl BinlogSource {
 
 /// How to open a stream.
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)] // independent switches, as COM_BINLOG_DUMP's flags
 pub struct StreamOptions {
     /// The replica `server_id` the stream presents. It must differ from every
     /// real server's and from other streams' on the same node: MariaDB ends
@@ -112,6 +113,11 @@ pub struct StreamOptions {
     pub filter: Option<TableFilter>,
     /// Verify CRC32 checksums.
     pub verify_checksums: bool,
+    /// Ask for a non-blocking dump (`BINLOG_DUMP_NON_BLOCK`): at the end of
+    /// the binlog the server ends the dump, and [`BinlogStream::next`]
+    /// returns [`Event::DumpEnd`] instead of waiting for new events. The
+    /// capability probe (chapter 09, "Binlog dump") reads this way.
+    pub non_blocking: bool,
 }
 
 impl fmt::Debug for StreamOptions {
@@ -122,13 +128,15 @@ impl fmt::Debug for StreamOptions {
             .field("annotate_rows", &self.annotate_rows)
             .field("register_slave", &self.register_slave)
             .field("filter", &self.filter.is_some())
+            .field("non_blocking", &self.non_blocking)
             .finish_non_exhaustive()
     }
 }
 
 impl StreamOptions {
     /// Defaults for a stream presenting `server_id`: 1 s heartbeats, three
-    /// periods of silence, no annotations, no registration, capability 4.
+    /// periods of silence, no annotations, no registration, capability 4,
+    /// blocking.
     #[must_use]
     pub fn new(server_id: u32) -> Self {
         Self {
@@ -141,6 +149,7 @@ impl StreamOptions {
             connect_timeout: Duration::from_secs(10),
             filter: None,
             verify_checksums: true,
+            non_blocking: false,
         }
     }
 }
@@ -169,6 +178,8 @@ pub struct BinlogStream {
     pending: Option<Vec<u8>>,
     silence: Duration,
     server_version: String,
+    non_blocking: bool,
+    ended: bool,
 }
 
 impl fmt::Debug for BinlogStream {
@@ -227,11 +238,13 @@ impl BinlogStream {
             conn.register_slave(opts.server_id, "sprig-binlog", 0)
                 .await?;
         }
-        let flags = if opts.annotate_rows {
-            dump_flags::SEND_ANNOTATE_ROWS
-        } else {
-            0
-        };
+        let mut flags = 0;
+        if opts.annotate_rows {
+            flags |= dump_flags::SEND_ANNOTATE_ROWS;
+        }
+        if opts.non_blocking {
+            flags |= dump_flags::NON_BLOCK;
+        }
         conn.binlog_dump(4, flags, opts.server_id, "").await?;
         // The first reply shows whether the server accepted the position.
         let first = tokio::time::timeout(opts.connect_timeout, conn.read_packet())
@@ -242,6 +255,8 @@ impl BinlogStream {
         decoder.set_filter(opts.filter.clone());
         decoder.set_verify_checksums(opts.verify_checksums);
         decoder.set_position(from.clone());
+        // An encrypted binlog arrives decrypted, after its START_ENCRYPTION.
+        decoder.set_server_decrypts(true);
         let silence = opts.heartbeat * opts.silence_periods.max(1);
         let server_version = conn.server_version.clone();
         tracing::debug!(
@@ -257,6 +272,8 @@ impl BinlogStream {
             pending: Some(first),
             silence,
             server_version,
+            non_blocking: opts.non_blocking,
+            ended: false,
         })
     }
 
@@ -268,7 +285,13 @@ impl BinlogStream {
     /// `ER_SPRIG_BINLOG_CORRUPT` on a bad event; the server's error if it
     /// ends the dump with one. After an error, reconnect from
     /// [`BinlogStream::position`] or a position committed elsewhere.
+    ///
+    /// A non-blocking stream returns [`Event::DumpEnd`] once at the end of
+    /// the binlog; reads after it fail with `ER_SPRIG_BINLOG_DISCONNECTED`.
     pub async fn next(&mut self) -> Result<Event> {
+        if self.ended {
+            return Err(disconnected("the non-blocking binlog dump has ended"));
+        }
         loop {
             let packet = match self.pending.take() {
                 Some(p) => p,
@@ -281,6 +304,10 @@ impl BinlogStream {
                         ))
                     })??,
             };
+            if self.non_blocking && is_eof(&packet) {
+                self.ended = true;
+                return Ok(Event::DumpEnd);
+            }
             check_packet(&packet)?;
             let raw = &packet[1..];
             let decoded = self.decoder.decode(raw)?;
@@ -310,6 +337,11 @@ impl BinlogStream {
     pub fn server_version(&self) -> &str {
         &self.server_version
     }
+}
+
+/// An EOF packet: what ends a non-blocking dump.
+fn is_eof(p: &[u8]) -> bool {
+    p.first() == Some(&0xfe) && p.len() < 9
 }
 
 fn check_packet(p: &[u8]) -> Result<()> {

@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mysql-8.4
+@server 8.4.11
+@server_caps 0x00000000dfffffff
+@caps 0x0000000001bfa285
+@kind query
+@framing plain
+@command COM_QUERY ROLLBACK
+C 00 03524f4c4c4241434b
+S 01 00000000400000001e00110c73746174656d656e745f6964033239360509085f5f5f5f5f5f5f5f

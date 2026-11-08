@@ -12,3 +12,13 @@
 # MariaDB backends have off. The gateway parses the attributes; showing
 # them there is the R4 translator's job (chapter 28).
 conn_attrs = "skip"
+
+[mysql.mysql-connector-j]
+# D8: Connector/J 9.7 binds a BigInteger above Long.MAX_VALUE as a signed
+# BIGINT (type 8, no unsigned flag) holding the bits of -1. MySQL 8.4
+# resolves the parameter's type from the column (BIGINT UNSIGNED) and
+# accepts it; MariaDB reads -1 and fails with 1264. MariaDB's PREPARE_OK
+# reports untyped parameters (type NULL), so the gateway can't tell this
+# from a real -1 until the parser and catalog know the column (the R4
+# translator, chapter 28).
+prepared_biginteger = "fail"

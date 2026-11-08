@@ -1982,6 +1982,21 @@ dependencies = [
 [[package]]
 name = "sprig-catalog"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "metrics",
+ "mysql_async",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sprig-common",
+ "sprig-meta",
+ "sprig-settings",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "sprig-cluster"
@@ -1989,9 +2004,11 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures",
+ "metrics",
  "mysql_async",
  "serde",
  "serde_json",
+ "sprig-binlog",
  "sprig-common",
  "sprig-meta",
  "sprig-settings",
@@ -2230,6 +2247,13 @@ version = "0.0.1"
 [[package]]
 name = "sprig-sql"
 version = "0.0.1"
+dependencies = [
+ "proptest",
+ "sprig-common",
+ "sprig-proto-mysql",
+ "sqlparser",
+ "thiserror",
+]
 
 [[package]]
 name = "sprig-streams"
@@ -2312,6 +2336,27 @@ dependencies = [
  "sprig-worker",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "sqlparser"
+version = "0.63.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3679862809bd1f92e563cf6fd820e28f39135303668001c10331d5027183e8b4"
+dependencies = [
+ "log",
+ "sqlparser_derive",
+]
+
+[[package]]
+name = "sqlparser_derive"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2905ae8e8148d8f7f5748ea95d1e949fa4fc1d7f5161547b758ad118b2e4b0aa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]

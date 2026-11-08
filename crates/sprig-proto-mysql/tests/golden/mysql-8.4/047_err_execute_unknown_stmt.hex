@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mysql-8.4
+@server 8.4.11
+@server_caps 0x00000000dfffffff
+@caps 0x0000000001bfa285
+@kind execute
+@framing plain
+@command COM_STMT_EXECUTE unknown id
+C 00 17e90300000001000000
+S 01 ffdb04234859303030556e6b6e6f776e2070726570617265642073746174656d656e742068616e646c65722028313030312920676976656e20746f206d7973716c5f73746d745f707265636865636b

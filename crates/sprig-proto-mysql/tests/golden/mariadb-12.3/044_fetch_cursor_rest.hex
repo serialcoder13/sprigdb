@@ -1,0 +1,12 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mariadb-12.3
+@server 12.3.3-MariaDB-ubu2404
+@server_caps 0x0000003d81fffffe
+@caps 0x0000002c01bfa284
+@kind fetch
+@framing plain
+@command COM_STMT_FETCH 10 rows
+@binary_types 3,1,1u,2,9,3,3u,8,8u,246,4,5,16u,1,10,11,12,7u,13u,254,253,254,253,252,252,252,252,254,254,252,255,255,254u,254u,254u,253,11,12
+C 00 1c030000000a000000
+S 01 00f8ffffffff02000000
+S 02 fe000082000000

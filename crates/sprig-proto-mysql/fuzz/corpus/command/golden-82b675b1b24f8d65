@@ -1,0 +1,2 @@
+ˆ•
+SELECT 1 AS a; SELECT 'x' AS b, 2 AS c; DO 0

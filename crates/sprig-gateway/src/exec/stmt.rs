@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use bytes::{Bytes, BytesMut};
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_proto_mysql::command::{
-    BULK_SEND_TYPES_TO_SERVER, BoundParam, BulkExecute, Command, ExecuteParams, PARAMETER_COUNT_AVAILABLE, ParamInfo,
-    ParamValue, StmtExecute,
+    BULK_SEND_TYPES_TO_SERVER, BoundParam, BulkExecute, Command, ExecuteParams,
+    PARAMETER_COUNT_AVAILABLE, ParamInfo, ParamValue, StmtExecute,
 };
 use sprig_proto_mysql::resultset::column_type;
 use sprig_proto_mysql::{Caps, ColumnDef, Persona, ProtoResult, Value};
@@ -56,6 +56,10 @@ pub(crate) struct Stmt {
     /// The backend statement id of the open cursor (on the pinned
     /// connection), if a cursor is open.
     pub cursor: Option<u32>,
+    /// Column names to give back (the text's `CONNECTION_ID()` calls).
+    pub renames: Vec<super::split::Renamed>,
+    /// The text has `NOWAIT` (see `Relay::mysql_nowait`).
+    pub nowait: bool,
 }
 
 impl Stmt {
@@ -70,6 +74,8 @@ impl Stmt {
             long_data_bytes: 0,
             long_data_over: false,
             cursor: None,
+            renames: Vec::new(),
+            nowait: false,
         }
     }
 
@@ -85,7 +91,10 @@ impl Stmt {
             return;
         }
         self.long_data_bytes += data.len();
-        self.long_data.entry(param).or_default().extend_from_slice(data);
+        self.long_data
+            .entry(param)
+            .or_default()
+            .extend_from_slice(data);
     }
 
     /// Drops buffered long data (after an execute, `COM_STMT_RESET`).
@@ -97,7 +106,11 @@ impl Stmt {
 
     /// The parameters to send: the statement's own (query attributes
     /// dropped), with long data folded in. Fails with 39011 past the limit.
-    pub(crate) fn params_for_backend(&mut self, decoded: &ExecuteParams, persona: Persona) -> Result<Vec<BoundParam>> {
+    pub(crate) fn params_for_backend(
+        &mut self,
+        decoded: &ExecuteParams,
+        persona: Persona,
+    ) -> Result<Vec<BoundParam>> {
         if self.long_data_over {
             self.clear_long_data();
             return Err(SprigError::new(
@@ -110,7 +123,11 @@ impl Stmt {
         for (i, p) in out.iter_mut().enumerate() {
             let idx = u16::try_from(i).unwrap_or(u16::MAX);
             if matches!(p.value, ParamValue::LongData) {
-                let data = self.long_data.remove(&idx).map(BytesMut::freeze).unwrap_or_default();
+                let data = self
+                    .long_data
+                    .remove(&idx)
+                    .map(BytesMut::freeze)
+                    .unwrap_or_default();
                 p.value = ParamValue::Value(Value::Bytes(data));
                 if !is_lenenc_type(p.type_code()) {
                     // Long data for a numeric parameter: send it as the
@@ -172,7 +189,12 @@ pub(crate) fn execute_payload(
 /// Builds the `COM_STMT_BULK_EXECUTE` payload for backend statement `b`.
 /// A bulk execute without types on a backend statement that has never
 /// seen them gets the types last bound (decoded and re-encoded).
-pub(crate) fn bulk_payload(b: &BackendStmt, raw: &BulkExecute, params: u16, types: Option<&[u16]>) -> ProtoResult<Bytes> {
+pub(crate) fn bulk_payload(
+    b: &BackendStmt,
+    raw: &BulkExecute,
+    params: u16,
+    types: Option<&[u16]>,
+) -> ProtoResult<Bytes> {
     let mut bulk = BulkExecute {
         stmt_id: b.id,
         flags: raw.flags,
@@ -226,7 +248,14 @@ impl Stmts {
 /// 1243: a statement the executor doesn't know (the front end maps ids,
 /// so this means the two disagree).
 fn unknown_stmt(r: StmtRef) -> SprigError {
-    SprigError::standard(1243, *b"HY000", format!("Unknown prepared statement handler ({}) given to the executor", r.0))
+    SprigError::standard(
+        1243,
+        *b"HY000",
+        format!(
+            "Unknown prepared statement handler ({}) given to the executor",
+            r.0
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -254,7 +283,11 @@ mod tests {
 
     #[test]
     fn long_data_folds_into_the_execute_and_respects_the_limit() {
-        let mut s = Stmt::new(Bytes::from_static(b"INSERT INTO t VALUES (?, ?)"), StmtInfo::write(), &backend(false));
+        let mut s = Stmt::new(
+            Bytes::from_static(b"INSERT INTO t VALUES (?, ?)"),
+            StmtInfo::write(),
+            &backend(false),
+        );
         s.add_long_data(1, b"hello ", 100);
         s.add_long_data(1, b"world", 100);
         let decoded = ExecuteParams {
@@ -265,12 +298,17 @@ mod tests {
             ],
         };
         let out = s.params_for_backend(&decoded, Persona::MariaDb).unwrap();
-        assert_eq!(out[1].value, ParamValue::Value(Value::Bytes(Bytes::from_static(b"hello world"))));
+        assert_eq!(
+            out[1].value,
+            ParamValue::Value(Value::Bytes(Bytes::from_static(b"hello world")))
+        );
         assert_eq!(s.long_data_bytes, 0);
 
         s.add_long_data(0, &[0u8; 60], 100);
         s.add_long_data(0, &[0u8; 60], 100);
-        let e = s.params_for_backend(&decoded, Persona::MariaDb).unwrap_err();
+        let e = s
+            .params_for_backend(&decoded, Persona::MariaDb)
+            .unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::LongDataLimit));
         // The next execute starts clean.
         assert!(s.params_for_backend(&decoded, Persona::MariaDb).is_ok());

@@ -275,6 +275,20 @@ services:
     image: sprigdb-sysbench:dev
     mem_limit: 256m
 
+  # Hibernate 6 via Spring Data JPA (connectors hibernate, hibernate-mariadb).
+  conn-hibernate:
+    <<: *connector
+    build: ./connectors/hibernate
+    image: sprigdb-conn-hibernate:dev
+    mem_limit: 768m
+
+  # Prisma ORM 6: schema engine (db pull) and query engine (connector prisma).
+  conn-prisma:
+    <<: *connector
+    build: ./connectors/prisma
+    image: sprigdb-conn-prisma:dev
+    mem_limit: 768m
+
 networks:
   dc-a: {}
 

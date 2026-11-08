@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use sprig_cluster::probe::{ActiveProbes, NodeFacts, RawCapture};
+use sprig_cluster::probe::{ActiveProbes, FeedLevel, NodeFacts, RawCapture};
 use sprig_cluster::record::{Capacity, SecretRefs};
 use sprig_cluster::sql::ProbeError;
 use sprig_common::ids::{DcId, NodeId};
@@ -250,6 +250,14 @@ fn provisioner(dc: &str) -> ExternalProvisioner {
     ExternalProvisioner::new(reg, ClusterSettings::default())
 }
 
+/// The dump probe's result in a precheck report.
+fn dump_of(r: &PrecheckReport) -> sprig_cluster::probe::DumpProbe {
+    r.probes
+        .iter()
+        .find_map(|p| p.active.as_ref().and_then(|a| a.binlog_dump.clone()))
+        .expect("the dump probe ran")
+}
+
 fn spec(addr: &str) -> NodeSpec {
     NodeSpec {
         node: NodeId::new("n1").unwrap(),
@@ -341,6 +349,9 @@ async fn registers_the_compose_single_node() {
     assert_eq!(rec.admin_state, AdminState::Active);
     assert_eq!(rec.provisioner, ProvisionerKind::External);
     assert!(rec.profile.as_ref().unwrap().derived.xa);
+    // Step 5 read the binlog as sprig_repl.
+    let dump = dump_of(&report);
+    assert!(dump.passed() && rec.profile.as_ref().unwrap().derived.feed_source);
 
     // An account with no privileges: refused, nothing written.
     let tag = p.tag();
@@ -367,16 +378,18 @@ async fn registers_the_compose_single_node() {
     let mut req = request("dc-a", weak_refs, vec![spec(&addr)]);
     req.name = "weak".into();
     let r = p.precheck_report(&req).await;
+
     root.exec(&format!("DROP USER IF EXISTS '{user}'@'%'"))
         .await
         .unwrap();
     root.close().await;
     std::fs::remove_dir_all(&dir).unwrap();
+
+    // sprig_repl's missing grants are an advisory now (the dump test below).
     assert!(!r.passed());
     for want in [
         "sprig_ctl can't manage tenant schemas: GRANT ALL ON `t%`.* TO sprig_ctl WITH GRANT OPTION",
         "sprig_ctl can't manage __sprig_sys: GRANT ALL ON `\\_\\_sprig\\_sys`.* TO sprig_ctl WITH GRANT OPTION",
-        "sprig_repl can't read binlogs: GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO sprig_repl",
     ] {
         assert!(
             r.blocking.iter().any(|b| b == want),
@@ -400,4 +413,72 @@ async fn registers_the_compose_single_node() {
         r.blocking
     );
     assert_eq!(p.registry().list().await.unwrap().len(), 1);
+}
+
+/// Root as `sprig_ctl`, an account without `REPLICATION SLAVE` as
+/// `sprig_repl`, on the Compose single node: the dump probe fails with
+/// 1227, registration still passes, the feed and the mover are
+/// `unsupported`, and the advisory names the grant.
+#[tokio::test]
+async fn a_sprig_repl_without_replication_slave_leaves_the_feed_unsupported() {
+    let Ok(url) = std::env::var("SPRIG_TEST_MARIADB_SINGLE") else {
+        eprintln!("skipped: SPRIG_TEST_MARIADB_SINGLE is not set");
+        return;
+    };
+    let opts = mysql_async::Opts::from_url(&url).unwrap();
+    let addr = format!("{}:{}", opts.ip_or_hostname(), opts.tcp_port());
+    let p = provisioner("dc-a");
+    let tag = p.tag();
+    let user = format!("sprignorepl_{tag}");
+    let dir = std::env::temp_dir().join(format!("sprig-prov-norepl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut root = ProbeSession::connect(
+        &NodeEndpoint::from_url(NodeId::new("n1").unwrap(), &url).unwrap(),
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    root.exec(&format!("CREATE USER '{user}'@'%' IDENTIFIED BY 'x-{tag}'"))
+        .await
+        .unwrap();
+    let mixed = dir.join("mixed.toml");
+    std::fs::write(
+        &mixed,
+        format!(
+            "[sprig_ctl]\nuser = \"{u}\"\npassword = \"{pw}\"\ntls = \"skip_verify\"\n\
+             [sprig_repl]\nuser = \"{user}\"\npassword = \"x-{tag}\"\ntls = \"skip_verify\"\n",
+            u = opts.user().unwrap(),
+            pw = opts.pass().unwrap()
+        ),
+    )
+    .unwrap();
+    let mixed_refs = crate::credentials::refs_for(&format!("file:{}", mixed.display())).unwrap();
+    let mut req = request("dc-a", mixed_refs, vec![spec(&addr)]);
+    req.name = "no-repl".into();
+    let m = p.precheck_report(&req).await;
+
+    root.exec(&format!("DROP USER IF EXISTS '{user}'@'%'"))
+        .await
+        .unwrap();
+    root.close().await;
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    assert!(m.passed(), "{:#?}", m.blocking);
+    let profile = m.profile.as_ref().unwrap();
+    assert_eq!(profile.derived.feed_level, FeedLevel::Unsupported);
+    assert!(!profile.derived.mover_source && !profile.derived.feed_source);
+    let dump = dump_of(&m);
+    let f = dump.failure.as_ref().expect("the dump failed");
+    assert_eq!(
+        (f.kind, f.errno),
+        (DumpFailureKind::Privilege, Some(1227)),
+        "{f:?}"
+    );
+    assert!(
+        m.advisories.iter().any(|a| a
+            == "sprig_repl can't read binlogs, so the change feed and the mover are off: \
+                GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO sprig_repl"),
+        "{:#?}",
+        m.advisories
+    );
 }

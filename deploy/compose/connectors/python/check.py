@@ -23,6 +23,15 @@ DATABASE = os.environ["SPRIG_DATABASE"]
 TLS = os.environ["SPRIG_TLS"]  # required | disabled
 PERSONA = os.environ.get("SPRIG_PERSONA", "mariadb")
 PREFIX = "t_%s_%s" % (CONNECTOR.replace("-", "_"), TLS)
+# Checks run.sh asked to leave out (--quick): not run, not reported.
+SKIPPED = set(os.environ.get("SPRIG_CONN_SKIP_CHECKS", "").replace(",", " ").split())
+
+if CONNECTOR.startswith("sqlalchemy-"):
+    # SQLAlchemy 2 over either driver: a script of its own in the same image.
+    import runpy
+
+    runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "sqla.py"), run_name="__main__")
+    sys.exit(0)
 
 if CONNECTOR == "pymysql":
     import pymysql as db
@@ -68,9 +77,9 @@ def expect(cond, msg):
         raise AssertionError(msg)
 
 
-def connect(compress=False, attrs=False):
+def connect(compress=False, attrs=False, **extra):
     kw = dict(host=HOST, port=PORT, user=USER, password=PASSWORD, database=DATABASE,
-              charset="utf8mb4", autocommit=True, client_flag=MULTI)
+              charset="utf8mb4", autocommit=True, client_flag=MULTI, **extra)
     if CONNECTOR == "pymysql":
         kw["max_allowed_packet"] = 64 * 1024 * 1024
         if TLS == "required":
@@ -339,18 +348,236 @@ def c_conn_attrs():
     return "%s=%s" % (want[0], attrs[want[0]])
 
 
+# --- chapter 05 matrix items --------------------------------------------------
+
+INFILE = '1,héllo 🌱\n2,"quoted, comma"\n3,\\N\n'
+INFILE_ROWS = "1=héllo 🌱|2=quoted, comma|3=NULL"
+
+
+def load_sql(t, path):
+    return ("LOAD DATA LOCAL INFILE '%s' INTO TABLE %s CHARACTER SET utf8mb4 "
+            "FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' LINES TERMINATED BY '\\n'" % (path, t))
+
+
+def loaded(c, t):
+    v = q(c, "SELECT IFNULL(GROUP_CONCAT(CONCAT(id, '=', IFNULL(v, 'NULL')) ORDER BY id SEPARATOR '|'), '') "
+             "FROM " + t)[0][0]
+    return canon("", v)
+
+
+def infile_table(c, t):
+    q(c, "DROP TABLE IF EXISTS " + t)
+    q(c, "CREATE TABLE %s (id INT PRIMARY KEY, v VARCHAR(32)) DEFAULT CHARSET = utf8mb4" % t)
+    if int(q(c, "SELECT @@GLOBAL.local_infile")[0][0]) == 0:
+        raise Skip("local_infile is off on the server")
+
+
+def infile_file():
+    import tempfile
+
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(INFILE)
+    return path
+
+
+def c_local_infile():
+    t, path = PREFIX + "_infile", infile_file()
+    c = connect(local_infile=True)
+    try:
+        infile_table(c, t)
+        with c.cursor() as cur:
+            n = cur.execute(load_sql(t, path))
+        rows = loaded(c, t)
+        expect(n == 3 and rows == INFILE_ROWS, "loaded %r rows: %r" % (n, rows))
+        q(c, "DROP TABLE " + t)
+        return "3 rows (local_infile=True)"
+    finally:
+        c.close()
+        os.remove(path)
+
+
+def infile_refusal():
+    """The server's refusal when the client doesn't offer CLIENT_LOCAL_FILES."""
+    return 3948 if PERSONA == "mysql" else 4166
+
+
+def c_local_infile_off():
+    t, path = PREFIX + "_infile_off", infile_file()
+    c = connect(local_infile=False)
+    try:
+        infile_table(c, t)
+        how = None
+        try:
+            q(c, load_sql(t, path))
+        except db.Error as e:
+            errno = e.args[0] if e.args and isinstance(e.args[0], int) else 0
+            how = "%s %s" % (errno, e.args[1] if len(e.args) > 1 else e)
+            if errno in (1148, 3948, 4166):
+                expect(errno == infile_refusal(), "server refused with %s, want %d" % (how, infile_refusal()))
+        expect(how, "the load succeeded")
+        rows = loaded(c, t)
+        expect(rows == "", "rows were loaded: %r" % rows)
+        q(c, "DROP TABLE " + t)
+        return "refused: " + how
+    finally:
+        c.close()
+        os.remove(path)
+
+
+PROC = """CREATE PROCEDURE {p}(IN a INT, OUT b INT, INOUT c INT)
+BEGIN
+  SELECT a AS x;
+  SELECT a + 1 AS y, 'two' AS z UNION ALL SELECT a + 2, 'three';
+  SET b = a * 10;
+  SET c = c + 1;
+END"""
+
+
+def c_call():
+    p = PREFIX + "_proc"
+    q(conn, "DROP PROCEDURE IF EXISTS " + p)
+    q(conn, PROC.format(p=p))
+    q(conn, "SET @b = NULL, @c = 5")
+    sets = []
+    with conn.cursor() as cur:
+        cur.execute("CALL %s(1, @b, @c)" % p)
+        while True:
+            if cur.description:
+                sets.append(";".join(",".join(canon("", v) for v in r) for r in cur.fetchall()))
+            if not cur.nextset():
+                break
+    b, c = q(conn, "SELECT @b, @c")[0]
+    q(conn, "DROP PROCEDURE " + p)
+    expect(sets == ["1", "2,two;3,three"], "resultsets %r" % sets)
+    expect((b, c) == (10, 6), "OUT b=%r INOUT c=%r" % (b, c))
+    return "text CALL: 2 resultsets, OUT 10, INOUT 6"
+
+
+def mark_session(c):
+    q(c, "SET @sprig_mark = 42, SESSION auto_increment_increment = 7")
+    q(c, "CREATE TEMPORARY TABLE sprig_tmp (id INT)")
+    return q(c, "SELECT CONNECTION_ID()")[0][0]
+
+
+def assert_reset(c, cid):
+    got = q(c, "SELECT CONNECTION_ID(), @sprig_mark, @@SESSION.auto_increment_increment")[0]
+    state = "id %s, @sprig_mark %r, auto_increment_increment %s" % got
+    expect(got[0] == cid, "connection id changed from %s: %s" % (cid, state))
+    expect(got[1] is None and got[2] == 1, "session not reset: " + state)
+    try:
+        q(c, "SELECT COUNT(*) FROM sprig_tmp")
+    except db.Error as e:
+        expect(e.args[0] == 1146, "temporary table probe: %r" % (e.args,))
+        return "same connection %s; user variable, session variable and temporary table cleared" % cid
+    raise AssertionError("the temporary table survived")
+
+
+def c_change_user():
+    if CONNECTOR == "pymysql":
+        raise NA("PyMySQL has no change-user API")
+    c = connect()
+    try:
+        cid = mark_session(c)
+        c.change_user(USER, PASSWORD, DATABASE)
+        return "change_user (COM_CHANGE_USER): " + assert_reset(c, cid)
+    finally:
+        c.close()
+
+
+def c_reset_connection():
+    raise NA("%s has no reset-connection API" % CONNECTOR)
+
+
+def c_pool_reprepare():
+    raise NA("%s has no server-side prepared statements (and no pool; see sqlalchemy-*)" % CONNECTOR)
+
+
+def lock_table():
+    t = PREFIX + "_lock"
+    q(conn, "DROP TABLE IF EXISTS " + t)
+    q(conn, "CREATE TABLE %s (id INT PRIMARY KEY, v INT) ENGINE = InnoDB" % t)
+    q(conn, "INSERT INTO %s VALUES (1, 0), (2, 0)" % t)
+    return t
+
+
+def lock_pair(t):
+    a, b = connect(), connect()
+    a.begin()
+    q(a, "SELECT v FROM %s WHERE id = 1 FOR UPDATE" % t)
+    q(b, "SET SESSION innodb_lock_wait_timeout = 1")
+    b.begin()
+    return a, b
+
+
+def errno_of(e):
+    return e.args[0] if e.args and isinstance(e.args[0], int) else 0
+
+
+def c_lock_wait():
+    t = lock_table()
+    a, b = lock_pair(t)
+    try:
+        q(b, "SELECT v FROM %s WHERE id = 2 FOR UPDATE" % t)
+        t0 = time.monotonic()
+        try:
+            q(b, "SELECT v FROM %s WHERE id = 1 FOR UPDATE" % t)
+            raise AssertionError("the second session got the lock")
+        except db.Error as e:
+            expect(errno_of(e) == 1205, "got %r" % (e.args,))
+        ms = int((time.monotonic() - t0) * 1000)
+        expect(900 <= ms < 10000, "timed out after %d ms" % ms)
+        # Only the statement is rolled back: the transaction still holds row 2.
+        q(b, "UPDATE %s SET v = 2 WHERE id = 2" % t)
+        b.commit()
+        a.commit()
+        expect(q(conn, "SELECT v FROM %s WHERE id = 2" % t)[0][0] == 2, "the waiting transaction lost its work")
+        q(conn, "DROP TABLE " + t)
+        return "1205 after %d ms; the transaction survived" % ms
+    finally:
+        a.close()
+        b.close()
+
+
+def c_lock_nowait():
+    t = lock_table()
+    a, b = lock_pair(t)
+    want = 3572 if PERSONA == "mysql" else 1205
+    try:
+        try:
+            q(b, "SELECT v FROM %s WHERE id = 1 FOR UPDATE NOWAIT" % t)
+            raise AssertionError("NOWAIT got the lock")
+        except db.Error as e:
+            got = errno_of(e)
+            expect(got == want, "NOWAIT: got %r, want %d" % (e.args, want))
+        ids = [r[0] for r in q(b, "SELECT id FROM %s ORDER BY id FOR UPDATE SKIP LOCKED" % t)]
+        expect(ids == [2], "SKIP LOCKED returned %r" % ids)
+        b.rollback()
+        a.rollback()
+        q(conn, "DROP TABLE " + t)
+        return "NOWAIT %d, SKIP LOCKED returned row 2" % got
+    finally:
+        a.close()
+        b.close()
+
+
 CHECKS = [
     ("connect", c_connect), ("plain_query", c_plain_query), ("types", c_types),
     ("prepared", c_prepared), ("transaction", c_transaction),
     ("multi_statement", c_multi_statement), ("duplicate_key", c_duplicate_key),
     ("last_insert_id", c_last_insert_id), ("large_row", c_large_row),
     ("multi_packet", c_multi_packet), ("compression", c_compression),
-    ("conn_attrs", c_conn_attrs),
+    ("conn_attrs", c_conn_attrs), ("local_infile", c_local_infile),
+    ("local_infile_off", c_local_infile_off), ("call", c_call), ("change_user", c_change_user),
+    ("reset_connection", c_reset_connection), ("pool_reprepare", c_pool_reprepare),
+    ("lock_wait", c_lock_wait), ("lock_nowait", c_lock_nowait),
 ]
 
 
 def main():
     for name, fn in CHECKS:
+        if name in SKIPPED:
+            continue
         if conn is None and name != "connect":
             emit(name, "fail", "no connection")
             continue

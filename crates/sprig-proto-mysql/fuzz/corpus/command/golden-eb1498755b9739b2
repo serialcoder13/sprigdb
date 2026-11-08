@@ -1,0 +1,2 @@
+ˆ•
+SELECT 1 AS a; SELECT * FROM missing_table; SELECT 2

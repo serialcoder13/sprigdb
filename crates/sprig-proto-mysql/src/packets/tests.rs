@@ -214,11 +214,33 @@ fn state_change_entry_is_a_bare_flag() {
         SessionChange::decode_all(&wire).expect("decode"),
         vec![SessionChange::StateChange(true)]
     );
-    assert_eq!(SessionChange::encode_all(&[SessionChange::StateChange(true)]), wire);
+    assert_eq!(
+        SessionChange::encode_all(&[SessionChange::StateChange(true)]),
+        wire
+    );
     // The nested form is still accepted when reading.
     let nested = Bytes::from_static(&[0x02, 0x02, 0x01, b'1']);
     assert_eq!(
         SessionChange::decode_all(&nested).expect("decode"),
         vec![SessionChange::StateChange(true)]
+    );
+}
+
+#[test]
+fn ok_info_is_length_encoded_without_session_track() {
+    // As MariaDB sends it to a client without SESSION_TRACK (captured).
+    let caps = Caps::PROTOCOL_41 | Caps::TRANSACTIONS;
+    let mut ok = OkPacket::new(StatusFlags::AUTOCOMMIT);
+    ok.affected_rows = 2;
+    ok.info = Bytes::from_static(b"Records: 2  Duplicates: 0  Warnings: 0");
+    let wire = ok.encode(caps);
+    assert_eq!(&wire[..8], &[0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 38]);
+    assert_eq!(OkPacket::decode(&wire, caps).unwrap().info, ok.info);
+    // A bare info string still decodes.
+    let mut bare = wire[..7].to_vec();
+    bare.extend_from_slice(b"Rows matched: 1");
+    assert_eq!(
+        &OkPacket::decode(&Bytes::from(bare), caps).unwrap().info[..],
+        b"Rows matched: 1"
     );
 }

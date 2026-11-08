@@ -1,0 +1,2 @@
+àÅïè
+SELECT 1 AS i, -1.5 AS d, 'x' AS s, NULL AS n, X'00FF' AS b, CAST('2024-01-02' AS DATE) AS dt, 18446744073709551615 AS big, REPEAT('z', 300) AS long_text, '' AS empty

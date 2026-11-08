@@ -11,6 +11,9 @@ $CONNECTOR = getenv('SPRIG_CONNECTOR');
 $TLS = getenv('SPRIG_TLS');
 $PREFIX = "t_{$CONNECTOR}_{$TLS}";
 $PDO = $CONNECTOR === 'pdo_mysql';
+$PERSONA = getenv('SPRIG_PERSONA') ?: 'mariadb';
+// Checks run.sh asked to leave out (--quick): not run, not reported.
+$SKIPPED = preg_split('/[ ,]+/', trim((string) getenv('SPRIG_CONN_SKIP_CHECKS')), -1, PREG_SPLIT_NO_EMPTY);
 
 final class NA extends Exception {}
 final class Skip extends Exception {}
@@ -33,8 +36,12 @@ function expect(bool $cond, string $msg): void
 
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
-/** A new session: PDO (emulated prepares, PDO's default) or mysqli. */
-function connect(bool $compress = false)
+/**
+ * A new session: PDO (emulated prepares, PDO's default) or mysqli. $extra
+ * holds PDO attributes or mysqli options; $persistent asks for a
+ * persistent connection (PDO::ATTR_PERSISTENT, mysqli's "p:" host).
+ */
+function connect(bool $compress = false, array $extra = [], bool $persistent = false)
 {
     global $PDO, $TLS;
     $host = getenv('SPRIG_HOST');
@@ -53,6 +60,10 @@ function connect(bool $compress = false)
         if ($compress) {
             $opts[Pdo\Mysql::ATTR_COMPRESS] = true;
         }
+        if ($persistent) {
+            $opts[PDO::ATTR_PERSISTENT] = true;
+        }
+        $opts = $extra + $opts;
         $c = new PDO(sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', $host, $port,
             getenv('SPRIG_DATABASE')), getenv('SPRIG_USER'), getenv('SPRIG_PASSWORD'), $opts);
         $c->exec("SET time_zone = '+00:00'");
@@ -67,7 +78,10 @@ function connect(bool $compress = false)
     if ($compress) {
         $flags |= MYSQLI_CLIENT_COMPRESS;
     }
-    $c->real_connect($host, getenv('SPRIG_USER'), getenv('SPRIG_PASSWORD'), getenv('SPRIG_DATABASE'),
+    foreach ($extra as $opt => $value) {
+        $c->options($opt, $value);
+    }
+    $c->real_connect(($persistent ? 'p:' : '') . $host, getenv('SPRIG_USER'), getenv('SPRIG_PASSWORD'), getenv('SPRIG_DATABASE'),
         $port, null, $flags);
     $c->set_charset('utf8mb4');
     $c->query("SET time_zone = '+00:00'");
@@ -438,15 +452,350 @@ function c_conn_attrs(): string
     return '_client_name=mysqlnd';
 }
 
+// --- chapter 05 matrix items ----------------------------------------------------
+
+const INFILE = "1,héllo 🌱\n2,\"quoted, comma\"\n3,\\N\n";
+const INFILE_ROWS = '1=héllo 🌱|2=quoted, comma|3=NULL';
+
+function load_sql(string $t, string $f): string
+{
+    return "LOAD DATA LOCAL INFILE '$f' INTO TABLE $t CHARACTER SET utf8mb4 "
+        . "FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' LINES TERMINATED BY '\\n'";
+}
+
+function loaded($c, string $t): string
+{
+    return (string) scalar($c, "SELECT IFNULL(GROUP_CONCAT(CONCAT(id, '=', IFNULL(v, 'NULL')) ORDER BY id SEPARATOR '|'), '') FROM $t");
+}
+
+function infile_table($c, string $t): void
+{
+    exec_sql($c, "DROP TABLE IF EXISTS $t");
+    exec_sql($c, "CREATE TABLE $t (id INT PRIMARY KEY, v VARCHAR(32)) DEFAULT CHARSET = utf8mb4");
+    if ((int) scalar($c, 'SELECT @@GLOBAL.local_infile') === 0) {
+        throw new Skip('local_infile is off on the server');
+    }
+}
+
+function infile_file(): string
+{
+    $f = tempnam(sys_get_temp_dir(), 'sprig');
+    file_put_contents($f, INFILE);
+    return $f;
+}
+
+function close_conn(&$c): void
+{
+    global $PDO;
+    $PDO ? $c = null : $c->close();
+}
+
+function c_local_infile(): string
+{
+    global $PDO, $PREFIX;
+    $t = "{$PREFIX}_infile";
+    $f = infile_file();
+    // mysqlnd sends a file only from the allowed directory (PHP 8.1+) or with local infile on.
+    $c = connect(false, $PDO ? [Pdo\Mysql::ATTR_LOCAL_INFILE => true]
+        : [MYSQLI_OPT_LOCAL_INFILE => true, MYSQLI_OPT_LOAD_DATA_LOCAL_DIR => dirname($f)]);
+    try {
+        infile_table($c, $t);
+        $n = $PDO ? $c->exec(load_sql($t, $f)) : ($c->query(load_sql($t, $f)) ? $c->affected_rows : -1);
+        $rows = loaded($c, $t);
+        expect($n === 3 && $rows === INFILE_ROWS, "loaded $n rows: $rows");
+        exec_sql($c, "DROP TABLE $t");
+        return '3 rows';
+    } finally {
+        close_conn($c);
+        unlink($f);
+    }
+}
+
+/** errno and SQLSTATE of a driver exception. */
+function err_of(Throwable $e): array
+{
+    if ($e instanceof PDOException && is_array($e->errorInfo)) {
+        return [(int) $e->errorInfo[1], (string) $e->errorInfo[0]];
+    }
+    if ($e instanceof mysqli_sql_exception) {
+        return [$e->getCode(), $e->getSqlState()];
+    }
+    return [0, ''];
+}
+
+function c_local_infile_off(): string
+{
+    global $PDO, $PREFIX, $PERSONA;
+    $t = "{$PREFIX}_infile_off";
+    $f = infile_file();
+    $c = connect(false, $PDO ? [Pdo\Mysql::ATTR_LOCAL_INFILE => false] : [MYSQLI_OPT_LOCAL_INFILE => false]);
+    try {
+        infile_table($c, $t);
+        $how = null;
+        try {
+            exec_sql($c, load_sql($t, $f));
+        } catch (PDOException | mysqli_sql_exception $e) {
+            [$errno, $state] = err_of($e);
+            $how = "$errno/$state " . $e->getMessage();
+            $want = $PERSONA === 'mysql' ? 3948 : 4166;
+            if (in_array($errno, [1148, 3948, 4166], true)) {
+                expect($errno === $want, "server refused with $how, want $want");
+            }
+        }
+        expect($how !== null, 'the load succeeded');
+        $rows = loaded($c, $t);
+        expect($rows === '', "rows were loaded: $rows");
+        exec_sql($c, "DROP TABLE $t");
+        return "refused: $how";
+    } finally {
+        close_conn($c);
+        unlink($f);
+    }
+}
+
+function proc_ddl(string $p): string
+{
+    return "CREATE PROCEDURE $p(IN a INT, OUT b INT, INOUT c INT)
+BEGIN
+  SELECT a AS x;
+  SELECT a + 1 AS y, 'two' AS z UNION ALL SELECT a + 2, 'three';
+  SET b = a * 10;
+  SET c = c + 1;
+END";
+}
+
+function c_call(): string
+{
+    global $conn, $PDO, $PREFIX;
+    $p = "{$PREFIX}_proc";
+    exec_sql($conn, "DROP PROCEDURE IF EXISTS $p");
+    exec_sql($conn, proc_ddl($p));
+    exec_sql($conn, 'SET @b = NULL, @c = 5');
+    $sets = [];
+    $fmt = fn (array $rows) => implode(';', array_map(fn ($r) => implode(',', $r), $rows));
+    if ($PDO) {
+        $how = 'text CALL (emulated prepares)';
+        $st = $conn->query("CALL $p(1, @b, @c)");
+        do {
+            if ($st->columnCount() > 0) {
+                $sets[] = $fmt($st->fetchAll(PDO::FETCH_NUM));
+            }
+        } while ($st->nextRowset());
+        $st->closeCursor();
+    } else {
+        $how = 'prepared CALL';
+        $st = $conn->prepare("CALL $p(?, @b, @c)");
+        $a = 1;
+        $st->bind_param('i', $a);
+        $st->execute();
+        do {
+            $r = $st->get_result();
+            if ($r !== false) {
+                $sets[] = $fmt($r->fetch_all(MYSQLI_NUM));
+            }
+        } while ($st->more_results() && $st->next_result());
+        $st->close();
+    }
+    [$b, $c] = rows($conn, 'SELECT @b, @c')[0];
+    exec_sql($conn, "DROP PROCEDURE $p");
+    expect($sets === ['1', '2,two;3,three'], 'resultsets ' . json_encode($sets));
+    expect((int) $b === 10 && (int) $c === 6, "OUT b=$b INOUT c=$c");
+    return "$how: 2 resultsets, OUT 10, INOUT 6";
+}
+
+function mark_session($c): string
+{
+    exec_sql($c, 'SET @sprig_mark = 42, SESSION auto_increment_increment = 7');
+    exec_sql($c, 'CREATE TEMPORARY TABLE sprig_tmp (id INT)');
+    return (string) scalar($c, 'SELECT CONNECTION_ID()');
+}
+
+function assert_reset($c, string $id): string
+{
+    [$cid, $mark, $inc] = rows($c, 'SELECT CONNECTION_ID(), @sprig_mark, @@SESSION.auto_increment_increment')[0];
+    $state = "id $cid, @sprig_mark " . json_encode($mark) . ", auto_increment_increment $inc";
+    expect((string) $cid === $id, "connection id changed from $id: $state");
+    expect($mark === null && (int) $inc === 1, "session not reset: $state");
+    try {
+        rows($c, 'SELECT COUNT(*) FROM sprig_tmp');
+    } catch (PDOException | mysqli_sql_exception $e) {
+        expect(err_of($e)[0] === 1146, 'temporary table probe: ' . $e->getMessage());
+        return "same connection $id; user variable, session variable and temporary table cleared";
+    }
+    throw new RuntimeException('the temporary table survived');
+}
+
+function c_change_user(): string
+{
+    global $PDO;
+    if ($PDO) {
+        throw new NA('PDO has no change-user API');
+    }
+    $c = connect();
+    try {
+        $id = mark_session($c);
+        expect($c->change_user(getenv('SPRIG_USER'), getenv('SPRIG_PASSWORD'), getenv('SPRIG_DATABASE')), 'change_user failed');
+        return 'mysqli::change_user (COM_CHANGE_USER): ' . assert_reset($c, $id);
+    } finally {
+        $c->close();
+    }
+}
+
+function c_reset_connection(): string
+{
+    global $CONNECTOR;
+    throw new NA("$CONNECTOR has no reset-connection API");
+}
+
+/**
+ * PHP's pool is the persistent connection. Execute a server-side prepared
+ * statement on one, KILL it from another session, release it, then ask for
+ * a persistent connection again: PHP must notice it died (mysqli re-uses a
+ * persistent link with COM_CHANGE_USER, PDO pings it), connect anew, and
+ * the statement is prepared again.
+ */
+function c_pool_reprepare(): string
+{
+    global $conn, $PDO;
+    $sql = 'SELECT ? + 1, CONNECTION_ID()';
+    $run = function ($c, int $v) use ($PDO, $sql): array {
+        if ($PDO) {
+            $c->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+            $st = $c->prepare($sql);
+            $st->execute([$v]);
+            return $st->fetch(PDO::FETCH_NUM);
+        }
+        $st = $c->prepare($sql);
+        $st->bind_param('i', $v);
+        $st->execute();
+        $r = $st->get_result()->fetch_row();
+        $st->close();
+        return $r;
+    };
+    $c = connect(false, [], true);
+    [$n, $id1] = $run($c, 41);
+    expect((int) $n === 42, "got $n");
+    close_conn($c);
+    $c = connect(false, [], true);
+    [$n, $again] = $run($c, 41);
+    expect((string) $again === (string) $id1, "the persistent connection wasn't re-used ($id1, then $again)");
+    close_conn($c);
+    exec_sql($conn, "KILL $id1");
+    // Wait until the killed session has left the processlist (its socket is closed).
+    for ($i = 0; $i < 100 && (int) scalar($conn, "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = $id1") !== 0; $i++) {
+        usleep(50000);
+    }
+    usleep(100000);
+    $c = connect(false, [], true);
+    [$n, $id2] = $run($c, 99);
+    close_conn($c);
+    expect((int) $n === 100, "after the kill: got $n");
+    expect((string) $id2 !== (string) $id1, "the killed connection $id1 was handed out again");
+    return "persistent connection $id1 re-used, killed, re-prepared on $id2";
+}
+
+function lock_table(): string
+{
+    global $conn, $PREFIX;
+    $t = "{$PREFIX}_lock";
+    exec_sql($conn, "DROP TABLE IF EXISTS $t");
+    exec_sql($conn, "CREATE TABLE $t (id INT PRIMARY KEY, v INT) ENGINE = InnoDB");
+    exec_sql($conn, "INSERT INTO $t VALUES (1, 0), (2, 0)");
+    return $t;
+}
+
+function begin($c): void
+{
+    global $PDO;
+    $PDO ? $c->beginTransaction() : $c->begin_transaction();
+}
+
+function lock_pair(string $t): array
+{
+    $a = connect();
+    $b = connect();
+    begin($a);
+    rows($a, "SELECT v FROM $t WHERE id = 1 FOR UPDATE");
+    exec_sql($b, 'SET SESSION innodb_lock_wait_timeout = 1');
+    begin($b);
+    return [$a, $b];
+}
+
+function c_lock_wait(): string
+{
+    global $conn;
+    $t = lock_table();
+    [$a, $b] = lock_pair($t);
+    try {
+        rows($b, "SELECT v FROM $t WHERE id = 2 FOR UPDATE");
+        $t0 = hrtime(true);
+        $got = null;
+        try {
+            rows($b, "SELECT v FROM $t WHERE id = 1 FOR UPDATE");
+        } catch (PDOException | mysqli_sql_exception $e) {
+            [$errno, $state] = err_of($e);
+            $got = "$errno/$state";
+            expect($errno === 1205, "got $got " . $e->getMessage());
+        }
+        expect($got !== null, 'the second session got the lock');
+        $ms = intdiv(hrtime(true) - $t0, 1000000);
+        expect($ms >= 900 && $ms < 10000, "timed out after $ms ms");
+        // Only the statement is rolled back: the transaction still holds row 2.
+        exec_sql($b, "UPDATE $t SET v = 2 WHERE id = 2");
+        $b->commit();
+        $a->commit();
+        expect((int) scalar($conn, "SELECT v FROM $t WHERE id = 2") === 2, 'the waiting transaction lost its work');
+        exec_sql($conn, "DROP TABLE $t");
+        return "$got after $ms ms; the transaction survived";
+    } finally {
+        close_conn($a);
+        close_conn($b);
+    }
+}
+
+function c_lock_nowait(): string
+{
+    global $conn, $PERSONA;
+    $t = lock_table();
+    [$a, $b] = lock_pair($t);
+    $want = $PERSONA === 'mysql' ? 3572 : 1205;
+    try {
+        $got = null;
+        try {
+            rows($b, "SELECT v FROM $t WHERE id = 1 FOR UPDATE NOWAIT");
+        } catch (PDOException | mysqli_sql_exception $e) {
+            [$errno, $state] = err_of($e);
+            $got = "$errno/$state";
+            expect($errno === $want, "NOWAIT: got $got " . $e->getMessage() . ", want $want");
+        }
+        expect($got !== null, 'NOWAIT got the lock');
+        $ids = array_map(fn ($r) => (int) $r[0], rows($b, "SELECT id FROM $t ORDER BY id FOR UPDATE SKIP LOCKED"));
+        expect($ids === [2], 'SKIP LOCKED returned ' . json_encode($ids));
+        $b->rollback();
+        $a->rollback();
+        exec_sql($conn, "DROP TABLE $t");
+        return "NOWAIT $got, SKIP LOCKED returned row 2";
+    } finally {
+        close_conn($a);
+        close_conn($b);
+    }
+}
+
 $checks = [
     'connect' => 'c_connect', 'plain_query' => 'c_plain_query', 'types' => 'c_types',
     'prepared' => 'c_prepared', 'transaction' => 'c_transaction',
     'multi_statement' => 'c_multi_statement', 'duplicate_key' => 'c_duplicate_key',
     'last_insert_id' => 'c_last_insert_id', 'large_row' => 'c_large_row',
     'multi_packet' => 'c_multi_packet', 'compression' => 'c_compression',
-    'conn_attrs' => 'c_conn_attrs',
+    'conn_attrs' => 'c_conn_attrs', 'local_infile' => 'c_local_infile',
+    'local_infile_off' => 'c_local_infile_off', 'call' => 'c_call', 'change_user' => 'c_change_user',
+    'reset_connection' => 'c_reset_connection', 'pool_reprepare' => 'c_pool_reprepare',
+    'lock_wait' => 'c_lock_wait', 'lock_nowait' => 'c_lock_nowait',
 ];
 foreach ($checks as $name => $fn) {
+    if (in_array($name, $SKIPPED, true)) {
+        continue;
+    }
     if ($conn === null && $name !== 'connect') {
         emit($name, 'fail', 'no connection');
         continue;

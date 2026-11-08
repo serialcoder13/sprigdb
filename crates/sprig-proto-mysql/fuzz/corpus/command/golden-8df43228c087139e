@@ -1,0 +1,2 @@
+ˆ•
+SELECT REPEAT('abc', 30000) AS big

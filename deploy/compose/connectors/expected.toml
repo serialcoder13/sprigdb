@@ -18,23 +18,77 @@
 checks = [
   "connect", "plain_query", "types", "prepared", "transaction", "multi_statement",
   "duplicate_key", "last_insert_id", "large_row", "multi_packet", "compression", "conn_attrs",
+  # chapter 05's matrix items
+  "local_infile", "local_infile_off", "call", "change_user", "reset_connection",
+  "pool_reprepare", "lock_wait", "lock_nowait",
 ]
 # sysbench reports these instead.
 sysbench_checks = [
   "prepare", "point_select_ps", "point_select_text", "read_write_ps", "read_write_text", "cleanup",
 ]
+# The ORMs and tools report their own checks (README, "The ORMs and tools").
+sqlalchemy_checks = ["connect", "core", "orm", "transaction", "reflection", "pool_reconnect"]
+hibernate_checks = [
+  "connect", "dialect", "schema_validate", "crud", "query", "transaction", "optimistic_lock",
+]
+prisma_checks = ["connect", "db_pull", "generate", "query", "transaction"]
+dump_checks = ["source", "dump", "restore", "checksum", "objects"]
+tpcc_checks = ["prepare", "run", "check", "cleanup"]
+
+# Which list each connector reports; "checks" when not named here.
+[check_sets]
+sysbench = "sysbench_checks"
+sysbench-tpcc = "tpcc_checks"
+sqlalchemy-pymysql = "sqlalchemy_checks"
+sqlalchemy-mysqlclient = "sqlalchemy_checks"
+hibernate = "hibernate_checks"
+hibernate-mariadb = "hibernate_checks"
+prisma = "prisma_checks"
+mysqldump = "dump_checks"
+mariadb-dump = "dump_checks"
 
 # --- connector limits (both personas) ----------------------------------------
 
+[all.mariadb-connector-j]
+change_user = "n/a"       # Connector/J 3 has no API that sends COM_CHANGE_USER
+
+[all.go-sql-driver]
+change_user = "n/a"       # no API that sends COM_CHANGE_USER
+reset_connection = "n/a"  # ResetSession (database/sql's hook) only checks liveness; no COM_RESET_CONNECTION
+
 [all.pymysql]
-prepared = "n/a"       # no binary protocol: parameters are interpolated client-side
-compression = "n/a"    # no compressed protocol ("compress ... not supported")
+prepared = "n/a"          # no binary protocol: parameters are interpolated client-side
+compression = "n/a"       # no compressed protocol ("compress ... not supported")
+change_user = "n/a"       # no change-user API
+reset_connection = "n/a"  # no reset-connection API
+pool_reprepare = "n/a"    # no server-side prepared statements, no pool (sqlalchemy-* covers pools)
 
 [all.mysqlclient]
-prepared = "n/a"       # MySQLdb interpolates parameters client-side
+prepared = "n/a"          # MySQLdb interpolates parameters client-side
+reset_connection = "n/a"  # no reset-connection API (change_user is exposed)
+pool_reprepare = "n/a"    # no server-side prepared statements, no pool (sqlalchemy-* covers pools)
+
+[all.pdo_mysql]
+change_user = "n/a"       # no change-user API (persistent connections are pinged, see pool_reprepare)
+reset_connection = "n/a"  # no reset-connection API
+
+[all.mysqli]
+reset_connection = "n/a"  # no reset-connection API (change_user is exposed, and re-uses persistent links)
+
+[all.mysql-cli]
+change_user = "n/a"       # no change-user command (resetconnection is reset_connection)
+pool_reprepare = "n/a"    # no pool, no server-side prepared statements
+
+[all.mariadb-cli]
+change_user = "n/a"       # no change-user command
+reset_connection = "n/a"  # the mariadb client has no resetconnection command
+pool_reprepare = "n/a"    # no pool, no server-side prepared statements
 
 [all.sysbench.required]
 "*" = "n/a"            # sysbench 1.0.20 can't encrypt without a client certificate and CA
+
+[all.sysbench-tpcc.required]
+"*" = "n/a"            # the same sysbench 1.0.20
 
 # --- MariaDB as the reference ----------------------------------------------
 
@@ -50,3 +104,35 @@ conn_attrs = "skip"
 # 1264 "Out of range"; MySQL 8.4 accepts it, and client-side prepares work
 # on both. The 3306 persona over a MariaDB backend must not inherit this.
 prepared_biginteger = "fail"
+
+[mariadb.mysqldump]
+# mysqldump 8.4 with the usual options reads information_schema.COLUMN_STATISTICS
+# (MariaDB has no such table) and warns that it can't set the events'
+# "terminology mode" (terminology_use_previous). With --column-statistics=0
+# the dump works, and the round trip (restore, checksum, objects) passes;
+# dump.sh carries on with that. The 3306 persona must take the usual options.
+dump = "fail"
+
+[mariadb.hibernate]
+# Hibernate 6.6 + MySQL Connector/J 9.7 can't start: Connector/J's
+# DatabaseMetaData.getSQLKeywords() reads information_schema.KEYWORDS
+# WHERE RESERVED = 1, and MariaDB's KEYWORDS has no RESERVED column, so
+# Hibernate can't resolve a dialect. The check restarts Spring with the
+# product and version named, and the other checks pass. The 3306 persona
+# over MariaDB must answer that query the MySQL way.
+schema_validate = "fail"
+
+[mariadb.hibernate-mariadb]
+# MariaDBDialect expects a json column, but MariaDB's JSON is LONGTEXT
+# (with a json_valid CHECK), so ddl-auto=validate fails on it. MySQL 8.4
+# reports json and passes. The other checks pass after a restart without
+# validation.
+schema_validate = "fail"
+
+# --- MySQL as the reference -------------------------------------------------
+
+[mysql.mariadb-connector-j]
+# Connector/J 3.5's reset() sends COM_RESET_CONNECTION only when the server
+# version says MariaDB; against MySQL 8.4 it clears only its own state. The
+# gateway's 3306 greets as MySQL, so the same holds there.
+reset_connection = "n/a"

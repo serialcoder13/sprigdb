@@ -118,6 +118,52 @@ fn checksum_mismatch_is_corrupt() {
 }
 
 #[test]
+fn start_encryption_is_skipped_on_a_dump_and_refused_in_a_file() {
+    // Scheme 1, key version 1, a 12-byte nonce.
+    let mut body = vec![1, 1, 0, 0, 0];
+    body.extend_from_slice(&[0xab; 12]);
+    let raw = event(et::START_ENCRYPTION, &body);
+    let mut file = Decoder::new(true);
+    let err = file.decode(&raw).unwrap_err();
+    assert_eq!(err.code(), Some(sprig_common::SprigCode::BinlogUnsupported));
+    assert!(err.message.contains("encrypted"), "{}", err.message);
+    let mut dump = Decoder::new(true);
+    dump.set_server_decrypts(true);
+    assert_eq!(dump.decode(&raw).unwrap(), None);
+    assert_eq!(dump.last_header().type_code, et::START_ENCRYPTION);
+    // The decrypted events after it decode as usual.
+    let xid = event(et::XID, &7u64.to_le_bytes());
+    assert_eq!(dump.decode(&xid).unwrap(), Some(Event::Xid(7)));
+}
+
+#[test]
+fn an_open_files_format_description_passes_its_checksum() {
+    let mut body = 4u16.to_le_bytes().to_vec();
+    let mut ver = b"12.3.0-MariaDB-log".to_vec();
+    ver.resize(50, 0);
+    body.extend_from_slice(&ver);
+    body.extend_from_slice(&0u32.to_le_bytes());
+    body.push(19);
+    body.extend_from_slice(&[0; 8]); // post-header lengths
+    body.push(1); // CRC32
+    // The checksum covers the event with LOG_EVENT_BINLOG_IN_USE_F clear;
+    // the server sets the flag afterwards on the file it has open.
+    let mut raw = event(et::FORMAT_DESCRIPTION, &body);
+    raw[17] |= 1;
+    let mut d = Decoder::new(false);
+    assert!(matches!(
+        d.decode(&raw).unwrap(),
+        Some(Event::FormatDescription {
+            checksums: true,
+            ..
+        })
+    ));
+    raw[30] ^= 1;
+    let err = Decoder::new(false).decode(&raw).unwrap_err();
+    assert_eq!(err.code(), Some(sprig_common::SprigCode::BinlogCorrupt));
+}
+
+#[test]
 fn gtid_groups_advance_the_position_when_they_end() {
     let mut d = Decoder::new(true);
     let ev = d

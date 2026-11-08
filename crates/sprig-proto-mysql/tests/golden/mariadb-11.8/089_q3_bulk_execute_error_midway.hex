@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mariadb-11.8
+@server 11.8.9-MariaDB-ubu2404-log
+@server_caps 0x0000003d81fffffe
+@caps 0x0000002c01bfa284
+@kind execute
+@framing plain
+@command COM_STMT_BULK_EXECUTE duplicate key in row 2
+C 00 faa900000080000300fd00000b000000000165000b000000000166
+S 01 ff26042332333030304475706c696361746520656e747279202731312720666f72206b657920275052494d41525927

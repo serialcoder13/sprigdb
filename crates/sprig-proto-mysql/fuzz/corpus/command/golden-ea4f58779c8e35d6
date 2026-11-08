@@ -1,0 +1,2 @@
+ˆ•
+SELECT id FROM all_types WHERE id < 0

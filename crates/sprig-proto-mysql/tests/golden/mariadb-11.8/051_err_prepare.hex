@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mariadb-11.8
+@server 11.8.9-MariaDB-ubu2404-log
+@server_caps 0x0000003d81fffffe
+@caps 0x0000002c01bfa284
+@kind prepare
+@framing plain
+@command COM_STMT_PREPARE missing table
+C 00 1653454c454354202a2046524f4d206d697373696e675f7461626c65
+S 01 ff7a042334325330325461626c65202773707269675f676f6c64656e2e6d697373696e675f7461626c652720646f65736e2774206578697374

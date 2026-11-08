@@ -1,0 +1,2 @@
+ˆ•
+SELECT @@character_set_server, @@collation_server, @@collation_connection, @@default_collation_for_utf8mb4, @@character_set_client

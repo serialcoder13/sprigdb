@@ -464,3 +464,68 @@ fn galera_minority_refuses_queries() {
     iso.lock().unwrap().clear();
     assert_eq!(done(m.exec(c, &get(1), ms(10))), Outcome::rows(vec![]));
 }
+
+/// MariaDB 12.3 with `binlog_storage_engine = innodb`: `XA PREPARE` takes no
+/// GTID and replicas never hold the prepared branch; `XA COMMIT` ships the
+/// whole transaction as one group; `XA ROLLBACK` logs nothing. With the
+/// classic binlog the prepare is a group of its own and replicas hold the
+/// branch prepared (measured on 12.3.3 and 11.8).
+#[test]
+fn xa_prepare_is_not_binlogged_when_the_binlog_is_in_innodb() {
+    for innodb in [false, true] {
+        let mut m = Model::new(1);
+        let mut p = ServerConfig::new("p", 201, 2);
+        p.binlog_in_innodb = innodb;
+        m.add_server(p);
+        m.add_replica(ServerConfig::new("r1", 202, 2), "p", ms(10));
+        let z = Duration::ZERO;
+        let a = m.connect("p", None, S, z).unwrap();
+        done(m.exec(a, &Stmt::CreateTable(t("t")), z));
+        let pos = |m: &mut Model, c, now| -> String {
+            done(m.exec(c, &Stmt::GtidBinlogPos, now))
+                .scalar()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let before = pos(&mut m, a, z);
+        done(m.exec(a, &Stmt::XaStart(t("x1")), z));
+        done(m.exec(a, &ins(1, "xa"), z));
+        done(m.exec(a, &Stmt::XaEnd(t("x1")), z));
+        done(m.exec(a, &Stmt::XaPrepare(t("x1")), z));
+        let after_prepare = pos(&mut m, a, z);
+        m.advance(ms(100));
+        let r = m.connect("r1", None, S, ms(100)).unwrap();
+        let on_replica = done(m.exec(r, &Stmt::XaRecover, ms(100)));
+        m.disconnect(a, ms(100));
+        let b = m.connect("p", None, S, ms(100)).unwrap();
+        done(m.exec(b, &Stmt::XaCommit(t("x1")), ms(100)));
+        let after_commit = pos(&mut m, b, ms(100));
+        m.advance(ms(200));
+        assert_eq!(
+            m.rows("r1", S, "t"),
+            vec![(1, "xa".into())],
+            "innodb={innodb}"
+        );
+        if innodb {
+            assert_eq!(after_prepare, before);
+            assert_eq!(on_replica, Outcome::rows(vec![]));
+            assert_eq!(after_commit, "2-201-2");
+        } else {
+            assert_eq!(after_prepare, "2-201-2");
+            assert_eq!(on_replica, Outcome::rows(vec![vec![Some("x1".into())]]));
+            assert_eq!(after_commit, "2-201-3");
+        }
+
+        // A prepared branch rolled back: logged only with the file binlog.
+        done(m.exec(b, &Stmt::XaStart(t("x2")), ms(200)));
+        done(m.exec(b, &ins(2, "gone"), ms(200)));
+        done(m.exec(b, &Stmt::XaEnd(t("x2")), ms(200)));
+        done(m.exec(b, &Stmt::XaPrepare(t("x2")), ms(200)));
+        m.disconnect(b, ms(200));
+        let c = m.connect("p", None, S, ms(200)).unwrap();
+        let mid = pos(&mut m, c, ms(200));
+        done(m.exec(c, &Stmt::XaRollback(t("x2")), ms(200)));
+        let end = pos(&mut m, c, ms(200));
+        assert_eq!(mid == end, innodb, "innodb={innodb}: {mid} -> {end}");
+    }
+}

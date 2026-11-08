@@ -385,7 +385,7 @@ pub struct Negotiated {
     /// The largest packet accepted from the client:
     /// `gateway.max_allowed_packet_bytes`. As on MySQL and MariaDB, the
     /// client's own `max_packet` doesn't lower it: it is what the client
-    /// reads, and drivers send small defaults (mysql_async 4 MiB) while
+    /// reads, and drivers send small defaults (`mysql_async` 4 MiB) while
     /// uploading more.
     pub max_packet: usize,
     /// The client's collation.

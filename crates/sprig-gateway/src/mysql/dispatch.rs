@@ -13,7 +13,7 @@
 //! | `COM_FIELD_LIST`, `COM_STMT_*` | Through the executor; client statement ids mapped here |
 //! | `COM_CREATE_DB`, `COM_DROP_DB` | As `CREATE DATABASE` / `DROP DATABASE` |
 //! | `COM_STATISTICS`, `COM_PROCESS_INFO`, `COM_PROCESS_KILL` | From the `SessionTable` |
-//! | `COM_CHANGE_USER` | Re-authenticate with a fresh nonce; new executor session |
+//! | `COM_CHANGE_USER` | Re-authenticate (a fresh nonce when the plugin switches); new executor session |
 //! | `COM_RESET_CONNECTION` | Reset the executor session and statements; OK |
 //! | `COM_SET_OPTION` | Multi-statements on or off; EOF (OK form under `DEPRECATE_EOF`) |
 //! | refresh, shutdown, debug, binlog | 1227 |
@@ -664,9 +664,14 @@ impl CommandLoop {
         r
     }
 
-    /// `COM_CHANGE_USER`: always an `AuthSwitchRequest` with a fresh nonce;
-    /// on success a new executor session for the new account (its cluster
-    /// may differ). A failed change closes the connection.
+    /// `COM_CHANGE_USER`: the first response is checked against the
+    /// connection's nonce when its plugin is the account's; otherwise an
+    /// `AuthSwitchRequest` with a fresh nonce. That is what MySQL and
+    /// MariaDB do, and libmariadb (mysqlclient, PHP's libmysqlclient
+    /// builds) depends on it: it answers a switch to the plugin it already
+    /// used by re-sending its first response, computed over the greeting's
+    /// nonce. On success a new executor session for the new account (its
+    /// cluster may differ). A failed change closes the connection.
     async fn change_user(&mut self, cu: ChangeUser) -> Result<Flow> {
         let persona = self.proto.persona;
         self.session.begin_command("Change user", None);
@@ -688,7 +693,7 @@ impl CommandLoop {
                 &mut io,
                 cu.plugin.as_deref(),
                 cu.auth_response.clone(),
-                true,
+                false,
                 &mut login,
             )
             .await?;

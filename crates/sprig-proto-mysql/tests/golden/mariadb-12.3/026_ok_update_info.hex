@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mariadb-12.3
+@server 12.3.3-MariaDB-ubu2404
+@server_caps 0x0000003d81fffffe
+@caps 0x0000002c01bfa284
+@kind query
+@framing plain
+@command COM_QUERY UPDATE kv SET v = 'c' WHERE v = 'b'
+C 00 03555044415445206b76205345542076203d202763272057484552452076203d20276227
+S 01 0001000300000028526f7773206d6174636865643a203120204368616e6765643a203120205761726e696e67733a2030

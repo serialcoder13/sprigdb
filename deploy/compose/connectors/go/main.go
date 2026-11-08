@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,10 +34,13 @@ var (
 	password = os.Getenv("SPRIG_PASSWORD")
 	database = os.Getenv("SPRIG_DATABASE")
 	tlsMode  = os.Getenv("SPRIG_TLS")
+	persona  = os.Getenv("SPRIG_PERSONA")
 	prefix   = "t_go_sql_driver_" + tlsMode
-	ctx      = context.Background()
-	conn     *sql.Conn
-	pool     *sql.DB
+	// Checks run.sh asked to leave out (--quick): not run, not reported.
+	skipped = strings.Fields(strings.ReplaceAll(os.Getenv("SPRIG_CONN_SKIP_CHECKS"), ",", " "))
+	ctx     = context.Background()
+	conn    *sql.Conn
+	pool    *sql.DB
 )
 
 type na string
@@ -572,6 +576,367 @@ func checkConnAttrs() (string, error) {
 	return "sprig_check=" + v, nil
 }
 
+// --- chapter 05 matrix items --------------------------------------------------
+
+const (
+	infileData = "1,héllo 🌱\n2,\"quoted, comma\"\n3,\\N\n"
+	infileRows = "1=héllo 🌱|2=quoted, comma|3=NULL"
+)
+
+func infileTable(c *sql.Conn, t string) error {
+	exec(c, "DROP TABLE IF EXISTS "+t)
+	if err := exec(c, "CREATE TABLE "+t+" (id INT PRIMARY KEY, v VARCHAR(32)) DEFAULT CHARSET = utf8mb4"); err != nil {
+		return err
+	}
+	if v, err := scalar(c, "SELECT @@GLOBAL.local_infile"); err != nil {
+		return err
+	} else if v == "0" {
+		return skip("local_infile is off on the server")
+	}
+	return nil
+}
+
+func loadSQL(t, path string) string {
+	return "LOAD DATA LOCAL INFILE '" + path + "' INTO TABLE " + t + " CHARACTER SET utf8mb4 " +
+		"FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' LINES TERMINATED BY '\\n'"
+}
+
+func loaded(c *sql.Conn, t string) (string, error) {
+	return scalar(c, "SELECT IFNULL(GROUP_CONCAT(CONCAT(id, '=', IFNULL(v, 'NULL')) ORDER BY id SEPARATOR '|'), '') FROM "+t)
+}
+
+func infileFile() (string, error) {
+	f, err := os.CreateTemp("", "sprig*.csv")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	_, err = f.WriteString(infileData)
+	return f.Name(), err
+}
+
+func checkLocalInfile() (string, error) {
+	t := prefix + "_infile"
+	path, err := infileFile()
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(path)
+	mysql.RegisterLocalFile(path)
+	defer mysql.DeregisterLocalFile(path)
+	if err := infileTable(conn, t); err != nil {
+		return "", err
+	}
+	r, err := conn.ExecContext(ctx, loadSQL(t, path))
+	if err != nil {
+		return "", err
+	}
+	n, _ := r.RowsAffected()
+	rows, err := loaded(conn, t)
+	if err != nil || n != 3 || rows != infileRows {
+		return "", fmt.Errorf("loaded %d rows: %q %v", n, rows, err)
+	}
+	exec(conn, "DROP TABLE "+t)
+	return "3 rows (RegisterLocalFile)", nil
+}
+
+// The server's refusal when the client doesn't offer CLIENT_LOCAL_FILES.
+func infileRefusal() uint16 {
+	if persona == "mysql" {
+		return 3948
+	}
+	return 4166
+}
+
+func checkLocalInfileOff() (string, error) {
+	t := prefix + "_infile_off"
+	path, err := infileFile()
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(path)
+	if err := infileTable(conn, t); err != nil {
+		return "", err
+	}
+	// Not registered and no allowAllFiles: the driver must refuse the server's request.
+	err = exec(conn, loadSQL(t, path))
+	if err == nil {
+		return "", errors.New("the load succeeded")
+	}
+	how := "client-side: " + err.Error()
+	var me *mysql.MySQLError
+	if errors.As(err, &me) {
+		how = fmt.Sprintf("%d/%s %s", me.Number, string(me.SQLState[:]), me.Message)
+		if (me.Number == 1148 || me.Number == 3948 || me.Number == 4166) && me.Number != infileRefusal() {
+			return "", fmt.Errorf("server refused with %s, want %d", how, infileRefusal())
+		}
+	}
+	if rows, err := loaded(conn, t); err != nil || rows != "" {
+		return "", fmt.Errorf("rows were loaded: %q %v", rows, err)
+	}
+	exec(conn, "DROP TABLE "+t)
+	return "refused: " + how, nil
+}
+
+const procDDL = `CREATE PROCEDURE %s(IN a INT, OUT b INT, INOUT c INT)
+BEGIN
+  SELECT a AS x;
+  SELECT a + 1 AS y, 'two' AS z UNION ALL SELECT a + 2, 'three';
+  SET b = a * 10;
+  SET c = c + 1;
+END`
+
+func checkCall() (string, error) {
+	p := prefix + "_proc"
+	exec(conn, "DROP PROCEDURE IF EXISTS "+p)
+	if err := exec(conn, fmt.Sprintf(procDDL, p)); err != nil {
+		return "", err
+	}
+	if err := exec(conn, "SET @b = NULL, @c = 5"); err != nil {
+		return "", err
+	}
+	// An argument makes it a server-side prepared CALL (binary protocol).
+	rows, err := conn.QueryContext(ctx, "CALL "+p+"(?, @b, @c)", 1)
+	if err != nil {
+		return "", err
+	}
+	var sets []string
+	for {
+		var set string
+		cols, _ := rows.Columns()
+		for rows.Next() {
+			vals := make([]sql.NullString, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				rows.Close()
+				return "", err
+			}
+			for i, v := range vals {
+				if i > 0 {
+					set += ","
+				}
+				set += v.String
+			}
+			set += ";"
+		}
+		if len(cols) > 0 {
+			sets = append(sets, set)
+		}
+		if !rows.NextResultSet() {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	rows.Close()
+	var b, c int
+	if err := conn.QueryRowContext(ctx, "SELECT @b, @c").Scan(&b, &c); err != nil {
+		return "", err
+	}
+	exec(conn, "DROP PROCEDURE "+p)
+	if len(sets) != 2 || sets[0] != "1;" || sets[1] != "2,two;3,three;" {
+		return "", fmt.Errorf("resultsets %q", sets)
+	}
+	if b != 10 || c != 6 {
+		return "", fmt.Errorf("OUT b=%d INOUT c=%d", b, c)
+	}
+	return "prepared CALL: 2 resultsets, OUT 10, INOUT 6", nil
+}
+
+func checkChangeUser() (string, error) {
+	return "", na("go-sql-driver/mysql has no change-user API")
+}
+
+func checkResetConnection() (string, error) {
+	// database/sql calls the driver's ResetSession when a connection goes back
+	// to the pool, but go-sql-driver only checks liveness there: it never
+	// sends COM_RESET_CONNECTION, so session state leaks between borrowers.
+	return "", na("go-sql-driver/mysql's ResetSession is a liveness check only, never COM_RESET_CONNECTION")
+}
+
+// A one-connection pool and a pool-level prepared statement: execute it,
+// KILL the pooled connection from another session, execute again.
+// database/sql must drop the dead connection (the driver's liveness check
+// returns ErrBadConn), reconnect and re-prepare the statement by itself.
+func checkPoolReprepare() (string, error) {
+	db, err := sql.Open("mysql", dsn(""))
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	st, err := db.PrepareContext(ctx, "SELECT ? + 1, CONNECTION_ID()")
+	if err != nil {
+		return "", err
+	}
+	defer st.Close()
+	var n int
+	var id1, id2 string
+	for _, v := range []int{41, 41} {
+		if err := st.QueryRowContext(ctx, v).Scan(&n, &id1); err != nil || n != 42 {
+			return "", fmt.Errorf("got %d %v", n, err)
+		}
+	}
+	if err := exec(conn, "KILL "+id1); err != nil {
+		return "", err
+	}
+	waitGone(id1)
+	if err := st.QueryRowContext(ctx, 99).Scan(&n, &id2); err != nil {
+		return "", fmt.Errorf("after the kill: %w", err)
+	}
+	if n != 100 || id1 == id2 {
+		return "", fmt.Errorf("after the kill: got %d on connection %s (killed %s)", n, id2, id1)
+	}
+	return fmt.Sprintf("database/sql pool: connection %s killed, re-prepared on %s", id1, id2), nil
+}
+
+// waitGone waits until the killed session has left the processlist, so the
+// pool is reused only after the server has closed its socket.
+func waitGone(id string) {
+	for i := 0; i < 100; i++ {
+		if n, err := scalar(conn, "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = "+id); err == nil && n == "0" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func lockTable() (string, error) {
+	t := prefix + "_lock"
+	exec(conn, "DROP TABLE IF EXISTS "+t)
+	if err := exec(conn, "CREATE TABLE "+t+" (id INT PRIMARY KEY, v INT) ENGINE = InnoDB"); err != nil {
+		return "", err
+	}
+	return t, exec(conn, "INSERT INTO "+t+" VALUES (1, 0), (2, 0)")
+}
+
+// Two sessions, each its own pool, with the first holding row 1 FOR UPDATE.
+func lockPair(t string) (a, b *sql.Tx, done func(), err error) {
+	dbA, cA, err := open("")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dbB, cB, err := open("&innodb_lock_wait_timeout=1")
+	if err != nil {
+		dbA.Close()
+		return nil, nil, nil, err
+	}
+	done = func() { cA.Close(); cB.Close(); dbA.Close(); dbB.Close() }
+	if a, err = cA.BeginTx(ctx, nil); err == nil {
+		var v int
+		err = a.QueryRowContext(ctx, "SELECT v FROM "+t+" WHERE id = 1 FOR UPDATE").Scan(&v)
+	}
+	if err == nil {
+		b, err = cB.BeginTx(ctx, nil)
+	}
+	if err != nil {
+		done()
+	}
+	return a, b, done, err
+}
+
+func errnoOf(err error) (uint16, string) {
+	var me *mysql.MySQLError
+	if errors.As(err, &me) {
+		return me.Number, fmt.Sprintf("%d/%s", me.Number, string(me.SQLState[:]))
+	}
+	return 0, fmt.Sprintf("%v", err)
+}
+
+func checkLockWait() (string, error) {
+	t, err := lockTable()
+	if err != nil {
+		return "", err
+	}
+	a, b, done, err := lockPair(t)
+	if err != nil {
+		return "", err
+	}
+	defer done()
+	var v int
+	if err := b.QueryRowContext(ctx, "SELECT v FROM "+t+" WHERE id = 2 FOR UPDATE").Scan(&v); err != nil {
+		return "", err
+	}
+	t0 := time.Now()
+	err = b.QueryRowContext(ctx, "SELECT v FROM "+t+" WHERE id = 1 FOR UPDATE").Scan(&v)
+	ms := time.Since(t0).Milliseconds()
+	if err == nil {
+		return "", errors.New("the second session got the lock")
+	}
+	n, got := errnoOf(err)
+	if n != 1205 {
+		return "", fmt.Errorf("got %s", got)
+	}
+	if ms < 900 || ms > 10000 {
+		return "", fmt.Errorf("timed out after %d ms", ms)
+	}
+	// Only the statement is rolled back: the transaction still holds row 2.
+	if _, err := b.ExecContext(ctx, "UPDATE "+t+" SET v = 2 WHERE id = 2"); err != nil {
+		return "", err
+	}
+	if err := b.Commit(); err != nil {
+		return "", err
+	}
+	a.Commit()
+	if s, _ := scalar(conn, "SELECT v FROM "+t+" WHERE id = 2"); s != "2" {
+		return "", errors.New("the waiting transaction lost its work")
+	}
+	exec(conn, "DROP TABLE "+t)
+	return fmt.Sprintf("%s after %d ms; the transaction survived", got, ms), nil
+}
+
+func checkLockNowait() (string, error) {
+	t, err := lockTable()
+	if err != nil {
+		return "", err
+	}
+	a, b, done, err := lockPair(t)
+	if err != nil {
+		return "", err
+	}
+	defer done()
+	defer a.Rollback()
+	defer b.Rollback()
+	want := uint16(1205)
+	if persona == "mysql" {
+		want = 3572
+	}
+	var v int
+	err = b.QueryRowContext(ctx, "SELECT v FROM "+t+" WHERE id = 1 FOR UPDATE NOWAIT").Scan(&v)
+	if err == nil {
+		return "", errors.New("NOWAIT got the lock")
+	}
+	n, got := errnoOf(err)
+	if n != want {
+		return "", fmt.Errorf("NOWAIT: got %s, want %d", got, want)
+	}
+	rows, err := b.QueryContext(ctx, "SELECT id FROM "+t+" ORDER BY id FOR UPDATE SKIP LOCKED")
+	if err != nil {
+		return "", err
+	}
+	var ids []int
+	for rows.Next() {
+		var id int
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if !slices.Equal(ids, []int{2}) {
+		return "", fmt.Errorf("SKIP LOCKED returned %v", ids)
+	}
+	b.Rollback()
+	a.Rollback()
+	exec(conn, "DROP TABLE "+t)
+	return "NOWAIT " + got + ", SKIP LOCKED returned row 2", nil
+}
+
 func main() {
 	checks := []struct {
 		name string
@@ -582,9 +947,15 @@ func main() {
 		{"multi_statement", checkMultiStatement}, {"duplicate_key", checkDuplicateKey},
 		{"last_insert_id", checkLastInsertID}, {"large_row", checkLargeRow},
 		{"multi_packet", checkMultiPacket}, {"compression", checkCompression},
-		{"conn_attrs", checkConnAttrs},
+		{"conn_attrs", checkConnAttrs}, {"local_infile", checkLocalInfile},
+		{"local_infile_off", checkLocalInfileOff}, {"call", checkCall}, {"change_user", checkChangeUser},
+		{"reset_connection", checkResetConnection}, {"pool_reprepare", checkPoolReprepare},
+		{"lock_wait", checkLockWait}, {"lock_nowait", checkLockNowait},
 	}
 	for _, c := range checks {
+		if slices.Contains(skipped, c.name) {
+			continue
+		}
 		if conn == nil && c.name != "connect" {
 			emit(c.name, "fail", "no connection", 0)
 			continue

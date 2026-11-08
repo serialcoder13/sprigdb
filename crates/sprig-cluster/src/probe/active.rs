@@ -65,9 +65,10 @@ pub struct ActiveProbes {
     pub sql_log_bin_settable: bool,
     /// Galera only: `SET SESSION wsrep_OSU_method` worked.
     pub osu_method_settable: Option<bool>,
-    /// The non-blocking binlog dump (chapter 10). `None`: not run; it needs
-    /// `sprig-binlog`.
-    pub binlog_dump: Option<bool>,
+    /// The binlog dump probe ([`super::dump`]), run as `sprig_repl` on the
+    /// same node. `None`: not run (no `sprig_repl` endpoint was given).
+    #[serde(default)]
+    pub binlog_dump: Option<super::dump::DumpProbe>,
 }
 
 /// Runs every active probe against `ep`.

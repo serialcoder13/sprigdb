@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mysql-8.4
+@server 8.4.11
+@server_caps 0x00000000dfffffff
+@caps 0x0000000001bfa285
+@kind query
+@framing plain
+@command COM_QUERY SELECT * FROM missing_table
+C 00 0353454c454354202a2046524f4d206d697373696e675f7461626c65
+S 01 ff7a042334325330325461626c65202773707269675f676f6c64656e2e6d697373696e675f7461626c652720646f65736e2774206578697374

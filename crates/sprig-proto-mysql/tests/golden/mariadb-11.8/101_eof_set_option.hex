@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mariadb-11.8
+@server 11.8.9-MariaDB-ubu2404-log
+@server_caps 0x0000003d81fffffe
+@caps 0x0000002400bfa28c
+@kind ok_or_err
+@framing plain
+@command COM_SET_OPTION MULTI_STATEMENTS_ON
+C 00 1b0000
+S 01 fe00000200

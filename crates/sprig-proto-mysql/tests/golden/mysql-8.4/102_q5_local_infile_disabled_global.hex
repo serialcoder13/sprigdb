@@ -1,0 +1,13 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mysql-8.4
+@server 8.4.11
+@server_caps 0x00000000dfffffff
+@caps 0x0000000001bfa285
+@kind query
+@framing plain
+@command COM_QUERY SELECT @@GLOBAL.local_infile
+C 00 0353454c454354204040474c4f42414c2e6c6f63616c5f696e66696c65
+S 01 01
+S 02 03646566000000154040474c4f42414c2e6c6f63616c5f696e66696c65000c3f0001000000088000000000
+S 03 0130
+S 04 fe000002000000

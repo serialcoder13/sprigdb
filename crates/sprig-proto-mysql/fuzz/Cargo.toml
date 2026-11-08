@@ -1,0 +1,105 @@
+# cargo-fuzz targets for sprig-proto-mysql (chapter 05 build step 13,
+# chapter 46 step 4). Not a workspace member: it has its own [workspace]
+# below, its own Cargo.lock, needs nightly, and is never shipped. See
+# README.md for how to run it and for the libFuzzer licence note.
+
+[package]
+name = "sprig-proto-mysql-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# libfuzzer-sys is MIT/Apache-2.0; it bundles LLVM's libFuzzer
+# (Apache-2.0 WITH LLVM-exception). Fuzzing only; see README.md.
+libfuzzer-sys = "0.4"
+sprig-proto-mysql = { path = ".." }
+async-trait = "0.1"
+bytes = "1.12"
+futures = "0.3"
+tokio = { version = "1.54", features = ["io-util"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+zeroize = "1.8"
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake_v10"
+path = "fuzz_targets/handshake_v10.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake_response"
+path = "fuzz_targets/handshake_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "err_packet"
+path = "fuzz_targets/err_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ok_packet"
+path = "fuzz_targets/ok_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "column_def"
+path = "fuzz_targets/column_def.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rows"
+path = "fuzz_targets/rows.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "command"
+path = "fuzz_targets/command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_auth"
+path = "fuzz_targets/server_auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client"
+path = "fuzz_targets/client.rs"
+test = false
+doc = false
+bench = false

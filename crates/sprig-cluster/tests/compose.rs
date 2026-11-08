@@ -70,16 +70,19 @@ async fn deep_profile(
     Vec<sprig_cluster::NodeProbe>,
     sprig_cluster::CapabilityProfile,
 ) {
+    // Root stands in for sprig_repl, so the binlog dump probe runs too.
     let probes = prober()
-        .probe_cluster(topology, eps, ProbeDepth::Deep)
+        .probe_cluster_with_repl(topology, eps, Some(eps), ProbeDepth::Deep)
         .await;
     for p in &probes {
         assert!(p.result.is_ok(), "{}: {:?}", p.node, p.result);
     }
-    assert!(
-        probes.iter().any(|p| p.active.is_some()),
-        "no active probe ran"
-    );
+    let active = probes
+        .iter()
+        .find_map(|p| p.active.as_ref())
+        .expect("no active probe ran");
+    let dump = active.binlog_dump.as_ref().expect("the dump probe ran");
+    assert!(dump.passed(), "{dump:?}");
     let profile = derive(DeriveInput {
         topology,
         probes: &probes,

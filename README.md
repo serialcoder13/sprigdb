@@ -57,7 +57,7 @@ cargo run -p sprigctl -- dc register ams1 --tags jurisdiction=EU
 
 ### Register clusters
 
-`sprigctl cluster register` prechecks a cluster (TLS, grants, the binlog settings the mover and the change feed need, account creation, `sprig_repl`, the capability profile) and registers it as `active`, or refuses it with 39511 and every missing item. Credentials are never stored in etcd: the record names them by reference (`file:<path>` or `env:<name>`), and a credentials file holds a `[sprig_ctl]` and a `[sprig_repl]` table. For the Compose servers, which have self-signed certificates and no system accounts, use root:
+`sprigctl cluster register` prechecks a cluster (TLS, grants, the binlog settings the mover and the change feed need, account creation, a short binlog read as `sprig_repl`, the capability profile) and registers it as `active`, or refuses it with 39511 and every missing item. A binlog `sprig_repl` can't read (no `REPLICATION SLAVE`, encrypted binlogs, a server that refuses plain-text connections: the binlog reader has no TLS yet and speaks only `mysql_native_password`) doesn't block registration: the feed and the mover show as `unsupported`, with the fix among the advisories. Credentials are never stored in etcd: the record names them by reference (`file:<path>` or `env:<name>`), and a credentials file holds a `[sprig_ctl]` and a `[sprig_repl]` table. For the Compose servers, which have self-signed certificates and no system accounts, use root:
 
 ```sh
 cat > /tmp/sprig-dev-creds.toml <<'TOML'
@@ -113,6 +113,37 @@ docker compose --profile all down -v                # stop and delete the data
 
 MariaDB 11.8 is the default; use `MARIADB_IMAGE=mariadb:12.3 docker compose ...` for 12.3. Development credentials are in `deploy/compose/.env` (root password `sprig-dev-root`); never reuse them.
 
+### Run the gateway locally
+
+`deploy/compose/gateway-dev.sh` runs a controller and a gateway on the host against the Compose stack (milestone M0.2), so real MySQL and MariaDB clients can log in and run statements on a registered cluster. It needs the stack (`docker compose --profile all up -d --wait`), `curl`, `jq` and `openssl`.
+
+```sh
+deploy/compose/gateway-dev.sh up        # build, start the controller, register clusters, set listeners, start the gateway
+deploy/compose/gateway-dev.sh status
+deploy/compose/gateway-dev.sh tls required   # or optional / off; applies live
+deploy/compose/gateway-dev.sh down      # stop both and remove what up wrote to etcd
+```
+
+`up` builds `sprigdb` and `sprigctl`, starts a controller with `sprigdb.dev.toml` (Admin API on 127.0.0.1:7480, bootstrapping the deployment if etcd is empty), registers `dc-a-single`, `dc-a-repl` and `dc-a-galera` as `dc-a-c1`, `dc-a-c2` and `dc-a-c3` (the ids `gateway-accounts.dev.toml` names; it stops if they would differ), writes the listener settings to etcd at dc scope, and starts the gateway with `sprigdb.gateway.dev.toml`, waiting for `/readyz` on 9190. Re-running it leaves running processes alone; after a code change run `down` and `up`. Processes, logs and what `up` created are in `deploy/compose/.gateway-dev/`, the development CA and server certificate (made once with `openssl`, git-ignored) in `deploy/compose/gateway-certs/`.
+
+| Listener | Address | Logins (password `sprig-dev-app`) |
+|---|---|---|
+| MySQL persona | 127.0.0.1:13306 | `app` → `dc-a-c1` (single), `app_repl` → `dc-a-c2` (primary + replicas), `app_galera` → `dc-a-c3` (Galera) |
+| MariaDB persona | 127.0.0.1:13307 | the same |
+
+TLS is `optional` on both (`SPRIG_GATEWAY_TLS=required up` for the gateway's own default). A first `caching_sha2_password` login over plaintext needs TLS once (decision D4: no RSA key exchange); after a TLS login the account's fast-auth entry lets plaintext logins through.
+
+```sh
+mysql -h 127.0.0.1 -P 13306 -u app -psprig-dev-app --ssl-mode=VERIFY_IDENTITY --ssl-ca=deploy/compose/gateway-certs/ca.pem
+mysql -h 127.0.0.1 -P 13306 -u app -psprig-dev-app --ssl-mode=DISABLED
+docker run --rm -v "$PWD/deploy/compose/gateway-certs/ca.pem:/ca.pem:ro" mariadb:11.8 \
+    mariadb -h host.docker.internal -P 13307 -u app -psprig-dev-app --ssl-ca=/ca.pem -e 'SELECT @@version_comment'
+```
+
+On Docker Desktop a container reaches the host as `host.docker.internal` (the certificate names it); `--network host` with 127.0.0.1 works only where host networking is enabled. The MariaDB 11.8 client verifies the server certificate by default, so give it `--ssl-ca`, or `--disable-ssl-verify-server-cert`, or `--skip-ssl`.
+
+To run a second instance next to the first (another etcd, other ports), set `SPRIG_GATEWAY_DEV_STATE`, `SPRIG_ETCD`, `SPRIG_GATEWAY_MYSQL_PORT`, `SPRIG_GATEWAY_MARIADB_PORT`, `SPRIG_ADMIN_PORT`, `SPRIG_CTL_TELEMETRY_PORT` and `SPRIG_GW_TELEMETRY_PORT` for `up`; `status` and `down` need only `SPRIG_GATEWAY_DEV_STATE`.
+
 ### Three data centers
 
 `deploy/compose/compose.3dc.yaml` simulates three DCs on one machine, each with its own etcd (the DC tier) and a MariaDB cluster in a different topology, plus a three-member global etcd tier with one member per DC. A `netem` service adds latency between the DCs' subnets with `tc netem`. Run it through `3dc.sh`, which always uses the project name `sprigdb-3dc` (the `.env` file's project name belongs to the single-DC setup):
@@ -145,4 +176,4 @@ export SPRIG_TEST_DOCKER=1        # tests that start their own Compose projects
 cargo test --workspace
 ```
 
-A list holds the writer first. `SPRIG_TEST_ENV_FILE=deploy/compose/env.3dc.toml` describes the three-DC layout instead (`sprig_testkit::Env`). `SPRIG_TEST_STRICT=1` turns a skip into a failure, as in CI; `SPRIG_TEST_KEEP=1` leaves Compose projects that tests start running after the test. CI runs the stages of chapter 46: S0 (format, lint, unit tests, `cargo deny`) on every push, S1 (integration tests against Compose) on pull requests and `main`, and S2 (the three-DC layout on MariaDB 11.8 and 12.3) nightly or on demand.
+A list holds the writer first. With `SPRIG_TEST_DOCKER=1`, clock-skew tests start throwaway MariaDB containers with `libfaketime` preloaded, from an image (`sprigdb-mariadb-faketime:<tag>`) they build once, which needs the network; the shared Compose servers' clocks are never skewed (faultd can't move one container's wall clock, see `sprig_testkit::faults::faketime`). `SPRIG_TEST_ENV_FILE=deploy/compose/env.3dc.toml` describes the three-DC layout instead (`sprig_testkit::Env`). `SPRIG_TEST_STRICT=1` turns a skip into a failure, as in CI; `SPRIG_TEST_KEEP=1` leaves Compose projects that tests start running after the test. CI runs the stages of chapter 46: S0 (format, lint, unit tests, `cargo deny`) on every push, S1 (integration tests against Compose) on pull requests and `main`, and S2 (the three-DC layout on MariaDB 11.8 and 12.3) nightly or on demand.

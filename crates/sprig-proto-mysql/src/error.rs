@@ -54,7 +54,7 @@ impl ErrPacket {
     /// A standard error with its default message.
     #[must_use]
     pub fn std(persona: Persona, e: StdErr) -> Self {
-        Self::new(e.code(persona), e.sqlstate(), e.message(persona))
+        Self::new(e.code(persona), e.sqlstate_for(persona), e.message(persona))
     }
 
     /// Decodes an ERR packet. The SQLSTATE marker `#` is optional (absent
@@ -210,10 +210,14 @@ pub enum StdErr {
 
 impl StdErr {
     /// The error number in this persona. MySQL and MariaDB share every
-    /// number listed so far; MariaDB's equivalents of 3159 and 3948 are
-    /// chapter 05 open questions 5 and 8.
+    /// number but one: MariaDB reports disabled local infile as 4166
+    /// `ER_LOAD_INFILE_CAPABILITY_DISABLED` where MySQL 8.4 uses 3948
+    /// (measured on MariaDB 11.8 and 12.3; chapter 05 open question 5).
     #[must_use]
-    pub fn code(self, _persona: Persona) -> u16 {
+    pub fn code(self, persona: Persona) -> u16 {
+        if persona == Persona::MariaDb && self == StdErr::LocalFilesDisabled {
+            return MARIADB_LOAD_INFILE_DISABLED;
+        }
         match self {
             StdErr::TooManyConnections => 1040,
             StdErr::BadHandshake => 1043,
@@ -236,7 +240,20 @@ impl StdErr {
         }
     }
 
-    /// The SQLSTATE.
+    /// The SQLSTATE in this persona. MariaDB sends 3159 with `08004` (MySQL
+    /// 8.4: `HY000`) and its 4166 with `HY000` (MySQL's 3948: `42000`), as
+    /// measured on MariaDB 12.3 and MySQL 8.4 (chapter 05 open questions 5
+    /// and 8).
+    #[must_use]
+    pub fn sqlstate_for(self, persona: Persona) -> [u8; 5] {
+        match (persona, self) {
+            (Persona::MariaDb, StdErr::SecureTransportRequired) => *b"08004",
+            (Persona::MariaDb, StdErr::LocalFilesDisabled) => SQLSTATE_GENERAL,
+            _ => self.sqlstate(),
+        }
+    }
+
+    /// The SQLSTATE, as MySQL 8.4 sends it (see [`StdErr::sqlstate_for`]).
     #[must_use]
     pub fn sqlstate(self) -> [u8; 5] {
         match self {
@@ -289,9 +306,14 @@ impl StdErr {
             StdErr::SecureTransportRequired => {
                 "Connections using insecure transport are prohibited while --require_secure_transport=ON."
             }
-            StdErr::LocalFilesDisabled => {
-                "Loading local data is disabled; this must be enabled on both the client and server sides"
-            }
+            StdErr::LocalFilesDisabled => match persona {
+                Persona::MySql84 => {
+                    "Loading local data is disabled; this must be enabled on both the client and server sides"
+                }
+                Persona::MariaDb => {
+                    "The used command is not allowed because the MariaDB server or client has disabled the local infile capability"
+                }
+            },
             StdErr::LocalInfileRejected => {
                 "LOAD DATA LOCAL INFILE rejected: the server asked for a file the statement did not name"
             }
@@ -312,18 +334,33 @@ pub fn errmap(persona: Persona, err: &SprigError) -> (u16, [u8; 5], String) {
     let (code, sqlstate) = match err.kind {
         ErrorKind::Sprig(code) => (code.number(), code.sqlstate()),
         ErrorKind::Backend { errno, sqlstate } => (errno, sqlstate),
-        ErrorKind::Standard { errno, sqlstate } => (persona_errno(persona, errno), sqlstate),
+        ErrorKind::Standard { errno, sqlstate } => persona_std(persona, errno, sqlstate),
     };
     let message = truncate_message(&err.message, MAX_MESSAGE_BYTES).to_owned();
     (code, sqlstate, message)
 }
 
-/// The number a persona uses for a standard MySQL error number. The
-/// identity until chapter 05's open questions 5 and 8 settle MariaDB's
-/// numbers for 3159 and 3948.
+/// MariaDB's `ER_LOAD_INFILE_CAPABILITY_DISABLED`, its counterpart of
+/// MySQL's 3948.
+pub const MARIADB_LOAD_INFILE_DISABLED: u16 = 4166;
+
+/// The number a persona uses for a standard MySQL error number: 3948
+/// becomes 4166 on the MariaDB persona; every other number is shared.
 #[must_use]
-pub fn persona_errno(_persona: Persona, errno: u16) -> u16 {
-    errno
+pub fn persona_errno(persona: Persona, errno: u16) -> u16 {
+    match (persona, errno) {
+        (Persona::MariaDb, 3948) => MARIADB_LOAD_INFILE_DISABLED,
+        _ => errno,
+    }
+}
+
+/// The (errno, SQLSTATE) a persona sends for a standard MySQL error.
+fn persona_std(persona: Persona, errno: u16, sqlstate: [u8; 5]) -> (u16, [u8; 5]) {
+    match (persona, errno) {
+        (Persona::MariaDb, 3159) => (3159, *b"08004"),
+        (Persona::MariaDb, 3948) => (MARIADB_LOAD_INFILE_DISABLED, SQLSTATE_GENERAL),
+        _ => (errno, sqlstate),
+    }
 }
 
 #[cfg(test)]
@@ -379,5 +416,19 @@ mod tests {
                 .message(Persona::MariaDb)
                 .contains("MariaDB")
         );
+    }
+
+    #[test]
+    fn mariadb_persona_uses_mariadb_numbers_and_states() {
+        let tls = ErrPacket::std(Persona::MariaDb, StdErr::SecureTransportRequired);
+        assert_eq!((tls.code, tls.sqlstate), (3159, *b"08004"));
+        let tls = ErrPacket::std(Persona::MySql84, StdErr::SecureTransportRequired);
+        assert_eq!((tls.code, tls.sqlstate), (3159, *b"HY000"));
+        let infile = ErrPacket::std(Persona::MariaDb, StdErr::LocalFilesDisabled);
+        assert_eq!((infile.code, infile.sqlstate), (4166, *b"HY000"));
+        let infile = ErrPacket::std(Persona::MySql84, StdErr::LocalFilesDisabled);
+        assert_eq!((infile.code, infile.sqlstate), (3948, *b"42000"));
+        assert_eq!(persona_errno(Persona::MariaDb, 3948), 4166);
+        assert_eq!(persona_errno(Persona::MySql84, 3948), 3948);
     }
 }

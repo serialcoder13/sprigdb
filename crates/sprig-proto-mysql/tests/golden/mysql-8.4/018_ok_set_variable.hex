@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mysql-8.4
+@server 8.4.11
+@server_caps 0x00000000dfffffff
+@caps 0x0000000001bfa285
+@kind query
+@framing plain
+@command COM_QUERY SET SESSION time_zone = '+05:30'
+C 00 035345542053455353494f4e2074696d655f7a6f6e65203d20272b30353a333027
+S 01 00000002400000002900110c73746174656d656e745f69640332383400110974696d655f7a6f6e65062b30353a3330020131

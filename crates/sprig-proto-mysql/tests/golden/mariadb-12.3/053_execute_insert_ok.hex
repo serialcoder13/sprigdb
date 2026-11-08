@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mariadb-12.3
+@server 12.3.3-MariaDB-ubu2404
+@server_caps 0x0000003d81fffffe
+@caps 0x0000002c01bfa284
+@kind execute
+@framing plain
+@command COM_STMT_EXECUTE INSERT
+C 00 170600000000010000000001fd000165
+S 01 00010402000000

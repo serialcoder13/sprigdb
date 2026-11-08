@@ -351,7 +351,11 @@ impl BackendConn {
                 metrics::counter!("sprig_backend_prepared_evictions_total", "cluster" => self.node.cluster.to_string()).increment(1);
                 self.client.close_statement(old.id).await?;
             }
-            let Prepared { ok, columns, params } = self.client.prepare(sql).await?;
+            let Prepared {
+                ok,
+                columns,
+                params,
+            } = self.client.prepare(sql).await?;
             self.budget.add(1);
             self.stmt_cache.insert(
                 sql,

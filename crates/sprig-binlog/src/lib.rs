@@ -9,7 +9,11 @@
 //! - [`BinlogStream`]: connects to a node as a GTID-aware replica
 //!   (`@mariadb_slave_capability = 4`, `@slave_connect_state`,
 //!   `@master_binlog_checksum`, then `COM_BINLOG_DUMP`) and yields
-//!   [`Event`]s, resuming after any [`GtidPos`];
+//!   [`Event`]s, resuming after any [`GtidPos`]; the server decrypts an
+//!   encrypted binlog (`encrypt_binlog = ON`), and the stream skips the
+//!   `START_ENCRYPTION` event it sends ahead of the events; a non-blocking dump
+//!   ([`StreamOptions::non_blocking`]) ends with [`Event::DumpEnd`] at the
+//!   end of the binlog (chapter 09's dump probe reads this way);
 //! - [`BinlogFile`]: the same events from binlog files;
 //! - [`Decoder`]: the shared parser: framing, CRC32 checksums, format
 //!   description, `GTID` and `GTID_LIST`, `TABLE_MAP`, rows events v1 and
@@ -21,8 +25,10 @@
 //!
 //! Not here: TLS to the source (the wire client lives here until
 //! `sprig-proto-mysql` exists), authentication plugins other than
-//! `mysql_native_password`, and MariaDB's pre-10.1 temporal format with
-//! fractional seconds, whose width the binlog doesn't record.
+//! `mysql_native_password`, MariaDB's pre-10.1 temporal format with
+//! fractional seconds, whose width the binlog doesn't record, and
+//! encrypted binlog files read directly ([`BinlogFile`] refuses them: only
+//! the server holds the key).
 
 pub mod consts;
 pub mod gtid;

@@ -7,7 +7,9 @@
 //!   detection, `REPEATABLE READ` snapshots taken at the first read
 //!   (`READ COMMITTED` per statement) and 11.8's `innodb_snapshot_isolation`;
 //! - XA: start, end, prepare, commit, rollback, recover; prepared branches
-//!   survive disconnects and crashes, holding their locks;
+//!   survive disconnects and crashes, holding their locks; with 12.3's
+//!   binlog in `InnoDB` ([`ServerConfig::binlog_in_innodb`]) `XA PREPARE` is
+//!   not binlogged, so it takes no GTID and replicas never see the branch;
 //! - a binlog of event groups with MariaDB GTIDs (`domain-server-seq`),
 //!   `@@last_gtid`, `@@gtid_binlog_pos` and `MASTER_GTID_WAIT`;
 //! - grants per schema with the current-database cache that makes a
@@ -31,7 +33,13 @@
 //! argument, so conformance scripts drive it step by step;
 //! [`SimMariaDb`] wraps it for simulations, on the simulated network and
 //! tokio's paused clock. [`conformance`] runs the same scripted scenarios
-//! against the model and real MariaDB.
+//! against the model and real MariaDB: 11.8 (the Compose servers) and
+//! 12.3 (a throwaway container configured like the Compose single node,
+//! with the file binlog and with `binlog_storage_engine = innodb`) give the
+//! same observations on the single-node and throwaway scenarios. The
+//! `InnoDB` binlog's XA difference is invisible there, because GTIDs are
+//! compared without sequence numbers; [`ServerConfig::binlog_in_innodb`]
+//! carries it, measured by hand on 12.3.3.
 //!
 //! Not modelled: SQL text (statements are [`Stmt`] values), gap and
 //! next-key locks (a locking read or write locks the key itself, present

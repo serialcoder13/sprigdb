@@ -6,13 +6,19 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const util = require('node:util');
 const mysql = require('mysql2/promise');
 
 const CONNECTOR = 'mysql2';
 const env = process.env;
 const TLS = env.SPRIG_TLS;
+const PERSONA = env.SPRIG_PERSONA || 'mariadb';
 const PREFIX = `t_mysql2_${TLS}`;
+// Checks run.sh asked to leave out (--quick): not run, not reported.
+const SKIPPED = new Set((env.SPRIG_CONN_SKIP_CHECKS || '').split(/[ ,]+/).filter(Boolean));
 
 class NA extends Error {}
 class Skip extends Error {}
@@ -28,8 +34,8 @@ function expect(cond, msg) {
   if (!cond) throw new Error(msg);
 }
 
-async function connect(extra = {}) {
-  const c = await mysql.createConnection({
+function options(extra = {}) {
+  return {
     host: env.SPRIG_HOST,
     port: Number(env.SPRIG_PORT),
     user: env.SPRIG_USER,
@@ -44,7 +50,11 @@ async function connect(extra = {}) {
     dateStrings: true, // JavaScript Dates stop at milliseconds; DATETIME(6) doesn't
     timezone: 'Z',
     ...extra,
-  });
+  };
+}
+
+async function connect(extra = {}) {
+  const c = await mysql.createConnection(options(extra));
   await c.query("SET time_zone = '+00:00'");
   return c;
 }
@@ -272,17 +282,270 @@ async function cConnAttrs() {
   }
 }
 
+// --- chapter 05 matrix items ---------------------------------------------------
+
+const INFILE = '1,héllo 🌱\n2,"quoted, comma"\n3,\\N\n';
+const INFILE_ROWS = '1=héllo 🌱|2=quoted, comma|3=NULL';
+const loadSql = (t, f) => `LOAD DATA LOCAL INFILE '${f}' INTO TABLE ${t} CHARACTER SET utf8mb4 `
+  + `FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' LINES TERMINATED BY '\\n'`;
+
+async function loaded(c, t) {
+  const [[r]] = await c.query(`SELECT IFNULL(GROUP_CONCAT(CONCAT(id, '=', IFNULL(v, 'NULL')) ORDER BY id SEPARATOR '|'), '') AS v FROM ${t}`);
+  return r.v;
+}
+
+async function infileTable(c, t) {
+  await c.query(`DROP TABLE IF EXISTS ${t}`);
+  await c.query(`CREATE TABLE ${t} (id INT PRIMARY KEY, v VARCHAR(32)) DEFAULT CHARSET = utf8mb4`);
+  const [[r]] = await c.query('SELECT @@GLOBAL.local_infile AS v');
+  if (Number(r.v) === 0) throw new Skip('local_infile is off on the server');
+}
+
+function infileFile() {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sprig')), 'data.csv');
+  fs.writeFileSync(f, INFILE);
+  return f;
+}
+
+async function cLocalInfile() {
+  const t = `${PREFIX}_infile`;
+  const f = infileFile();
+  // mysql2 3.x streams a local file only through infileStreamFactory.
+  const c = await connect({ infileStreamFactory: (name) => fs.createReadStream(name) });
+  try {
+    await infileTable(c, t);
+    const [r] = await c.query(loadSql(t, f));
+    const rows = await loaded(c, t);
+    expect(r.affectedRows === 3 && rows === INFILE_ROWS, `loaded ${r.affectedRows} rows: ${rows}`);
+    await c.query(`DROP TABLE ${t}`);
+    return '3 rows (infileStreamFactory)';
+  } finally {
+    await c.end();
+  }
+}
+
+const infileRefusal = () => (PERSONA === 'mysql' ? 3948 : 4166);
+
+async function cLocalInfileOff() {
+  const t = `${PREFIX}_infile_off`;
+  const f = infileFile();
+  // Without the LOCAL_FILES capability the server itself must refuse.
+  const c = await connect({ flags: ['-LOCAL_FILES'] });
+  try {
+    await infileTable(c, t);
+    let how;
+    try {
+      await c.query(loadSql(t, f));
+    } catch (e) {
+      how = `${e.errno}/${e.sqlState} ${e.message}`;
+      if ([1148, 3948, 4166].includes(e.errno)) {
+        expect(e.errno === infileRefusal(), `server refused with ${how}, want ${infileRefusal()}`);
+      }
+    }
+    expect(how, 'the load succeeded');
+    const rows = await loaded(c, t);
+    expect(rows === '', `rows were loaded: ${rows}`);
+    await c.query(`DROP TABLE ${t}`);
+    return `refused: ${how}`;
+  } finally {
+    await c.end();
+  }
+}
+
+const PROC = (p) => `CREATE PROCEDURE ${p}(IN a INT, OUT b INT, INOUT c INT)
+BEGIN
+  SELECT a AS x;
+  SELECT a + 1 AS y, 'two' AS z UNION ALL SELECT a + 2, 'three';
+  SET b = a * 10;
+  SET c = c + 1;
+END`;
+
+async function cCall() {
+  const p = `${PREFIX}_proc`;
+  await conn.query(`DROP PROCEDURE IF EXISTS ${p}`);
+  await conn.query(PROC(p));
+  await conn.query('SET @b = NULL, @c = 5');
+  const out = [];
+  // execute(): a prepared CALL over the binary protocol.
+  for (const [how, run] of [['text', () => conn.query(`CALL ${p}(1, @b, @c)`)],
+    ['prepared', () => conn.execute(`CALL ${p}(?, @b, @c)`, [1])]]) {
+    if (how === 'prepared') await conn.query('SET @c = 5');
+    const [results] = await run();
+    // Resultsets, then the CALL's own OK packet.
+    const sets = results.filter(Array.isArray).map((rs) => rs.map((r) => Object.values(r).join(',')).join(';'));
+    expect(sets.length === 2 && sets[0] === '1' && sets[1] === '2,two;3,three',
+      `${how}: resultsets ${JSON.stringify(results)}`);
+    const [[r]] = await conn.query('SELECT @b AS b, @c AS c');
+    expect(Number(r.b) === 10 && Number(r.c) === 6, `${how}: OUT b=${r.b} INOUT c=${r.c}`);
+    out.push(how);
+  }
+  await conn.query(`DROP PROCEDURE ${p}`);
+  return `${out.join(' and ')} CALL: 2 resultsets, OUT 10, INOUT 6`;
+}
+
+async function markSession(c) {
+  await c.query('SET @sprig_mark = 42, SESSION auto_increment_increment = 7');
+  await c.query('CREATE TEMPORARY TABLE sprig_tmp (id INT)');
+  const [[r]] = await c.query('SELECT CONNECTION_ID() AS id');
+  return String(r.id);
+}
+
+async function assertReset(c, id) {
+  const [[r]] = await c.query('SELECT CONNECTION_ID() AS id, @sprig_mark AS m, @@SESSION.auto_increment_increment AS inc');
+  const state = `id ${r.id}, @sprig_mark ${r.m}, auto_increment_increment ${r.inc}`;
+  expect(String(r.id) === id, `connection id changed from ${id}: ${state}`);
+  expect(r.m === null && Number(r.inc) === 1, `session not reset: ${state}`);
+  try {
+    await c.query('SELECT COUNT(*) FROM sprig_tmp');
+  } catch (e) {
+    expect(e.errno === 1146, `temporary table probe: ${e.errno} ${e.message}`);
+    return `same connection ${id}; user variable, session variable and temporary table cleared`;
+  }
+  throw new Error('the temporary table survived');
+}
+
+async function cChangeUser() {
+  const c = await connect();
+  try {
+    const id = await markSession(c);
+    await c.changeUser({ user: env.SPRIG_USER, password: env.SPRIG_PASSWORD, database: env.SPRIG_DATABASE });
+    return `changeUser (COM_CHANGE_USER): ${await assertReset(c, id)}`;
+  } finally {
+    await c.end();
+  }
+}
+
+async function cResetConnection() {
+  const c = await connect();
+  try {
+    const id = await markSession(c);
+    await c.reset();
+    return `reset (COM_RESET_CONNECTION): ${await assertReset(c, id)}`;
+  } finally {
+    await c.end();
+  }
+}
+
+// A one-connection pool; execute() caches the prepared statement per
+// connection. KILL the pooled connection from another session and execute
+// again: the pool must drop it, connect anew and re-prepare.
+async function cPoolReprepare() {
+  const pool = mysql.createPool({ ...options(), connectionLimit: 1, maxIdle: 1 });
+  try {
+    const sql = 'SELECT ? + 1 AS n, CONNECTION_ID() AS id';
+    let [[r]] = await pool.execute(sql, [41]);
+    [[r]] = await pool.execute(sql, [41]);
+    expect(Number(r.n) === 42, `got ${r.n}`);
+    const id1 = String(r.id);
+    await conn.query(`KILL ${id1}`);
+    await waitGone(id1);
+    [[r]] = await pool.execute(sql, [99]);
+    expect(Number(r.n) === 100, `after the kill: got ${r.n}`);
+    expect(String(r.id) !== id1, `the killed connection ${id1} was handed out again`);
+    return `mysql2 pool: connection ${id1} killed, re-prepared on ${r.id}`;
+  } finally {
+    await pool.end();
+  }
+}
+
+// Waits until a killed session has left the processlist (its socket is closed).
+async function waitGone(id) {
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  for (let i = 0; i < 100; i++) {
+    const [[r]] = await conn.query(`SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = ${id}`);
+    if (Number(Object.values(r)[0]) === 0) break;
+    await sleep(50);
+  }
+  await sleep(100);
+}
+
+async function lockTable() {
+  const t = `${PREFIX}_lock`;
+  await conn.query(`DROP TABLE IF EXISTS ${t}`);
+  await conn.query(`CREATE TABLE ${t} (id INT PRIMARY KEY, v INT) ENGINE = InnoDB`);
+  await conn.query(`INSERT INTO ${t} VALUES (1, 0), (2, 0)`);
+  return t;
+}
+
+async function lockPair(t) {
+  const a = await connect();
+  const b = await connect();
+  await a.beginTransaction();
+  await a.query(`SELECT v FROM ${t} WHERE id = 1 FOR UPDATE`);
+  await b.query('SET SESSION innodb_lock_wait_timeout = 1');
+  await b.beginTransaction();
+  return [a, b];
+}
+
+async function cLockWait() {
+  const t = await lockTable();
+  const [a, b] = await lockPair(t);
+  try {
+    await b.query(`SELECT v FROM ${t} WHERE id = 2 FOR UPDATE`);
+    const t0 = performance.now();
+    let got;
+    try {
+      await b.query(`SELECT v FROM ${t} WHERE id = 1 FOR UPDATE`);
+    } catch (e) {
+      got = `${e.errno}/${e.sqlState}`;
+      expect(e.errno === 1205, `got ${got} ${e.message}`);
+    }
+    expect(got, 'the second session got the lock');
+    const ms = Math.round(performance.now() - t0);
+    expect(ms >= 900 && ms < 10000, `timed out after ${ms} ms`);
+    // Only the statement is rolled back: the transaction still holds row 2.
+    await b.query(`UPDATE ${t} SET v = 2 WHERE id = 2`);
+    await b.commit();
+    await a.commit();
+    const [[r]] = await conn.query(`SELECT v FROM ${t} WHERE id = 2`);
+    expect(Number(r.v) === 2, 'the waiting transaction lost its work');
+    await conn.query(`DROP TABLE ${t}`);
+    return `${got} after ${ms} ms; the transaction survived`;
+  } finally {
+    await a.end();
+    await b.end();
+  }
+}
+
+async function cLockNowait() {
+  const t = await lockTable();
+  const [a, b] = await lockPair(t);
+  const want = PERSONA === 'mysql' ? 3572 : 1205;
+  try {
+    let got;
+    try {
+      await b.query(`SELECT v FROM ${t} WHERE id = 1 FOR UPDATE NOWAIT`);
+    } catch (e) {
+      got = `${e.errno}/${e.sqlState}`;
+      expect(e.errno === want, `NOWAIT: got ${got} ${e.message}, want ${want}`);
+    }
+    expect(got, 'NOWAIT got the lock');
+    const [rows] = await b.query(`SELECT id FROM ${t} ORDER BY id FOR UPDATE SKIP LOCKED`);
+    expect(rows.map((r) => r.id).join(',') === '2', `SKIP LOCKED returned ${JSON.stringify(rows)}`);
+    await b.rollback();
+    await a.rollback();
+    await conn.query(`DROP TABLE ${t}`);
+    return `NOWAIT ${got}, SKIP LOCKED returned row 2`;
+  } finally {
+    await a.end();
+    await b.end();
+  }
+}
+
 const CHECKS = [
   ['connect', cConnect], ['plain_query', cPlainQuery], ['types', cTypes],
   ['prepared', cPrepared], ['transaction', cTransaction],
   ['multi_statement', cMultiStatement], ['duplicate_key', cDuplicateKey],
   ['last_insert_id', cLastInsertId], ['large_row', cLargeRow],
   ['multi_packet', cMultiPacket], ['compression', cCompression],
-  ['conn_attrs', cConnAttrs],
+  ['conn_attrs', cConnAttrs], ['local_infile', cLocalInfile], ['local_infile_off', cLocalInfileOff],
+  ['call', cCall], ['change_user', cChangeUser], ['reset_connection', cResetConnection],
+  ['pool_reprepare', cPoolReprepare], ['lock_wait', cLockWait], ['lock_nowait', cLockNowait],
 ];
 
 (async () => {
   for (const [name, fn] of CHECKS) {
+    if (SKIPPED.has(name)) continue;
     if (!conn && name !== 'connect') {
       emit(name, 'fail', 'no connection');
       continue;

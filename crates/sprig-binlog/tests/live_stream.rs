@@ -173,3 +173,43 @@ async fn throughput() {
         drop_schema(&url, &schema).await;
     }
 }
+
+/// A non-blocking dump from the current position (what chapter 09's dump
+/// probe reads) sends the format description and the start position's
+/// `GTID_LIST`, then ends with [`Event::DumpEnd`] instead of waiting.
+/// Read-only, so it runs on the shared single node.
+#[tokio::test]
+async fn non_blocking_dump_ends_at_the_end_of_the_binlog() {
+    let Some(us) = urls(common::SINGLE, module_path!()) else {
+        return;
+    };
+    for url in us {
+        let mut c = sql(&url).await;
+        let now = gtid_pos(&mut c).await;
+        let mut o = StreamOptions::new(server_id());
+        o.non_blocking = true;
+        o.heartbeat = Duration::from_secs(30);
+        let start = Instant::now();
+        let mut s = BinlogStream::connect(&source(&url), &now, &o)
+            .await
+            .unwrap();
+        let mut types = Vec::new();
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), s.next())
+                .await
+                .expect("a non-blocking dump ends without waiting for heartbeats")
+                .unwrap();
+            if matches!(ev, Event::DumpEnd) {
+                break;
+            }
+            types.push(s.last_header().type_code);
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let et = sprig_binlog::consts::event_type::FORMAT_DESCRIPTION;
+        assert!(types.contains(&et), "{url}: {types:?}");
+        let gl = sprig_binlog::consts::event_type::GTID_LIST;
+        assert!(types.contains(&gl), "{url}: {types:?}");
+        let e = s.next().await.unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::BinlogDisconnected));
+    }
+}

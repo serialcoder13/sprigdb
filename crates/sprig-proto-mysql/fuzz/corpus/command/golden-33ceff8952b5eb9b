@@ -1,0 +1,2 @@
+ˆ•
+SELECT * FROM all_types WHERE id >= ? ORDER BY id

@@ -1,13 +1,17 @@
 //! The binlog settings the change feed and the mover need (chapter 09,
 //! "Binlog for the change feed"; chapter 38, "Binlog requirements").
 //!
-//! These checks read only server variables. Whether a dump actually
-//! streams valid events is the binlog dump probe's job, which needs
-//! `sprig-binlog` (see [`ActiveProbes::binlog_dump`](super::ActiveProbes)).
+//! [`check`] reads only server variables. Whether a dump actually streams
+//! valid events is the binlog dump probe's job ([`super::dump`], kept in
+//! [`ActiveProbes::binlog_dump`](super::ActiveProbes)); [`check_with_dump`]
+//! folds its result in, so a node whose settings pass but whose binlog
+//! `sprig_repl` can't read (no `REPLICATION SLAVE`, a checksum or format
+//! the reader doesn't know, corrupt events) is `unsupported` too.
 
 use serde::{Deserialize, Serialize};
 
 use super::NodeProbe;
+use super::dump::DumpProbe;
 use super::parse::{BinlogFormat, NodeFacts, RowImage, RowMetadata};
 
 /// The default of `feed.retention_hours` (chapter 38, which owns the key):
@@ -202,13 +206,42 @@ pub fn check(facts: &NodeFacts, retention_hours: u64) -> FeedCheck {
     FeedCheck { level, gaps }
 }
 
+/// [`check`], plus the dump probe's result where it ran: a conclusive
+/// failure ([`DumpProbe::blocks_feed`]) is a blocking gap, so the level is
+/// `unsupported`. An inconclusive one (a timeout, a lost connection) only
+/// adds an advisory gap.
+#[must_use]
+pub fn check_with_dump(
+    facts: &NodeFacts,
+    retention_hours: u64,
+    dump: Option<&DumpProbe>,
+) -> FeedCheck {
+    let mut c = check(facts, retention_hours);
+    if let Some(mut g) = dump.and_then(DumpProbe::gap) {
+        if dump.is_some_and(DumpProbe::blocks_feed) {
+            c.level = FeedLevel::Unsupported;
+        } else {
+            g.severity = GapSeverity::Advisory;
+        }
+        c.gaps.push(g);
+        c.gaps.sort_by_key(|g| g.severity as u8);
+    }
+    c
+}
+
 /// One line per gap on every answering node, each with its fix, for the
-/// registration report and the decision log.
+/// registration report and the decision log; the dump probe's gap on the
+/// node it ran on.
 #[must_use]
 pub fn report(probes: &[NodeProbe], retention_hours: u64) -> Vec<String> {
     probes
         .iter()
-        .filter_map(|p| p.facts().map(|f| (p, check(f, retention_hours))))
+        .filter_map(|p| {
+            p.facts().map(|f| {
+                let dump = p.active.as_ref().and_then(|a| a.binlog_dump.as_ref());
+                (p, check_with_dump(f, retention_hours, dump))
+            })
+        })
         .flat_map(|(p, c)| {
             c.gaps.into_iter().map(move |g| {
                 format!(
@@ -302,6 +335,38 @@ mod tests {
         let lines = report(&p, 168);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].starts_with("node n1: binlog_row_metadata is MINIMAL"));
+    }
+
+    #[test]
+    fn a_failed_dump_probe_blocks_and_an_inconclusive_one_advises() {
+        use crate::probe::dump::{DumpFailureKind, classify};
+        let mut p = replication();
+        let mut dump = DumpProbe {
+            failure: Some(classify(&sprig_common::SprigError::backend(
+                1227,
+                *b"42000",
+                "Access denied; you need (at least one of) the REPLICATION SLAVE privilege(s)",
+            ))),
+            ..DumpProbe::default()
+        };
+        let f = p[0].facts().unwrap().clone();
+        let c = check_with_dump(&f, 168, Some(&dump));
+        assert_eq!(c.level, FeedLevel::Unsupported);
+        assert_eq!(c.gaps[0].variable, "binlog dump");
+        assert!(c.gaps[0].fix.starts_with("GRANT REPLICATION SLAVE"));
+        p[0].active = Some(crate::testutil::all_passed());
+        p[0].active.as_mut().unwrap().binlog_dump = Some(dump.clone());
+        let lines = report(&p, 168);
+        assert!(lines[0].contains("binlog dump"), "{lines:?}");
+
+        dump.failure.as_mut().unwrap().kind = DumpFailureKind::Timeout;
+        let c = check_with_dump(&f, 168, Some(&dump));
+        assert_eq!(c.level, FeedLevel::Full);
+        assert_eq!(c.gaps[0].severity, GapSeverity::Advisory);
+        assert_eq!(
+            check_with_dump(&f, 168, Some(&DumpProbe::default())),
+            check(&f, 168)
+        );
     }
 
     #[test]

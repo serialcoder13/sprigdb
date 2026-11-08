@@ -83,7 +83,14 @@ impl OkPacket {
                 session_state = payload.slice_ref(r.lenenc_bytes()?);
             }
         } else {
-            info = payload.slice_ref(r.rest());
+            // Servers write the info as a length-encoded string here too
+            // (MariaDB's and MySQL's net_store_data); accept a bare one.
+            let rest = r.peek_rest();
+            let mut l = Reader::new(rest);
+            info = match l.lenenc_bytes() {
+                Ok(b) if l.is_empty() && !rest.is_empty() => payload.slice_ref(b),
+                _ => payload.slice_ref(rest),
+            };
         }
         Ok(Self {
             header,
@@ -124,7 +131,11 @@ impl OkPacket {
                 w.lenenc_bytes(&self.session_state);
             }
         } else {
-            w.bytes(&self.info);
+            // Length-encoded even without SESSION_TRACK, as MariaDB and MySQL
+            // send it: libmysql, mysql_async and the JDBC drivers read it so.
+            if !self.info.is_empty() {
+                w.lenenc_bytes(&self.info);
+            }
         }
         w.into_bytes()
     }

@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mariadb-11.8
+@server 11.8.9-MariaDB-ubu2404-log
+@server_caps 0x0000003d81fffffe
+@caps 0x0000002c01bfa284
+@kind query
+@framing plain
+@command COM_QUERY SET SESSION session_track_state_change = ON
+C 00 035345542053455353494f4e2073657373696f6e5f747261636b5f73746174655f6368616e6765203d204f4e
+S 01 000000024000000003020131

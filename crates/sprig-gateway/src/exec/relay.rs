@@ -27,14 +27,19 @@
 use bytes::Bytes;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_proto_mysql::client::PacketKind;
+use sprig_proto_mysql::codec::Framing;
 use sprig_proto_mysql::packets::{OkPacket, SessionChange};
+use sprig_proto_mysql::resultset::{decode_text_row, encode_text_row};
+use sprig_proto_mysql::state::ProtoState;
 use sprig_proto_mysql::{Caps, ColumnDef, ErrPacket, StatusFlags};
 
+use super::split::Renamed;
 use crate::backend::BackendSession;
 use crate::backend::state::gateway_var;
 use crate::pipeline::{EndOfRows, ResultSink, RowFormat};
 
 /// How to relay one response.
+#[allow(clippy::struct_excessive_bools)] // one flag per relay option
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Relay<'a> {
     /// Another result of the client's text follows this response.
@@ -51,6 +56,60 @@ pub(crate) struct Relay<'a> {
     pub backend_caps: Caps,
     /// What a `LOCAL INFILE` request may ask for.
     pub infile: Infile<'a>,
+    /// `SHOW [SESSION] STATUS`: the rows describing the client's own
+    /// connection to rewrite.
+    pub conn_status: Option<&'a ConnStatus>,
+    /// Column names to give back (the gateway rewrote `CONNECTION_ID()`).
+    pub renames: &'a [Renamed],
+    /// The 3306 persona ran a `NOWAIT` statement: MariaDB's 1205 for a
+    /// lock not granted at once is MySQL's 3572.
+    pub mysql_nowait: bool,
+}
+
+/// The session status variables that describe the client's connection
+/// (TLS, compression). The backend reports its own link to the gateway,
+/// always TLS and uncompressed, so `SHOW STATUS` rows for these are
+/// rewritten with the client's values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConnStatus {
+    vars: Vec<(&'static str, String)>,
+}
+
+impl ConnStatus {
+    /// The client connection's values.
+    pub(crate) fn of(proto: &ProtoState) -> Self {
+        let (cipher, version) = proto
+            .tls
+            .as_ref()
+            .map_or((String::new(), String::new()), |t| {
+                (t.cipher.to_owned(), format!("TLSv{}", t.version))
+            });
+        let (on, algorithm, level) = match proto.framing {
+            Framing::Plain => ("OFF", String::new(), "0".to_owned()),
+            Framing::Zlib { level } => ("ON", "zlib".to_owned(), level.to_string()),
+            Framing::Zstd { level } => ("ON", "zstd".to_owned(), level.to_string()),
+        };
+        Self {
+            vars: vec![
+                ("Ssl_cipher", cipher),
+                ("Ssl_version", version),
+                ("Compression", on.to_owned()),
+                ("Compression_algorithm", algorithm),
+                ("Compression_level", level),
+            ],
+        }
+    }
+
+    /// The row for a status variable, rewritten if it is one of these.
+    fn rewrite(&self, row: &[u8]) -> Option<Bytes> {
+        let vals = decode_text_row(row, 2).ok()?;
+        let name = vals.first().copied().flatten()?;
+        let (_, v) = self
+            .vars
+            .iter()
+            .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))?;
+        Some(encode_text_row([Some(name), Some(v.as_bytes())]))
+    }
 }
 
 /// The `LOCAL INFILE` request a statement may cause.
@@ -75,7 +134,10 @@ pub(crate) struct Relayed {
 
 /// 39012: the backend sent something the protocol doesn't allow here.
 pub(crate) fn protocol_error(what: &str) -> SprigError {
-    SprigError::new(SprigCode::BackendProtocol, format!("unexpected backend packet: {what}"))
+    SprigError::new(
+        SprigCode::BackendProtocol,
+        format!("unexpected backend packet: {what}"),
+    )
 }
 
 /// A backend ERR as the client sees it: code, SQLSTATE and message kept.
@@ -99,12 +161,22 @@ impl Relay<'_> {
     }
 }
 
-fn decode_defs(defs: &[Bytes], caps: Caps) -> Result<Vec<ColumnDef>> {
+fn decode_defs(defs: &[Bytes], caps: Caps, renames: &[Renamed]) -> Result<Vec<ColumnDef>> {
     let mut out = Vec::with_capacity(defs.len());
     for d in defs {
-        out.push(ColumnDef::decode(d, caps)?);
+        let mut c = ColumnDef::decode(d, caps)?;
+        rename(&mut c, renames);
+        out.push(c);
     }
     Ok(out)
+}
+
+/// Gives a column the name the client's text gave it, if the gateway
+/// rewrote that expression.
+pub(crate) fn rename(c: &mut ColumnDef, renames: &[Renamed]) {
+    if let Some(r) = renames.iter().find(|r| r.from == c.name) {
+        c.name = r.to.clone();
+    }
 }
 
 /// The client's OK packet for a backend OK (see the module docs).
@@ -147,7 +219,12 @@ fn client_visible(c: &SessionChange) -> bool {
 /// # Errors
 /// The backend's lost-connection errors; 39012 for a packet out of place;
 /// the client's transport errors (the client is gone).
-pub(crate) async fn relay(bs: &mut BackendSession, out: &mut dyn ResultSink, r: &Relay<'_>) -> Result<Relayed> {
+#[allow(clippy::too_many_lines)] // one arm per packet kind
+pub(crate) async fn relay(
+    bs: &mut BackendSession,
+    out: &mut dyn ResultSink,
+    r: &Relay<'_>,
+) -> Result<Relayed> {
     let client_caps = out.wire().caps;
     let mut res = Relayed::default();
     let mut defs: Vec<Bytes> = Vec::new();
@@ -184,7 +261,14 @@ pub(crate) async fn relay(bs: &mut BackendSession, out: &mut dyn ResultSink, r: 
                     begin(out, &defs, r, client_caps).await?;
                     begun = true;
                 }
-                out.raw_row(p.payload).await?;
+                match r
+                    .conn_status
+                    .filter(|_| want == 2)
+                    .and_then(|cs| cs.rewrite(&p.payload))
+                {
+                    Some(row) => out.raw_row(row).await?,
+                    None => out.raw_row(p.payload).await?,
+                }
             }
             PacketKind::End(t) => {
                 let mut status = t.status();
@@ -216,7 +300,16 @@ pub(crate) async fn relay(bs: &mut BackendSession, out: &mut dyn ResultSink, r: 
                 res.status = Some(status);
             }
             PacketKind::Err(e) => {
-                out.error(&backend_error(&e)).await?;
+                let err = if r.mysql_nowait && e.code == 1205 {
+                    SprigError::standard(
+                        3572,
+                        *b"HY000",
+                        "Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.",
+                    )
+                } else {
+                    backend_error(&e)
+                };
+                out.error(&err).await?;
                 res.errored = true;
             }
             PacketKind::LocalInfile => {
@@ -233,7 +326,10 @@ pub(crate) async fn relay(bs: &mut BackendSession, out: &mut dyn ResultSink, r: 
                     return Ok(res);
                 }
             }
-            PacketKind::PrepareOk(_) | PacketKind::ParamDef | PacketKind::ParamsEof | PacketKind::Raw => {
+            PacketKind::PrepareOk(_)
+            | PacketKind::ParamDef
+            | PacketKind::ParamsEof
+            | PacketKind::Raw => {
                 return Err(protocol_error("prepare or raw packet in a resultset"));
             }
         }
@@ -241,12 +337,18 @@ pub(crate) async fn relay(bs: &mut BackendSession, out: &mut dyn ResultSink, r: 
     Ok(res)
 }
 
-async fn begin(out: &mut dyn ResultSink, defs: &[Bytes], r: &Relay<'_>, client: Caps) -> Result<()> {
-    if r.raw_defs(client) {
+async fn begin(
+    out: &mut dyn ResultSink,
+    defs: &[Bytes],
+    r: &Relay<'_>,
+    client: Caps,
+) -> Result<()> {
+    if r.raw_defs(client) && r.renames.is_empty() {
         out.begin_rows_raw(defs, r.format).await
     } else {
-        metrics::counter!("sprig_mysql_rewritten_packets_total", "kind" => "column_def").increment(defs.len() as u64);
-        let cols = decode_defs(defs, r.backend_caps)?;
+        metrics::counter!("sprig_mysql_rewritten_packets_total", "kind" => "column_def")
+            .increment(defs.len() as u64);
+        let cols = decode_defs(defs, r.backend_caps, r.renames)?;
         out.begin_rows(&cols, r.format).await
     }
 }
@@ -258,10 +360,17 @@ async fn cursor_opened(
     status: StatusFlags,
     res: &mut Relayed,
 ) -> Result<()> {
-    let cols = decode_defs(defs, r.backend_caps)?;
+    let cols = decode_defs(defs, r.backend_caps, r.renames)?;
     let mut status = r.status(status);
     status.remove(StatusFlags::SESSION_STATE_CHANGED);
-    out.cursor_opened(&cols, EndOfRows { status, warnings: 0 }).await?;
+    out.cursor_opened(
+        &cols,
+        EndOfRows {
+            status,
+            warnings: 0,
+        },
+    )
+    .await?;
     res.cursor_opened = true;
     res.status = Some(status);
     Ok(())
@@ -270,7 +379,12 @@ async fn cursor_opened(
 /// Answers a `LOCAL INFILE` request for `name`: streams the client's file
 /// when the statement named exactly this file and loading is allowed
 /// (true), else declines it to the backend with an empty file (false).
-async fn local_infile(bs: &mut BackendSession, out: &mut dyn ResultSink, r: &Relay<'_>, name: &[u8]) -> Result<bool> {
+async fn local_infile(
+    bs: &mut BackendSession,
+    out: &mut dyn ResultSink,
+    r: &Relay<'_>,
+    name: &[u8],
+) -> Result<bool> {
     let ok = r.infile.allowed && r.infile.name == Some(name);
     if !ok {
         tracing::warn!(
@@ -309,6 +423,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn connection_status_rows_describe_the_client() {
+        let cs = ConnStatus {
+            vars: vec![
+                ("Ssl_cipher", "TLS_AES_256_GCM_SHA384".into()),
+                ("Compression", "OFF".into()),
+            ],
+        };
+        let row = encode_text_row([Some(&b"Ssl_cipher"[..]), Some(&b"ECDHE"[..])]);
+        let out = cs.rewrite(&row).unwrap();
+        assert_eq!(
+            decode_text_row(&out, 2).unwrap()[1],
+            Some(&b"TLS_AES_256_GCM_SHA384"[..])
+        );
+        let other = encode_text_row([Some(&b"Uptime"[..]), Some(&b"5"[..])]);
+        assert!(cs.rewrite(&other).is_none());
+    }
+
+    #[test]
     fn ok_session_state_keeps_the_clients_changes_only() {
         let mut ok = OkPacket::new(StatusFlags::AUTOCOMMIT);
         ok.set_session_changes(&[
@@ -324,7 +456,10 @@ mod tests {
             SessionChange::StateChange(true),
             SessionChange::TransactionState(Bytes::from_static(b"T_______")),
         ]);
-        let out = client_ok(ok, StatusFlags::AUTOCOMMIT | StatusFlags::SESSION_STATE_CHANGED);
+        let out = client_ok(
+            ok,
+            StatusFlags::AUTOCOMMIT | StatusFlags::SESSION_STATE_CHANGED,
+        );
         let kept = out.session_changes().unwrap();
         assert_eq!(kept.len(), 2);
         assert!(matches!(&kept[0], SessionChange::Schema(s) if &s[..] == b"shop"));
@@ -335,7 +470,10 @@ mod tests {
             name: Bytes::from_static(b"last_gtid"),
             value: Bytes::from_static(b"0-1-6"),
         }]);
-        let out = client_ok(only_gateway, StatusFlags::AUTOCOMMIT | StatusFlags::SESSION_STATE_CHANGED);
+        let out = client_ok(
+            only_gateway,
+            StatusFlags::AUTOCOMMIT | StatusFlags::SESSION_STATE_CHANGED,
+        );
         assert!(out.session_state.is_empty());
         assert!(!out.status.contains(StatusFlags::SESSION_STATE_CHANGED));
     }

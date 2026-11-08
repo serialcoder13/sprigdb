@@ -1,0 +1,2 @@
+ˆ•
+LOAD DATA LOCAL INFILE 'golden.csv' INTO TABLE li

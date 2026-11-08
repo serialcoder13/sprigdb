@@ -145,9 +145,40 @@ fn minimal_row_image_clears_mover_and_feed_source() {
     );
     // A failed dump probe clears it.
     let mut probes = single();
-    probes[0].active.as_mut().unwrap().binlog_dump = Some(false);
+    probes[0].active.as_mut().unwrap().binlog_dump = Some(crate::probe::DumpProbe {
+        failure: Some(crate::probe::dump::classify(
+            &sprig_common::SprigError::backend(
+                1227,
+                *b"42000",
+                "Access denied; you need (at least one of) the REPLICATION SLAVE privilege(s)",
+            ),
+        )),
+        ..crate::probe::DumpProbe::default()
+    });
+    let p = derive_for(TopologyKind::SingleNode, &probes);
+    assert!(!p.derived.mover_source && !p.derived.feed_source);
+    assert_eq!(p.derived.feed_level, FeedLevel::Unsupported);
+    // A timed-out one is inconclusive: the settings decide.
+    probes[0]
+        .active
+        .as_mut()
+        .unwrap()
+        .binlog_dump
+        .as_mut()
+        .unwrap()
+        .failure
+        .as_mut()
+        .unwrap()
+        .kind = crate::probe::DumpFailureKind::Timeout;
     assert!(
-        !derive_for(TopologyKind::SingleNode, &probes)
+        derive_for(TopologyKind::SingleNode, &probes)
+            .derived
+            .mover_source
+    );
+    // A passing one keeps it.
+    probes[0].active.as_mut().unwrap().binlog_dump = Some(crate::probe::DumpProbe::default());
+    assert!(
+        derive_for(TopologyKind::SingleNode, &probes)
             .derived
             .mover_source
     );

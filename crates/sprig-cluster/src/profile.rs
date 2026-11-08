@@ -196,7 +196,7 @@ pub struct CapabilityProfile {
     pub derived: Derived,
 }
 
-/// The inputs of [`derive`].
+/// The inputs of [`derive()`].
 #[derive(Debug, Clone, Copy)]
 pub struct DeriveInput<'a> {
     /// The record's topology.
@@ -384,9 +384,12 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
     // log_slave_updates (replica) and a passing dump probe. The settings
     // half is the feed check (chapter 38), which also asks Galera nodes for
     // log_slave_updates.
-    // TODO(sprig-binlog): the dump probe (`ActiveProbes::binlog_dump`) is
-    // never run yet, so `None` (not run) counts as passing here.
-    let dump_ok = active.and_then(|a| a.binlog_dump) != Some(false);
+    // The dump probe (`ActiveProbes::binlog_dump`) runs where a `sprig_repl`
+    // endpoint was given; not run, or inconclusive (a timeout or a lost
+    // connection), leaves the settings to decide.
+    let dump_ok = !active
+        .and_then(|a| a.binlog_dump.as_ref())
+        .is_some_and(crate::probe::DumpProbe::blocks_feed);
     let feed_level = if dump_ok {
         answered
             .iter()

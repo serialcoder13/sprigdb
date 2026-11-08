@@ -10,7 +10,8 @@
 //! 3. depth: deep at the first pass of a new profile, after a version,
 //!    server_id or Galera membership change, daily, or on `probe --full`;
 //!    full every cluster.probe_interval_seconds; light otherwise
-//! 4. probe every node as sprig_ctl; derive the profile; assess health
+//! 4. probe every node as sprig_ctl (a deep probe also reads the binlog
+//!    as sprig_repl: the dump probe); derive the profile; assess health
 //! 5. publish: downgrades at once, upgrades after
 //!    cluster.capability_upgrade_sustain_seconds; health when it changes;
 //!    the Galera writer set when it changes
@@ -38,7 +39,7 @@ use sprig_cluster::probe::{NodeProbe, ProbeDepth, Prober};
 use sprig_cluster::profile::{
     CapabilityPublisher, Direction, FieldChange, full_probe_triggers, registration_gaps,
 };
-use sprig_cluster::record::{AdminState, TopologyKind, rfc3339};
+use sprig_cluster::record::{AdminState, NodeSpec, SecretRefs, TopologyKind, rfc3339};
 use sprig_cluster::registry::{ClusterRegistry, StoredCluster};
 use sprig_cluster::settings::ClusterSettings;
 use sprig_cluster::sql::{NodeEndpoint, ProbeError, ProbeSession};
@@ -358,10 +359,22 @@ impl ClusterMonitor {
         d.observe(&rec);
         let nodes = d.discover(&rec).await?;
         let mut eps = Vec::new();
+        // A deep probe also runs the binlog dump probe as sprig_repl, as
+        // registration does (chapter 09, "Binlog dump"); without it a
+        // registration-time "feed unsupported" would lapse into the
+        // settings' verdict after the upgrade sustain period.
+        let repl = repl_endpoints(id, &rec.secrets, &nodes, depth);
+        let mut repl_eps = repl.as_ref().map(|_| Vec::new());
         let mut failed: Vec<(usize, NodeProbe)> = Vec::new();
         for (i, n) in nodes.iter().enumerate() {
             match CredentialConnector::ctl(&rec.secrets).endpoint(n) {
-                Ok(ep) => eps.push(ep),
+                Ok(ep) => {
+                    // Keep sprig_repl's list in the order of `eps`.
+                    if let (Some(r), Some(all)) = (repl_eps.as_mut(), repl.as_ref()) {
+                        r.push(all[i].clone());
+                    }
+                    eps.push(ep);
+                }
                 Err(e) => failed.push((
                     i,
                     NodeProbe {
@@ -384,7 +397,7 @@ impl ClusterMonitor {
         }
         let started = Instant::now();
         let mut probes = Prober::with_clock(settings.probe_timeout, Arc::clone(&self.clock))
-            .probe_cluster(rec.topology, &eps, depth)
+            .probe_cluster_with_repl(rec.topology, &eps, repl_eps.as_deref(), depth)
             .await;
         for (i, p) in failed {
             probes.insert(i.min(probes.len()), p);
@@ -506,6 +519,30 @@ impl ClusterMonitor {
 /// Writes the writer's heartbeat before a pass, so replicas' lag is read
 /// from a fresh row (chapter 09, "Internal schema"). The writer is the one
 /// the last pass saw; nothing is written before a pass has seen replicas.
+/// Every node's `sprig_repl` endpoint, in the order of `nodes`, for the
+/// binlog dump probe of a deep probe; `None` at other depths, or (with a
+/// warning) when the credential doesn't resolve: the dump probe then
+/// doesn't run and the feed settings decide, as at registration.
+fn repl_endpoints(
+    cluster: &ClusterId,
+    secrets: &SecretRefs,
+    nodes: &[NodeSpec],
+    depth: ProbeDepth,
+) -> Option<Vec<NodeEndpoint>> {
+    if depth != ProbeDepth::Deep {
+        return None;
+    }
+    let repl = CredentialConnector::repl(secrets);
+    match nodes.iter().map(|n| repl.endpoint(n)).collect() {
+        Ok(eps) => Some(eps),
+        Err(e) => {
+            tracing::warn!(cluster = %cluster, error = %e.message,
+                "sprig_repl credential doesn't resolve; the binlog dump probe is skipped");
+            None
+        }
+    }
+}
+
 async fn beat(st: &mut ClusterState, eps: &[NodeEndpoint], timeout: Duration) {
     if !st.last_probes.iter().any(|p| {
         p.facts()

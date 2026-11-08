@@ -1,6 +1,7 @@
 //! Faults against Docker Compose: [`ComposeFaults`] implements [`Faults`]
 //! with toxiproxy (link faults on proxied routes), `faultd` (partitions
-//! between containers) and the Docker CLI (kill, pause), and
+//! between containers), the Docker CLI (kill, pause) and libfaketime (clock
+//! skew in throwaway containers started for it, [`super::faketime`]), and
 //! [`OwnContainer`] runs the throwaway `sprig-sim-*` containers those
 //! faults may touch.
 //!
@@ -143,10 +144,34 @@ impl OwnMariaDb {
     /// # Errors
     /// If the container doesn't start or never accepts connections.
     pub async fn start(image: Option<&str>, server_id: u32, domain: u32) -> Result<Self> {
-        let image = image
+        Self::run(&Self::image(image), server_id, domain).await
+    }
+
+    /// Like [`start`](Self::start), from the image's
+    /// [`faketime`](super::faketime) variant (built on first use): its
+    /// wall clock can be skewed with
+    /// [`ComposeFaults::skew_clock`](super::ComposeFaults) or
+    /// [`faketime::set`](super::faketime::set).
+    ///
+    /// # Errors
+    /// If the image can't be built, or as [`start`](Self::start).
+    pub async fn start_with_faketime(
+        image: Option<&str>,
+        server_id: u32,
+        domain: u32,
+    ) -> Result<Self> {
+        let image = super::faketime::ensure_image(&Self::image(image))?;
+        Self::run(&image, server_id, domain).await
+    }
+
+    fn image(image: Option<&str>) -> String {
+        image
             .map(str::to_owned)
             .or_else(|| skip::var("MARIADB_IMAGE"))
-            .unwrap_or_else(|| "mariadb:11.8".to_owned());
+            .unwrap_or_else(|| "mariadb:11.8".to_owned())
+    }
+
+    async fn run(image: &str, server_id: u32, domain: u32) -> Result<Self> {
         let cnf = crate::compose::compose_dir()
             .join("mariadb")
             .join("binlog.cnf");
@@ -163,7 +188,7 @@ impl OwnMariaDb {
         let publish = format!("127.0.0.1:{port}:3306");
         let container = OwnContainer::run(
             "mariadb",
-            &["-e", &env, "-p", &publish, "-v", &mount, &image, &sid, &dom],
+            &["-e", &env, "-p", &publish, "-v", &mount, image, &sid, &dom],
         )?;
         let addr = container.port(3306)?;
         let url = format!("mysql://root:{OWN_MARIADB_PASSWORD}@{addr}");
@@ -196,6 +221,8 @@ enum Held {
     Faultd { container: String },
     /// A paused container.
     Paused { container: String },
+    /// A skewed clock in a faketime container.
+    Skew { container: String },
 }
 
 /// [`Faults`] against Docker Compose.
@@ -331,10 +358,14 @@ impl Faults for ComposeFaults {
         }))
     }
 
-    async fn skew_clock(&self, n: &Node, _offset_ms: i64, _rate_ppm: i64) -> Result<FaultId> {
-        Err(SprigError::internal(format!(
-            "clock skew of {n} needs an image with libfaketime; not available yet"
-        )))
+    /// Only for containers started with libfaketime
+    /// ([`OwnMariaDb::start_with_faketime`]); see [`super::faketime`] for
+    /// why faultd can't skew a container's clock.
+    async fn skew_clock(&self, n: &Node, offset_ms: i64, rate_ppm: i64) -> Result<FaultId> {
+        super::faketime::set(n.as_str(), offset_ms, rate_ppm).await?;
+        Ok(self.hold(Held::Skew {
+            container: n.0.clone(),
+        }))
     }
 
     async fn heal(&self, id: FaultId) -> Result<()> {
@@ -351,6 +382,7 @@ impl Faults for ComposeFaults {
             Some(Held::Disabled { proxy }) => self.toxiproxy()?.set_enabled(&proxy, true).await,
             Some(Held::Faultd { container }) => self.faultd()?.heal(&container),
             Some(Held::Paused { container }) => docker(&["unpause", &container]).map(drop),
+            Some(Held::Skew { container }) => super::faketime::set(&container, 0, 0).await,
         }
     }
 
@@ -388,6 +420,7 @@ mod tests {
         let shared = Node::from("sprigdb-dev-primary-1");
         assert!(f.kill(&shared).await.is_err());
         assert!(f.pause(&shared).await.is_err());
+        assert!(f.skew_clock(&shared, 1000, 0).await.is_err());
         assert!(
             f.partition(std::slice::from_ref(&shared), &[Node::from("sprig-sim-x")])
                 .await

@@ -1252,7 +1252,9 @@ impl BackendSession {
                     return;
                 }
                 // finish() had taken the statement: its connection is gone.
-                Err(_) => tracing::warn!("abandoned backend statement didn't end; its connection is closed"),
+                Err(_) => tracing::warn!(
+                    "abandoned backend statement didn't end; its connection is closed"
+                ),
             }
         } else if self.inflight.take().is_none() {
             return;

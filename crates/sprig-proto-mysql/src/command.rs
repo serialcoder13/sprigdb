@@ -443,7 +443,12 @@ impl StmtExecute {
         let mut r = Reader::new(src);
         let attrs = caps.contains(Caps::QUERY_ATTRIBUTES);
         let count = if attrs && self.flags & PARAMETER_COUNT_AVAILABLE != 0 {
-            bounded_count(&mut r, 1)?
+            // NULL and long-data parameters take no value bytes, and a
+            // re-execute carries no types, so a parameter can cost as little
+            // as one NULL-bitmap bit: only the bitmap is checked here. The
+            // allocations below grow with bytes actually read (or with the
+            // lookup's remembered types), never with `count` alone.
+            bounded_count(&mut r, 0)?
         } else {
             usize::from(info.count)
         };

@@ -1,0 +1,12 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mariadb-12.3
+@server 12.3.3-MariaDB-ubu2404
+@server_caps 0x0000003d81fffffe
+@caps 0x0000002400bfa28c
+@kind field_list
+@framing plain
+@command COM_FIELD_LIST kv
+C 00 046b7600
+S 01 036465660c73707269675f676f6c64656e026b76026b760269640269640c3f000b0000000303420000000130
+S 02 036465660c73707269675f676f6c64656e026b76026b76017601760ce00050000000fd0440000000fb
+S 03 fe00000200

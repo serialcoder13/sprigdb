@@ -11,6 +11,9 @@
 # COM_QUERY by switching the client's delimiter to `$$`.
 set -uo pipefail
 
+# The dump tools ship in the same images: mysqldump with mysql, mariadb-dump with mariadb.
+case $SPRIG_CONNECTOR in mysqldump | mariadb-dump) exec /dump.sh ;; esac
+
 CONNECTOR=$SPRIG_CONNECTOR
 TLS=$SPRIG_TLS
 PREFIX="t_${CONNECTOR//-/_}_${TLS}"
@@ -255,9 +258,155 @@ c_conn_attrs() {
   echo "_client_name=$out"
 }
 
+# --- chapter 05 matrix items --------------------------------------------------
+
+PERSONA=${SPRIG_PERSONA:-mariadb}
+INFILE_ROWS='1=héllo 🌱|2=quoted, comma|3=NULL'
+LOADED="SELECT IFNULL(GROUP_CONCAT(CONCAT(id, '=', IFNULL(v, 'NULL')) ORDER BY id SEPARATOR '|'), '') FROM"
+
+infile_setup() { # table: creates the table and $WORK/data.csv; exit 3 if the server has local_infile off
+  printf '1,héllo 🌱\n2,"quoted, comma"\n3,\\N\n' >"$WORK/data.csv"
+  local out
+  out=$(sql <<<"DROP TABLE IF EXISTS $1; CREATE TABLE $1 (id INT PRIMARY KEY, v VARCHAR(32)) DEFAULT CHARSET = utf8mb4; SELECT @@GLOBAL.local_infile") || return 1
+  [[ $out == 0 ]] && { echo "local_infile is off on the server"; return 3; }
+  return 0
+}
+
+load_sql() { # table
+  printf "LOAD DATA LOCAL INFILE '%s' INTO TABLE %s CHARACTER SET utf8mb4 FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' LINES TERMINATED BY '\\\\n'" "$WORK/data.csv" "$1"
+}
+
+c_local_infile() {
+  local t=${PREFIX}_infile out rc
+  infile_setup "$t"; rc=$?; ((rc == 0)) || return $rc
+  out=$(sql --local-infile=1 <<<"$(load_sql "$t"); $LOADED $t; DROP TABLE $t;") || return 1
+  [[ $out == "$INFILE_ROWS" ]] || { fail "loaded: $out"; return; }
+  echo "3 rows (--local-infile=1)"
+}
+
+c_local_infile_off() {
+  local t=${PREFIX}_infile_off out rc want=4166
+  [[ $PERSONA == mysql ]] && want=3948
+  infile_setup "$t"; rc=$?; ((rc == 0)) || return $rc
+  if sql --local-infile=0 <<<"$(load_sql "$t")" >/dev/null; then fail "the load succeeded"; return; fi
+  local how
+  how=$(head -c 200 "$WORK/err")
+  if [[ $how =~ ^ERROR\ (1148|3948|4166) ]] && [[ ${BASH_REMATCH[1]} != "$want" ]]; then
+    fail "server refused with $how, want $want"; return
+  fi
+  out=$(sql <<<"$LOADED $t; DROP TABLE $t;") || return 1
+  [[ -z $out ]] || { fail "rows were loaded: $out"; return; }
+  echo "refused: $how"
+}
+
+c_call() {
+  local p=${PREFIX}_proc out
+  out=$(sql <<SQL
+DROP PROCEDURE IF EXISTS $p;
+DELIMITER //
+CREATE PROCEDURE $p(IN a INT, OUT b INT, INOUT c INT)
+BEGIN
+  SELECT a AS x;
+  SELECT a + 1 AS y, 'two' AS z UNION ALL SELECT a + 2, 'three';
+  SET b = a * 10;
+  SET c = c + 1;
+END//
+DELIMITER ;
+SET @b = NULL, @c = 5;
+CALL $p(1, @b, @c);
+SELECT @b, @c;
+DROP PROCEDURE $p;
+SQL
+  ) || return 1
+  [[ $out == $'1\n2\ttwo\n3\tthree\n10\t6' ]] || { fail "got $out"; return; }
+  echo "text CALL: 2 resultsets, OUT 10, INOUT 6"
+}
+
+c_change_user() { echo "the $CLI client has no change-user command"; return 2; }
+
+c_reset_connection() {
+  [[ $CONNECTOR == mysql-cli ]] || { echo "the mariadb client has no resetconnection command"; return 2; }
+  local out
+  # --force: the last statement must fail (the temporary table is gone).
+  out=$(sql --force <<'SQL'
+SET @sprig_mark = 42, SESSION auto_increment_increment = 7;
+CREATE TEMPORARY TABLE sprig_tmp (id INT);
+SELECT CONNECTION_ID();
+resetconnection
+SELECT CONNECTION_ID(), IFNULL(@sprig_mark, 'NULL'), @@SESSION.auto_increment_increment;
+SELECT COUNT(*) FROM sprig_tmp;
+SQL
+  )
+  local id=${out%%$'\n'*}
+  [[ $out == "$id"$'\n'"$id"$'\tNULL\t1' ]] || { fail "session not reset: $out"; return; }
+  grep -q '^ERROR 1146' "$WORK/err" || { fail "temporary table probe: $(head -c 200 "$WORK/err")"; return; }
+  echo "resetconnection (COM_RESET_CONNECTION): same connection $id; user variable, session variable and temporary table cleared"
+}
+
+c_pool_reprepare() { echo "the $CLI client has no pool or server-side prepared statements"; return 2; }
+
+# lock_holder table seconds: a background session that holds row 1 FOR UPDATE
+# for that long; returns once the lock is taken.
+lock_holder() {
+  local t=$1
+  sql <<<"DROP TABLE IF EXISTS $t; CREATE TABLE $t (id INT PRIMARY KEY, v INT) ENGINE = InnoDB; INSERT INTO $t VALUES (1, 0), (2, 0);" || return 1
+  : >"$WORK/holder.out"
+  "$CLI" "${ARGS[@]}" --unbuffered >"$WORK/holder.out" 2>"$WORK/holder.err" <<<"START TRANSACTION; SELECT 'locked', v FROM $t WHERE id = 1 FOR UPDATE; DO SLEEP($2); COMMIT;" &
+  HOLDER=$!
+  local i
+  for i in $(seq 100); do
+    grep -q locked "$WORK/holder.out" && return 0
+    sleep 0.1
+  done
+  fail "the holder never got the lock: $(cat "$WORK/holder.err")"
+}
+
+c_lock_wait() {
+  local t=${PREFIX}_lock out t0 ms
+  lock_holder "$t" 2.5 || return 1
+  t0=$(now_ms)
+  out=$(sql --force <<SQL
+SET SESSION innodb_lock_wait_timeout = 1;
+START TRANSACTION;
+SELECT v FROM $t WHERE id = 2 FOR UPDATE;
+SELECT v FROM $t WHERE id = 1 FOR UPDATE;
+UPDATE $t SET v = 2 WHERE id = 2;
+COMMIT;
+SQL
+  )
+  ms=$(($(now_ms) - t0))
+  wait "$HOLDER"
+  grep -q '^ERROR 1205' "$WORK/err" || { fail "got $(head -c 200 "$WORK/err")"; return; }
+  ((ms >= 900 && ms < 10000)) || { fail "timed out after $ms ms"; return; }
+  out=$(sql <<<"SELECT v FROM $t WHERE id = 2; DROP TABLE $t;") || return 1
+  [[ $out == 2 ]] || { fail "the waiting transaction lost its work ($out)"; return; }
+  echo "$(grep -o '^ERROR 1205 ([0-9A-Z]*)' "$WORK/err") after about $ms ms (with connect); the transaction survived"
+}
+
+c_lock_nowait() {
+  local t=${PREFIX}_lock out want=1205
+  [[ $PERSONA == mysql ]] && want=3572
+  lock_holder "$t" 1 || return 1
+  out=$(sql --force <<SQL
+START TRANSACTION;
+SELECT v FROM $t WHERE id = 1 FOR UPDATE NOWAIT;
+SELECT id FROM $t ORDER BY id FOR UPDATE SKIP LOCKED;
+ROLLBACK;
+SQL
+  )
+  wait "$HOLDER"
+  grep -q "^ERROR $want" "$WORK/err" || { fail "NOWAIT: got $(head -c 200 "$WORK/err"), want $want"; return; }
+  [[ $out == 2 ]] || { fail "SKIP LOCKED returned $out"; return; }
+  sql <<<"DROP TABLE $t" || return 1
+  echo "NOWAIT $(grep -o "^ERROR $want ([0-9A-Z]*)" "$WORK/err"), SKIP LOCKED returned row 2"
+}
+
 CONNECTED=
+SKIPPED=" ${SPRIG_CONN_SKIP_CHECKS:-} "; SKIPPED=${SKIPPED//,/ }
 for check in connect plain_query types prepared transaction multi_statement duplicate_key \
-             last_insert_id large_row multi_packet compression conn_attrs; do
+             last_insert_id large_row multi_packet compression conn_attrs local_infile local_infile_off \
+             call change_user reset_connection pool_reprepare lock_wait lock_nowait; do
+  [[ $SKIPPED == *" $check "* ]] && continue
   if [[ $check != connect && -z $CONNECTED ]]; then
     emit "$check" fail "no connection"
     continue

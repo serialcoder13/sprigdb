@@ -230,6 +230,31 @@ fn execute_with_query_attributes() {
     assert_eq!(p.params[0].value, ParamValue::Value(Value::Int(7)));
 }
 
+/// Regression (fuzz target `command`): a re-execute under query
+/// attributes whose parameters are all NULL carries a count larger than
+/// the bytes after it (bitmap plus bind flag), and must still parse.
+#[test]
+fn execute_count_of_all_null_parameters_without_types() {
+    let caps = caps();
+    let types = vec![u16::from(ct::LONGLONG); 3];
+    let stmts = Stmts(HashMap::from([(9, (3, Some(types), vec![]))]));
+    // id 9, PARAMETER_COUNT_AVAILABLE, iterations 1, count 3, bitmap
+    // 0b111, new_params_bind_flag 0.
+    let b = Bytes::from_static(&[0x17, 9, 0, 0, 0, 0x08, 1, 0, 0, 0, 3, 0b111, 0]);
+    let Command::StmtExecute(e) = Command::parse_with(&b, caps, MY, &stmts).expect("parse") else {
+        panic!("not an execute")
+    };
+    let p = e.params.clone().expect("params");
+    assert_eq!(p.params.len(), 3);
+    assert!(
+        p.params
+            .iter()
+            .all(|x| x.value == ParamValue::Value(Value::Null))
+    );
+    let cmd = Command::StmtExecute(e);
+    assert_eq!(cmd.encode(caps).expect("encode"), b);
+}
+
 #[test]
 fn bulk_execute_is_mariadb_only() {
     let caps = Caps::server_default(MARIA);

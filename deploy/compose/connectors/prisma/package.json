@@ -1,0 +1,9 @@
+{
+  "name": "sprigdb-connector-prisma",
+  "private": true,
+  "description": "SprigDB connector check: Prisma ORM (db pull, generate, queries)",
+  "dependencies": {
+    "@prisma/client": "6.19.0",
+    "prisma": "6.19.0"
+  }
+}

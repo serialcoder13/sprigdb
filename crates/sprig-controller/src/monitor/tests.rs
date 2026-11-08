@@ -312,3 +312,201 @@ async fn record_events_schedule_and_passes_debounce() {
         .unwrap();
     assert_eq!(forced.depth, Some(ProbeDepth::Light));
 }
+
+/// A credentials file under the system temp directory with a `[sprig_ctl]`
+/// and a `[sprig_repl]` table (development TLS), removed on drop.
+struct CredsFile(std::path::PathBuf);
+
+impl CredsFile {
+    fn new(ctl: (&str, &str), repl: (&str, &str)) -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "sprigdb-monitor-creds-{}-{}.toml",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let f = Self(path);
+        f.write(ctl, repl);
+        f
+    }
+
+    fn write(&self, ctl: (&str, &str), repl: (&str, &str)) {
+        std::fs::write(
+            &self.0,
+            format!(
+                "[sprig_ctl]\nuser = {:?}\npassword = {:?}\ntls = \"skip_verify\"\n\n\
+                 [sprig_repl]\nuser = {:?}\npassword = {:?}\ntls = \"skip_verify\"\n",
+                ctl.0, ctl.1, repl.0, repl.1
+            ),
+        )
+        .unwrap();
+    }
+
+    fn secrets(&self) -> SecretRefs {
+        let p = self.0.display();
+        SecretRefs {
+            ctl: format!("file:{p}#sprig_ctl"),
+            repl: format!("file:{p}#sprig_repl"),
+        }
+    }
+}
+
+impl Drop for CredsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn node(n: &str, addr: &str) -> NodeSpec {
+    NodeSpec {
+        node: NodeId::new(n).unwrap(),
+        addr: addr.into(),
+        zone: None,
+    }
+}
+
+#[test]
+fn deep_probes_get_sprig_repl_endpoints_in_node_order() {
+    let creds = CredsFile::new(("root", "a"), ("repl_user", "b"));
+    let id = ClusterId::new("c1").unwrap();
+    let nodes = [node("n1", "10.0.0.1:3306"), node("n2", "10.0.0.2:3307")];
+    let s = creds.secrets();
+    for depth in [ProbeDepth::Light, ProbeDepth::Full] {
+        assert!(
+            repl_endpoints(&id, &s, &nodes, depth).is_none(),
+            "{depth:?}"
+        );
+    }
+    let eps = repl_endpoints(&id, &s, &nodes, ProbeDepth::Deep).unwrap();
+    let got: Vec<(String, String, Option<String>)> = eps
+        .iter()
+        .map(|e| {
+            (
+                e.node.to_string(),
+                e.addr(),
+                e.opts.user().map(str::to_owned),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (
+                "n1".into(),
+                "10.0.0.1:3306".into(),
+                Some("repl_user".into())
+            ),
+            (
+                "n2".into(),
+                "10.0.0.2:3307".into(),
+                Some("repl_user".into())
+            ),
+        ]
+    );
+    // A credential that doesn't resolve skips the dump probe.
+    let unset = SecretRefs {
+        ctl: s.ctl.clone(),
+        repl: "env:SPRIG_TEST_MONITOR_REPL_UNSET".into(),
+    };
+    assert!(repl_endpoints(&id, &unset, &nodes, ProbeDepth::Deep).is_none());
+}
+
+/// The single Compose node, as `(user, password, host:port)`.
+fn single_node() -> Option<(String, String, String)> {
+    let Some(url) = std::env::var("SPRIG_TEST_MARIADB_SINGLE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        let strict = std::env::var("SPRIG_TEST_STRICT")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "yes" | "on"));
+        assert!(
+            !strict,
+            "SPRIG_TEST_MARIADB_SINGLE is not set and SPRIG_TEST_STRICT is on"
+        );
+        eprintln!("skipped: set SPRIG_TEST_MARIADB_SINGLE to run it");
+        return None;
+    };
+    let url = url.split(',').next().unwrap().trim();
+    let rest = url.strip_prefix("mysql://").unwrap();
+    let (auth, host) = rest.split_once('@').unwrap();
+    let (user, pass) = auth.split_once(':').unwrap();
+    let host = host.split('/').next().unwrap();
+    Some((user.into(), pass.into(), host.into()))
+}
+
+/// Daily and `--full` deep passes run the binlog dump probe as `sprig_repl`,
+/// as registration does: it passes with a working credential, and a
+/// failing one turns the feed off on every deep pass, rather than only at
+/// registration (the published profile would otherwise lapse to the feed
+/// settings' verdict after the upgrade sustain period).
+#[tokio::test]
+async fn deep_passes_run_the_binlog_dump_probe() {
+    let Some((user, pass, addr)) = single_node() else {
+        return;
+    };
+    let creds = CredsFile::new((&user, &pass), (&user, &pass));
+    let f = fixture("mon-dump").await;
+    let guard = lead(&f.dc).await;
+    let reg = f.monitor.registry().clone();
+    let mut r = unreachable("dump1", TopologyKind::SingleNode);
+    r.nodes = vec![node("n1", &addr)];
+    r.secrets = creds.secrets();
+    let id = reg.register(r).await.unwrap().body().cluster_id.clone();
+    reg.set_admin_state(&id, AdminState::Active, vec![])
+        .await
+        .unwrap();
+
+    let dump = |m: &ClusterMonitor| {
+        let cell = m.cell(&id);
+        let st = cell.try_lock().unwrap();
+        st.last_probes[0]
+            .active
+            .as_ref()
+            .expect("the deep probe's active probes")
+            .binlog_dump
+            .clone()
+    };
+    let pass1 = f
+        .monitor
+        .pass(&id, Some(ProbeDepth::Deep), guard.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pass1.depth, Some(ProbeDepth::Deep));
+    let d = dump(&f.monitor).expect("the dump probe ran");
+    assert!(d.passed(), "{d:?}");
+    assert!(d.events.iter().any(|e| e == "format_description"), "{d:?}");
+
+    // sprig_repl's password stops working: the next deep pass says so.
+    creds.write((&user, &pass), (&user, "not-the-password"));
+    let pass2 = f
+        .monitor
+        .pass(&id, Some(ProbeDepth::Deep), guard.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let d = dump(&f.monitor).expect("the dump probe ran");
+    let failure = d.failure.as_ref().expect("a login failure");
+    assert_eq!(
+        failure.kind,
+        sprig_cluster::probe::dump::DumpFailureKind::Login,
+        "{d:?}"
+    );
+    let profile = pass2.cluster.unwrap().body().profile.clone().unwrap();
+    assert_eq!(
+        profile.derived.feed_level,
+        sprig_cluster::probe::feed::FeedLevel::Unsupported
+    );
+    assert!(!profile.derived.feed_source);
+
+    // Light passes don't run it.
+    f.monitor
+        .pass(&id, Some(ProbeDepth::Light), guard)
+        .await
+        .unwrap()
+        .unwrap();
+    let cell = f.monitor.cell(&id);
+    assert!(cell.try_lock().unwrap().last_probes[0].active.is_none());
+    drop(f.live);
+}

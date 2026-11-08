@@ -23,25 +23,42 @@
 # that asks for TLS still gets it. `tls required` switches both listeners
 # live (the gateway's own default); `tls optional` switches back.
 #
-# Variables: SPRIG_GATEWAY_TLS (optional), SPRIG_ETCD (http://127.0.0.1:2379),
-# CARGO_TARGET_DIR (target).
+# Variables: SPRIG_GATEWAY_TLS (optional), CARGO_TARGET_DIR (target), and,
+# to run a second instance next to the default one (say against your own
+# etcd), SPRIG_GATEWAY_DEV_STATE (deploy/compose/.gateway-dev),
+# SPRIG_ETCD (http://127.0.0.1:2379), SPRIG_GATEWAY_MYSQL_PORT (13306),
+# SPRIG_GATEWAY_MARIADB_PORT (13307), SPRIG_ADMIN_PORT (7480),
+# SPRIG_CTL_TELEMETRY_PORT (9180) and SPRIG_GW_TELEMETRY_PORT (9190). up
+# records them in the state directory, so status and down need only
+# SPRIG_GATEWAY_DEV_STATE; while an instance is up, its recorded values win.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 root=$(pwd)
 
-etcd=${SPRIG_ETCD:-http://127.0.0.1:2379}
+state=${SPRIG_GATEWAY_DEV_STATE:-deploy/compose/.gateway-dev}
+state=${state%/}
+# The values of the instance that is up, written by up.
+if [[ -f $state/env ]]; then
+    # shellcheck disable=SC1091 # written by up
+    source "$state/env"
+fi
+etcd=${etcd:-${SPRIG_ETCD:-http://127.0.0.1:2379}}
+mysql_port=${mysql_port:-${SPRIG_GATEWAY_MYSQL_PORT:-13306}}
+mariadb_port=${mariadb_port:-${SPRIG_GATEWAY_MARIADB_PORT:-13307}}
+admin_port=${admin_port:-${SPRIG_ADMIN_PORT:-7480}}
+ctl_telemetry_port=${ctl_telemetry_port:-${SPRIG_CTL_TELEMETRY_PORT:-9180}}
+gw_telemetry_port=${gw_telemetry_port:-${SPRIG_GW_TELEMETRY_PORT:-9190}}
 dc="dc-a"
-state=deploy/compose/.gateway-dev
 certs=deploy/compose/gateway-certs
 # status and down use the binaries up built, whatever CARGO_TARGET_DIR is then.
 bin=$(cat "$state/bin" 2>/dev/null || echo "${CARGO_TARGET_DIR:-target}/debug")
-# sprigdb.dev.toml's Admin API and telemetry, and the gateway's.
-admin=http://127.0.0.1:7480
-ctl_ready=http://127.0.0.1:9180/readyz
-gw_ready=http://127.0.0.1:9190/readyz
-mysql_port=13306
-mariadb_port=13307
+# The Admin API and the two roles' telemetry. sprigdb.dev.toml and
+# sprigdb.gateway.dev.toml hold the defaults; start passes the values above,
+# with the etcd endpoint, as SPRIGDB_* overrides.
+admin=http://127.0.0.1:$admin_port
+ctl_ready=http://127.0.0.1:$ctl_telemetry_port/readyz
+gw_ready=http://127.0.0.1:$gw_telemetry_port/readyz
 
 # Registration order fixes the ids (numbers are allocated max + 1 across the
 # deployment), and gateway-accounts.dev.toml names these ids:
@@ -135,7 +152,14 @@ start() {
         say "$name already running (pid $(pid_of "$name"))"
         return
     fi
-    nohup "$bin/sprigdb" --config "$config" "$role" >>"$state/$name.log" 2>&1 </dev/null &
+    # One previous log is kept; a trace-level gateway log grows fast.
+    if [[ -f $state/$name.log ]]; then mv -f "$state/$name.log" "$state/$name.log.1"; fi
+    local telemetry=$ctl_telemetry_port
+    if [[ $role == gateway ]]; then telemetry=$gw_telemetry_port; fi
+    SPRIGDB_META_DC_SEEDS="[\"$etcd\"]" \
+        SPRIGDB_CONTROLLER_ADMIN_ADDR="127.0.0.1:$admin_port" \
+        SPRIGDB_TELEMETRY_BOOTSTRAP_ADDR="127.0.0.1:$telemetry" \
+        nohup "$bin/sprigdb" --config "$config" "$role" >"$state/$name.log" 2>&1 </dev/null &
     echo $! >"$state/$name.pid"
     say "$name started (pid $!, log $state/$name.log)"
 }
@@ -275,13 +299,16 @@ up() {
         die "no etcd at $etcd: start the Compose stack (cd deploy/compose && docker compose --profile all up -d --wait)"
     mkdir -p "$state"
     echo '*' >"$state/.gitignore"
+    printf '%s\n' "etcd=$etcd" "mysql_port=$mysql_port" "mariadb_port=$mariadb_port" \
+        "admin_port=$admin_port" "ctl_telemetry_port=$ctl_telemetry_port" \
+        "gw_telemetry_port=$gw_telemetry_port" >"$state/env"
 
     # Ports held by anything other than our processes.
     local port
-    for port in 7480 9180; do
-        running controller || ! listening $port || die "127.0.0.1:$port is taken by another process"
+    for port in "$admin_port" "$ctl_telemetry_port"; do
+        running controller || ! listening "$port" || die "127.0.0.1:$port is taken by another process"
     done
-    for port in 9190 $mysql_port $mariadb_port; do
+    for port in "$gw_telemetry_port" "$mysql_port" "$mariadb_port"; do
         running gateway || ! listening "$port" || die "127.0.0.1:$port is taken by another process"
     done
 
@@ -327,10 +354,10 @@ up() {
     start gateway deploy/compose/sprigdb.gateway.dev.toml gateway
     wait_ready gateway "$gw_ready"
     for _ in $(seq 1 20); do
-        listening $mysql_port && listening $mariadb_port && break
+        listening "$mysql_port" && listening "$mariadb_port" && break
         sleep 0.5
     done
-    if ! listening $mysql_port || ! listening $mariadb_port; then
+    if ! listening "$mysql_port" || ! listening "$mariadb_port"; then
         grep -i "listener" "$state/gateway.log" | tail -n 10 >&2 || true
         die "the gateway isn't listening on $mysql_port and $mariadb_port; see $state/gateway.log"
     fi
@@ -341,7 +368,9 @@ gateway-dev: up. Listeners: MySQL persona 127.0.0.1:$mysql_port, MariaDB persona
 Logins (password sprig-dev-app): app -> dc-a-c1 (single), app_repl -> dc-a-c2 (primary + replicas), app_galera -> dc-a-c3 (Galera).
 
   mysql -h 127.0.0.1 -P $mysql_port -u app -psprig-dev-app --ssl-mode=VERIFY_IDENTITY --ssl-ca=$root/$certs/ca.pem
+  mysql -h 127.0.0.1 -P $mysql_port -u app -psprig-dev-app --ssl-mode=DISABLED
   mariadb -h 127.0.0.1 -P $mariadb_port -u app -psprig-dev-app --ssl --ssl-ca=$root/$certs/ca.pem
+  docker run --rm mariadb:11.8 mariadb -h host.docker.internal -P $mariadb_port -u app -psprig-dev-app -e 'SELECT @@version_comment'
   SPRIG_CONN_USER=app SPRIG_CONN_PASSWORD=sprig-dev-app deploy/compose/connectors/run.sh 127.0.0.1 $mysql_port mysql
 
 Logs: $state/controller.log, $state/gateway.log. Stop with: $0 down
@@ -395,7 +424,8 @@ status() {
             say "$name not running"
         fi
     done
-    for port in 7480 $mysql_port $mariadb_port; do
+    say "state $state/, etcd $etcd"
+    for port in "$admin_port" "$mysql_port" "$mariadb_port"; do
         if listening "$port"; then say "127.0.0.1:$port listening"; else say "127.0.0.1:$port closed"; fi
     done
     if curl -fsS -o /dev/null "$etcd/version" 2>/dev/null; then

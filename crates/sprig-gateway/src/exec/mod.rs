@@ -18,7 +18,8 @@
 //! | `FieldList` | `COM_FIELD_LIST`, definitions re-encoded |
 //!
 //! `LOAD DATA LOCAL INFILE` needs the client's `LOCAL_FILES` and
-//! `sql.local_infile = on`, else 3948 before anything reaches the backend;
+//! `sql.local_infile = on`, else 3948 (MariaDB persona: 4166) before
+//! anything reaches the backend;
 //! the backend's request must name the statement's file, else 39010.
 //!
 //! The [`BackendSession`] opens at the first request, when the client's
@@ -37,7 +38,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 use sprig_auth::BackendTarget;
 use sprig_common::{Result, SprigError};
 use sprig_proto_mysql::client::PacketKind;
-use sprig_proto_mysql::command::{CURSOR_TYPE_FOR_UPDATE, CURSOR_TYPE_READ_ONLY, CURSOR_TYPE_SCROLLABLE, com};
+use sprig_proto_mysql::command::{
+    CURSOR_TYPE_FOR_UPDATE, CURSOR_TYPE_READ_ONLY, CURSOR_TYPE_SCROLLABLE, com,
+};
 use sprig_proto_mysql::packets::OkPacket;
 use sprig_proto_mysql::{Caps, ColumnDef, Persona, StatusFlags};
 
@@ -46,8 +49,8 @@ pub use self::settings::{ExecSettings, ExecSettingsSource};
 use self::stmt::{Stmt, Stmts, bulk_payload, execute_payload};
 use crate::backend::{BackendSession, BackendStmt, Backends, SessionOpts, StmtInfo};
 use crate::pipeline::{
-    Abandon, EndOfRows, ExecCtx, ExecSummary, Executor, LoginInfo, PreparedMeta, Request, ResultSink, RowFormat,
-    SessionExec, StmtRef,
+    Abandon, EndOfRows, ExecCtx, ExecSummary, Executor, LoginInfo, PreparedMeta, Request,
+    ResultSink, RowFormat, SessionExec, StmtRef,
 };
 
 /// How long `abandoned` waits for `KILL QUERY`, and for the killed
@@ -104,7 +107,8 @@ impl std::fmt::Debug for PassSession {
 
 /// The MariaDB capabilities a backend connection takes from a 3307 client,
 /// so its packets need no rewriting for that client.
-const MARIADB_PASS_CAPS: Caps = Caps::MARIADB_CLIENT_EXTENDED_METADATA.union(Caps::MARIADB_CLIENT_STMT_BULK_OPERATIONS);
+const MARIADB_PASS_CAPS: Caps =
+    Caps::MARIADB_CLIENT_EXTENDED_METADATA.union(Caps::MARIADB_CLIENT_STMT_BULK_OPERATIONS);
 
 fn mariadb_caps(persona: Persona, client: Caps) -> Caps {
     match persona {
@@ -126,19 +130,31 @@ fn multi_statements_off(rest: &[u8]) -> SprigError {
     )
 }
 
-/// 3948: `LOCAL INFILE` without the client's `LOCAL_FILES` or with
-/// `sql.local_infile = off`.
-fn local_infile_disabled() -> SprigError {
-    SprigError::standard(
-        3948,
-        *b"42000",
-        "Loading local data is disabled; this must be enabled on both the client and server sides",
-    )
+/// `LOCAL INFILE` without the client's `LOCAL_FILES` or with
+/// `sql.local_infile = off`, refused before the backend is asked, with
+/// each persona's own error: MySQL's 3948, MariaDB's 4166.
+fn local_infile_disabled(persona: Persona) -> SprigError {
+    match persona {
+        Persona::MySql84 => SprigError::standard(
+            3948,
+            *b"42000",
+            "Loading local data is disabled; this must be enabled on both the client and server sides",
+        ),
+        Persona::MariaDb => SprigError::standard(
+            4166,
+            *b"HY000",
+            "The used command is not allowed because the MariaDB server or client has disabled the local infile capability",
+        ),
+    }
 }
 
 /// 1421.
 fn no_open_cursor(stmt: StmtRef) -> SprigError {
-    SprigError::standard(1421, *b"HY000", format!("The statement ({}) has no open cursor.", stmt.0))
+    SprigError::standard(
+        1421,
+        *b"HY000",
+        format!("The statement ({}) has no open cursor.", stmt.0),
+    )
 }
 
 /// Whether `flags` (of `COM_STMT_EXECUTE`) ask for a cursor.
@@ -210,7 +226,12 @@ impl PassSession {
         }
     }
 
-    async fn query(&mut self, cx: &mut ExecCtx<'_>, sql: Bytes, out: &mut dyn ResultSink) -> Result<ExecSummary> {
+    async fn query(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        sql: Bytes,
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
         let mut pieces = split::split(&sql);
         if pieces.len() > 1 && !cx.proto.multi_statements {
             let second = pieces[1].as_ptr() as usize - sql.as_ptr() as usize;
@@ -224,16 +245,24 @@ impl PassSession {
         let client_local = cx.proto.has(Caps::LOCAL_FILES);
         let n = pieces.len();
         let mut summary = ExecSummary::default();
+        let conn_id = cx.session.id.0;
+        let mysql = self.persona == Persona::MySql84;
         for (i, piece) in pieces.into_iter().enumerate() {
+            let (piece, renames) = match split::rewrite_connection_id(&piece, conn_id) {
+                Some((sql, renames)) => (sql, renames),
+                None => (piece, Vec::new()),
+            };
             let infile_name = split::local_infile_name(&piece);
             let mut allowed = false;
             if infile_name.is_some() {
                 allowed = client_local && self.settings.current().local_infile;
                 if !allowed {
-                    return Err(local_infile_disabled());
+                    return Err(local_infile_disabled(self.persona));
                 }
             }
             let info = StmtInfo::classify(&piece);
+            let conn_status =
+                split::is_session_status(&piece).then(|| relay::ConnStatus::of(cx.proto));
             let bs = self.bs(cx);
             bs.query(&info, &piece).await?;
             let r = Relay {
@@ -246,6 +275,9 @@ impl PassSession {
                     name: infile_name.as_deref(),
                     allowed,
                 },
+                conn_status: conn_status.as_ref(),
+                renames: &renames,
+                mysql_nowait: mysql && split::has_keyword(&piece, "NOWAIT"),
             };
             let relayed = relay(bs, out, &r).await?;
             let status = self.finish(out.finished()).await?;
@@ -258,12 +290,23 @@ impl PassSession {
     }
 
     async fn prepare(&mut self, cx: &mut ExecCtx<'_>, sql: Bytes) -> Result<ExecSummary> {
+        let (sql, renames) = match split::rewrite_connection_id(&sql, cx.session.id.0) {
+            Some((sql, renames)) => (sql, renames),
+            None => (sql, Vec::new()),
+        };
         let info = StmtInfo::classify(&sql);
         let prepared = self.bs(cx).prepare(&info, &sql).await?;
         let meta_params = prepared.param_defs.clone();
-        let meta_columns = prepared.columns.clone();
-        let stmt = self.stmts.insert(Stmt::new(sql, info, &prepared));
-        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).increment(1.0);
+        let mut meta_columns = prepared.columns.clone();
+        for c in &mut meta_columns {
+            relay::rename(c, &renames);
+        }
+        let mut st = Stmt::new(sql, info, &prepared);
+        st.renames = renames;
+        st.nowait = self.persona == Persona::MySql84 && split::has_keyword(&st.sql, "NOWAIT");
+        let stmt = self.stmts.insert(st);
+        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str())
+            .increment(1.0);
         Ok(ExecSummary {
             status: None,
             prepared: Some(PreparedMeta {
@@ -292,7 +335,8 @@ impl PassSession {
         }
         let cursor = wants_cursor(raw.flags) && !s.columns.is_empty();
         let had_cursor = s.cursor.take().is_some();
-        let (sql, info) = (s.sql.clone(), s.info.clone());
+        let (sql, info, renames, nowait) =
+            (s.sql.clone(), s.info.clone(), s.renames.clone(), s.nowait);
         let flags = raw.flags;
         let client_bound = params.new_params_bound;
         tracing::trace!(
@@ -327,10 +371,19 @@ impl PassSession {
             fetch: false,
             backend_caps,
             infile: Infile::default(),
+            conn_status: None,
+            renames: &renames,
+            mysql_nowait: nowait,
         };
         let relayed = relay(bs, out, &r).await;
         let status = self.finish(out.finished()).await;
-        let opened = matches!(relayed, Ok(Relayed { cursor_opened: true, .. }));
+        let opened = matches!(
+            relayed,
+            Ok(Relayed {
+                cursor_opened: true,
+                ..
+            })
+        );
         if cursor && !opened {
             if let Some(bs) = self.bs.as_mut() {
                 bs.close_cursor();
@@ -345,7 +398,13 @@ impl PassSession {
         })
     }
 
-    async fn fetch(&mut self, cx: &mut ExecCtx<'_>, stmt: StmtRef, rows: u32, out: &mut dyn ResultSink) -> Result<ExecSummary> {
+    async fn fetch(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: StmtRef,
+        rows: u32,
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
         let backend_caps = self.backend_caps(cx);
         let s = self.stmts.get_mut(stmt)?;
         let Some(id) = s.cursor else {
@@ -365,11 +424,18 @@ impl PassSession {
             fetch: true,
             backend_caps,
             infile: Infile::default(),
+            conn_status: None,
+            renames: &[],
+            mysql_nowait: false,
         };
         let relayed = relay(bs, out, &r).await;
         let status = self.finish(out.finished()).await;
         let closed = match &relayed {
-            Ok(r) => r.errored || r.status.is_some_and(|s| s.contains(StatusFlags::LAST_ROW_SENT)),
+            Ok(r) => {
+                r.errored
+                    || r.status
+                        .is_some_and(|s| s.contains(StatusFlags::LAST_ROW_SENT))
+            }
             Err(_) => true,
         };
         if closed {
@@ -392,7 +458,12 @@ impl PassSession {
         }
     }
 
-    async fn reset_stmt(&mut self, cx: &mut ExecCtx<'_>, stmt: StmtRef, out: &mut dyn ResultSink) -> Result<ExecSummary> {
+    async fn reset_stmt(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: StmtRef,
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
         let backend_caps = self.backend_caps(cx);
         let s = self.stmts.get_mut(stmt)?;
         s.clear_long_data();
@@ -414,6 +485,9 @@ impl PassSession {
             fetch: false,
             backend_caps,
             infile: Infile::default(),
+            conn_status: None,
+            renames: &[],
+            mysql_nowait: false,
         };
         let relayed = relay(bs, out, &r).await;
         let status = self.finish(out.finished()).await;
@@ -445,6 +519,9 @@ impl PassSession {
             fetch: false,
             backend_caps,
             infile: Infile::default(),
+            conn_status: None,
+            renames: &[],
+            mysql_nowait: false,
         };
         let relayed = relay(bs, out, &r).await?;
         let status = self.finish(out.finished()).await?;
@@ -496,19 +573,31 @@ impl PassSession {
         }
         let status = self.finish(out.finished()).await?;
         if !done {
-            return Err(protocol_error("COM_FIELD_LIST response without a terminator"));
+            return Err(protocol_error(
+                "COM_FIELD_LIST response without a terminator",
+            ));
         }
-        Ok(ExecSummary { status, prepared: None })
+        Ok(ExecSummary {
+            status,
+            prepared: None,
+        })
     }
 }
 
 #[async_trait]
 impl SessionExec for PassSession {
-    async fn execute(&mut self, cx: &mut ExecCtx<'_>, req: Request, out: &mut dyn ResultSink) -> Result<ExecSummary> {
+    async fn execute(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        req: Request,
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
         match req {
             Request::Query { sql, attrs: _ } => self.query(cx, sql, out).await,
             Request::Prepare { sql } => self.prepare(cx, sql).await,
-            Request::Execute { stmt, raw, params } => self.execute(cx, stmt, &raw, &params, out).await,
+            Request::Execute { stmt, raw, params } => {
+                self.execute(cx, stmt, &raw, &params, out).await
+            }
             Request::Fetch { stmt, rows } => self.fetch(cx, stmt, rows, out).await,
             Request::LongData { stmt, param, data } => {
                 let limit = self.settings.current().long_data_max;
@@ -528,7 +617,9 @@ impl SessionExec for PassSession {
                 Ok(ExecSummary::default())
             }
             Request::BulkExecute { stmt, raw } => self.bulk(cx, stmt, &raw, out).await,
-            Request::FieldList { table, wildcard } => self.field_list(cx, &table, &wildcard, out).await,
+            Request::FieldList { table, wildcard } => {
+                self.field_list(cx, &table, &wildcard, out).await
+            }
         }
     }
 
@@ -550,7 +641,8 @@ impl SessionExec for PassSession {
     async fn reset(&mut self, _cx: &mut ExecCtx<'_>) -> Result<()> {
         let n = self.stmts_len();
         self.stmts.clear();
-        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).decrement(n);
+        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str())
+            .decrement(n);
         match self.bs.as_mut() {
             Some(bs) => bs.reset().await,
             None => Ok(()),
@@ -581,7 +673,8 @@ impl SessionExec for PassSession {
     async fn close(&mut self) {
         let n = self.stmts_len();
         self.stmts.clear();
-        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).decrement(n);
+        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str())
+            .decrement(n);
         if let Some(bs) = self.bs.as_mut() {
             bs.close().await;
         }
@@ -594,4 +687,3 @@ impl PassSession {
         self.stmts.len() as f64
     }
 }
-

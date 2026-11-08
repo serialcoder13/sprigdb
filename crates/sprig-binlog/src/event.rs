@@ -179,7 +179,8 @@ pub struct QueryStatus {
 /// A decoded binlog event.
 ///
 /// Statement-format helpers (`INTVAR`, `RAND`, `USER_VAR`),
-/// `BINLOG_CHECKPOINT`, `START_ENCRYPTION` and MySQL-only events are not
+/// `BINLOG_CHECKPOINT`, `START_ENCRYPTION` (skipped on a dump, refused in a
+/// file: see [`Decoder::set_server_decrypts`]) and MySQL-only events are not
 /// returned; partial-row fragments are returned once, reassembled, as one
 /// [`Event::Rows`].
 #[derive(Debug, Clone, PartialEq)]
@@ -267,6 +268,10 @@ pub enum Event {
     Incident(String),
     /// The server stopped (end of a file it closed at shutdown).
     Stop,
+    /// The server reached the end of its binlog and ended a non-blocking
+    /// dump ([`crate::StreamOptions::non_blocking`]). Never decoded from a
+    /// file or an event; only [`crate::BinlogStream`] returns it.
+    DumpEnd,
 }
 
 /// Which tables' rows to decode. Rows events and table maps of other tables
@@ -293,6 +298,7 @@ pub struct Decoder {
     header: EventHeader,
     position: GtidPos,
     open: Option<(Gtid, GtidFlags)>,
+    server_decrypts: bool,
 }
 
 impl fmt::Debug for Decoder {
@@ -327,7 +333,18 @@ impl Decoder {
             header: EventHeader::default(),
             position: GtidPos::new(),
             open: None,
+            server_decrypts: false,
         }
+    }
+
+    /// Whether the events come from a server's dump, which decrypts an
+    /// encrypted binlog's events before sending them but still sends the
+    /// file's `START_ENCRYPTION` event: the decoder then skips that event.
+    /// Off by default, for binlog files, where it means the events after it
+    /// are encrypted and the decoder refuses it. [`crate::BinlogStream`]
+    /// turns it on.
+    pub fn set_server_decrypts(&mut self, on: bool) {
+        self.server_decrypts = on;
     }
 
     /// Decodes rows only for tables `filter` accepts.
@@ -445,7 +462,17 @@ impl Decoder {
         };
         if checksums && self.verify {
             let (data, crc) = raw.split_at(raw.len() - CHECKSUM_LEN);
-            check_crc(data, crc, et::FORMAT_DESCRIPTION)?;
+            // The server sets LOG_EVENT_BINLOG_IN_USE_F (bit 0 of the header
+            // flags, byte 17) on the open file's format description without
+            // recomputing the checksum, which covers the event with the bit
+            // clear (as `mariadb-binlog` checks it).
+            if data[17] & 1 != 0 {
+                let mut clear = data.to_vec();
+                clear[17] &= !1;
+                check_crc(&clear, crc, et::FORMAT_DESCRIPTION)?;
+            } else {
+                check_crc(data, crc, et::FORMAT_DESCRIPTION)?;
+            }
         }
         self.post_header = rest[..rest.len() - 1 - CHECKSUM_LEN].to_vec();
         self.checksums = checksums;
@@ -534,6 +561,12 @@ impl Decoder {
                 Event::Incident(format!("incident {kind}: {msg}"))
             }
             et::STOP => Event::Stop,
+            et::START_ENCRYPTION if self.server_decrypts => {
+                tracing::debug!(
+                    "skipping START_ENCRYPTION: the server decrypts the binlog's events"
+                );
+                return Ok(None);
+            }
             et::START_ENCRYPTION => {
                 return Err(unsupported(
                     "encrypted binlog file; read it through a server, which decrypts",

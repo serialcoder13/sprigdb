@@ -8,6 +8,7 @@
 //! |---|---|
 //! | toxiproxy | `SPRIG_TEST_TOXIPROXY`, `SPRIG_TEST_MARIADB_SINGLE` |
 //! | faultd, kill, pause | `SPRIG_TEST_FAULTD`, `SPRIG_TEST_DOCKER` |
+//! | clock skew (libfaketime) | `SPRIG_TEST_DOCKER` (the first run builds the image, which needs the network) |
 //! | Elle | `SPRIG_TEST_ELLE` (plus `SPRIG_TEST_MARIADB_SINGLE` for the workload) |
 //!
 //! Faults touch only this test's own toxiproxy routes and `sprig-sim-*`
@@ -240,4 +241,63 @@ async fn list_append_on_mariadb_is_serializable() {
     let v = v.unwrap();
     assert!(oks > 20, "only {oks} transactions committed");
     assert_eq!(v.valid, Some(true), "{}", v.detail);
+}
+
+/// The server's wall clock minus ours, in milliseconds.
+async fn server_offset_ms(c: &mut mysql_async::Conn) -> i64 {
+    let server: String = c
+        .query_first("SELECT CAST(UNIX_TIMESTAMP(NOW(6)) AS CHAR)")
+        .await
+        .expect("now")
+        .expect("a row");
+    let ours = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after 1970")
+        .as_secs_f64();
+    let server: f64 = server.parse().expect("a decimal");
+    #[allow(clippy::cast_possible_truncation)]
+    let ms = ((server - ours) * 1000.0).round() as i64;
+    ms
+}
+
+/// libfaketime in a throwaway MariaDB: `skew_clock` moves the server's
+/// `NOW()` forward and back while it runs; healing restores it. Shared
+/// containers are refused.
+#[tokio::test]
+async fn clock_skew_in_an_own_faketime_container() {
+    require_env!(skip::DOCKER);
+    let db = sprig_testkit::faults::compose::OwnMariaDb::start_with_faketime(None, 931, 93)
+        .await
+        .unwrap();
+    let mut c = conn(&db.url).await.unwrap();
+    let faults = ComposeFaults::new(None, None);
+    let node = Node::from(db.container.name());
+
+    let before = server_offset_ms(&mut c).await;
+    assert!(before.abs() < 1000, "unskewed: {before} ms");
+
+    let ahead = faults.skew_clock(&node, 30_000, 0).await.unwrap();
+    let off = server_offset_ms(&mut c).await;
+    assert!((off - 30_000).abs() < 1500, "+30 s: {off} ms");
+    faults.heal(ahead).await.unwrap();
+    let off = server_offset_ms(&mut c).await;
+    assert!(off.abs() < 1500, "healed: {off} ms");
+
+    faults.skew_clock(&node, -20_000, 0).await.unwrap();
+    let off = server_offset_ms(&mut c).await;
+    assert!((off + 20_000).abs() < 1500, "-20 s: {off} ms");
+    // Still a working server.
+    let one: Option<u8> = c.query_first("SELECT 1").await.unwrap();
+    assert_eq!(one, Some(1));
+    faults.heal_all().await.unwrap();
+    let off = server_offset_ms(&mut c).await;
+    assert!(off.abs() < 1500, "healed: {off} ms");
+
+    assert!(
+        faults
+            .skew_clock(&Node::from("sprigdb-dev-single-1"), 1000, 0)
+            .await
+            .is_err()
+    );
+    drop(c);
 }

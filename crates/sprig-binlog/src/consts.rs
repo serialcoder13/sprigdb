@@ -171,6 +171,9 @@ pub mod rows_flags {
 
 /// `COM_BINLOG_DUMP` flags.
 pub(crate) mod dump_flags {
+    /// `BINLOG_DUMP_NON_BLOCK`: end the dump with an EOF packet at the end
+    /// of the binlog instead of waiting for new events.
+    pub(crate) const NON_BLOCK: u16 = 1;
     /// Send `ANNOTATE_ROWS` events (the statement text before row events).
     pub(crate) const SEND_ANNOTATE_ROWS: u16 = 2;
 }

@@ -166,6 +166,19 @@ sprig_codes! {
     SessionStateLost = 39033, "ER_SPRIG_SESSION_STATE_LOST", "SprigSessionStateLost", SQLSTATE_CONNECTION, false;
     /// The backend was lost after part of a result was sent (chapter 06).
     BackendLost = 39034, "ER_SPRIG_BACKEND_LOST", "SprigBackendLost", SQLSTATE_CONNECTION, false;
+    /// The tenant's catalog writer or the global tier can't be reached, so
+    /// DDL, setting and account changes fail; cached reads continue
+    /// (chapter 08).
+    CatalogUnavailable = 39070, "ER_SPRIG_CATALOG_UNAVAILABLE", "SprigCatalogUnavailable", SQLSTATE_CONNECTION, true;
+    /// A catalog change met a concurrent one: a pending DDL job on the
+    /// object, a busy version row or a held migration lock (chapter 08).
+    CatalogConflict = 39071, "ER_SPRIG_CATALOG_CONFLICT", "SprigCatalogConflict", SQLSTATE_RETRY, true;
+    /// The tenant is not active or its catalog is not bootstrapped yet
+    /// (chapter 08).
+    TenantNotReady = 39072, "ER_SPRIG_TENANT_NOT_READY", "SprigTenantNotReady", SQLSTATE_GENERAL, false;
+    /// The tenant's catalog has a format newer than this binary reads
+    /// (chapter 08).
+    CatalogFormatTooNew = 39073, "ER_SPRIG_CATALOG_FORMAT_TOO_NEW", "SprigCatalogFormatTooNew", SQLSTATE_GENERAL, false;
     /// A setting value lies outside the bounds in force (chapter 08).
     SettingOutOfBounds = 39080, "ER_SPRIG_SETTING_OUT_OF_BOUNDS", "SprigSettingOutOfBounds", SQLSTATE_GENERAL, false;
     /// The setting key is not in the registry (chapter 08).
@@ -333,7 +346,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ClusterFenced
         | SprigCode::BackendUnavailable
         | SprigCode::BackendPoolTimeout
-        | SprigCode::BackendLost => (Code::Unavailable, 503),
+        | SprigCode::BackendLost
+        | SprigCode::CatalogUnavailable => (Code::Unavailable, 503),
+        SprigCode::CatalogConflict => (Code::Aborted, 409),
+        SprigCode::CatalogFormatTooNew => (Code::FailedPrecondition, 500),
         SprigCode::BinlogCorrupt => (Code::DataLoss, 500),
         SprigCode::BackendProtocol => (Code::Internal, 502),
         SprigCode::ClusterFenceFailed | SprigCode::OutcomeUnknown | SprigCode::SessionStateLost => {
@@ -341,7 +357,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         }
         SprigCode::ClusterNotFound | SprigCode::UnknownDc => (Code::NotFound, 404),
         SprigCode::ClusterExists => (Code::AlreadyExists, 409),
-        SprigCode::ClusterStateInvalid => (Code::FailedPrecondition, 409),
+        SprigCode::ClusterStateInvalid | SprigCode::TenantNotReady => {
+            (Code::FailedPrecondition, 409)
+        }
         SprigCode::AdminUnauthenticated => (Code::Unauthenticated, 401),
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
     };

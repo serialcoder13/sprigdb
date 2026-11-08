@@ -10,6 +10,9 @@
 #   SPRIG_SYSBENCH_THREADS (4), SPRIG_SYSBENCH_TIME (10 seconds per step).
 set -uo pipefail
 
+# sysbench-tpcc shares the image.
+[[ ${SPRIG_CONNECTOR:-sysbench} == sysbench-tpcc ]] && exec /tpcc.sh
+
 TLS=$SPRIG_TLS
 TABLES=${SPRIG_SYSBENCH_TABLES:-2}
 SIZE=${SPRIG_SYSBENCH_TABLE_SIZE:-10000}

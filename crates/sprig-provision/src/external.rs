@@ -8,7 +8,7 @@
 //! 2. SHOW GRANTS FOR CURRENT_USER; compare with the required list
 //! 3. read the required variables; compare with the settings table
 //! 4. create and drop user sprig_probe_<8 hex> and schema t0_sprig_probe_<8 hex>
-//! 5. as sprig_repl, check its grants and that it can list the binary logs
+//! 5. as sprig_repl, open a binlog dump at the current position and read one event
 //! 6. chapter 09's probes build the capability profile; record declared values
 //! 7. any failure -> 39511 ER_SPRIG_CLUSTER_PRECHECK_FAILED, listing every missing item;
 //!    success -> clusters/<id> with provisioner = external, then active
@@ -18,12 +18,21 @@
 //! change feed's check ([`sprig_cluster::probe::feed`]), reused as is.
 //! Differences from the book: step 4's schema is `t0_sprig_probe_<hex>`,
 //! because `sprig_ctl`'s grants cover only `t%` (the book's
-//! `sprig_probe_<hex>` schema would always fail); step 5 doesn't read a
-//! binlog event yet, which needs `sprig-binlog`; and missing privileges
+//! `sprig_probe_<hex>` schema would always fail); and missing privileges
 //! other than those on `t%` and `__sprig_sys` are advisories, as chapter 09
 //! has it ("a missing privilege disables only what needs it"), not
 //! failures. `require_secure_transport = OFF` is an advisory: SprigDB's own
 //! sessions are refused unless encrypted either way.
+//!
+//! Step 5 is chapter 09's binlog dump probe ([`sprig_cluster::probe::dump`]),
+//! run once as `sprig_repl` on the node the active probes ran on, as part
+//! of the deep probe, so the profile's feed level reflects it. By the same
+//! rule, a dump that fails because of `sprig_repl`'s privileges or the
+//! binlog itself (no `REPLICATION SLAVE`, a checksum or format the reader
+//! doesn't know, a server that refuses the reader's plain-text connection)
+//! is an advisory: registration succeeds with the feed and the mover
+//! `unsupported`. A `sprig_repl` credential that doesn't resolve or log in,
+//! and a dump that times out or loses its connection, block.
 //!
 //! On external clusters SprigDB never changes server settings, restarts,
 //! adds or removes nodes, or touches schemas outside `t%` and
@@ -33,6 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use sprig_cluster::health::HealthTracker;
+use sprig_cluster::probe::dump::{self, DumpFailureKind};
 use sprig_cluster::probe::feed::{self, GapSeverity};
 use sprig_cluster::probe::{
     Grant, NodeFacts, NodeProbe, PrivilegeInfo, ProbeDepth, Prober, active_target,
@@ -161,8 +171,9 @@ impl ExternalProvisioner {
                 }
             }
         }
+        let repl_eps = repl_endpoints(req);
         let probes = Prober::with_clock(timeout, Arc::clone(&self.clock))
-            .probe_cluster(req.topology, &eps, ProbeDepth::Deep)
+            .probe_cluster_with_repl(req.topology, &eps, repl_eps.as_deref(), ProbeDepth::Deep)
             .await;
         for (p, nr) in probes.iter().zip(report.nodes.iter_mut()) {
             match &p.result {
@@ -195,9 +206,9 @@ impl ExternalProvisioner {
             report
                 .blocking
                 .extend(self.account_checks(&eps[i], timeout).await);
-            report
-                .blocking
-                .extend(repl_check(req, &req.nodes[i], timeout).await);
+            let (blocking, advisories) = repl_check(req, &req.nodes[i], &probes[i], timeout).await;
+            report.blocking.extend(blocking);
+            report.advisories.extend(advisories);
             report
                 .advisories
                 .extend(old_temporal_check(&eps[i], timeout).await);
@@ -606,46 +617,92 @@ fn privileges_of(rows: Vec<sprig_cluster::sql::TextRow>) -> PrivilegeInfo {
     PrivilegeInfo::from_grants(&grants)
 }
 
-/// Step 5: `sprig_repl` logs in, holds `REPLICATION SLAVE` and `BINLOG
-/// MONITOR`, and can list the binary logs.
-async fn repl_check(req: &RegisterCluster, node: &NodeSpec, timeout: Duration) -> Vec<String> {
+/// Every node's `sprig_repl` endpoint, for the dump probe; `None` if the
+/// credential doesn't resolve (step 5 reports that).
+fn repl_endpoints(req: &RegisterCluster) -> Option<Vec<NodeEndpoint>> {
+    let repl = CredentialConnector::repl(&req.secrets);
+    req.nodes
+        .iter()
+        .map(|n| sprig_cluster::driver::NodeConnector::endpoint(&repl, n).ok())
+        .collect()
+}
+
+/// Step 5: `sprig_repl` logs in and reads the binlog: chapter 09's dump
+/// probe, reusing the deep probe's run on this node (`probe`) when there
+/// is one, else running it here from the node's `@@gtid_binlog_pos`. Its
+/// grants are checked too, for a clearer message. Returns (blocking,
+/// advisories).
+async fn repl_check(
+    req: &RegisterCluster,
+    node: &NodeSpec,
+    probe: &NodeProbe,
+    timeout: Duration,
+) -> (Vec<String>, Vec<String>) {
+    let dump = probe.active.as_ref().and_then(|a| a.binlog_dump.clone());
+    let from = probe
+        .facts()
+        .map(|f| f.binlog.gtid_binlog_pos.clone())
+        .unwrap_or_default();
     let ep = match sprig_cluster::driver::NodeConnector::endpoint(
         &CredentialConnector::repl(&req.secrets),
         node,
     ) {
         Ok(ep) => ep,
-        Err(e) => return vec![format!("sprig_repl credential: {}", e.message)],
+        Err(e) => {
+            return (
+                vec![format!("sprig_repl credential: {}", e.message)],
+                Vec::new(),
+            );
+        }
     };
     let mut s = match ProbeSession::connect(&ep, timeout).await {
         Ok(s) => s,
-        Err(e) => return vec![format!("node {}: sprig_repl can't log in: {e}", node.node)],
+        Err(e) => {
+            return (
+                vec![format!("node {}: sprig_repl can't log in: {e}", node.node)],
+                Vec::new(),
+            );
+        }
     };
-    let mut out = Vec::new();
+    let mut advisories = Vec::new();
     match s.rows("SHOW GRANTS").await {
         Ok(rows) => {
             let p = privileges_of(rows);
             if !(p.replication_slave && p.binlog_monitor) {
-                out.push(
-                    "sprig_repl can't read binlogs: GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO sprig_repl"
+                advisories.push(
+                    "sprig_repl can't read binlogs, so the change feed and the mover are off: \
+                     GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO sprig_repl"
                         .to_owned(),
                 );
             }
         }
-        Err(e) => out.push(format!(
+        Err(e) => advisories.push(format!(
             "node {}: sprig_repl SHOW GRANTS failed: {e}",
             node.node
         )),
     }
-    if out.is_empty()
-        && let Err(e) = s.rows("SHOW BINARY LOGS").await
-    {
-        out.push(format!(
-            "node {}: sprig_repl can't list the binary logs ({e})",
-            node.node
-        ));
-    }
     s.close().await;
-    out
+    let dump = match dump {
+        Some(d) => d,
+        None => dump::run(&ep, &from, timeout).await,
+    };
+    let mut blocking = Vec::new();
+    if let Some(f) = &dump.failure {
+        let line = format!(
+            "node {}: {}",
+            node.node,
+            dump.advisory().unwrap_or_default()
+        );
+        match f.kind {
+            DumpFailureKind::Login | DumpFailureKind::Unreachable | DumpFailureKind::Timeout => {
+                blocking.push(line);
+            }
+            // The grants line above already says what to grant.
+            DumpFailureKind::Privilege if !advisories.is_empty() => {}
+            _ => advisories.push(line),
+        }
+    }
+    (blocking, advisories)
 }
 
 #[cfg(test)]

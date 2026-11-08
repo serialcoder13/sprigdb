@@ -24,6 +24,19 @@
 //! and each watch restart is counted in `sprig_meta_watch_restarts_total`
 //! (`tier`, `reason`).
 //!
+//! **Staleness.** Each cache reports `sprig_meta_cache_staleness_seconds`
+//! (`source`: `g` or the dc id, as chapter 23's `MetaEvent`; `prefix`: the
+//! cached prefix under the tier root), once a second and on every change of
+//! state: how long ago the cache was last known to reflect the store. While
+//! its watch runs, events arrive in revision order as they commit, so the
+//! cache is current and the gauge is 0. When the watch ends (a store error,
+//! a closed stream, a compaction), the gauge counts from that moment, or
+//! from the last listing, until a watch runs again; before the first
+//! listing it counts from the cache's start. [`Mirror::staleness`] and
+//! [`LazyCache::staleness`] return the same value. A connection that dies
+//! silently counts as current until the store client notices (etcd's
+//! keepalive).
+//!
 //! **Resuming.** A watch can end in the middle of a revision (a `MemStore`
 //! watcher whose queue overflows), so after events the watch resumes at the
 //! last revision applied rather than one past it; replayed events are
@@ -69,6 +82,100 @@ fn tier_label(t: &Tier) -> &'static str {
     match t {
         Tier::Global => "global",
         Tier::Dc(_) => "dc",
+    }
+}
+
+/// The `source` label of chapter 23: `g` for the global tier, else the dc
+/// id.
+fn source_label(t: &Tier) -> String {
+    match t {
+        Tier::Global => "g".to_owned(),
+        Tier::Dc(dc) => dc.to_string(),
+    }
+}
+
+/// How long ago a cache was last known to reflect its store (see
+/// "Staleness" above).
+#[derive(Debug)]
+struct Freshness {
+    state: Mutex<FreshState>,
+    gauge: metrics::Gauge,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FreshState {
+    /// When the cache started.
+    started: tokio::time::Instant,
+    /// Its watch is running.
+    live: bool,
+    /// The last moment it was known current: a listing, or the end of a
+    /// watch.
+    known_at: Option<tokio::time::Instant>,
+}
+
+impl Freshness {
+    fn new(tier: &Tier, prefix: &Key) -> Self {
+        let root = tier.root();
+        let rel = prefix
+            .as_str()
+            .strip_prefix(root.as_str())
+            .unwrap_or(prefix.as_str())
+            .to_owned();
+        Self {
+            state: Mutex::new(FreshState {
+                started: tokio::time::Instant::now(),
+                live: false,
+                known_at: None,
+            }),
+            gauge: metrics::gauge!(
+                "sprig_meta_cache_staleness_seconds",
+                "source" => source_label(tier),
+                "prefix" => rel
+            ),
+        }
+    }
+
+    /// A listing just completed: the cache reflects the store now.
+    fn listed(&self) {
+        lock(&self.state).known_at = Some(tokio::time::Instant::now());
+        self.report();
+    }
+
+    /// The watch is running (`true`) or just ended (`false`).
+    fn set_live(&self, live: bool) {
+        {
+            let mut st = lock(&self.state);
+            if st.live && !live {
+                st.known_at = Some(tokio::time::Instant::now());
+            }
+            st.live = live;
+        }
+        self.report();
+    }
+
+    fn staleness(&self) -> Duration {
+        let st = *lock(&self.state);
+        if st.live {
+            Duration::ZERO
+        } else {
+            st.known_at.unwrap_or(st.started).elapsed()
+        }
+    }
+
+    fn report(&self) {
+        self.gauge.set(self.staleness().as_secs_f64());
+    }
+}
+
+/// Sets the staleness gauge once a second until `stop` fires.
+async fn report_staleness(fresh: Arc<Freshness>, stop: CancellationToken) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            _ = tick.tick() => fresh.report(),
+        }
     }
 }
 
@@ -166,6 +273,8 @@ struct MirrorShared {
     generation: watch::Sender<u64>,
     /// The highest revision the cache reflects, for [`Mirror::wait_for`].
     revision: watch::Sender<Revision>,
+    /// For `sprig_meta_cache_staleness_seconds`.
+    fresh: Arc<Freshness>,
 }
 
 impl MirrorShared {
@@ -209,12 +318,15 @@ impl Mirror {
     #[must_use]
     pub fn spawn(store: Arc<dyn MetaStore>, prefix: Key) -> Self {
         let stop = CancellationToken::new();
+        let fresh = Arc::new(Freshness::new(store.tier(), &prefix));
         let shared = Arc::new(MirrorShared {
             prefix,
             state: RwLock::new(MirrorState::default()),
             generation: watch::channel(0).0,
             revision: watch::channel(0).0,
+            fresh: Arc::clone(&fresh),
         });
+        tokio::spawn(report_staleness(fresh, stop.clone()));
         tokio::spawn(run_mirror(store, Arc::clone(&shared), stop.clone()));
         Self {
             shared,
@@ -300,6 +412,14 @@ impl Mirror {
         // The sender lives in `self`, so this can't fail.
         let _ = rx.wait_for(|r| *r >= rev).await;
     }
+
+    /// How long ago the cache was last known to reflect the store: zero
+    /// while its watch runs (see "Staleness" in the module docs). The value
+    /// of `sprig_meta_cache_staleness_seconds`.
+    #[must_use]
+    pub fn staleness(&self) -> Duration {
+        self.shared.fresh.staleness()
+    }
 }
 
 /// The mirror's background task: list, watch, re-list on compaction.
@@ -330,6 +450,7 @@ async fn run_mirror(store: Arc<dyn MetaStore>, shared: Arc<MirrorShared>, stop: 
                 .collect();
             st.rev = rev;
         }
+        shared.fresh.listed();
         shared.bump();
         shared.reached(rev);
         backoff.reset();
@@ -350,7 +471,10 @@ async fn run_mirror(store: Arc<dyn MetaStore>, shared: Arc<MirrorShared>, stop: 
                     continue;
                 }
             };
-            match follow_mirror(&shared, &mut w, &mut resume, &mut backoff, &stop).await {
+            shared.fresh.set_live(true);
+            let ended = follow_mirror(&shared, &mut w, &mut resume, &mut backoff, &stop).await;
+            shared.fresh.set_live(false);
+            match ended {
                 Ended::Stopped => return,
                 Ended::Compacted => {
                     tracing::info!(%prefix, "mirror watch compacted; listing again");
@@ -509,6 +633,8 @@ struct LazyShared {
     watching: watch::Sender<bool>,
     /// Bumped after every change to a loaded group.
     generation: watch::Sender<u64>,
+    /// For `sprig_meta_cache_staleness_seconds`.
+    fresh: Arc<Freshness>,
 }
 
 impl LazyShared {
@@ -561,13 +687,16 @@ impl LazyCache {
     #[must_use]
     pub fn spawn(store: Arc<dyn MetaStore>, prefix: Key, capacity: usize) -> Self {
         let stop = CancellationToken::new();
+        let fresh = Arc::new(Freshness::new(store.tier(), &prefix));
         let shared = Arc::new(LazyShared {
             prefix,
             capacity: capacity.max(1),
             state: Mutex::new(LazyState::default()),
             watching: watch::channel(false).0,
             generation: watch::channel(0).0,
+            fresh: Arc::clone(&fresh),
         });
+        tokio::spawn(report_staleness(fresh, stop.clone()));
         tokio::spawn(run_lazy(
             Arc::clone(&store),
             Arc::clone(&shared),
@@ -664,6 +793,14 @@ impl LazyCache {
     #[must_use]
     pub fn changes(&self) -> watch::Receiver<u64> {
         self.shared.generation.subscribe()
+    }
+
+    /// How long ago the loaded groups were last known to reflect the
+    /// store: zero while the watch runs (see "Staleness" in the module
+    /// docs). The value of `sprig_meta_cache_staleness_seconds`.
+    #[must_use]
+    pub fn staleness(&self) -> Duration {
+        self.shared.fresh.staleness()
     }
 
     fn group_prefix(&self, group: &str) -> Result<Key> {
@@ -785,7 +922,9 @@ async fn run_lazy(store: Arc<dyn MetaStore>, shared: Arc<LazyShared>, stop: Canc
             }
         };
         shared.watching.send_replace(true);
+        shared.fresh.set_live(true);
         let ended = follow_lazy(&shared, &mut w, &mut resume, &mut backoff, &stop).await;
+        shared.fresh.set_live(false);
         match ended {
             Ended::Stopped => return,
             Ended::Compacted => {
@@ -799,6 +938,7 @@ async fn run_lazy(store: Arc<dyn MetaStore>, shared: Arc<LazyShared>, stop: Canc
                     };
                     match r {
                         Ok(rev) => {
+                            shared.fresh.listed();
                             resume = rev + 1;
                             break;
                         }

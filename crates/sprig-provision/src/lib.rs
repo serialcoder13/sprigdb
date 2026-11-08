@@ -11,10 +11,10 @@
 //!   controllers resolve them;
 //! - [`external`]: the external provisioner, which registers MariaDB that
 //!   already exists after prechecking its TLS, grants, settings (the change
-//!   feed's binlog settings included), accounts and capability profile.
+//!   feed's binlog settings included), accounts, a binlog read as
+//!   `sprig_repl` (chapter 09's dump probe) and capability profile.
 //!
-//! Not yet: the object-store check (step 3), the binlog dump read of
-//! precheck step 5 (it needs `sprig-binlog`), and the Kubernetes and VM
+//! Not yet: the object-store check (step 3) and the Kubernetes and VM
 //! provisioners (R2).
 
 pub mod credentials;

@@ -83,7 +83,8 @@ impl ExecSettingsSource {
                 let snap = live.snapshot();
                 let ctx = SettingCtx::process(dc);
                 ExecSettings {
-                    long_data_max: usize::try_from(snap.get(&LONG_DATA_MAX_BYTES, &ctx)).unwrap_or(usize::MAX),
+                    long_data_max: usize::try_from(snap.get(&LONG_DATA_MAX_BYTES, &ctx))
+                        .unwrap_or(usize::MAX),
                     local_infile: snap.get(&LOCAL_INFILE, &ctx),
                 }
             }

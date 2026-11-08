@@ -8,8 +8,11 @@
 //!   compare-and-set writes, events and watches;
 //! - [`probe`]: light, full and deep probes against MariaDB and their
 //!   parsers (version, topology, semi-sync, binlog, GTID, privileges), and
-//!   the active probes (XA, features, JSON, generated columns, PL/SQL), and
-//!   the binlog settings the change feed needs ([`probe::feed`]);
+//!   the active probes (XA, features, JSON, generated columns, PL/SQL), the
+//!   binlog settings the change feed needs ([`probe::feed`]), and the
+//!   binlog dump probe ([`probe::dump`]: a short non-blocking dump as
+//!   `sprig_repl` through `sprig-binlog`, run with the active probes when
+//!   a `sprig_repl` endpoint is given);
 //! - [`profile`]: `derive()` from probes to a capability profile, profile
 //!   diffs, registration gates and publishing with hysteresis;
 //! - [`health`]: the health model and the heartbeat writer;
@@ -24,9 +27,12 @@
 //! `sprig-controller::admin` and `sprigctl`; the controller's `registry`
 //! loop (`sprig-controller::monitor`) runs the probes and publishes.
 //!
-//! Not yet: the binlog dump probe and the true feed retention (both need
-//! `sprig-binlog`), server tuning (steps 10-12), and failover hooks with
-//! the `read_only` self-fence (step 13, R2).
+//! Not yet: the true feed retention (now minus the horizon's commit time,
+//! which needs a binlog read at the horizon), the dump probe in the
+//! controller's `registry` loop (it calls [`probe::Prober::probe_cluster`],
+//! which has no `sprig_repl` endpoint; registration runs it), server
+//! tuning (steps 10-12), and failover hooks with the `read_only`
+//! self-fence (step 13, R2).
 
 pub mod driver;
 pub mod fence;

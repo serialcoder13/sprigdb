@@ -7,6 +7,11 @@
 #   faultd.sh partition <pid> <peer-ip>     drop traffic to and from peer
 #   faultd.sh delay <pid> <ms> [jitter-ms] [loss-%]   netem on eth0
 #   faultd.sh heal <pid>                    remove faultd's rules and netem
+#
+# No clock skew: containers share the Docker VM's wall clock, and time
+# namespaces don't virtualise CLOCK_REALTIME, so faultd can't move one
+# container's clock. sprig-testkit skews throwaway containers with
+# libfaketime instead (sprig_testkit::faults::faketime).
 set -eu
 
 in_ns() {

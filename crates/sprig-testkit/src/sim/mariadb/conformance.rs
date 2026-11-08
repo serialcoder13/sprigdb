@@ -7,8 +7,8 @@
 //! then lists [`Action`]s. `Exec` sends a statement and records either its
 //! outcome or that it blocked (on the real server: no reply within
 //! [`SETTLE`]); `Await` records a blocked statement's outcome. Results are
-//! normalised so that both sides compare: GTIDs keep only
-//! `domain-server`, XIDs and user names lose the run's unique suffix, and
+//! normalised so that both sides compare: GTIDs (`@@last_gtid` and each
+//! GTID of `@@gtid_binlog_pos`) keep only `domain-server`, XIDs and user names lose the run's unique suffix, and
 //! every client-side connection failure is `2013`.
 //!
 //! Targets on the shared Compose servers ([`Target::Single`],
@@ -392,15 +392,22 @@ fn normalize(a: &Action, obs: Observed) -> Observed {
                 | Stmt::MasterGtidWait { .. }
         )
     ) || matches!(a, Action::WaitGtidOf(..));
+    // GTID positions keep `domain-server` per GTID: sequence numbers depend
+    // on the server's history.
     let rows = match stmt_of(a) {
-        Some(Stmt::LastGtid) => rows
+        Some(Stmt::LastGtid | Stmt::GtidBinlogPos) => rows
             .into_iter()
             .map(|r| {
                 r.into_iter()
                     .map(|v| {
-                        v.map(|g| match g.parse::<Gtid>() {
-                            Ok(g) => format!("{}-{}", g.domain, g.server),
-                            Err(_) => g,
+                        v.map(|pos| {
+                            pos.split(',')
+                                .map(|g| match g.trim().parse::<Gtid>() {
+                                    Ok(g) => format!("{}-{}", g.domain, g.server),
+                                    Err(_) => g.to_owned(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
                         })
                     })
                     .collect()
@@ -1079,6 +1086,9 @@ pub fn scenarios() -> Vec<Scenario> {
                 Exec(0, Stmt::XaEnd(x("x1"))),
                 Exec(0, Stmt::XaPrepare(x("x1"))),
                 Exec(0, get(1)),
+                // Variables stay readable in the prepared state.
+                Exec(0, Stmt::LastGtid),
+                Exec(0, Stmt::GtidBinlogPos),
                 Exec(1, Stmt::XaRecover),
                 Exec(1, Stmt::XaCommit(x("x1"))),
                 Exec(1, Stmt::SetLockWaitTimeout(1)),

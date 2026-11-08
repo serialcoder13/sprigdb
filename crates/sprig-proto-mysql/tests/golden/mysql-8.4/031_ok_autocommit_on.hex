@@ -1,0 +1,10 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mysql-8.4
+@server 8.4.11
+@server_caps 0x00000000dfffffff
+@caps 0x0000000001bfa285
+@kind query
+@framing plain
+@command COM_QUERY SET autocommit = 1
+C 00 03534554206175746f636f6d6d6974203d2031
+S 01 000000024000000026000e0a6175746f636f6d6d6974024f4e00110c73746174656d656e745f696403323937020131

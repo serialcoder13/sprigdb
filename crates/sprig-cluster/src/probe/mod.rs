@@ -8,6 +8,7 @@
 //! active probes ([`active`]) on one writable node.
 
 pub mod active;
+pub mod dump;
 pub mod feed;
 pub mod grants;
 pub mod parse;
@@ -20,6 +21,7 @@ use sprig_common::ids::NodeId;
 use sprig_common::time::{Clock, SystemClock};
 
 pub use active::{ActiveProbes, FeatureFlags};
+pub use dump::{DumpFailure, DumpFailureKind, DumpProbe};
 pub use feed::{FeedCheck, FeedGap, FeedLevel};
 pub use grants::{Grant, GrantTarget, PrivilegeInfo};
 pub use parse::{
@@ -263,11 +265,30 @@ impl Prober {
 
     /// Probes every node concurrently. With [`ProbeDepth::Deep`], the active
     /// probes then run on the first writable node (the first `Synced` node
-    /// on Galera) and are attached to its result.
+    /// on Galera) and are attached to its result. The binlog dump probe
+    /// doesn't run: it needs `sprig_repl`, see
+    /// [`probe_cluster_with_repl`](Self::probe_cluster_with_repl).
     pub async fn probe_cluster(
         &self,
         topology: TopologyKind,
         nodes: &[NodeEndpoint],
+        depth: ProbeDepth,
+    ) -> Vec<NodeProbe> {
+        self.probe_cluster_with_repl(topology, nodes, None, depth)
+            .await
+    }
+
+    /// [`probe_cluster`](Self::probe_cluster), and with
+    /// [`ProbeDepth::Deep`] and `repl` given (the `sprig_repl` endpoint of
+    /// each node, in the order of `nodes`), the binlog dump probe
+    /// ([`dump`]) on the node the active probes ran on, from that node's
+    /// `@@gtid_binlog_pos`. Its result is in
+    /// [`ActiveProbes::binlog_dump`].
+    pub async fn probe_cluster_with_repl(
+        &self,
+        topology: TopologyKind,
+        nodes: &[NodeEndpoint],
+        repl: Option<&[NodeEndpoint]>,
         depth: ProbeDepth,
     ) -> Vec<NodeProbe> {
         let base = depth.min(ProbeDepth::Full);
@@ -281,7 +302,13 @@ impl Prober {
         {
             let galera = probes[i].facts().is_some_and(|f| f.galera.is_some());
             match active::run(&nodes[i], self.timeout, galera).await {
-                Ok(a) => probes[i].active = Some(a),
+                Ok(mut a) => {
+                    if let (Some(ep), Some(f)) = (repl.and_then(|r| r.get(i)), probes[i].facts()) {
+                        a.binlog_dump =
+                            Some(dump::run(ep, &f.binlog.gtid_binlog_pos, self.timeout).await);
+                    }
+                    probes[i].active = Some(a);
+                }
                 Err(e) => {
                     tracing::warn!(node = %nodes[i].node, error = %e, "active probes failed");
                 }

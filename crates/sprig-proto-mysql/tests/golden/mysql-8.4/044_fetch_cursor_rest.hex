@@ -1,0 +1,12 @@
+# sprig-proto-mysql golden capture (tests/golden_capture.rs)
+@target mysql-8.4
+@server 8.4.11
+@server_caps 0x00000000dfffffff
+@caps 0x0000000001bfa285
+@kind fetch
+@framing plain
+@command COM_STMT_FETCH 10 rows
+@binary_types 3,1,1u,2,9,3,3u,8,8u,246,4,5,16u,1,10,11,12,7,13u,254,253,254,253,252,252,252,252,254,254,245,255,255,11,12
+C 00 1c010000000a000000
+S 01 00f8ffffff0f02000000
+S 02 fe000082000000

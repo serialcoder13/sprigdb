@@ -265,3 +265,67 @@ async fn a_failed_load_caches_nothing() {
     put(&s, &key(&s, "shardmaps/1/0"), "x").await;
     assert_eq!(c.group("1").await.unwrap().len(), 1);
 }
+
+/// `sprig_meta_cache_staleness_seconds`: zero while the watch runs; while
+/// the store is unavailable it counts from the moment the watch ended; it is
+/// zero again once a watch runs. Before the first listing it counts from
+/// the start.
+#[tokio::test(start_paused = true)]
+async fn staleness_counts_from_the_end_of_the_watch() {
+    let s = store();
+    put(&s, &key(&s, "clusters/c1"), "x").await;
+    s.set_unavailable(true);
+    let m = Mirror::spawn(Arc::new(s.clone()), key(&s, "clusters/"));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        m.staleness() >= Duration::from_secs(3),
+        "{:?}",
+        m.staleness()
+    );
+    s.set_unavailable(false);
+    tokio::time::timeout(WAIT, m.ready()).await.unwrap();
+    until(|| m.staleness().is_zero()).await;
+
+    // The watch ends: staleness counts from then, not from the listing.
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert!(m.staleness().is_zero());
+    s.set_unavailable(true);
+    until(|| !m.staleness().is_zero()).await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let st = m.staleness();
+    assert!(
+        st >= Duration::from_secs(4) && st < Duration::from_secs(10),
+        "{st:?}"
+    );
+    s.set_unavailable(false);
+    until(|| m.staleness().is_zero()).await;
+    let r = put(&s, &key(&s, "clusters/c2"), "y").await;
+    tokio::time::timeout(WAIT, m.wait_for(r)).await.unwrap();
+    assert!(m.staleness().is_zero());
+}
+
+#[tokio::test(start_paused = true)]
+async fn lazy_cache_staleness_follows_its_watch() {
+    let s = store();
+    put(&s, &key(&s, "shardmaps/t1/m"), "x").await;
+    s.set_unavailable(true);
+    let c = LazyCache::spawn(Arc::new(s.clone()), key(&s, "shardmaps/"), 8);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(c.staleness() >= Duration::from_secs(2));
+    s.set_unavailable(false);
+    tokio::time::timeout(WAIT, c.ready()).await.unwrap();
+    until(|| c.staleness().is_zero()).await;
+    assert_eq!(c.group("t1").await.unwrap().len(), 1);
+    s.set_unavailable(true);
+    until(|| !c.staleness().is_zero()).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(c.staleness() >= Duration::from_secs(5));
+    s.set_unavailable(false);
+    until(|| c.staleness().is_zero()).await;
+}
+
+#[test]
+fn staleness_source_labels_follow_chapter_23() {
+    assert_eq!(source_label(&Tier::Global), "g");
+    assert_eq!(source_label(&Tier::Dc(DcId::new("mum1").unwrap())), "mum1");
+}

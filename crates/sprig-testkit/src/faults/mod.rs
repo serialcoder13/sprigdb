@@ -7,8 +7,11 @@
 //!   links, kills, pauses and skews simulated nodes;
 //! - against Docker Compose, [`ComposeFaults`] uses [`toxiproxy`] for link
 //!   faults on proxied routes (latency, loss, resets, timeouts),
-//!   [`faultd`] for `iptables` partitions inside containers, and the
-//!   Docker CLI for `SIGKILL` plus restart and `docker pause`.
+//!   [`faultd`] for `iptables` partitions inside containers, the Docker
+//!   CLI for `SIGKILL` plus restart and `docker pause`, and [`faketime`]
+//!   for clock skew in throwaway MariaDB containers started with
+//!   libfaketime (the shared Compose servers can't be skewed: faultd has
+//!   no way to move one container's wall clock, see [`faketime`]).
 //!
 //! [`history`] records operation histories ([`history::OpRecord`]) as JSON
 //! lines and converts them to EDN; [`elle`] runs `elle-cli` on them.
@@ -19,6 +22,7 @@
 
 pub mod compose;
 pub mod elle;
+pub mod faketime;
 pub mod faultd;
 pub mod history;
 pub mod toxiproxy;

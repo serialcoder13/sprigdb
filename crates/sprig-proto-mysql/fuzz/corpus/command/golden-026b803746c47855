@@ -1,0 +1,2 @@
+ˆ•
+INSERT INTO kv (v) VALUES ('a'), ('b')

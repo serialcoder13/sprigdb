@@ -5,10 +5,16 @@
 // variables (see ../run.sh); SPRIG_CONNECTOR is "mysql-connector-j" or
 // "mariadb-connector-j".
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -25,12 +31,17 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 public final class Check {
     static final String CONNECTOR = System.getenv("SPRIG_CONNECTOR");
     static final boolean MYSQL_CJ = CONNECTOR.equals("mysql-connector-j");
     static final String TLS = System.getenv("SPRIG_TLS");
     static final String PREFIX = "t_" + CONNECTOR.replace('-', '_') + "_" + TLS;
+    static final String PERSONA = Objects.requireNonNullElse(System.getenv("SPRIG_PERSONA"), "mariadb");
+    /** Checks run.sh asked to leave out (--quick): not run, not reported. */
+    static final Set<String> SKIPPED = Set.of(Objects.requireNonNullElse(System.getenv("SPRIG_CONN_SKIP_CHECKS"), "")
+            .trim().split("[ ,]+"));
     static final HexFormat HEX = HexFormat.of();
     static Connection conn;
 
@@ -76,7 +87,7 @@ public final class Check {
         if (!cond) throw new AssertionError(msg);
     }
 
-    static Connection connect(String extra) throws SQLException {
+    static String url(String extra) {
         String base = (MYSQL_CJ ? "jdbc:mysql://" : "jdbc:mariadb://") + System.getenv("SPRIG_HOST") + ":"
                 + System.getenv("SPRIG_PORT") + "/" + System.getenv("SPRIG_DATABASE");
         String opts;
@@ -88,8 +99,11 @@ public final class Check {
             opts = "sslMode=" + (TLS.equals("required") ? "trust" : "disable") // trust: no verification
                     + "&allowPublicKeyRetrieval=true&allowMultiQueries=true&useServerPrepStmts=true";
         }
-        Connection c = DriverManager.getConnection(base + "?" + opts + extra, System.getenv("SPRIG_USER"),
-                System.getenv("SPRIG_PASSWORD"));
+        return base + "?" + opts + extra;
+    }
+
+    static Connection connect(String extra) throws SQLException {
+        Connection c = DriverManager.getConnection(url(extra), System.getenv("SPRIG_USER"), System.getenv("SPRIG_PASSWORD"));
         try (Statement s = c.createStatement()) {
             s.execute("SET time_zone = '+00:00'");
         }
@@ -423,6 +437,301 @@ public final class Check {
         }
     }
 
+    // --- chapter 05 matrix items ------------------------------------------------
+
+    /** The file LOAD DATA LOCAL INFILE sends, and what the table must hold afterwards. */
+    static final String INFILE = "1,héllo 🌱\n2,\"quoted, comma\"\n3,\\N\n";
+    static final String INFILE_ROWS = "1=héllo 🌱|2=quoted, comma|3=NULL";
+
+    static String loadSql(String t, Path f) {
+        return "LOAD DATA LOCAL INFILE '" + f + "' INTO TABLE " + t + " CHARACTER SET utf8mb4 "
+                + "FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' LINES TERMINATED BY '\\n'";
+    }
+
+    static String loaded(Connection c, String t) throws SQLException {
+        return scalar(c, "SELECT IFNULL(GROUP_CONCAT(CONCAT(id, '=', IFNULL(v, 'NULL')) ORDER BY id SEPARATOR '|'), '') FROM " + t);
+    }
+
+    static void infileTable(Connection c, String t) throws Exception {
+        exec(c, "DROP TABLE IF EXISTS " + t);
+        exec(c, "CREATE TABLE " + t + " (id INT PRIMARY KEY, v VARCHAR(32)) DEFAULT CHARSET = utf8mb4");
+        if (scalar(c, "SELECT @@GLOBAL.local_infile").equals("0")) throw new Skip("local_infile is off on the server");
+    }
+
+    static String localInfile() throws Exception {
+        String t = PREFIX + "_infile";
+        Path f = Files.createTempFile("sprig", ".csv");
+        Files.writeString(f, INFILE, StandardCharsets.UTF_8);
+        try (Connection c = connect(MYSQL_CJ ? "&allowLoadLocalInfile=true" : "&allowLocalInfile=true")) {
+            infileTable(c, t);
+            int n;
+            try (Statement s = c.createStatement()) {
+                n = s.executeUpdate(loadSql(t, f));
+            }
+            String rows = loaded(c, t);
+            expect(n == 3 && rows.equals(INFILE_ROWS), "loaded " + n + " rows: " + rows);
+            exec(c, "DROP TABLE " + t);
+            return "3 rows";
+        } finally {
+            Files.deleteIfExists(f);
+        }
+    }
+
+    /** The server's refusal when the client doesn't offer CLIENT_LOCAL_FILES, per persona. */
+    static int infileRefusal() {
+        return PERSONA.equals("mysql") ? 3948 : 4166;
+    }
+
+    static String localInfileOff() throws Exception {
+        String t = PREFIX + "_infile_off";
+        Path f = Files.createTempFile("sprig", ".csv");
+        Files.writeString(f, INFILE, StandardCharsets.UTF_8);
+        try (Connection c = connect(MYSQL_CJ ? "&allowLoadLocalInfile=false" : "&allowLocalInfile=false")) {
+            infileTable(c, t);
+            String how;
+            try (Statement s = c.createStatement()) {
+                s.executeUpdate(loadSql(t, f));
+                throw new AssertionError("the load succeeded");
+            } catch (SQLException e) {
+                how = e.getErrorCode() + "/" + e.getSQLState() + " " + e.getMessage();
+                if (e.getErrorCode() == 1148 || e.getErrorCode() == 3948 || e.getErrorCode() == 4166)
+                    expect(e.getErrorCode() == infileRefusal(), "server refused with " + how + ", want " + infileRefusal());
+            }
+            expect(loaded(c, t).isEmpty(), "rows were loaded: " + loaded(c, t));
+            exec(c, "DROP TABLE " + t);
+            return "refused: " + how;
+        } finally {
+            Files.deleteIfExists(f);
+        }
+    }
+
+    /** Two resultsets, then an OUT and an INOUT parameter. */
+    static final String PROC = """
+            CREATE PROCEDURE %s(IN a INT, OUT b INT, INOUT c INT)
+            BEGIN
+              SELECT a AS x;
+              SELECT a + 1 AS y, 'two' AS z UNION ALL SELECT a + 2, 'three';
+              SET b = a * 10;
+              SET c = c + 1;
+            END""";
+
+    static String call() throws Exception {
+        String p = PREFIX + "_proc";
+        exec(conn, "DROP PROCEDURE IF EXISTS " + p);
+        exec(conn, PROC.formatted(p));
+        List<String> results = new ArrayList<>();
+        int b, c;
+        try (CallableStatement cs = conn.prepareCall("{CALL " + p + "(?, ?, ?)}")) {
+            cs.setInt(1, 1);
+            cs.registerOutParameter(2, Types.INTEGER);
+            cs.setInt(3, 5);
+            cs.registerOutParameter(3, Types.INTEGER);
+            boolean isRs = cs.execute();
+            while (true) {
+                if (isRs) {
+                    StringBuilder r = new StringBuilder();
+                    try (ResultSet rs = cs.getResultSet()) {
+                        int n = rs.getMetaData().getColumnCount();
+                        while (rs.next()) {
+                            for (int i = 1; i <= n; i++) r.append(i > 1 ? "," : "").append(rs.getString(i));
+                            r.append(';');
+                        }
+                    }
+                    results.add(r.toString());
+                } else if (cs.getUpdateCount() == -1) {
+                    break;
+                }
+                isRs = cs.getMoreResults();
+            }
+            b = cs.getInt(2);
+            c = cs.getInt(3);
+        }
+        exec(conn, "DROP PROCEDURE " + p);
+        // Drivers may surface the OUT-parameter row as a resultset of their own; the first two must be ours.
+        expect(results.size() >= 2 && results.get(0).equals("1;") && results.get(1).equals("2,two;3,three;"),
+                "resultsets " + results);
+        expect(b == 10 && c == 6, "OUT b=" + b + " INOUT c=" + c);
+        return results.size() + " resultsets, OUT 10, INOUT 6";
+    }
+
+    /** Leaves state a session reset must clear; returns the connection id. */
+    static String markSession(Connection c) throws SQLException {
+        exec(c, "SET @sprig_mark = 42, SESSION auto_increment_increment = 7");
+        exec(c, "CREATE TEMPORARY TABLE sprig_tmp (id INT)");
+        return scalar(c, "SELECT CONNECTION_ID()");
+    }
+
+    static String assertReset(Connection c, String id) throws SQLException {
+        String state;
+        try (Statement s = c.createStatement();
+             ResultSet r = s.executeQuery("SELECT CONNECTION_ID(), @sprig_mark, @@SESSION.auto_increment_increment, CURRENT_USER()")) {
+            r.next();
+            state = "id " + r.getString(1) + ", @sprig_mark " + r.getString(2) + ", auto_increment_increment " + r.getString(3);
+            expect(r.getString(1).equals(id), "connection id changed from " + id + ": " + state);
+            expect(r.getString(2) == null && r.getString(3).equals("1"), "session not reset: " + state);
+        }
+        try {
+            scalar(c, "SELECT COUNT(*) FROM sprig_tmp");
+            throw new AssertionError("the temporary table survived");
+        } catch (SQLException e) {
+            expect(e.getErrorCode() == 1146, "temporary table probe: " + e.getErrorCode() + " " + e.getMessage());
+        }
+        expect(scalar(c, "SELECT 1 + 1").equals("2"), "session unusable after the reset");
+        return "same connection " + id + "; user variable, session variable and temporary table cleared";
+    }
+
+    static String changeUser() throws Exception {
+        if (!MYSQL_CJ) throw new NA("MariaDB Connector/J 3 has no change-user API");
+        try (Connection c = connect("")) {
+            String id = markSession(c);
+            Class<?> jc = Class.forName("com.mysql.cj.jdbc.JdbcConnection");
+            jc.getMethod("changeUser", String.class, String.class)
+                    .invoke(c.unwrap(jc), System.getenv("SPRIG_USER"), System.getenv("SPRIG_PASSWORD"));
+            return "JdbcConnection.changeUser (COM_CHANGE_USER): " + assertReset(c, id);
+        }
+    }
+
+    static String resetConnection() throws Exception {
+        // MariaDB Connector/J's reset() sends COM_RESET_CONNECTION only with useResetConnection.
+        try (Connection c = connect(MYSQL_CJ ? "" : "&useResetConnection=true")) {
+            String id = markSession(c);
+            String how;
+            if (MYSQL_CJ) {
+                Class<?> jc = Class.forName("com.mysql.cj.jdbc.JdbcConnection");
+                jc.getMethod("resetServerState").invoke(c.unwrap(jc));
+                how = "JdbcConnection.resetServerState";
+            } else {
+                // Connector/J 3.5 sends COM_RESET_CONNECTION only to a server whose version says MariaDB;
+                // against MySQL (and the gateway's 3306) reset() only clears the driver's own state.
+                if (!scalar(c, "SELECT VERSION()").contains("MariaDB"))
+                    throw new NA("MariaDB Connector/J's reset() sends COM_RESET_CONNECTION only to MariaDB servers");
+                Class<?> mc = Class.forName("org.mariadb.jdbc.Connection");
+                mc.getMethod("reset").invoke(c.unwrap(mc));
+                how = "Connection.reset with useResetConnection=true";
+            }
+            return how + " (COM_RESET_CONNECTION): " + assertReset(c, id);
+        }
+    }
+
+    /**
+     * A one-connection HikariCP pool with the driver's prepared-statement
+     * cache: execute a server-side prepared statement, KILL the pooled
+     * connection from another session, then prepare and execute again. The
+     * pool must notice and reconnect, and the statement is prepared afresh.
+     */
+    static String poolReprepare() throws Exception {
+        System.setProperty("com.zaxxer.hikari.aliveBypassWindowMs", "0"); // validate on every borrow
+        HikariConfig hc = new HikariConfig();
+        hc.setJdbcUrl(url(MYSQL_CJ ? "&cachePrepStmts=true" : "&cachePrepStmts=true&prepStmtCacheSize=50"));
+        hc.setUsername(System.getenv("SPRIG_USER"));
+        hc.setPassword(System.getenv("SPRIG_PASSWORD"));
+        hc.setMaximumPoolSize(1);
+        hc.setPoolName("sprig-" + CONNECTOR);
+        String sql = "SELECT ? + 1, CONNECTION_ID()";
+        try (HikariDataSource ds = new HikariDataSource(hc)) {
+            String id1, id2;
+            for (int round = 0; round < 2; round++) {
+                try (Connection c = ds.getConnection(); PreparedStatement p = c.prepareStatement(sql)) {
+                    p.setInt(1, 41);
+                    try (ResultSet r = p.executeQuery()) {
+                        r.next();
+                        expect(r.getInt(1) == 42, "got " + r.getInt(1));
+                    }
+                }
+            }
+            try (Connection c = ds.getConnection(); PreparedStatement p = c.prepareStatement(sql)) {
+                p.setInt(1, 1);
+                try (ResultSet r = p.executeQuery()) {
+                    r.next();
+                    id1 = r.getString(2);
+                }
+            }
+            exec(conn, "KILL " + id1);
+            waitGone(id1);
+            try (Connection c = ds.getConnection(); PreparedStatement p = c.prepareStatement(sql)) {
+                p.setInt(1, 99);
+                try (ResultSet r = p.executeQuery()) {
+                    r.next();
+                    expect(r.getInt(1) == 100, "after the kill: got " + r.getInt(1));
+                    id2 = r.getString(2);
+                }
+            }
+            expect(!id1.equals(id2), "the killed connection " + id1 + " was handed out again");
+            return "HikariCP 6.3.0: connection " + id1 + " killed, re-prepared on " + id2;
+        }
+    }
+
+    /** Waits until a killed session has left the processlist (its socket is closed). */
+    static void waitGone(String id) throws Exception {
+        for (int i = 0; i < 100 && !scalar(conn, "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = " + id).equals("0"); i++) Thread.sleep(50);
+        Thread.sleep(100);
+    }
+
+    static String lockTable(Connection c) throws SQLException {
+        String t = PREFIX + "_lock";
+        exec(c, "DROP TABLE IF EXISTS " + t);
+        exec(c, "CREATE TABLE " + t + " (id INT PRIMARY KEY, v INT) ENGINE = InnoDB");
+        exec(c, "INSERT INTO " + t + " VALUES (1, 0), (2, 0)");
+        return t;
+    }
+
+    static String lockWait() throws Exception {
+        String t = lockTable(conn);
+        try (Connection a = connect(""); Connection b = connect("")) {
+            a.setAutoCommit(false);
+            scalar(a, "SELECT v FROM " + t + " WHERE id = 1 FOR UPDATE");
+            exec(b, "SET SESSION innodb_lock_wait_timeout = 1");
+            b.setAutoCommit(false);
+            scalar(b, "SELECT v FROM " + t + " WHERE id = 2 FOR UPDATE");
+            long t0 = System.nanoTime();
+            String got;
+            try {
+                scalar(b, "SELECT v FROM " + t + " WHERE id = 1 FOR UPDATE");
+                throw new AssertionError("the second session got the lock");
+            } catch (SQLException e) {
+                got = e.getErrorCode() + "/" + e.getSQLState();
+                expect(e.getErrorCode() == 1205, "got " + got + " " + e.getMessage());
+            }
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            expect(ms >= 900 && ms < 10_000, "timed out after " + ms + " ms");
+            // Only the statement is rolled back: the transaction still holds row 2.
+            exec(b, "UPDATE " + t + " SET v = 2 WHERE id = 2");
+            b.commit();
+            a.commit();
+            expect(scalar(conn, "SELECT v FROM " + t + " WHERE id = 2").equals("2"), "the waiting transaction lost its work");
+            exec(conn, "DROP TABLE " + t);
+            return got + " after " + ms + " ms; the transaction survived";
+        }
+    }
+
+    static String lockNowait() throws Exception {
+        String t = lockTable(conn);
+        int want = PERSONA.equals("mysql") ? 3572 : 1205;
+        String got;
+        try (Connection a = connect(""); Connection b = connect("")) {
+            a.setAutoCommit(false);
+            scalar(a, "SELECT v FROM " + t + " WHERE id = 1 FOR UPDATE");
+            b.setAutoCommit(false);
+            try {
+                scalar(b, "SELECT v FROM " + t + " WHERE id = 1 FOR UPDATE NOWAIT");
+                throw new AssertionError("NOWAIT got the lock");
+            } catch (SQLException e) {
+                got = e.getErrorCode() + "/" + e.getSQLState();
+                expect(e.getErrorCode() == want, "NOWAIT: got " + got + " " + e.getMessage() + ", want " + want);
+            }
+            StringBuilder ids = new StringBuilder();
+            try (Statement s = b.createStatement();
+                 ResultSet r = s.executeQuery("SELECT id FROM " + t + " ORDER BY id FOR UPDATE SKIP LOCKED")) {
+                while (r.next()) ids.append(r.getString(1)).append(' ');
+            }
+            expect(ids.toString().equals("2 "), "SKIP LOCKED returned " + ids);
+            b.rollback();
+            a.rollback();
+        }
+        exec(conn, "DROP TABLE " + t);
+        return "NOWAIT " + got + ", SKIP LOCKED returned row 2";
+    }
+
     public static void main(String[] args) {
         Map<String, CheckFn> checks = new LinkedHashMap<>();
         checks.put("connect", Check::connectCheck);
@@ -438,8 +747,17 @@ public final class Check {
         checks.put("multi_packet", Check::multiPacket);
         checks.put("compression", Check::compression);
         checks.put("conn_attrs", Check::connAttrs);
+        checks.put("local_infile", Check::localInfile);
+        checks.put("local_infile_off", Check::localInfileOff);
+        checks.put("call", Check::call);
+        checks.put("change_user", Check::changeUser);
+        checks.put("reset_connection", Check::resetConnection);
+        checks.put("pool_reprepare", Check::poolReprepare);
+        checks.put("lock_wait", Check::lockWait);
+        checks.put("lock_nowait", Check::lockNowait);
         for (var e : checks.entrySet()) {
             String name = e.getKey();
+            if (SKIPPED.contains(name)) continue;
             if (conn == null && !name.equals("connect")) {
                 emit(name, "fail", "no connection", 0);
                 continue;

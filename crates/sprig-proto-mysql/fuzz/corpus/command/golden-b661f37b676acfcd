@@ -1,0 +1,2 @@
+ˆ•
+INSERT INTO bulk_t (id, v) VALUES (?, ?)
