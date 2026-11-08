@@ -73,7 +73,11 @@ impl std::fmt::Debug for MariaSource {
         f.debug_struct("MariaSource")
             .field(
                 "extensions",
-                &self.extensions.iter().map(|e| e.module()).collect::<Vec<_>>(),
+                &self
+                    .extensions
+                    .iter()
+                    .map(|e| e.module())
+                    .collect::<Vec<_>>(),
             )
             .field("supports", &self.supports)
             .field("timeout", &self.timeout)
@@ -144,9 +148,7 @@ impl CatalogSource for MariaSource {
                     let Some(kind) = e.versioned() else {
                         continue;
                     };
-                    let prev_state = prev
-                        .filter(|_| !full)
-                        .and_then(|p| p.ext.raw(e.module()));
+                    let prev_state = prev.filter(|_| !full).and_then(|p| p.ext.raw(e.module()));
                     let since = match (prev_state, prev) {
                         (Some(_), Some(p)) => Some(match kind {
                             VersionKind::Catalog => p.version,

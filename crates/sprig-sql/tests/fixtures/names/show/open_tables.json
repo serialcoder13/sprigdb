@@ -1,0 +1,97 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Database",
+      "org_name": "Database",
+      "org_table": "OPEN_TABLES",
+      "schema": "information_schema",
+      "table": "OPEN_TABLES",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Table",
+      "org_name": "Table",
+      "org_table": "OPEN_TABLES",
+      "schema": "information_schema",
+      "table": "OPEN_TABLES",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 1,
+      "name": "In_use",
+      "org_name": "In_use",
+      "org_table": "OPEN_TABLES",
+      "schema": "information_schema",
+      "table": "OPEN_TABLES",
+      "type": 8
+    },
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 4,
+      "name": "Name_locked",
+      "org_name": "Name_locked",
+      "org_table": "OPEN_TABLES",
+      "schema": "information_schema",
+      "table": "OPEN_TABLES",
+      "type": 8
+    }
+  ],
+  "rows": [
+    [
+      "t9999_d1_g1_s1",
+      "orders",
+      "0",
+      "0"
+    ],
+    [
+      "t9999_d1_g1_s1",
+      "v_orders",
+      "0",
+      "0"
+    ],
+    [
+      "t9999_d1_g1_s1",
+      "__sprig_v",
+      "0",
+      "0"
+    ],
+    [
+      "t9999_d1_g1_s1",
+      "gipk",
+      "0",
+      "0"
+    ],
+    [
+      "t9999_d1_g1_s1",
+      "__sprig_lk_orders__email",
+      "0",
+      "0"
+    ],
+    [
+      "t9999_d1_g1_s1",
+      "customers",
+      "0",
+      "0"
+    ],
+    [
+      "t9999_d1_g1_s1",
+      "parts",
+      "0",
+      "0"
+    ]
+  ],
+  "sql": "SHOW OPEN TABLES FROM `t9999_d1_g1_s1`"
+}

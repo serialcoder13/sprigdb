@@ -14,7 +14,7 @@ use sprig_cluster::profile::FieldChange;
 use sprig_cluster::record::{
     Capacity, ClusterRecord, Declared, NodeSpec, ProvisionerKind, SecretRefs, TopologyKind,
 };
-use sprig_common::ids::DcId;
+use sprig_common::ids::{ClusterId, DcId, TenantId};
 use sprig_meta::Revision;
 use sprig_meta::bootstrap::DcRecord;
 use sprig_provision::PrecheckReport;
@@ -161,4 +161,81 @@ pub struct ErrorBody {
     pub message: String,
     /// The request's id in the logs.
     pub trace_id: String,
+}
+
+// ---- Tenants (chapter 08 step 9, chapter 23 step 16) ----
+
+/// `POST /admin/v1/tenants`: create a tenant, optionally under a parent,
+/// and bootstrap its catalog.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateTenantRequest {
+    /// The name, a lowercase DNS label.
+    pub name: String,
+    /// The parent's name; a root tenant without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The cluster for the catalog; the active cluster with the fewest
+    /// tenants without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<ClusterId>,
+}
+
+/// A tenant as the Admin API shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantView {
+    /// The id.
+    pub tenant_id: TenantId,
+    /// The name.
+    pub name: String,
+    /// The directory state.
+    pub state: String,
+    /// The home DC.
+    pub home_dc: DcId,
+    /// The parent's id; 0 for a root.
+    pub parent_tenant_id: u64,
+    /// The parent's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Ids root first, self included.
+    pub path: String,
+    /// Root 0.
+    pub depth: u32,
+    /// Children.
+    pub child_count: u64,
+    /// The last allocated catalog version.
+    pub catalog_version: u64,
+    /// The last allocated auth version.
+    pub auth_version: u64,
+    /// The catalog version of the last tenant-scope settings change.
+    pub settings_version: u64,
+    /// The cluster holding the catalog, once placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<ClusterId>,
+    /// Ancestors' names, root first (`show` only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestry: Vec<String>,
+    /// When it was created.
+    #[serde(default)]
+    pub created_at: String,
+    /// The directory entry's mod revision.
+    pub mod_revision: Revision,
+}
+
+/// The answer to `POST /admin/v1/tenants`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateTenantResponse {
+    /// `false` when the tenant existed (a re-run continues its bootstrap).
+    pub created: bool,
+    /// The tenant after the call.
+    pub tenant: TenantView,
+    /// Why its catalog went where it did: `requested` or `fewest_tenants`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+}
+
+/// `GET /admin/v1/tenants`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListTenantsResponse {
+    /// Every tenant, by id.
+    pub tenants: Vec<TenantView>,
 }

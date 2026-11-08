@@ -1,0 +1,37 @@
+[
+  {
+    "errno": 1146,
+    "message": "Table 't9999_d1_g1_s1.nope' doesn't exist",
+    "sql": "SELECT * FROM `t9999_d1_g1_s1`.nope"
+  },
+  {
+    "errno": 1054,
+    "message": "Unknown column 't9999_d1_g1_s1.orders.nope' in 'SELECT'",
+    "sql": "SELECT `t9999_d1_g1_s1`.orders.nope FROM `t9999_d1_g1_s1`.orders"
+  },
+  {
+    "errno": 1452,
+    "message": "Cannot add or update a child row: a foreign key constraint fails (`t9999_d1_g1_s1`.`orders`, CONSTRAINT `fk_cust` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`))",
+    "sql": "INSERT INTO `t9999_d1_g1_s1`.orders (id, customer_id) VALUES (1, 42)"
+  },
+  {
+    "errno": 1051,
+    "message": "Unknown table 't9999_d1_g1_s1.nope'",
+    "sql": "DROP TABLE `t9999_d1_g1_s1`.nope"
+  },
+  {
+    "errno": 1146,
+    "message": "Table 't9999_d7_g7_s7.missing' doesn't exist",
+    "sql": "SELECT * FROM `t9999_d7_g7_s7`.missing"
+  },
+  {
+    "errno": 1305,
+    "message": "PROCEDURE t9999_d1_g1_s1.nope does not exist",
+    "sql": "CALL `t9999_d1_g1_s1`.nope()"
+  },
+  {
+    "errno": 1062,
+    "message": "Duplicate entry 'a' for key 'PRIMARY'",
+    "sql": "INSERT INTO `t9999_d1_g1_s1`.__sprig_lk_orders__email VALUES ('a'), ('a')"
+  }
+]

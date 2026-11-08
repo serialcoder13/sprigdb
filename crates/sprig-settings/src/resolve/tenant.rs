@@ -276,7 +276,12 @@ impl TenantSettings {
     /// # Errors
     /// 39081 if the key is unknown; `Internal` if `ctx` names another
     /// tenant.
-    pub fn resolve(&self, etcd: &MemSettings<'_>, key: &str, ctx: &SettingCtx<'_>) -> Result<Resolved> {
+    pub fn resolve(
+        &self,
+        etcd: &MemSettings<'_>,
+        key: &str,
+        ctx: &SettingCtx<'_>,
+    ) -> Result<Resolved> {
         let def = super::def(self.registry, key)?;
         let bound = self.bind(ctx)?;
         let stamp = etcd.stamp();
@@ -473,7 +478,11 @@ impl TenantSettingsBuilder {
                 bytes += ROW_BYTES + entry_bytes(e);
             }
         }
-        bytes += self.ignored.iter().map(|(_, k)| ROW_BYTES + k.len()).sum::<usize>();
+        bytes += self
+            .ignored
+            .iter()
+            .map(|(_, k)| ROW_BYTES + k.len())
+            .sum::<usize>();
         TenantSettings {
             registry: self.registry,
             tenant: self.tenant,
@@ -585,9 +594,6 @@ pub fn clamp_summary(values: &[ClampedValue]) -> Option<String> {
         (0, 0) => None,
         (c, 0) => Some(format!("{c} {} will be clamped", plural(c))),
         (0, i) => Some(format!("{i} {} will be ignored", plural(i))),
-        (c, i) => Some(format!(
-            "{c} {} will be clamped and {i} ignored",
-            plural(c)
-        )),
+        (c, i) => Some(format!("{c} {} will be clamped and {i} ignored", plural(c))),
     }
 }

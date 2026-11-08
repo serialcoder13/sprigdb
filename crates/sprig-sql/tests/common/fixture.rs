@@ -55,7 +55,13 @@ impl Captured {
         let rows: Vec<Value> = self
             .rows
             .iter()
-            .map(|r| Value::Array(r.iter().map(|v| v.as_deref().map_or(Value::Null, s)).collect()))
+            .map(|r| {
+                Value::Array(
+                    r.iter()
+                        .map(|v| v.as_deref().map_or(Value::Null, s))
+                        .collect(),
+                )
+            })
             .collect();
         json!({ "sql": self.sql, "columns": cols, "rows": rows })
     }
@@ -89,10 +95,7 @@ impl Captured {
                     .map(|r| {
                         r.as_array()
                             .map(|cells| {
-                                cells
-                                    .iter()
-                                    .map(|c| (!c.is_null()).then(|| b(c)))
-                                    .collect()
+                                cells.iter().map(|c| (!c.is_null()).then(|| b(c))).collect()
                             })
                             .unwrap_or_default()
                     })
@@ -137,8 +140,10 @@ impl Captured {
 pub fn row_strings(r: &TextRow) -> Vec<String> {
     r.iter()
         .map(|v| {
-            v.as_deref()
-                .map_or_else(|| "NULL".to_owned(), |b| String::from_utf8_lossy(b).into_owned())
+            v.as_deref().map_or_else(
+                || "NULL".to_owned(),
+                |b| String::from_utf8_lossy(b).into_owned(),
+            )
         })
         .collect()
 }

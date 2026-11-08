@@ -304,6 +304,7 @@ impl PassSession {
         let mut st = Stmt::new(sql, info, &prepared);
         st.renames = renames;
         st.nowait = self.persona == Persona::MySql84 && split::has_keyword(&st.sql, "NOWAIT");
+        st.session_status = split::is_session_status(&st.sql);
         let stmt = self.stmts.insert(st);
         metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str())
             .increment(1.0);
@@ -337,6 +338,7 @@ impl PassSession {
         let had_cursor = s.cursor.take().is_some();
         let (sql, info, renames, nowait) =
             (s.sql.clone(), s.info.clone(), s.renames.clone(), s.nowait);
+        let conn_status = s.session_status.then(|| relay::ConnStatus::of(cx.proto));
         let flags = raw.flags;
         let client_bound = params.new_params_bound;
         tracing::trace!(
@@ -371,7 +373,7 @@ impl PassSession {
             fetch: false,
             backend_caps,
             infile: Infile::default(),
-            conn_status: None,
+            conn_status: conn_status.as_ref(),
             renames: &renames,
             mysql_nowait: nowait,
         };

@@ -1,0 +1,100 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "Event",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 356,
+      "name": "sql_mode",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 24,
+      "name": "time_zone",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 848,
+      "name": "Create Event",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 128,
+      "name": "character_set_client",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "collation_connection",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "Database Collation",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "ev_purge",
+      "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
+      "SYSTEM",
+      "CREATE DEFINER=`root`@`%` EVENT `ev_purge` ON SCHEDULE EVERY 1 DAY STARTS '2030-01-01 00:00:00' ON COMPLETION NOT PRESERVE DISABLE DO DELETE FROM `t9999_d1_g1_s1`.orders WHERE created_at < NOW() - INTERVAL 1 YEAR",
+      "utf8mb4",
+      "utf8mb4_uca1400_ai_ci",
+      "utf8mb4_uca1400_ai_ci"
+    ]
+  ],
+  "sql": "SHOW CREATE EVENT ev_purge"
+}

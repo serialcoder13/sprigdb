@@ -1,0 +1,816 @@
+//! Tenant bootstrap and deletion (chapter 08, "Bootstrap, DDL and
+//! migrations", build step 9; chapter 23, "The tenant tree").
+//!
+//! ```text
+//! sprigctl tenant create acme --dc mum1 [--under platform] [--residency ...] [--admin admin]
+//! global controller: validate name, parent and residency; allocate the id; create
+//!   tenant-names/acme and tenants/<id> (state creating, versions 0) in one txn (23)
+//! home DC controller, job tenant_bootstrap (idempotent, progress in sprig.bootstrap):
+//!   pick a cluster (chapter 11, least busy without a hint); create shardmaps/<id>/0;
+//!   CREATE DATABASE t<id>_sprig; run all migrations; insert internal keys;
+//!   copy the ancestry and ancestors' settings (tree_settings reconcile);
+//!   create the admin user (14) with backend grants (29); state creating → active
+//! ```
+//!
+//! [`TenantService`] serves the Admin API's tenant calls and runs the
+//! bootstrap; the [`TenantLifecycle`] loop (`tenant_bootstrap`, DC leader)
+//! finishes what a crash or a lost request left behind: a tenant still
+//! `creating` is bootstrapped again, and one past
+//! `catalog.bootstrap_timeout_minutes` becomes `failed` with an alert
+//! (chapter 08: "bootstrap past `catalog.bootstrap_timeout_minutes`
+//! becomes failed"); a tenant `deleting` is cleaned up. Every step is idempotent:
+//!
+//! 1. **Placement.** The shard map `shardmaps/<id>/0` records the choice,
+//!    written once with a `Missing` guard and the DC leader's token, so two
+//!    runs agree. Interim placement until chapter 11's (M0.6): the
+//!    `--cluster` asked for, else the active cluster of the DC holding the
+//!    fewest catalogs, ties to the lower cluster number. The choice, its
+//!    reason and the counts considered are logged as a `tenant.place`
+//!    decision and kept in `sprig.bootstrap`.
+//! 2. **Catalog.** The migrator creates `t<id>_sprig` and runs every
+//!    module's migrations (`CREATE ... IF NOT EXISTS`, serialized by
+//!    `GET_LOCK`).
+//! 3. **Ancestry.** The `tree_settings` reconcile (`TreeSync`) writes
+//!    `sprig.ancestry`, `sprig.ancestor_versions` and the ancestors' rows,
+//!    in one versioned change (`change()` doesn't check the tenant's state,
+//!    so it works while `creating`).
+//! 4. **Hooks** ([`BootstrapHooks`]): chapter 14's admin user and verifier
+//!    tables and chapter 29's backend accounts and grants belong to other
+//!    milestones; they plug in here.
+//! 5. **Active.** The entry goes `creating` → `active` in a transaction
+//!    guarded by its mod revision.
+//!
+//! Chapter 08 creates no logical database at bootstrap; the first one comes
+//! from the tenant's own `CREATE DATABASE`.
+//!
+//! **Deletion** (chapter 23's `delete_tenant`): only a leaf that is
+//! `active` or `failed`; the entry becomes `deleting` and the parent's
+//! child count drops in one transaction. Cleanup then drops the catalog
+//! schema (refused while the catalog lists live databases), runs the hooks'
+//! `dropping`, removes the shard map, and finally the entry and its name.
+//! The id is never reused.
+//!
+//! Where this differs from the book: chapter 08 runs bootstrap as a job
+//! (`tenant_bootstrap`) through the scheduler; here the Admin API call runs
+//! it inline and the loop of the same name is the crash backstop, so
+//! `sprigctl tenant create` returns once the tenant is active. The
+//! bootstrap deadline is measured from when this leader first saw the
+//! tenant `creating` (the entry's `created_at` is for people only).
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use sprig_catalog::bootstrap::{
+    BootstrapProgress, BootstrapStep, create_catalog, drop_catalog, read_progress, write_progress,
+};
+use sprig_catalog::migrate::MigrateOpts;
+use sprig_catalog::placement::ShardMap;
+use sprig_catalog::settings::BOOTSTRAP_TIMEOUT_MINUTES;
+use sprig_catalog::{CatalogEndpoint, Migrator, Module, SettingsBackend, SettingsTx, Store};
+use sprig_common::ids::{ClusterId, DcId, TenantId};
+use sprig_common::time::Clock;
+use sprig_common::{Result, SprigCode, SprigError};
+use sprig_meta::{Cmp, Consistency, ListOpts, MetaStore, Op, Record, Txn};
+use sprig_settings::{LiveSettings, SettingCtx};
+
+use crate::admin::types::{CreateTenantRequest, CreateTenantResponse, ListTenantsResponse, TenantView};
+use crate::catalogs::ShardMapLocator;
+use crate::monitor::leader_guard;
+use crate::runtime::{LoopCx, LoopTier, MetaEvent, Outcome, Reconciler, WatchSpec};
+use crate::settings::TENANT_MAX_DEPTH;
+use crate::tree::{Directory, DirectoryEntry, NewTenant, StoredEntry, TenantState};
+use crate::tree_settings::{SyncOutcome, TreeSync};
+
+/// Other chapters' parts of bootstrap and deletion.
+#[async_trait::async_trait]
+pub trait BootstrapHooks: Send + Sync + 'static {
+    /// Catalog modules migrated with the core module (chapter 14's
+    /// verifier tables, chapter 29's privileges, ...).
+    fn modules(&self) -> Vec<Module> {
+        Vec::new()
+    }
+
+    /// After the catalog and the ancestry: chapter 14's admin user,
+    /// chapter 29's backend accounts and grants. Must be idempotent.
+    ///
+    /// # Errors
+    /// The hook's error; bootstrap retries.
+    async fn catalog_ready(&self, _tenant: &DirectoryEntry, _catalog: &CatalogEndpoint) -> Result<()> {
+        Ok(())
+    }
+
+    /// Before a deleted tenant's catalog is dropped (`None` if it never
+    /// got one): chapter 29 removes backend accounts. Must be idempotent.
+    ///
+    /// # Errors
+    /// The hook's error; cleanup retries.
+    async fn dropping(&self, _tenant: &DirectoryEntry, _catalog: Option<&CatalogEndpoint>) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// No hooks: what M0.3 has.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoHooks;
+
+impl BootstrapHooks for NoHooks {}
+
+/// The Admin API's tenant calls (`sprig.admin.v1.Tenants`).
+#[async_trait::async_trait]
+pub trait TenantAdmin: Send + Sync {
+    /// Creates a tenant and bootstraps it; re-running for a tenant still
+    /// `creating` continues its bootstrap. `guard` is the DC leader's.
+    ///
+    /// # Errors
+    /// As [`TenantService::create`].
+    async fn create(&self, req: CreateTenantRequest, guard: Vec<Cmp>) -> Result<CreateTenantResponse>;
+    /// Every tenant.
+    ///
+    /// # Errors
+    /// The store's errors.
+    async fn list(&self) -> Result<ListTenantsResponse>;
+    /// One tenant by name, with its ancestry and catalog cluster.
+    ///
+    /// # Errors
+    /// 39072 for an unknown name.
+    async fn show(&self, name: &str) -> Result<TenantView>;
+    /// Deletes a leaf tenant: `deleting`, then cleanup.
+    ///
+    /// # Errors
+    /// As [`TenantService::delete`].
+    async fn delete(&self, name: &str, guard: Vec<Cmp>) -> Result<TenantView>;
+}
+
+/// What a bootstrap run ended with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bootstrapped {
+    /// The entry after the run.
+    pub entry: DirectoryEntry,
+    /// The catalog's cluster.
+    pub cluster: ClusterId,
+    /// Why it went there.
+    pub placement: String,
+}
+
+/// Bootstraps, shows and deletes tenants homed in this DC.
+pub struct TenantService<B: SettingsBackend>
+where
+    B::Tx: SettingsTx,
+{
+    directory: Directory,
+    dc_store: Arc<dyn MetaStore>,
+    dc: DcId,
+    locator: ShardMapLocator,
+    tree: Arc<TreeSync<B>>,
+    hooks: Arc<dyn BootstrapHooks>,
+    migrator: Migrator,
+    clock: Arc<dyn Clock>,
+    live: Option<LiveSettings>,
+}
+
+impl<B: SettingsBackend> std::fmt::Debug for TenantService<B>
+where
+    B::Tx: SettingsTx,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenantService")
+            .field("dc", &self.dc)
+            .finish_non_exhaustive()
+    }
+}
+
+fn placement_unavailable(message: String) -> SprigError {
+    SprigError::new(SprigCode::PlacementUnavailable, message)
+}
+
+impl<B: SettingsBackend> TenantService<B>
+where
+    B::Tx: SettingsTx,
+{
+    /// The service of DC `dc_store`'s tier: catalogs found with `locator`,
+    /// ancestry copied by `tree` (whose directory is used), `hooks` for
+    /// other chapters, `live` for `tenant.max_depth` and the bootstrap
+    /// deadline (defaults without it).
+    ///
+    /// # Errors
+    /// `Internal` if `dc_store` isn't a DC tier or a hook's module is
+    /// invalid.
+    pub fn new(
+        dc_store: Arc<dyn MetaStore>,
+        locator: ShardMapLocator,
+        tree: Arc<TreeSync<B>>,
+        hooks: Arc<dyn BootstrapHooks>,
+        clock: Arc<dyn Clock>,
+        live: Option<LiveSettings>,
+    ) -> Result<Self> {
+        let sprig_meta::Tier::Dc(dc) = dc_store.tier().clone() else {
+            return Err(SprigError::internal("tenant bootstrap needs a DC tier store"));
+        };
+        let migrator = Migrator::new(&hooks.modules())?.with_clock(Arc::clone(&clock));
+        Ok(Self {
+            directory: tree.directory().clone(),
+            dc_store,
+            dc,
+            locator,
+            tree,
+            hooks,
+            migrator,
+            clock,
+            live,
+        })
+    }
+
+    /// The directory.
+    #[must_use]
+    pub fn directory(&self) -> &Directory {
+        &self.directory
+    }
+
+    /// The DC.
+    #[must_use]
+    pub fn dc(&self) -> &DcId {
+        &self.dc
+    }
+
+    fn max_depth(&self) -> u32 {
+        self.live
+            .as_ref()
+            .map_or(TENANT_MAX_DEPTH.default, |l| {
+                l.get(&TENANT_MAX_DEPTH, &SettingCtx::process(&self.dc))
+            })
+    }
+
+    fn bootstrap_timeout(&self) -> Duration {
+        let m = self
+            .live
+            .as_ref()
+            .map_or(BOOTSTRAP_TIMEOUT_MINUTES.default, |l| {
+                l.get(&BOOTSTRAP_TIMEOUT_MINUTES, &SettingCtx::process(&self.dc))
+            });
+        Duration::from_secs(m.saturating_mul(60))
+    }
+
+    /// Creates `req.name` in the directory (chapter 23) and bootstraps it
+    /// here. A tenant of that name still `creating` under the same parent
+    /// is bootstrapped again (a re-run after a crash); one already `active`
+    /// is returned with `created: false`.
+    ///
+    /// # Errors
+    /// 39792 for a bad name; 39360 if the name belongs to another tenant;
+    /// 39072, 39303, 39508 or 39509 for the parent; 39120 if no cluster
+    /// can take the catalog; 39504 off the leader; catalog errors.
+    pub async fn create(&self, req: &CreateTenantRequest, guard: &[Cmp]) -> Result<CreateTenantResponse> {
+        let parent = match &req.parent {
+            Some(p) => Some(self.directory.require(p).await?),
+            None => None,
+        };
+        let parent_id = parent.as_ref().map(|p| p.body().tenant_id);
+        let (entry, created) = if let Some(e) = self.directory.by_name(&req.name).await? {
+            let b = e.body();
+            let same = b.parent() == parent_id && b.home_dc == self.dc;
+            if !same || !matches!(b.state, TenantState::Creating | TenantState::Active) {
+                return Err(SprigError::new(
+                    SprigCode::TenantExists,
+                    format!("a tenant named {:?} exists ({})", req.name, b.state),
+                ));
+            }
+            (e, false)
+        } else {
+            if let Some(c) = &req.cluster
+                && !self.locator.pools().placeable().await?.contains(c)
+            {
+                return Err(placement_unavailable(format!(
+                    "cluster {c} is not an active cluster of dc {}",
+                    self.dc
+                )));
+            }
+            let new = NewTenant {
+                name: req.name.clone(),
+                parent: parent_id,
+                home_dc: self.dc.clone(),
+                placement_hint: req.cluster.clone(),
+            };
+            let e = self
+                .directory
+                .create(&new, self.max_depth(), self.clock.wall())
+                .await?;
+            (e, true)
+        };
+        let done = self.bootstrap(entry.body().tenant_id, guard).await?;
+        let tenant = self.show_id(done.entry.tenant_id).await?;
+        Ok(CreateTenantResponse {
+            created,
+            tenant,
+            placement: Some(done.placement),
+        })
+    }
+
+    /// Runs (or continues) `id`'s bootstrap; see the module docs.
+    ///
+    /// # Errors
+    /// 39072 for a tenant that isn't `creating` or `active` here; 39120 if
+    /// no cluster can take the catalog; 39504 off the leader; catalog
+    /// errors (retryable ones are retried by the loop).
+    pub async fn bootstrap(&self, id: TenantId, guard: &[Cmp]) -> Result<Bootstrapped> {
+        let entry = self
+            .directory
+            .get(id)
+            .await?
+            .ok_or_else(|| SprigError::new(SprigCode::TenantNotReady, format!("no tenant {id}")))?;
+        let b = entry.body().clone();
+        if b.home_dc != self.dc {
+            return Err(SprigError::new(
+                SprigCode::TenantNotReady,
+                format!("tenant {} is homed in {}, not {}", b.name, b.home_dc, self.dc),
+            ));
+        }
+        if !matches!(b.state, TenantState::Creating | TenantState::Active) {
+            return Err(SprigError::new(
+                SprigCode::TenantNotReady,
+                format!("tenant {} is {}", b.name, b.state),
+            ));
+        }
+        let (cluster, placement, considered) = self.place(&b, guard).await?;
+        if b.state == TenantState::Active {
+            return Ok(Bootstrapped {
+                entry: b,
+                cluster,
+                placement,
+            });
+        }
+        let pool = self.locator.pools().writer(&cluster).await?;
+        let store = Store::new(self.locator.schema(id));
+        let opts = MigrateOpts {
+            applied_by: format!("controller:{}", self.dc),
+            ..MigrateOpts::default()
+        };
+        create_catalog(&pool, store.schema(), &self.migrator, &opts).await?;
+        let progress = |step| {
+            write_progress(&pool, &store, step, &cluster, &placement, &considered, self.clock.wall())
+        };
+        progress(BootstrapStep::Migrated).await?;
+        match self.tree.sync_entry(&b).await? {
+            SyncOutcome::Current | SyncOutcome::Copied { .. } => {}
+            SyncOutcome::Behind(x) => {
+                return Err(SprigError::new(
+                    SprigCode::CatalogUnavailable,
+                    format!("ancestor {x}'s catalog is behind its directory; try again"),
+                ));
+            }
+            SyncOutcome::Blocked(why) => {
+                return Err(SprigError::new(SprigCode::TenantNotReady, why));
+            }
+        }
+        progress(BootstrapStep::Ancestry).await?;
+        let ep = CatalogEndpoint {
+            pool: pool.clone(),
+            store: store.clone(),
+        };
+        self.hooks.catalog_ready(&b, &ep).await?;
+        progress(BootstrapStep::Hooks).await?;
+        let after = self
+            .directory
+            .update(id, |e| {
+                if e.state != TenantState::Creating {
+                    return Ok(false);
+                }
+                e.state = TenantState::Active;
+                e.placement_hint = None;
+                Ok(true)
+            })
+            .await?;
+        progress(BootstrapStep::Done).await?;
+        tracing::info!(tenant = %id, name = %b.name, %cluster, placement, "tenant bootstrapped");
+        Ok(Bootstrapped {
+            entry: after.body().clone(),
+            cluster,
+            placement,
+        })
+    }
+
+    /// Step 1: the recorded placement, or a new one written once.
+    async fn place(
+        &self,
+        b: &DirectoryEntry,
+        guard: &[Cmp],
+    ) -> Result<(ClusterId, String, Vec<(ClusterId, u64)>)> {
+        let key = ShardMap::catalog_key(self.dc_store.tier(), b.tenant_id)?;
+        if let Some(c) = self.locator.cluster_of(b.tenant_id).await? {
+            let p = self.recorded_placement(b.tenant_id, &c).await;
+            return Ok((c, p.as_ref().map_or_else(|| "recorded".to_owned(), |p| p.placement.clone()),
+                p.map(|p| p.considered).unwrap_or_default()));
+        }
+        if b.state == TenantState::Active {
+            return Err(SprigError::internal(format!(
+                "active tenant {} has no catalog shard map in {}",
+                b.name, self.dc
+            )));
+        }
+        let placeable = self.locator.pools().placeable().await?;
+        let counts = self.catalogs_per_cluster().await?;
+        let considered: Vec<(ClusterId, u64)> = placeable
+            .iter()
+            .map(|c| (c.clone(), counts.get(c).copied().unwrap_or(0)))
+            .collect();
+        let (cluster, reason) = match &b.placement_hint {
+            Some(h) if placeable.contains(h) => (h.clone(), "requested"),
+            Some(h) => {
+                return Err(placement_unavailable(format!(
+                    "cluster {h} is not an active cluster of dc {}",
+                    self.dc
+                )));
+            }
+            None => {
+                let best = considered
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(i, (_, n))| (*n, *i))
+                    .map(|(_, (c, _))| c.clone())
+                    .ok_or_else(|| {
+                        placement_unavailable(format!(
+                            "dc {} has no active cluster for tenant {}'s catalog",
+                            self.dc, b.name
+                        ))
+                    })?;
+                (best, "fewest_tenants")
+            }
+        };
+        let map = ShardMap::catalog(b.tenant_id, cluster.clone(), b.epoch);
+        let mut when = vec![Cmp::Missing(key.clone())];
+        when.extend_from_slice(guard);
+        let r = self
+            .dc_store
+            .txn(Txn {
+                when,
+                then: vec![Op::Put {
+                    key,
+                    value: Record::new(map).encode()?,
+                    lease: None,
+                }],
+                otherwise: Vec::new(),
+            })
+            .await?;
+        if !r.succeeded {
+            // Another run placed it first, or this controller lost the lead.
+            return match self.locator.cluster_of(b.tenant_id).await? {
+                Some(c) => Ok((c, "recorded".to_owned(), Vec::new())),
+                None => Err(SprigError::new(
+                    SprigCode::NotLeader,
+                    "this controller no longer leads the DC",
+                )),
+            };
+        }
+        tracing::info!(event = "decision", component = "controller", kind = "tenant.place",
+            tenant = %b.tenant_id, name = %b.name, %cluster, reason, considered = ?considered,
+            "catalog placed");
+        Ok((cluster, reason.to_owned(), considered))
+    }
+
+    async fn recorded_placement(&self, id: TenantId, c: &ClusterId) -> Option<BootstrapProgress> {
+        let pool = self.locator.pools().writer(c).await.ok()?;
+        read_progress(&pool, &Store::new(self.locator.schema(id)))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Catalog shard maps per cluster in this DC.
+    async fn catalogs_per_cluster(&self) -> Result<HashMap<ClusterId, u64>> {
+        let prefix = self.dc_store.tier().key("shardmaps/")?;
+        let mut out: HashMap<ClusterId, u64> = HashMap::new();
+        let mut opts = ListOpts::default();
+        loop {
+            let page = self.dc_store.list(&prefix, opts.clone()).await?;
+            for kv in &page.kvs {
+                if !kv.key.as_str().ends_with("/0") {
+                    continue;
+                }
+                if let Ok(m) = Record::<ShardMap>::decode(&kv.value)
+                    && let Some(c) = m.body.catalog_cluster()
+                {
+                    *out.entry(c.clone()).or_default() += 1;
+                }
+            }
+            if !page.more {
+                return Ok(out);
+            }
+            opts.at = Some(page.revision);
+            opts.after = page.kvs.last().map(|kv| kv.key.clone());
+        }
+    }
+
+    /// Marks a bootstrap that ran past its deadline `failed`.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn fail(&self, id: TenantId, why: &str) -> Result<()> {
+        let after = self
+            .directory
+            .update(id, |e| {
+                if e.state != TenantState::Creating {
+                    return Ok(false);
+                }
+                e.state = TenantState::Failed;
+                Ok(true)
+            })
+            .await?;
+        if after.body().state == TenantState::Failed {
+            tracing::error!(alert = "TenantBootstrapFailed", tenant = %id,
+                name = %after.body().name, why, "tenant bootstrap failed");
+        }
+        Ok(())
+    }
+
+    /// Deletes `name`: a leaf tenant that is `active` or `failed` becomes
+    /// `deleting`, then cleanup runs (here, and in the loop until it
+    /// finishes).
+    ///
+    /// # Errors
+    /// 39072 for an unknown tenant, or one that isn't `active` or
+    /// `failed`; 39362 while it has children; the store's errors.
+    pub async fn delete(&self, name: &str, guard: &[Cmp]) -> Result<TenantView> {
+        let e = self.directory.require(name).await?;
+        let id = e.body().tenant_id;
+        if e.body().home_dc != self.dc {
+            return Err(SprigError::new(
+                SprigCode::TenantNotReady,
+                format!("tenant {name} is homed in {}; delete it there", e.body().home_dc),
+            ));
+        }
+        let marked = self.directory.mark_deleting(id).await?;
+        let view = Self::view(&marked, None, Vec::new(), None);
+        if let Err(err) = self.cleanup(id, guard).await {
+            tracing::warn!(tenant = %id, error = %err, "tenant cleanup will be retried by the loop");
+        }
+        Ok(view)
+    }
+
+    /// Cleans up a `deleting` tenant; see the module docs.
+    ///
+    /// # Errors
+    /// 39072 while the catalog lists live databases; the store's and
+    /// catalog's errors.
+    pub async fn cleanup(&self, id: TenantId, guard: &[Cmp]) -> Result<()> {
+        let Some(e) = self.directory.get(id).await? else {
+            return Ok(());
+        };
+        if e.body().state != TenantState::Deleting {
+            return Ok(());
+        }
+        let key = ShardMap::catalog_key(self.dc_store.tier(), id)?;
+        match self.locator.cluster_of(id).await? {
+            Some(c) => {
+                let ep = CatalogEndpoint {
+                    pool: self.locator.pools().writer(&c).await?,
+                    store: Store::new(self.locator.schema(id)),
+                };
+                self.hooks.dropping(e.body(), Some(&ep)).await?;
+                drop_catalog(&ep.pool, &ep.store).await?;
+                let kv = self.dc_store.get(&key, Consistency::Linearizable).await?;
+                if let Some(kv) = kv {
+                    let mut when = vec![Cmp::ModRev(key.clone(), kv.mod_revision)];
+                    when.extend_from_slice(guard);
+                    let r = self
+                        .dc_store
+                        .txn(Txn {
+                            when,
+                            then: vec![Op::Delete(key)],
+                            otherwise: Vec::new(),
+                        })
+                        .await?;
+                    if !r.succeeded {
+                        return Err(SprigError::new(
+                            SprigCode::NotLeader,
+                            "this controller no longer leads the DC",
+                        ));
+                    }
+                }
+            }
+            None => self.hooks.dropping(e.body(), None).await?,
+        }
+        self.directory.remove(&e).await
+    }
+
+    fn view(
+        e: &StoredEntry,
+        parent: Option<String>,
+        ancestry: Vec<String>,
+        cluster: Option<ClusterId>,
+    ) -> TenantView {
+        let b = e.body();
+        TenantView {
+            tenant_id: b.tenant_id,
+            name: b.name.clone(),
+            state: b.state.as_str().to_owned(),
+            home_dc: b.home_dc.clone(),
+            parent_tenant_id: b.parent_tenant_id,
+            parent,
+            path: b.path.clone(),
+            depth: b.depth,
+            child_count: b.child_count,
+            catalog_version: b.catalog_version,
+            auth_version: b.auth_version,
+            settings_version: b.settings_version,
+            cluster,
+            ancestry,
+            created_at: b.created_at.clone(),
+            mod_revision: e.mod_revision,
+        }
+    }
+
+    async fn show_id(&self, id: TenantId) -> Result<TenantView> {
+        let e = self
+            .directory
+            .get(id)
+            .await?
+            .ok_or_else(|| SprigError::new(SprigCode::TenantNotReady, format!("no tenant {id}")))?;
+        let ancestry: Vec<String> = self
+            .directory
+            .ancestry(e.body())
+            .await?
+            .into_iter()
+            .map(|(r, _)| r.name)
+            .collect();
+        let cluster = if e.body().home_dc == self.dc {
+            self.locator.cluster_of(id).await?
+        } else {
+            None
+        };
+        Ok(Self::view(&e, ancestry.last().cloned(), ancestry, cluster))
+    }
+}
+
+#[async_trait::async_trait]
+impl<B: SettingsBackend> TenantAdmin for TenantService<B>
+where
+    B::Tx: SettingsTx,
+{
+    async fn create(&self, req: CreateTenantRequest, guard: Vec<Cmp>) -> Result<CreateTenantResponse> {
+        TenantService::create(self, &req, &guard).await
+    }
+
+    async fn list(&self) -> Result<ListTenantsResponse> {
+        let entries = self.directory.list().await?;
+        let names: BTreeMap<u64, String> = entries
+            .iter()
+            .map(|e| (e.body().tenant_id.0, e.body().name.clone()))
+            .collect();
+        Ok(ListTenantsResponse {
+            tenants: entries
+                .iter()
+                .map(|e| {
+                    let parent = names.get(&e.body().parent_tenant_id).cloned();
+                    Self::view(e, parent, Vec::new(), None)
+                })
+                .collect(),
+        })
+    }
+
+    async fn show(&self, name: &str) -> Result<TenantView> {
+        let e = self.directory.require(name).await?;
+        self.show_id(e.body().tenant_id).await
+    }
+
+    async fn delete(&self, name: &str, guard: Vec<Cmp>) -> Result<TenantView> {
+        TenantService::delete(self, name, &guard).await
+    }
+}
+
+/// The `tenant_bootstrap` loop: finishes or fails `creating` tenants and
+/// cleans up `deleting` ones homed in this DC.
+pub struct TenantLifecycle<B: SettingsBackend>
+where
+    B::Tx: SettingsTx,
+{
+    service: Arc<TenantService<B>>,
+    first_seen: Mutex<HashMap<TenantId, Instant>>,
+}
+
+impl<B: SettingsBackend> std::fmt::Debug for TenantLifecycle<B>
+where
+    B::Tx: SettingsTx,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenantLifecycle")
+            .field("dc", self.service.dc())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<B: SettingsBackend> TenantLifecycle<B>
+where
+    B::Tx: SettingsTx,
+{
+    /// The loop over `service`.
+    #[must_use]
+    pub fn new(service: Arc<TenantService<B>>) -> Self {
+        Self {
+            service,
+            first_seen: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn wants(&self, e: &DirectoryEntry) -> bool {
+        e.home_dc == *self.service.dc()
+            && matches!(e.state, TenantState::Creating | TenantState::Deleting)
+    }
+
+    fn first_seen(&self) -> std::sync::MutexGuard<'_, HashMap<TenantId, Instant>> {
+        self.first_seen.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl<B: SettingsBackend> Reconciler for TenantLifecycle<B>
+where
+    B::Tx: SettingsTx,
+{
+    type Key = TenantId;
+
+    fn name(&self) -> &'static str {
+        "tenant_bootstrap"
+    }
+
+    fn tier(&self) -> LoopTier {
+        LoopTier::DcLeader
+    }
+
+    fn watches(&self) -> Vec<WatchSpec> {
+        vec![WatchSpec::global("tenants/")]
+    }
+
+    fn workers(&self) -> usize {
+        4
+    }
+
+    fn keys_for(&self, ev: &MetaEvent) -> Vec<TenantId> {
+        let Some(kv) = &ev.kv else {
+            return Vec::new();
+        };
+        match StoredEntry::decode(kv) {
+            Ok(e) if self.wants(e.body()) => vec![e.body().tenant_id],
+            _ => Vec::new(),
+        }
+    }
+
+    async fn all_keys(&self, _cx: &LoopCx) -> Result<Vec<TenantId>> {
+        Ok(self
+            .service
+            .directory()
+            .list()
+            .await?
+            .iter()
+            .map(StoredEntry::body)
+            .filter(|e| self.wants(e))
+            .map(|e| e.tenant_id)
+            .collect())
+    }
+
+    async fn reconcile(&self, cx: &LoopCx, key: &TenantId) -> Result<Outcome> {
+        let Some(e) = self.service.directory().get(*key).await? else {
+            self.first_seen().remove(key);
+            return Ok(Outcome::Done);
+        };
+        if !self.wants(e.body()) {
+            self.first_seen().remove(key);
+            return Ok(Outcome::Done);
+        }
+        let guard = leader_guard(cx)?;
+        match e.body().state {
+            TenantState::Creating => {
+                let since = *self.first_seen().entry(*key).or_insert_with(Instant::now);
+                if since.elapsed() > self.service.bootstrap_timeout() {
+                    self.service
+                        .fail(*key, "past catalog.bootstrap_timeout_minutes")
+                        .await?;
+                    self.first_seen().remove(key);
+                    return Ok(Outcome::Done);
+                }
+                match self.service.bootstrap(*key, &guard).await {
+                    Ok(_) => {
+                        self.first_seen().remove(key);
+                        Ok(Outcome::Done)
+                    }
+                    Err(err) if err.code() == Some(SprigCode::PlacementUnavailable) => {
+                        tracing::warn!(tenant = %key, error = %err, "tenant bootstrap waits for a cluster");
+                        Ok(Outcome::Blocked { reason: "no cluster can take the catalog" })
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            TenantState::Deleting => match self.service.cleanup(*key, &guard).await {
+                Ok(()) => Ok(Outcome::Done),
+                Err(err) if err.code() == Some(SprigCode::TenantNotReady) => {
+                    tracing::warn!(tenant = %key, error = %err, "tenant cleanup waits");
+                    Ok(Outcome::Blocked { reason: "the deleted tenant still has databases" })
+                }
+                Err(err) => Err(err),
+            },
+            _ => Ok(Outcome::Done),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

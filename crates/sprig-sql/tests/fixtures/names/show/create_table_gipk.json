@@ -1,0 +1,35 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "Table",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 4096,
+      "name": "Create Table",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "gipk",
+      "CREATE TABLE `gipk` (\n  `my_row_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT INVISIBLE,\n  `v` int(11) DEFAULT NULL,\n  PRIMARY KEY (`my_row_id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci"
+    ]
+  ],
+  "sql": "SHOW CREATE TABLE gipk"
+}

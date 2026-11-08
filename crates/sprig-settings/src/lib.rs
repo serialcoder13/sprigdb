@@ -36,7 +36,9 @@ pub mod scope;
 pub mod value;
 pub mod watch;
 
-pub use etcd::{SettingChange, SettingRecord, SettingsStores, SettingsWriter, Warning};
+pub use etcd::{
+    SettingChange, SettingRecord, SettingsStores, SettingsWriter, Warning, normalize_change,
+};
 #[doc(hidden)]
 pub use linkme;
 pub use registry::{AnySetting, Apply, HardBounds, Registry, Scopes, Setting};

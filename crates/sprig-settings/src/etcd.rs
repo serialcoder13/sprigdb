@@ -533,6 +533,17 @@ impl SettingsWriter {
     }
 }
 
+/// `change` checked against `def`'s type: a value in the key's canonical
+/// form, or bounds whose numbers aren't NaN and whose allowed values fit
+/// the type. The tenant-scope writer (`sprig-catalog::settings`) uses the
+/// same check as [`SettingsWriter::set`].
+///
+/// # Errors
+/// 39084 `ER_SPRIG_SETTING_BAD_VALUE`.
+pub fn normalize_change(def: &dyn AnySetting, change: SettingChange) -> Result<SettingChange> {
+    check_change(def, change)
+}
+
 /// Normalizes a value or checks bounds against the key's type: 39084.
 fn check_change(def: &dyn AnySetting, change: SettingChange) -> Result<SettingChange> {
     let key = def.key();

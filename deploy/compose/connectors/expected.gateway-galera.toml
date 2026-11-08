@@ -26,14 +26,72 @@ last_insert_id = "fail"
 change_user = "fail"
 reset_connection = "fail"
 
+# The same auto-increment step: SQLAlchemy's core check reads back id 1,
+# and the dump checks compare AUTO_INCREMENT values and a row inserted
+# after the restore.
+[all.sqlalchemy-pymysql]
+core = "fail"
+
+[all.sqlalchemy-mysqlclient]
+core = "fail"
+
+[all.mysqldump]
+objects = "fail"
+
+[all.mariadb-dump]
+objects = "fail"
+
 [mysql.hibernate]
 # Hibernate with MySQL Connector/J reads information_schema.KEYWORDS
 # WHERE RESERVED = 1 to resolve its dialect; MariaDB's KEYWORDS has no
 # RESERVED column. The 3306 persona answers that the MySQL way with the
 # core information_schema providers (M0.5; decisions/mysql-persona-gaps.md).
 schema_validate = "fail"
+# MySQLDialect binds JSON values as CAST(? AS json), which MariaDB has no
+# syntax for (1064): the R4 translator's rewrite (chapter 28).
+crud = "fail"
+query = "fail"
+optimistic_lock = "fail"
 
 [mysql.hibernate-mariadb]
 # ddl-auto=validate expects a json column; MariaDB's JSON is LONGTEXT. The
 # 3306 persona reports json for such columns in M0.5 (same decisions file).
 schema_validate = "fail"
+
+[mysql.sqlalchemy-pymysql]
+# JSON columns reflect as LONGTEXT (MariaDB's JSON); the 3306 persona
+# reports json in M0.5 (decisions/mysql-persona-gaps.md, gap 3).
+reflection = "fail"
+
+[mysql.sqlalchemy-mysqlclient]
+# As sqlalchemy-pymysql.
+reflection = "fail"
+
+[mysql.prisma]
+# db pull introspects JSON columns as LONGTEXT (gap 3, M0.5); the steps
+# after it report "an earlier step failed".
+connect = "fail"
+db_pull = "fail"
+generate = "fail"
+query = "fail"
+transaction = "fail"
+
+[mysql.mysqldump]
+# mysqldump 8.4 reads information_schema.COLUMN_STATISTICS and sets
+# terminology_use_previous (gap 7, R4).
+dump = "fail"
+
+[mysql.mariadb-dump]
+# Against MySQL 8.4 the restore rejects values for virtual generated
+# columns (gap 8); behind the gateway the backend is MariaDB, so it works.
+restore = "pass"
+checksum = "pass"
+objects = "pass"
+
+[mysql.sysbench-tpcc]
+# MySQL 8.4 accepts w_ytd under ONLY_FULL_GROUP_BY because it depends on
+# the grouped primary key (functional dependence); MariaDB doesn't detect
+# that and fails with 1055. The 3306 persona's sql_mode comes from MySQL 8.4,
+# so this needs the R4 translator (or a looser persona sql_mode). sysbench
+# runs plaintext only, so only the disabled pass reports it.
+disabled.check = "fail"

@@ -151,8 +151,14 @@ pub struct BackendStmt {
     pub types_sent: bool,
 }
 
-/// The connection's statement cache: SQL text to backend statement, least
-/// recently used first out.
+/// The connection's statement cache: default schema and SQL text to
+/// backend statement, least recently used first out.
+///
+/// The schema is part of the key because MariaDB resolves unqualified
+/// names (and `DATABASE()`) against the default schema current at prepare
+/// time, not at execute time: a statement prepared for a session in schema
+/// `a` must not serve a later session of the same pooled connection in
+/// schema `b`.
 #[derive(Debug, Default)]
 pub struct StmtCache {
     map: HashMap<Vec<u8>, (u64, BackendStmt)>,
@@ -172,19 +178,20 @@ impl StmtCache {
         self.map.is_empty()
     }
 
-    /// The statement for `sql`, marked as used.
-    pub fn get_mut(&mut self, sql: &[u8]) -> Option<&mut BackendStmt> {
+    /// The statement for `key` (schema and SQL text, as `stmt_key` makes
+    /// it), marked as used.
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut BackendStmt> {
         self.tick += 1;
         let tick = self.tick;
-        self.map.get_mut(sql).map(|(t, s)| {
+        self.map.get_mut(key).map(|(t, s)| {
             *t = tick;
             s
         })
     }
 
-    fn insert(&mut self, sql: &[u8], stmt: BackendStmt) {
+    fn insert(&mut self, key: &[u8], stmt: BackendStmt) {
         self.tick += 1;
-        self.map.insert(sql.to_vec(), (self.tick, stmt));
+        self.map.insert(key.to_vec(), (self.tick, stmt));
     }
 
     fn pop_lru(&mut self) -> Option<BackendStmt> {
@@ -195,6 +202,22 @@ impl StmtCache {
             .map(|(k, _)| k.clone())?;
         self.map.remove(&key).map(|(_, s)| s)
     }
+}
+
+/// The statement cache's key: the default schema the statement is
+/// prepared under (none: `0`; else `1`, the name, `0`), then the SQL text.
+fn stmt_key(schema: Option<&str>, sql: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(sql.len() + schema.map_or(1, |s| s.len() + 2));
+    match schema {
+        None => key.push(0),
+        Some(s) => {
+            key.push(1);
+            key.extend_from_slice(s.as_bytes());
+            key.push(0);
+        }
+    }
+    key.extend_from_slice(sql);
+    key
 }
 
 /// One warning, as `SHOW WARNINGS` lists it.
@@ -342,7 +365,8 @@ impl BackendConn {
     /// # Errors
     /// The server's ERR for a bad statement; connection errors.
     pub async fn prepare_cached(&mut self, sql: &[u8]) -> Result<&mut BackendStmt, ClientError> {
-        if self.stmt_cache.get_mut(sql).is_none() {
+        let key = stmt_key(self.applied.schema.as_deref(), sql);
+        if self.stmt_cache.get_mut(&key).is_none() {
             while self.budget.over() {
                 let Some(old) = self.stmt_cache.pop_lru() else {
                     break;
@@ -358,7 +382,7 @@ impl BackendConn {
             } = self.client.prepare(sql).await?;
             self.budget.add(1);
             self.stmt_cache.insert(
-                sql,
+                &key,
                 BackendStmt {
                     id: ok.stmt_id,
                     params: ok.params,
@@ -369,7 +393,7 @@ impl BackendConn {
             );
         }
         self.stmt_cache
-            .get_mut(sql)
+            .get_mut(&key)
             .ok_or_else(|| ClientError::Unexpected("statement cache lost an entry".to_owned()))
     }
 
@@ -459,5 +483,20 @@ impl BackendConn {
         self.client.take_changes();
         self.applied = AppliedState::default();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stmt_key;
+
+    #[test]
+    fn statement_keys_include_the_schema() {
+        let sql = b"SELECT v FROM t";
+        assert_ne!(stmt_key(Some("a"), sql), stmt_key(Some("b"), sql));
+        assert_ne!(stmt_key(None, sql), stmt_key(Some("a"), sql));
+        assert_eq!(stmt_key(Some("a"), sql), stmt_key(Some("a"), sql));
+        // The separator keeps schema and text apart.
+        assert_ne!(stmt_key(Some("ab"), b"c"), stmt_key(Some("a"), b"bc"));
     }
 }

@@ -1,0 +1,127 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Field",
+      "org_name": "COLUMN_NAME",
+      "org_table": "COLUMNS",
+      "schema": "information_schema",
+      "table": "COLUMNS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4113,
+      "length": 786420,
+      "name": "Type",
+      "org_name": "COLUMN_TYPE",
+      "org_table": "COLUMNS",
+      "schema": "information_schema",
+      "table": "COLUMNS",
+      "type": 252
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 12,
+      "name": "Null",
+      "org_name": "IS_NULLABLE",
+      "org_table": "COLUMNS",
+      "schema": "information_schema",
+      "table": "COLUMNS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 12,
+      "name": "Key",
+      "org_name": "COLUMN_KEY",
+      "org_table": "COLUMNS",
+      "schema": "information_schema",
+      "table": "COLUMNS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4112,
+      "length": 786384,
+      "name": "Default",
+      "org_name": "COLUMN_DEFAULT",
+      "org_table": "COLUMNS",
+      "schema": "information_schema",
+      "table": "COLUMNS",
+      "type": 252
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 320,
+      "name": "Extra",
+      "org_name": "EXTRA",
+      "org_table": "COLUMNS",
+      "schema": "information_schema",
+      "table": "COLUMNS",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "id",
+      "int(11)",
+      "NO",
+      "PRI",
+      null,
+      ""
+    ],
+    [
+      "customer_id",
+      "int(11)",
+      "NO",
+      "MUL",
+      null,
+      ""
+    ],
+    [
+      "account_id",
+      "int(11)",
+      "YES",
+      "MUL",
+      null,
+      ""
+    ],
+    [
+      "total",
+      "decimal(10,2)",
+      "YES",
+      "",
+      "0.00",
+      ""
+    ],
+    [
+      "created_at",
+      "datetime",
+      "YES",
+      "",
+      "current_timestamp()",
+      ""
+    ],
+    [
+      "_sprig_p_status",
+      "varchar(20)",
+      "YES",
+      "MUL",
+      null,
+      "INVISIBLE"
+    ]
+  ],
+  "sql": "DESCRIBE orders"
+}

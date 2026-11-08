@@ -2,19 +2,23 @@
 //!
 //! In gateway memory only: an account's `SHA256(SHA256(password))`, filled
 //! after a full authentication succeeded, so later logins take chapter 05's
-//! fast path (one scramble check, no SHA-256 crypt). An entry is bound to
-//! the account's verifiers ([`Account::verifier_key`]): when they change, the
-//! entry no longer matches and the next login takes the full path. Entries
-//! expire after `auth.fast_cache_ttl_hours` (24 by default).
+//! fast path (one scramble check, no SHA-256 crypt). Entries expire after
+//! `auth.fast_cache_ttl_hours` (24 by default).
 //!
-//! Interim (M0.2): keyed by user name and verifier key; chapter 14's
-//! `(tenant, user_id, verifier_id)` key and auth-version invalidation come
-//! with the catalog (M0.3).
+//! Two kinds of entries:
+//! - **Catalog accounts** ([`FastKey`]): `(tenant, user_id, verifier_id)`,
+//!   up to two per account (primary and secondary password). Verifier ids
+//!   are never reused, so a password change makes the old entries
+//!   unreachable at once; they age out or are pruned on the next fill.
+//! - **Interim file accounts** (decision D1): keyed by user name and bound
+//!   to the account's verifiers ([`Account::verifier_key`]); a changed
+//!   verifier misses.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use sprig_common::ids::{TenantId, UserId};
 use sprig_common::time::Clock;
 
 use crate::accounts::Account;
@@ -22,6 +26,24 @@ use crate::verifier::{FastCacheValue, verify_scramble};
 
 /// `auth.fast_cache_ttl_hours`' default, 24 hours.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(24 * 3600);
+
+/// A catalog account's fast-cache key: one verifier of one user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FastKey {
+    /// The tenant.
+    pub tenant: TenantId,
+    /// The user.
+    pub user: UserId,
+    /// `verifiers.verifier_id` of the `caching_sha2_password` verifier the
+    /// password matched.
+    pub verifier: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Catalog(FastKey),
+    File(String),
+}
 
 struct Entry {
     verifier_key: String,
@@ -33,7 +55,7 @@ struct Entry {
 pub struct FastCache {
     clock: Arc<dyn Clock>,
     ttl: Duration,
-    entries: Mutex<HashMap<String, Entry>>,
+    entries: Mutex<HashMap<Key, Entry>>,
 }
 
 impl std::fmt::Debug for FastCache {
@@ -56,46 +78,37 @@ impl FastCache {
         }
     }
 
-    /// The cached value for `account`, if one was filled under its current
-    /// verifiers and hasn't expired.
-    #[must_use]
-    pub fn get(&self, account: &Account) -> Option<FastCacheValue> {
+    fn lookup(&self, key: &Key, verifier_key: &str) -> Option<FastCacheValue> {
         let now = self.clock.now();
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        let hit = match entries.get(&account.user) {
-            Some(e) if e.verifier_key != account.verifier_key() => None,
+        let hit = match entries.get(key) {
+            Some(e) if e.verifier_key != verifier_key => None,
             Some(e) if now.saturating_duration_since(e.filled_at) >= self.ttl => None,
             Some(e) => Some(e.value.clone()),
             None => None,
         };
         if hit.is_none() {
-            entries.remove(&account.user);
+            entries.remove(key);
         }
         drop(entries);
         count(if hit.is_some() { "hit" } else { "miss" });
         hit
     }
 
-    /// Records `password` for `account`. Call only after a full
-    /// authentication with this password succeeded.
-    pub fn fill(&self, account: &Account, password: &[u8]) {
+    fn insert(&self, key: Key, verifier_key: String, password: &[u8]) {
         let entry = Entry {
-            verifier_key: account.verifier_key(),
+            verifier_key,
             value: FastCacheValue::from_password(password),
             filled_at: self.clock.now(),
         };
         let now = entry.filled_at;
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.retain(|_, e| now.saturating_duration_since(e.filled_at) < self.ttl);
-        entries.insert(account.user.clone(), entry);
+        entries.insert(key, entry);
     }
 
-    /// The fast path in one call: whether `client_response` to `nonce`
-    /// matches the cached value. `false` on a miss or a mismatch; either way
-    /// the caller falls through to the full path (chapter 05, step 3).
-    #[must_use]
-    pub fn verify_scramble(&self, account: &Account, nonce: &[u8], client_response: &[u8]) -> bool {
-        let Some(value) = self.get(account) else {
+    fn check(value: Option<FastCacheValue>, nonce: &[u8], client_response: &[u8]) -> bool {
+        let Some(value) = value else {
             return false;
         };
         let ok = verify_scramble(nonce, client_response, &value);
@@ -105,12 +118,69 @@ impl FastCache {
         ok
     }
 
-    /// Drops `user`'s entry.
+    // ---- catalog accounts ----
+
+    /// The cached value for `key`, if filled and not expired.
+    #[must_use]
+    pub fn get_key(&self, key: &FastKey) -> Option<FastCacheValue> {
+        self.lookup(&Key::Catalog(*key), "")
+    }
+
+    /// Records `password` for `key`. Call only after a full authentication
+    /// with this password matched that verifier.
+    pub fn fill_key(&self, key: &FastKey, password: &[u8]) {
+        self.insert(Key::Catalog(*key), String::new(), password);
+    }
+
+    /// The fast path for one catalog verifier: whether `client_response`
+    /// to `nonce` matches the value cached for `key`. `false` on a miss or
+    /// a mismatch.
+    #[must_use]
+    pub fn verify_scramble_key(&self, key: &FastKey, nonce: &[u8], client_response: &[u8]) -> bool {
+        Self::check(self.get_key(key), nonce, client_response)
+    }
+
+    /// Drops every entry of `tenant`'s user `user`.
+    pub fn forget_user(&self, tenant: TenantId, user: UserId) {
+        self.entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|k, _| !matches!(k, Key::Catalog(f) if f.tenant == tenant && f.user == user));
+    }
+
+    // ---- interim file accounts ----
+
+    /// The cached value for `account`, if one was filled under its current
+    /// verifiers and hasn't expired.
+    #[must_use]
+    pub fn get(&self, account: &Account) -> Option<FastCacheValue> {
+        self.lookup(&Key::File(account.user.clone()), &account.verifier_key())
+    }
+
+    /// Records `password` for `account`. Call only after a full
+    /// authentication with this password succeeded.
+    pub fn fill(&self, account: &Account, password: &[u8]) {
+        self.insert(
+            Key::File(account.user.clone()),
+            account.verifier_key(),
+            password,
+        );
+    }
+
+    /// The fast path in one call: whether `client_response` to `nonce`
+    /// matches the cached value. `false` on a miss or a mismatch; either way
+    /// the caller falls through to the full path (chapter 05, step 3).
+    #[must_use]
+    pub fn verify_scramble(&self, account: &Account, nonce: &[u8], client_response: &[u8]) -> bool {
+        Self::check(self.get(account), nonce, client_response)
+    }
+
+    /// Drops `user`'s entry (file accounts).
     pub fn forget(&self, user: &str) {
         self.entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(user);
+            .remove(&Key::File(user.to_owned()));
     }
 
     /// How many entries are held, expired ones included.
@@ -183,5 +253,49 @@ mod tests {
         cache.fill(&new, b"new");
         cache.forget("app");
         assert!(cache.get(&new).is_none());
+    }
+
+    #[test]
+    fn catalog_keys_are_per_verifier() {
+        let cache = FastCache::new(Arc::new(ManualClock::new()), DEFAULT_TTL);
+        let t = TenantId(7);
+        let primary = FastKey {
+            tenant: t,
+            user: UserId(1),
+            verifier: 10,
+        };
+        let secondary = FastKey {
+            verifier: 11,
+            ..primary
+        };
+        let nonce = [3u8; 20];
+        cache.fill_key(&primary, b"new");
+        cache.fill_key(&secondary, b"old");
+        assert!(cache.verify_scramble_key(
+            &primary,
+            &nonce,
+            &caching_sha2_scramble(b"new", &nonce)
+        ));
+        assert!(cache.verify_scramble_key(
+            &secondary,
+            &nonce,
+            &caching_sha2_scramble(b"old", &nonce)
+        ));
+        assert!(!cache.verify_scramble_key(
+            &primary,
+            &nonce,
+            &caching_sha2_scramble(b"old", &nonce)
+        ));
+        // A new verifier id (a password change) misses.
+        assert!(
+            cache
+                .get_key(&FastKey {
+                    verifier: 12,
+                    ..primary
+                })
+                .is_none()
+        );
+        cache.forget_user(t, UserId(1));
+        assert!(cache.is_empty());
     }
 }

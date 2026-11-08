@@ -85,6 +85,11 @@ key! {
     MAX_REBUILDS_PER_CLUSTER: u32 = "recovery.max_rebuilds_per_cluster", 1, Scopes::OPERATIONAL, 1, 64, 25,
     "Concurrent rebuilds or reseeds"
 }
+key! {
+    /// `tenant.max_depth`: the deepest tenant tree (root at depth 0).
+    TENANT_MAX_DEPTH: u32 = "tenant.max_depth", 64, Scopes(0b10_0000), 1, 4096, 23,
+    "Deepest tenant tree (root at depth 0)"
+}
 
 /// A snapshot of the controller's keys, resolved for one DC.
 #[derive(Debug, Clone, PartialEq, Eq)]

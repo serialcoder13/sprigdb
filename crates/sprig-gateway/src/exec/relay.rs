@@ -29,9 +29,11 @@ use sprig_common::{Result, SprigCode, SprigError};
 use sprig_proto_mysql::client::PacketKind;
 use sprig_proto_mysql::codec::Framing;
 use sprig_proto_mysql::packets::{OkPacket, SessionChange};
-use sprig_proto_mysql::resultset::{decode_text_row, encode_text_row};
+use sprig_proto_mysql::resultset::{
+    decode_binary_row, decode_text_row, encode_binary_row, encode_text_row,
+};
 use sprig_proto_mysql::state::ProtoState;
-use sprig_proto_mysql::{Caps, ColumnDef, ErrPacket, StatusFlags};
+use sprig_proto_mysql::{Caps, ColumnDef, ErrPacket, StatusFlags, Value};
 
 use super::split::Renamed;
 use crate::backend::BackendSession;
@@ -98,6 +100,22 @@ impl ConnStatus {
                 ("Compression_level", level),
             ],
         }
+    }
+
+    /// The same for a binary row (`SHOW STATUS` prepared, as Prisma's raw
+    /// queries do), whose column definitions are `defs`.
+    fn rewrite_binary(&self, row: &Bytes, defs: &[Bytes], caps: Caps) -> Option<Bytes> {
+        let cols = decode_defs(defs, caps, &[]).ok()?;
+        let mut vals = decode_binary_row(row, &cols).ok()?;
+        let Some(Value::Bytes(name)) = vals.first() else {
+            return None;
+        };
+        let (_, v) = self
+            .vars
+            .iter()
+            .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))?;
+        *vals.get_mut(1)? = Value::Bytes(Bytes::from(v.clone()));
+        encode_binary_row(&vals, &cols).ok()
     }
 
     /// The row for a status variable, rewritten if it is one of these.
@@ -261,11 +279,14 @@ pub(crate) async fn relay(
                     begin(out, &defs, r, client_caps).await?;
                     begun = true;
                 }
-                match r
+                let rewritten = r
                     .conn_status
                     .filter(|_| want == 2)
-                    .and_then(|cs| cs.rewrite(&p.payload))
-                {
+                    .and_then(|cs| match r.format {
+                        RowFormat::Text => cs.rewrite(&p.payload),
+                        RowFormat::Binary => cs.rewrite_binary(&p.payload, &defs, r.backend_caps),
+                    });
+                match rewritten {
                     Some(row) => out.raw_row(row).await?,
                     None => out.raw_row(p.payload).await?,
                 }
@@ -438,6 +459,26 @@ mod tests {
         );
         let other = encode_text_row([Some(&b"Uptime"[..]), Some(&b"5"[..])]);
         assert!(cs.rewrite(&other).is_none());
+        // Binary rows (a prepared SHOW STATUS).
+        let col = |n: &str| ColumnDef {
+            name: Bytes::copy_from_slice(n.as_bytes()),
+            col_type: sprig_proto_mysql::resultset::column_type::VAR_STRING,
+            charset: 45,
+            ..ColumnDef::default()
+        };
+        let cols = [col("Variable_name"), col("Value")];
+        let defs: Vec<Bytes> = cols.iter().map(|c| c.encode(Caps::PROTOCOL_41)).collect();
+        let row = encode_binary_row(
+            &[
+                Value::Bytes(Bytes::from_static(b"Compression")),
+                Value::Bytes(Bytes::from_static(b"ON")),
+            ],
+            &cols,
+        )
+        .unwrap();
+        let out = cs.rewrite_binary(&row, &defs, Caps::PROTOCOL_41).unwrap();
+        let vals = decode_binary_row(&out, &cols).unwrap();
+        assert_eq!(vals[1], Value::Bytes(Bytes::from_static(b"OFF")));
     }
 
     #[test]

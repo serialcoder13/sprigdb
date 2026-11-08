@@ -1,0 +1,114 @@
+{
+  "columns": [
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 129,
+      "length": 11,
+      "name": "Id",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 8
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 512,
+      "name": "User",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "Host",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 0,
+      "length": 256,
+      "name": "db",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 64,
+      "name": "Command",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 129,
+      "length": 7,
+      "name": "Time",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 3
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 0,
+      "length": 120,
+      "name": "State",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 0,
+      "length": 400,
+      "name": "Info",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 3,
+      "flags": 129,
+      "length": 7,
+      "name": "Progress",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 5
+    }
+  ],
+  "rows": [],
+  "sql": "SHOW PROCESSLIST"
+}

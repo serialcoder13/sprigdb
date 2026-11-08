@@ -3,7 +3,13 @@
 //! chapter's worked example, layering equivalence, memoization, the
 //! incremental builder, clamp reports and watches.
 
-#![allow(clippy::unwrap_used, clippy::too_many_lines)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    clippy::type_complexity,
+    clippy::useless_vec
+)]
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -261,9 +267,23 @@ fn wider_bounds_clamp_lock_and_filter() {
         bounds: None,
     };
     // (key, rows, value, source, clamped, ignored)
-    let table: Vec<(&str, Vec<(At, Entry)>, Value, ScopeKind, bool, Vec<(ScopeKind, Ignored)>)> = vec![
+    let table: Vec<(
+        &str,
+        Vec<(At, Entry)>,
+        Value,
+        ScopeKind,
+        bool,
+        Vec<(ScopeKind, Ignored)>,
+    )> = vec![
         // Hard bounds clamp a stored value that predates them.
-        (n, vec![(At::Object, val(500))], Value::Int(64), ScopeKind::Object, true, vec![]),
+        (
+            n,
+            vec![(At::Object, val(500))],
+            Value::Int(64),
+            ScopeKind::Object,
+            true,
+            vec![],
+        ),
         // A dc minimum raises the tenant's value.
         (
             n,
@@ -308,14 +328,26 @@ fn wider_bounds_clamp_lock_and_filter() {
             Value::Int(7),
             ScopeKind::Dc,
             false,
-            vec![(ScopeKind::Tenant, Ignored::Locked), (ScopeKind::Object, Ignored::Locked)],
+            vec![
+                (ScopeKind::Tenant, Ignored::Locked),
+                (ScopeKind::Object, Ignored::Locked),
+            ],
         ),
         // An allowed list at global ignores a value outside it; the next
         // wider value wins.
         (
             m,
             vec![
-                (At::Global, Entry { value: None, bounds: Some(Bounds::allowed([Value::from("off"), Value::from("recommend")])) }),
+                (
+                    At::Global,
+                    Entry {
+                        value: None,
+                        bounds: Some(Bounds::allowed([
+                            Value::from("off"),
+                            Value::from("recommend"),
+                        ])),
+                    },
+                ),
                 (At::Tenant, s("off")),
                 (At::Object, s("on")),
             ],
@@ -361,7 +393,15 @@ fn keys_resolve_only_at_accepted_scopes() {
         value: Some(Value::Bool(b)),
         bounds: None,
     };
-    let r = resolve(key, &[(At::Global, t(true)), (At::Dc, t(false)), (At::Cluster, t(false))], 4);
+    let r = resolve(
+        key,
+        &[
+            (At::Global, t(true)),
+            (At::Dc, t(false)),
+            (At::Cluster, t(false)),
+        ],
+        4,
+    );
     assert_eq!((r.value, r.source), (Value::Bool(true), ScopeKind::Global));
 }
 
@@ -417,7 +457,8 @@ fn results_are_memoized_per_etcd_snapshot() {
     // An etcd change gets a new stamp: the memo is not served for it.
     let stamp = etcd.stamp();
     let base = SettingCtx::process(&d);
-    etcd.set_bounds(Level::Global, &base, key, Bounds::max(4.0)).unwrap();
+    etcd.set_bounds(Level::Global, &base, key, Bounds::max(4.0))
+        .unwrap();
     assert_ne!(etcd.stamp(), stamp);
     let r = ts.resolve(&etcd, key, &tctx).unwrap();
     assert_eq!((r.value, r.clamped), (Value::Int(4), true));
@@ -425,7 +466,8 @@ fn results_are_memoized_per_etcd_snapshot() {
     assert_eq!(ts.memoized(), 3);
     // The memo stays bounded.
     for o in 0..(super::memo::CAP as u64 + 10) {
-        ts.resolve(&etcd, key, &tctx.with_object(ObjectId(o))).unwrap();
+        ts.resolve(&etcd, key, &tctx.with_object(ObjectId(o)))
+            .unwrap();
     }
     assert!(ts.memoized() <= super::memo::CAP);
 }
@@ -436,7 +478,14 @@ fn the_builder_shares_untouched_scopes_and_applies_resets() {
     let mut b = TenantSettings::builder(registry(), ACME, 3);
     b.put(TenantScope::Tenant, key, val(9));
     b.put(TenantScope::Database(DB), key, val(8));
-    b.put(TenantScope::Object(ORDERS), MODE.key, Entry { value: Some(Value::from("on")), bounds: None });
+    b.put(
+        TenantScope::Object(ORDERS),
+        MODE.key,
+        Entry {
+            value: Some(Value::from("on")),
+            bounds: None,
+        },
+    );
     b.put(TenantScope::Tenant, "future.key", val(1));
     b.put(TenantScope::Tenant, "sprig.catalog_version", val(3));
     let v3 = b.build();
@@ -504,7 +553,8 @@ fn clamped_values_are_reported_with_warnings() {
 
     // Locking at dc ignores every tenant value: three warnings.
     let base = SettingCtx::process(&d);
-    etcd.set_bounds(Level::Dc, &base, n, Bounds::locked()).unwrap();
+    etcd.set_bounds(Level::Dc, &base, n, Bounds::locked())
+        .unwrap();
     let out = ts.clamped(&etcd, &d, &db_of);
     assert_eq!(out.len(), 3);
     assert!(out.iter().all(|c| c.why == Some(Ignored::Locked)));
@@ -615,7 +665,13 @@ proptest! {
 
 // ---- Settings over live mirrors ----
 
-async fn put_record(store: &Arc<MemStore>, stores: &SettingsStores, scope: &Scope, key: &str, e: Entry) {
+async fn put_record(
+    store: &Arc<MemStore>,
+    stores: &SettingsStores,
+    scope: &Scope,
+    key: &str,
+    e: Entry,
+) {
     let rec = Record::new(SettingRecord {
         value: e.value,
         bounds: e.bounds,
@@ -679,15 +735,32 @@ async fn settings_resolve_watch_and_follow_tenant_snapshots() {
     // quiet; the resolved watch doesn't wake.
     let v2 = {
         let mut e = v1.edit(2);
-        e.put(TenantScope::Tenant, MODE.key, Entry { value: Some(Value::from("on")), bounds: None });
+        e.put(
+            TenantScope::Tenant,
+            MODE.key,
+            Entry {
+                value: Some(Value::from("on")),
+                bounds: None,
+            },
+        );
         Arc::new(e.build())
     };
     settings.tenant_loaded(&v2, &v2.changed_keys(&v1));
     assert!(!any.has_changed().unwrap());
 
     // An etcd bound tightening the key: both wake, the value is clamped.
-    put_record(&global, &stores, &Scope::Global, key, bounds(Bounds::max(4.0))).await;
-    let r = tokio::time::timeout(Duration::from_secs(5), w.changed()).await.unwrap().unwrap();
+    put_record(
+        &global,
+        &stores,
+        &Scope::Global,
+        key,
+        bounds(Bounds::max(4.0)),
+    )
+    .await;
+    let r = tokio::time::timeout(Duration::from_secs(5), w.changed())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!((r.value.clone(), r.clamped), (Value::Int(4), true));
     assert!(any.has_changed().unwrap());
     any.borrow_and_update();
@@ -701,7 +774,10 @@ async fn settings_resolve_watch_and_follow_tenant_snapshots() {
     };
     settings.tenant_loaded(&v3, &v3.changed_keys(&v2));
     assert!(any.has_changed().unwrap());
-    let r = tokio::time::timeout(Duration::from_secs(5), w.changed()).await.unwrap().unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(5), w.changed())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!((r.value, r.clamped), (Value::Int(2), false));
 
     // An older snapshot arriving late doesn't move the watch back.

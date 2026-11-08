@@ -711,6 +711,15 @@ impl BackendSession {
         }
     }
 
+    /// Whether the session runs with `autocommit = 0`, so its next
+    /// statement opens a transaction.
+    fn implicit_transactions(&self) -> bool {
+        self.vars
+            .vars
+            .get("autocommit")
+            .is_some_and(|v| v.eq_ignore_ascii_case("OFF") || v == "0")
+    }
+
     /// The causal target of a read.
     fn causal_target(&self, settings: &BackendSettings) -> GtidSet {
         let mut t = self.causal.clone();
@@ -802,7 +811,13 @@ impl BackendSession {
         deadline: Instant,
     ) -> Result<(BackendLease, RouteKind, Option<GtidSet>, u8)> {
         let shard = self.opts.shard;
-        let plain = info.class == StmtClass::Read && self.pins.is_empty() && !force_writer;
+        // With autocommit = 0 every statement, a plain read too, opens a
+        // transaction (chapter 06, "Pins"): it belongs on the writer, where
+        // the rest of that transaction runs.
+        let plain = info.class == StmtClass::Read
+            && self.pins.is_empty()
+            && !force_writer
+            && !self.implicit_transactions();
         let mut last_err: Option<String> = None;
         loop {
             let writer = self.backends.writers.writer(view, shard);

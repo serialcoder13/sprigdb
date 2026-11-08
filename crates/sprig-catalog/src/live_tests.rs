@@ -47,13 +47,13 @@ use crate::version::*;
 
 const MARIADB_ENV: &str = "SPRIG_TEST_MARIADB_SINGLE";
 
-fn maria_url() -> Option<String> {
+pub(crate) fn maria_url() -> Option<String> {
     std::env::var(MARIADB_ENV)
         .ok()
         .filter(|v| !v.trim().is_empty())
 }
 
-fn unique_schema() -> String {
+pub(crate) fn unique_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,7 +67,7 @@ fn unique_schema() -> String {
 }
 
 /// A tenant id no other case uses.
-fn unique_tenant() -> TenantId {
+pub(crate) fn unique_tenant() -> TenantId {
     static N: AtomicU64 = AtomicU64::new(0);
     TenantId(
         9_000_000_000 + u64::from(std::process::id()) * 1000 + N.fetch_add(1, Ordering::Relaxed),
@@ -76,7 +76,7 @@ fn unique_tenant() -> TenantId {
 
 /// Runs `body` with a pool and a fresh schema name; drops the schema
 /// afterwards, also on failure. Skips without `SPRIG_TEST_MARIADB_SINGLE`.
-async fn with_schema<F, Fut>(case: &str, body: F)
+pub(crate) async fn with_schema<F, Fut>(case: &str, body: F)
 where
     F: FnOnce(Pool, String) -> Fut,
     Fut: Future<Output = ()>,
@@ -101,7 +101,7 @@ where
     }
 }
 
-async fn migrate(pool: &Pool, schema: &str) {
+pub(crate) async fn migrate(pool: &Pool, schema: &str) {
     let mut conn = pool.get_conn().await.unwrap();
     Migrator::new(&[])
         .unwrap()
@@ -112,7 +112,7 @@ async fn migrate(pool: &Pool, schema: &str) {
 
 /// Runs `body` with the global tier (see [`global_store`]) and deletes
 /// its keys afterwards, also when the body fails.
-async fn with_global<F, Fut>(body: F)
+pub(crate) async fn with_global<F, Fut>(body: F)
 where
     F: FnOnce(Arc<dyn MetaStore>) -> Fut,
     Fut: Future<Output = ()>,
@@ -126,7 +126,7 @@ where
 }
 
 /// The global tier: etcd when configured (a private tier), else memory.
-async fn global_store() -> Arc<dyn MetaStore> {
+pub(crate) async fn global_store() -> Arc<dyn MetaStore> {
     match std::env::var(ETCD_ENV) {
         Ok(url) if !url.trim().is_empty() => Arc::new(
             EtcdStore::connect(unique_tier(), &EtcdConfig::new(vec![url]))
@@ -137,7 +137,7 @@ async fn global_store() -> Arc<dyn MetaStore> {
     }
 }
 
-async fn seed_directory(store: &dyn MetaStore, tenant: TenantId) {
+pub(crate) async fn seed_directory(store: &dyn MetaStore, tenant: TenantId) {
     let key = store.tier().key(&format!("tenants/{tenant}")).unwrap();
     let body = json!({"v": 1, "tenant_id": tenant.0, "name": "live", "state": "active",
                       "catalog_version": 0, "auth_version": 0});
@@ -164,7 +164,7 @@ async fn directory_versions(store: &dyn MetaStore, tenant: TenantId) -> Director
     serde_json::from_slice(&kv.value).unwrap()
 }
 
-fn catalog_for(
+pub(crate) fn catalog_for(
     pool: &Pool,
     schema: &str,
     tenant: TenantId,

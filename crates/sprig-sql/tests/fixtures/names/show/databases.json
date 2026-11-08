@@ -1,0 +1,22 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Database (information\\_schema)",
+      "org_name": "SCHEMA_NAME",
+      "org_table": "SCHEMATA",
+      "schema": "information_schema",
+      "table": "SCHEMATA",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "information_schema"
+    ]
+  ],
+  "sql": "SHOW DATABASES LIKE 'information\\_schema'"
+}

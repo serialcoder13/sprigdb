@@ -60,6 +60,8 @@ pub(crate) struct Stmt {
     pub renames: Vec<super::split::Renamed>,
     /// The text has `NOWAIT` (see `Relay::mysql_nowait`).
     pub nowait: bool,
+    /// The text is `SHOW [SESSION] STATUS` (see `Relay::conn_status`).
+    pub session_status: bool,
 }
 
 impl Stmt {
@@ -76,6 +78,7 @@ impl Stmt {
             cursor: None,
             renames: Vec::new(),
             nowait: false,
+            session_status: false,
         }
     }
 

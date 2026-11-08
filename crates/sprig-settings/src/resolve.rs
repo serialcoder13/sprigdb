@@ -32,9 +32,7 @@ mod tenant;
 mod tests;
 
 pub use live::{OwnedCtx, ResolvedWatch, Settings, TenantNotify};
-pub use tenant::{
-    ClampedValue, TenantScope, TenantSettings, TenantSettingsBuilder, clamp_summary,
-};
+pub use tenant::{ClampedValue, TenantScope, TenantSettings, TenantSettingsBuilder, clamp_summary};
 
 /// Stamps of [`MemSettings`] contents: every store and every change to one
 /// gets a new stamp, so a memoized result can name exactly the rows it was
@@ -255,7 +253,9 @@ impl<'r> MemSettings<'r> {
     /// 39081 if the key is unknown.
     pub fn resolve(&self, key: &str, ctx: &SettingCtx<'_>) -> Result<Resolved> {
         let def = self.def(key)?;
-        Ok(walk(def, ctx, |scope| self.rows.get(&(scope.clone(), def.key()))))
+        Ok(walk(def, ctx, |scope| {
+            self.rows.get(&(scope.clone(), def.key()))
+        }))
     }
 
     /// The typed value of `setting` in `ctx`, or its default if resolution

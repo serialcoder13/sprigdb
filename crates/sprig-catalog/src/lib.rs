@@ -22,17 +22,50 @@
 //!   [`change`](version::Versioner::change), the protocol that commits a
 //!   versioned change, with failpoints for crash tests (step 3).
 //!
-//! Not yet: the gateway cache (step 4), [`CatalogExtension`] loading,
-//! setting writes (step 7), bootstrap (step 9), the DDL write path (step 10),
-//! the reconciler (step 11) and upgrade orchestration (step 12).
+//! - [`cache`]: the gateway cache (step 4): immutable [`TenantCatalog`]
+//!   snapshots, incremental loads, invalidation from the directory's
+//!   version keys, single-flight loads, read-your-own-DDL freshness,
+//!   bounded memory with LRU eviction, and [`CatalogExtension`]s through
+//!   which other chapters' modules load their state into snapshots.
 //!
-//! [`CatalogExtension`]: https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/08-catalog.md#interfaces
+//! Six-scope setting resolution over a snapshot (step 5) is in
+//! `sprig-settings` ([`sprig_settings::Settings`]); each snapshot carries
+//! its tenant's rows as a [`sprig_settings::TenantSettings`].
+//!
+//! - [`ancestry`]: the catalog side of step 6: `sprig.ancestry`,
+//!   `sprig.ancestor_versions` and the read-only copies of every
+//!   ancestor's tenant-scope rows, replaced in one versioned change (the
+//!   `tree_settings` loop that drives it is in `sprig-controller`);
+//! - [`settings`]: setting writes at tenant, database and object scope
+//!   (step 7): registry, scope, `operator_only`, privilege hook, type,
+//!   bounds of every wider scope (etcd scopes and ancestors' copies
+//!   included), locks and allowed lists, clamp warnings and decisions;
+//! - [`bootstrap`] and [`placement`]: the catalog side of tenant bootstrap
+//!   (step 9): the schema and its migrations, `sprig.bootstrap` progress,
+//!   and the catalog's shard map `shardmaps/<tenant>/0`;
+//! - [`rows`]: the settings-row access the three share, over MariaDB and
+//!   the in-memory catalog.
+//!
+//! Not yet: the DDL write path (step 10), the reconciler (step 11),
+//! upgrade orchestration (step 12), and ancestry modes other than `copy`
+//! (step 18).
 
+pub mod ancestry;
+pub mod bootstrap;
+pub mod cache;
 pub mod migrate;
+pub mod placement;
+pub mod rows;
+pub mod settings;
 mod sql;
 pub mod store;
 pub mod version;
 
+pub use cache::{
+    CacheConfig, CatalogExtension, CatalogSource, DirectoryFeed, DirectoryWatch, ExtState,
+    ExtensionStates, Freshness, MariaSource, Node, SnapshotTx, TenantCache, TenantCatalog,
+    TenantPin, TenantRef,
+};
 pub use migrate::{FormatState, Migration, Migrator, Module, ModuleFormat, Phase};
 pub use store::{
     CatalogEndpoint, CatalogLocator, Counter, DatabaseRow, DbState, Namespace, ObjectFlags,
@@ -40,9 +73,15 @@ pub use store::{
     StaticLocator, Store, Versions,
 };
 pub use version::{
-    CatalogStore, CatalogTx, Change, ChangeOpts, DirectoryAllocator, DirectoryVersions,
+    CatalogStore, CatalogTx, Change, ChangeOpts, DirectoryAllocator, DirectoryVersions, Locked,
     MariaBackend, MariaCatalog, MariaOpts, MariaTx, Step, VersionAllocator, VersionBackend,
     VersionKind, Versioner,
+};
+pub use ancestry::{AncestorRows, AncestryReport, AncestryState};
+pub use rows::{SettingsBackend, SettingsTx, TenantScopeRows};
+pub use settings::{
+    AllowAll, DecisionSink, EtcdView, FixedEtcd, LogDecisions, Principal, Privilege, SetOutcome,
+    SetRequest, SettingAuthorizer, SettingDecision, Target, TenantSettingsWriter,
 };
 
 #[cfg(test)]

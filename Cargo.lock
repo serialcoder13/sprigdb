@@ -1947,13 +1947,22 @@ name = "sprig-auth"
 version = "0.0.1"
 dependencies = [
  "arc-swap",
+ "async-trait",
+ "bytes",
+ "futures",
  "getrandom 0.3.4",
  "metrics",
+ "mysql_async",
  "serde",
+ "serde_json",
  "sha1",
  "sha2",
+ "sprig-catalog",
  "sprig-common",
+ "sprig-meta",
+ "sprig-proto-mysql",
  "sprig-provision",
+ "sprig-settings",
  "subtle",
  "tokio",
  "toml",
@@ -2045,8 +2054,10 @@ dependencies = [
  "axum",
  "futures",
  "metrics",
+ "mysql_async",
  "serde",
  "serde_json",
+ "sprig-catalog",
  "sprig-cluster",
  "sprig-common",
  "sprig-meta",
@@ -2249,11 +2260,14 @@ version = "0.0.1"
 name = "sprig-sql"
 version = "0.0.1"
 dependencies = [
+ "bytes",
  "proptest",
+ "serde_json",
  "sprig-common",
  "sprig-proto-mysql",
  "sqlparser",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

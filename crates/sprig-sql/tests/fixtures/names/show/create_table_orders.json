@@ -1,0 +1,35 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "Table",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 4096,
+      "name": "Create Table",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "orders",
+      "CREATE TABLE `orders` (\n  `id` int(11) NOT NULL,\n  `customer_id` int(11) NOT NULL,\n  `account_id` int(11) DEFAULT NULL,\n  `total` decimal(10,2) DEFAULT 0.00,\n  `created_at` datetime DEFAULT current_timestamp(),\n  `_sprig_p_status` varchar(20) DEFAULT NULL INVISIBLE,\n  PRIMARY KEY (`id`),\n  KEY `sprig_auto_3fa91c0e` (`customer_id`,`created_at`),\n  KEY `idx_status` (`_sprig_p_status`),\n  KEY `idx_mixed` (`account_id`,`_sprig_p_status`),\n  CONSTRAINT `fk_acct` FOREIGN KEY (`account_id`) REFERENCES `t9999_d2_g2_s2`.`accounts` (`id`),\n  CONSTRAINT `fk_cust` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`),\n  CONSTRAINT `chk_total` CHECK (`total` >= 0),\n  CONSTRAINT `chk_status` CHECK (`_sprig_p_status` <> '')\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci"
+    ]
+  ],
+  "sql": "SHOW CREATE TABLE orders"
+}

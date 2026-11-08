@@ -3,6 +3,9 @@
 
 #![allow(dead_code, unreachable_pub)]
 
+pub mod fixture;
+pub mod leaks;
+
 use sprig_common::ids::TenantId;
 use sprig_proto_mysql::packets::Persona;
 use sprig_sql::lex::LexOptions;

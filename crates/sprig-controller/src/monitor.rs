@@ -212,6 +212,18 @@ impl ClusterMonitor {
         st.driver.as_ref().and_then(|(d, ..)| d.report())
     }
 
+    /// The node the topology driver last chose as `id`'s writer in this
+    /// term (`None` before its first pass, or with no writer).
+    pub async fn writer_node(&self, id: &ClusterId) -> Option<sprig_common::ids::NodeId> {
+        let cell = self.states().get(id).cloned()?;
+        let st = cell.lock().await;
+        let (d, ..) = st.driver.as_ref()?;
+        d.dyn_driver()
+            .writer(sprig_common::ids::ShardId(0))
+            .ok()
+            .map(|e| e.node)
+    }
+
     /// Takes over a cluster a registration just published: its deep probes
     /// count, so the first pass is a light one.
     pub async fn adopt(&self, stored: &StoredCluster, probes: Vec<NodeProbe>) {

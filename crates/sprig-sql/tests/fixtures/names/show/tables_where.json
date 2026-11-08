@@ -1,0 +1,37 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 292,
+      "name": "Tables_in_t9999_d1_g1_s1",
+      "org_name": "TABLE_NAME",
+      "org_table": "TABLE_NAMES",
+      "schema": "information_schema",
+      "table": "TABLE_NAMES",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "__sprig_lk_orders__email"
+    ],
+    [
+      "__sprig_v"
+    ],
+    [
+      "customers"
+    ],
+    [
+      "orders"
+    ],
+    [
+      "parts"
+    ],
+    [
+      "v_orders"
+    ]
+  ],
+  "sql": "SHOW TABLES FROM `t9999_d1_g1_s1` WHERE `Tables_in_t9999_d1_g1_s1` LIKE '%s%'"
+}

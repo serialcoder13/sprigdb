@@ -1,0 +1,48 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 28,
+      "name": "Level",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 161,
+      "length": 4,
+      "name": "Code",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 3
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 2048,
+      "name": "Message",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "Note",
+      "1051",
+      "Unknown table 't9999_d1_g1_s1.nope'"
+    ]
+  ],
+  "sql": "SHOW WARNINGS"
+}

@@ -717,12 +717,19 @@ mod tests {
         // Replayed by value, so a session's own setting survives pooling
         // without pinning.
         assert_eq!(var_kind("innodb_snapshot_isolation"), Some(VarKind::Bool));
-        assert_eq!(sysvar_literal("innodb_snapshot_isolation", "ON").as_deref(), Some("ON"));
+        assert_eq!(
+            sysvar_literal("innodb_snapshot_isolation", "ON").as_deref(),
+            Some("ON")
+        );
         let mut base = Baseline::default();
-        base.vars.insert("innodb_snapshot_isolation".into(), "ON".into());
-        let (prefix, _) = sync_prefix(&AppliedState::default(), &base, &m, &StmtInfo::write(), 0).unwrap();
+        base.vars
+            .insert("innodb_snapshot_isolation".into(), "ON".into());
+        let (prefix, _) =
+            sync_prefix(&AppliedState::default(), &base, &m, &StmtInfo::write(), 0).unwrap();
         assert!(
-            prefix.iter().any(|p| p.contains("innodb_snapshot_isolation = OFF")),
+            prefix
+                .iter()
+                .any(|p| p.contains("innodb_snapshot_isolation = OFF")),
             "{prefix:?}"
         );
         assert_eq!(d.vars["collation_connection"], "utf8mb4_general_ci");

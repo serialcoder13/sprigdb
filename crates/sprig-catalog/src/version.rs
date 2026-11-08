@@ -525,41 +525,30 @@ impl<B: VersionBackend> Versioner<B> {
         kind: VersionKind,
         opts: ChangeOpts,
     ) -> Result<Change<B>> {
+        self.lock(tenant, kind).await?.allocate(opts).await
+    }
+
+    /// The first half of [`change`](Self::change): locks the version row
+    /// and allocates nothing yet. A caller that must check rows before
+    /// committing to a change (a setting write checking bounds) reads them
+    /// through [`Locked::tx`], then either [`Locked::allocate`]s or
+    /// [`Locked::release`]s, so a refused change leaves no gap.
+    ///
+    /// # Errors
+    /// As [`VersionBackend::begin_locked`].
+    pub async fn lock(&self, tenant: TenantId, kind: VersionKind) -> Result<Locked<B>> {
         let (tx, previous) = self.backend.begin_locked(tenant, kind).await?;
         if let Err(e) = self.fail(tenant, kind, Step::Locked) {
             drop(tx);
             return Err(e);
         }
-        let version = match self
-            .allocator
-            .allocate(tenant, kind, previous, opts.tenant_settings)
-            .await
-        {
-            Ok(v) if v > previous => v,
-            Ok(v) => {
-                let _ = self.backend.rollback(tx).await;
-                return Err(SprigError::internal(format!(
-                    "allocated {} version {v} not above the committed {previous}",
-                    kind.label()
-                )));
-            }
-            Err(e) => {
-                let _ = self.backend.rollback(tx).await;
-                return Err(e);
-            }
-        };
-        if let Err(e) = self.fail(tenant, kind, Step::Allocated) {
-            drop(tx);
-            return Err(e);
-        }
-        Ok(Change {
+        Ok(Locked {
             tx,
             backend: Arc::clone(&self.backend),
             allocator: Arc::clone(&self.allocator),
             failpoint: self.failpoint.clone(),
             tenant,
             kind,
-            version,
             previous,
         })
     }
@@ -600,6 +589,109 @@ impl<B: VersionBackend> Versioner<B> {
         tracing::info!(%tenant, kind = kind.label(), from = committed, to = dir, "closing a version gap");
         self.backend.commit(tx, kind, dir).await?;
         Ok(dir)
+    }
+}
+
+/// A transaction holding a version row, with no version allocated yet
+/// ([`Versioner::lock`]).
+#[must_use = "a locked version row must be allocated or released"]
+pub struct Locked<B: VersionBackend> {
+    tx: B::Tx,
+    backend: Arc<B>,
+    allocator: Arc<dyn VersionAllocator>,
+    failpoint: Option<Failpoint>,
+    tenant: TenantId,
+    kind: VersionKind,
+    previous: u64,
+}
+
+impl<B: VersionBackend> std::fmt::Debug for Locked<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Locked")
+            .field("tenant", &self.tenant)
+            .field("kind", &self.kind)
+            .field("previous", &self.previous)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<B: VersionBackend> Locked<B> {
+    /// The committed version.
+    #[must_use]
+    pub fn previous(&self) -> u64 {
+        self.previous
+    }
+
+    /// The tenant.
+    #[must_use]
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// The open transaction, to read rows in (they can't change while the
+    /// row is locked by this transaction, as every versioned change takes
+    /// the same lock).
+    pub fn tx(&mut self) -> &mut B::Tx {
+        &mut self.tx
+    }
+
+    /// Allocates the next version in the global tier: the change proper.
+    ///
+    /// # Errors
+    /// As [`VersionAllocator::allocate`]; the transaction is rolled back
+    /// on any error.
+    pub async fn allocate(self, opts: ChangeOpts) -> Result<Change<B>> {
+        let Locked {
+            tx,
+            backend,
+            allocator,
+            failpoint,
+            tenant,
+            kind,
+            previous,
+        } = self;
+        let version = match allocator
+            .allocate(tenant, kind, previous, opts.tenant_settings)
+            .await
+        {
+            Ok(v) if v > previous => v,
+            Ok(v) => {
+                let _ = backend.rollback(tx).await;
+                return Err(SprigError::internal(format!(
+                    "allocated {} version {v} not above the committed {previous}",
+                    kind.label()
+                )));
+            }
+            Err(e) => {
+                let _ = backend.rollback(tx).await;
+                return Err(e);
+            }
+        };
+        if let Err(e) = failpoint
+            .as_ref()
+            .map_or(Ok(()), |f| f(tenant, kind, Step::Allocated))
+        {
+            drop(tx);
+            return Err(e);
+        }
+        Ok(Change {
+            tx,
+            backend,
+            allocator,
+            failpoint,
+            tenant,
+            kind,
+            version,
+            previous,
+        })
+    }
+
+    /// Rolls back without allocating: no version, no gap.
+    ///
+    /// # Errors
+    /// The backend's error.
+    pub async fn release(self) -> Result<()> {
+        self.backend.rollback(self.tx).await
     }
 }
 
@@ -765,6 +857,12 @@ impl MariaBackend {
     #[must_use]
     pub fn locator(&self) -> &Arc<dyn CatalogLocator> {
         &self.locator
+    }
+
+    /// The timeouts.
+    #[must_use]
+    pub fn opts(&self) -> MariaOpts {
+        self.opts
     }
 }
 

@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sprig_common::ids::{DbId, DcId, ObjectId, TenantId};
 use sprig_settings::{
     ClampedValue, MemSettings, Registry, SettingCtx, TenantScope, TenantSettings,
@@ -33,7 +33,9 @@ use sprig_settings::{
 
 use super::cow::CowMap;
 use super::ext::{ExtState, ExtensionStates};
-use crate::store::{DatabaseRow, DbState, Namespace, ObjectRow, ObjectState, SettingScope, Snapshot};
+use crate::store::{
+    DatabaseRow, DbState, Namespace, ObjectRow, ObjectState, SettingScope, Snapshot,
+};
 
 /// The internal key holding the ancestry (chapter 08, "Internal keys").
 pub const ANCESTRY_KEY: &str = "sprig.ancestry";
@@ -42,7 +44,7 @@ pub const ANCESTRY_KEY: &str = "sprig.ancestry";
 const ENTRY_BYTES: usize = 96;
 
 /// An ancestor tenant, as `sprig.ancestry` lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantRef {
     /// The ancestor's id.
     pub id: TenantId,
@@ -114,7 +116,7 @@ type NameMap = CowMap<Arc<str>, ObjectId>;
 /// A snapshot's objects, by id and by `(database, namespace, name key)`.
 #[derive(Clone, Debug, Default)]
 pub struct ObjectIndex {
-    by_id: CowMap<ObjectId, Arc<ObjectRow>>,
+    pub(crate) by_id: CowMap<ObjectId, Arc<ObjectRow>>,
     by_name: Arc<HashMap<(DbId, Namespace), NameMap>>,
 }
 
@@ -127,7 +129,12 @@ impl ObjectIndex {
 
     /// The object named `name_key` in `db` and `namespace`.
     #[must_use]
-    pub fn by_name(&self, db: DbId, namespace: Namespace, name_key: &str) -> Option<&Arc<ObjectRow>> {
+    pub fn by_name(
+        &self,
+        db: DbId,
+        namespace: Namespace,
+        name_key: &str,
+    ) -> Option<&Arc<ObjectRow>> {
         let id = self.by_name.get(&(db, namespace))?.get(name_key)?;
         self.get(*id)
     }
@@ -324,7 +331,12 @@ impl TenantCatalog {
 
     /// The object named `name_key` in database `db` and `namespace`.
     #[must_use]
-    pub fn object(&self, db: DbId, namespace: Namespace, name_key: &str) -> Option<&Arc<ObjectRow>> {
+    pub fn object(
+        &self,
+        db: DbId,
+        namespace: Namespace,
+        name_key: &str,
+    ) -> Option<&Arc<ObjectRow>> {
         self.objects.by_name(db, namespace, name_key)
     }
 
@@ -354,7 +366,10 @@ impl TenantCatalog {
     }
 
     fn absorb(&self, loaded: Loaded, full: bool) -> Self {
-        let Loaded { snapshot: snap, ext } = loaded;
+        let Loaded {
+            snapshot: snap,
+            ext,
+        } = loaded;
         let mut dbs = self.databases.clone();
         let mut objs = self.objects.clone();
         let mut bytes = self.core_bytes;
@@ -452,7 +467,7 @@ impl TenantCatalog {
     }
 }
 
-fn parse_ancestry(tenant: TenantId, v: Option<&serde_json::Value>) -> Arc<[TenantRef]> {
+pub(crate) fn parse_ancestry(tenant: TenantId, v: Option<&serde_json::Value>) -> Arc<[TenantRef]> {
     let Some(v) = v else {
         return Arc::from(Vec::new());
     };

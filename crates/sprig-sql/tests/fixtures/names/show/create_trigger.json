@@ -1,0 +1,100 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 768,
+      "name": "Trigger",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 356,
+      "name": "sql_mode",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 0,
+      "length": 4096,
+      "name": "SQL Original Statement",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 128,
+      "name": "character_set_client",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "collation_connection",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "Database Collation",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 2,
+      "flags": 128,
+      "length": 22,
+      "name": "Created",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 12
+    }
+  ],
+  "rows": [
+    [
+      "trg_orders",
+      "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
+      "CREATE DEFINER=`root`@`%` TRIGGER t9999_d1_g1_s1.trg_orders BEFORE INSERT ON t9999_d1_g1_s1.orders FOR EACH ROW SET NEW.total = IFNULL(NEW.total, (SELECT COUNT(*) FROM `t9999_d2_g2_s2`.accounts))",
+      "utf8mb4",
+      "utf8mb4_uca1400_ai_ci",
+      "utf8mb4_uca1400_ai_ci",
+      "2026-11-08 06:12:53.32"
+    ]
+  ],
+  "sql": "SHOW CREATE TRIGGER trg_orders"
+}

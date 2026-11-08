@@ -7,23 +7,49 @@
 //!   position, span editing (build step 2) and the substitutions for
 //!   `DATABASE()`, account functions and query attributes (build step 3).
 //!
-//! Not here yet: the `SHOW` family (step 4), `information_schema` inline
-//! views (step 5), `performance_schema`, `sys` and `mysql` (step 6),
-//! column-definition and message mapping (step 7), hiding beyond the
-//! reserved-name checks the rewrite makes (step 8) and `DEFINER` (step 9).
+//! - [`show`]: the `SHOW` family (build step 4): classification, the
+//!   local answers (`SHOW DATABASES`, `SHOW PROCESSLIST`, routines from
+//!   their original text).
+//! - [`infoschema`]: `information_schema` inline views, pushdown, the
+//!   column registry, `SCHEMATA` and `PROCESSLIST` (build step 5).
+//! - [`output`]: column-definition and message mapping (build step 7).
+//! - [`hide`]: what a session may see, the `SHOW CREATE TABLE` line
+//!   filter and `CREATE TABLE ... LIKE` (build step 8).
+//! - [`result`]: the [`ResultMapper`] a forwarded statement's result goes
+//!   through.
+//! - [`plan`](mod@plan): the whole flow for a client's text, one
+//!   [`StmtPlan`] per statement.
+//!
+//! Not here yet: `performance_schema`, `sys` and `mysql` (step 6),
+//! `DEFINER` mapping beyond output (step 9), the `SPRIG_` views (step 11).
 
+pub mod hide;
+pub mod infoschema;
 pub mod map;
+pub mod output;
+pub mod plan;
+pub mod result;
 pub mod rewrite;
+pub mod show;
 
+pub use hide::{Visibility, create_like_sql, filter_create_table};
+pub use infoschema::{ColumnRegistry, InfoSchemaCtx, TableClass, rewrite_information_schema};
 pub use map::{LogicalDb, MemoryNameMap, NameMap, Purpose, SchemaSet};
+pub use output::{
+    AccountResolver, OutputCtx, map_bytes, map_column_def, map_message, map_text,
+    physical_name_leaks,
+};
+pub use plan::{Action, Plan, PlanCtx, StmtPlan, plan};
+pub use result::{LocalAnswer, ResultMapper, TextRow};
 pub use rewrite::{
     AccountInfo, Edit, EditKind, Engine, RewriteCtx, Rewritten, StatementInfo, StmtKind, SystemRef,
     SystemSchema, UseTarget, rewrite, unrewrite,
 };
+pub use show::{ProcessRow, RoutineSource, SessionSource, ShowInfo, ShowKind, routine_answer};
 
 use std::fmt;
 
-use sprig_common::SprigError;
+use sprig_common::{SprigCode, SprigError};
 
 /// What kind of object a name denotes, for error messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -106,6 +132,17 @@ pub enum NameError {
     /// rewriter does not handle. Never forwarded unrewritten.
     #[error("name rewrite unsupported: {0}")]
     Unsupported(String),
+    /// A standard error the gateway raises in MariaDB's words: 1227 for
+    /// refused `SHOW`s, 1142 for server-wide `information_schema` tables.
+    #[error("{message}")]
+    Refused {
+        /// The MySQL error number.
+        errno: u16,
+        /// The SQLSTATE.
+        sqlstate: [u8; 5],
+        /// The message.
+        message: String,
+    },
 }
 
 fn missing_message(kind: ObjectKind, db: Option<&str>, name: &str) -> String {
@@ -146,6 +183,7 @@ impl NameError {
             NameError::UnknownColumn(_) => 1054,
             NameError::Reserved(_) => 39050,
             NameError::Unsupported(_) => 39051,
+            NameError::Refused { errno, .. } => *errno,
         }
     }
 
@@ -165,6 +203,7 @@ impl NameError {
             },
             NameError::UnknownColumn(_) => *b"42S22",
             NameError::Unsupported(_) => *b"HY000",
+            NameError::Refused { sqlstate, .. } => *sqlstate,
         }
     }
 
@@ -175,15 +214,21 @@ impl NameError {
         matches!(self, NameError::UnknownDatabase(_))
     }
 
-    /// The error as a [`SprigError`].
-    ///
-    /// 39050 and 39051 are built as standard errors with their numbers and
-    /// SQLSTATEs until `sprig_common::SprigCode` gains `ReservedName` and
-    /// `NameRewriteUnsupported` (Appendix E).
+    /// The error as a [`SprigError`]: 39050 and 39051 as
+    /// [`SprigCode::ReservedName`] and [`SprigCode::NameRewriteUnsupported`],
+    /// the rest as standard errors with their numbers and SQLSTATEs.
     #[must_use]
     pub fn into_sprig(self) -> SprigError {
-        let (errno, state) = (self.errno(), self.sqlstate());
-        SprigError::standard(errno, state, self.to_string())
+        match self {
+            NameError::Reserved(_) => SprigError::new(SprigCode::ReservedName, self.to_string()),
+            NameError::Unsupported(_) => {
+                SprigError::new(SprigCode::NameRewriteUnsupported, self.to_string())
+            }
+            _ => {
+                let (errno, state) = (self.errno(), self.sqlstate());
+                SprigError::standard(errno, state, self.to_string())
+            }
+        }
     }
 }
 
@@ -218,7 +263,18 @@ mod tests {
         assert_eq!(e.to_string(), "PROCEDURE billing.__sprig_p does not exist");
         assert_eq!(NameError::Reserved("t1_x".into()).errno(), 39050);
         let s = NameError::Unsupported("x".into()).into_sprig();
+        assert_eq!(s.code(), Some(SprigCode::NameRewriteUnsupported));
         assert_eq!(s.protocol().mysql_errno, 39051);
         assert_eq!(&s.protocol().sqlstate, b"HY000");
+        let s = NameError::Reserved("t1_x".into()).into_sprig();
+        assert_eq!(s.code(), Some(SprigCode::ReservedName));
+        assert_eq!(s.protocol().mysql_errno, 39050);
+        let e = NameError::Refused {
+            errno: 1142,
+            sqlstate: *b"42000",
+            message: "denied".into(),
+        };
+        assert_eq!((e.errno(), &e.sqlstate()), (1142, b"42000"));
+        assert_eq!(e.into_sprig().protocol().mysql_errno, 1142);
     }
 }

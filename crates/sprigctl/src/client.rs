@@ -104,6 +104,14 @@ impl AdminClient {
         self.call(Method::POST, path, Some(bytes)).await
     }
 
+    /// `DELETE path`.
+    ///
+    /// # Errors
+    /// The API's error, or a transport failure.
+    pub(crate) async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, CallError> {
+        self.call(Method::DELETE, path, None).await
+    }
+
     async fn call<T: DeserializeOwned>(
         &self,
         method: Method,

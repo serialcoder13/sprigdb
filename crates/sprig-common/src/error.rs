@@ -86,6 +86,8 @@ pub struct ProtocolError {
 const SQLSTATE_GENERAL: [u8; 5] = *b"HY000";
 const SQLSTATE_RETRY: [u8; 5] = *b"40001";
 const SQLSTATE_CONNECTION: [u8; 5] = *b"08S01";
+/// Syntax error or access rule violation (chapter 07 uses it for reserved names).
+const SQLSTATE_SYNTAX_ACCESS: [u8; 5] = *b"42000";
 
 macro_rules! sprig_codes {
     ($(
@@ -168,7 +170,7 @@ sprig_codes! {
     BackendLost = 39034, "ER_SPRIG_BACKEND_LOST", "SprigBackendLost", SQLSTATE_CONNECTION, false;
     /// A statement creates or names a reserved name: `__sprig_` objects,
     /// `_sprig_` columns, `t<digits>_` or system databases (chapter 07).
-    ReservedName = 39050, "ER_SPRIG_RESERVED_NAME", "SprigReservedName", SQLSTATE_GENERAL, false;
+    ReservedName = 39050, "ER_SPRIG_RESERVED_NAME", "SprigReservedName", SQLSTATE_SYNTAX_ACCESS, false;
     /// A statement holds a name position the rewriter can't map safely
     /// (chapter 07).
     NameRewriteUnsupported = 39051, "ER_SPRIG_NAME_REWRITE_UNSUPPORTED", "SprigNameRewriteUnsupported", SQLSTATE_GENERAL, false;
@@ -226,6 +228,22 @@ sprig_codes! {
     /// an unknown checksum algorithm, an encrypted binlog file or an
     /// authentication plugin it lacks (chapter 10). Not yet in Appendix E.
     BinlogUnsupported = 39114, "ER_SPRIG_BINLOG_UNSUPPORTED", "SprigBinlogUnsupported", SQLSTATE_GENERAL, false;
+    /// No cluster can take the placement (chapter 11; tenant bootstrap's
+    /// interim placement in chapter 08).
+    PlacementUnavailable = 39120, "ER_SPRIG_PLACEMENT_UNAVAILABLE", "SprigPlacementUnavailable", SQLSTATE_GENERAL, true;
+    /// Logins can't be decided now: the tenant's credentials can't be
+    /// loaded (catalog or directory unreachable), or hashing is saturated
+    /// (chapter 14).
+    AuthUnavailable = 39301, "ER_SPRIG_AUTH_UNAVAILABLE", "SprigAuthUnavailable", SQLSTATE_CONNECTION, true;
+    /// The tenant, or a tenant above it in the tree, is suspended; logins
+    /// are refused (chapter 14).
+    TenantSuspended = 39303, "ER_SPRIG_TENANT_SUSPENDED", "SprigTenantSuspended", SQLSTATE_GENERAL, false;
+    /// The tenant name is taken (chapter 29; the `tenant-names/` guard of
+    /// chapter 23).
+    TenantExists = 39360, "ER_SPRIG_TENANT_EXISTS", "SprigTenantExists", SQLSTATE_GENERAL, false;
+    /// A tenant with children can't be dropped (chapter 29; chapter 23's
+    /// delete guard).
+    TenantHasChildren = 39362, "ER_SPRIG_TENANT_HAS_CHILDREN", "SprigTenantHasChildren", SQLSTATE_GENERAL, false;
     /// The control plane's store is unreachable (chapter 23).
     MetaUnavailable = 39500, "ER_SPRIG_META_UNAVAILABLE", "SprigMetaUnavailable", SQLSTATE_CONNECTION, true;
     /// This controller no longer leads (or never did): its session was lost
@@ -234,6 +252,10 @@ sprig_codes! {
     NotLeader = 39504, "ER_SPRIG_NOT_LEADER", "SprigNotLeader", SQLSTATE_GENERAL, false;
     /// The data center isn't registered (chapter 24).
     UnknownDc = 39503, "ER_SPRIG_UNKNOWN_DC", "SprigUnknownDc", SQLSTATE_GENERAL, false;
+    /// A tenant would be deeper than `tenant.max_depth` (chapter 23).
+    TenantDepthExceeded = 39508, "ER_SPRIG_TENANT_DEPTH_EXCEEDED", "SprigTenantDepthExceeded", SQLSTATE_GENERAL, false;
+    /// A tree operation on a subtree with an open move (chapter 23).
+    TenantTreeBusy = 39509, "ER_SPRIG_TENANT_TREE_BUSY", "SprigTenantTreeBusy", SQLSTATE_GENERAL, true;
     /// The provisioner doesn't support the operation (chapter 27).
     ProvisionerUnsupported = 39510, "ER_SPRIG_PROVISIONER_UNSUPPORTED", "SprigProvisionerUnsupported", SQLSTATE_GENERAL, false;
     /// An external cluster failed its registration prechecks; the message
@@ -355,8 +377,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::BackendUnavailable
         | SprigCode::BackendPoolTimeout
         | SprigCode::BackendLost
-        | SprigCode::CatalogUnavailable => (Code::Unavailable, 503),
-        SprigCode::CatalogConflict => (Code::Aborted, 409),
+        | SprigCode::CatalogUnavailable
+        | SprigCode::AuthUnavailable => (Code::Unavailable, 503),
+        SprigCode::CatalogConflict | SprigCode::TenantTreeBusy => (Code::Aborted, 409),
         SprigCode::CatalogFormatTooNew => (Code::FailedPrecondition, 500),
         SprigCode::BinlogCorrupt => (Code::DataLoss, 500),
         SprigCode::BackendProtocol => (Code::Internal, 502),
@@ -364,10 +387,13 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
             (Code::Aborted, 409)
         }
         SprigCode::ClusterNotFound | SprigCode::UnknownDc => (Code::NotFound, 404),
-        SprigCode::ClusterExists => (Code::AlreadyExists, 409),
-        SprigCode::ClusterStateInvalid | SprigCode::TenantNotReady => {
-            (Code::FailedPrecondition, 409)
-        }
+        SprigCode::ClusterExists | SprigCode::TenantExists => (Code::AlreadyExists, 409),
+        SprigCode::ClusterStateInvalid
+        | SprigCode::TenantNotReady
+        | SprigCode::TenantHasChildren
+        | SprigCode::TenantDepthExceeded => (Code::FailedPrecondition, 409),
+        SprigCode::TenantSuspended => (Code::PermissionDenied, 403),
+        SprigCode::PlacementUnavailable => (Code::ResourceExhausted, 503),
         SprigCode::AdminUnauthenticated => (Code::Unauthenticated, 401),
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
     };

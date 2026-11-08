@@ -45,6 +45,11 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
         )
         .route("/admin/v1/dcs", get(list_dcs).post(register_dc))
         .route("/admin/v1/dcs/{dc}", get(get_dc))
+        .route("/admin/v1/tenants", get(list_tenants).post(create_tenant))
+        .route(
+            "/admin/v1/tenants/{name}",
+            get(get_tenant).delete(delete_tenant),
+        )
         .fallback(not_routed)
         .with_state(app)
 }
@@ -268,6 +273,46 @@ async fn get_dc(
     let r = async {
         authorize(&app, &headers)?;
         app.svc.get_dc(&dc).await
+    };
+    respond(r.await)
+}
+
+async fn list_tenants(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.list_tenants().await
+    };
+    respond(r.await)
+}
+
+async fn create_tenant(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.create_tenant(parse_required(&body)?).await
+    };
+    respond(r.await)
+}
+
+async fn get_tenant(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.get_tenant(&name).await
+    };
+    respond(r.await)
+}
+
+async fn delete_tenant(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.delete_tenant(&name).await
     };
     respond(r.await)
 }

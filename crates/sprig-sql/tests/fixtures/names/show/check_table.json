@@ -1,0 +1,67 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 0,
+      "length": 512,
+      "name": "Table",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 0,
+      "length": 40,
+      "name": "Op",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 0,
+      "length": 40,
+      "name": "Msg_type",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 0,
+      "length": 1572864,
+      "name": "Msg_text",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 250
+    }
+  ],
+  "rows": [
+    [
+      "t9999_d1_g1_s1.orders",
+      "check",
+      "status",
+      "OK"
+    ],
+    [
+      "t9999_d2_g2_s2.accounts",
+      "check",
+      "status",
+      "OK"
+    ]
+  ],
+  "sql": "CHECK TABLE orders, `t9999_d2_g2_s2`.accounts"
+}

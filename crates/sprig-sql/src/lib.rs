@@ -5,7 +5,7 @@
 //! (Name virtualization) and [chapter 28](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/28-translator.md)
 //! (Translator) of the SprigDB low-level design.
 //!
-//! Implemented so far (chapter 07 build steps 1 to 3):
+//! Implemented so far (chapter 07 build steps 1 to 5, 7 and 8):
 //!
 //! - [`lex`]: the persona-aware lexer, with executable comments
 //!   ([`lex::versioned`]), `ANSI_QUOTES` and `NO_BACKSLASH_ESCAPES`;
@@ -13,7 +13,12 @@
 //!   [`names::NameMap`];
 //! - [`names::rewrite`](mod@names::rewrite): the statement rewrite over every name position,
 //!   by span editing, with the `DATABASE()`, account-function and
-//!   query-attribute substitutions.
+//!   query-attribute substitutions;
+//! - [`names::show`], [`names::infoschema`], [`names::output`],
+//!   [`names::hide`], [`names::result`] and [`names::plan`](mod@names::plan):
+//!   the `SHOW` family, `information_schema` inline views, names in
+//!   results and messages, hiding of internal objects, and the per-statement
+//!   plan the gateway follows.
 
 pub mod lex;
 pub mod names;

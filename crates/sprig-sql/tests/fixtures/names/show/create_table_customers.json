@@ -1,0 +1,35 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "Table",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 4096,
+      "name": "Create Table",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "customers",
+      "CREATE TABLE `customers` (\n  `id` int(11) NOT NULL AUTO_INCREMENT,\n  `name` varchar(100) NOT NULL,\n  `email` varchar(200) DEFAULT NULL,\n  `_sprig_rk` bigint(20) DEFAULT NULL INVISIBLE,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `email` (`email`),\n  KEY `idx_rk` (`_sprig_rk`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci COMMENT='people'"
+    ]
+  ],
+  "sql": "SHOW CREATE TABLE customers"
+}

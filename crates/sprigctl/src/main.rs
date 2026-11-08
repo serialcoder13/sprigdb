@@ -7,7 +7,11 @@
 //! Implemented, over the Admin API (chapter 37), never etcd:
 //! - `sprigctl dc register|list|show` (chapter 23 step 7);
 //! - `sprigctl cluster register|list|show|probe|drain` (chapter 09 step 9,
-//!   chapter 27 step 1).
+//!   chapter 27 step 1);
+//! - `sprigctl tenant create|list|show|delete` (chapter 08 step 9, chapter
+//!   23 step 16): `create <name> [--under <parent>] [--cluster <id>]`
+//!   bootstraps the tenant's catalog and returns once it is active;
+//!   `delete` removes a leaf tenant (it asks for the name unless `--yes`).
 //!
 //! Every other command group parses and prints "not implemented yet",
 //! exiting with status 1.
@@ -27,8 +31,9 @@ use std::process::ExitCode;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde::Serialize;
 use sprig_controller::admin::types::{
-    ClusterView, GetDcResponse, ListClustersResponse, ListDcsResponse, ProbeClusterRequest,
-    ProbeClusterResponse, RegisterClusterResponse, RegisterDcRequest, RegisterDcResponse,
+    ClusterView, CreateTenantRequest, CreateTenantResponse, GetDcResponse, ListClustersResponse,
+    ListDcsResponse, ListTenantsResponse, ProbeClusterRequest, ProbeClusterResponse,
+    RegisterClusterResponse, RegisterDcRequest, RegisterDcResponse, TenantView,
 };
 use sprig_controller::dc;
 
@@ -38,13 +43,6 @@ use crate::cluster::RegisterFlags;
 /// Command groups not implemented yet, and their subcommands (writing
 /// guide, 5.10).
 const GROUPS: &[(&str, &str, &[&str])] = &[
-    (
-        "tenant",
-        "Tenants",
-        &[
-            "create", "list", "show", "move", "pin", "unpin", "failover", "settings",
-        ],
-    ),
     ("shard", "Shards", &["list", "split", "merge", "move"]),
     (
         "index",
@@ -80,6 +78,60 @@ const GROUPS: &[(&str, &str, &[&str])] = &[
         &["mongodb", "mysql"],
     ),
 ];
+
+/// `sprigctl tenant` subcommands not implemented yet.
+const TENANT_LATER: &[&str] = &["move", "pin", "unpin", "failover", "settings"];
+
+/// `sprigctl tenant`.
+fn tenant_group() -> Command {
+    let name = || {
+        Arg::new("name")
+            .required(true)
+            .help("Tenant name, a lowercase DNS label")
+    };
+    let mut g = Command::new("tenant")
+        .about("Tenants")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("create")
+                .about("Create a tenant and bootstrap its catalog (returns once active)")
+                .arg(name())
+                .arg(
+                    Arg::new("under")
+                        .long("under")
+                        .help("The parent tenant; a root tenant without it"),
+                )
+                .arg(
+                    Arg::new("cluster")
+                        .long("cluster")
+                        .help("The cluster for the catalog, such as mum1-c7 (default: the active cluster with the fewest tenants)"),
+                ),
+        )
+        .subcommand(Command::new("list").about("List tenants"))
+        .subcommand(
+            Command::new("show")
+                .about("Show a tenant: state, ancestry, catalog cluster and versions")
+                .arg(name()),
+        )
+        .subcommand(
+            Command::new("delete")
+                .about("Delete a leaf tenant and drop its catalog")
+                .arg(name()),
+        );
+    for &sub in TENANT_LATER {
+        g = g.subcommand(
+            Command::new(sub).arg(
+                Arg::new("args")
+                    .num_args(0..)
+                    .trailing_var_arg(true)
+                    .allow_hyphen_values(true)
+                    .help("Arguments (not parsed yet)"),
+            ),
+        );
+    }
+    g
+}
 
 /// `sprigctl dc`.
 fn dc_group() -> Command {
@@ -253,7 +305,8 @@ fn cli() -> Command {
                 .help("Don't ask for confirmation"),
         )
         .subcommand(dc_group())
-        .subcommand(cluster_group());
+        .subcommand(cluster_group())
+        .subcommand(tenant_group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -303,7 +356,12 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
-    if group != "dc" && group != "cluster" {
+    let implemented = match group {
+        "dc" | "cluster" => true,
+        "tenant" => !TENANT_LATER.contains(&name.as_str()),
+        _ => false,
+    };
+    if !implemented {
         eprintln!("sprigctl {group} {name}: not implemented yet");
         return ExitCode::FAILURE;
     }
@@ -319,10 +377,10 @@ fn main() -> ExitCode {
     };
     let r = runtime.block_on(async {
         let client = client(&matches)?;
-        if group == "dc" {
-            run_dc(&client, &matches, sub).await
-        } else {
-            run_cluster(&client, &matches, sub).await
+        match group {
+            "dc" => run_dc(&client, &matches, sub).await,
+            "tenant" => run_tenant(&client, &matches, sub).await,
+            _ => run_cluster(&client, &matches, sub).await,
         }
     });
     match r {
@@ -461,7 +519,7 @@ fn register_flags(m: &ArgMatches, sub: &ArgMatches) -> Result<RegisterFlags, Fai
     })
 }
 
-/// Asks for the cluster id unless `--yes`.
+/// Asks for the cluster id (or tenant name) unless `--yes`.
 fn confirm(m: &ArgMatches, what: &str, id: &str) -> Result<(), Failed> {
     if m.get_flag("yes") {
         return Ok(());
@@ -471,7 +529,7 @@ fn confirm(m: &ArgMatches, what: &str, id: &str) -> Result<(), Failed> {
             "{what} {id} needs --yes when not run interactively"
         )));
     }
-    print!("{what} {id}? Type the cluster id to confirm: ");
+    print!("{what} {id}? Type {id} to confirm: ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     std::io::stdin()
@@ -550,6 +608,81 @@ async fn run_cluster(
                 )
                 .await?;
             print(out, &r, render::cluster_show);
+            Ok(ExitCode::SUCCESS)
+        }
+        _ => Ok(ExitCode::FAILURE),
+    }
+}
+
+async fn run_tenant(
+    c: &AdminClient,
+    m: &ArgMatches,
+    group: &ArgMatches,
+) -> Result<ExitCode, Failed> {
+    let out = output(m);
+    let Some((cmd, sub)) = group.subcommand() else {
+        return Ok(ExitCode::FAILURE);
+    };
+    let name = || sub.get_one::<String>("name").cloned().unwrap_or_default();
+    match cmd {
+        "create" => {
+            let cluster = sub
+                .get_one::<String>("cluster")
+                .map(|c| sprig_common::ids::ClusterId::new(c.as_str()))
+                .transpose()
+                .map_err(|e| format!("--cluster: {e}"))?;
+            let req = CreateTenantRequest {
+                name: name(),
+                parent: sub.get_one::<String>("under").cloned(),
+                cluster,
+            };
+            if m.get_flag("dry-run") {
+                println!(
+                    "would create tenant {}{}{} and bootstrap its catalog",
+                    req.name,
+                    req.parent
+                        .as_ref()
+                        .map_or(String::new(), |p| format!(" under {p}")),
+                    req.cluster
+                        .as_ref()
+                        .map_or(String::new(), |c| format!(" on {c}")),
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            let r: CreateTenantResponse = c.post("/admin/v1/tenants", &req).await?;
+            if !r.created {
+                eprintln!("tenant {} already existed; its bootstrap was continued", r.tenant.name);
+            }
+            print(out, &r, |r| {
+                let mut s = render::tenant_show(&r.tenant);
+                if let Some(p) = &r.placement {
+                    s.push_str("placement:         ");
+                    s.push_str(p);
+                    s.push('\n');
+                }
+                s
+            });
+            Ok(ExitCode::SUCCESS)
+        }
+        "list" => {
+            let r: ListTenantsResponse = c.get("/admin/v1/tenants").await?;
+            print(out, &r, |r| render::tenant_list(&r.tenants));
+            Ok(ExitCode::SUCCESS)
+        }
+        "show" => {
+            let r: TenantView = c.get(&format!("/admin/v1/tenants/{}", name())).await?;
+            print(out, &r, render::tenant_show);
+            Ok(ExitCode::SUCCESS)
+        }
+        "delete" => {
+            let name = name();
+            if m.get_flag("dry-run") {
+                println!("would delete tenant {name} and drop its catalog");
+                return Ok(ExitCode::SUCCESS);
+            }
+            confirm(m, "delete tenant", &name)?;
+            let r: TenantView = c.delete(&format!("/admin/v1/tenants/{name}")).await?;
+            print(out, &r, render::tenant_show);
             Ok(ExitCode::SUCCESS)
         }
         _ => Ok(ExitCode::FAILURE),

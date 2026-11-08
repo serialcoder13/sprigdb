@@ -19,21 +19,33 @@
 //!   etcd mirrors they are resolved from (chapter 23 step 8);
 //! - [`monitor`]: the `registry` loop, which probes every cluster and keeps
 //!   its capability profile and health current (chapter 09);
-//! - [`admin`]: the Admin API's `Clusters` and `DataCenters` services
-//!   (chapter 09 step 9, chapter 37), served as REST on
-//!   `[controller] admin_addr`.
+//! - [`admin`]: the Admin API's `Clusters`, `DataCenters` and `Tenants`
+//!   services (chapter 09 step 9, chapter 23 step 7, chapter 08 step 9,
+//!   chapter 37), served as REST on `[controller] admin_addr`;
+//! - [`tree`]: the tenant tree in the directory: entries, names, ids,
+//!   create under a parent and the delete guard (chapter 23 step 16, the
+//!   parts bootstrap needs);
+//! - [`tree_settings`]: the `tree_settings` loop that copies ancestors'
+//!   settings into descendants' catalogs (chapter 08 step 6);
+//! - [`tenants`]: tenant bootstrap and deletion, and the
+//!   `tenant_bootstrap` loop that finishes or fails them (chapter 08 step
+//!   9); [`catalogs`]: how the controller reaches tenant catalogs.
 //!
 //! Not yet: the relay and peer services (R2), the latency prober, the
-//! global loops (`directory`, `tree_moves`, `dc_registry`), the decision
-//! log (chapter 11), and the Admin API's other services.
+//! global loops (`directory`, `tree_moves`, `dc_registry`), subtree moves,
+//! the decision log (chapter 11), and the Admin API's other services.
 
 pub mod admin;
+pub mod catalogs;
 pub mod dc;
 pub mod dispatch;
 pub mod live;
 pub mod monitor;
 pub mod runtime;
 pub mod settings;
+pub mod tenants;
+pub mod tree;
+pub mod tree_settings;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,10 +59,16 @@ use sprig_meta::bootstrap::{self, Bootstrap};
 use sprig_meta::elect::LeaderRecord;
 use sprig_meta::etcd::{EtcdTls, connect_tiers};
 
+use sprig_catalog::{DirectoryAllocator, MariaBackend, Versioner};
+
 use crate::admin::{AdminService, http};
+use crate::catalogs::{ClusterPools, RegistryPools, ShardMapLocator, default_naming};
 use crate::monitor::{ClusterMonitor, RegistryLoop};
 use crate::runtime::{Loop, Runtime, Stores};
 use crate::settings::ControlSettings;
+use crate::tenants::{NoHooks, TenantLifecycle, TenantService};
+use crate::tree::Directory;
+use crate::tree_settings::{TreeSettings, TreeSync};
 
 /// Wait between checks while another controller bootstraps the deployment.
 const BOOTSTRAP_WAIT: Duration = Duration::from_secs(1);
@@ -125,15 +143,40 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     };
     let registry = ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?;
     let monitor = Arc::new(ClusterMonitor::new(
-        registry,
+        registry.clone(),
         settings.live.clone(),
         Arc::clone(&clock),
     ));
+    // Tenant catalogs: found through their shard maps, changed with
+    // versions allocated in the directory (chapter 08).
+    let pools: Arc<dyn ClusterPools> =
+        Arc::new(RegistryPools::new(registry, Some(Arc::clone(&monitor))));
+    let locator = ShardMapLocator::new(Arc::clone(&stores.dc), pools, default_naming());
+    let versioner = Versioner::new(
+        MariaBackend::new(Arc::new(locator.clone())).with_clock(Arc::clone(&clock)),
+        Arc::new(DirectoryAllocator::new(Arc::clone(&stores.global))),
+    );
+    let tree = Arc::new(TreeSync::new(
+        versioner,
+        Directory::new(Arc::clone(&stores.global)),
+        Arc::clone(&clock),
+    ));
+    let tenants = Arc::new(TenantService::new(
+        Arc::clone(&stores.dc),
+        locator,
+        Arc::clone(&tree),
+        Arc::new(NoHooks),
+        Arc::clone(&clock),
+        Some(settings.live.clone()),
+    )?);
+    let tree_loop = TreeSettings::new(tree, dc.clone(), Some(settings.live.clone()))?;
     let rt = Runtime::new(stores.clone(), Arc::clone(&clock), me)
         .with_settings(settings.control.clone())
         .with_loop(Loop::new(dispatch::Dispatch))
         .with_loop(Loop::new(dispatch::JobGc))
         .with_loop(Loop::new(RegistryLoop::new(Arc::clone(&monitor))))
+        .with_loop(Loop::new(tree_loop))
+        .with_loop(Loop::new(TenantLifecycle::new(Arc::clone(&tenants))))
         .global_candidate(cfg.controller.global_candidate);
 
     let token = cfg
@@ -146,12 +189,9 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     let admin_addr = listener
         .local_addr()
         .map_err(|e| SprigError::internal("admin listener address").with_source(e))?;
-    let svc = Arc::new(AdminService::new(
-        stores,
-        monitor,
-        rt.status(),
-        Arc::clone(&clock),
-    ));
+    let svc = Arc::new(
+        AdminService::new(stores, monitor, rt.status(), Arc::clone(&clock)).with_tenants(tenants),
+    );
     let admin = tokio::spawn(http::serve(
         listener,
         http::router(svc, token),

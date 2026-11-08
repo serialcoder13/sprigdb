@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sprig_cluster::health::HealthReport;
 use sprig_cluster::profile::{CapabilityProfile, Direction};
-use sprig_controller::admin::types::{ClusterView, ProbeClusterResponse};
+use sprig_controller::admin::types::{ClusterView, ProbeClusterResponse, TenantView};
 use sprig_controller::dc::DcView;
 use sprig_meta::bootstrap::DcRecord;
 use sprig_provision::PrecheckReport;
@@ -420,5 +420,62 @@ pub(crate) fn probe(r: &ProbeClusterResponse) -> String {
         );
     }
     s.push_str(&cluster_show(&r.cluster));
+    s
+}
+
+/// `sprigctl tenant list`.
+#[must_use]
+pub(crate) fn tenant_list(tenants: &[TenantView]) -> String {
+    let rows: Vec<[String; 8]> = tenants
+        .iter()
+        .map(|t| {
+            [
+                t.tenant_id.to_string(),
+                t.name.clone(),
+                t.state.clone(),
+                t.parent.clone().unwrap_or_else(|| "-".to_owned()),
+                t.home_dc.to_string(),
+                t.depth.to_string(),
+                t.child_count.to_string(),
+                format!("{}/{}", t.catalog_version, t.settings_version),
+            ]
+        })
+        .collect();
+    table(
+        [
+            "ID", "NAME", "STATE", "PARENT", "HOME", "DEPTH", "CHILDREN", "VERSIONS",
+        ],
+        &rows,
+    )
+}
+
+/// `sprigctl tenant show` and `create`.
+#[must_use]
+pub(crate) fn tenant_show(t: &TenantView) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "tenant:            {} ({})", t.name, t.tenant_id);
+    let _ = writeln!(s, "state:             {}", t.state);
+    let _ = writeln!(s, "home dc:           {}", t.home_dc);
+    let _ = writeln!(
+        s,
+        "parent:            {}",
+        t.parent.as_deref().unwrap_or("- (a root tenant)")
+    );
+    if !t.ancestry.is_empty() {
+        let _ = writeln!(s, "ancestry:          {}", t.ancestry.join(" > "));
+    }
+    let _ = writeln!(s, "path:              {} (depth {})", t.path, t.depth);
+    let _ = writeln!(s, "children:          {}", t.child_count);
+    let _ = writeln!(
+        s,
+        "catalog cluster:   {}",
+        t.cluster.as_ref().map_or("-".to_owned(), ToString::to_string)
+    );
+    let _ = writeln!(s, "catalog version:   {}", t.catalog_version);
+    let _ = writeln!(s, "auth version:      {}", t.auth_version);
+    let _ = writeln!(s, "settings version:  {}", t.settings_version);
+    if !t.created_at.is_empty() {
+        let _ = writeln!(s, "created:           {}", t.created_at);
+    }
     s
 }

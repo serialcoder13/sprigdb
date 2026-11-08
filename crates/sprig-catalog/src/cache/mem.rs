@@ -215,6 +215,13 @@ impl MemSourceTx {
     pub fn committed(&self) -> MemTables {
         lock(&self.tenant.tables).clone()
     }
+
+    /// Applies the staged writes to `tables` (a copy), as the commit will.
+    pub(crate) fn apply_staged(&self, tables: &mut MemTables) {
+        for w in &self.staged {
+            tables.write(w.clone());
+        }
+    }
 }
 
 /// The in-memory catalog (see the module docs).
@@ -326,7 +333,11 @@ const fn slot(kind: VersionKind) -> usize {
 impl VersionBackend for MemSource {
     type Tx = MemSourceTx;
 
-    async fn begin_locked(&self, tenant: TenantId, kind: VersionKind) -> Result<(MemSourceTx, u64)> {
+    async fn begin_locked(
+        &self,
+        tenant: TenantId,
+        kind: VersionKind,
+    ) -> Result<(MemSourceTx, u64)> {
         let t = self.tenant(tenant)?;
         let guard = Arc::clone(&t.locks[slot(kind)]).lock_owned().await;
         let v = lock(&t.tables).versions.get(kind);

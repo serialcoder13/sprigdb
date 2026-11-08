@@ -27,7 +27,12 @@ use crate::scope::SettingCtx;
 pub(crate) const CAP: usize = 4096;
 
 /// The cheap part of a memo key; the DC and cluster are compared per entry.
-type Head = (&'static str, Option<TenantId>, Option<DbId>, Option<ObjectId>);
+type Head = (
+    &'static str,
+    Option<TenantId>,
+    Option<DbId>,
+    Option<ObjectId>,
+);
 
 #[derive(Debug)]
 struct Slot {
@@ -59,7 +64,12 @@ fn same_place(s: &Slot, ctx: &SettingCtx<'_>) -> bool {
 
 impl Memo {
     /// The result for `key` in `ctx` computed against etcd stamp `stamp`.
-    pub(crate) fn get(&self, key: &'static str, ctx: &SettingCtx<'_>, stamp: u64) -> Option<Resolved> {
+    pub(crate) fn get(
+        &self,
+        key: &'static str,
+        ctx: &SettingCtx<'_>,
+        stamp: u64,
+    ) -> Option<Resolved> {
         let t = self.table.read().unwrap_or_else(PoisonError::into_inner);
         t.map
             .get(&head(key, ctx))?
@@ -93,6 +103,9 @@ impl Memo {
     /// Number of memoized results.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.table.read().unwrap_or_else(PoisonError::into_inner).len
+        self.table
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len
     }
 }

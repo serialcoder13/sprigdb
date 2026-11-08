@@ -1,0 +1,165 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Trigger",
+      "org_name": "TRIGGER_NAME",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 24,
+      "name": "Event",
+      "org_name": "EVENT_MANIPULATION",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Table",
+      "org_name": "EVENT_OBJECT_TABLE",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4112,
+      "length": 786420,
+      "name": "Statement",
+      "org_name": "ACTION_STATEMENT",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 252
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 24,
+      "name": "Timing",
+      "org_name": "ACTION_TIMING",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 2,
+      "flags": 4224,
+      "length": 22,
+      "name": "Created",
+      "org_name": "CREATED",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 12
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 32768,
+      "name": "sql_mode",
+      "org_name": "SQL_MODE",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4096,
+      "length": 1536,
+      "name": "Definer",
+      "org_name": "DEFINER",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 128,
+      "name": "character_set_client",
+      "org_name": "CHARACTER_SET_CLIENT",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "collation_connection",
+      "org_name": "COLLATION_CONNECTION",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Database Collation",
+      "org_name": "DATABASE_COLLATION",
+      "org_table": "TRIGGERS",
+      "schema": "information_schema",
+      "table": "TRIGGERS",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "trg_orders",
+      "INSERT",
+      "orders",
+      "SET NEW.total = IFNULL(NEW.total, (SELECT COUNT(*) FROM `t9999_d2_g2_s2`.accounts))",
+      "BEFORE",
+      "2026-11-08 06:12:53.32",
+      "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
+      "root@%",
+      "utf8mb4",
+      "utf8mb4_uca1400_ai_ci",
+      "utf8mb4_uca1400_ai_ci"
+    ],
+    [
+      "__sprig_trg",
+      "UPDATE",
+      "orders",
+      "SET NEW.total = NEW.total",
+      "BEFORE",
+      "2026-11-08 06:12:53.33",
+      "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
+      "root@%",
+      "utf8mb4",
+      "utf8mb4_uca1400_ai_ci",
+      "utf8mb4_uca1400_ai_ci"
+    ]
+  ],
+  "sql": "SHOW TRIGGERS FROM `t9999_d1_g1_s1`"
+}

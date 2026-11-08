@@ -1265,6 +1265,30 @@ impl Store {
         rows.into_iter().map(setting_row).collect()
     }
 
+    /// Every row of `key`, at any scope (empty rows included), ordered by
+    /// scope. The key isn't indexed alone: this scans the tenant's
+    /// `settings` table, which `catalog.max_setting_rows` keeps small.
+    ///
+    /// # Errors
+    /// As [`setting`](Self::setting).
+    pub async fn settings_for_key<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        key: &str,
+    ) -> Result<Vec<SettingRow>> {
+        let rows: Vec<Row> = q
+            .exec(
+                format!(
+                    "SELECT {SET_COLS} FROM {} WHERE setting_key = ? ORDER BY scope_kind, scope_id",
+                    self.settings
+                ),
+                (key,),
+            )
+            .await
+            .map_err(map_err)?;
+        rows.into_iter().map(setting_row).collect()
+    }
+
     // ---- schema_versions ----
 
     /// Inserts a schema version.

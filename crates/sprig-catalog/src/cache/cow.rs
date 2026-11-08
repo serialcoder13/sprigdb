@@ -32,7 +32,7 @@ impl<K, V> std::fmt::Debug for CowMap<K, V> {
         f.debug_struct("CowMap")
             .field("len", &self.len)
             .field("shards", &self.shards.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -125,10 +125,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CowMap<K, V> {
         if want == self.shards.len() {
             return;
         }
-        let entries: Vec<(K, V)> = self
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let entries: Vec<(K, V)> = self.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut shards: Vec<HashMap<K, V>> = (0..want).map(|_| HashMap::new()).collect();
         self.shards = vec![Arc::default(); want];
         for (k, v) in entries {

@@ -78,6 +78,9 @@ pub trait NameMap: Send + Sync {
     /// The database with id `id`.
     fn database_by_id(&self, id: DbId) -> Option<&LogicalDb>;
 
+    /// Every database of the tenant, in the catalog's order.
+    fn list(&self) -> Vec<&LogicalDb>;
+
     /// The schemas `db` stands for, for `purpose`.
     ///
     /// # Errors
@@ -240,6 +243,10 @@ impl NameMap for MemoryNameMap {
 
     fn database_by_id(&self, id: DbId) -> Option<&LogicalDb> {
         self.by_id.get(&id).map(|&i| &self.dbs[i])
+    }
+
+    fn list(&self) -> Vec<&LogicalDb> {
+        self.dbs.iter().collect()
     }
 }
 

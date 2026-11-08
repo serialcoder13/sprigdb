@@ -567,6 +567,72 @@ async fn read_your_writes_on_primary_and_replicas() {
     b.close().await;
 }
 
+/// With `autocommit = 0` a plain read opens a transaction, so it runs on
+/// the writer and pins there (chapter 06, "Pins"); before the fix it went
+/// to a replica, opened the transaction there, and the gateway discarded
+/// that connection and pinned the session as untracked for good.
+#[tokio::test]
+async fn autocommit_off_reads_stay_on_the_writer() {
+    let u = need!(
+        skip::MARIADB_REPLICATION,
+        "autocommit_off_reads_stay_on_the_writer"
+    );
+    let addrs: Vec<String> = u.iter().map(|x| x.addr.clone()).collect();
+    let rig = rig(
+        TopologyKind::PrimaryReplica,
+        &u[0].user,
+        &u[0].pass,
+        &addrs,
+        fast_settings(),
+    );
+    let db = unique_ident("sprig_bt");
+    let mut a = rig.session(Persona::MariaDb);
+    ok(&mut a, &format!("CREATE DATABASE {db}")).await;
+    ok(&mut a, &format!("CREATE TABLE {db}.t (v INT)")).await;
+    rig.wait_roles(&[NodeRole::Writer, NodeRole::Replica, NodeRole::Replica])
+        .await;
+    // Plain reads leave the writer while autocommit is on.
+    let mut replica = false;
+    for _ in 0..20 {
+        let r = ok(&mut a, &format!("SELECT COUNT(*) FROM {db}.t")).await;
+        replica |= matches!(r.out.route, RouteKind::Replica | RouteKind::ReplicaWait);
+    }
+    assert!(replica, "no read left the writer with autocommit on");
+
+    ok(&mut a, "SET autocommit = 0").await;
+    let r = ok(&mut a, &format!("SELECT COUNT(*) FROM {db}.t")).await;
+    assert_eq!(
+        r.out.route,
+        RouteKind::Writer,
+        "first read of the implicit transaction"
+    );
+    assert!(r.out.pinned, "the implicit transaction pins the connection");
+    let writer = r.out.node.clone();
+    ok(&mut a, &format!("INSERT INTO {db}.t VALUES (1)")).await;
+    let r = ok(&mut a, &format!("SELECT COUNT(*) FROM {db}.t")).await;
+    assert_eq!(r.cell(0, 0), Some("1"));
+    assert_eq!(
+        r.out.node, writer,
+        "the transaction stays on one connection"
+    );
+    ok(&mut a, "COMMIT").await;
+    // Still autocommit = 0: the next read opens the next transaction there.
+    let r = ok(&mut a, &format!("SELECT COUNT(*) FROM {db}.t")).await;
+    assert_eq!(r.out.route, RouteKind::Writer);
+    ok(&mut a, "ROLLBACK").await;
+
+    ok(&mut a, "SET autocommit = 1").await;
+    let mut replica = false;
+    for _ in 0..20 {
+        let r = ok(&mut a, &format!("SELECT COUNT(*) FROM {db}.t")).await;
+        assert!(!r.out.pinned, "nothing pins once autocommit is back on");
+        replica |= matches!(r.out.route, RouteKind::Replica | RouteKind::ReplicaWait);
+    }
+    assert!(replica, "reads leave the writer again with autocommit on");
+    ok(&mut a, &format!("DROP DATABASE {db}")).await;
+    a.close().await;
+}
+
 #[tokio::test]
 async fn read_your_writes_on_galera() {
     let u = need!(skip::MARIADB_GALERA, "read_your_writes_on_galera");
@@ -1046,4 +1112,51 @@ async fn lowered_limits_converge() {
     for mut s in sessions {
         s.close().await;
     }
+}
+
+/// MariaDB binds a prepared statement's unqualified names to the default
+/// schema at prepare time. Two sessions in different schemas that prepare
+/// the same text on the same pooled connection must each get their own
+/// schema's table (the statement cache keys by schema and text); before the
+/// fix the second session got the first one's statement.
+#[tokio::test]
+async fn prepared_statements_follow_the_session_schema() {
+    let u = need!(
+        skip::MARIADB_SINGLE,
+        "prepared_statements_follow_the_session_schema"
+    );
+    let rig = rig(
+        TopologyKind::SingleNode,
+        &u[0].user,
+        &u[0].pass,
+        &[u[0].addr.clone()],
+        BackendSettings {
+            max_conns_per_node: 1, // every statement uses the same connection
+            ..fast_settings()
+        },
+    );
+    let (a, b) = (unique_ident("sprig_bt_a"), unique_ident("sprig_bt_b"));
+    let mut s = rig.session(Persona::MariaDb);
+    for db in [&a, &b] {
+        ok(&mut s, &format!("CREATE DATABASE {db}")).await;
+        ok(&mut s, &format!("CREATE TABLE {db}.t (v INT)")).await;
+    }
+    // One session switching schemas stands in for sessions that log in
+    // with different databases (a session without one never gets a
+    // connection that has one).
+    let sql = b"SELECT v FROM t";
+    let info = StmtInfo::classify(sql);
+    for db in [&a, &b, &a] {
+        ok(&mut s, &format!("USE {db}")).await;
+        let st = s.prepare(&info, sql).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&st.columns[0].schema),
+            db.as_str(),
+            "the statement was prepared under another schema"
+        );
+    }
+    for db in [&a, &b] {
+        ok(&mut s, &format!("DROP DATABASE {db}")).await;
+    }
+    s.close().await;
 }

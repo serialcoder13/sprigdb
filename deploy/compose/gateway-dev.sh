@@ -23,7 +23,8 @@
 # that asks for TLS still gets it. `tls required` switches both listeners
 # live (the gateway's own default); `tls optional` switches back.
 #
-# Variables: SPRIG_GATEWAY_TLS (optional), CARGO_TARGET_DIR (target), and,
+# Variables: SPRIG_GATEWAY_TLS (optional), CARGO_TARGET_DIR (target),
+# SPRIG_GATEWAY_PROFILE (debug; release for latency and sysbench numbers), and,
 # to run a second instance next to the default one (say against your own
 # etcd), SPRIG_GATEWAY_DEV_STATE (deploy/compose/.gateway-dev),
 # SPRIG_ETCD (http://127.0.0.1:2379), SPRIG_GATEWAY_MYSQL_PORT (13306),
@@ -52,7 +53,9 @@ gw_telemetry_port=${gw_telemetry_port:-${SPRIG_GW_TELEMETRY_PORT:-9190}}
 dc="dc-a"
 certs=deploy/compose/gateway-certs
 # status and down use the binaries up built, whatever CARGO_TARGET_DIR is then.
-bin=$(cat "$state/bin" 2>/dev/null || echo "${CARGO_TARGET_DIR:-target}/debug")
+profile=${SPRIG_GATEWAY_PROFILE:-debug}
+case $profile in debug | release) ;; *) echo "gateway-dev: SPRIG_GATEWAY_PROFILE must be debug or release" >&2; exit 1 ;; esac
+bin=$(cat "$state/bin" 2>/dev/null || echo "${CARGO_TARGET_DIR:-target}/$profile")
 # The Admin API and the two roles' telemetry. sprigdb.dev.toml and
 # sprigdb.gateway.dev.toml hold the defaults; start passes the values above,
 # with the etcd endpoint, as SPRIGDB_* overrides.
@@ -312,9 +315,11 @@ up() {
         running gateway || ! listening "$port" || die "127.0.0.1:$port is taken by another process"
     done
 
-    say "building sprigdb and sprigctl"
-    cargo build -q -p sprigdb -p sprigctl
-    bin=${CARGO_TARGET_DIR:-target}/debug
+    say "building sprigdb and sprigctl ($profile)"
+    local release=()
+    if [[ $profile == release ]]; then release=(--release); fi
+    cargo build -q ${release[@]+"${release[@]}"} -p sprigdb -p sprigctl
+    bin=${CARGO_TARGET_DIR:-target}/$profile
     echo "$bin" >"$state/bin"
 
     # Whether the controller bootstraps the deployment here; then down removes

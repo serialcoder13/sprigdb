@@ -18,6 +18,15 @@
 //! | `DataCenters.RegisterDc` | `POST /admin/v1/dcs` |
 //! | `DataCenters.ListDcs` | `GET /admin/v1/dcs` |
 //! | `DataCenters.GetDc` | `GET /admin/v1/dcs/{dc_id}` |
+//! | `Tenants.CreateTenant` | `POST /admin/v1/tenants` |
+//! | `Tenants.ListTenants` | `GET /admin/v1/tenants` |
+//! | `Tenants.GetTenant` | `GET /admin/v1/tenants/{name}` |
+//! | `Tenants.DeleteTenant` | `DELETE /admin/v1/tenants/{name}` |
+//!
+//! `CreateTenant` and `DeleteTenant` write the DC's tier (the catalog's
+//! shard map) with the DC leader's token, so they too are answered only by
+//! the leader. Tenant calls are served when the controller was given a
+//! [`TenantAdmin`] (chapter 08 step 9).
 //!
 //! Where the book differs: chapter 37 serves this API from every gateway
 //! on 8080/8443, as gRPC and REST generated from protobuf, with platform
@@ -44,10 +53,12 @@ use tokio::sync::watch;
 use crate::dc::{self, DcKind, DcRegistration, Registered};
 use crate::monitor::ClusterMonitor;
 use crate::runtime::{Status, Stores};
+use crate::tenants::TenantAdmin;
 use types::{
-    ClusterView, GetDcResponse, ListClustersResponse, ListDcsResponse, ProbeClusterRequest,
-    ProbeClusterResponse, RegisterClusterRequest, RegisterClusterResponse, RegisterDcRequest,
-    RegisterDcResponse,
+    ClusterView, CreateTenantRequest, CreateTenantResponse, GetDcResponse, ListClustersResponse,
+    ListDcsResponse, ListTenantsResponse, ProbeClusterRequest, ProbeClusterResponse,
+    RegisterClusterRequest, RegisterClusterResponse, RegisterDcRequest, RegisterDcResponse,
+    TenantView,
 };
 
 /// 39792 `ER_SPRIG_ADMIN_REQUEST_INVALID`.
@@ -68,6 +79,7 @@ pub struct AdminService {
     monitor: Arc<ClusterMonitor>,
     status: watch::Receiver<Status>,
     clock: Arc<dyn Clock>,
+    tenants: Option<Arc<dyn TenantAdmin>>,
 }
 
 impl std::fmt::Debug for AdminService {
@@ -93,7 +105,57 @@ impl AdminService {
             monitor,
             status,
             clock,
+            tenants: None,
         }
+    }
+
+    /// The same service with the tenant calls.
+    #[must_use]
+    pub fn with_tenants(mut self, tenants: Arc<dyn TenantAdmin>) -> Self {
+        self.tenants = Some(tenants);
+        self
+    }
+
+    fn tenants(&self) -> Result<&Arc<dyn TenantAdmin>> {
+        self.tenants
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't manage tenants"))
+    }
+
+    /// `Tenants.CreateTenant`: the directory entry, then the bootstrap.
+    ///
+    /// # Errors
+    /// 39504 off the leader; as [`TenantAdmin::create`].
+    pub async fn create_tenant(&self, req: CreateTenantRequest) -> Result<CreateTenantResponse> {
+        let t = self.tenants()?;
+        let guard = self.leader_guard().await?;
+        t.create(req, guard).await
+    }
+
+    /// `Tenants.ListTenants`.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn list_tenants(&self) -> Result<ListTenantsResponse> {
+        self.tenants()?.list().await
+    }
+
+    /// `Tenants.GetTenant`.
+    ///
+    /// # Errors
+    /// 39072 for an unknown name.
+    pub async fn get_tenant(&self, name: &str) -> Result<TenantView> {
+        self.tenants()?.show(name).await
+    }
+
+    /// `Tenants.DeleteTenant`: `deleting`, then cleanup.
+    ///
+    /// # Errors
+    /// 39504 off the leader; as [`TenantAdmin::delete`].
+    pub async fn delete_tenant(&self, name: &str) -> Result<TenantView> {
+        let t = self.tenants()?;
+        let guard = self.leader_guard().await?;
+        t.delete(name, guard).await
     }
 
     /// The data center this controller serves.

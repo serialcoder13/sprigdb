@@ -1,0 +1,191 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Table",
+      "org_name": "TABLE_NAME",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 1,
+      "name": "Non_unique",
+      "org_name": "NON_UNIQUE",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 8
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Key_name",
+      "org_name": "INDEX_NAME",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 4129,
+      "length": 2,
+      "name": "Seq_in_index",
+      "org_name": "SEQ_IN_INDEX",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 3
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 256,
+      "name": "Column_name",
+      "org_name": "COLUMN_NAME",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4096,
+      "length": 4,
+      "name": "Collation",
+      "org_name": "COLLATION",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 4096,
+      "length": 21,
+      "name": "Cardinality",
+      "org_name": "CARDINALITY",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 8
+    },
+    {
+      "charset": 63,
+      "decimals": 0,
+      "flags": 4096,
+      "length": 3,
+      "name": "Sub_part",
+      "org_name": "SUB_PART",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 8
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4096,
+      "length": 40,
+      "name": "Packed",
+      "org_name": "PACKED",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 12,
+      "name": "Null",
+      "org_name": "NULLABLE",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 64,
+      "name": "Index_type",
+      "org_name": "INDEX_TYPE",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 64,
+      "name": "Comment",
+      "org_name": "COMMENT",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 4096,
+      "name": "Index_comment",
+      "org_name": "INDEX_COMMENT",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 0,
+      "flags": 4097,
+      "length": 12,
+      "name": "Ignored",
+      "org_name": "IGNORED",
+      "org_table": "STATISTICS",
+      "schema": "information_schema",
+      "table": "STATISTICS",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "gipk",
+      "0",
+      "PRIMARY",
+      "1",
+      "my_row_id",
+      "A",
+      "0",
+      null,
+      null,
+      "",
+      "BTREE",
+      "",
+      "",
+      "NO"
+    ]
+  ],
+  "sql": "SHOW INDEX FROM gipk"
+}

@@ -1,0 +1,61 @@
+{
+  "columns": [
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "View",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 4096,
+      "name": "Create View",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 128,
+      "name": "character_set_client",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    },
+    {
+      "charset": 224,
+      "decimals": 39,
+      "flags": 1,
+      "length": 256,
+      "name": "collation_connection",
+      "org_name": "",
+      "org_table": "",
+      "schema": "",
+      "table": "",
+      "type": 253
+    }
+  ],
+  "rows": [
+    [
+      "v_orders",
+      "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v_orders` AS select `o`.`id` AS `id`,`a`.`name` AS `name` from (`t9999_d1_g1_s1`.`orders` `o` join `t9999_d2_g2_s2`.`accounts` `a` on(`a`.`id` = `o`.`account_id`))",
+      "utf8mb4",
+      "utf8mb4_uca1400_ai_ci"
+    ]
+  ],
+  "sql": "SHOW CREATE VIEW `t9999_d1_g1_s1`.v_orders"
+}
