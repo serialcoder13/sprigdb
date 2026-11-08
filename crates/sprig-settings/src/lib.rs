@@ -25,11 +25,21 @@
 //!   and [`ResolvedWatch`]es on resolved values; clamp reports for the
 //!   warnings of bound-tightening writes.
 //!
-//! Not yet: the ancestor-copy loop that fills ancestor rows (chapter 08
-//! step 6; resolution already walks them), tenant-scope writes (step 7),
-//! privileges and `operator_only` checks (chapter 29).
+//! - [`explain`]: a resolution with its chain, one step per scope with
+//!   its row, the bounds in force there and what happened to its value
+//!   (`sprigctl settings get`, chapter 47 "Explaining settings");
+//!   [`SettingsWriter::set_guarded`] and [`BoundsPatch`]: the Admin API's
+//!   writes under the serving leader's fencing compare, with bounds
+//!   patched inside the guarded write.
+//!
+//! The tenant-scope side lives elsewhere: the ancestor-copy loop that
+//! fills ancestor rows is `sprig-controller::tree_settings` (chapter 08
+//! step 6) and tenant, database and object writes are
+//! `sprig-catalog::settings` (step 7), which reuses
+//! [`normalize_change`]. Not yet: privilege checks (chapter 29).
 
 pub mod etcd;
+pub mod explain;
 pub mod registry;
 pub mod resolve;
 pub mod scope;
@@ -37,8 +47,10 @@ pub mod value;
 pub mod watch;
 
 pub use etcd::{
-    SettingChange, SettingRecord, SettingsStores, SettingsWriter, Warning, normalize_change,
+    BoundsPatch, RecordOutcome, SettingChange, SettingEdit, SettingRecord, SettingsStores,
+    SettingsWriter, Warning, normalize_change, show_bounds, show_value,
 };
+pub use explain::{ExplainStep, Explanation, StepOutcome, explain_layered};
 #[doc(hidden)]
 pub use linkme;
 pub use registry::{AnySetting, Apply, HardBounds, Registry, Scopes, Setting};

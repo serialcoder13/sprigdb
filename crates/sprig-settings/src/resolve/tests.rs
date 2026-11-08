@@ -549,7 +549,7 @@ fn clamped_values_are_reported_with_warnings() {
     assert_eq!(clamp_summary(&out).unwrap(), "1 value will be clamped");
     let w = out[0].warning(ACME);
     assert_eq!(w.scope, Scope::Object(ACME, ORDERS));
-    assert!(w.message.contains("read as Int(5)"), "{}", w.message);
+    assert!(w.message.contains("read as 5"), "{}", w.message);
 
     // Locking at dc ignores every tenant value: three warnings.
     let base = SettingCtx::process(&d);

@@ -1,0 +1,33 @@
+# Expected outcomes of the M0.3 harness other than `pass` (README.md).
+#
+#   mode      persona  suite      connector          check            status  reason
+#
+# `*` matches anything; `-` is "no connector" (every suite but hibernate).
+# The last matching line wins, so put the general lines first. A check
+# passes the matrix only when its status equals the expected one, so an
+# unexpected pass is reported too and this file stays accurate.
+
+# MySQL Connector/J 9.7's DatabaseMetaData.getSQLKeywords() reads
+# information_schema.KEYWORDS WHERE RESERVED = 1, which MariaDB doesn't have,
+# so Hibernate can't resolve a dialect and validation fails before it looks
+# at a table. On 3306 the gateway must answer that view: chapter 28's
+# translator, milestone M0.5. The rest of the check runs after a restart
+# without validation and must pass.
+*         *        hibernate  hibernate          schema_validate  fail    MySQL Connector/J reads information_schema.KEYWORDS.RESERVED (translator, M0.5)
+
+# Baseline: direct MariaDB has no physical names to leak, so the leak checks
+# report n/a (the Rust leak suite still asserts that its detector catches the
+# probe names MariaDB echoes in its errors, which proves the byte scan).
+baseline  *        dump       -                  dump_leaks       n/a     no physical names exist in baseline
+baseline  *        isolation  -                  isolation_leaks  n/a     no physical names exist in baseline
+baseline  *        leaks      -                  leaks            n/a     no physical names exist in baseline
+# ... and SprigDB's settings statements don't exist in MariaDB.
+baseline  *        settings   -                  object_scope     n/a     MariaDB has no SPRIG SET (it answers 1064)
+baseline  *        settings   -                  out_of_bounds    n/a     MariaDB has no SPRIG SET (it answers 1064)
+baseline  *        settings   -                  scope_bounds     n/a     MariaDB has no SPRIG SET (it answers 1064)
+baseline  *        settings   -                  object_only      n/a     MariaDB has no SPRIG SET (it answers 1064)
+# mysqldump 8.4's --all-databases writes no database at all from MariaDB 11.8
+# for a plain user (and only one for root), while --databases works. On
+# 3306 the gateway stands for MySQL 8.4, where it works, so through the
+# gateway this stays `pass`.
+baseline  mysql    dump       -                  dump_all         fail    mysqldump 8.4 --all-databases dumps nothing from MariaDB 11.8

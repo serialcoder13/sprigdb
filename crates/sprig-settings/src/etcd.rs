@@ -39,7 +39,8 @@ use sprig_common::time::Clock;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_meta::bootstrap::rfc3339;
 use sprig_meta::{
-    Cmp, Consistency, Key, Leadership, ListOpts, MetaStore, Op, Record, Revision, Tier, Versioned,
+    Cmp, Consistency, Key, Leadership, ListOpts, MetaStore, Op, Record, Revision, Tier, Txn,
+    Versioned,
 };
 
 use crate::registry::{AnySetting, Registry};
@@ -331,6 +332,57 @@ impl SettingsWriter {
         who: &str,
         reason: &str,
     ) -> Result<Vec<Warning>> {
+        let def = self.target(scope, key)?;
+        let want = self.stores.leader_key(scope)?;
+        if leader.key() != &want {
+            return Err(SprigError::internal(format!(
+                "{} settings are written by the leader at {want}, not {}",
+                scope_kind(scope),
+                leader.key()
+            )));
+        }
+        let edit = SettingEdit::Change(check_change(def, change)?);
+        Ok(self
+            .apply(Commit::Leader(leader), def, scope, &edit, who, reason)
+            .await?
+            .warnings)
+    }
+
+    /// Applies `edit` to `key` at `scope` like [`set`](Self::set), but
+    /// guarded by the compares in `guard` instead of a [`Leadership`] held
+    /// by this process: the Admin API passes the fencing compare of the
+    /// leader it runs on (`CreateRev(leader key, token)`). A bounds patch is
+    /// applied to the bounds read inside the guarded retry loop, so two
+    /// concurrent patches don't lose each other's parts.
+    ///
+    /// R0 (single-etcd mode, chapter 23): `global` records may be written
+    /// under the DC leader's guard, as the DC leader writes the tenant
+    /// directory; from R2 the guard is the global leader's.
+    ///
+    /// # Errors
+    /// As [`set`](Self::set); 39504 `ER_SPRIG_NOT_LEADER` when a compare in
+    /// `guard` no longer holds.
+    pub async fn set_guarded(
+        &self,
+        guard: &[Cmp],
+        scope: &Scope,
+        key: &str,
+        edit: SettingEdit,
+        who: &str,
+        reason: &str,
+    ) -> Result<RecordOutcome> {
+        let def = self.target(scope, key)?;
+        let edit = match edit {
+            SettingEdit::Change(c) => SettingEdit::Change(check_change(def, c)?),
+            p @ SettingEdit::PatchBounds(_) => p,
+        };
+        self.apply(Commit::Guard(guard), def, scope, &edit, who, reason)
+            .await
+    }
+
+    /// The declaration of `key`, checked against `scope`, whose record key
+    /// this process can build.
+    fn target(&self, scope: &Scope, key: &str) -> Result<&'static dyn AnySetting> {
         let def = self.def(key)?;
         let kind = scope_kind(scope);
         if !def.scopes().contains(kind) {
@@ -339,17 +391,37 @@ impl SettingsWriter {
                 format!("{key} can't be set at {kind} scope"),
             ));
         }
+        self.stores.record_key(scope, key)?;
+        Ok(def)
+    }
+
+    /// The write itself: read, check against the wider bounds, guarded
+    /// transaction, retried while the record changes under it.
+    async fn apply(
+        &self,
+        commit: Commit<'_>,
+        def: &'static dyn AnySetting,
+        scope: &Scope,
+        edit: &SettingEdit,
+        who: &str,
+        reason: &str,
+    ) -> Result<RecordOutcome> {
+        let key = def.key();
+        let kind = scope_kind(scope);
         let record_key = self.stores.record_key(scope, key)?;
-        let want = self.stores.leader_key(scope)?;
-        if leader.key() != &want {
-            return Err(SprigError::internal(format!(
-                "{kind} settings are written by the leader at {want}, not {}",
-                leader.key()
-            )));
-        }
-        let change = check_change(def, change)?;
         for _ in 0..WRITE_ATTEMPTS {
             let wider = self.wider_bounds(def, scope).await?;
+            let current = self.read(scope, key).await?;
+            let change = match edit {
+                SettingEdit::Change(c) => c.clone(),
+                SettingEdit::PatchBounds(p) => {
+                    let stored = current.as_ref().and_then(|(r, _)| r.body.bounds.as_ref());
+                    match p.apply(stored) {
+                        Some(b) => check_change(def, SettingChange::SetBounds(b))?,
+                        None => SettingChange::ResetBounds,
+                    }
+                }
+            };
             if let SettingChange::Set(v) = &change {
                 if wider.locked {
                     return Err(locked(key));
@@ -357,14 +429,18 @@ impl SettingsWriter {
                 if !wider.admits(v) {
                     return Err(SprigError::new(
                         SprigCode::SettingOutOfBounds,
-                        format!("{key}: {v:?} is outside the bounds in force {wider:?}"),
+                        format!(
+                            "{key}: {} is outside the bounds in force ({})",
+                            show_value(v),
+                            show_bounds(&wider)
+                        ),
                     ));
                 }
             }
             if matches!(change, SettingChange::SetBounds(_)) && wider.locked {
                 return Err(locked(key));
             }
-            let current = self.read(scope, key).await?;
+            let previous = current.as_ref().map(|(r, _)| r.body.clone());
             let (mut rec, guard) = match current {
                 Some((rec, rev)) => (rec, Cmp::ModRev(record_key.clone(), rev)),
                 None => (
@@ -387,7 +463,8 @@ impl SettingsWriter {
             rec.body.set_by = who.to_owned();
             rec.body.set_at = rfc3339(self.clock.wall());
             rec.body.reason = reason.to_owned();
-            let op = if rec.body.value.is_none() && rec.body.bounds.is_none() {
+            let emptied = rec.body.value.is_none() && rec.body.bounds.is_none();
+            let op = if emptied {
                 Op::Delete(record_key.clone())
             } else {
                 Op::Put {
@@ -397,25 +474,75 @@ impl SettingsWriter {
                 }
             };
             // Nothing to delete: done.
-            if matches!(op, Op::Delete(_)) && matches!(guard, Cmp::Missing(_)) {
-                return Ok(Vec::new());
+            if emptied && matches!(guard, Cmp::Missing(_)) {
+                return Ok(RecordOutcome::default());
             }
-            let r = leader.commit_if(vec![guard], vec![op]).await?;
-            if !r.succeeded {
+            let committed = match commit {
+                Commit::Leader(l) => l.commit_if(vec![guard], vec![op]).await?.succeeded,
+                Commit::Guard(g) => self.commit_guarded(scope, g, guard, op).await?,
+            };
+            if !committed {
                 tracing::debug!(%record_key, "setting record changed under the write; retrying");
                 continue;
             }
             tracing::info!(event = "settings.set", scope = %kind, key, who, reason, change = ?change, "setting changed");
-            return match &change {
+            let warnings = match &change {
                 SettingChange::SetBounds(b) => {
-                    self.lower_outside(def, scope, &wider.intersect(b)).await
+                    self.lower_outside(def, scope, &wider.intersect(b)).await?
                 }
-                _ => Ok(Vec::new()),
+                _ => Vec::new(),
             };
+            return Ok(RecordOutcome {
+                previous,
+                current: (!emptied).then_some(rec.body),
+                warnings,
+                changed: true,
+            });
         }
         Err(SprigError::new(
             SprigCode::MetaUnavailable,
             format!("{record_key} kept changing; try again"),
+        ))
+    }
+
+    /// One guarded transaction: `true` if it committed, `false` if the
+    /// record changed (retry); 39504 if `guard` no longer holds.
+    async fn commit_guarded(
+        &self,
+        scope: &Scope,
+        guard: &[Cmp],
+        record: Cmp,
+        op: Op,
+    ) -> Result<bool> {
+        let store = self.stores.store(scope);
+        let mut when = guard.to_vec();
+        when.push(record);
+        let r = store
+            .txn(Txn {
+                when,
+                then: vec![op],
+                otherwise: Vec::new(),
+            })
+            .await?;
+        if r.succeeded {
+            return Ok(true);
+        }
+        if guard.is_empty() {
+            return Ok(false);
+        }
+        let still = store
+            .txn(Txn {
+                when: guard.to_vec(),
+                then: Vec::new(),
+                otherwise: Vec::new(),
+            })
+            .await?;
+        if still.succeeded {
+            return Ok(false);
+        }
+        Err(SprigError::new(
+            SprigCode::NotLeader,
+            "this controller no longer leads; send the request to the current leader",
         ))
     }
 
@@ -583,4 +710,125 @@ fn locked(key: &str) -> SprigError {
         SprigCode::SettingLocked,
         format!("{key} is locked by a wider scope"),
     )
+}
+
+/// How [`SettingsWriter`] commits: through a leadership this process
+/// holds, or under compares the caller supplies.
+#[derive(Clone, Copy)]
+enum Commit<'a> {
+    Leader(&'a Leadership),
+    Guard(&'a [Cmp]),
+}
+
+/// A change of one scope's bounds that keeps what it doesn't name
+/// (`sprigctl settings bounds|lock|unlock`). Each field that is `Some`
+/// replaces that part of the stored bounds: `min: Some(None)` clears the
+/// minimum, `min: Some(Some(3.0))` sets it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BoundsPatch {
+    /// The new minimum, or `Some(None)` to clear it.
+    pub min: Option<Option<f64>>,
+    /// The new maximum, or `Some(None)` to clear it.
+    pub max: Option<Option<f64>>,
+    /// The new allowed list, or `Some(None)` to clear it.
+    pub allowed: Option<Option<Vec<Value>>>,
+    /// Lock or unlock narrower scopes.
+    pub locked: Option<bool>,
+}
+
+impl BoundsPatch {
+    /// Whether the patch changes nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.min.is_none() && self.max.is_none() && self.allowed.is_none() && self.locked.is_none()
+    }
+
+    /// The bounds after applying the patch to `current`; `None` when
+    /// nothing is left (no minimum, maximum or allowed list, and unlocked),
+    /// which is a reset of the bounds.
+    #[must_use]
+    pub fn apply(&self, current: Option<&Bounds>) -> Option<Bounds> {
+        let mut b = current.cloned().unwrap_or_default();
+        if let Some(m) = self.min {
+            b.min = m;
+        }
+        if let Some(m) = self.max {
+            b.max = m;
+        }
+        if let Some(a) = &self.allowed {
+            b.allowed.clone_from(a);
+        }
+        if let Some(l) = self.locked {
+            b.locked = l;
+        }
+        (b != Bounds::default()).then_some(b)
+    }
+}
+
+/// What [`SettingsWriter::set_guarded`] changes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingEdit {
+    /// A whole change, as [`SettingsWriter::set`] takes.
+    Change(SettingChange),
+    /// A partial change of the bounds, applied to the stored bounds inside
+    /// the guarded write.
+    PatchBounds(BoundsPatch),
+}
+
+impl From<SettingChange> for SettingEdit {
+    fn from(c: SettingChange) -> Self {
+        SettingEdit::Change(c)
+    }
+}
+
+/// What [`SettingsWriter::set_guarded`] did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RecordOutcome {
+    /// The record before the write.
+    pub previous: Option<SettingRecord>,
+    /// The record after it; `None` when it was deleted (nothing left).
+    pub current: Option<SettingRecord>,
+    /// Lower values new bounds will clamp or ignore.
+    pub warnings: Vec<Warning>,
+    /// `false` when there was nothing to change (a reset of a record that
+    /// doesn't exist).
+    pub changed: bool,
+}
+
+/// A value as an operator writes it: `8`, `true`, `'on'`.
+#[must_use]
+pub fn show_value(v: &Value) -> String {
+    match v {
+        Value::Bool(b) => b.to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Str(s) => format!("'{s}'"),
+    }
+}
+
+/// Bounds as an operator reads them: `min 1, max 8, allowed ('on',
+/// 'off'), locked`, or `none`.
+#[must_use]
+pub fn show_bounds(b: &Bounds) -> String {
+    let mut parts = Vec::new();
+    if let Some(m) = b.min {
+        parts.push(format!("min {m}"));
+    }
+    if let Some(m) = b.max {
+        parts.push(format!("max {m}"));
+    }
+    if let Some(a) = &b.allowed {
+        parts.push(format!(
+            "allowed ({})",
+            a.iter().map(show_value).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if b.locked {
+        parts.push("locked".to_owned());
+    }
+    if parts.is_empty() {
+        "none".to_owned()
+    } else {
+        parts.join(", ")
+    }
 }

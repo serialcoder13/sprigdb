@@ -73,6 +73,20 @@ impl GtidSet {
         self.domains.get(&domain).map(|&(_, n)| n)
     }
 
+    /// The part of this position in one replication domain (a Galera
+    /// cluster's `wsrep_gtid_domain_id`).
+    #[must_use]
+    pub fn only(&self, domain: u32) -> GtidSet {
+        GtidSet {
+            domains: self
+                .domains
+                .get(&domain)
+                .map(|&v| (domain, v))
+                .into_iter()
+                .collect(),
+        }
+    }
+
     /// Parses `@@gtid_slave_pos`-style text; empty text is the empty set.
     ///
     /// # Errors
@@ -135,5 +149,7 @@ mod tests {
         assert!(GtidSet::parse("").unwrap().is_empty());
         assert!(GtidSet::parse("0-1").is_err());
         assert!(GtidSet::parse("x-1-2").is_err());
+        assert_eq!(a.only(1).to_string(), "1-12-77");
+        assert!(a.only(9).is_empty());
     }
 }

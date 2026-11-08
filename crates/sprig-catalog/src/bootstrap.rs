@@ -65,6 +65,106 @@ pub struct BootstrapProgress {
     pub at: String,
 }
 
+/// Who owns an existing catalog schema, as [`claim_catalog`] found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogClaim {
+    /// The schema didn't exist; this call created it with the owner mark.
+    Created,
+    /// The schema exists and carries this owner's mark (a re-run).
+    Ours,
+    /// The schema exists with another mark, or none: an earlier tenant's
+    /// catalog under the same id. Its comment is given.
+    Foreign(String),
+}
+
+/// A string literal for MariaDB, with `'` and `\` escaped.
+fn literal(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+/// The comment of `schema` on `pool`'s server, which holds its owner mark;
+/// `None` if the schema doesn't exist.
+///
+/// # Errors
+/// 39070 or a backend error.
+pub async fn catalog_owner(pool: &Pool, schema: &str) -> Result<Option<String>> {
+    let mut conn = pool.get_conn().await.map_err(map_err)?;
+    let row: Option<Option<String>> = conn
+        .exec_first(
+            "SELECT SCHEMA_COMMENT FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
+            (schema,),
+        )
+        .await
+        .map_err(map_err)?;
+    Ok(row.map(Option::unwrap_or_default))
+}
+
+/// Creates the catalog schema with `owner` as its comment, the mark that
+/// proves whose it is, in the same statement, so no crash leaves an
+/// unmarked catalog behind. An existing schema is never adopted unless it
+/// carries the same mark: a tenant id is never reused, so a schema already
+/// there for a new tenant is an earlier tenant's (left by a deletion that
+/// didn't finish, or by a directory whose id counter was lost).
+///
+/// # Errors
+/// 39070 or a backend error.
+pub async fn claim_catalog(pool: &Pool, schema: &str, owner: &str) -> Result<CatalogClaim> {
+    let judge = |found: String| {
+        if found == owner {
+            CatalogClaim::Ours
+        } else {
+            CatalogClaim::Foreign(found)
+        }
+    };
+    if let Some(found) = catalog_owner(pool, schema).await? {
+        return Ok(judge(found));
+    }
+    let mut conn = pool.get_conn().await.map_err(map_err)?;
+    let created = conn
+        .query_drop(format!(
+            "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT {}",
+            quote(schema),
+            literal(owner)
+        ))
+        .await;
+    drop(conn);
+    match created {
+        Ok(()) => Ok(CatalogClaim::Created),
+        // 1007: another run created it first; judge its mark.
+        Err(mysql_async::Error::Server(e)) if e.code == 1007 => {
+            Ok(judge(catalog_owner(pool, schema).await?.unwrap_or_default()))
+        }
+        Err(e) => Err(map_err(e)),
+    }
+}
+
+/// The tenant ids of the catalog schemas on `pool`'s server named
+/// `<prefix><id><suffix>` (`t<id>_sprig` in production).
+///
+/// # Errors
+/// 39070 or a backend error.
+pub async fn catalog_ids(pool: &Pool, prefix: &str, suffix: &str) -> Result<Vec<u64>> {
+    let like = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    };
+    let mut conn = pool.get_conn().await.map_err(map_err)?;
+    let names: Vec<String> = conn
+        .exec(
+            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE ?",
+            (format!("{}%{}", like(prefix), like(suffix)),),
+        )
+        .await
+        .map_err(map_err)?;
+    Ok(names
+        .iter()
+        .filter_map(|n| n.strip_prefix(prefix)?.strip_suffix(suffix))
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+        .filter_map(|id| id.parse().ok())
+        .collect())
+}
+
 /// Creates `schema` on `pool`'s server (`utf8mb4_bin`) and runs every
 /// pending migration of the core module and `migrator`'s other modules.
 /// Safe to repeat and to run concurrently (the migrator serializes runs).

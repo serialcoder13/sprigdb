@@ -1170,3 +1170,131 @@ async fn snapshot_isolation_per_persona() {
         db.drop(&addr, topo.user).await;
     }
 }
+
+/// Every result set of one text (`COM_QUERY` with several statements), or
+/// the error number that stopped it.
+async fn text_results(c: &mut Conn, sql: &str) -> Result<Vec<Vec<Row>>, u16> {
+    let mut r = c.query_iter(sql).await.map_err(|e| server_code(&e))?;
+    let mut out = Vec::new();
+    while !r.is_empty() {
+        let rows: Vec<Row> = r.collect().await.map_err(|e| server_code(&e))?;
+        out.push(rows);
+    }
+    Ok(out)
+}
+
+/// The first column of each result set that has rows, as integers.
+fn scalars(sets: &[Vec<Row>]) -> Vec<i64> {
+    sets.iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| s[0].get::<i64, _>(0).unwrap())
+        .collect()
+}
+
+/// Transactions inside one multi-statement text keep MySQL's semantics
+/// whatever state earlier statements left in the session, on a session
+/// without a default schema and with qualified names. Before the fix a
+/// `CALL db.p()` made session tracking report an empty schema, which the
+/// gateway replayed as `USE` on the next backend connection: every later
+/// statement failed with 1046.
+#[tokio::test]
+async fn multi_statement_transactions_after_session_state() {
+    let Some(eps) = endpoints("multi_statement_transactions_after_session_state") else {
+        return;
+    };
+    for (addr, persona, topo) in matrix(&eps) {
+        let db = Db::create(&addr, topo.user, "gw_mtx").await;
+        let t = format!("`{}`.t", db.name);
+        let mut setup = gw(&addr, topo.user, None).await;
+        setup
+            .query_drop(format!("CREATE TABLE {t} (id INT PRIMARY KEY)"))
+            .await
+            .unwrap();
+        setup
+            .query_drop(format!(
+                "CREATE PROCEDURE `{0}`.p(IN x INT) BEGIN START TRANSACTION; INSERT INTO {t} VALUES (x); END",
+                db.name
+            ))
+            .await
+            .unwrap();
+        setup
+            .query_drop(format!("CREATE PROCEDURE `{}`.q() SELECT 1", db.name))
+            .await
+            .unwrap();
+        setup.disconnect().await.unwrap();
+
+        let states: [(&str, Vec<String>); 4] = [
+            ("fresh", vec![]),
+            ("after CALL", vec![format!("CALL `{}`.q()", db.name)]),
+            (
+                "after autocommit off and on",
+                vec!["SET autocommit = 0; SET autocommit = 1".to_owned()],
+            ),
+            (
+                "after an error and ROLLBACK",
+                vec![
+                    format!("BEGIN; INSERT INTO {t} VALUES (1); INSERT INTO {t} VALUES (1)"),
+                    "ROLLBACK".to_owned(),
+                ],
+            ),
+        ];
+        for (k, (state, before)) in states.iter().enumerate() {
+            let ctx = format!("{persona:?} {} {state}", topo.user);
+            let mut c = gw(&addr, topo.user, None).await;
+            for sql in before {
+                let _ = text_results(&mut c, sql).await;
+            }
+            let id = |n: usize| 1000 * (k + 1) + n;
+            let cases = [
+                (
+                    "BEGIN in the text",
+                    format!(
+                        "BEGIN; INSERT INTO {t} VALUES ({0}); SELECT COUNT(*) FROM {t} WHERE id = {0}; \
+                         ROLLBACK; SELECT COUNT(*) FROM {t} WHERE id = {0}",
+                        id(1)
+                    ),
+                    vec![1, 0],
+                ),
+                (
+                    "transaction begun inside CALL",
+                    format!(
+                        "CALL `{1}`.p({0}); SELECT COUNT(*) FROM {t} WHERE id = {0}; \
+                         ROLLBACK; SELECT COUNT(*) FROM {t} WHERE id = {0}",
+                        id(2),
+                        db.name
+                    ),
+                    vec![1, 0],
+                ),
+                (
+                    "START TRANSACTION in an executable comment",
+                    format!(
+                        "/*!40101 START TRANSACTION */; INSERT INTO {t} VALUES ({0}); \
+                         SELECT COUNT(*) FROM {t} WHERE id = {0}; ROLLBACK; \
+                         SELECT COUNT(*) FROM {t} WHERE id = {0}",
+                        id(3)
+                    ),
+                    vec![1, 0],
+                ),
+                (
+                    "DDL commits implicitly",
+                    format!(
+                        "BEGIN; INSERT INTO {t} VALUES ({0}); CREATE TABLE `{1}`.t2_{2} (a INT); \
+                         ROLLBACK; SELECT COUNT(*) FROM {t} WHERE id = {0}",
+                        id(4),
+                        db.name,
+                        k
+                    ),
+                    vec![1],
+                ),
+            ];
+            for (name, sql, want) in cases {
+                let got = text_results(&mut c, &sql)
+                    .await
+                    .unwrap_or_else(|e| panic!("{ctx}, {name}: error {e}"));
+                assert_eq!(scalars(&got), want, "{ctx}, {name}");
+            }
+            c.disconnect().await.unwrap();
+        }
+        db.drop(&addr, topo.user).await;
+    }
+}

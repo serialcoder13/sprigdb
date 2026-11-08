@@ -416,6 +416,17 @@ fn plan_show(
             {
                 text = tables_in_where(text, f, info.schema.as_deref(), current, ctx);
             }
+            if matches!(
+                kind,
+                ShowKind::ProcedureStatus
+                    | ShowKind::FunctionStatus
+                    | ShowKind::PackageStatus
+                    | ShowKind::Events
+                    | ShowKind::OpenTables
+            ) && let Some(f) = info.filter.clone()
+            {
+                text = schemas_in_where(text, f, ctx);
+            }
             forward(text, ResultMapper::show(kind, ctx.vis))
         }
     };
@@ -439,6 +450,48 @@ fn databases_where(names: &[String], filter: &[u8], nbe: bool) -> Action {
     sql.extend_from_slice(b" ORDER BY `Database`");
     let mapper = ResultMapper::scrub().with_columns(vec![databases_column(None)]);
     Action::Forward { sql, mapper }
+}
+
+/// `SHOW PROCEDURE STATUS WHERE Db = 'shop'` (as dump tools list
+/// routines) and the other `SHOW`s whose rows name a database: MariaDB
+/// evaluates the filter over physical names, so a string literal in it that
+/// is one of the tenant's databases becomes that database's schema. The
+/// rows' `Db` column is mapped back on the way out. Patterns (`LIKE 'sh%'`)
+/// are left alone.
+fn schemas_in_where(text: Vec<u8>, filter: Range<usize>, ctx: &PlanCtx<'_>) -> Vec<u8> {
+    let map = ctx.rewrite.map;
+    let nbe = ctx.rewrite.lex.no_backslash_escapes;
+    let Ok(tokens) = lex::lex(&text, &ctx.rewrite.lex) else {
+        return text;
+    };
+    let mut out = Vec::with_capacity(text.len() + 16);
+    let mut at = 0;
+    for t in tokens
+        .iter()
+        .filter(|t| t.kind == TokenKind::String && t.start as usize >= filter.start)
+    {
+        let Some(v) = lex::string_value(t.bytes(&text), nbe) else {
+            continue;
+        };
+        let name = String::from_utf8_lossy(&v);
+        let key = if ctx.rewrite.lower_case_table_names {
+            name.to_lowercase()
+        } else {
+            name.into_owned()
+        };
+        let Some(schema) = map
+            .physical(&key, Purpose::Metadata)
+            .ok()
+            .and_then(|s| s.0.first().copied())
+        else {
+            continue;
+        };
+        out.extend_from_slice(&text[at..t.start as usize]);
+        out.extend_from_slice(sql_string(&schema.to_string(), nbe).as_bytes());
+        at = t.end as usize;
+    }
+    out.extend_from_slice(&text[at..]);
+    out
 }
 
 /// `SHOW TABLES ... WHERE`: the client names the column

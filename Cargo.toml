@@ -24,6 +24,7 @@ sprig-cluster = { path = "crates/sprig-cluster" }
 sprig-testkit = { path = "crates/sprig-testkit" }
 sprig-provision = { path = "crates/sprig-provision" }
 sprig-binlog = { path = "crates/sprig-binlog" }
+sprig-catalog = { path = "crates/sprig-catalog" }
 
 # Third-party crates. Every licence must be on deny.toml's allow-list (chapter 03).
 async-trait = "0.1"

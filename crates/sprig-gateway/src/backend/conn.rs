@@ -59,10 +59,10 @@ impl std::fmt::Debug for ConnectSpec {
 }
 
 impl ConnectSpec {
-    /// The two initialization statements (chapter 06): session tracking
-    /// and timeouts, then the persona baseline.
+    /// The gateway-owned variables (chapter 06, "New connections"):
+    /// session tracking and timeouts, and `wsrep_sync_wait = 0` on Galera.
     #[must_use]
-    pub fn init_sql(&self) -> String {
+    pub fn gateway_sql(&self) -> String {
         let wsrep = if self.galera {
             ", wsrep_sync_wait = 0"
         } else {
@@ -71,14 +71,31 @@ impl ConnectSpec {
         format!(
             "SET SESSION session_track_system_variables = '*', session_track_schema = ON, \
              session_track_state_change = ON, session_track_transaction_info = 'STATE', \
-             net_write_timeout = {}, wait_timeout = {}{wsrep}; \
-             SET NAMES utf8mb4 COLLATE {}, SESSION sql_mode = '{}'",
-            self.net_write_timeout_secs,
-            self.wait_timeout_secs,
+             net_write_timeout = {}, wait_timeout = {}{wsrep}",
+            self.net_write_timeout_secs, self.wait_timeout_secs,
+        )
+    }
+
+    /// The two initialization statements (chapter 06): the gateway-owned
+    /// variables, then the persona baseline.
+    #[must_use]
+    pub fn init_sql(&self) -> String {
+        format!(
+            "{}; SET NAMES utf8mb4 COLLATE {}, SESSION sql_mode = '{}'",
+            self.gateway_sql(),
             persona::COLLATION,
             persona::MARIADB_SQL_MODE
         )
     }
+}
+
+/// What [`BackendConn::restore_gateway_vars`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Restored {
+    /// The values the client's statement gave the gateway-owned variables.
+    pub client: Vec<(String, String)>,
+    /// Every allowed variable's value on the connection afterwards.
+    pub allowed: Vec<(String, String)>,
 }
 
 /// Counts a node's backend prepared statements against this gateway's
@@ -250,6 +267,7 @@ pub struct BackendConn {
     /// `@@global.max_prepared_stmt_count` at connect.
     pub max_prepared: u64,
     init_sql: Arc<str>,
+    gateway_sql: Arc<str>,
     budget: Arc<PreparedBudget>,
 }
 
@@ -299,15 +317,11 @@ pub async fn connect(
     let deadline = Instant::now() + spec.connect_timeout;
     let mut client = MysqlClient::connect(&spec.addr, &cfg).await?;
     let init_sql: Arc<str> = Arc::from(spec.init_sql());
+    let gateway_sql: Arc<str> = Arc::from(spec.gateway_sql());
     let left = deadline.saturating_duration_since(Instant::now());
-    let names: Vec<String> = allowed_vars()
-        .map(|n| format!("'{}'", n.to_ascii_uppercase()))
-        .collect();
     let sql = format!(
-        "{init_sql}; SELECT CONNECTION_ID(), @@global.max_prepared_stmt_count; \
-         SELECT LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.SESSION_VARIABLES \
-         WHERE VARIABLE_NAME IN ({})",
-        names.join(",")
+        "{init_sql}; SELECT CONNECTION_ID(), @@global.max_prepared_stmt_count; {}",
+        allowed_vars_sql()
     );
     let results = tokio::time::timeout(left, client.query(&sql))
         .await
@@ -347,8 +361,21 @@ pub async fn connect(
         baseline: Arc::new(baseline),
         max_prepared,
         init_sql,
+        gateway_sql,
         budget,
     })
+}
+
+/// The query that reads every allowed variable's session value.
+fn allowed_vars_sql() -> String {
+    let names: Vec<String> = allowed_vars()
+        .map(|n| format!("'{}'", n.to_ascii_uppercase()))
+        .collect();
+    format!(
+        "SELECT LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.SESSION_VARIABLES \
+         WHERE VARIABLE_NAME IN ({})",
+        names.join(",")
+    )
 }
 
 impl BackendConn {
@@ -466,6 +493,64 @@ impl BackendConn {
             .and_then(|r| r.into_iter().next().flatten())
             .and_then(|b| std::str::from_utf8(&b).ok()?.parse().ok())
             .unwrap_or(0))
+    }
+
+    /// After a client statement that set gateway-owned variables (chapter
+    /// 06, "Replay rules"): reads the values it gave `names`, puts the
+    /// gateway's own values back (initialization's, or the server default
+    /// for the ones initialization leaves alone), and reads every allowed
+    /// variable, since tracking may have been off for part of the
+    /// statement. One round trip.
+    ///
+    /// # Errors
+    /// Connection errors; the server's ERR (the connection's tracking is
+    /// then unknown: discard it).
+    pub async fn restore_gateway_vars(
+        &mut self,
+        names: &[String],
+    ) -> Result<Restored, ClientError> {
+        // Only names from the gateway's fixed list reach this text.
+        let names: Vec<&String> = names
+            .iter()
+            .filter(|n| super::state::settable_gateway_var(n))
+            .collect();
+        let mut parts = Vec::with_capacity(3);
+        if !names.is_empty() {
+            let cols: Vec<String> = names.iter().map(|n| format!("@@session.{n}")).collect();
+            parts.push(format!("SELECT {}", cols.join(", ")));
+        }
+        let mut restore = vec![self.gateway_sql.to_string()];
+        restore.extend(
+            names
+                .iter()
+                .filter(|n| !self.gateway_sql.contains(&format!("{n} =")))
+                .map(|n| format!("{n} = DEFAULT")),
+        );
+        parts.push(restore.join(", "));
+        parts.push(allowed_vars_sql());
+        let sql = parts.join("; ");
+        let results = self.client.query(&sql).await?;
+        self.client.take_changes();
+        let mut sets = results.iter().filter(|r| !r.columns.is_empty());
+        let mut out = Restored::default();
+        if !names.is_empty()
+            && let Some(rs) = sets.next()
+        {
+            let row = rs.text_rows()?.into_iter().next().unwrap_or_default();
+            for (i, n) in names.iter().enumerate() {
+                out.client
+                    .push(((*n).clone(), text(row.get(i).and_then(Option::as_ref))));
+            }
+        }
+        if let Some(rs) = sets.next() {
+            for row in rs.text_rows()? {
+                out.allowed.push((
+                    text(row.first().and_then(Option::as_ref)),
+                    text(row.get(1).and_then(Option::as_ref)),
+                ));
+            }
+        }
+        Ok(out)
     }
 
     /// `COM_RESET_CONNECTION`, then the initialization again: the

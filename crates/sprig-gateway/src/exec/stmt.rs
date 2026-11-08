@@ -62,6 +62,13 @@ pub(crate) struct Stmt {
     pub nowait: bool,
     /// The text is `SHOW [SESSION] STATUS` (see `Relay::conn_status`).
     pub session_status: bool,
+    /// Tenant sessions: the result mapper of the planned statement (its
+    /// column definitions are already mapped in `columns`).
+    pub mapper: Option<sprig_sql::names::ResultMapper>,
+    /// Tenant sessions: a statement the gateway answers itself (DDL,
+    /// settings, a local answer), kept as the client's text and planned
+    /// again at each execute. Never prepared on a backend.
+    pub deferred: Option<Bytes>,
 }
 
 impl Stmt {
@@ -79,6 +86,29 @@ impl Stmt {
             renames: Vec::new(),
             nowait: false,
             session_status: false,
+            mapper: None,
+            deferred: None,
+        }
+    }
+
+    /// A statement the gateway answers itself (see [`Stmt::deferred`]):
+    /// no parameters, `columns` as `PREPARE_OK` reports them.
+    pub(crate) fn deferred(sql: Bytes, columns: Vec<ColumnDef>) -> Self {
+        Self {
+            info: StmtInfo::write(),
+            params: 0,
+            columns,
+            types: None,
+            long_data: HashMap::new(),
+            long_data_bytes: 0,
+            long_data_over: false,
+            cursor: None,
+            renames: Vec::new(),
+            nowait: false,
+            session_status: false,
+            mapper: None,
+            deferred: Some(sql.clone()),
+            sql,
         }
     }
 

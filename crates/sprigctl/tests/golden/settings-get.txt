@@ -1,0 +1,9 @@
+auto_index.max_per_table for object acme.shop.orders = 5
+from object acme.shop.orders, clamped; bounds in force below: min 1, max 5
+SCOPE     TARGET            VALUE  BOUNDS  LIMITS HERE    NOTE
+object    acme.shop.orders  7      -       min 1, max 5   ◄ effective, clamped to 5  set by user:7 2026-11-08T09:30:00Z (capacity)
+database  acme.shop         -      -       min 1, max 5   (unset)
+tenant    acme              6      max 5   min 1, max 8   overridden  set by op:kiran 2026-11-08T09:30:00Z (capacity)
+dc        mum1              -      -       min 1, max 8   (unset)
+global                      -      max 8   min 1, max 64  bounds only  set by op:kiran 2026-11-08T09:30:00Z (capacity)
+default                     5      -       min 1, max 64  overridden

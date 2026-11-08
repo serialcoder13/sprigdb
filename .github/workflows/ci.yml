@@ -332,3 +332,63 @@ jobs:
         if: always()
         working-directory: deploy/compose
         run: docker compose --profile single down -v --timeout 10
+
+  # M0.3 "done when" (chapter 48): two tenants on one cluster run the same
+  # schema-tool suite (Flyway, Hibernate validation, mysqldump and
+  # mariadb-dump) and see only their own objects; no physical name reaches a
+  # client in the leak suite; an object-scope setting is live within seconds
+  # and an out-of-bounds value is refused with 39080. The harness is
+  # deploy/compose/m03 (README there); its baseline mode already passes
+  # against MariaDB 11.8 directly.
+  #
+  # Disabled until the gateway serves M0.3's tenants (the catalog, name
+  # virtualization and SPRIG SET). To enable: drop `if: false`. gateway-dev.sh
+  # up provisions the tenants itself (acme and globex on dc-a-single, users
+  # acme.app and globex.app with password sprig-dev-app).
+  m03:
+    name: M0.3 tenants, names and settings (gateway)
+    needs: [integration]
+    if: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      SPRIG_TEST_STRICT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Compose (etcd + one node) and build the m03 images
+        working-directory: deploy/compose
+        run: |
+          docker compose --profile m03 config --quiet
+          docker compose --profile single up -d --wait --wait-timeout 300
+          docker compose --profile m03 pull --quiet m03-flyway
+          docker compose --profile m03 build --quiet m03-hibernate m03-mysql-cli m03-mariadb-cli
+      - run: cargo build --locked -p sprigdb -p sprigctl
+      - run: cargo test --locked -p sprig-testkit --test m03_leaks --test m03_settings --no-run
+      - name: Baseline (direct MariaDB) proves the harness
+        run: |
+          for persona in mariadb mysql; do
+            SPRIG_M03_MODE=baseline SPRIG_M03_BUILD=0 \
+              deploy/compose/m03/run.sh 127.0.0.1 13301 "$persona" m03_acme m03_globex sprig-dev-app
+          done
+      - name: Start the gateway
+        run: deploy/compose/gateway-dev.sh up
+      - name: M0.3 harness, both ports
+        run: |
+          export SPRIG_M03_BUILD=0 SPRIG_M03_BACKEND=mysql://root:sprig-dev-root@127.0.0.1:13301
+          deploy/compose/m03/run.sh 127.0.0.1 13307 mariadb acme.app globex.app sprig-dev-app
+          deploy/compose/m03/run.sh 127.0.0.1 13306 mysql acme.app globex.app sprig-dev-app
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m03-harness
+          path: |
+            deploy/compose/m03/results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          deploy/compose/gateway-dev.sh down || true
+          docker compose --project-directory deploy/compose --profile single down -v --timeout 10

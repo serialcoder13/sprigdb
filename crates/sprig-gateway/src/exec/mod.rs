@@ -29,6 +29,7 @@ pub mod relay;
 pub mod settings;
 pub mod split;
 pub mod stmt;
+mod tenant;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,12 +40,12 @@ use sprig_auth::BackendTarget;
 use sprig_common::{Result, SprigError};
 use sprig_proto_mysql::client::PacketKind;
 use sprig_proto_mysql::command::{
-    CURSOR_TYPE_FOR_UPDATE, CURSOR_TYPE_READ_ONLY, CURSOR_TYPE_SCROLLABLE, com,
+    CURSOR_TYPE_FOR_UPDATE, CURSOR_TYPE_READ_ONLY, CURSOR_TYPE_SCROLLABLE, QueryAttrs, com,
 };
 use sprig_proto_mysql::packets::OkPacket;
 use sprig_proto_mysql::{Caps, ColumnDef, Persona, StatusFlags};
 
-use self::relay::{Infile, Relay, Relayed, backend_error, protocol_error, relay};
+use self::relay::{Infile, NamesOut, Relay, Relayed, backend_error, protocol_error, relay};
 pub use self::settings::{ExecSettings, ExecSettingsSource};
 use self::stmt::{Stmt, Stmts, bulk_payload, execute_payload};
 use crate::backend::{BackendSession, BackendStmt, Backends, SessionOpts, StmtInfo};
@@ -52,6 +53,9 @@ use crate::pipeline::{
     Abandon, EndOfRows, ExecCtx, ExecSummary, Executor, LoginInfo, PreparedMeta, Request,
     ResultSink, RowFormat, SessionExec, StmtRef,
 };
+use crate::tenant::TenantServices;
+use crate::tenant::names::Accounts;
+use crate::tenant::session::TenantSession;
 
 /// How long `abandoned` waits for `KILL QUERY`, and for the killed
 /// statement's response before its connection is discarded.
@@ -63,18 +67,44 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct PassThrough {
     backends: Arc<Backends>,
     settings: ExecSettingsSource,
+    tenants: Option<Arc<TenantServices>>,
 }
 
 impl PassThrough {
     /// An executor over `backends`, reading its settings from `settings`.
     #[must_use]
     pub fn new(backends: Arc<Backends>, settings: ExecSettingsSource) -> Self {
-        Self { backends, settings }
+        Self {
+            backends,
+            settings,
+            tenants: None,
+        }
+    }
+
+    /// The same executor with tenant sessions (M0.3): catalog logins get
+    /// names virtualized, DDL through the catalog and settings in SQL (see
+    /// `exec::tenant`). Accounts-file logins keep M0.2's pass-through.
+    #[must_use]
+    pub fn with_tenants(mut self, tenants: Arc<TenantServices>) -> Self {
+        self.tenants = Some(tenants);
+        self
     }
 }
 
 impl Executor for PassThrough {
     fn open(&self, login: &LoginInfo) -> Box<dyn SessionExec> {
+        let tenant = match (&self.tenants, login.principal.tenant) {
+            (Some(svc), Some(_)) => {
+                match TenantSession::new(Arc::clone(svc), login.principal.clone()) {
+                    Ok(t) => Some(Box::new(t)),
+                    Err(e) => {
+                        tracing::error!(error = %e, "tenant session failed to open");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         Box::new(PassSession {
             backends: Arc::clone(&self.backends),
             target: login.backend.clone(),
@@ -82,6 +112,8 @@ impl Executor for PassThrough {
             settings: self.settings.clone(),
             bs: None,
             stmts: Stmts::default(),
+            tenant,
+            subst: Vec::new(),
         })
     }
 }
@@ -94,6 +126,12 @@ pub struct PassSession {
     settings: ExecSettingsSource,
     bs: Option<BackendSession>,
     stmts: Stmts,
+    /// A catalog login's tenant state (M0.3); `None` for accounts-file
+    /// logins, whose names pass through unchanged (decision D2).
+    tenant: Option<Box<TenantSession>>,
+    /// Columns the name rewrite's substitutions renamed (`DATABASE()`
+    /// became `'shop'`): the next forwarded statement gives them back.
+    subst: Vec<split::Renamed>,
 }
 
 impl std::fmt::Debug for PassSession {
@@ -163,11 +201,17 @@ fn wants_cursor(flags: u8) -> bool {
 }
 
 impl PassSession {
-    /// The backend session, opened with the client's capabilities.
+    /// The backend session, opened with the client's capabilities. A
+    /// tenant session opens it in the schema of its current logical
+    /// database.
     fn bs(&mut self, cx: &ExecCtx<'_>) -> &mut BackendSession {
         let backends = &self.backends;
         let target = &self.target;
         let persona = self.persona;
+        let schema = match self.tenant.as_deref() {
+            Some(ts) => ts.schema_of(ts.current.as_deref().or(cx.db)),
+            None => cx.db.map(str::to_owned),
+        };
         self.bs.get_or_insert_with(|| {
             backends.session(
                 target.clone(),
@@ -176,7 +220,7 @@ impl PassSession {
                     found_rows: cx.proto.has(Caps::FOUND_ROWS),
                     mariadb_caps: mariadb_caps(persona, cx.proto.caps),
                     collation: cx.proto.collation,
-                    schema: cx.db.map(str::to_owned),
+                    schema,
                     ..SessionOpts::default()
                 },
             )
@@ -248,10 +292,7 @@ impl PassSession {
         let conn_id = cx.session.id.0;
         let mysql = self.persona == Persona::MySql84;
         for (i, piece) in pieces.into_iter().enumerate() {
-            let (piece, renames) = match split::rewrite_connection_id(&piece, conn_id) {
-                Some((sql, renames)) => (sql, renames),
-                None => (piece, Vec::new()),
-            };
+            let (piece, renames) = self.session_rewrites(piece, conn_id);
             let infile_name = split::local_infile_name(&piece);
             let mut allowed = false;
             if infile_name.is_some() {
@@ -270,7 +311,7 @@ impl PassSession {
                 format: RowFormat::Text,
                 cursor: false,
                 fetch: false,
-                backend_caps,
+                backend_caps: bs.backend_caps().unwrap_or(backend_caps),
                 infile: Infile {
                     name: infile_name.as_deref(),
                     allowed,
@@ -279,7 +320,7 @@ impl PassSession {
                 renames: &renames,
                 mysql_nowait: mysql && split::has_keyword(&piece, "NOWAIT"),
             };
-            let relayed = relay(bs, out, &r).await?;
+            let relayed = relay(bs, out, &r, None).await?;
             let status = self.finish(out.finished()).await?;
             summary.status = status.or(relayed.status);
             if relayed.errored {
@@ -290,10 +331,7 @@ impl PassSession {
     }
 
     async fn prepare(&mut self, cx: &mut ExecCtx<'_>, sql: Bytes) -> Result<ExecSummary> {
-        let (sql, renames) = match split::rewrite_connection_id(&sql, cx.session.id.0) {
-            Some((sql, renames)) => (sql, renames),
-            None => (sql, Vec::new()),
-        };
+        let (sql, renames) = self.session_rewrites(sql, cx.session.id.0);
         let info = StmtInfo::classify(&sql);
         let prepared = self.bs(cx).prepare(&info, &sql).await?;
         let meta_params = prepared.param_defs.clone();
@@ -316,9 +354,11 @@ impl PassSession {
                 columns: meta_columns,
                 warnings: 0,
             }),
+            db: None,
         })
     }
 
+    #[allow(clippy::too_many_lines)] // the execute path, deferred and relayed
     async fn execute(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -330,6 +370,25 @@ impl PassSession {
         let persona = self.persona;
         let backend_caps = self.backend_caps(cx);
         let s = self.stmts.get_mut(stmt)?;
+        if let Some(text) = s.deferred.clone() {
+            // A statement the gateway answers itself, planned again now.
+            let step = self
+                .tenant_text(
+                    cx,
+                    &text,
+                    &QueryAttrs::default(),
+                    false,
+                    RowFormat::Binary,
+                    out,
+                )
+                .await?;
+            return Ok(ExecSummary {
+                status: step.status,
+                prepared: None,
+                db: Some(self.current_logical()),
+            });
+        }
+        let mut mapper = s.mapper.clone();
         let values = s.params_for_backend(params, persona)?;
         if params.new_params_bound {
             s.types = Some(values.iter().map(|p| p.param_type).collect());
@@ -346,7 +405,10 @@ impl PassSession {
             types = ?values.iter().map(|p| p.param_type).collect::<Vec<_>>(),
             "execute parameters"
         );
-        let bs = self.bs(cx);
+        let _ = self.bs(cx);
+        let Some(bs) = self.bs.as_mut() else {
+            return Err(SprigError::internal("no backend session"));
+        };
         if had_cursor {
             // Executing again closes the old cursor on the server.
             bs.close_cursor();
@@ -371,13 +433,24 @@ impl PassSession {
             format: RowFormat::Binary,
             cursor,
             fetch: false,
-            backend_caps,
+            backend_caps: bs.backend_caps().unwrap_or(backend_caps),
             infile: Infile::default(),
             conn_status: conn_status.as_ref(),
             renames: &renames,
             mysql_nowait: nowait,
         };
-        let relayed = relay(bs, out, &r).await;
+        let map = self.tenant.as_deref().map(TenantSession::map);
+        let accounts = Accounts(self.tenant.as_deref().and_then(TenantSession::auth));
+        let aliases = self.tenant.as_deref().map(TenantSession::aliases);
+        let mut names = match (&mut mapper, &map) {
+            (Some(m), Some(map)) => Some(NamesOut {
+                mapper: m,
+                ctx: sprig_sql::names::OutputCtx::new(&**map).accounts(&accounts),
+                aliases: aliases.as_ref(),
+            }),
+            _ => None,
+        };
+        let relayed = relay(bs, out, &r, names.as_mut()).await;
         let status = self.finish(out.finished()).await;
         let opened = matches!(
             relayed,
@@ -397,6 +470,7 @@ impl PassSession {
         Ok(ExecSummary {
             status: status?.or(relayed.status),
             prepared: None,
+            db: None,
         })
     }
 
@@ -424,13 +498,13 @@ impl PassSession {
             format: RowFormat::Binary,
             cursor: false,
             fetch: true,
-            backend_caps,
+            backend_caps: bs.backend_caps().unwrap_or(backend_caps),
             infile: Infile::default(),
             conn_status: None,
             renames: &[],
             mysql_nowait: false,
         };
-        let relayed = relay(bs, out, &r).await;
+        let relayed = relay(bs, out, &r, None).await;
         let status = self.finish(out.finished()).await;
         let closed = match &relayed {
             Ok(r) => {
@@ -447,6 +521,7 @@ impl PassSession {
         Ok(ExecSummary {
             status: status?.or(relayed.status),
             prepared: None,
+            db: None,
         })
     }
 
@@ -485,19 +560,20 @@ impl PassSession {
             format: RowFormat::Binary,
             cursor: false,
             fetch: false,
-            backend_caps,
+            backend_caps: bs.backend_caps().unwrap_or(backend_caps),
             infile: Infile::default(),
             conn_status: None,
             renames: &[],
             mysql_nowait: false,
         };
-        let relayed = relay(bs, out, &r).await;
+        let relayed = relay(bs, out, &r, None).await;
         let status = self.finish(out.finished()).await;
         self.close_cursor(stmt);
         let relayed = relayed?;
         Ok(ExecSummary {
             status: status?.or(relayed.status),
             prepared: None,
+            db: None,
         })
     }
 
@@ -519,17 +595,18 @@ impl PassSession {
             format: RowFormat::Binary,
             cursor: false,
             fetch: false,
-            backend_caps,
+            backend_caps: bs.backend_caps().unwrap_or(backend_caps),
             infile: Infile::default(),
             conn_status: None,
             renames: &[],
             mysql_nowait: false,
         };
-        let relayed = relay(bs, out, &r).await?;
+        let relayed = relay(bs, out, &r, None).await?;
         let status = self.finish(out.finished()).await?;
         Ok(ExecSummary {
             status: status.or(relayed.status),
             prepared: None,
+            db: None,
         })
     }
 
@@ -546,13 +623,30 @@ impl PassSession {
         p.put_slice(table);
         p.put_u8(0);
         p.put_slice(wildcard);
-        let bs = self.bs(cx);
+        let map = self.tenant.as_deref().map(TenantSession::map);
+        let _ = self.bs(cx);
+        let Some(bs) = self.bs.as_mut() else {
+            return Err(SprigError::internal("no backend session"));
+        };
         bs.command(&StmtInfo::read(), p.freeze()).await?;
+        // The definitions come encoded with the serving connection's
+        // capabilities.
+        let backend_caps = bs.backend_caps().unwrap_or(backend_caps);
         let mut cols: Vec<ColumnDef> = Vec::new();
         let mut done = false;
         while let Some(pk) = bs.next().await? {
             match pk.kind {
-                PacketKind::ColumnDef => cols.push(ColumnDef::decode(&pk.payload, backend_caps)?),
+                PacketKind::ColumnDef => {
+                    let mut c = ColumnDef::decode(&pk.payload, backend_caps)?;
+                    if let Some(map) = &map {
+                        // Tenant sessions see logical names (chapter 07).
+                        sprig_sql::names::map_column_def(
+                            &mut c,
+                            &sprig_sql::names::OutputCtx::new(&**map),
+                        );
+                    }
+                    cols.push(c);
+                }
                 PacketKind::End(t) => {
                     let mut status = t.status();
                     status.remove(StatusFlags::SESSION_STATE_CHANGED);
@@ -567,7 +661,11 @@ impl PassSession {
                     done = true;
                 }
                 PacketKind::Err(e) => {
-                    out.error(&backend_error(&e)).await?;
+                    let mut err = backend_error(&e);
+                    if let Some(map) = &map {
+                        err = relay::map_error(err, &sprig_sql::names::OutputCtx::new(&**map));
+                    }
+                    out.error(&err).await?;
                     done = true;
                 }
                 _ => return Err(protocol_error("in a COM_FIELD_LIST response")),
@@ -582,6 +680,7 @@ impl PassSession {
         Ok(ExecSummary {
             status,
             prepared: None,
+            db: None,
         })
     }
 }
@@ -594,50 +693,18 @@ impl SessionExec for PassSession {
         req: Request,
         out: &mut dyn ResultSink,
     ) -> Result<ExecSummary> {
-        match req {
-            Request::Query { sql, attrs: _ } => self.query(cx, sql, out).await,
-            Request::Prepare { sql } => self.prepare(cx, sql).await,
-            Request::Execute { stmt, raw, params } => {
-                self.execute(cx, stmt, &raw, &params, out).await
-            }
-            Request::Fetch { stmt, rows } => self.fetch(cx, stmt, rows, out).await,
-            Request::LongData { stmt, param, data } => {
-                let limit = self.settings.current().long_data_max;
-                // An unknown statement is reported by nothing: long data
-                // has no response.
-                if let Ok(s) = self.stmts.get_mut(stmt) {
-                    s.add_long_data(param, &data, limit);
-                }
-                Ok(ExecSummary::default())
-            }
-            Request::ResetStmt { stmt } => self.reset_stmt(cx, stmt, out).await,
-            Request::CloseStmt { stmt } => {
-                self.close_cursor(stmt);
-                if self.stmts.remove(stmt).is_some() {
-                    metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).decrement(1.0);
-                }
-                Ok(ExecSummary::default())
-            }
-            Request::BulkExecute { stmt, raw } => self.bulk(cx, stmt, &raw, out).await,
-            Request::FieldList { table, wildcard } => {
-                self.field_list(cx, &table, &wildcard, out).await
-            }
-        }
+        let r = self.run_request(cx, req, out).await;
+        // Tenant sessions: no error the gateway returns carries a physical
+        // name (the relay maps the ones it sends itself).
+        r.map_err(|e| self.map_error(e))
     }
 
     async fn init_db(&mut self, cx: &mut ExecCtx<'_>, schema: &str) -> Result<()> {
-        let sql = format!("USE {}", crate::backend::state::quote_ident(schema));
-        let info = StmtInfo::classify(sql.as_bytes());
-        let bs = self.bs(cx);
-        bs.query(&info, sql.as_bytes()).await?;
-        let mut err = None;
-        while let Some(p) = bs.next().await? {
-            if let PacketKind::Err(e) = p.kind {
-                err = Some(backend_error(&e));
-            }
+        if self.tenant.is_some() {
+            let r = self.tenant_init_db(cx, schema).await;
+            return r.map_err(|e| self.map_error(e));
         }
-        bs.finish().await?;
-        err.map_or(Ok(()), Err)
+        self.init_physical(cx, schema).await
     }
 
     async fn reset(&mut self, _cx: &mut ExecCtx<'_>) -> Result<()> {
@@ -645,6 +712,9 @@ impl SessionExec for PassSession {
         self.stmts.clear();
         metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str())
             .decrement(n);
+        if let Some(ts) = self.tenant.as_deref_mut() {
+            ts.reset();
+        }
         match self.bs.as_mut() {
             Some(bs) => bs.reset().await,
             None => Ok(()),
@@ -684,8 +754,121 @@ impl SessionExec for PassSession {
 }
 
 impl PassSession {
+    /// The gateway's rewrites of a statement's text for this session: the
+    /// client's own values of gateway-owned variables, and
+    /// `CONNECTION_ID()`. The renames give the columns back their names.
+    fn session_rewrites(&self, sql: Bytes, conn_id: u32) -> (Bytes, Vec<split::Renamed>) {
+        let mut renames = Vec::new();
+        let sql = match self
+            .bs
+            .as_ref()
+            .and_then(|b| split::rewrite_gateway_vars(&sql, &b.vars().gateway_vars))
+        {
+            Some((s, r)) => {
+                renames.extend(r);
+                s
+            }
+            None => sql,
+        };
+        match split::rewrite_connection_id(&sql, conn_id) {
+            Some((s, r)) => {
+                renames.extend(r);
+                (s, renames)
+            }
+            None => (sql, renames),
+        }
+    }
+
+    /// One request, dispatched (see `SessionExec::execute`).
+    async fn run_request(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        req: Request,
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
+        match req {
+            Request::Query { sql, attrs } => {
+                if self.tenant.is_some() {
+                    self.tenant_query(cx, sql, &attrs, out).await
+                } else {
+                    self.query(cx, sql, out).await
+                }
+            }
+            Request::Prepare { sql } => {
+                if self.tenant.is_some() {
+                    self.tenant_prepare(cx, sql).await
+                } else {
+                    self.prepare(cx, sql).await
+                }
+            }
+            Request::Execute { stmt, raw, params } => {
+                self.execute(cx, stmt, &raw, &params, out).await
+            }
+            Request::Fetch { stmt, rows } => self.fetch(cx, stmt, rows, out).await,
+            Request::LongData { stmt, param, data } => {
+                let limit = match self.tenant.as_deref() {
+                    // Followed live (a resolved-setting watch).
+                    Some(ts) => ts.long_data_max(),
+                    None => self.settings.current().long_data_max,
+                };
+                // An unknown statement is reported by nothing: long data
+                // has no response.
+                if let Ok(s) = self.stmts.get_mut(stmt) {
+                    s.add_long_data(param, &data, limit);
+                }
+                Ok(ExecSummary::default())
+            }
+            Request::ResetStmt { stmt } => self.reset_stmt(cx, stmt, out).await,
+            Request::CloseStmt { stmt } => {
+                self.close_cursor(stmt);
+                if self.stmts.remove(stmt).is_some() {
+                    metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str()).decrement(1.0);
+                }
+                Ok(ExecSummary::default())
+            }
+            Request::BulkExecute { stmt, raw } => self.bulk(cx, stmt, &raw, out).await,
+            Request::FieldList { table, wildcard } => {
+                self.field_list(cx, &table, &wildcard, out).await
+            }
+        }
+    }
+
+    /// A tenant session's error with physical names mapped to logical ones
+    /// (another tenant's as `?`).
+    fn map_error(&self, e: SprigError) -> SprigError {
+        let Some(ts) = self.tenant.as_deref() else {
+            return e;
+        };
+        let map = ts.map();
+        let accounts = Accounts(ts.auth());
+        let mut e = relay::map_error(
+            e,
+            &sprig_sql::names::OutputCtx::new(&*map).accounts(&accounts),
+        );
+        if let Some(m) = ts.aliases().apply(e.message.as_bytes()) {
+            e.message = String::from_utf8_lossy(&m).into_owned();
+        }
+        e
+    }
+
     #[allow(clippy::cast_precision_loss)] // a gauge
     fn stmts_len(&self) -> f64 {
         self.stmts.len() as f64
+    }
+
+    /// `USE schema` with a physical (or system) schema name.
+    async fn init_physical(&mut self, cx: &mut ExecCtx<'_>, schema: &str) -> Result<()> {
+        let sql = format!("USE {}", crate::backend::state::quote_ident(schema));
+        let info = StmtInfo::classify(sql.as_bytes());
+        let bs = self.bs(cx);
+        bs.query(&info, sql.as_bytes()).await?;
+        let mut err = None;
+        while let Some(p) = bs.next().await? {
+            if let PacketKind::Err(e) = p.kind {
+                err = Some(backend_error(&e));
+            }
+        }
+        bs.finish().await?;
+        err.map_or(Ok(()), Err)
     }
 }

@@ -115,22 +115,64 @@ pub struct RuntimeConfig {
     pub worker_threads: usize,
 }
 
-/// `[gateway]`: runtime sizing plus, until M0.3, the accounts file.
+/// `[gateway]`: runtime sizing and where logins come from.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     /// Tokio worker threads; 0 means one per CPU.
     #[serde(default)]
     pub worker_threads: usize,
-    /// Interim (M0.2, decision D1 in the plan's `decisions/m0.2-interim.md`):
-    /// the TOML file listing the logins the gateway accepts, each with its
-    /// chapter 14 password verifier, cluster, backend account and backend
-    /// `credentials_ref` (format in `sprig_auth::accounts`). Re-read within
-    /// a second of a change. Unset, or a missing file, means no accounts:
-    /// every login fails with 1045. Removed when chapter 14's catalog
-    /// logins land (M0.3).
+    /// Where logins come from: `catalog` (chapter 14: tenants, their
+    /// catalogs' users, logical names) or `accounts_file` (M0.2's interim
+    /// file, raw clusters, names unchanged). Unset: `accounts_file` when
+    /// [`GatewayConfig::accounts_file`] is set, else `catalog`
+    /// ([`GatewayConfig::effective_login_mode`]).
+    #[serde(default)]
+    pub login_mode: Option<LoginModeConfig>,
+    /// Interim (M0.2, decision D1 in the plan's `decisions/m0.2-interim.md`),
+    /// used in `accounts_file` mode only: the TOML file listing the logins
+    /// the gateway accepts, each with its chapter 14 password verifier,
+    /// cluster, backend account and backend `credentials_ref` (format in
+    /// `sprig_auth::accounts`). Re-read within a second of a change. Unset,
+    /// or a missing file, means no accounts: every login fails with 1045.
     #[serde(default)]
     pub accounts_file: Option<PathBuf>,
+    /// Interim (chapter 14, "Backend target, interim"), used in `catalog`
+    /// mode until chapter 29's per-user backend accounts (M0.5): the TOML
+    /// file naming the backend account each tenant's sessions use, or a
+    /// default for every tenant (format in `sprig_gateway::tenant::backends`).
+    /// Without one, a verified catalog login fails with 39998.
+    #[serde(default)]
+    pub backends_file: Option<PathBuf>,
+    /// This process's own listener addresses, by listener name (`mysql =
+    /// "127.0.0.1:23306"`), replacing the DC's `listener.<name>.bind`
+    /// settings: a second gateway in the same DC (development, tests).
+    #[serde(default)]
+    pub listen_override: std::collections::BTreeMap<String, String>,
+}
+
+/// `[gateway] login_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginModeConfig {
+    /// M0.2's interim accounts file.
+    AccountsFile,
+    /// Tenant catalogs (chapter 14).
+    Catalog,
+}
+
+impl GatewayConfig {
+    /// The login mode in force: the configured one, else `accounts_file`
+    /// when an accounts file is configured (so M0.2 configs keep working),
+    /// else `catalog`.
+    #[must_use]
+    pub fn effective_login_mode(&self) -> LoginModeConfig {
+        self.login_mode.unwrap_or(if self.accounts_file.is_some() {
+            LoginModeConfig::AccountsFile
+        } else {
+            LoginModeConfig::Catalog
+        })
+    }
 }
 
 /// `[controller]`: runtime sizing plus the start-up switches of chapter 23.
@@ -475,6 +517,31 @@ mod tests {
         assert_eq!(d.gateway.accounts_file, Some(PathBuf::from("/tmp/a.toml")));
         let none = ProcessConfig::from_toml_and_env("[node]\ndc = \"mum1\"\n", env(&[])).unwrap();
         assert!(none.gateway.accounts_file.is_none());
+        // The login mode: explicit, else the accounts file decides.
+        assert_eq!(
+            c.gateway.effective_login_mode(),
+            LoginModeConfig::AccountsFile
+        );
+        assert_eq!(
+            none.gateway.effective_login_mode(),
+            LoginModeConfig::Catalog
+        );
+        let cat = ProcessConfig::from_toml_and_env(
+            "[node]\ndc = \"mum1\"\n[gateway]\nlogin_mode = \"catalog\"\naccounts_file = \"/a\"\nbackends_file = \"/b\"\n",
+            env(&[]),
+        )
+        .unwrap();
+        assert_eq!(cat.gateway.effective_login_mode(), LoginModeConfig::Catalog);
+        assert_eq!(cat.gateway.backends_file, Some(PathBuf::from("/b")));
+        let by_env = ProcessConfig::from_toml_and_env(
+            "[node]\ndc = \"mum1\"\n",
+            env(&[("SPRIGDB_GATEWAY_LOGIN_MODE", "accounts_file")]),
+        )
+        .unwrap();
+        assert_eq!(
+            by_env.gateway.effective_login_mode(),
+            LoginModeConfig::AccountsFile
+        );
         // Gateway-only: other roles' sections refuse it.
         let wrong = ProcessConfig::from_toml_and_env(
             "[node]\ndc = \"mum1\"\n[worker]\naccounts_file = \"/a\"\n",

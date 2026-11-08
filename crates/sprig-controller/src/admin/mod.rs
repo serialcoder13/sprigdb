@@ -22,7 +22,13 @@
 //! | `Tenants.ListTenants` | `GET /admin/v1/tenants` |
 //! | `Tenants.GetTenant` | `GET /admin/v1/tenants/{name}` |
 //! | `Tenants.DeleteTenant` | `DELETE /admin/v1/tenants/{name}` |
+//! | `Users.CreateUser` (interim) | `POST /admin/v1/tenants/{name}/users` ([`crate::users`]) |
+//! | `Settings.*` | `/admin/v1/settings[/{key}]`, `/admin/v1/tenants/{name}/settings` ([`crate::settings_admin`]) |
 //!
+//! Settings writes at `global`, `dc` and `cluster` scope are answered only
+//! by the DC leader (or, for `global`, a controller leading the global
+//! tier) and carry its fencing compare; writes at tenant, database and
+//! object scope are catalog changes and are answered by any controller.
 //! `CreateTenant` and `DeleteTenant` write the DC's tier (the catalog's
 //! shard map) with the DC leader's token, so they too are answered only by
 //! the leader. Tenant calls are served when the controller was given a
@@ -53,12 +59,15 @@ use tokio::sync::watch;
 use crate::dc::{self, DcKind, DcRegistration, Registered};
 use crate::monitor::ClusterMonitor;
 use crate::runtime::{Status, Stores};
+use crate::settings_admin::SettingsAdmin;
 use crate::tenants::TenantAdmin;
+use crate::users::UserAdmin;
 use types::{
     ClusterView, CreateTenantRequest, CreateTenantResponse, GetDcResponse, ListClustersResponse,
-    ListDcsResponse, ListTenantsResponse, ProbeClusterRequest, ProbeClusterResponse,
-    RegisterClusterRequest, RegisterClusterResponse, RegisterDcRequest, RegisterDcResponse,
-    TenantView,
+    ListDcsResponse, ListSettingKeysQuery, ListSettingKeysResponse, ListTenantsResponse,
+    ProbeClusterRequest, ProbeClusterResponse, RegisterClusterRequest, RegisterClusterResponse,
+    RegisterDcRequest, RegisterDcResponse, ScopeRef, SettingContextQuery, SettingExplanation,
+    SettingWrite, SettingWriteResponse, TenantSettingsResponse, TenantView,
 };
 
 /// 39792 `ER_SPRIG_ADMIN_REQUEST_INVALID`.
@@ -80,6 +89,8 @@ pub struct AdminService {
     status: watch::Receiver<Status>,
     clock: Arc<dyn Clock>,
     tenants: Option<Arc<dyn TenantAdmin>>,
+    users: Option<Arc<dyn UserAdmin>>,
+    settings: Option<Arc<dyn SettingsAdmin>>,
 }
 
 impl std::fmt::Debug for AdminService {
@@ -106,6 +117,8 @@ impl AdminService {
             status,
             clock,
             tenants: None,
+            users: None,
+            settings: None,
         }
     }
 
@@ -114,6 +127,97 @@ impl AdminService {
     pub fn with_tenants(mut self, tenants: Arc<dyn TenantAdmin>) -> Self {
         self.tenants = Some(tenants);
         self
+    }
+
+    /// The same service with the (interim) user calls.
+    #[must_use]
+    pub fn with_users(mut self, users: Arc<dyn UserAdmin>) -> Self {
+        self.users = Some(users);
+        self
+    }
+
+    /// `Users.CreateUser` (interim, [`crate::users`]): a user with a
+    /// password in a tenant's catalog. Any controller answers it: the
+    /// change is the catalog's.
+    ///
+    /// # Errors
+    /// As [`UserAdmin::create`].
+    pub async fn create_user(
+        &self,
+        tenant: &str,
+        req: crate::users::CreateUserRequest,
+    ) -> Result<crate::users::CreateUserResponse> {
+        self.users
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't manage users"))?
+            .create(tenant, req)
+            .await
+    }
+
+    /// The same service with the settings calls.
+    #[must_use]
+    pub fn with_settings(mut self, settings: Arc<dyn SettingsAdmin>) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
+    fn settings(&self) -> Result<&Arc<dyn SettingsAdmin>> {
+        self.settings
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't serve settings"))
+    }
+
+    /// `Settings.ListKeys`.
+    ///
+    /// # Errors
+    /// As [`SettingsAdmin::list_keys`].
+    pub async fn list_setting_keys(
+        &self,
+        q: &ListSettingKeysQuery,
+    ) -> Result<ListSettingKeysResponse> {
+        self.settings()?.list_keys(q).await
+    }
+
+    /// `Settings.GetSetting` and `ExplainSetting`.
+    ///
+    /// # Errors
+    /// As [`SettingsAdmin::explain`].
+    pub async fn explain_setting(
+        &self,
+        key: &str,
+        q: &SettingContextQuery,
+    ) -> Result<SettingExplanation> {
+        self.settings()?.explain(key, q).await
+    }
+
+    /// Every settings write. `global`, `dc` and `cluster` need the leader's
+    /// guard: the global leader's for `global` when this controller leads
+    /// the global tier, else the DC leader's (R0, single-etcd mode).
+    ///
+    /// # Errors
+    /// 39504 off the leader for etcd scopes; as [`SettingsAdmin::write`].
+    pub async fn write_setting(&self, key: &str, w: SettingWrite) -> Result<SettingWriteResponse> {
+        let s = self.settings()?;
+        let global_token = self.status.borrow().global_leader;
+        let guard = if !w.scope.is_etcd() {
+            Vec::new()
+        } else if let (ScopeRef::Global, Some(token)) = (&w.scope, global_token) {
+            vec![Cmp::CreateRev(
+                self.stores.global.tier().key("leader")?,
+                token,
+            )]
+        } else {
+            self.leader_guard().await?
+        };
+        s.write(key, &w, guard).await
+    }
+
+    /// A tenant's own settings rows and its copies of its ancestors'.
+    ///
+    /// # Errors
+    /// As [`SettingsAdmin::tenant_settings`].
+    pub async fn tenant_settings(&self, name: &str) -> Result<TenantSettingsResponse> {
+        self.settings()?.tenant_settings(name).await
     }
 
     fn tenants(&self) -> Result<&Arc<dyn TenantAdmin>> {

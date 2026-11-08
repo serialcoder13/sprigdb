@@ -10,8 +10,10 @@ publish.workspace = true
 
 [dependencies]
 bytes.workspace = true
+sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-proto-mysql.workspace = true
+sprig-settings.workspace = true
 sqlparser.workspace = true
 thiserror.workspace = true
 

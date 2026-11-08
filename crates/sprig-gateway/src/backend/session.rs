@@ -15,7 +15,7 @@ use sprig_proto_mysql::resultset::Terminator;
 use sprig_proto_mysql::{Caps, ErrPacket, Persona, ProtoResult, StatusFlags};
 use tokio::time::Instant;
 
-use super::classify::{StmtClass, StmtInfo};
+use super::classify::{Effect, StmtClass, StmtInfo};
 use super::cluster::{ClusterView, NodeKey, NodeRef};
 use super::conn::{self, BackendStmt, ConnectSpec, Warning};
 use super::pins::{PinReason, Pins};
@@ -34,9 +34,10 @@ pub struct SessionOpts {
     pub persona: Persona,
     /// The client negotiated `CLIENT_FOUND_ROWS`.
     pub found_rows: bool,
-    /// MariaDB extended capabilities the client has (3307), among
-    /// `MARIADB_CLIENT_EXTENDED_METADATA` and
-    /// `MARIADB_CLIENT_STMT_BULK_OPERATIONS`.
+    /// MariaDB extended capabilities to ask backend connections for (3307),
+    /// among `MARIADB_CLIENT_EXTENDED_METADATA` and
+    /// `MARIADB_CLIENT_STMT_BULK_OPERATIONS`. A backend may grant fewer:
+    /// [`BackendSession::backend_caps`] says what it did.
     pub mariadb_caps: Caps,
     /// The handshake collation id.
     pub collation: u16,
@@ -70,19 +71,57 @@ pub enum RouteKind {
     Replica,
     /// On a replica, after the wait-or-fail prefix.
     ReplicaWait,
-    /// On a Galera node without a sync wait.
+    /// On a Galera node other than the writer, with no check: the read
+    /// had no write to see, or the node's polled position covered it.
     Galera,
-    /// On a Galera node with `wsrep_sync_wait = 1`.
+    /// On a Galera node other than the writer whose position covered the
+    /// causal target, after the bounded sync-wait check
+    /// ([`reads::GALERA_SYNC_CHECK`]).
     GaleraSyncWait,
+    /// On a Galera node other than the writer whose polled position didn't
+    /// show the causal target yet, after the bounded check
+    /// (`reads.galera_unconfirmed = check`, decision D14).
+    GaleraUnconfirmed,
 }
 
 impl RouteKind {
+    /// Off the writer: state must never appear on such a connection.
     fn reader(self) -> bool {
         matches!(
             self,
-            RouteKind::Replica | RouteKind::ReplicaWait | RouteKind::GaleraSyncWait
+            RouteKind::Replica
+                | RouteKind::ReplicaWait
+                | RouteKind::Galera
+                | RouteKind::GaleraSyncWait
+                | RouteKind::GaleraUnconfirmed
         )
     }
+}
+
+/// What a read waits for before the client's statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Wait {
+    /// Nothing.
+    None,
+    /// A replica: the wait-or-fail prefix for this target.
+    Replica(GtidSet),
+    /// A Galera node: [`reads::GALERA_SYNC_CHECK`], bounded by
+    /// `reads.galera_sync_wait_timeout_ms`.
+    Galera,
+}
+
+/// How the sync (and wait) before a statement went.
+enum Sent {
+    /// The statement is on its way.
+    Ready,
+    /// A sync statement failed.
+    SyncErr(ErrPacket),
+    /// The wait failed (replica 1242, or the Galera check's error); the
+    /// connection is idle and reusable.
+    WaitFailed,
+    /// The Galera check didn't finish in time; the connection is still
+    /// busy with it and must be dropped.
+    WaitTimedOut,
 }
 
 /// What the gateway answers itself after a release (chapter 06,
@@ -323,6 +362,22 @@ impl BackendSession {
         Some((lease.key().node_key(), lease.conn_ref().thread_id))
     }
 
+    /// The capabilities the backend connection serving the statement in
+    /// flight negotiated (or the held connection's, between statements);
+    /// `None` without either. Call it after [`query`](Self::query),
+    /// [`execute`](Self::execute) or [`command`](Self::command) returns:
+    /// column definitions in the response are encoded with these (only
+    /// `MARIADB_CLIENT_EXTENDED_METADATA` changes them), whatever
+    /// [`SessionOpts::mariadb_caps`] asked for.
+    #[must_use]
+    pub fn backend_caps(&self) -> Option<Caps> {
+        self.cur
+            .as_ref()
+            .map(|c| &c.lease)
+            .or(self.held.as_ref().map(|(l, _)| l))
+            .map(|l| l.conn_ref().client.caps())
+    }
+
     /// `KILL QUERY` on the backend thread of the statement in flight (or
     /// the held connection).
     ///
@@ -534,7 +589,10 @@ impl BackendSession {
         }
 
         // Session tracking: schema, variables, commit GTIDs, untracked state.
-        let observed = state::observe(&cur.tracked);
+        let mut observed = state::observe(&cur.tracked);
+        if Self::drop_set_statement_reports(&mut cur, &mut observed) {
+            observed.unexplained = false;
+        }
         self.vars.apply(&observed);
         cur.lease.conn().applied.apply(&observed);
         let unexplained = observed.unexplained && !cur.stmt.expects_state_change();
@@ -549,6 +607,16 @@ impl BackendSession {
                 "session state SprigDB can't replay: pinning the backend connection"
             );
             self.pins.set_untracked();
+        }
+        if !cur.stmt.sets_gateway_vars.is_empty()
+            && cur.error.is_none()
+            && let Err(e) = self.restore_gateway_vars(&mut cur).await
+        {
+            tracing::warn!(node = %node, error = %e, "restoring the gateway's session variables failed; closing the connection");
+            let o = outcome(&cur, false);
+            drop(cur);
+            self.connection_gone();
+            return Ok(o);
         }
         if let Some(g) = observed
             .gtid
@@ -589,7 +657,12 @@ impl BackendSession {
         if route.reader() && !self.pins.is_empty() {
             // State appeared on a reader: it can't follow the session to the
             // writer. Drop that connection and keep the session conservative.
-            tracing::warn!(node = %node, "unexpected session state on a reader; discarding it");
+            tracing::warn!(
+                node = %node,
+                pins = ?self.pins.reasons(),
+                tracked = ?cur.tracked,
+                "unexpected session state on a reader; discarding it"
+            );
             self.pins.lose_connection();
             self.pins.set_untracked();
             let o = outcome(&cur, true);
@@ -655,6 +728,101 @@ impl BackendSession {
         }
         conn.client.take_changes();
         ok
+    }
+
+    /// `SET STATEMENT` quirks of MariaDB's tracking: it reports the
+    /// temporary values as changes, though they revert when the statement
+    /// ends, and reports each revert later, with the next statement on that
+    /// connection that changes any session state. Neither is a change by
+    /// the statement at hand: temporary values are dropped, and so are
+    /// reverts of variables outside the allowed list, which would pin the
+    /// session `Untracked` (an allowed variable's revert is its true value
+    /// and applies as usual). A `CALL` may change any variable itself, so
+    /// its reports are kept. Returns whether a report was dropped.
+    fn drop_set_statement_reports(cur: &mut Current, observed: &mut state::Observed) -> bool {
+        let applied = &mut cur.lease.conn().applied;
+        let pending = std::mem::take(&mut applied.scoped_pending);
+        let scoped = &cur.stmt.scoped_vars;
+        let call = cur.stmt.effects.contains(&Effect::Call);
+        let before = observed.vars.len() + observed.untracked.len();
+        observed.vars.retain(|(n, _)| !scoped.contains(n));
+        observed
+            .untracked
+            .retain(|n| !scoped.contains(n) && (call || !pending.contains(n)));
+        let reported = |n: &String| cur.tracked.vars.iter().any(|(r, _)| r == n);
+        applied.scoped_pending = pending
+            .into_iter()
+            .filter(|n| !reported(n) || scoped.contains(n))
+            .chain(scoped.iter().cloned())
+            .collect();
+        observed.vars.len() + observed.untracked.len() != before
+    }
+
+    /// A client statement set gateway-owned variables: keep the client's
+    /// values for the gateway to answer, put the gateway's back on the
+    /// connection, and resync the allowed variables tracking may have
+    /// missed while the client's settings were in force.
+    async fn restore_gateway_vars(
+        &mut self,
+        cur: &mut Current,
+    ) -> std::result::Result<(), ClientError> {
+        let names = cur.stmt.sets_gateway_vars.clone();
+        let conn = cur.lease.conn();
+        let restored = conn.restore_gateway_vars(&names).await?;
+        for (n, v) in restored.client {
+            self.vars.gateway_vars.insert(n, v);
+        }
+        let base = Arc::clone(&conn.baseline);
+        for (n, v) in restored.allowed {
+            let have = conn
+                .applied
+                .vars
+                .get(&n)
+                .map(String::as_str)
+                .or(base.get(&n));
+            if have != Some(v.as_str()) {
+                conn.applied.vars.insert(n.clone(), v.clone());
+                self.vars.vars.insert(n, v);
+            }
+        }
+        conn.applied.wsrep_sync_wait = 0;
+        Ok(())
+    }
+
+    /// The session's connection is gone outside a statement: what it held
+    /// is lost, and the next statement reports a lost transaction (1213)
+    /// or other pinned state (39033).
+    fn connection_gone(&mut self) {
+        self.held = None;
+        self.pending_capture.clear();
+        let in_trx = self.pins.in_transaction();
+        let lost_state = self.pins.holds_state();
+        self.pins.lose_connection();
+        self.deferred = if lost_state {
+            Some(SprigError::new(
+                SprigCode::SessionStateLost,
+                "the backend connection holding this session's state was lost",
+            ))
+        } else if in_trx {
+            Some(SprigError::standard(
+                1213,
+                *b"40001",
+                "Deadlock found when trying to get lock; try restarting transaction \
+                 (the backend connection was lost and the transaction rolled back)",
+            ))
+        } else {
+            None
+        };
+    }
+
+    /// The client set `wsrep_sync_wait` itself: it asks for causal reads
+    /// across gateways, which the shard's writer gives (decision D13), so
+    /// its plain reads stay there.
+    fn client_sync_wait(&self) -> bool {
+        self.vars
+            .gateway_vars
+            .get("wsrep_sync_wait")
+            .is_some_and(|v| !v.parse::<u32>().is_ok_and(|n| n == 0))
     }
 
     fn count_pin(&self, r: PinReason) {
@@ -740,7 +908,6 @@ impl BackendSession {
         node: &NodeRef,
         settings: &BackendSettings,
         deadline: Instant,
-        wsrep: u8,
     ) -> std::result::Result<BackendLease, AcquireError<ClientError>> {
         let b = &self.backends;
         let key = PoolKey {
@@ -758,7 +925,9 @@ impl BackendSession {
             .pools
             .acquire(
                 &key,
-                |base| vars.digest(wsrep, base),
+                // The gateway keeps wsrep_sync_wait at 0: the Galera check
+                // sets it for one statement only.
+                |base| vars.digest(0, base),
                 b.limits(&view.id),
                 deadline,
                 || async {
@@ -809,7 +978,7 @@ impl BackendSession {
         force_writer: bool,
         exclude: &mut Vec<NodeId>,
         deadline: Instant,
-    ) -> Result<(BackendLease, RouteKind, Option<GtidSet>, u8)> {
+    ) -> Result<(BackendLease, RouteKind, Wait)> {
         let shard = self.opts.shard;
         // With autocommit = 0 every statement, a plain read too, opens a
         // transaction (chapter 06, "Pins"): it belongs on the writer, where
@@ -817,11 +986,12 @@ impl BackendSession {
         let plain = info.class == StmtClass::Read
             && self.pins.is_empty()
             && !force_writer
-            && !self.implicit_transactions();
+            && !self.implicit_transactions()
+            && !self.client_sync_wait();
         let mut last_err: Option<String> = None;
         loop {
             let writer = self.backends.writers.writer(view, shard);
-            let (node, route, wait_for, wsrep) = if plain {
+            let (node, route, wait) = if plain {
                 let target = self.causal_target(settings);
                 let pool = &self.backends.pools;
                 let load = |k: &NodeKey| pool.node_counts(k).1;
@@ -846,7 +1016,7 @@ impl BackendSession {
                 .increment(1);
                 match choice {
                     ReadTarget::Writer => match &writer {
-                        Ok(w) => (w.clone(), RouteKind::Writer, None, 0),
+                        Ok(w) => (w.clone(), RouteKind::Writer, Wait::None),
                         Err(e) => {
                             if Instant::now() >= deadline {
                                 return Err(unavailable(
@@ -857,30 +1027,31 @@ impl BackendSession {
                             continue;
                         }
                     },
-                    ReadTarget::Replica { node, wait_for } => {
-                        let r = if wait_for.is_some() {
-                            RouteKind::ReplicaWait
-                        } else {
-                            RouteKind::Replica
-                        };
-                        (node, r, wait_for, 0)
-                    }
-                    ReadTarget::GaleraNode { node, sync_wait } => {
+                    ReadTarget::Replica { node, wait_for } => match wait_for {
+                        Some(t) => (node, RouteKind::ReplicaWait, Wait::Replica(t)),
+                        None => (node, RouteKind::Replica, Wait::None),
+                    },
+                    ReadTarget::GaleraNode {
+                        node,
+                        sync_wait,
+                        confirmed,
+                    } => {
                         let galera_writer =
                             writer.as_ref().ok().is_some_and(|w| w.node == node.node);
-                        let r = if sync_wait {
-                            RouteKind::GaleraSyncWait
+                        if sync_wait && !confirmed {
+                            (node, RouteKind::GaleraUnconfirmed, Wait::Galera)
+                        } else if sync_wait {
+                            (node, RouteKind::GaleraSyncWait, Wait::Galera)
                         } else if galera_writer {
-                            RouteKind::Writer
+                            (node, RouteKind::Writer, Wait::None)
                         } else {
-                            RouteKind::Galera
-                        };
-                        (node, r, None, u8::from(sync_wait))
+                            (node, RouteKind::Galera, Wait::None)
+                        }
                     }
                 }
             } else {
                 match writer {
-                    Ok(w) => (w, RouteKind::Writer, None, 0),
+                    Ok(w) => (w, RouteKind::Writer, Wait::None),
                     Err(e) => {
                         if Instant::now() >= deadline {
                             return Err(unavailable(last_err.unwrap_or(e.message)));
@@ -890,8 +1061,8 @@ impl BackendSession {
                     }
                 }
             };
-            match self.lease(view, &node, settings, deadline, wsrep).await {
-                Ok(l) => return Ok((l, route, wait_for, wsrep)),
+            match self.lease(view, &node, settings, deadline).await {
+                Ok(l) => return Ok((l, route, wait)),
                 Err(AcquireError::Timeout) => return Err(pool_timeout()),
                 Err(AcquireError::Connect(e)) => {
                     if let Some(err) = e.server_error() {
@@ -940,8 +1111,8 @@ impl BackendSession {
         let mut io_retried = false;
         let text = matches!(req, Req::Text(_));
         loop {
-            let (mut lease, route, wait_for, wsrep) = match self.held.take() {
-                Some((l, _)) => (l, RouteKind::Pinned, None, 0),
+            let (mut lease, route, wait) = match self.held.take() {
+                Some((l, _)) => (l, RouteKind::Pinned, Wait::None),
                 None => {
                     self.route_lease(&view, info, &settings, force_writer, &mut exclude, deadline)
                         .await?
@@ -961,7 +1132,7 @@ impl BackendSession {
             }
             let base = Arc::clone(&conn.baseline);
             let (prefix, next_applied) =
-                match state::sync_prefix(&conn.applied, &base, &self.vars, info, wsrep) {
+                match state::sync_prefix(&conn.applied, &base, &self.vars, info, 0) {
                     Ok(x) => x,
                     Err(state::Unreplayable(why)) => {
                         tracing::warn!(%why, "session state can't be replayed");
@@ -983,72 +1154,118 @@ impl BackendSession {
 
             // Sync (and wait), then send.
             let wait_started = Instant::now();
-            let sent: std::result::Result<Option<ErrPacket>, ClientError> = async {
+            let galera_timeout = settings.galera_sync_wait_timeout;
+            let sent: std::result::Result<Sent, ClientError> = async {
                 if let Req::Text(sql) = &req {
                     let mut all = Vec::with_capacity(sql.len() + 256);
                     for p in &prefix {
                         all.extend_from_slice(p.as_bytes());
                         all.extend_from_slice(b"; ");
                     }
-                    if let Some(w) = &wait_for {
-                        all.extend_from_slice(
-                            reads::wait_prefix(w, settings.gtid_wait_timeout).as_bytes(),
-                        );
-                        all.extend_from_slice(b"; ");
+                    match &wait {
+                        Wait::Replica(t) => {
+                            all.extend_from_slice(
+                                reads::wait_prefix(t, settings.gtid_wait_timeout).as_bytes(),
+                            );
+                            all.extend_from_slice(b"; ");
+                        }
+                        Wait::Galera => {
+                            all.extend_from_slice(reads::GALERA_SYNC_CHECK.as_bytes());
+                            all.extend_from_slice(b"; ");
+                        }
+                        Wait::None => {}
                     }
                     all.extend_from_slice(sql);
                     conn.client.send_query(&all).await?;
-                    let n = prefix.len() + usize::from(wait_for.is_some());
-                    for _ in 0..n {
+                    for _ in 0..prefix.len() {
                         if let Some(e) = consume_statement(conn).await? {
-                            return Ok(Some(e));
+                            return Ok(Sent::SyncErr(e));
                         }
                     }
-                    return Ok(None);
+                    return Ok(match &wait {
+                        Wait::None => Sent::Ready,
+                        Wait::Replica(_) => match consume_statement(conn).await? {
+                            None => Sent::Ready,
+                            Some(e) if e.code == reads::WAIT_TIMEOUT_ERRNO => Sent::WaitFailed,
+                            Some(e) => Sent::SyncErr(e),
+                        },
+                        Wait::Galera => {
+                            match tokio::time::timeout(galera_timeout, consume_statement(conn))
+                                .await
+                            {
+                                Err(_) => Sent::WaitTimedOut,
+                                Ok(r) => match r? {
+                                    None => Sent::Ready,
+                                    Some(_) => Sent::WaitFailed,
+                                },
+                            }
+                        }
+                    });
                 }
                 if !prefix.is_empty() {
                     match conn.client.query(&prefix.join("; ")).await {
                         Ok(_) => {}
-                        Err(ClientError::Server(e)) => return Ok(Some(e)),
+                        Err(ClientError::Server(e)) => return Ok(Sent::SyncErr(e)),
                         Err(e) => return Err(e),
                     }
                 }
-                if let Some(w) = &wait_for {
-                    let row = conn
-                        .client
-                        .query_first(&reads::wait_query(w, settings.gtid_wait_timeout))
-                        .await?;
-                    let v = row
-                        .and_then(|r| r.into_iter().next().flatten())
-                        .map(|b| String::from_utf8_lossy(&b).into_owned());
-                    if v.as_deref() != Some("0") {
-                        return Ok(Some(ErrPacket::new(
-                            reads::WAIT_TIMEOUT_ERRNO,
-                            *b"21000",
-                            "replica wait timed out",
-                        )));
+                match &wait {
+                    Wait::None => Ok(Sent::Ready),
+                    Wait::Replica(t) => {
+                        let row = conn
+                            .client
+                            .query_first(&reads::wait_query(t, settings.gtid_wait_timeout))
+                            .await?;
+                        let v = row
+                            .and_then(|r| r.into_iter().next().flatten())
+                            .map(|b| String::from_utf8_lossy(&b).into_owned());
+                        Ok(if v.as_deref() == Some("0") {
+                            Sent::Ready
+                        } else {
+                            Sent::WaitFailed
+                        })
+                    }
+                    Wait::Galera => {
+                        match tokio::time::timeout(
+                            galera_timeout,
+                            conn.client.query_drop(reads::GALERA_SYNC_CHECK),
+                        )
+                        .await
+                        {
+                            Err(_) => Ok(Sent::WaitTimedOut),
+                            Ok(Ok(())) => Ok(Sent::Ready),
+                            Ok(Err(ClientError::Server(_))) => Ok(Sent::WaitFailed),
+                            Ok(Err(e)) => Err(e),
+                        }
                     }
                 }
-                Ok(None)
             }
             .await;
+            let waited = !matches!(wait, Wait::None);
             match sent {
-                Ok(None) => {}
-                Ok(Some(e)) => {
-                    let wait_failed = wait_for.is_some() && e.code == reads::WAIT_TIMEOUT_ERRNO;
-                    if wait_failed {
+                Ok(Sent::Ready) => {}
+                Ok(Sent::WaitFailed | Sent::WaitTimedOut) => {
+                    // The read reruns on the writer (chapter 06: "Replica too
+                    // slow", and decisions D13 and D14 for Galera).
+                    metrics::counter!("sprig_backend_gtid_wait_timeouts_total", "cluster" => cluster.to_string())
+                        .increment(1);
+                    metrics::histogram!("sprig_backend_gtid_wait_seconds", "cluster" => cluster.to_string())
+                        .record(wait_started.elapsed().as_secs_f64());
+                    if matches!(sent, Ok(Sent::WaitTimedOut)) {
+                        // Still waiting on the server: never reuse it.
+                        tracing::debug!(node = %node_key, "Galera sync-wait check timed out; reading from the writer");
+                        drop(lease);
+                    } else {
                         // The sync statements before the wait ran.
                         conn.applied = next_applied;
                         conn.client.take_changes();
-                        metrics::counter!("sprig_backend_gtid_wait_timeouts_total", "cluster" => cluster.to_string())
-                            .increment(1);
-                        metrics::histogram!("sprig_backend_gtid_wait_seconds", "cluster" => cluster.to_string())
-                            .record(wait_started.elapsed().as_secs_f64());
                         let limits = self.backends.limits(&cluster);
                         self.backends.pools.release(lease, Release::Reuse, limits);
-                        force_writer = true;
-                        continue;
                     }
+                    force_writer = true;
+                    continue;
+                }
+                Ok(Sent::SyncErr(e)) => {
                     metrics::counter!("sprig_backend_failures_total", "cluster" => cluster.to_string(), "kind" => "sync")
                         .increment(1);
                     drop(lease);
@@ -1079,7 +1296,7 @@ impl BackendSession {
                     continue;
                 }
             }
-            if wait_for.is_some() {
+            if waited {
                 metrics::histogram!("sprig_backend_gtid_wait_seconds", "cluster" => cluster.to_string())
                     .record(wait_started.elapsed().as_secs_f64());
             }

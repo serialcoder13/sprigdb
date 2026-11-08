@@ -201,6 +201,11 @@ pub struct ExecSummary {
     pub status: Option<StatusFlags>,
     /// `Request::Prepare`'s answer.
     pub prepared: Option<PreparedMeta>,
+    /// The session's default database after the request, when the executor
+    /// tracks it (tenant sessions: the logical name; `Some(None)` when the
+    /// session has none). The front end shows it in `SHOW PROCESSLIST` and
+    /// passes it back in [`ExecCtx::db`].
+    pub db: Option<Option<String>>,
 }
 
 /// Who logged in, as [`Executor::open`] needs it.

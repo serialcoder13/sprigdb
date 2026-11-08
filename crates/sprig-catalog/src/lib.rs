@@ -46,13 +46,20 @@
 //! - [`rows`]: the settings-row access the three share, over MariaDB and
 //!   the in-memory catalog.
 //!
-//! Not yet: the DDL write path (step 10), the reconciler (step 11),
-//! upgrade orchestration (step 12), and ancestry modes other than `copy`
-//! (step 18).
+//! - [`ddl`]: the single-shard DDL write path (step 10): prepare with
+//!   unversioned marks and an intent row, the physical statement through a
+//!   [`DdlExecutor`](ddl::DdlExecutor), one versioned change to publish;
+//!   and the repairs the reconciler makes with it (step 11: finish, roll
+//!   back or roll forward stuck jobs, adopt outside objects). The
+//!   reconciler loop itself is `sprig-controller::catalog_reconciler`.
+//!
+//! Not yet: upgrade orchestration (step 12), and ancestry modes other than
+//! `copy` (step 18).
 
 pub mod ancestry;
 pub mod bootstrap;
 pub mod cache;
+pub mod ddl;
 pub mod migrate;
 pub mod placement;
 pub mod rows;
@@ -61,12 +68,18 @@ mod sql;
 pub mod store;
 pub mod version;
 
+pub use ancestry::{AncestorRows, AncestryReport, AncestryState};
 pub use cache::{
     CacheConfig, CatalogExtension, CatalogSource, DirectoryFeed, DirectoryWatch, ExtState,
     ExtensionStates, Freshness, MariaSource, Node, SnapshotTx, TenantCache, TenantCatalog,
     TenantPin, TenantRef,
 };
 pub use migrate::{FormatState, Migration, Migrator, Module, ModuleFormat, Phase};
+pub use rows::{SettingsBackend, SettingsTx, TenantScopeRows};
+pub use settings::{
+    AllowAll, DecisionSink, EtcdView, FixedEtcd, LogDecisions, Principal, Privilege, SetOutcome,
+    SetRequest, SettingAuthorizer, SettingDecision, Target, TenantSettingsWriter,
+};
 pub use store::{
     CatalogEndpoint, CatalogLocator, Counter, DatabaseRow, DbState, Namespace, ObjectFlags,
     ObjectKind, ObjectRow, ObjectState, SchemaVersionRow, SettingRow, SettingScope, Snapshot,
@@ -76,12 +89,6 @@ pub use version::{
     CatalogStore, CatalogTx, Change, ChangeOpts, DirectoryAllocator, DirectoryVersions, Locked,
     MariaBackend, MariaCatalog, MariaOpts, MariaTx, Step, VersionAllocator, VersionBackend,
     VersionKind, Versioner,
-};
-pub use ancestry::{AncestorRows, AncestryReport, AncestryState};
-pub use rows::{SettingsBackend, SettingsTx, TenantScopeRows};
-pub use settings::{
-    AllowAll, DecisionSink, EtcdView, FixedEtcd, LogDecisions, Principal, Privilege, SetOutcome,
-    SetRequest, SettingAuthorizer, SettingDecision, Target, TenantSettingsWriter,
 };
 
 #[cfg(test)]

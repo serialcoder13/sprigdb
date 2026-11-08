@@ -56,10 +56,10 @@ pub fn render(r: Result<Rewritten, sprig_sql::names::NameError>) -> String {
     }
 }
 
-/// Rewrites with both engines, checks they agree, and returns the
-/// rendered result.
+/// Rewrites with both engines, checks they agree (on the text, and on
+/// each statement's DDL target), and returns the rendered result.
 pub fn both(map: &MemoryNameMap, lex: LexOptions, sql: &str) -> String {
-    let lexer = render(rewrite(sql.as_bytes(), &ctx(map, lex, Engine::Lexer)));
+    let lexer_r = rewrite(sql.as_bytes(), &ctx(map, lex, Engine::Lexer));
     let auto_r = rewrite(sql.as_bytes(), &ctx(map, lex, Engine::Auto));
     if let Ok(r) = &auto_r {
         for s in &r.statements {
@@ -70,6 +70,20 @@ pub fn both(map: &MemoryNameMap, lex: LexOptions, sql: &str) -> String {
             );
         }
     }
+    if let (Ok(l), Ok(a)) = (&lexer_r, &auto_r) {
+        let targets = |r: &Rewritten| {
+            r.statements
+                .iter()
+                .map(|s| (s.ddl.clone(), s.nested_ddl))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            targets(l),
+            targets(a),
+            "engines differ on the DDL target of {sql:?}"
+        );
+    }
+    let lexer = render(lexer_r);
     let auto = render(auto_r);
     assert_eq!(lexer, auto, "engines differ on {sql:?}");
     lexer

@@ -26,7 +26,7 @@ use sprig_auth::accounts::BackendTarget;
 use sprig_cluster::record::TopologyKind;
 use sprig_common::ids::{ClusterId, DcId, NodeId, ShardId};
 use sprig_common::{SprigCode, SprigError};
-use sprig_gateway::backend::settings::BackendSettings;
+use sprig_gateway::backend::settings::{BackendSettings, CausalScope, GaleraUnconfirmed};
 use sprig_gateway::backend::{
     BackendSession, Backends, ClusterView, FixedSettings, NodeHealth, NodeRef, NodeRole, RouteKind,
     SessionOpts, StaticClusters, StmtInfo, StmtOutcome,
@@ -659,6 +659,12 @@ async fn read_your_writes_on_galera() {
     let mut b = rig.session(Persona::MariaDb);
     for i in 1..=30 {
         ok(&mut a, &format!("INSERT INTO {db}.t (v) VALUES ({i})")).await;
+        if i % 2 == 0 {
+            // Give the position poll time to see the other nodes apply it
+            // (decision D13); otherwise the read may leave the writer with
+            // the check alone (decision D14).
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
         let r = ok(
             &mut b,
             &format!("SELECT MAX(v), @@wsrep_sync_wait FROM {db}.t"),
@@ -669,17 +675,154 @@ async fn read_your_writes_on_galera() {
             Some(i.to_string().as_str()),
             "read {i} missed the write"
         );
-        if r.out.route == RouteKind::GaleraSyncWait {
+        // The check runs before the client's statement, which keeps 0.
+        assert_eq!(r.cell(0, 1), Some("0"), "read {i}");
+        if matches!(
+            r.out.route,
+            RouteKind::GaleraSyncWait | RouteKind::GaleraUnconfirmed
+        ) {
             sync_waits += 1;
-            assert_eq!(r.cell(0, 1), Some("1"));
         }
         nodes.insert(r.out.node.node.clone());
     }
     eprintln!("sync waits: {sync_waits}/30 over {} nodes", nodes.len());
-    assert!(sync_waits > 0, "reads off the writer use wsrep_sync_wait");
+    assert!(
+        sync_waits > 0,
+        "reads leave the writer once others have the write"
+    );
     ok(&mut a, &format!("DROP DATABASE {db}")).await;
     a.close().await;
     b.close().await;
+}
+
+/// Decisions D13 and D14 under load: four sessions, 1,000 write-then-read
+/// rounds each, in four shapes (autocommit insert, update, explicit
+/// transaction, delete and insert), with and without a pause before the
+/// read, once per `reads.galera_unconfirmed` mode. No read misses its
+/// write; with `check` (D14) most reads leave the writer.
+#[tokio::test]
+async fn read_your_writes_on_galera_stress() {
+    let u = need!(skip::MARIADB_GALERA, "read_your_writes_on_galera_stress");
+    let addrs: Vec<String> = u.iter().map(|x| x.addr.clone()).collect();
+    let mut on_writer = Vec::new();
+    for mode in [GaleraUnconfirmed::Writer, GaleraUnconfirmed::Check] {
+        let rig = rig(
+            TopologyKind::Galera,
+            &u[0].user,
+            &u[0].pass,
+            &addrs,
+            BackendSettings {
+                position_poll: Duration::from_millis(25),
+                galera_unconfirmed: mode,
+                ..fast_settings()
+            },
+        );
+        let (misses, routes, slowest, timeouts) = galera_stress_round(&rig, 1000).await;
+        let writer = routes.get("Writer").copied().unwrap_or(0);
+        eprintln!(
+            "{mode:?}: 4 x 1000 reads: {misses} misses, {writer} on the writer, \
+             {timeouts} took the check timeout or longer, slowest {slowest:?}; routes {routes:?}"
+        );
+        assert_eq!(misses, 0, "{mode:?}: reads missed their writes");
+        assert!(
+            slowest < Duration::from_secs(1),
+            "{mode:?}: a read took {slowest:?}"
+        );
+        on_writer.push(writer);
+    }
+    assert!(
+        on_writer[1] * 2 < on_writer[0],
+        "check mode moves reads off the writer: {on_writer:?}"
+    );
+}
+
+/// Four sessions of write-then-read rounds: the misses, the routes, the
+/// slowest read and how many reads took the check timeout or longer.
+async fn galera_stress_round(
+    rig: &Rig,
+    rounds: u32,
+) -> (u32, std::collections::BTreeMap<String, u32>, Duration, u32) {
+    let check_timeout = rig.settings.get().galera_sync_wait_timeout;
+    let db = unique_ident("sprig_bt");
+    let mut a = rig.session(Persona::MariaDb);
+    ok(&mut a, &format!("CREATE DATABASE {db}")).await;
+    ok(
+        &mut a,
+        &format!("CREATE TABLE {db}.c (w INT PRIMARY KEY, v INT NOT NULL)"),
+    )
+    .await;
+    rig.wait_roles(&[NodeRole::Galera, NodeRole::Galera, NodeRole::Galera])
+        .await;
+    let mut workers = Vec::new();
+    for w in 0..4u32 {
+        let mut s = rig.session(Persona::MariaDb);
+        let db = db.clone();
+        workers.push(tokio::spawn(async move {
+            ok(&mut s, &format!("INSERT INTO {db}.c VALUES ({w}, 0)")).await;
+            let mut routes = std::collections::BTreeMap::<String, u32>::new();
+            let mut misses = 0u32;
+            let mut slowest = Duration::ZERO;
+            let mut timeouts = 0u32;
+            let mut seed = u64::from(w) * 7919 + 1;
+            for i in 1..=rounds {
+                match i % 4 {
+                    0 => {
+                        ok(&mut s, &format!("UPDATE {db}.c SET v = {i} WHERE w = {w}")).await;
+                    }
+                    1 => {
+                        ok(&mut s, "BEGIN").await;
+                        ok(&mut s, &format!("UPDATE {db}.c SET v = {i} WHERE w = {w}")).await;
+                        ok(&mut s, "COMMIT").await;
+                    }
+                    2 => {
+                        ok(&mut s, &format!("DELETE FROM {db}.c WHERE w = {w}")).await;
+                        ok(&mut s, &format!("INSERT INTO {db}.c VALUES ({w}, {i})")).await;
+                    }
+                    _ => {
+                        ok(
+                            &mut s,
+                            &format!("INSERT INTO {db}.c VALUES ({w}, {i}) ON DUPLICATE KEY UPDATE v = {i}"),
+                        )
+                        .await;
+                    }
+                }
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                if seed >> 62 == 0 {
+                    // A quarter of the reads wait 0-40 ms: the poll may
+                    // then show the write on other nodes.
+                    tokio::time::sleep(Duration::from_millis((seed >> 32) % 41)).await;
+                }
+                let started = tokio::time::Instant::now();
+                let r = ok(&mut s, &format!("SELECT v FROM {db}.c WHERE w = {w}")).await;
+                let took = started.elapsed();
+                slowest = slowest.max(took);
+                timeouts += u32::from(took >= check_timeout);
+                if r.cell(0, 0) != Some(i.to_string().as_str()) {
+                    misses += 1;
+                    eprintln!("worker {w} round {i}: read {:?} on {:?}", r.cell(0, 0), r.out.route);
+                }
+                *routes.entry(format!("{:?}", r.out.route)).or_default() += 1;
+            }
+            s.close().await;
+            (misses, routes, slowest, timeouts)
+        }));
+    }
+    let mut misses = 0;
+    let mut slowest = Duration::ZERO;
+    let mut timeouts = 0;
+    let mut routes = std::collections::BTreeMap::<String, u32>::new();
+    for h in workers {
+        let (m, r, sl, t) = h.await.unwrap();
+        misses += m;
+        slowest = slowest.max(sl);
+        timeouts += t;
+        for (k, n) in r {
+            *routes.entry(k).or_default() += n;
+        }
+    }
+    ok(&mut a, &format!("DROP DATABASE {db}")).await;
+    a.close().await;
+    (misses, routes, slowest, timeouts)
 }
 
 async fn kill(u: &Url, thread: &str) {
@@ -1159,4 +1302,551 @@ async fn prepared_statements_follow_the_session_schema() {
         ok(&mut s, &format!("DROP DATABASE {db}")).await;
     }
     s.close().await;
+}
+
+/// Blocks apply on a Galera node: `FLUSH TABLES WITH READ LOCK` on a side
+/// connection holds the node's applier until [`ApplyBlock::release`] (or
+/// until the connection drops, if the test panics first).
+struct ApplyBlock {
+    conn: Option<MysqlClient>,
+}
+
+impl ApplyBlock {
+    async fn on(u: &Url) -> Self {
+        let mut c = side(u).await;
+        c.query_drop("FLUSH TABLES WITH READ LOCK").await.unwrap();
+        Self { conn: Some(c) }
+    }
+
+    async fn release(&mut self) {
+        if let Some(mut c) = self.conn.take() {
+            c.query_drop("UNLOCK TABLES").await.unwrap();
+            c.quit().await;
+        }
+    }
+}
+
+/// Waits until a Galera node is Synced again with an empty receive queue.
+async fn wait_synced(u: &Url) {
+    let end = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let mut c = side(u).await;
+        let rs = c
+            .query(
+                "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS \
+                 WHERE VARIABLE_NAME = 'wsrep_local_state'",
+            )
+            .await
+            .unwrap();
+        c.quit().await;
+        let state = rs
+            .iter()
+            .find(|r| !r.columns.is_empty())
+            .and_then(|r| r.text_rows().ok())
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next().flatten())
+            .map(|b| String::from_utf8_lossy(&b).into_owned());
+        if state.as_deref() == Some("4") {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < end,
+            "{} not Synced: {state:?}",
+            u.addr
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Decisions D13 and D14 (finding O1): a Galera node that is behind never
+/// stalls a read that must see a write. Apply is blocked on one node while
+/// health checks are too slow to notice (as between two checks in
+/// production), so only the polled positions and the bounded check protect
+/// the reads: each takes well under a second and is served by a node that
+/// has the write, or by the writer. Until the node is marked behind, a read
+/// may try it and lose at most `reads.galera_sync_wait_timeout_ms` before
+/// rerunning on the writer; once it is marked behind it is never tried.
+/// Once the node catches up, reads return to it.
+#[tokio::test]
+async fn a_lagging_galera_node_never_stalls_reads() {
+    let u = need!(
+        skip::MARIADB_GALERA,
+        "a_lagging_galera_node_never_stalls_reads"
+    );
+    let addrs: Vec<String> = u.iter().map(|x| x.addr.clone()).collect();
+    let rig = rig(
+        TopologyKind::Galera,
+        &u[0].user,
+        &u[0].pass,
+        &addrs,
+        BackendSettings {
+            // Health checks see the blocked node as Synced and ready for
+            // the whole test: the first check runs at once, the next after
+            // a minute.
+            health_interval: Duration::from_secs(60),
+            ..fast_settings()
+        },
+    );
+    let db = unique_ident("sprig_bt");
+    let mut a = rig.session(Persona::MariaDb);
+    ok(&mut a, &format!("CREATE DATABASE {db}")).await;
+    ok(
+        &mut a,
+        &format!("CREATE TABLE {db}.t (id INT PRIMARY KEY AUTO_INCREMENT, v INT)"),
+    )
+    .await;
+    rig.wait_roles(&[NodeRole::Galera, NodeRole::Galera, NodeRole::Galera])
+        .await;
+    let writer = rig
+        .backends
+        .writer(&rig.target.cluster, ShardId(0))
+        .await
+        .unwrap();
+    let lag_i = rig
+        .view
+        .nodes
+        .iter()
+        .position(|n| n.node != writer.node)
+        .unwrap();
+    let lagging = rig.node(lag_i);
+    eprintln!("writer {}, blocking apply on {lagging}", writer.node);
+
+    let check_timeout = rig.settings.get().galera_sync_wait_timeout;
+    let mut block = ApplyBlock::on(&u[lag_i]).await;
+    let mut slowest = Duration::ZERO;
+    let mut check_timeouts = 0u32;
+    let mut served = std::collections::HashMap::<String, u32>::new();
+    let result = Box::pin(async {
+        for i in 1..=40 {
+            ok(&mut a, &format!("INSERT INTO {db}.t (v) VALUES ({i})")).await;
+            if i % 4 == 0 {
+                // Let the position poll see the other nodes catch up.
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+            // A fresh session each time, as in O1.
+            let mut b = rig.session(Persona::MariaDb);
+            let started = tokio::time::Instant::now();
+            let r = run(&mut b, &format!("SELECT MAX(v) FROM {db}.t")).await;
+            let took = started.elapsed();
+            b.close().await;
+            let r = r.unwrap_or_else(|e| panic!("read {i}: {e} after {took:?}"));
+            slowest = slowest.max(took);
+            if took >= check_timeout {
+                check_timeouts += 1;
+            }
+            assert!(r.err().is_none(), "read {i}: {:?} after {took:?}", r.err());
+            assert_eq!(r.cell(0, 0), Some(i.to_string().as_str()), "read {i}");
+            assert!(took < Duration::from_secs(1), "read {i} took {took:?}");
+            assert_ne!(r.out.node, lagging, "read {i} went to the blocked node");
+            *served
+                .entry(format!("{}/{:?}", r.out.node.node, r.out.route))
+                .or_default() += 1;
+        }
+        // Far behind (reads.max_galera_lag_ms, 1 s): the node is marked
+        // and gets no reads at all, even ones with no write to see.
+        rig.wait_for(
+            "the blocked node to be behind",
+            Duration::from_secs(10),
+            |r| r.backends.nodes().status(&lagging).behind,
+        )
+        .await;
+        // Reads that must see a write (decision D14: possibly with no node
+        // but the writer showing it) never try the node behind, so no
+        // check times out.
+        for i in 41..=60 {
+            ok(&mut a, &format!("INSERT INTO {db}.t (v) VALUES ({i})")).await;
+            let mut b = rig.session(Persona::MariaDb);
+            let started = tokio::time::Instant::now();
+            let r = ok(&mut b, &format!("SELECT MAX(v) FROM {db}.t")).await;
+            let took = started.elapsed();
+            b.close().await;
+            assert_eq!(r.cell(0, 0), Some(i.to_string().as_str()), "read {i}");
+            assert!(took < check_timeout, "read {i} took {took:?}");
+            assert_ne!(r.out.node, lagging, "read {i} went to the node behind");
+            *served
+                .entry(format!("behind:{}/{:?}", r.out.node.node, r.out.route))
+                .or_default() += 1;
+        }
+        rig.settings.set(BackendSettings {
+            causal_scope: CausalScope::Session,
+            ..rig.settings.get().as_ref().clone()
+        });
+        for i in 0..20 {
+            let mut b = rig.session(Persona::MariaDb);
+            let started = tokio::time::Instant::now();
+            let r = ok(&mut b, &format!("SELECT COUNT(*) FROM {db}.t")).await;
+            b.close().await;
+            assert!(started.elapsed() < Duration::from_secs(1), "plain read {i}");
+            assert_ne!(
+                r.out.node, lagging,
+                "plain read {i} went to the node behind"
+            );
+        }
+        rig.settings.set(BackendSettings {
+            causal_scope: CausalScope::TenantGateway,
+            ..rig.settings.get().as_ref().clone()
+        });
+    })
+    .await;
+    block.release().await;
+    wait_synced(&u[lag_i]).await;
+    let () = result;
+    eprintln!(
+        "blocked: slowest read {slowest:?}, {check_timeouts} check timeouts; served by {served:?}"
+    );
+    rig.wait_for("the node to catch up", Duration::from_secs(10), |r| {
+        !r.backends.nodes().status(&lagging).behind
+    })
+    .await;
+
+    // Caught up: reads that must see a write go to that node again.
+    let mut back = false;
+    for i in 61..=120 {
+        ok(&mut a, &format!("INSERT INTO {db}.t (v) VALUES ({i})")).await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let mut b = rig.session(Persona::MariaDb);
+        let r = ok(&mut b, &format!("SELECT MAX(v) FROM {db}.t")).await;
+        b.close().await;
+        assert_eq!(r.cell(0, 0), Some(i.to_string().as_str()), "read {i}");
+        if r.out.node == lagging {
+            back = true;
+            break;
+        }
+    }
+    assert!(back, "reads never returned to {lagging} after it caught up");
+    ok(&mut a, &format!("DROP DATABASE {db}")).await;
+    a.close().await;
+}
+
+/// Follow-up 1: the session reports the capabilities its backend
+/// connection negotiated, not the ones `SessionOpts` asked for.
+#[tokio::test]
+async fn backend_caps_are_the_connections_own() {
+    use sprig_proto_mysql::Caps;
+    let u = need!(skip::MARIADB_SINGLE, "backend_caps_are_the_connections_own");
+    let rig = rig(
+        TopologyKind::SingleNode,
+        &u[0].user,
+        &u[0].pass,
+        &[u[0].addr.clone()],
+        fast_settings(),
+    );
+    let ext = Caps::MARIADB_CLIENT_EXTENDED_METADATA;
+    for asked in [ext, Caps::empty()] {
+        let mut s = rig.backends.session(
+            rig.target.clone(),
+            SessionOpts {
+                mariadb_caps: asked,
+                ..SessionOpts::default()
+            },
+        );
+        assert_eq!(s.backend_caps(), None, "no connection yet");
+        s.query(&StmtInfo::read(), b"SELECT 1").await.unwrap();
+        let caps = s.backend_caps().expect("the statement's connection");
+        while s.next().await.unwrap().is_some() {}
+        s.finish().await.unwrap();
+        // MariaDB 11.8 grants extended metadata when asked, and only then.
+        assert_eq!(caps.contains(ext), asked.contains(ext), "{asked:?}");
+        assert!(caps.contains(Caps::PROTOCOL_41));
+        assert_eq!(s.backend_caps(), None, "released between statements");
+        ok(&mut s, "SELECT GET_LOCK('sprig_bt_caps', 1)").await;
+        assert_eq!(
+            s.backend_caps().map(|c| c.contains(ext)),
+            Some(asked.contains(ext)),
+            "the held connection's"
+        );
+        ok(&mut s, "SELECT RELEASE_LOCK('sprig_bt_caps')").await;
+        s.close().await;
+    }
+}
+
+fn reader_route(r: RouteKind) -> bool {
+    matches!(
+        r,
+        RouteKind::Replica
+            | RouteKind::ReplicaWait
+            | RouteKind::Galera
+            | RouteKind::GaleraSyncWait
+            | RouteKind::GaleraUnconfirmed
+    )
+}
+
+/// Follow-up 2: plain reads on replicas and Galera nodes never leave state
+/// on the reader ("unexpected session state on a reader"). Covers the
+/// wait-or-fail prefix (including timeouts), user variables, schema and
+/// variable syncs, prepared reads, and `SET STATEMENT ... FOR SELECT`,
+/// whose temporary values MariaDB's tracking reports as if they stuck.
+#[tokio::test]
+async fn reads_leave_no_state_on_readers() {
+    let mut ran = false;
+    for (var, topology) in [
+        (skip::MARIADB_REPLICATION, TopologyKind::PrimaryReplica),
+        (skip::MARIADB_GALERA, TopologyKind::Galera),
+    ] {
+        let Some(u) = urls(var) else { continue };
+        ran = true;
+        let addrs: Vec<String> = u.iter().map(|x| x.addr.clone()).collect();
+        let rig = rig(
+            topology,
+            &u[0].user,
+            &u[0].pass,
+            &addrs,
+            BackendSettings {
+                // Short replica waits: some time out and rerun on the writer.
+                gtid_wait_timeout: Duration::from_millis(1),
+                ..fast_settings()
+            },
+        );
+        let db = unique_ident("sprig_bt");
+        let mut a = rig.session(Persona::MySql84);
+        ok(&mut a, &format!("CREATE DATABASE {db}")).await;
+        ok(
+            &mut a,
+            &format!("CREATE TABLE {db}.t (id INT PRIMARY KEY, v INT)"),
+        )
+        .await;
+        let roles = if topology == TopologyKind::Galera {
+            [NodeRole::Galera; 3]
+        } else {
+            [NodeRole::Writer, NodeRole::Replica, NodeRole::Replica]
+        };
+        rig.wait_roles(&roles).await;
+        ok(&mut a, &format!("USE {db}")).await;
+        ok(&mut a, "SET NAMES latin1").await;
+        ok(&mut a, "SET time_zone = '+05:30', sql_select_limit = 1000").await;
+        ok(&mut a, "SET @k = 3").await;
+        let mut on_readers = 0;
+        for i in 0..60 {
+            if i % 3 == 0 {
+                ok(&mut a, &format!("REPLACE INTO t VALUES ({}, {i})", i % 7)).await;
+            }
+            if i % 5 == 0 {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+            if i % 6 == 4 {
+                // A state change right after SET STATEMENT carries its revert.
+                ok(&mut a, &format!("SET @k = {}", i % 7)).await;
+                assert!(
+                    !a.is_pinned(),
+                    "{topology:?} SET @k after SET STATEMENT: {:?}",
+                    a.pins()
+                );
+            }
+            let sql = match i % 6 {
+                0 => "SELECT COUNT(*) FROM t".to_owned(),
+                1 => "SELECT v FROM t WHERE id = @k".to_owned(),
+                2 => "SET STATEMENT max_statement_time = 5 FOR SELECT COUNT(*) FROM t".to_owned(),
+                3 => "SET STATEMENT innodb_lock_wait_timeout = 2 FOR SELECT * FROM t".to_owned(),
+                4 => "SELECT @@time_zone, @@character_set_client, DATABASE()".to_owned(),
+                _ => "SELECT SQL_CALC_FOUND_ROWS * FROM t LIMIT 1".to_owned(),
+            };
+            let r = ok(&mut a, &sql).await;
+            if reader_route(r.out.route) {
+                on_readers += 1;
+            }
+            assert!(
+                !(reader_route(r.out.route) && r.out.pinned),
+                "{topology:?} {sql}: state on a reader ({:?})",
+                r.out.route
+            );
+            assert!(!a.is_pinned(), "{topology:?} {sql}: pinned {:?}", a.pins());
+
+            // Prepared too.
+            let info = StmtInfo::classify(b"SELECT v FROM t WHERE id = 1");
+            a.execute(&info, b"SELECT v FROM t WHERE id = 1", &mut |st| {
+                // COM_STMT_EXECUTE, no cursor, one iteration, no parameters.
+                let mut p = vec![0x17];
+                p.extend_from_slice(&st.id.to_le_bytes());
+                p.push(0);
+                p.extend_from_slice(&1u32.to_le_bytes());
+                Ok(bytes::Bytes::from(p))
+            })
+            .await
+            .unwrap();
+            while a.next().await.unwrap().is_some() {}
+            let o = a.finish().await.unwrap();
+            assert!(
+                !(reader_route(o.route) && o.pinned),
+                "{topology:?} prepared read"
+            );
+        }
+        // On the writer too: the revert reported with the next change
+        // (before the fix, a lifelong Untracked pin).
+        for _ in 0..3 {
+            ok(
+                &mut a,
+                "SET STATEMENT innodb_lock_wait_timeout = 3 FOR SELECT * FROM t FOR UPDATE",
+            )
+            .await;
+            ok(&mut a, "SET @z = 1").await;
+            assert!(!a.is_pinned(), "{topology:?}: {:?}", a.pins());
+        }
+        eprintln!("{topology:?}: {on_readers}/60 text reads on readers");
+        assert!(on_readers > 0, "{topology:?}: no read left the writer");
+        // SET STATEMENT left nothing behind (MariaDB reports the revert of
+        // an allowed variable later: its true value, the baseline's).
+        assert!(
+            a.vars()
+                .vars
+                .get("max_statement_time")
+                .is_none_or(|v| v == "0.000000"),
+            "{:?}",
+            a.vars().vars.get("max_statement_time")
+        );
+        assert!(!a.vars().vars.contains_key("innodb_lock_wait_timeout"));
+        let r = run_as(&mut a, &StmtInfo::write(), "SELECT @@max_statement_time")
+            .await
+            .unwrap();
+        assert_eq!(r.cell(0, 0), Some("0.000000"));
+        // The replayed state is intact.
+        let r = ok(
+            &mut a,
+            "SELECT @@time_zone, @@character_set_client, @@sql_select_limit",
+        )
+        .await;
+        assert_eq!(
+            r.rows[0],
+            [
+                Some("+05:30".into()),
+                Some("latin1".into()),
+                Some("1000".into())
+            ]
+        );
+        ok(&mut a, &format!("DROP DATABASE {db}")).await;
+        a.close().await;
+    }
+    if !ran {
+        skip::report_missing(skip::MARIADB_REPLICATION, "reads_leave_no_state_on_readers");
+    }
+}
+
+/// Follow-up 3: a client's `session_track_*`, timeout or `wsrep_sync_wait`
+/// settings never stick to the backend connection. The gateway keeps the
+/// client's values (to answer) and its own tracking: commits, schema and
+/// variables are still seen, on this connection and the next session's.
+#[tokio::test]
+async fn clients_cannot_change_the_gateways_session_tracking() {
+    let u = need!(
+        skip::MARIADB_SINGLE,
+        "clients_cannot_change_the_gateways_session_tracking"
+    );
+    let rig = rig(
+        TopologyKind::SingleNode,
+        &u[0].user,
+        &u[0].pass,
+        &[u[0].addr.clone()],
+        BackendSettings {
+            max_conns_per_node: 1, // every statement uses the same connection
+            ..fast_settings()
+        },
+    );
+    let db = unique_ident("sprig_bt");
+    let mut s = rig.session(Persona::MariaDb);
+    ok(
+        &mut s,
+        "SET SESSION session_track_system_variables = 'autocommit', session_track_schema = OFF, \
+         session_track_state_change = OFF, wait_timeout = 5, net_read_timeout = 7",
+    )
+    .await;
+    assert!(!s.is_pinned(), "{:?}", s.pins());
+    let g = &s.vars().gateway_vars;
+    assert_eq!(g["session_track_system_variables"], "autocommit");
+    // As MariaDB itself answers @@session_track_schema.
+    assert_eq!(g["session_track_schema"], "0");
+    assert_eq!(g["session_track_state_change"], "0");
+    assert_eq!(g["wait_timeout"], "5");
+    assert_eq!(g["net_read_timeout"], "7");
+    // The backend connection kept the gateway's values.
+    let r = ok(
+        &mut s,
+        "SELECT @@session.session_track_system_variables, @@session.session_track_schema, \
+         @@session.session_track_state_change, @@session.wait_timeout, \
+         @@session.net_read_timeout = @@global.net_read_timeout",
+    )
+    .await;
+    assert_eq!(r.cell(0, 0), Some("*"));
+    assert_eq!(r.cell(0, 1), Some("1"));
+    assert_eq!(r.cell(0, 2), Some("1"));
+    assert!(r.cell(0, 3).unwrap().parse::<u64>().unwrap() >= 600);
+    assert_eq!(r.cell(0, 4), Some("1"));
+    // Tracking still works: variables, schema, commits.
+    ok(&mut s, "SET time_zone = '+02:00'").await;
+    assert_eq!(s.vars().vars["time_zone"], "+02:00");
+    ok(&mut s, &format!("CREATE DATABASE {db}")).await;
+    ok(&mut s, &format!("USE {db}")).await;
+    assert_eq!(s.vars().schema.as_deref(), Some(db.as_str()));
+    ok(&mut s, "CREATE TABLE t (v INT)").await;
+    ok(&mut s, "INSERT INTO t VALUES (1)").await;
+    assert!(!s.causal().is_empty(), "the commit's GTID was tracked");
+    // Tracking off for part of one statement: the change it hid is resynced.
+    ok(
+        &mut s,
+        "SET session_track_system_variables = '', time_zone = '+03:00'",
+    )
+    .await;
+    assert_eq!(s.vars().vars["time_zone"], "+03:00");
+    assert_eq!(s.vars().gateway_vars["session_track_system_variables"], "");
+    // MariaDB Connector/J's start-up statement.
+    ok(
+        &mut s,
+        "set autocommit=1, session_track_schema=1, session_track_system_variables = \
+         CONCAT(@@global.session_track_system_variables, ',auto_increment_increment')",
+    )
+    .await;
+    assert!(!s.is_pinned());
+    assert!(
+        s.vars().gateway_vars["session_track_system_variables"]
+            .contains("auto_increment_increment")
+    );
+    // The next session on the same backend connection sees none of it.
+    let mut t = rig.session(Persona::MariaDb);
+    let r = ok(
+        &mut t,
+        "SELECT @@session.session_track_system_variables, @@session.wait_timeout >= 600, @@time_zone",
+    )
+    .await;
+    assert_eq!(r.cell(0, 0), Some("*"));
+    assert_eq!(r.cell(0, 1), Some("1"));
+    assert_ne!(r.cell(0, 2), Some("+03:00"));
+    assert!(t.vars().gateway_vars.is_empty());
+    t.close().await;
+    // A failed SET changes nothing and records nothing.
+    let r = run(&mut s, "SET session_track_schema = 'bogus'")
+        .await
+        .unwrap();
+    assert!(r.err().is_some());
+    assert_eq!(s.vars().gateway_vars["session_track_schema"], "1");
+    ok(&mut s, &format!("DROP DATABASE {db}")).await;
+    s.close().await;
+
+    // Galera: a client asking for wsrep_sync_wait gets causal reads from
+    // the shard's writer instead; the connection keeps 0.
+    if let Some(u) = urls(skip::MARIADB_GALERA) {
+        let addrs: Vec<String> = u.iter().map(|x| x.addr.clone()).collect();
+        let g = crate::rig(
+            TopologyKind::Galera,
+            &u[0].user,
+            &u[0].pass,
+            &addrs,
+            fast_settings(),
+        );
+        let mut s = g.session(Persona::MariaDb);
+        ok(&mut s, "SELECT 1").await;
+        g.wait_roles(&[NodeRole::Galera, NodeRole::Galera, NodeRole::Galera])
+            .await;
+        ok(&mut s, "SET SESSION wsrep_sync_wait = 1").await;
+        assert_eq!(s.vars().gateway_vars["wsrep_sync_wait"], "1");
+        for _ in 0..10 {
+            let r = ok(&mut s, "SELECT @@session.wsrep_sync_wait").await;
+            assert_eq!(r.out.route, RouteKind::Writer);
+            assert_eq!(r.cell(0, 0), Some("0"));
+        }
+        ok(&mut s, "SET SESSION wsrep_sync_wait = 0").await;
+        let mut left = false;
+        for _ in 0..20 {
+            left |= reader_route(ok(&mut s, "SELECT 1").await.out.route);
+        }
+        assert!(left, "plain reads leave the writer again");
+        s.close().await;
+    }
 }

@@ -94,6 +94,16 @@ const GATEWAY: &[&str] = &[
     "error_count",
 ];
 
+/// Gateway-owned variables a client can't set (the server refuses).
+const READ_ONLY_GATEWAY: &[&str] = &["last_gtid", "warning_count", "error_count"];
+
+/// Whether `name` is a gateway-owned variable a client statement can set:
+/// its value is the client's to see, the connection keeps the gateway's.
+#[must_use]
+pub fn settable_gateway_var(name: &str) -> bool {
+    gateway_var(name) && !READ_ONLY_GATEWAY.contains(&name)
+}
+
 /// The replay kind of an allowed variable, or `None` if it can't be
 /// replayed by value.
 #[must_use]
@@ -249,6 +259,11 @@ pub struct AppliedState {
     pub user_vars: BTreeMap<String, VarValue>,
     /// `LAST_INSERT_ID()` on this connection.
     pub last_insert_id: u64,
+    /// Variables a `SET STATEMENT` on this connection set for one
+    /// statement. MariaDB reports each one's revert later, with the next
+    /// statement that changes any session state; that report is not a
+    /// change by that statement.
+    pub scoped_pending: std::collections::BTreeSet<String>,
 }
 
 /// The client-visible session state the gateway keeps for one session.
@@ -265,6 +280,11 @@ pub struct SessionVars {
     pub user_vars: BTreeMap<String, VarValue>,
     /// `LAST_INSERT_ID()`.
     pub last_insert_id: u64,
+    /// The client's own values of gateway-owned variables it set
+    /// (`session_track_*`, `wait_timeout`, `net_*_timeout`,
+    /// `wsrep_sync_wait`, ...): the gateway answers these; backend
+    /// connections keep the gateway's values.
+    pub gateway_vars: BTreeMap<String, String>,
 }
 
 /// The persona baselines (chapter 06, "New connections").
@@ -506,7 +526,8 @@ pub struct Observed {
     pub vars: Vec<(String, String)>,
     /// Variables that can't be replayed: the session pins `Untracked`.
     pub untracked: Vec<String>,
-    /// The new schema.
+    /// The new schema; `Some("")` when the connection has none any more
+    /// (see [`tracked_schema`]).
     pub schema: Option<String>,
     /// GTID of a commit.
     pub gtid: Option<String>,
@@ -536,11 +557,21 @@ pub fn observe(changes: &TrackedChanges) -> Observed {
     o
 }
 
+/// The default schema after a tracked schema change. MariaDB reports an
+/// empty name when the connection is left without one: `CALL db.p()` from a
+/// session without a default schema switches to `db` for the routine and
+/// back to none, and reports the change. That is no schema, not a schema
+/// with an empty name (replaying it as `USE` fails with 1046 on every
+/// later statement).
+fn tracked_schema(name: &str) -> Option<String> {
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 impl SessionVars {
     /// Applies what tracking reported for a statement of this session.
     pub fn apply(&mut self, o: &Observed) {
         if let Some(s) = &o.schema {
-            self.schema = Some(s.clone());
+            self.schema = tracked_schema(s);
         }
         for (n, v) in &o.vars {
             self.vars.insert(n.clone(), v.clone());
@@ -552,7 +583,7 @@ impl AppliedState {
     /// Applies what tracking reported for a statement on this connection.
     pub fn apply(&mut self, o: &Observed) {
         if let Some(s) = &o.schema {
-            self.schema = Some(s.clone());
+            self.schema = tracked_schema(s);
         }
         for (n, v) in &o.vars {
             self.vars.insert(n.clone(), v.clone());
@@ -576,6 +607,28 @@ mod tests {
             .map(|(a, b)| (a.to_owned(), b.to_owned()))
             .collect(),
         }
+    }
+
+    #[test]
+    fn an_empty_tracked_schema_means_none() {
+        let o = Observed {
+            schema: Some(String::new()),
+            ..Observed::default()
+        };
+        let mut s = SessionVars::default();
+        s.apply(&o);
+        assert_eq!(s.schema, None);
+        let mut a = AppliedState {
+            schema: Some("db".into()),
+            ..AppliedState::default()
+        };
+        a.apply(&o);
+        assert_eq!(a.schema, None);
+        s.apply(&Observed {
+            schema: Some("db".into()),
+            ..Observed::default()
+        });
+        assert_eq!(s.schema.as_deref(), Some("db"));
     }
 
     #[test]

@@ -304,3 +304,16 @@ fn information_schema_in_other_statements() {
     };
     assert!(String::from_utf8_lossy(sql).contains(") AS `TABLES`"));
 }
+
+#[test]
+fn show_status_filters_compare_schemas() {
+    let (sql, _) = fwd("SHOW PROCEDURE STATUS WHERE Db = 'billing' AND Name <> 'crm'");
+    assert_eq!(
+        sql,
+        "SHOW PROCEDURE STATUS WHERE Db = 't42_d1_g1_s1' AND Name <> 't42_d2_g2_s2'"
+    );
+    let (sql, _) = fwd("SHOW FUNCTION STATUS WHERE Db = 'nope'");
+    assert_eq!(sql, "SHOW FUNCTION STATUS WHERE Db = 'nope'");
+    let (sql, _) = fwd("SHOW EVENTS LIKE 'billing'");
+    assert!(sql.contains("'billing'"), "{sql}");
+}

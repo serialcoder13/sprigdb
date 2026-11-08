@@ -27,15 +27,24 @@
 //!   parts bootstrap needs);
 //! - [`tree_settings`]: the `tree_settings` loop that copies ancestors'
 //!   settings into descendants' catalogs (chapter 08 step 6);
+//! - [`settings_admin`]: the Admin API's `Settings` service: list and
+//!   describe keys, resolve one with its chain and provenance, and set,
+//!   reset, bound, lock and unlock it at every scope (chapter 08 step 7,
+//!   chapter 23 step 8, chapter 37, chapter 47);
 //! - [`tenants`]: tenant bootstrap and deletion, and the
 //!   `tenant_bootstrap` loop that finishes or fails them (chapter 08 step
-//!   9); [`catalogs`]: how the controller reaches tenant catalogs.
+//!   9); [`catalogs`]: how the controller reaches tenant catalogs;
+//! - [`catalog_reconciler`]: the `catalog_reconciler` loop (chapter 08 step
+//!   11): stuck DDL jobs finished or rolled back, missing and orphan
+//!   schemas, outside objects adopted, tombstones purged by age, clamped
+//!   setting values counted.
 //!
 //! Not yet: the relay and peer services (R2), the latency prober, the
 //! global loops (`directory`, `tree_moves`, `dc_registry`), subtree moves,
 //! the decision log (chapter 11), and the Admin API's other services.
 
 pub mod admin;
+pub mod catalog_reconciler;
 pub mod catalogs;
 pub mod dc;
 pub mod dispatch;
@@ -43,9 +52,11 @@ pub mod live;
 pub mod monitor;
 pub mod runtime;
 pub mod settings;
+pub mod settings_admin;
 pub mod tenants;
 pub mod tree;
 pub mod tree_settings;
+pub mod users;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,14 +70,17 @@ use sprig_meta::bootstrap::{self, Bootstrap};
 use sprig_meta::elect::LeaderRecord;
 use sprig_meta::etcd::{EtcdTls, connect_tiers};
 
+use sprig_catalog::ddl::DdlEngine;
 use sprig_catalog::{DirectoryAllocator, MariaBackend, Versioner};
 
 use crate::admin::{AdminService, http};
+use crate::catalog_reconciler::{CatalogReconciler, LogDecisions, PoolExecutors};
 use crate::catalogs::{ClusterPools, RegistryPools, ShardMapLocator, default_naming};
 use crate::monitor::{ClusterMonitor, RegistryLoop};
 use crate::runtime::{Loop, Runtime, Stores};
 use crate::settings::ControlSettings;
-use crate::tenants::{NoHooks, TenantLifecycle, TenantService};
+use crate::settings_admin::SettingsService;
+use crate::tenants::{TenantLifecycle, TenantService};
 use crate::tree::Directory;
 use crate::tree_settings::{TreeSettings, TreeSync};
 
@@ -110,6 +124,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
 ///
 /// # Errors
 /// As [`run`], after connecting.
+#[allow(clippy::too_many_lines)] // the role's wiring, one loop after another
 pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> Result<()> {
     let role = Role::Controller;
     let cfg = &ctx.config;
@@ -156,16 +171,38 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         MariaBackend::new(Arc::new(locator.clone())).with_clock(Arc::clone(&clock)),
         Arc::new(DirectoryAllocator::new(Arc::clone(&stores.global))),
     );
-    let tree = Arc::new(TreeSync::new(
-        versioner,
+    let reconciler = CatalogReconciler::new(
+        DdlEngine::new(versioner.clone(), Arc::clone(&clock)),
         Directory::new(Arc::clone(&stores.global)),
+        Arc::new(PoolExecutors::new(locator.clone())),
+        Arc::new(LogDecisions),
+        dc.clone(),
+        Some(settings.live.clone()),
+        Arc::clone(&clock),
+    );
+    let settings_admin = Arc::new(SettingsService::new(
+        settings.live.clone(),
+        versioner.clone(),
+        Directory::new(Arc::clone(&stores.global)),
+        Arc::clone(&clock),
+    ));
+    let tree = Arc::new(TreeSync::new(
+        versioner.clone(),
+        Directory::new(Arc::clone(&stores.global)),
+        Arc::clone(&clock),
+    ));
+    let users = Arc::new(users::TenantUsers::new(
+        Directory::new(Arc::clone(&stores.global)),
+        Arc::new(locator.clone()),
+        versioner.clone(),
         Arc::clone(&clock),
     ));
     let tenants = Arc::new(TenantService::new(
         Arc::clone(&stores.dc),
         locator,
         Arc::clone(&tree),
-        Arc::new(NoHooks),
+        // Chapter 14's verifier tables with the core catalog.
+        Arc::new(users::AuthHooks),
         Arc::clone(&clock),
         Some(settings.live.clone()),
     )?);
@@ -177,6 +214,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(RegistryLoop::new(Arc::clone(&monitor))))
         .with_loop(Loop::new(tree_loop))
         .with_loop(Loop::new(TenantLifecycle::new(Arc::clone(&tenants))))
+        .with_loop(Loop::new(reconciler))
         .global_candidate(cfg.controller.global_candidate);
 
     let token = cfg
@@ -190,7 +228,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .local_addr()
         .map_err(|e| SprigError::internal("admin listener address").with_source(e))?;
     let svc = Arc::new(
-        AdminService::new(stores, monitor, rt.status(), Arc::clone(&clock)).with_tenants(tenants),
+        AdminService::new(stores, monitor, rt.status(), Arc::clone(&clock))
+            .with_tenants(tenants)
+            .with_users(users)
+            .with_settings(settings_admin),
     );
     let admin = tokio::spawn(http::serve(
         listener,

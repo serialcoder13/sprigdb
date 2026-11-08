@@ -309,6 +309,7 @@ impl SessionExec for CannedSession {
                 return Ok(ExecSummary {
                     status: Some(self.status()),
                     prepared: Some(meta),
+                    db: None,
                 });
             }
             Request::Execute { stmt, params, .. } => {
@@ -358,6 +359,7 @@ impl SessionExec for CannedSession {
         Ok(ExecSummary {
             status: Some(self.status()),
             prepared: None,
+            db: None,
         })
     }
 

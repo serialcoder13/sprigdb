@@ -4,11 +4,15 @@
 //! hashlib for the nonce `0123456789abcdefghij`).
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use sprig_auth::StaticAccounts;
 use sprig_auth::accounts::parse_accounts;
+use sprig_auth::{FastCache, LoginSource, MysqlLogin, StaticAccounts};
 use sprig_common::time::ManualClock;
+use sprig_proto_mysql::auth::{AuthPath, AuthVerdict, LoginFlow, Method, Outcome};
+use sprig_proto_mysql::handshake::NONCE_LEN;
+use zeroize::Zeroizing;
 
 use super::*;
 
@@ -29,7 +33,7 @@ fn unhex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-fn deps() -> Arc<LoginDeps> {
+fn deps() -> Arc<LoginService> {
     let text = format!(
         r#"
 [[account]]
@@ -50,25 +54,27 @@ backend_credentials = "env:SPRIG_TEST_BACKEND"
     );
     let accounts = parse_accounts(&text, Path::new(".")).unwrap();
     let cache = FastCache::new(Arc::new(ManualClock::new()), Duration::from_secs(3600));
-    Arc::new(LoginDeps::new(
-        Arc::new(StaticAccounts::new(accounts)),
+    Arc::new(LoginService::new(
+        LoginSource::File(Arc::new(StaticAccounts::new(accounts))),
         Arc::new(cache),
     ))
 }
 
-fn login(deps: &Arc<LoginDeps>, user: &str) -> AccountLogin {
-    AccountLogin::new(
-        Arc::clone(deps),
+async fn login(deps: &Arc<LoginService>, user: &str) -> MysqlLogin {
+    deps.start(request(
         Persona::MySql84,
         user.as_bytes(),
         "10.0.0.7:5000".parse().unwrap(),
-    )
+        None,
+        Caps::empty(),
+    ))
+    .await
 }
 
 #[tokio::test]
 async fn golden_native_scramble() {
     let d = deps();
-    let mut l = login(&d, "app");
+    let mut l = login(&d, "app").await;
     assert_eq!(l.method(Some("mysql_native_password")), Method::Native);
     assert!(l.check_native(NONCE, &unhex(GOLDEN_NATIVE)));
     assert!(!l.check_native(NONCE, &[0; 20]));
@@ -82,25 +88,29 @@ async fn golden_native_scramble() {
 #[tokio::test]
 async fn golden_sha2_scramble_takes_the_fast_path_after_a_full_login() {
     let d = deps();
-    let mut l = login(&d, "app");
+    let mut l = login(&d, "app").await;
     assert_eq!(l.method(Some("caching_sha2_password")), Method::CachingSha2);
     // Cold cache: the fast path misses, the full path verifies and fills.
     assert!(!l.check_fast(NONCE, &unhex(GOLDEN_SHA2)));
     assert!(!l.check_password(Zeroizing::new(b"wrong".to_vec())).await);
-    assert!(d.fast_cache.is_empty());
+    assert!(d.fast_cache().is_empty());
     assert!(l.check_password(Zeroizing::new(b"secret".to_vec())).await);
-    assert_eq!(d.fast_cache.len(), 1);
+    assert_eq!(d.fast_cache().len(), 1);
     // The next login's golden scramble matches the cached stage 2.
-    let mut l = login(&d, "app");
+    let mut l = login(&d, "app").await;
     assert!(l.check_fast(NONCE, &unhex(GOLDEN_SHA2)));
     assert!(!l.check_fast(NONCE, &[0; 32]));
-    assert_eq!(l.principal().map(|p| p.user), Some("app".to_owned()));
+    assert_eq!(
+        l.decide(Outcome::Verified, AuthPath::Fast).await,
+        AuthVerdict::Accept
+    );
+    assert_eq!(l.principal().map(|p| p.user.as_str()), Some("app"));
 }
 
 #[tokio::test]
 async fn native_only_accounts_switch_to_native() {
     let d = deps();
-    let l = login(&d, "nat");
+    let l = login(&d, "nat").await;
     assert_eq!(l.method(Some("caching_sha2_password")), Method::Native);
     assert_eq!(l.method(Some("mysql_clear_password")), Method::ClearText);
 }
@@ -108,7 +118,7 @@ async fn native_only_accounts_switch_to_native() {
 #[tokio::test]
 async fn unknown_users_look_like_sha2_accounts_and_fail_with_1045() {
     let d = deps();
-    let mut l = login(&d, "ghost");
+    let mut l = login(&d, "ghost").await;
     assert_eq!(l.method(Some("mysql_native_password")), Method::CachingSha2);
     assert!(!l.check_fast(NONCE, &unhex(GOLDEN_SHA2)));
     assert!(!l.check_native(NONCE, &unhex(GOLDEN_NATIVE)));
@@ -123,7 +133,7 @@ async fn unknown_users_look_like_sha2_accounts_and_fail_with_1045() {
         "Access denied for user 'ghost'@'10.0.0.7' (using password: YES)"
     );
     // A real user with a wrong password gets the same message shape.
-    let mut real = login(&d, "app");
+    let mut real = login(&d, "app").await;
     let _ = real.check_password(Zeroizing::new(b"wrong".to_vec())).await;
     let AuthVerdict::Refuse(e2) = real.decide(Outcome::WrongCredentials, AuthPath::Full).await
     else {
@@ -136,19 +146,45 @@ async fn unknown_users_look_like_sha2_accounts_and_fail_with_1045() {
 async fn overlong_names_are_unknown() {
     let d = deps();
     let long = "a".repeat(33);
-    let l = AccountLogin::new(
-        d,
-        Persona::MySql84,
-        long.as_bytes(),
+    let mut l = login(&d, &long).await;
+    assert!(!l.check_password(Zeroizing::new(b"secret".to_vec())).await);
+    assert!(matches!(
+        l.decide(Outcome::Verified, AuthPath::Full).await,
+        AuthVerdict::Refuse(_)
+    ));
+}
+
+#[test]
+fn requests_carry_sni_certificates_and_expired_password_support() {
+    let tls = TlsInfo {
+        version: "1.3",
+        cipher: "TLS_AES_128_GCM_SHA256",
+        sni: Some("acme.db.example".into()),
+        client_cert: true,
+    };
+    let r = request(
+        Persona::MariaDb,
+        b"alice",
         "10.0.0.7:1".parse().unwrap(),
+        Some(&tls),
+        Caps::CAN_HANDLE_EXPIRED_PASSWORDS,
     );
-    assert!(l.account().is_none());
+    assert!(r.tls && r.client_cert && r.can_handle_expired_password);
+    assert_eq!(r.sni.as_deref(), Some("acme.db.example"));
+    let plain = request(
+        Persona::MySql84,
+        b"acme.alice",
+        "10.0.0.7:1".parse().unwrap(),
+        None,
+        Caps::empty(),
+    );
+    assert!(!plain.tls && !plain.client_cert && !plain.can_handle_expired_password);
 }
 
 #[tokio::test]
 async fn rsa_refusal_says_to_use_tls() {
     let d = deps();
-    let mut l = login(&d, "app");
+    let mut l = login(&d, "app").await;
     let AuthVerdict::Refuse(e) = l.decide(Outcome::NeedsTls, AuthPath::Rsa).await else {
         panic!("accepted");
     };

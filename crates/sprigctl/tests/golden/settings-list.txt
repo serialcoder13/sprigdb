@@ -1,0 +1,4 @@
+KEY                       TYPE  DEFAULT  SCOPES     WHO        MEANING
+auto_index.max_per_table  int   5        all        tenants    Automatic indexes per table
+catalog.cache_max_mb      int   512      global,dc  operators  Cache memory per gateway
+2 keys

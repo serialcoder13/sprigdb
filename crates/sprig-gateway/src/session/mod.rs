@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use sprig_common::ids::{ClusterId, ConnId, DcId};
+use sprig_common::ids::{ConnId, DcId, TenantId};
 use sprig_common::{CancellationToken, SprigCode, SprigError};
 use tokio::sync::Notify;
 
@@ -115,18 +115,10 @@ impl fmt::Display for SessionState {
     }
 }
 
-/// Who a session logged in as.
-///
-/// Interim (M0.2, decision D1): the login name and the cluster its
-/// statements go to. Chapter 14's `sprig_auth::Principal` (tenant, user id,
-/// host, mechanism, limits) replaces it in M0.3.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Principal {
-    /// The login name.
-    pub user: String,
-    /// The cluster every statement goes to (decision D3).
-    pub cluster: ClusterId,
-}
+/// Who a session logged in as: chapter 14's principal (tenant, user id,
+/// host, sandbox flag, backend target). Accounts-file logins have no
+/// tenant.
+pub use sprig_auth::Principal;
 
 /// Why a session was asked to close at its next safe point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +261,7 @@ struct Activity {
     command: &'static str,
     info: Option<String>,
     since: Option<Instant>,
+    tenant: Option<TenantId>,
 }
 
 /// A session's shared half: what the [`SessionTable`] holds and other tasks
@@ -353,6 +346,7 @@ impl SessionHandle {
         let since = a.since.unwrap_or(self.connected_at);
         ProcessRow {
             id: self.id,
+            tenant: a.tenant,
             user: a.user,
             host: self.peer,
             db: a.db,
@@ -376,6 +370,8 @@ impl SessionHandle {
 pub struct ProcessRow {
     /// `Id`.
     pub id: ConnId,
+    /// The tenant, for catalog logins.
+    pub tenant: Option<TenantId>,
     /// `User`; `None` before login.
     pub user: Option<String>,
     /// `Host`: the client address.
@@ -507,7 +503,11 @@ impl Session {
 
     /// Records the login: the principal and the `User` column.
     pub fn set_principal(&mut self, principal: Principal) {
-        self.handle.activity().user = Some(principal.user.clone());
+        {
+            let mut a = self.handle.activity();
+            a.user = Some(principal.user.clone());
+            a.tenant = principal.tenant;
+        }
         self.principal = Some(principal);
     }
 

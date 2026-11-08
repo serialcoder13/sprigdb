@@ -352,9 +352,12 @@ where
     }
 
     fn workers(&self) -> usize {
-        let n = self.live.as_ref().map_or(TREE_SYNC_CONCURRENCY.default, |l| {
-            l.get(&TREE_SYNC_CONCURRENCY, &SettingCtx::process(&self.dc))
-        });
+        let n = self
+            .live
+            .as_ref()
+            .map_or(TREE_SYNC_CONCURRENCY.default, |l| {
+                l.get(&TREE_SYNC_CONCURRENCY, &SettingCtx::process(&self.dc))
+            });
         usize::try_from(n).unwrap_or(1).max(1)
     }
 

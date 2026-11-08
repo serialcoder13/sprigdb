@@ -7,6 +7,9 @@
 //!   position, span editing (build step 2) and the substitutions for
 //!   `DATABASE()`, account functions and query attributes (build step 3).
 //!
+//! - [`ddl`]: the typed DDL target of each statement
+//!   ([`StatementInfo::ddl`]) and its conversion to the catalog's
+//!   `DdlStatement` (chapter 08 step 10, the gateway side).
 //! - [`show`]: the `SHOW` family (build step 4): classification, the
 //!   local answers (`SHOW DATABASES`, `SHOW PROCESSLIST`, routines from
 //!   their original text).
@@ -23,6 +26,7 @@
 //! Not here yet: `performance_schema`, `sys` and `mysql` (step 6),
 //! `DEFINER` mapping beyond output (step 9), the `SPRIG_` views (step 11).
 
+pub mod ddl;
 pub mod hide;
 pub mod infoschema;
 pub mod map;
@@ -32,6 +36,7 @@ pub mod result;
 pub mod rewrite;
 pub mod show;
 
+pub use ddl::{AlterOp, DdlKind, DdlName, DdlTarget};
 pub use hide::{Visibility, create_like_sql, filter_create_table};
 pub use infoschema::{ColumnRegistry, InfoSchemaCtx, TableClass, rewrite_information_schema};
 pub use map::{LogicalDb, MemoryNameMap, NameMap, Purpose, SchemaSet};

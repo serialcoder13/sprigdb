@@ -191,6 +191,10 @@ impl<S> MaybeTls<S> {
                 .and_then(|c| c.suite().as_str())
                 .unwrap_or("unknown"),
             sni: conn.server_name().map(str::to_owned),
+            // rustls hands back peer certificates only after verifying them
+            // against the listener's client verifier; listeners don't ask
+            // for client certificates yet, so this stays false for now.
+            client_cert: conn.peer_certificates().is_some_and(|c| !c.is_empty()),
         })
     }
 }
@@ -244,6 +248,9 @@ pub struct TlsInfo {
     pub cipher: &'static str,
     /// The server name the client asked for, if any.
     pub sni: Option<String>,
+    /// The client presented a certificate the listener verified (chapter
+    /// 14's `REQUIRE X509`).
+    pub client_cert: bool,
 }
 
 /// An accepted client connection, handed to a [`Frontend`].

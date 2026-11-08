@@ -1,0 +1,1 @@
+auto_index.max_per_table at tenant:acme: nothing to change (value 6, bounds max 5)

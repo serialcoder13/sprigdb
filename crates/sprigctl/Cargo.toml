@@ -20,12 +20,13 @@ sprig-common.workspace = true
 sprig-controller.workspace = true
 sprig-meta.workspace = true
 sprig-provision.workspace = true
+sprig-settings.workspace = true
 tokio.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 mysql_async.workspace = true
-sprig-settings.workspace = true
 
 [lints]
 workspace = true

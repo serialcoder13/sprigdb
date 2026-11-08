@@ -522,3 +522,227 @@ async fn the_client_against_the_admin_api() {
         CallError::Transport(_)
     ));
 }
+
+// --- Tenants (chapter 08 step 9) --------------------------------------------
+
+#[test]
+fn tenant_commands_parse() {
+    let m = cli()
+        .try_get_matches_from([
+            "sprigctl",
+            "tenant",
+            "create",
+            "pune",
+            "--under",
+            "acme",
+            "--cluster",
+            "mum1-c7",
+        ])
+        .unwrap();
+    let (_, t) = m.subcommand().unwrap();
+    let (cmd, sub) = t.subcommand().unwrap();
+    assert_eq!(cmd, "create");
+    assert_eq!(sub.get_one::<String>("name").unwrap(), "pune");
+    assert_eq!(sub.get_one::<String>("under").unwrap(), "acme");
+    assert_eq!(sub.get_one::<String>("cluster").unwrap(), "mum1-c7");
+    for args in [
+        &["tenant", "list"][..],
+        &["tenant", "show", "pune"],
+        &["--yes", "tenant", "delete", "pune"],
+        &["tenant", "move", "pune", "--to", "x"],
+    ] {
+        let mut full = vec!["sprigctl"];
+        full.extend_from_slice(args);
+        assert!(cli().try_get_matches_from(full).is_ok(), "{args:?}");
+    }
+    for bad in [
+        &["tenant", "create"][..],
+        &["tenant", "show"],
+        &["tenant", "delete"],
+    ] {
+        let mut full = vec!["sprigctl"];
+        full.extend_from_slice(bad);
+        assert!(cli().try_get_matches_from(full).is_err(), "{bad:?}");
+    }
+    assert!(TENANT_LATER.contains(&"move"));
+}
+
+fn tenant_view(id: u64, name: &str, parent: Option<&str>) -> TenantView {
+    TenantView {
+        tenant_id: sprig_common::ids::TenantId(id),
+        name: name.into(),
+        state: "active".into(),
+        home_dc: DcId::new("mum1").unwrap(),
+        parent_tenant_id: u64::from(parent.is_some()),
+        parent: parent.map(Into::into),
+        path: if parent.is_some() {
+            format!("/1/{id}/")
+        } else {
+            format!("/{id}/")
+        },
+        depth: u32::from(parent.is_some()),
+        child_count: 0,
+        catalog_version: 4,
+        auth_version: 0,
+        settings_version: 3,
+        cluster: Some(ClusterId::new("mum1-c1").unwrap()),
+        ancestry: parent.into_iter().map(Into::into).collect(),
+        created_at: "2026-11-08T09:00:00Z".into(),
+        mod_revision: 9,
+    }
+}
+
+#[test]
+fn tenant_output() {
+    let list = render::tenant_list(&[
+        tenant_view(1, "acme", None),
+        tenant_view(2, "pune", Some("acme")),
+    ]);
+    let lines: Vec<&str> = list.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(
+        lines[0].starts_with("ID  NAME  STATE   PARENT  HOME"),
+        "{list}"
+    );
+    assert!(lines[2].contains("pune  active  acme    mum1"), "{list}");
+    assert!(lines[2].ends_with("4/3"), "{list}");
+    let show = render::tenant_show(&tenant_view(2, "pune", Some("acme")));
+    for want in [
+        "tenant:            pune (2)",
+        "ancestry:          acme",
+        "catalog cluster:   mum1-c1",
+        "settings version:  3",
+    ] {
+        assert!(show.contains(want), "{want}: {show}");
+    }
+    assert!(render::tenant_show(&tenant_view(1, "acme", None)).contains("- (a root tenant)"));
+}
+
+/// Answers tenant calls from memory, for the HTTP face.
+struct FakeTenants;
+
+#[async_trait::async_trait]
+impl sprig_controller::tenants::TenantAdmin for FakeTenants {
+    async fn create(
+        &self,
+        req: CreateTenantRequest,
+        guard: Vec<sprig_meta::Cmp>,
+    ) -> sprig_common::Result<CreateTenantResponse> {
+        assert_eq!(guard.len(), 1, "the leader's guard");
+        Ok(CreateTenantResponse {
+            created: true,
+            tenant: tenant_view(2, &req.name, req.parent.as_deref()),
+            placement: Some(
+                if req.cluster.is_some() {
+                    "requested"
+                } else {
+                    "fewest_tenants"
+                }
+                .into(),
+            ),
+        })
+    }
+    async fn list(&self) -> sprig_common::Result<ListTenantsResponse> {
+        Ok(ListTenantsResponse {
+            tenants: vec![tenant_view(1, "acme", None)],
+        })
+    }
+    async fn show(&self, name: &str) -> sprig_common::Result<TenantView> {
+        if name == "acme" {
+            Ok(tenant_view(1, "acme", None))
+        } else {
+            Err(sprig_common::SprigError::new(
+                sprig_common::SprigCode::TenantNotReady,
+                format!("no tenant named {name:?}"),
+            ))
+        }
+    }
+    async fn delete(
+        &self,
+        name: &str,
+        _: Vec<sprig_meta::Cmp>,
+    ) -> sprig_common::Result<TenantView> {
+        let mut v = tenant_view(1, name, None);
+        v.state = "deleting".into();
+        Ok(v)
+    }
+}
+
+#[tokio::test]
+async fn tenant_calls_over_the_admin_api() {
+    let store = MemStore::new(Tier::Dc(DcId::new("ctl-t").unwrap()));
+    let global = store.with_tier(Tier::Global);
+    let live = LiveSettings::start(
+        Registry::global().unwrap(),
+        SettingsStores::new(Arc::new(global.clone()), Arc::new(store.clone())).unwrap(),
+    )
+    .unwrap();
+    live.ready().await;
+    let registry = ClusterRegistry::new(Arc::new(global.clone()), Arc::new(store.clone())).unwrap();
+    let monitor = Arc::new(ClusterMonitor::new(registry, live, Arc::new(SystemClock)));
+    let (status_tx, rx) = tokio::sync::watch::channel(Status::default());
+    let stores = Stores {
+        dc: Arc::new(store.clone()),
+        global: Arc::new(global.clone()),
+    };
+    let bare = Arc::new(AdminService::new(
+        stores.clone(),
+        Arc::clone(&monitor),
+        rx.clone(),
+        Arc::new(SystemClock),
+    ));
+    let svc = Arc::new(
+        AdminService::new(stores, monitor, rx, Arc::new(SystemClock))
+            .with_tenants(Arc::new(FakeTenants)),
+    );
+    let mut ends = Vec::new();
+    let stop = sprig_common::CancellationToken::new();
+    for s in [svc, bare] {
+        let l = http::bind("127.0.0.1:0".parse().unwrap(), None)
+            .await
+            .unwrap();
+        ends.push(format!("http://{}", l.local_addr().unwrap()));
+        tokio::spawn(http::serve(l, http::router(s, None), stop.clone()));
+    }
+    let c = AdminClient::new(&ends[0], None).unwrap();
+    let req = CreateTenantRequest {
+        name: "pune".into(),
+        parent: Some("acme".into()),
+        cluster: None,
+    };
+    // Off the leader: refused.
+    let e = c
+        .post::<_, CreateTenantResponse>("/admin/v1/tenants", &req)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().starts_with("39504"), "{e}");
+    // As the leader.
+    status_tx.send_modify(|s| s.dc_leader = Some(1));
+    let r: CreateTenantResponse = c.post("/admin/v1/tenants", &req).await.unwrap();
+    assert!(r.created);
+    assert_eq!(r.tenant.parent.as_deref(), Some("acme"));
+    assert_eq!(r.placement.as_deref(), Some("fewest_tenants"));
+    let l: ListTenantsResponse = c.get("/admin/v1/tenants").await.unwrap();
+    assert_eq!(l.tenants[0].name, "acme");
+    let v: TenantView = c.get("/admin/v1/tenants/acme").await.unwrap();
+    assert_eq!(v.tenant_id.0, 1);
+    let e = c
+        .get::<TenantView>("/admin/v1/tenants/nobody")
+        .await
+        .unwrap_err();
+    assert!(matches!(&e, CallError::Api(b) if b.code == 39072), "{e}");
+    let d: TenantView = c.delete("/admin/v1/tenants/acme").await.unwrap();
+    assert_eq!(d.state, "deleting");
+    // A controller without tenant management says so.
+    let e = AdminClient::new(&ends[1], None)
+        .unwrap()
+        .get::<ListTenantsResponse>("/admin/v1/tenants")
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("doesn't manage tenants"), "{e}");
+    stop.cancel();
+}
+
+// --- Settings (chapter 08 steps 7-8, chapter 23 step 8, chapter 47) --------
+
+mod settings_cli;

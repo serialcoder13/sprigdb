@@ -1,7 +1,9 @@
 //! Node states (chapter 06, "Health checks"; build step 7): Up, Suspect
 //! and Down from active checks and from errors on real traffic, plus what
 //! the checks and the position poller observed (role, Galera state, GTID
-//! positions, estimated replica lag).
+//! positions, estimated lag) and whether the node is behind: lagging more
+//! than `reads.max_replica_lag_ms` (a replica) or `reads.max_galera_lag_ms`
+//! (a Galera node), so it gets no reads until it catches up.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
@@ -75,10 +77,15 @@ pub struct NodeStatus {
     pub observed: Option<Observation>,
     /// `@@gtid_slave_pos` at the last poll.
     pub slave_pos: Option<GtidSet>,
-    /// `@@gtid_binlog_pos` at the last poll.
+    /// `@@gtid_binlog_pos` at the last poll. On a Galera node this is what
+    /// it has applied (`None` when its GTIDs aren't comparable across the
+    /// cluster: `wsrep_gtid_mode` off).
     pub binlog_pos: Option<GtidSet>,
-    /// Estimated replication lag at the last poll.
+    /// Estimated lag at the last poll: for a replica, behind its writer;
+    /// for a Galera node, behind the most advanced node of its cluster.
     pub lag: Option<Duration>,
+    /// Lagging more than its threshold at the last poll (no reads).
+    pub behind: bool,
 }
 
 impl NodeStatus {
@@ -100,14 +107,16 @@ impl NodeStatus {
     }
 }
 
-/// How long the writer's position history is kept for lag estimates.
+/// How long a cluster's position history is kept for lag estimates.
 const HISTORY: Duration = Duration::from_secs(120);
 
 /// The state of every node this gateway uses.
 #[derive(Debug, Default)]
 pub struct NodeTable {
     nodes: Mutex<HashMap<NodeKey, NodeStatus>>,
-    writer_history: Mutex<HashMap<ClusterId, VecDeque<(Instant, GtidSet)>>>,
+    /// Per cluster, when its newest position first appeared: the
+    /// primary's binlog position, or the most advanced Galera node's.
+    head_history: Mutex<HashMap<ClusterId, VecDeque<(Instant, GtidSet)>>>,
 }
 
 impl NodeTable {
@@ -179,21 +188,7 @@ impl NodeTable {
     ) {
         let now = Instant::now();
         if is_writer && let Some(b) = &binlog {
-            let mut h = self
-                .writer_history
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let q = h.entry(k.cluster.clone()).or_default();
-            if q.back().is_none_or(|(_, last)| last != b) {
-                q.push_back((now, b.clone()));
-            }
-            while q
-                .front()
-                .is_some_and(|(t, _)| now.duration_since(*t) > HISTORY)
-                && q.len() > 1
-            {
-                q.pop_front();
-            }
+            self.push_history(&k.cluster, b.clone(), now);
         }
         let lag = if is_writer {
             Some(Duration::ZERO)
@@ -209,17 +204,91 @@ impl NodeTable {
         });
     }
 
+    /// Records one poll round of a Galera cluster: each node's
+    /// `@@gtid_binlog_pos`, and the cluster's `wsrep_gtid_domain_id` when
+    /// `wsrep_gtid_mode` is on (`None` otherwise: positions then aren't
+    /// comparable, so none is kept and causal reads go to the writer). The
+    /// most advanced position in that domain goes into the cluster's
+    /// history; a node's lag is now minus the time the cluster first had a
+    /// commit the node lacks, as for replicas.
+    pub fn record_galera_positions(
+        &self,
+        cluster: &ClusterId,
+        polled: &[(NodeKey, Option<GtidSet>)],
+        domain: Option<u32>,
+    ) {
+        let now = Instant::now();
+        let Some(domain) = domain else {
+            for (k, _) in polled {
+                self.with(k, |s| {
+                    s.slave_pos = None;
+                    s.binlog_pos = None;
+                    s.lag = None;
+                });
+            }
+            return;
+        };
+        let mut head = GtidSet::new();
+        for p in polled.iter().filter_map(|(_, p)| p.as_ref()) {
+            head.union(&p.only(domain));
+        }
+        if !head.is_empty() {
+            self.push_history(cluster, head, now);
+        }
+        for (k, pos) in polled {
+            let lag = pos
+                .as_ref()
+                .and_then(|p| self.estimate_lag(cluster, &p.only(domain), now));
+            self.with(k, |s| {
+                s.slave_pos = None;
+                s.binlog_pos.clone_from(pos);
+                s.lag = lag;
+            });
+        }
+    }
+
+    /// Sets whether a node is behind; returns the new value if it changed.
+    pub fn set_behind(&self, k: &NodeKey, behind: bool) -> Option<bool> {
+        self.with(k, |s| {
+            (s.behind != behind).then(|| {
+                s.behind = behind;
+                behind
+            })
+        })
+    }
+
     /// Forgets a node's positions (its poll failed).
     pub fn clear_positions(&self, k: &NodeKey) {
         self.with(k, |s| {
             s.slave_pos = None;
+            s.binlog_pos = None;
             s.lag = None;
         });
     }
 
+    /// Adds a cluster's newest position to its history, keeping
+    /// [`HISTORY`] of it.
+    fn push_history(&self, cluster: &ClusterId, pos: GtidSet, now: Instant) {
+        let mut h = self
+            .head_history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let q = h.entry(cluster.clone()).or_default();
+        if q.back().is_none_or(|(_, last)| *last != pos) {
+            q.push_back((now, pos));
+        }
+        while q
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) > HISTORY)
+            && q.len() > 1
+        {
+            q.pop_front();
+        }
+    }
+
     fn estimate_lag(&self, cluster: &ClusterId, pos: &GtidSet, now: Instant) -> Option<Duration> {
         let h = self
-            .writer_history
+            .head_history
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let q = h.get(cluster)?;
@@ -273,6 +342,55 @@ mod tests {
             !t.status(&k).usable(),
             "a desynced Galera node is not usable"
         );
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)] // two nodes, a table, a cluster
+    fn galera_lag_is_measured_against_the_most_advanced_node() {
+        let t = NodeTable::new();
+        let c = ClusterId::new("dc-a-c1").unwrap();
+        let (a, b) = (key("a"), key("b"));
+        let p = |s: &str| Some(GtidSet::parse(s).unwrap());
+        // Each node's own domain (301, 302) never counts: only domain 3.
+        t.record_galera_positions(
+            &c,
+            &[
+                (a.clone(), p("3-301-10,301-301-4")),
+                (b.clone(), p("3-301-10,302-302-9")),
+            ],
+            Some(3),
+        );
+        assert_eq!(t.status(&a).lag, Some(Duration::ZERO));
+        assert_eq!(t.status(&b).lag, Some(Duration::ZERO));
+        std::thread::sleep(Duration::from_millis(20));
+        t.record_galera_positions(
+            &c,
+            &[(a.clone(), p("3-301-12")), (b.clone(), p("3-301-10"))],
+            Some(3),
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        t.record_galera_positions(
+            &c,
+            &[(a.clone(), p("3-301-12")), (b.clone(), p("3-301-10"))],
+            Some(3),
+        );
+        assert_eq!(t.status(&a).lag, Some(Duration::ZERO));
+        let lag = t.status(&b).lag.unwrap();
+        assert!(lag >= Duration::from_millis(20), "{lag:?}");
+        assert_eq!(t.status(&b).binlog_pos, p("3-301-10"));
+        assert_eq!(t.set_behind(&b, true), Some(true));
+        assert_eq!(t.set_behind(&b, true), None);
+        // Caught up.
+        t.record_galera_positions(
+            &c,
+            &[(a.clone(), p("3-301-12")), (b.clone(), p("3-301-12"))],
+            Some(3),
+        );
+        assert_eq!(t.status(&b).lag, Some(Duration::ZERO));
+        // wsrep_gtid_mode off: nothing comparable is kept.
+        t.record_galera_positions(&c, &[(b.clone(), p("3-301-13"))], None);
+        assert_eq!(t.status(&b).binlog_pos, None);
+        assert_eq!(t.status(&b).lag, None);
     }
 
     #[test]

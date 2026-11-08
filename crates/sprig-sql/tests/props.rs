@@ -153,6 +153,32 @@ proptest! {
         }
     }
 
+    /// Every DDL shape gets a catalog target whose names are the logical
+    /// names written (quoting removed), and both engines give the same one.
+    #[test]
+    fn ddl_targets_carry_logical_names(
+        (sql, d1, d2, obj) in ddl_statement(),
+        mariadb in any::<bool>(),
+    ) {
+        let map = map_for(&[&d1, &d2]);
+        let lex_opts = if mariadb { LexOptions::mariadb() } else { LexOptions::mysql84() };
+        let mut targets = Vec::new();
+        for engine in [Engine::Lexer, Engine::Auto] {
+            let ctx = RewriteCtx::new(&map, lex_opts.persona).lex(lex_opts).engine(engine);
+            let r = rewrite(sql.as_bytes(), &ctx).unwrap();
+            prop_assert_eq!(r.statements.len(), 1);
+            let Some(t) = r.statements[0].ddl.clone() else {
+                return Err(TestCaseError::fail(format!("no target for {sql}")));
+            };
+            let dbg = format!("{t:?}");
+            prop_assert!(dbg.contains(&format!("{d1:?}")), "{} lacks {:?}", dbg, d1);
+            prop_assert!(dbg.contains(&format!("{obj:?}")), "{} lacks {:?}", dbg, obj);
+            prop_assert!(t.to_catalog().unwrap().is_some());
+            targets.push(t);
+        }
+        prop_assert_eq!(&targets[0], &targets[1]);
+    }
+
     /// Chapter 07: re-parsing the rewritten text gives the same AST with
     /// only schema parts changed.
     #[test]
@@ -175,6 +201,35 @@ proptest! {
         let _ = original.visit(&mut swap);
         prop_assert_eq!(strip(&format!("{original:?}")), strip(&format!("{rewritten:?}")));
     }
+}
+
+/// DDL statement shapes over two databases and an object name.
+fn ddl_statement() -> impl Strategy<Value = (String, String, String, String)> {
+    (
+        db_name(),
+        db_name(),
+        "[a-zA-Z_][a-zA-Z0-9_ $]{0,10}",
+        0usize..10,
+        trivia(),
+    )
+        .prop_map(|(d1, d2, obj, shape, w)| {
+            let (a, b, o) = (backquote(&d1), backquote(&d2), backquote(&obj));
+            let sql = match shape {
+                0 => format!("CREATE TABLE{w}IF NOT EXISTS {a}.{o} (id INT)"),
+                1 => format!("CREATE TABLE {a}.{o}{w}LIKE {b}.src"),
+                2 => format!("DROP TABLE IF EXISTS {a}.{o},{w}{b}.x"),
+                3 => format!("RENAME TABLE {a}.{o} TO{w}{b}.{o}"),
+                4 => format!("ALTER TABLE {a}.{o}{w}RENAME TO {b}.y"),
+                5 => format!("TRUNCATE TABLE{w}{a}.{o}"),
+                6 => format!("CREATE INDEX i ON{w}{a}.{o} (id)"),
+                7 => format!(
+                    "CREATE TRIGGER {a}.{o} BEFORE INSERT ON{w}{b}.t FOR EACH ROW SET NEW.a = 1"
+                ),
+                8 => format!("CREATE OR REPLACE VIEW {a}.{o}{w}AS SELECT * FROM {b}.t"),
+                _ => format!("DROP VIEW{w}{a}.{o}"),
+            };
+            (sql, d1, d2, obj)
+        })
 }
 
 fn soup_word() -> impl Strategy<Value = String> {

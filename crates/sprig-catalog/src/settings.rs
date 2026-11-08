@@ -233,8 +233,12 @@ pub trait SettingAuthorizer: Send + Sync {
     ///
     /// # Errors
     /// Access denied (1227 or chapter 29's code).
-    async fn authorize(&self, tenant: TenantId, principal: &Principal, need: Privilege)
-    -> Result<()>;
+    async fn authorize(
+        &self,
+        tenant: TenantId,
+        principal: &Principal,
+        need: Privilege,
+    ) -> Result<()>;
 }
 
 /// Allows every write: the privilege tables arrive with chapter 29 (M0.5).
@@ -476,31 +480,7 @@ where
     /// - [`Versioner::change`]'s errors (39070, 39071, 39072, 39504).
     pub async fn set(&self, req: &SetRequest) -> Result<SetOutcome> {
         let key = req.key.as_str();
-        let def = def_of(self.registry, key)?;
-        let kind = req.target.kind();
-        if !def.scopes().contains(kind) {
-            return Err(SprigError::new(
-                SprigCode::SettingScopeNotAllowed,
-                format!("{key} can't be set at {kind} scope"),
-            ));
-        }
-        if def.operator_only() && req.principal.is_tenant() {
-            return Err(access_denied(key));
-        }
-        let bounds_change = matches!(
-            req.change,
-            SettingChange::SetBounds(_) | SettingChange::ResetBounds
-        );
-        let need = match req.target {
-            _ if bounds_change => Privilege::SettingsAdmin,
-            Target::Tenant => Privilege::SettingsAdmin,
-            Target::Database(d) => Privilege::AlterDatabase(d),
-            Target::Object(o) => Privilege::AlterObject(o),
-        };
-        self.auth
-            .authorize(req.tenant, &req.principal, need)
-            .await?;
-        let change = normalize_change(def, req.change.clone())?;
+        let (def, change) = self.precheck(req).await?;
         let etcd = self.etcd.snapshot();
 
         let mut locked = self
@@ -536,7 +516,17 @@ where
         let scope = req.target.scope();
         let written = async {
             let tx = c.tx();
-            write_row(tx, scope, key, &change, previous.as_ref(), &set_by, now, version).await?;
+            write_row(
+                tx,
+                scope,
+                key,
+                &change,
+                previous.as_ref(),
+                &set_by,
+                now,
+                version,
+            )
+            .await?;
             let current = tx.setting(scope, key).await?.as_ref().and_then(row_entry);
             let clamped = if matches!(change, SettingChange::SetBounds(_)) {
                 self.clamped_below(tx, req, &ancestry, &etcd, version)
@@ -556,7 +546,14 @@ where
         };
         let version = c.commit().await?;
         Ok(self
-            .finish(req, previous.as_ref().and_then(row_entry), current, &clamped, set_by, version)
+            .finish(
+                req,
+                previous.as_ref().and_then(row_entry),
+                current,
+                &clamped,
+                set_by,
+                version,
+            )
             .await)
     }
 
@@ -611,6 +608,37 @@ where
             warnings,
             summary,
         }
+    }
+
+    /// Steps 1 to 4: the key, the scope, `operator_only`, the privilege
+    /// and the type. Nothing is read from the catalog yet.
+    async fn precheck(&self, req: &SetRequest) -> Result<(&'static dyn AnySetting, SettingChange)> {
+        let key = req.key.as_str();
+        let def = def_of(self.registry, key)?;
+        let kind = req.target.kind();
+        if !def.scopes().contains(kind) {
+            return Err(SprigError::new(
+                SprigCode::SettingScopeNotAllowed,
+                format!("{key} can't be set at {kind} scope"),
+            ));
+        }
+        if def.operator_only() && req.principal.is_tenant() {
+            return Err(access_denied(key));
+        }
+        let bounds_change = matches!(
+            req.change,
+            SettingChange::SetBounds(_) | SettingChange::ResetBounds
+        );
+        let need = match req.target {
+            _ if bounds_change => Privilege::SettingsAdmin,
+            Target::Tenant => Privilege::SettingsAdmin,
+            Target::Database(d) => Privilege::AlterDatabase(d),
+            Target::Object(o) => Privilege::AlterObject(o),
+        };
+        self.auth
+            .authorize(req.tenant, &req.principal, need)
+            .await?;
+        Ok((def, normalize_change(def, req.change.clone())?))
     }
 
     /// Steps 5 and the target's existence, under the version row's lock.

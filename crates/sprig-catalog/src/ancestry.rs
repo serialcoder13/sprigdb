@@ -39,8 +39,8 @@ use serde_json::Value as Json;
 use sprig_common::ids::TenantId;
 use sprig_common::{Result, SprigError};
 
-use crate::cache::snapshot::{ANCESTRY_KEY, parse_ancestry};
 use crate::cache::TenantRef;
+use crate::cache::snapshot::{ANCESTRY_KEY, parse_ancestry};
 use crate::rows::SettingsTx;
 use crate::store::{SettingRow, SettingScope};
 
@@ -77,7 +77,9 @@ impl AncestryState {
     /// The transaction's errors.
     pub async fn read<T: SettingsTx + ?Sized>(tx: &mut T, tenant: TenantId) -> Result<Self> {
         let a = tx.setting(SettingScope::Tenant, ANCESTRY_KEY).await?;
-        let v = tx.setting(SettingScope::Tenant, ANCESTOR_VERSIONS_KEY).await?;
+        let v = tx
+            .setting(SettingScope::Tenant, ANCESTOR_VERSIONS_KEY)
+            .await?;
         Ok(Self::from_values(
             tenant,
             a.as_ref().and_then(|r| r.value.as_ref()),
@@ -88,11 +90,7 @@ impl AncestryState {
     /// The ancestors' ids, root first (empty without the key).
     #[must_use]
     pub fn ids(&self) -> Vec<TenantId> {
-        self.ancestry
-            .iter()
-            .flatten()
-            .map(|r| r.id)
-            .collect()
+        self.ancestry.iter().flatten().map(|r| r.id).collect()
     }
 
     /// Whether the copy is current for `want` (root first) given each
@@ -101,9 +99,10 @@ impl AncestryState {
     /// recorded.
     #[must_use]
     pub fn is_current(&self, want: &[(TenantRef, u64)]) -> bool {
-        let same_tree = self.ancestry.as_deref().is_some_and(|a| {
-            a.len() == want.len() && a.iter().zip(want).all(|(x, (w, _))| x == w)
-        });
+        let same_tree = self
+            .ancestry
+            .as_deref()
+            .is_some_and(|a| a.len() == want.len() && a.iter().zip(want).all(|(x, (w, _))| x == w));
         same_tree
             && self.versions.len() == want.len()
             && want

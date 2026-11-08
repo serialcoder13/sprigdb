@@ -13,15 +13,18 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sprig_common::{CancellationToken, ErrorKind, Result, SprigCode, SprigError};
 use tokio::net::TcpListener;
 
-use super::types::{ErrorBody, ProbeClusterRequest};
+use super::types::{
+    ErrorBody, LockSettingRequest, ProbeClusterRequest, ResetSettingRequest, ScopeRef,
+    SetBoundsRequest, SetSettingRequest, SettingOp, SettingWrite,
+};
 use super::{AdminService, invalid};
 
 /// The routes' shared state.
@@ -49,6 +52,16 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
         .route(
             "/admin/v1/tenants/{name}",
             get(get_tenant).delete(delete_tenant),
+        )
+        .route("/admin/v1/tenants/{name}/settings", get(tenant_settings))
+        .route("/admin/v1/tenants/{name}/users", post(create_user))
+        .route("/admin/v1/settings", get(list_setting_keys))
+        .route(
+            "/admin/v1/settings/{key}",
+            get(get_setting)
+                .put(set_setting)
+                .delete(unset_setting)
+                .post(setting_method),
         )
         .fallback(not_routed)
         .with_state(app)
@@ -313,6 +326,228 @@ async fn delete_tenant(
     let r = async {
         authorize(&app, &headers)?;
         app.svc.delete_tenant(&name).await
+    };
+    respond(r.await)
+}
+
+async fn create_user(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.create_user(&name, parse_required(&body)?).await
+    };
+    respond(r.await)
+}
+
+async fn tenant_settings(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.tenant_settings(&name).await
+    };
+    respond(r.await)
+}
+
+/// `%XX` and `+` decoded.
+fn percent_decode(s: &str) -> Result<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hex = b
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                    .ok_or_else(|| invalid(format!("query string: bad escape in {s:?}")))?;
+                out.push(hex);
+                i += 2;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).map_err(|_| invalid("query string: not UTF-8"))
+}
+
+/// The query string as `T`: each `name=value` a string field; empty values
+/// are left out. 39792 when it doesn't fit.
+fn query<T: DeserializeOwned>(uri: &Uri) -> Result<T> {
+    let mut m = serde_json::Map::new();
+    for part in uri.query().unwrap_or_default().split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        let (k, v) = part.split_once('=').unwrap_or((part, ""));
+        let v = percent_decode(v)?;
+        if !v.is_empty() {
+            m.insert(percent_decode(k)?, serde_json::Value::String(v));
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(m))
+        .map_err(|e| invalid(format!("query string: {e}")))
+}
+
+async fn list_setting_keys(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.list_setting_keys(&query(&uri)?).await
+    };
+    respond(r.await)
+}
+
+/// `{key}` and `{key}:explain`: the same answer.
+async fn get_setting(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(key): UrlPath<String>,
+    uri: Uri,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let key = match key.rsplit_once(':') {
+            Some((k, "explain")) => k,
+            Some(_) => {
+                return Err(invalid(format!(
+                    "GET /admin/v1/settings/{key}: expected {{key}} or {{key}}:explain"
+                )));
+            }
+            None => key.as_str(),
+        };
+        app.svc.explain_setting(key, &query(&uri)?).await
+    };
+    respond(r.await)
+}
+
+fn scope_of(scope: Option<ScopeRef>) -> Result<ScopeRef> {
+    scope.ok_or_else(|| {
+        invalid("scope is required: global, dc[:<id>], cluster:<id>, tenant:<name>, db:<tenant>.<db> or object:<tenant>.<db>.<object>")
+    })
+}
+
+fn write(
+    scope: Option<ScopeRef>,
+    op: SettingOp,
+    actor: Option<String>,
+    reason: String,
+) -> Result<SettingWrite> {
+    Ok(SettingWrite {
+        scope: scope_of(scope)?,
+        op,
+        actor: actor.unwrap_or_default(),
+        reason,
+    })
+}
+
+async fn set_setting(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(key): UrlPath<String>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let req: SetSettingRequest = parse_required(&body)?;
+        let w = write(
+            req.scope,
+            SettingOp::Set {
+                value: req.value,
+                value_text: req.value_text,
+            },
+            req.actor,
+            req.reason,
+        )?;
+        app.svc.write_setting(&key, w).await
+    };
+    respond(r.await)
+}
+
+/// `DELETE /admin/v1/settings/{key}?scope=...`: `Settings.UnsetSetting`,
+/// the value's reset.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnsetQuery {
+    scope: Option<ScopeRef>,
+    #[serde(default)]
+    reason: String,
+    actor: Option<String>,
+}
+
+async fn unset_setting(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(key): UrlPath<String>,
+    uri: Uri,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let q: UnsetQuery = query(&uri)?;
+        let w = write(
+            q.scope,
+            SettingOp::Reset {
+                value: true,
+                bounds: false,
+            },
+            q.actor,
+            q.reason,
+        )?;
+        app.svc.write_setting(&key, w).await
+    };
+    respond(r.await)
+}
+
+/// `{key}:reset`, `{key}:bounds`, `{key}:lock` and `{key}:unlock`.
+async fn setting_method(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let (key, w) = match name.rsplit_once(':') {
+            Some((key, "reset")) => {
+                let req: ResetSettingRequest = parse_required(&body)?;
+                let op = SettingOp::Reset {
+                    value: req.all || !req.bounds,
+                    bounds: req.all || req.bounds,
+                };
+                (key, write(req.scope, op, req.actor, req.reason)?)
+            }
+            Some((key, "bounds")) => {
+                let req: SetBoundsRequest = parse_required(&body)?;
+                let op = SettingOp::Bounds {
+                    min: req.min,
+                    max: req.max,
+                    allowed: req.allowed,
+                    allowed_text: req.allowed_text,
+                    clear: req.clear,
+                };
+                (key, write(req.scope, op, req.actor, req.reason)?)
+            }
+            Some((key, m @ ("lock" | "unlock"))) => {
+                let req: LockSettingRequest = parse_required(&body)?;
+                let op = SettingOp::Lock {
+                    locked: m == "lock",
+                };
+                (key, write(req.scope, op, req.actor, req.reason)?)
+            }
+            _ => {
+                return Err(invalid(format!(
+                    "POST /admin/v1/settings/{name}: expected {{key}}:reset, :bounds, :lock or :unlock"
+                )));
+            }
+        };
+        app.svc.write_setting(key, w).await
     };
     respond(r.await)
 }

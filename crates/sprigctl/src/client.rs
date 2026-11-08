@@ -104,6 +104,20 @@ impl AdminClient {
         self.call(Method::POST, path, Some(bytes)).await
     }
 
+    /// `PUT path` with `body` as JSON.
+    ///
+    /// # Errors
+    /// The API's error, or a transport failure.
+    pub(crate) async fn put<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, CallError> {
+        let bytes = serde_json::to_vec(body)
+            .map_err(|e| CallError::Transport(format!("encoding the request: {e}")))?;
+        self.call(Method::PUT, path, Some(bytes)).await
+    }
+
     /// `DELETE path`.
     ///
     /// # Errors

@@ -686,6 +686,24 @@ impl<B: VersionBackend> Locked<B> {
         })
     }
 
+    /// Commits the rows written in [`tx`](Self::tx) without allocating a
+    /// version: chapter 08's "intermediate states commit without a
+    /// version". The rows must carry the committed version
+    /// ([`previous`](Self::previous)), so incremental loads skip them
+    /// until a versioned change touches them. The version row keeps its
+    /// value. Checked against the allocator's fence first.
+    ///
+    /// # Errors
+    /// 39504 if the allocator's leadership ended (rolled back); 39070 if
+    /// the commit fails.
+    pub async fn commit_unversioned(self) -> Result<()> {
+        if let Err(e) = self.allocator.check_fence() {
+            let _ = self.backend.rollback(self.tx).await;
+            return Err(e);
+        }
+        self.backend.commit(self.tx, self.kind, self.previous).await
+    }
+
     /// Rolls back without allocating: no version, no gap.
     ///
     /// # Errors

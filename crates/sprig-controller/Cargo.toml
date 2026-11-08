@@ -16,7 +16,8 @@ metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sprig-catalog = { path = "../sprig-catalog" }
+sprig-auth.workspace = true
+sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true

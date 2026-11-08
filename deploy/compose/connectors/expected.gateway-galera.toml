@@ -86,7 +86,9 @@ dump = "fail"
 # columns (gap 8); behind the gateway the backend is MariaDB, so it works.
 restore = "pass"
 checksum = "pass"
-objects = "pass"
+# This section overrides [all.mariadb-dump]: objects still fails on Galera
+# for the auto-increment step above (p_count sees ids stepping by 3).
+objects = "fail"
 
 [mysql.sysbench-tpcc]
 # MySQL 8.4 accepts w_ytd under ONLY_FULL_GROUP_BY because it depends on

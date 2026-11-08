@@ -17,6 +17,11 @@
 //! saw); if one is not, or the statement doesn't parse, the walker's answer
 //! stands ([`Engine::Auto`]) or the statement fails with 39051
 //! ([`Engine::Ast`]).
+//!
+//! For the DDL kinds it models (`CREATE TABLE`, `CREATE VIEW`, `ALTER
+//! TABLE`, `TRUNCATE`, `CREATE INDEX`, `DROP TABLE` and `DROP VIEW`), the
+//! AST also gives the statement's [`DdlTarget`]; it must equal the
+//! walker's for the engines to agree.
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -36,6 +41,7 @@ use super::walker::Out;
 use super::{Edit, EditKind, Engine, RewriteCtx, StmtKind, SystemRef, SystemSchema};
 use crate::lex::{Token, TokenKind, ident_value};
 use crate::names::NameError;
+use crate::names::ddl::{AlterOp, DdlKind, DdlName, DdlTarget};
 use crate::names::map::Purpose;
 
 type R<T = ()> = Result<T, NameError>;
@@ -68,7 +74,10 @@ pub(super) fn apply(src: &[u8], tokens: &[Token], ctx: &RewriteCtx<'_>, out: &mu
         if !strict && !has_dotted_name(src, tokens, &range) {
             continue;
         }
-        let Some(found) = schema_positions(text, tokens, range.clone()) else {
+        let current = out.currents.get(si).cloned().flatten();
+        let Some((found, ast_ddl)) =
+            schema_positions(text, tokens, range.clone(), current.as_deref())
+        else {
             if strict {
                 return Err(unsupported(
                     "sqlparser-rs could not account for the statement",
@@ -86,13 +95,20 @@ pub(super) fn apply(src: &[u8], tokens: &[Token], ctx: &RewriteCtx<'_>, out: &mu
             .collect();
         walker.sort_by_key(|r| r.start);
         walker.dedup();
+        if strict && st.kind == StmtKind::Ddl && ast_ddl.is_none() {
+            return Err(unsupported("sqlparser-rs could not classify the DDL"));
+        }
+        let ddl_agree = ast_ddl == st.ddl;
         let agree = walker == found;
         if !agree {
             replace_schema_edits(src, ctx, out, si, &range, &found, purpose)?;
         }
         let st = &mut out.statements[si];
         st.engine = Engine::Ast;
-        st.engines_agree = agree;
+        st.engines_agree = agree && ddl_agree;
+        if ast_ddl.is_some() {
+            st.ddl = ast_ddl;
+        }
     }
     Ok(())
 }
@@ -165,13 +181,15 @@ fn replace_schema_edits(
 }
 
 /// The byte ranges of the database tokens in the statement at `range`, by
-/// the AST, or `None` when sqlparser-rs can't parse it or doesn't account
-/// for every dotted name.
+/// the AST, and its DDL target (unqualified names in `current`), or `None`
+/// when sqlparser-rs can't parse it or doesn't account for every dotted
+/// name.
 fn schema_positions(
     text: &str,
     tokens: &[Token],
     range: Range<usize>,
-) -> Option<Vec<Range<usize>>> {
+    current: Option<&str>,
+) -> Option<(Vec<Range<usize>>, Option<DdlTarget>)> {
     let toks: Vec<Token> = tokens
         .iter()
         .copied()
@@ -253,7 +271,134 @@ fn schema_positions(
             return None;
         }
     }
-    Some(found)
+    Some((found, ddl_target(&stmt, current)))
+}
+
+/// A name from the AST: `name` or `db.name`.
+fn ddl_name(n: &ObjectName, current: Option<&str>) -> Option<DdlName> {
+    let ids = idents(n);
+    if ids.len() != n.0.len() {
+        return None;
+    }
+    match ids.as_slice() {
+        [name] => Some(DdlName::unqualified(&name.value, current)),
+        [db, name] => Some(DdlName::qualified(&db.value, &name.value)),
+        _ => None,
+    }
+}
+
+/// The DDL target of a modelled statement, as the AST gives it.
+#[allow(clippy::too_many_lines)]
+fn ddl_target(s: &Statement, current: Option<&str>) -> Option<DdlTarget> {
+    let name = |n: &ObjectName| ddl_name(n, current);
+    match s {
+        Statement::CreateTable(ct) => {
+            if ct.clone.is_some() {
+                return None;
+            }
+            let like = match &ct.like {
+                Some(CreateTableLikeKind::Parenthesized(l) | CreateTableLikeKind::Plain(l)) => {
+                    Some(name(&l.name)?)
+                }
+                None => None,
+            };
+            Some(DdlTarget::CreateObject {
+                kind: DdlKind::Table,
+                name: name(&ct.name)?,
+                if_not_exists: ct.if_not_exists,
+                or_replace: ct.or_replace,
+                temporary: ct.temporary,
+                parent: None,
+                like,
+                as_select: ct.query.is_some(),
+            })
+        }
+        Statement::CreateView(cv) => {
+            if cv.materialized || cv.secure || cv.or_alter {
+                return None;
+            }
+            Some(DdlTarget::CreateObject {
+                kind: DdlKind::View,
+                name: name(&cv.name)?,
+                if_not_exists: cv.if_not_exists,
+                or_replace: cv.or_replace,
+                temporary: cv.temporary,
+                parent: None,
+                like: None,
+                as_select: false,
+            })
+        }
+        Statement::AlterTable(at) => {
+            if at.only || at.table_type.is_some() {
+                return None;
+            }
+            let table = name(&at.name)?;
+            let mut rename_to = None;
+            for op in &at.operations {
+                if let AlterTableOperation::RenameTable { table_name } = op {
+                    let (RenameTableNameKind::As(n) | RenameTableNameKind::To(n)) = table_name;
+                    rename_to = Some(name(n)?);
+                }
+            }
+            match (rename_to, at.operations.len()) {
+                (Some(to), 1) => Some(DdlTarget::RenameTables {
+                    pairs: vec![(table, to)],
+                    if_exists: at.if_exists,
+                }),
+                (rename_to, _) => Some(DdlTarget::AlterObject {
+                    kind: DdlKind::Table,
+                    name: table,
+                    if_exists: at.if_exists,
+                    op: AlterOp::Change { rename_to },
+                }),
+            }
+        }
+        Statement::Truncate(t) => match t.table_names.as_slice() {
+            [target] if !t.if_exists && t.partitions.is_none() && !target.only => {
+                Some(DdlTarget::Truncate {
+                    name: name(&target.name)?,
+                })
+            }
+            _ => None,
+        },
+        Statement::CreateIndex(ci) => {
+            let index = match &ci.name {
+                Some(n) => Some(idents(n).last()?.value.clone()),
+                None => None,
+            };
+            Some(DdlTarget::AlterObject {
+                kind: DdlKind::Table,
+                name: name(&ci.table_name)?,
+                if_exists: false,
+                op: AlterOp::CreateIndex {
+                    name: index,
+                    if_not_exists: ci.if_not_exists,
+                    or_replace: false,
+                },
+            })
+        }
+        Statement::Drop {
+            object_type,
+            if_exists,
+            names,
+            temporary,
+            table: None,
+            ..
+        } => {
+            let kind = match object_type {
+                sqlparser::ast::ObjectType::Table => DdlKind::Table,
+                sqlparser::ast::ObjectType::View => DdlKind::View,
+                _ => return None,
+            };
+            Some(DdlTarget::DropObjects {
+                kind,
+                names: names.iter().map(name).collect::<Option<Vec<_>>>()?,
+                if_exists: *if_exists,
+                temporary: *temporary,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Deepest parenthesis and `CASE` nesting sent to sqlparser-rs. Its

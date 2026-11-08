@@ -2,6 +2,12 @@
 //! and position polling every `reads.replica_position_poll_ms` (chapter
 //! 06, "Health checks" and "Read routing"), on one side connection per
 //! node, all nodes in parallel, each check with a 1 s timeout.
+//!
+//! Every node's position is polled, Galera nodes included (decision D13):
+//! a read that must see a write goes only to a node whose position covers
+//! it. After each round the monitor estimates every node's lag and marks
+//! the nodes that are behind (no reads), with `sprig_backend_node_behind`
+//! and the `backend.node_behind` and `backend.node_caught_up` events.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +18,7 @@ use sprig_common::ids::{ClusterId, NodeId};
 use sprig_proto_mysql::client::MysqlClient;
 
 use super::Backends;
-use super::cluster::{ClusterView, NodeRef};
+use super::cluster::{ClusterView, NodeKey, NodeRef};
 use super::health::{NodeRole, Observation};
 use crate::reads::GtidSet;
 
@@ -21,6 +27,11 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const POLL_SQL: &str = "SELECT @@read_only, @@gtid_slave_pos, @@gtid_binlog_pos, \
     (SELECT COUNT(*) FROM information_schema.SLAVE_STATUS)";
 const POLL_SQL_PLAIN: &str = "SELECT @@read_only, @@gtid_slave_pos, @@gtid_binlog_pos, 0";
+/// Galera: the GTIDs the node has applied are in `@@gtid_binlog_pos`;
+/// with `wsrep_gtid_mode` on, the cluster's writes share one domain,
+/// `wsrep_gtid_domain_id`, with the same sequence numbers on every node.
+const POLL_SQL_GALERA: &str = "SELECT @@read_only, @@gtid_slave_pos, @@gtid_binlog_pos, 0, \
+    @@wsrep_gtid_mode, @@wsrep_gtid_domain_id";
 const GALERA_SQL: &str =
     "SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_local_state', 'wsrep_ready')";
 
@@ -28,6 +39,8 @@ struct Polled {
     obs: Observation,
     slave: Option<GtidSet>,
     binlog: Option<GtidSet>,
+    /// Galera with `wsrep_gtid_mode` on: `wsrep_gtid_domain_id`.
+    galera_domain: Option<u32>,
 }
 
 fn text(v: Option<&Option<bytes::Bytes>>) -> String {
@@ -37,7 +50,12 @@ fn text(v: Option<&Option<bytes::Bytes>>) -> String {
 }
 
 async fn poll(c: &mut MysqlClient, topology: TopologyKind, health: bool) -> Result<Polled, String> {
-    let row = match c.query_first(POLL_SQL).await {
+    let first = if topology == TopologyKind::Galera {
+        POLL_SQL_GALERA
+    } else {
+        POLL_SQL
+    };
+    let row = match c.query_first(first).await {
         Ok(r) => r,
         Err(e) if e.server_error().is_some() => c
             .query_first(POLL_SQL_PLAIN)
@@ -50,6 +68,9 @@ async fn poll(c: &mut MysqlClient, topology: TopologyKind, health: bool) -> Resu
     let slave = GtidSet::parse(&text(row.get(1))).ok();
     let binlog = GtidSet::parse(&text(row.get(2))).ok();
     let channels: u64 = text(row.get(3)).parse().unwrap_or(0);
+    let galera_domain = (text(row.get(4)) == "1")
+        .then(|| text(row.get(5)).parse().ok())
+        .flatten();
     let mut obs = Observation {
         role: match topology {
             TopologyKind::Galera => NodeRole::Galera,
@@ -74,7 +95,12 @@ async fn poll(c: &mut MysqlClient, topology: TopologyKind, health: bool) -> Resu
         }
         obs.galera_usable = Some(state == "4" && ready.eq_ignore_ascii_case("ON"));
     }
-    Ok(Polled { obs, slave, binlog })
+    Ok(Polled {
+        obs,
+        slave,
+        binlog,
+        galera_domain,
+    })
 }
 
 async fn check(
@@ -105,6 +131,27 @@ async fn check(
     }
 }
 
+/// Publishes a node's lag and whether it is behind (more than `max_lag`;
+/// an unknown lag is not behind), with an event when that changes.
+fn note_lag(b: &Backends, key: &NodeKey, max_lag: Duration) {
+    let s = b.nodes.status(key);
+    let (cluster, node) = (key.cluster.to_string(), key.node.to_string());
+    if let Some(lag) = s.lag {
+        metrics::gauge!("sprig_backend_replica_lag_seconds", "cluster" => cluster.clone(), "node" => node.clone())
+            .set(lag.as_secs_f64());
+    }
+    let behind = s.lag.is_some_and(|l| l > max_lag);
+    metrics::gauge!("sprig_backend_node_behind", "cluster" => cluster, "node" => node)
+        .set(if behind { 1.0 } else { 0.0 });
+    if let Some(now) = b.nodes.set_behind(key, behind) {
+        if now {
+            tracing::warn!(event = "backend.node_behind", node = %key, lag = ?s.lag, "backend node behind: no reads until it catches up");
+        } else {
+            tracing::info!(event = "backend.node_caught_up", node = %key, "backend node caught up");
+        }
+    }
+}
+
 pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
     let mut conns: HashMap<NodeId, MysqlClient> = HashMap::new();
     let mut last_health: HashMap<NodeId, Instant> = HashMap::new();
@@ -125,6 +172,9 @@ pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
                 let (b, view) = (&b, &view);
                 async move { (n, health, check(b, view, n, c, health).await) }
             });
+            let galera = view.topology == TopologyKind::Galera;
+            let mut galera_round: Vec<(NodeKey, Option<GtidSet>)> = Vec::new();
+            let mut galera_domain = None;
             for (n, health, (conn, result)) in futures::future::join_all(checks).await {
                 let key = view.key(&n.node);
                 if health {
@@ -132,11 +182,12 @@ pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
                 }
                 match result {
                     Ok(p) => {
-                        let is_writer = p.obs.role == NodeRole::Writer;
-                        b.nodes.record_positions(&key, p.slave, p.binlog, is_writer);
-                        if let Some(lag) = b.nodes.status(&key).lag {
-                            metrics::gauge!("sprig_backend_replica_lag_seconds", "cluster" => cluster.to_string(), "node" => n.node.to_string())
-                                .set(lag.as_secs_f64());
+                        if galera {
+                            galera_domain = galera_domain.or(p.galera_domain);
+                            galera_round.push((key.clone(), p.binlog));
+                        } else {
+                            let is_writer = p.obs.role == NodeRole::Writer;
+                            b.nodes.record_positions(&key, p.slave, p.binlog, is_writer);
                         }
                         if health && let Some(h) = b.nodes.record_pass(&key, p.obs) {
                             b.on_health_change(&key, h);
@@ -158,6 +209,18 @@ pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
                         }
                     }
                 }
+            }
+            if galera {
+                b.nodes
+                    .record_galera_positions(&cluster, &galera_round, galera_domain);
+            }
+            let max_lag = if galera {
+                settings.max_galera_lag
+            } else {
+                settings.max_replica_lag
+            };
+            for n in &view.nodes {
+                note_lag(&b, &view.key(&n.node), max_lag);
             }
         }
         tokio::select! {

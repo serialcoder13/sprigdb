@@ -21,7 +21,7 @@ use sprig_common::{SprigCode, SprigError};
 use sprig_meta::conformance::{ETCD_ENV, delete_prefix, unique_tier};
 use sprig_meta::elect::{Election, Elector, LeaderRecord, Leadership};
 use sprig_meta::session::{SessionOpts, TokioClock};
-use sprig_meta::{EtcdConfig, EtcdStore, MemStore, MetaStore, Op, Txn};
+use sprig_meta::{Cmp, EtcdConfig, EtcdStore, MemStore, MetaStore, Op, Txn};
 
 use crate::*;
 
@@ -129,6 +129,7 @@ cases! {
     mirrors_follow_writes_and_notify,
     tightened_bounds_warn_and_clamp,
     a_deposed_leader_cannot_write,
+    guarded_writes_and_bound_patches,
 }
 
 fn run_mem(case: Case) {
@@ -699,4 +700,155 @@ async fn a_deposed_leader_cannot_write(env: Env) {
     let (rec, _) = w.read(&dc, "test.cache_mb").await.unwrap().unwrap();
     assert_eq!(rec.body.value, Some(Value::Int(11)));
     next.resign().await.unwrap();
+}
+
+/// The Admin API's path: writes under the serving leader's fencing compare
+/// (the DC leader's, also for `global` in single-etcd mode), bounds
+/// patched inside the guarded write, outcomes with the records before and
+/// after, and a guard that no longer holds.
+async fn guarded_writes_and_bound_patches(env: Env) {
+    let w = env.writer();
+    let dl = env.lead(&env.stores.dc).await;
+    let guard = vec![Cmp::CreateRev(dl.key().clone(), dl.token)];
+    let dc = env.dc();
+    let key = "test.cache_mb";
+    let set = |v: i64| SettingEdit::Change(SettingChange::Set(Value::Int(v)));
+    let patch = |p: BoundsPatch| SettingEdit::PatchBounds(p);
+
+    let o = w
+        .set_guarded(&guard, &Scope::Global, key, set(3000), "op:kiran", "r1")
+        .await
+        .unwrap();
+    assert!(o.changed);
+    assert_eq!(o.previous, None);
+    assert_eq!(o.current.as_ref().unwrap().value, Some(Value::Int(3000)));
+    w.set_guarded(&guard, &dc, key, set(4000), "op:kiran", "r2")
+        .await
+        .unwrap();
+    // A maximum on global keeps the value and warns about the dc value.
+    let o = w
+        .set_guarded(
+            &guard,
+            &Scope::Global,
+            key,
+            patch(BoundsPatch {
+                max: Some(Some(3500.0)),
+                ..BoundsPatch::default()
+            }),
+            "op:kiran",
+            "cap",
+        )
+        .await
+        .unwrap();
+    let cur = o.current.unwrap();
+    assert_eq!(cur.value, Some(Value::Int(3000)));
+    assert_eq!(cur.bounds.as_ref().unwrap().max, Some(3500.0));
+    assert_eq!(o.warnings.len(), 1, "{:?}", o.warnings);
+    assert_eq!(o.warnings[0].scope, dc);
+    // Lock keeps the maximum.
+    let o = w
+        .set_guarded(
+            &guard,
+            &Scope::Global,
+            key,
+            patch(BoundsPatch {
+                locked: Some(true),
+                ..BoundsPatch::default()
+            }),
+            "op:kiran",
+            "freeze",
+        )
+        .await
+        .unwrap();
+    let b = o.current.unwrap().bounds.unwrap();
+    assert!(b.locked);
+    assert_eq!(b.max, Some(3500.0));
+    assert!(o.warnings[0].message.contains("locked"), "{:?}", o.warnings);
+    let e = w
+        .set_guarded(&guard, &dc, key, set(100), "op", "")
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), Some(SprigCode::SettingLocked));
+    // Unlock and clear the maximum: nothing left of the bounds.
+    let o = w
+        .set_guarded(
+            &guard,
+            &Scope::Global,
+            key,
+            patch(BoundsPatch {
+                locked: Some(false),
+                max: Some(None),
+                ..BoundsPatch::default()
+            }),
+            "op:kiran",
+            "thaw",
+        )
+        .await
+        .unwrap();
+    assert_eq!(o.current.unwrap().bounds, None);
+    // Out of bounds, wrong type, unknown, wrong scope.
+    w.set_guarded(
+        &guard,
+        &Scope::Global,
+        key,
+        patch(BoundsPatch {
+            max: Some(Some(5000.0)),
+            ..BoundsPatch::default()
+        }),
+        "op",
+        "",
+    )
+    .await
+    .unwrap();
+    let err = |r: sprig_common::Result<RecordOutcome>| code(&r.unwrap_err());
+    assert_eq!(
+        err(w.set_guarded(&guard, &dc, key, set(6000), "op", "").await),
+        Some(SprigCode::SettingOutOfBounds)
+    );
+    assert_eq!(
+        err(w
+            .set_guarded(
+                &guard,
+                &dc,
+                key,
+                SettingEdit::Change(SettingChange::Set("big".into())),
+                "op",
+                ""
+            )
+            .await),
+        Some(SprigCode::SettingBadValue)
+    );
+    assert_eq!(
+        err(w
+            .set_guarded(&guard, &dc, "test.nope", set(1), "op", "")
+            .await),
+        Some(SprigCode::SettingUnknown)
+    );
+    assert_eq!(
+        err(w
+            .set_guarded(&guard, &dc, "test.data_only", set(1), "op", "")
+            .await),
+        Some(SprigCode::SettingScopeNotAllowed)
+    );
+    // A reset of nothing changes nothing.
+    let o = w
+        .set_guarded(
+            &guard,
+            &Scope::Cluster(env.cluster(4)),
+            key,
+            SettingEdit::Change(SettingChange::Reset),
+            "op",
+            "",
+        )
+        .await
+        .unwrap();
+    assert!(!o.changed);
+    // A guard that no longer holds: not the leader.
+    let stale = vec![Cmp::CreateRev(dl.key().clone(), dl.token + 1_000_000)];
+    assert_eq!(
+        err(w.set_guarded(&stale, &dc, key, set(10), "op", "").await),
+        Some(SprigCode::NotLeader)
+    );
+    let (rec, _) = w.read(&dc, key).await.unwrap().unwrap();
+    assert_eq!(rec.body.value, Some(Value::Int(4000)));
 }

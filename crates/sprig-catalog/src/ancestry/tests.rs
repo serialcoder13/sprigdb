@@ -142,7 +142,11 @@ async fn copies_replace_changed_rows_and_clear_removed_ones() {
                 settings_version: 3,
                 rows: vec![
                     tenant_row("auth.password_lock_minutes", Some(json!(30)), None),
-                    tenant_row("auto_index.mode", None, Some(Bounds::allowed([Value::from("off"), Value::from("on")]))),
+                    tenant_row(
+                        "auto_index.mode",
+                        None,
+                        Some(Bounds::allowed([Value::from("off"), Value::from("on")])),
+                    ),
                     // Internal and empty rows are never copied.
                     tenant_row("sprig.catalog_version", Some(json!("9")), None),
                     tenant_row("auto_index.max_per_table", None, None),
@@ -151,7 +155,11 @@ async fn copies_replace_changed_rows_and_clear_removed_ones() {
             AncestorRows {
                 tenant: B,
                 settings_version: 4,
-                rows: vec![tenant_row("auth.password_lock_minutes", Some(json!(10)), None)],
+                rows: vec![tenant_row(
+                    "auth.password_lock_minutes",
+                    Some(json!(10)),
+                    None,
+                )],
             },
         ],
     )
@@ -162,7 +170,9 @@ async fn copies_replace_changed_rows_and_clear_removed_ones() {
     assert_eq!((a_lock.value, a_lock.version), (Some(json!(30)), v1));
     assert!(row_of(&v, SettingScope::Ancestor(A), "sprig.catalog_version").is_none());
     assert_eq!(
-        row_of(&v, SettingScope::Tenant, ANCESTRY_KEY).unwrap().value,
+        row_of(&v, SettingScope::Tenant, ANCESTRY_KEY)
+            .unwrap()
+            .value,
         Some(json!([{"id": 10, "name": "a"}, {"id": 20, "name": "b"}]))
     );
     assert_eq!(
@@ -191,7 +201,10 @@ async fn copies_replace_changed_rows_and_clear_removed_ones() {
     let a_lock = row_of(&v, SettingScope::Ancestor(A), "auth.password_lock_minutes").unwrap();
     assert_eq!(a_lock.version, v1, "an unchanged copy is left alone");
     let mode = row_of(&v, SettingScope::Ancestor(A), "auto_index.mode").unwrap();
-    assert_eq!((mode.value, mode.bounds, mode.version), (Some(json!("on")), None, v2));
+    assert_eq!(
+        (mode.value, mode.bounds, mode.version),
+        (Some(json!("on")), None, v2)
+    );
     assert_eq!(
         row_of(&v, SettingScope::Tenant, ANCESTOR_VERSIONS_KEY)
             .unwrap()
@@ -267,7 +280,10 @@ fn staleness_follows_the_directory_versions() {
     assert_eq!(s.ids(), vec![A, B]);
     let want = |sa, sb| vec![(r(A, "a"), sa), (r(B, ""), sb)];
     assert!(s.is_current(&want(5, 2)));
-    assert!(s.is_current(&want(4, 1)), "older directory versions are covered");
+    assert!(
+        s.is_current(&want(4, 1)),
+        "older directory versions are covered"
+    );
     assert_eq!(s.stale(&want(6, 2)), vec![A]);
     assert!(!s.is_current(&want(6, 2)));
     // A renamed ancestor isn't the same ancestry.
@@ -294,12 +310,20 @@ async fn caches_load_the_copy_incrementally_as_in_full() {
                 AncestorRows {
                     tenant: A,
                     settings_version: 1,
-                    rows: vec![tenant_row("auth.password_lock_minutes", Some(json!(30)), None)],
+                    rows: vec![tenant_row(
+                        "auth.password_lock_minutes",
+                        Some(json!(30)),
+                        None,
+                    )],
                 },
                 AncestorRows {
                     tenant: B,
                     settings_version: 1,
-                    rows: vec![tenant_row("auth.password_lock_minutes", Some(json!(10)), None)],
+                    rows: vec![tenant_row(
+                        "auth.password_lock_minutes",
+                        Some(json!(10)),
+                        None,
+                    )],
                 },
             ],
         ),
@@ -313,7 +337,11 @@ async fn caches_load_the_copy_incrementally_as_in_full() {
         ),
         (vec![r(B, "b")], Vec::new()),
     ];
-    let expect = [(10, ScopeKind::Ancestor(B)), (30, ScopeKind::Ancestor(A)), (0, ScopeKind::Default)];
+    let expect = [
+        (10, ScopeKind::Ancestor(B)),
+        (30, ScopeKind::Ancestor(A)),
+        (0, ScopeKind::Default),
+    ];
     for ((want, fresh), (value, source)) in steps.iter().zip(expect) {
         run(&v, want, fresh).await;
         let next = cached.apply(load(Some(cached.version)));

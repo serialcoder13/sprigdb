@@ -18,7 +18,13 @@
 //!   [`names::hide`], [`names::result`] and [`names::plan`](mod@names::plan):
 //!   the `SHOW` family, `information_schema` inline views, names in
 //!   results and messages, hiding of internal objects, and the per-statement
-//!   plan the gateway follows.
+//!   plan the gateway follows;
+//! - [`names::ddl`]: the typed DDL target of each statement and its
+//!   conversion to `sprig-catalog`'s `DdlStatement` (chapter 08 step 10,
+//!   the gateway side).
+//! - [`settings_stmt`]: settings in SQL (chapter 08 step 8): `SPRIG SET`,
+//!   `RESET`, `BOUNDS`, `SHOW SPRIG SETTINGS` and `ALTER TENANT <name>`.
 
 pub mod lex;
 pub mod names;
+pub mod settings_stmt;

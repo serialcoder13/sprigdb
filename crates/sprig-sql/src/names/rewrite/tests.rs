@@ -70,3 +70,31 @@ fn deep_statements_never_overflow_the_ast_path() {
         let _ = rewrite(c.as_bytes(), &ctx);
     }
 }
+
+#[test]
+fn statement_ranges_keep_the_executable_comments_they_open() {
+    let m = MemoryNameMap::new(TenantId(1)).with_db(1, "d", 1, 1);
+    for persona in [Persona::MySql84, Persona::MariaDb] {
+        let ctx = RewriteCtx::new(&m, persona);
+        let sql = b"START TRANSACTION /*!40100 WITH CONSISTENT SNAPSHOT */; SELECT 1";
+        let r = rewrite(sql, &ctx).unwrap();
+        let first = &r.statements[0];
+        assert_eq!(
+            &sql[first.range.clone()],
+            b"START TRANSACTION /*!40100 WITH CONSISTENT SNAPSHOT */"
+        );
+        // A statement wholly inside a comment keeps the comment.
+        let sql = b"/*!40101 SET NAMES utf8mb4 */";
+        let r = rewrite(sql, &ctx).unwrap();
+        assert_eq!(&sql[r.statements[0].range.clone()], &sql[..]);
+        // Dump tools' triggers and views: several comments, one statement.
+        let sql = b"/*!50003 CREATE*/ /*!50017 DEFINER=`app`@`%`*/ /*!50003 TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1 */";
+        let r = rewrite(sql, &ctx).unwrap();
+        assert_eq!(r.statements.len(), 1);
+        assert_eq!(&sql[r.statements[0].range.clone()], &sql[..]);
+        // Two statements in one comment keep their own ranges.
+        let sql = b"/*!40101 SET @a = 1; SET @b = 2 */";
+        let r = rewrite(sql, &ctx).unwrap();
+        assert_eq!(&sql[r.statements[0].range.clone()], b"SET @a = 1");
+    }
+}

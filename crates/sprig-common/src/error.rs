@@ -174,6 +174,10 @@ sprig_codes! {
     /// A statement holds a name position the rewriter can't map safely
     /// (chapter 07).
     NameRewriteUnsupported = 39051, "ER_SPRIG_NAME_REWRITE_UNSUPPORTED", "SprigNameRewriteUnsupported", SQLSTATE_GENERAL, false;
+    /// A SprigDB `information_schema` view would inline more rows than
+    /// `names.local_view_max_rows` (chapter 07): narrow it by schema or
+    /// table.
+    MetadataTooLarge = 39052, "ER_SPRIG_METADATA_TOO_LARGE", "SprigMetadataTooLarge", SQLSTATE_GENERAL, false;
     /// The tenant's catalog writer or the global tier can't be reached, so
     /// DDL, setting and account changes fail; cached reads continue
     /// (chapter 08).
@@ -366,7 +370,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::LocalInfileRejected
         | SprigCode::LongDataLimit
         | SprigCode::ReservedName
-        | SprigCode::NameRewriteUnsupported => (Code::FailedPrecondition, 400),
+        | SprigCode::NameRewriteUnsupported
+        | SprigCode::MetadataTooLarge => (Code::FailedPrecondition, 400),
         SprigCode::GatewayDraining
         | SprigCode::ListenerRetired
         | SprigCode::MetaUnavailable

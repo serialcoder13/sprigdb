@@ -175,6 +175,18 @@ pub enum CausalScope {
     TenantGateway,
 }
 
+/// `reads.galera_unconfirmed` (decision D14): where a Galera read goes
+/// when it must see a write and no node but the writer has a polled
+/// position covering it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaleraUnconfirmed {
+    /// The least-loaded node that isn't behind, after the bounded check
+    /// (the default).
+    Check,
+    /// The writer.
+    Writer,
+}
+
 /// Resolved `backend.*` and `reads.*` values for one cluster.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackendSettings {
@@ -212,6 +224,12 @@ pub struct BackendSettings {
     pub position_poll: Duration,
     /// `reads.gtid_wait_timeout_ms`.
     pub gtid_wait_timeout: Duration,
+    /// `reads.max_galera_lag_ms`.
+    pub max_galera_lag: Duration,
+    /// `reads.galera_sync_wait_timeout_ms`.
+    pub galera_sync_wait_timeout: Duration,
+    /// `reads.galera_unconfirmed`.
+    pub galera_unconfirmed: GaleraUnconfirmed,
 }
 
 impl Default for BackendSettings {
@@ -235,6 +253,11 @@ impl Default for BackendSettings {
             max_replica_lag: Duration::from_millis(reads::MAX_REPLICA_LAG_MS.default),
             position_poll: Duration::from_millis(reads::REPLICA_POSITION_POLL_MS.default),
             gtid_wait_timeout: Duration::from_millis(reads::GTID_WAIT_TIMEOUT_MS.default),
+            max_galera_lag: Duration::from_millis(reads::MAX_GALERA_LAG_MS.default),
+            galera_sync_wait_timeout: Duration::from_millis(
+                reads::GALERA_SYNC_WAIT_TIMEOUT_MS.default,
+            ),
+            galera_unconfirmed: GaleraUnconfirmed::Check,
         }
     }
 }
@@ -274,6 +297,15 @@ impl BackendSettings {
             max_replica_lag: Duration::from_millis(snap.get(&reads::MAX_REPLICA_LAG_MS, ctx)),
             position_poll: Duration::from_millis(snap.get(&reads::REPLICA_POSITION_POLL_MS, ctx)),
             gtid_wait_timeout: Duration::from_millis(snap.get(&reads::GTID_WAIT_TIMEOUT_MS, ctx)),
+            max_galera_lag: Duration::from_millis(snap.get(&reads::MAX_GALERA_LAG_MS, ctx)),
+            galera_sync_wait_timeout: Duration::from_millis(
+                snap.get(&reads::GALERA_SYNC_WAIT_TIMEOUT_MS, ctx),
+            ),
+            galera_unconfirmed: if snap.get(&reads::GALERA_UNCONFIRMED, ctx) == "writer" {
+                GaleraUnconfirmed::Writer
+            } else {
+                GaleraUnconfirmed::Check
+            },
         }
     }
 }
@@ -403,6 +435,9 @@ mod tests {
             "reads.max_replica_lag_ms",
             "reads.replica_position_poll_ms",
             "reads.gtid_wait_timeout_ms",
+            "reads.max_galera_lag_ms",
+            "reads.galera_sync_wait_timeout_ms",
+            "reads.galera_unconfirmed",
         ] {
             let s = r.get(key).unwrap_or_else(|| panic!("{key} not registered"));
             assert_eq!(s.owner(), 6, "{key}");
@@ -413,6 +448,9 @@ mod tests {
         assert_eq!(d.acquire_timeout, Duration::from_secs(2));
         assert_eq!(d.gtid_wait_timeout, Duration::from_millis(100));
         assert_eq!(d.position_poll, Duration::from_millis(250));
+        assert_eq!(d.max_galera_lag, Duration::from_millis(1000));
+        assert_eq!(d.galera_sync_wait_timeout, Duration::from_millis(300));
+        assert_eq!(d.galera_unconfirmed, GaleraUnconfirmed::Check);
         assert_eq!(d.pool_mode, PoolMode::Transaction);
     }
 

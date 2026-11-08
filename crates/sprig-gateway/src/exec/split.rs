@@ -253,6 +253,84 @@ pub fn rewrite_connection_id(sql: &[u8], id: u32) -> Option<(Bytes, Vec<Renamed>
     Some((Bytes::from(out), renamed))
 }
 
+/// Replaces reads of gateway-owned variables the client set itself
+/// (`@@wait_timeout`, `@@session.net_read_timeout`, `@@session_track_*`,
+/// ...) in a `SELECT` with the client's values from `vars`: backend
+/// connections keep the gateway's own values of these (chapter 06), so the
+/// backend would answer with the gateway's. The relay renames each column
+/// back to the text the client wrote. `None` when nothing changes. Global
+/// reads (`@@global.x`) are the server's and stay.
+#[must_use]
+pub fn rewrite_gateway_vars(
+    sql: &[u8],
+    vars: &std::collections::BTreeMap<String, String>,
+) -> Option<(Bytes, Vec<Renamed>)> {
+    if vars.is_empty() || !first_word_is(sql, "SELECT") {
+        return None;
+    }
+    let ident = |ch: u8| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'$' || ch == b'.';
+    let text = sql;
+    let mut out: Vec<u8> = Vec::new();
+    let mut renamed = Vec::new();
+    let mut copied = 0;
+    let mut pos = 0;
+    while pos < text.len() {
+        match text[pos] {
+            quote @ (b'\'' | b'"' | b'`') => pos = skip_quoted(text, pos, quote),
+            b'#' => pos = skip_line(text, pos),
+            b'-' if is_dash_comment(text, pos) => pos = skip_line(text, pos),
+            b'/' if text.get(pos + 1) == Some(&b'*') && !is_executable_comment(text, pos) => {
+                pos = skip_block(text, pos);
+            }
+            b'@' if text.get(pos + 1) == Some(&b'@') => {
+                let start = pos + 2;
+                let end = text[start..]
+                    .iter()
+                    .position(|&ch| !ident(ch))
+                    .map_or(text.len(), |off| start + off);
+                let full = String::from_utf8_lossy(&text[start..end]).to_ascii_lowercase();
+                let name = full
+                    .strip_prefix("session.")
+                    .or_else(|| full.strip_prefix("local."))
+                    .unwrap_or(&full);
+                if let Some(v) = vars.get(name).filter(|_| !name.contains('.')) {
+                    let lit = if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+                        v.clone()
+                    } else {
+                        format!("'{}'", v.replace('\\', "\\\\").replace('\'', "''"))
+                    };
+                    out.extend_from_slice(&text[copied..pos]);
+                    out.extend_from_slice(lit.as_bytes());
+                    renamed.push(Renamed {
+                        from: Bytes::from(lit),
+                        to: Bytes::copy_from_slice(&text[pos..end]),
+                    });
+                    copied = end;
+                }
+                pos = end;
+            }
+            _ => pos += 1,
+        }
+    }
+    if renamed.is_empty() {
+        return None;
+    }
+    out.extend_from_slice(&text[copied..]);
+    Some((Bytes::from(out), renamed))
+}
+
+/// Whether the statement's first word is `word`.
+fn first_word_is(sql: &[u8], word: &str) -> bool {
+    let Some(at) = first_word_at(sql, 0) else {
+        return false;
+    };
+    let end = sql[at..]
+        .iter()
+        .position(|c| !c.is_ascii_alphabetic())
+        .map_or(sql.len(), |o| at + o);
+    sql[at..end].eq_ignore_ascii_case(word.as_bytes())
+}
+
 /// Whether `keyword` (upper case) appears as a word of `sql` outside
 /// quotes and comments.
 #[must_use]
@@ -370,6 +448,26 @@ fn unescape(b: &[u8], i: usize, quote: u8) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gateway_vars_read_the_clients_values() {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("wait_timeout".to_owned(), "600".to_owned());
+        vars.insert("session_track_schema".to_owned(), "OFF".to_owned());
+        let (sql, renames) = rewrite_gateway_vars(
+            b"SELECT @@wait_timeout, @@SESSION.session_track_schema, @@global.wait_timeout, '@@wait_timeout'",
+            &vars,
+        )
+        .unwrap();
+        assert_eq!(
+            &sql[..],
+            b"SELECT 600, 'OFF', @@global.wait_timeout, '@@wait_timeout'"
+        );
+        assert_eq!(&renames[0].to[..], b"@@wait_timeout");
+        assert_eq!(&renames[1].from[..], b"'OFF'");
+        assert!(rewrite_gateway_vars(b"SET @@wait_timeout = 5", &vars).is_none());
+        assert!(rewrite_gateway_vars(b"SELECT @@net_read_timeout", &vars).is_none());
+    }
+
     use super::*;
 
     fn pieces(s: &str) -> Vec<String> {

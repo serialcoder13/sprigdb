@@ -185,16 +185,20 @@ impl SettingsTx for MariaTx {
 impl SettingsBackend for MariaBackend {
     async fn tenant_scope(&self, tenant: TenantId) -> Result<TenantScopeRows> {
         let ep = self.locator().reader(tenant).await?;
-        timed(self.opts().statement_timeout * 2, "tenant settings", async {
-            let mut tx = ep.store.begin_snapshot(&ep.pool).await?;
-            let versions = ep.store.versions(&mut tx).await?;
-            let rows = ep.store.settings_of(&mut tx, SettingScope::Tenant).await?;
-            tx.commit().await.map_err(map_err)?;
-            Ok(TenantScopeRows {
-                version: versions.catalog,
-                rows,
-            })
-        })
+        timed(
+            self.opts().statement_timeout * 2,
+            "tenant settings",
+            async {
+                let mut tx = ep.store.begin_snapshot(&ep.pool).await?;
+                let versions = ep.store.versions(&mut tx).await?;
+                let rows = ep.store.settings_of(&mut tx, SettingScope::Tenant).await?;
+                tx.commit().await.map_err(map_err)?;
+                Ok(TenantScopeRows {
+                    version: versions.catalog,
+                    rows,
+                })
+            },
+        )
         .await
     }
 }
@@ -203,7 +207,7 @@ impl SettingsBackend for MariaBackend {
 
 impl MemSourceTx {
     /// The tables with this transaction's staged writes applied.
-    fn current(&self) -> MemTables {
+    pub(crate) fn current(&self) -> MemTables {
         let mut t = self.committed();
         self.apply_staged(&mut t);
         t

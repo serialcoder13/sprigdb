@@ -1,0 +1,6 @@
+bounds auto_index.max_per_table at tenant:acme by op:kiran
+  before:  value 6
+  after:   value 6, bounds max 5
+  catalog version 13
+warning: 1 value will be clamped
+  object:acme.shop.orders = 7: auto_index.max_per_table: the value at object:acme.shop.orders is outside the bounds in force and is read as 5

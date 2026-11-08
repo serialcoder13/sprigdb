@@ -271,6 +271,10 @@ pub async fn create_user(
         }),
         Err(e) => {
             let _ = c.rollback().await;
+            // The version was allocated in the directory: close the gap at
+            // once, so caches don't wait `catalog.version_wait_ms` for a
+            // version that will never commit.
+            let _ = cat.settle(tenant, VersionKind::Auth).await;
             Err(e)
         }
     }
@@ -318,6 +322,10 @@ where
         }),
         Err(e) => {
             let _ = c.rollback().await;
+            // The version was allocated in the directory: close the gap at
+            // once, so caches don't wait `catalog.version_wait_ms` for a
+            // version that will never commit.
+            let _ = cat.settle(tenant, VersionKind::Auth).await;
             Err(e)
         }
     }

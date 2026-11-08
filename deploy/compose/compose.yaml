@@ -31,6 +31,11 @@ x-mariadb: &mariadb
   networks: [dc-a]
   ulimits:
     nofile: { soft: 65536, hard: 65536 }
+  # Seven servers share one Docker VM (often 8 GB, shared with other work).
+  # A cap makes a runaway test restart its own server instead of the kernel
+  # killing an unrelated container. Override with MARIADB_MEM_LIMIT.
+  mem_limit: ${MARIADB_MEM_LIMIT:-1g}
+  memswap_limit: ${MARIADB_MEMSWAP_LIMIT:-1536m}
   healthcheck: &mariadb-health
     test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
     interval: 5s
@@ -288,6 +293,55 @@ services:
     build: ./connectors/prisma
     image: sprigdb-conn-prisma:dev
     mem_limit: 768m
+
+  # Milestone M0.3's "done when" harness (m03/README.md): two tenants run the
+  # same schema-tool suite (Flyway, Hibernate validation, mysqldump and
+  # mariadb-dump) and the isolation checks, one container at a time:
+  #
+  #   m03/run.sh 127.0.0.1 13307 mariadb acme.app globex.app sprig-dev-app
+  #
+  # The CLI services reuse the connector matrix's images; JVMs are capped
+  # below their mem_limit.
+  m03-flyway:
+    image: flyway/flyway:13.8.1
+    profiles: [m03]
+    network_mode: ${SPRIG_CONN_NETWORK_MODE:-bridge}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      JAVA_ARGS: -Xmx160m -XX:+UseSerialGC -XX:TieredStopAtLevel=1
+    volumes: ["./m03/flyway/sql:/flyway/sql:ro"]
+    mem_limit: 384m
+
+  m03-hibernate:
+    <<: *connector
+    build:
+      context: ./m03/hibernate
+      additional_contexts: { conn: ./connectors/hibernate }
+    image: sprigdb-m03-hibernate:dev
+    profiles: [m03]
+    mem_limit: 512m
+
+  m03-mysql-cli:
+    <<: *connector
+    build:
+      context: ./connectors/cli
+      args: { BASE: "mysql:8.4.11" }
+    image: sprigdb-conn-mysql-cli:dev
+    profiles: [m03]
+    entrypoint: ["bash", "/m03/sql/suite.sh"]
+    volumes: ["./m03:/m03:ro"]
+    mem_limit: 256m
+
+  m03-mariadb-cli:
+    <<: *connector
+    build:
+      context: ./connectors/cli
+      args: { BASE: "mariadb:11.8.9" }
+    image: sprigdb-conn-mariadb-cli:dev
+    profiles: [m03]
+    entrypoint: ["bash", "/m03/sql/suite.sh"]
+    volumes: ["./m03:/m03:ro"]
+    mem_limit: 256m
 
 networks:
   dc-a: {}

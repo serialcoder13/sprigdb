@@ -26,7 +26,8 @@ use tokio::sync::OwnedMutexGuard;
 use super::snapshot::{Loaded, TenantCatalog};
 use super::source::{CatalogSource, Node};
 use crate::store::{
-    DatabaseRow, DbState, ObjectRow, ObjectState, SettingRow, SettingScope, Snapshot, Versions,
+    DatabaseRow, DbState, ObjectRow, ObjectState, SchemaVersionRow, SettingRow, SettingScope,
+    Snapshot, Versions,
 };
 use crate::version::{VersionBackend, VersionKind};
 
@@ -39,8 +40,17 @@ pub struct MemTables {
     pub databases: BTreeMap<DbId, DatabaseRow>,
     /// `objects`.
     pub objects: BTreeMap<ObjectId, ObjectRow>,
-    /// `settings`, by scope and key (internal rows are not modelled).
+    /// `settings`, by scope and key (internal rows are not modelled,
+    /// except those a test or the DDL path writes).
     pub settings: BTreeMap<(SettingScope, String), SettingRow>,
+    /// The id counters `sprig.next_*_id`, by key: the next id to hand
+    /// out (a missing counter starts at 1).
+    pub counters: BTreeMap<String, u64>,
+    /// `schema_versions`, by object and version.
+    pub schema_versions: BTreeMap<(ObjectId, u64), SchemaVersionRow>,
+    /// When the catalog version row was last written (`set_at`); `None`
+    /// before the first commit.
+    pub version_set_at: Option<SystemTime>,
 }
 
 impl MemTables {
@@ -84,6 +94,26 @@ impl MemTables {
             }
             MemWrite::Setting(r) => {
                 self.settings.insert((r.scope, r.key.clone()), r);
+            }
+            MemWrite::DeleteDatabase(db) => {
+                self.databases.remove(&db);
+                self.settings
+                    .retain(|(s, _), _| *s != SettingScope::Database(db));
+            }
+            MemWrite::DeleteObject(o) => {
+                self.objects.remove(&o);
+                self.settings
+                    .retain(|(s, _), _| *s != SettingScope::Object(o));
+                self.schema_versions.retain(|(id, _), _| *id != o);
+            }
+            MemWrite::DeleteSetting(scope, key) => {
+                self.settings.remove(&(scope, key));
+            }
+            MemWrite::Counter(key, next) => {
+                self.counters.insert(key, next);
+            }
+            MemWrite::SchemaVersion(r) => {
+                self.schema_versions.insert((r.object_id, r.version), r);
             }
             MemWrite::Reset {
                 scope,
@@ -129,6 +159,8 @@ impl MemTables {
             };
             !(dead_scope || (r.is_empty() && r.version <= up_to))
         });
+        self.schema_versions
+            .retain(|(o, _), _| !dead_objects.contains(o));
         for o in dead_objects {
             self.objects.remove(&o);
         }
@@ -145,6 +177,11 @@ enum MemWrite {
     Database(DatabaseRow),
     Object(ObjectRow),
     Setting(SettingRow),
+    DeleteDatabase(DbId),
+    DeleteObject(ObjectId),
+    DeleteSetting(SettingScope, String),
+    Counter(String, u64),
+    SchemaVersion(SchemaVersionRow),
     Reset {
         scope: SettingScope,
         key: String,
@@ -208,6 +245,32 @@ impl MemSourceTx {
             bounds,
             version,
         });
+    }
+
+    /// Deletes a database row with its settings rows.
+    pub fn delete_database(&mut self, db: DbId) {
+        self.staged.push(MemWrite::DeleteDatabase(db));
+    }
+
+    /// Deletes an object row with its settings rows and schema versions.
+    pub fn delete_object(&mut self, object: ObjectId) {
+        self.staged.push(MemWrite::DeleteObject(object));
+    }
+
+    /// Deletes a settings row.
+    pub fn delete_setting(&mut self, scope: SettingScope, key: &str) {
+        self.staged
+            .push(MemWrite::DeleteSetting(scope, key.to_owned()));
+    }
+
+    /// Sets a counter's next id.
+    pub fn set_counter(&mut self, key: &str, next: u64) {
+        self.staged.push(MemWrite::Counter(key.to_owned(), next));
+    }
+
+    /// Inserts or replaces a schema version.
+    pub fn put_schema_version(&mut self, r: SchemaVersionRow) {
+        self.staged.push(MemWrite::SchemaVersion(r));
     }
 
     /// The tables as committed (not including staged writes).
@@ -275,6 +338,17 @@ impl MemSource {
         let mut tables = lock(&t.tables);
         let up_to = up_to.min(tables.versions.catalog);
         tables.purge(up_to);
+        Ok(())
+    }
+
+    /// Sets when `tenant`'s catalog version row was last written, for
+    /// tests of purging by age.
+    ///
+    /// # Errors
+    /// 39072 if the tenant isn't bootstrapped.
+    pub fn set_version_time(&self, tenant: TenantId, at: SystemTime) -> Result<()> {
+        let t = self.tenant(tenant)?;
+        lock(&t.tables).version_set_at = Some(at);
         Ok(())
     }
 
@@ -357,7 +431,10 @@ impl VersionBackend for MemSource {
             tables.write(w);
         }
         match kind {
-            VersionKind::Catalog => tables.versions.catalog = version,
+            VersionKind::Catalog => {
+                tables.versions.catalog = version;
+                tables.version_set_at = Some(SystemTime::now());
+            }
             VersionKind::Auth => tables.versions.auth = version,
         }
         Ok(())

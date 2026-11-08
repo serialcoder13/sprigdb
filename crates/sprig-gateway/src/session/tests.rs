@@ -105,8 +105,20 @@ fn processlist_rows() {
         .unwrap();
     a.set_state(SessionState::Authenticating);
     a.set_principal(Principal {
+        tenant: None,
+        tenant_name: None,
+        user_id: None,
         user: "app".into(),
-        cluster: ClusterId::new("dc-a-c1").unwrap(),
+        host: "%".into(),
+        client_ip: peer().ip(),
+        must_change_password: false,
+        limits: sprig_auth::store::AccountLimits::default(),
+        auth_version: 0,
+        backend: sprig_auth::BackendTarget {
+            cluster: sprig_common::ids::ClusterId::new("dc-a-c1").unwrap(),
+            user: "root".into(),
+            credentials: "env:SPRIG_TEST_BACKEND".parse().unwrap(),
+        },
     });
     a.set_state(SessionState::Ready);
     a.set_db(Some("shop".into()));

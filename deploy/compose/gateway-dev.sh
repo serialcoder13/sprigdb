@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
 # Runs a controller and a gateway on the host against the Compose stack
-# (milestone M0.2), so real MySQL and MariaDB clients can log in to the
-# gateway and run statements on a registered cluster.
+# (milestones M0.2 and M0.3), so real MySQL and MariaDB clients can log in to
+# the gateway and run statements on a registered cluster.
+#
+# Two login modes (SPRIG_GATEWAY_LOGIN_MODE):
+#
+# - catalog (the default, M0.3): tenants with their own logical databases.
+#   up creates the tenants acme and globex on dc-a-single (dc-a-c1), each
+#   with the user app (password sprig-dev-app, also a mysql_native_password
+#   verifier, with auth.mysql_native_password on for both tenants): log in as
+#   acme.app or globex.app. Their sessions run as the backend account in
+#   gateway-backends.dev.toml (root, interim until chapter 29); DDL creating
+#   databases and stored programs runs as the cluster's sprig_ctl account.
+#   down drops the two tenants' databases through the gateway (needs the
+#   mysql client) and deletes the tenants.
+# - accounts_file (M0.2): the logins app, app_repl and app_galera of
+#   gateway-accounts.dev.toml on the three raw clusters, names unchanged.
+#   The connector matrix runs against this mode.
 #
 #   deploy/compose/gateway-dev.sh up       # build, start, register, configure
 #   deploy/compose/gateway-dev.sh status
@@ -23,7 +38,8 @@
 # that asks for TLS still gets it. `tls required` switches both listeners
 # live (the gateway's own default); `tls optional` switches back.
 #
-# Variables: SPRIG_GATEWAY_TLS (optional), CARGO_TARGET_DIR (target),
+# Variables: SPRIG_GATEWAY_LOGIN_MODE (catalog), SPRIG_GATEWAY_TLS (optional),
+# CARGO_TARGET_DIR (target),
 # SPRIG_GATEWAY_PROFILE (debug; release for latency and sysbench numbers), and,
 # to run a second instance next to the default one (say against your own
 # etcd), SPRIG_GATEWAY_DEV_STATE (deploy/compose/.gateway-dev),
@@ -50,6 +66,11 @@ mariadb_port=${mariadb_port:-${SPRIG_GATEWAY_MARIADB_PORT:-13307}}
 admin_port=${admin_port:-${SPRIG_ADMIN_PORT:-7480}}
 ctl_telemetry_port=${ctl_telemetry_port:-${SPRIG_CTL_TELEMETRY_PORT:-9180}}
 gw_telemetry_port=${gw_telemetry_port:-${SPRIG_GW_TELEMETRY_PORT:-9190}}
+login_mode=${login_mode:-${SPRIG_GATEWAY_LOGIN_MODE:-catalog}}
+case $login_mode in catalog | accounts_file) ;; *) echo "gateway-dev: SPRIG_GATEWAY_LOGIN_MODE must be catalog or accounts_file" >&2; exit 1 ;; esac
+# The tenants catalog mode creates, each with the user app.
+tenants=(acme globex)
+tenant_password=sprig-dev-app
 dc="dc-a"
 certs=deploy/compose/gateway-certs
 # status and down use the binaries up built, whatever CARGO_TARGET_DIR is then.
@@ -160,6 +181,7 @@ start() {
     local telemetry=$ctl_telemetry_port
     if [[ $role == gateway ]]; then telemetry=$gw_telemetry_port; fi
     SPRIGDB_META_DC_SEEDS="[\"$etcd\"]" \
+        SPRIGDB_GATEWAY_LOGIN_MODE="$login_mode" \
         SPRIGDB_CONTROLLER_ADMIN_ADDR="127.0.0.1:$admin_port" \
         SPRIGDB_TELEMETRY_BOOTSTRAP_ADDR="127.0.0.1:$telemetry" \
         nohup "$bin/sprigdb" --config "$config" "$role" >"$state/$name.log" 2>&1 </dev/null &
@@ -293,6 +315,80 @@ TOML
     done
 }
 
+# --- tenants (catalog mode) -------------------------------------------------------
+
+# Creates the tenants and their users unless they exist (both calls are
+# idempotent), and turns on mysql_native_password for them, so plaintext
+# clients without the caching_sha2_password fast cache can log in too.
+provision_tenants() {
+    local t out
+    for t in "${tenants[@]}"; do
+        out=$(ctl tenant create "$t" --cluster dc-a-c1 2>&1) || die "sprigctl tenant create $t failed: $out"
+        local id
+        id=$(ctl -o json tenant show "$t" | jq -r '.tenant_id')
+        grep -q "^$t " "$state/tenants" 2>/dev/null || echo "$t $id" >>"$state/tenants"
+        out=$(ctl tenant user add "$t" app --password "$tenant_password" --native --if-not-exists 2>&1) ||
+            die "sprigctl tenant user add $t app failed: $out"
+        out=$(ctl settings set auth.mysql_native_password true --scope "tenant:$t" \
+            --reason "deploy/compose/gateway-dev.sh" 2>&1) ||
+            die "enabling mysql_native_password for $t failed: $out"
+        say "tenant $t ready: log in as $t.app"
+    done
+}
+
+# Drops the tenants' databases through the gateway, then deletes them.
+remove_tenants() {
+    [[ -f $state/tenants ]] || return 0
+    local t dbs db q
+    if ! command -v mysql >/dev/null; then
+        say "no mysql client: tenants $(cut -d' ' -f1 "$state/tenants" | tr '\n' ' ')left in place (drop their databases, then sprigctl tenant delete)"
+        return 0
+    fi
+    q='`'
+    while read -r t _id; do
+        [[ -n $t ]] || continue
+        local my=(mysql -h 127.0.0.1 -P "$mysql_port" -u "$t.app" "-p$tenant_password" --ssl-mode=REQUIRED -N -B)
+        # A few passes: a database another one's foreign keys point into
+        # can only go after it.
+        local pass left
+        for pass in 1 2 3 4; do
+            if ! dbs=$("${my[@]}" -e "SHOW DATABASES" 2>/dev/null); then
+                say "couldn't log in as $t.app to drop its databases"
+                break
+            fi
+            left=0
+            while read -r db; do
+                case $db in information_schema | performance_schema | mysql | sys | "") continue ;; esac
+                if ! "${my[@]}" -e "DROP DATABASE $q${db//$q/$q$q}$q" >/dev/null 2>&1; then
+                    left=$((left + 1))
+                    [[ $pass == 4 ]] && say "couldn't drop $t's database $db"
+                fi
+            done <<<"$dbs"
+            [[ $left == 0 ]] && break
+        done
+        if ! ctl tenant delete "$t" --yes >/dev/null 2>&1; then
+            say "tenant $t not deleted (databases left?)"
+            continue
+        fi
+        # Cleanup (dropping the catalog) may finish in the controller's loop:
+        # wait for the entry to go before the controller stops.
+        local gone=false
+        for _ in $(seq 1 40); do
+            if ! ctl tenant show "$t" >/dev/null 2>&1; then
+                gone=true
+                break
+            fi
+            sleep 0.5
+        done
+        if $gone; then
+            say "tenant $t deleted"
+            sed -i.bak "/^$t /d" "$state/tenants" && rm -f "$state/tenants.bak"
+        else
+            say "tenant $t is still deleting: its t${_id:-<id>}_* schemas stay (later tenants get higher ids and never adopt them); drop them by hand"
+        fi
+    done < <(cat "$state/tenants")
+}
+
 # --- commands --------------------------------------------------------------------
 
 up() {
@@ -304,7 +400,7 @@ up() {
     echo '*' >"$state/.gitignore"
     printf '%s\n' "etcd=$etcd" "mysql_port=$mysql_port" "mariadb_port=$mariadb_port" \
         "admin_port=$admin_port" "ctl_telemetry_port=$ctl_telemetry_port" \
-        "gw_telemetry_port=$gw_telemetry_port" >"$state/env"
+        "gw_telemetry_port=$gw_telemetry_port" "login_mode=$login_mode" >"$state/env"
 
     # Ports held by anything other than our processes.
     local port
@@ -367,9 +463,25 @@ up() {
         die "the gateway isn't listening on $mysql_port and $mariadb_port; see $state/gateway.log"
     fi
 
+    if [[ $login_mode == catalog ]]; then
+        provision_tenants
+        cat <<EOF
+
+gateway-dev: up (login mode catalog). Listeners: MySQL persona 127.0.0.1:$mysql_port, MariaDB persona 127.0.0.1:$mariadb_port (TLS $tls).
+Logins (password $tenant_password): acme.app and globex.app, tenants acme and globex on dc-a-c1 (single).
+Each tenant sees only its own databases; CREATE DATABASE makes one.
+
+  mysql -h 127.0.0.1 -P $mysql_port -u acme.app -p$tenant_password --ssl-mode=REQUIRED
+  mysql -h 127.0.0.1 -P $mysql_port -u globex.app -p$tenant_password --ssl-mode=DISABLED --default-auth=mysql_native_password
+
+Logs: $state/controller.log, $state/gateway.log. Stop with: $0 down
+M0.2's logins (app, app_repl, app_galera): SPRIG_GATEWAY_LOGIN_MODE=accounts_file $0 up
+EOF
+        return
+    fi
     cat <<EOF
 
-gateway-dev: up. Listeners: MySQL persona 127.0.0.1:$mysql_port, MariaDB persona 127.0.0.1:$mariadb_port (TLS $tls).
+gateway-dev: up (login mode accounts_file). Listeners: MySQL persona 127.0.0.1:$mysql_port, MariaDB persona 127.0.0.1:$mariadb_port (TLS $tls).
 Logins (password sprig-dev-app): app -> dc-a-c1 (single), app_repl -> dc-a-c2 (primary + replicas), app_galera -> dc-a-c3 (Galera).
 
   mysql -h 127.0.0.1 -P $mysql_port -u app -psprig-dev-app --ssl-mode=VERIFY_IDENTITY --ssl-ca=$root/$certs/ca.pem
@@ -387,6 +499,7 @@ down() {
         say "not up (no $state/)"
         return
     fi
+    if running gateway && running controller; then remove_tenants; fi
     stop gateway
     stop controller
 
@@ -414,6 +527,15 @@ down() {
         for key in /sprig/g/settings/system.deployment_id "/sprig/g/dcs/$dc" /sprig/g/ids/tenant; do
             n=$((n + $(etcd_del "$key")))
         done
+        # Tenants up created that weren't deleted above: their directory
+        # entries go with the deployment (their schemas stay on the cluster).
+        if [[ -s $state/tenants ]]; then
+            while read -r t id; do
+                [[ -n $t ]] || continue
+                say "removing tenant $t ($id) from the directory; its t${id}_* schemas stay on dc-a-single"
+                n=$((n + $(etcd_del "/sprig/g/tenants/$id") + $(etcd_del "/sprig/g/tenant-names/$t")))
+            done <"$state/tenants"
+        fi
     fi
     say "deleted $n etcd keys"
     rm -rf "$state"

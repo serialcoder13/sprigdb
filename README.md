@@ -55,6 +55,26 @@ cargo run -p sprigctl -- dc show dc-a          # includes the current leader
 cargo run -p sprigctl -- dc register ams1 --tags jurisdiction=EU
 ```
 
+### Change settings
+
+Every setting is declared once in code, with its type, default, accepted scopes and hard bounds, and set at one of six scopes: object > database > tenant (and its ancestors) > cluster > dc > global. The nearest value wins, and every wider scope's bounds (min, max, allowed values, lock) limit it. `global`, `dc` and `cluster` values live in etcd and are written through the DC leader; tenant, database and object values live in the tenant's catalog. Everything applies live. `sprigctl settings` (also `sprigctl config`) shows and changes them through the Admin API:
+
+```sh
+sprigctl settings list --prefix catalog.            # keys, types, defaults, scopes; --tenant-settable, --accepts tenant
+sprigctl settings describe catalog.cache_max_mb      # type, default, scopes, hard bounds, who may set it
+sprigctl settings get auto_index.max_per_table --tenant acme --db shop --object orders
+                                                     # effective value, where it comes from, each scope's row and bounds
+sprigctl settings set catalog.cache_max_mb 1024 --scope dc --reason "bigger caches"
+sprigctl settings set auto_index.mode on --scope object --tenant acme --db shop --object orders
+sprigctl settings bounds auto_index.max_per_table --scope global --max 8    # parts not named are kept
+sprigctl settings bounds auto_index.mode --scope tenant --tenant acme --allowed off,recommend
+sprigctl settings lock auto_index.mode --scope tenant --tenant acme         # unlock undoes it
+sprigctl settings reset auto_index.mode --scope tenant --tenant acme [--bounds | --all]
+sprigctl tenant settings acme [--all]                # the tenant's own rows; --all adds its ancestors' copies
+```
+
+`--scope` also takes chapter 47's one-word form (`--scope object:acme.shop.orders`, `--scope dc:dc-a`). A value outside the bounds in force is refused (39080), as are an unknown key (39081), a scope the key doesn't accept (39082), a key locked by a wider scope (39083) and a value of the wrong type (39084). Tightening bounds is accepted and lists the narrower values that will now be clamped or ignored. Writes are recorded as `op:<actor>` (`--actor`, `SPRIGCTL_ACTOR` or `$USER`) with `--reason`, and logged as `settings.changed` events.
+
 ### Register clusters
 
 `sprigctl cluster register` prechecks a cluster (TLS, grants, the binlog settings the mover and the change feed need, account creation, a short binlog read as `sprig_repl`, the capability profile) and registers it as `active`, or refuses it with 39511 and every missing item. A binlog `sprig_repl` can't read (no `REPLICATION SLAVE`, a server that refuses plain-text connections: the binlog reader has no TLS yet and speaks only `mysql_native_password`) doesn't block registration: the feed and the mover show as `unsupported`, with the fix among the advisories. Credentials are never stored in etcd: the record names them by reference (`file:<path>` or `env:<name>`), and a credentials file holds a `[sprig_ctl]` and a `[sprig_repl]` table. For the Compose servers, which have self-signed certificates and no system accounts, use root:
@@ -124,7 +144,7 @@ deploy/compose/gateway-dev.sh tls required   # or optional / off; applies live
 deploy/compose/gateway-dev.sh down      # stop both and remove what up wrote to etcd
 ```
 
-`up` builds `sprigdb` and `sprigctl`, starts a controller with `sprigdb.dev.toml` (Admin API on 127.0.0.1:7480, bootstrapping the deployment if etcd is empty), registers `dc-a-single`, `dc-a-repl` and `dc-a-galera` as `dc-a-c1`, `dc-a-c2` and `dc-a-c3` (the ids `gateway-accounts.dev.toml` names; it stops if they would differ), writes the listener settings to etcd at dc scope, and starts the gateway with `sprigdb.gateway.dev.toml`, waiting for `/readyz` on 9190. Re-running it leaves running processes alone; after a code change run `down` and `up`. Processes, logs and what `up` created are in `deploy/compose/.gateway-dev/`, the development CA and server certificate (made once with `openssl`, git-ignored) in `deploy/compose/gateway-certs/`.
+`up` builds `sprigdb` and `sprigctl`, starts a controller with `sprigdb.dev.toml` (Admin API on 127.0.0.1:7480, bootstrapping the deployment if etcd is empty), registers `dc-a-single`, `dc-a-repl` and `dc-a-galera` as `dc-a-c1`, `dc-a-c2` and `dc-a-c3` (the ids `gateway-accounts.dev.toml` names; it stops if they would differ), writes the listener settings to etcd at dc scope, and starts the gateway with `sprigdb.gateway.dev.toml`, waiting for `/readyz` on 9190. Re-running it leaves running processes alone; after a code change run `down` and `up`. `SPRIG_GATEWAY_PROFILE=release up` builds and runs release binaries (for latency and sysbench numbers); `CARGO_TARGET_DIR` picks the target directory. Processes, logs and what `up` created are in `deploy/compose/.gateway-dev/`, the development CA and server certificate (made once with `openssl`, git-ignored) in `deploy/compose/gateway-certs/`.
 
 | Listener | Address | Logins (password `sprig-dev-app`) |
 |---|---|---|

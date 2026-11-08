@@ -73,3 +73,42 @@ pub static GTID_WAIT_TIMEOUT_MS: Setting<u64> = Setting {
     doc: "Replica catch-up wait before reading from the writer",
 };
 sprig_settings::register!(GTID_WAIT_TIMEOUT_MS);
+
+/// `reads.max_galera_lag_ms`.
+pub static MAX_GALERA_LAG_MS: Setting<u64> = Setting {
+    key: "reads.max_galera_lag_ms",
+    default: 1000,
+    scopes: Scopes::ALL,
+    hard: HardBounds::range(0, 86_400_000),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 6,
+    doc: "A Galera node further behind gets no reads until it catches up",
+};
+sprig_settings::register!(MAX_GALERA_LAG_MS);
+
+/// `reads.galera_sync_wait_timeout_ms`.
+pub static GALERA_SYNC_WAIT_TIMEOUT_MS: Setting<u64> = Setting {
+    key: "reads.galera_sync_wait_timeout_ms",
+    default: 300,
+    scopes: Scopes::ALL,
+    hard: HardBounds::range(1, 60_000),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 6,
+    doc: "Galera sync-wait check before reading from the writer",
+};
+sprig_settings::register!(GALERA_SYNC_WAIT_TIMEOUT_MS);
+
+/// `reads.galera_unconfirmed`: `check` or `writer` (decision D14).
+pub static GALERA_UNCONFIRMED: Setting<Text> = Setting {
+    key: "reads.galera_unconfirmed",
+    default: Cow::Borrowed("check"),
+    scopes: Scopes::ALL,
+    hard: HardBounds::one_of(&["check", "writer"]),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 6,
+    doc: "check or writer: a Galera read whose write no polled position shows yet",
+};
+sprig_settings::register!(GALERA_UNCONFIRMED);

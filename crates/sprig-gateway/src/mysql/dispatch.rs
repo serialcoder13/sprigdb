@@ -35,7 +35,6 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt as _};
-use sprig_auth::Account;
 use sprig_common::ids::ConnId;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_proto_mysql::auth::{AuthIo, AuthVerdict, authenticate};
@@ -52,7 +51,6 @@ use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 
 use super::local::{self, Local, PersonaVar};
-use super::login::AccountLogin;
 use super::settings::FrontendSettings;
 use super::sink::WireSink;
 use super::watch::ClientWatch;
@@ -152,7 +150,6 @@ pub struct CommandLoop {
     framed: ClientFramed,
     proto: ProtoState,
     exec: Box<dyn SessionExec>,
-    account: Arc<Account>,
     db: Option<String>,
     status: StatusFlags,
     stmts: Stmts,
@@ -202,7 +199,6 @@ impl CommandLoop {
             framed,
             proto: l.proto,
             exec: l.exec,
-            account: l.account,
             db: l.db,
             status: StatusFlags::AUTOCOMMIT,
             stmts: Stmts::default(),
@@ -468,6 +464,12 @@ impl CommandLoop {
         };
         let ran = match end {
             End::Done(Ok(summary)) => {
+                if let Some(db) = &summary.db {
+                    // The executor tracks the session's database (tenant
+                    // sessions: `USE` in SQL changes it).
+                    self.db.clone_from(db);
+                    self.session.set_db(db.clone());
+                }
                 if let Some(s) = summary.status.or(sink.last_status) {
                     self.status = s
                         & (StatusFlags::IN_TRANS
@@ -676,12 +678,18 @@ impl CommandLoop {
         let persona = self.proto.persona;
         self.session.begin_command("Change user", None);
         self.session.set_state(SessionState::Authenticating);
-        let mut login = AccountLogin::new(
-            Arc::clone(&self.shared.cfg.login),
-            persona,
-            &cu.user,
-            self.session.peer,
-        );
+        let mut login = self
+            .shared
+            .cfg
+            .login
+            .start(super::login::request(
+                persona,
+                &cu.user,
+                self.session.peer,
+                self.session.tls.as_ref(),
+                self.proto.caps,
+            ))
+            .await;
         let verdict = {
             let mut io = AuthIo {
                 io: &mut self.framed,
@@ -700,14 +708,14 @@ impl CommandLoop {
             self.proto.nonce = io.nonce;
             v
         };
-        let (account, principal) = match verdict {
+        let principal = match verdict {
             AuthVerdict::Refuse(e) => {
                 self.send_err(e).await?;
                 return Ok(Flow::Close);
             }
-            AuthVerdict::Accept => match (login.account().cloned(), login.principal()) {
-                (Some(a), Some(p)) => (a, p),
-                _ => return Err(SprigError::internal("login accepted without an account")),
+            AuthVerdict::Accept => match login.principal() {
+                Some(p) => p.clone(),
+                None => return Err(SprigError::internal("login accepted without a principal")),
             },
         };
         // The old executor session rolls back and releases; the new login
@@ -719,11 +727,10 @@ impl CommandLoop {
         self.session.set_db(None);
         self.session.set_principal(principal.clone());
         self.exec = self.shared.cfg.executor.open(&LoginInfo {
+            backend: principal.backend.clone(),
             principal,
-            backend: account.backend.clone(),
             persona,
         });
-        self.account = account;
         self.session.set_state(SessionState::Ready);
         self.session.end_command();
         if let Some(db) = cu
@@ -815,6 +822,7 @@ impl CommandLoop {
     /// (MySQL's rule without `CONNECTION_ADMIN`).
     async fn kill(&mut self, id: ConnId, query_only: bool) -> Result<Flow> {
         let me = self.session.principal.as_ref().map(|p| p.user.clone());
+        let my_tenant = self.session.principal.as_ref().and_then(|p| p.tenant);
         let Some(target) = self.ctx.sessions.get(id) else {
             return self
                 .send_err(ErrPacket::new(
@@ -824,8 +832,8 @@ impl CommandLoop {
                 ))
                 .await;
         };
-        let owner = target.process_row(self.ctx.sessions.clock().now()).user;
-        if owner.is_none() || owner != me {
+        let row = target.process_row(self.ctx.sessions.clock().now());
+        if row.user.is_none() || row.user != me || row.tenant != my_tenant {
             return self
                 .send_err(ErrPacket::new(
                     1095,
@@ -847,6 +855,7 @@ impl CommandLoop {
     async fn process_list(&mut self, full: bool) -> Result<Flow> {
         let charset = u16::from(self.proto.persona.greeting_collation());
         let me = self.session.principal.as_ref().map(|p| p.user.clone());
+        let my_tenant = self.session.principal.as_ref().and_then(|p| p.tenant);
         let cols = vec![
             int_column("Id", true),
             text_column("User", charset),
@@ -862,7 +871,7 @@ impl CommandLoop {
             .sessions
             .list()
             .into_iter()
-            .filter(|r| r.user.is_some() && r.user == me)
+            .filter(|r| r.user.is_some() && r.user == me && r.tenant == my_tenant)
             .map(|r| {
                 let info = r.info.map(|i| {
                     if full {

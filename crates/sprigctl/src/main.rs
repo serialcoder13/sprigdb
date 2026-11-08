@@ -11,7 +11,14 @@
 //! - `sprigctl tenant create|list|show|delete` (chapter 08 step 9, chapter
 //!   23 step 16): `create <name> [--under <parent>] [--cluster <id>]`
 //!   bootstraps the tenant's catalog and returns once it is active;
-//!   `delete` removes a leaf tenant (it asks for the name unless `--yes`).
+//!   `delete` removes a leaf tenant (it asks for the name unless `--yes`);
+//!   `settings <name> [--all]` lists the tenant's setting rows;
+//!   `user add <tenant> <user> --password ...` creates a user in the
+//!   tenant's catalog (interim, until chapter 29's `CREATE USER`);
+//! - `sprigctl settings list|describe|get|set|reset|bounds|lock|unlock`
+//!   (alias `config`; chapter 08 steps 7-8, chapter 23 step 8, chapter 47
+//!   step 5): see where a value comes from and change it at any of the six
+//!   scopes (see [`settings`]).
 //!
 //! Every other command group parses and prints "not implemented yet",
 //! exiting with status 1.
@@ -24,6 +31,7 @@
 mod client;
 mod cluster;
 mod render;
+mod settings;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
@@ -36,6 +44,7 @@ use sprig_controller::admin::types::{
     RegisterClusterResponse, RegisterDcRequest, RegisterDcResponse, TenantView,
 };
 use sprig_controller::dc;
+use sprig_controller::users::{CreateUserRequest, CreateUserResponse};
 
 use crate::client::{AdminClient, CallError, DEFAULT_ENDPOINT};
 use crate::cluster::RegisterFlags;
@@ -54,11 +63,6 @@ const GROUPS: &[(&str, &str, &[&str])] = &[
         "explain",
         "Explain a query fingerprint, a decision or a tenant's placement",
         &["query", "decision", "placement"],
-    ),
-    (
-        "config",
-        "Policy settings, with --scope global|dc:<id>|cluster:<id>|tenant:<name>|db:<tenant>.<db>|object:<tenant>.<db>.<object>",
-        &["get", "set", "unset", "explain"],
     ),
     ("feed", "Change feeds", &["list", "show", "lag"]),
     ("search", "Search indexes", &["list", "show", "rebuild"]),
@@ -80,7 +84,7 @@ const GROUPS: &[(&str, &str, &[&str])] = &[
 ];
 
 /// `sprigctl tenant` subcommands not implemented yet.
-const TENANT_LATER: &[&str] = &["move", "pin", "unpin", "failover", "settings"];
+const TENANT_LATER: &[&str] = &["move", "pin", "unpin", "failover"];
 
 /// `sprigctl tenant`.
 fn tenant_group() -> Command {
@@ -118,6 +122,56 @@ fn tenant_group() -> Command {
             Command::new("delete")
                 .about("Delete a leaf tenant and drop its catalog")
                 .arg(name()),
+        )
+        .subcommand(
+            Command::new("user")
+                .about("Users of a tenant (interim, until CREATE USER: chapter 29)")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("add")
+                        .about("Create a user with a password in the tenant's catalog")
+                        .arg(name())
+                        .arg(
+                            Arg::new("user")
+                                .required(true)
+                                .help("The user name, without the tenant prefix"),
+                        )
+                        .arg(
+                            Arg::new("password")
+                                .long("password")
+                                .required(true)
+                                .help("The password"),
+                        )
+                        .arg(
+                            Arg::new("host")
+                                .long("host")
+                                .help("The host pattern (default %)"),
+                        )
+                        .arg(
+                            Arg::new("if-not-exists")
+                                .long("if-not-exists")
+                                .action(ArgAction::SetTrue)
+                                .help("Succeed without a change if the user exists (1396)"),
+                        )
+                        .arg(
+                            Arg::new("native")
+                                .long("native")
+                                .action(ArgAction::SetTrue)
+                                .help("Also store a mysql_native_password verifier (used where the tenant's auth.mysql_native_password is on)"),
+                        ),
+                ),
+        )
+        .subcommand(
+            Command::new("settings")
+                .about("The tenant's own setting rows (tenant, database and object scope)")
+                .arg(name())
+                .arg(
+                    Arg::new("all")
+                        .long("all")
+                        .action(ArgAction::SetTrue)
+                        .help("Also its copies of its ancestors' rows"),
+                ),
         );
     for &sub in TENANT_LATER {
         g = g.subcommand(
@@ -306,28 +360,23 @@ fn cli() -> Command {
         )
         .subcommand(dc_group())
         .subcommand(cluster_group())
-        .subcommand(tenant_group());
+        .subcommand(tenant_group())
+        .subcommand(settings::group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
             .subcommand_required(true)
             .arg_required_else_help(true);
         for &sub in subs {
-            let mut s = Command::new(sub).arg(
-                Arg::new("args")
-                    .num_args(0..)
-                    .trailing_var_arg(true)
-                    .allow_hyphen_values(true)
-                    .help("Arguments (not parsed yet)"),
+            g = g.subcommand(
+                Command::new(sub).arg(
+                    Arg::new("args")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("Arguments (not parsed yet)"),
+                ),
             );
-            if group == "config" {
-                s = s.arg(
-                    Arg::new("scope")
-                        .long("scope")
-                        .help("global, dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db> or object:<tenant>.<db>.<object>"),
-                );
-            }
-            g = g.subcommand(s);
         }
         cmd = cmd.subcommand(g);
     }
@@ -357,7 +406,7 @@ fn main() -> ExitCode {
     };
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
-        "dc" | "cluster" => true,
+        "dc" | "cluster" | "settings" => true,
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         _ => false,
     };
@@ -380,6 +429,9 @@ fn main() -> ExitCode {
         match group {
             "dc" => run_dc(&client, &matches, sub).await,
             "tenant" => run_tenant(&client, &matches, sub).await,
+            "settings" => settings::run(&client, &matches, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
             _ => run_cluster(&client, &matches, sub).await,
         }
     });
@@ -614,6 +666,7 @@ async fn run_cluster(
     }
 }
 
+#[allow(clippy::too_many_lines)] // one arm per subcommand
 async fn run_tenant(
     c: &AdminClient,
     m: &ArgMatches,
@@ -651,7 +704,10 @@ async fn run_tenant(
             }
             let r: CreateTenantResponse = c.post("/admin/v1/tenants", &req).await?;
             if !r.created {
-                eprintln!("tenant {} already existed; its bootstrap was continued", r.tenant.name);
+                eprintln!(
+                    "tenant {} already existed; its bootstrap was continued",
+                    r.tenant.name
+                );
             }
             print(out, &r, |r| {
                 let mut s = render::tenant_show(&r.tenant);
@@ -683,6 +739,52 @@ async fn run_tenant(
             confirm(m, "delete tenant", &name)?;
             let r: TenantView = c.delete(&format!("/admin/v1/tenants/{name}")).await?;
             print(out, &r, render::tenant_show);
+            Ok(ExitCode::SUCCESS)
+        }
+        "settings" => {
+            settings::tenant(c, sub, out).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "user" => {
+            let Some(("add", add)) = sub.subcommand() else {
+                return Ok(ExitCode::FAILURE);
+            };
+            let tenant = add.get_one::<String>("name").cloned().unwrap_or_default();
+            let req = CreateUserRequest {
+                user: add.get_one::<String>("user").cloned().unwrap_or_default(),
+                host: add.get_one::<String>("host").cloned(),
+                password: add
+                    .get_one::<String>("password")
+                    .cloned()
+                    .unwrap_or_default(),
+                native: add.get_flag("native"),
+            };
+            if m.get_flag("dry-run") {
+                println!(
+                    "would create user {}@{} in tenant {tenant}",
+                    req.user,
+                    req.host.as_deref().unwrap_or("%")
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            let r: Result<CreateUserResponse, client::CallError> = c
+                .post(&format!("/admin/v1/tenants/{tenant}/users"), &req)
+                .await;
+            let r = match r {
+                Err(client::CallError::Api(e))
+                    if add.get_flag("if-not-exists") && e.code == 1396 =>
+                {
+                    eprintln!("user {} already exists in tenant {tenant}", req.user);
+                    return Ok(ExitCode::SUCCESS);
+                }
+                other => other?,
+            };
+            print(out, &r, |r| {
+                format!(
+                    "created user '{}'@'{}' (id {}) in tenant {} ({})\nlog in as:        {}\n",
+                    r.user, r.host, r.user_id, r.tenant, r.tenant_id, r.login
+                )
+            });
             Ok(ExitCode::SUCCESS)
         }
         _ => Ok(ExitCode::FAILURE),

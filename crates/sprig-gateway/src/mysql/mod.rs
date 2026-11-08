@@ -12,8 +12,9 @@
 //!    capability negotiation and connection attributes; all within
 //!    `gateway.handshake_timeout_ms`.
 //! 2. **Login** (step 4): [`sprig_proto_mysql::auth::authenticate`] with
-//!    the gateway's [`login::AccountLogin`] flow over the interim accounts
-//!    file (decision D1) and the fast cache; the executor's session opens;
+//!    chapter 14's [`sprig_auth::MysqlLogin`] from the process's
+//!    [`login::LoginService`] (tenant catalogs, or the interim accounts file
+//!    with `login_mode = "accounts_file"`); the executor's session opens;
 //!    `CONNECT_WITH_DB` runs `USE`; then the OK packet, after which the
 //!    codec switches to zlib or zstd if agreed (step 10).
 //! 3. **Command phase** (step 6, [`dispatch`]): one command at a time,
@@ -36,7 +37,6 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use sprig_auth::Account;
 use sprig_common::{Result, SprigError};
 use sprig_proto_mysql::auth::{AuthIo, AuthVerdict, authenticate};
 use sprig_proto_mysql::handshake::{
@@ -55,7 +55,7 @@ use crate::pipeline::{ExecCtx, LoginInfo, SessionExec, SharedExecutor};
 use crate::session::{Session, SessionState, SessionTable};
 
 use self::listener_hooks::ListenerHooks;
-use self::login::{AccountLogin, LoginDeps};
+use self::login::LoginService;
 use self::settings::{FrontendSettings, SettingsSource};
 
 /// What a MySQL-family front end is built from.
@@ -64,8 +64,9 @@ pub struct MySqlConfig {
     pub persona: Persona,
     /// Where the live settings come from.
     pub settings: SettingsSource,
-    /// Accounts, fast cache and hashing slots, shared by both personas.
-    pub login: Arc<LoginDeps>,
+    /// Logins (chapter 14): the source, the fast cache and the hashing
+    /// slots, shared by both personas.
+    pub login: Arc<LoginService>,
     /// The executor statements go to.
     pub executor: SharedExecutor,
     /// The registry the listener hooks retire sessions through.
@@ -120,8 +121,9 @@ impl MySqlFrontend {
 
 /// What [`MySqlStack::start`] needs from the process.
 pub struct StackConfig {
-    /// `[gateway] accounts_file` (decision D1); `None` refuses every login.
-    pub accounts_file: Option<std::path::PathBuf>,
+    /// Logins: catalog or the interim accounts file, by `[gateway]
+    /// login_mode` (built in [`crate::run`]).
+    pub login: Arc<LoginService>,
     /// The live settings mirror.
     pub live: sprig_settings::LiveSettings,
     /// This gateway's DC.
@@ -137,7 +139,7 @@ pub struct StackConfig {
 impl fmt::Debug for StackConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StackConfig")
-            .field("accounts_file", &self.accounts_file)
+            .field("login", &self.login)
             .field("dc", &self.dc)
             .finish_non_exhaustive()
     }
@@ -158,27 +160,13 @@ impl fmt::Debug for MySqlStack {
 }
 
 impl MySqlStack {
-    /// Loads the accounts file and starts its watcher and the listener
-    /// hooks, until `stop` is cancelled.
+    /// Starts the listener hooks, until `stop` is cancelled.
     ///
     /// # Errors
-    /// 39998 if the accounts file exists but can't be read or parsed (a
-    /// broken file is refused at start-up).
+    /// None today; kept for start-up checks.
     pub fn start(cfg: StackConfig, stop: sprig_common::CancellationToken) -> Result<Self> {
         let mut tasks = Vec::new();
-        let accounts: Arc<dyn sprig_auth::AccountStore> = if let Some(path) = &cfg.accounts_file {
-            let file = sprig_auth::FileAccounts::open(path)?;
-            tasks.push(file.spawn_watcher(sprig_auth::accounts::POLL_INTERVAL, stop.clone()));
-            file
-        } else {
-            tracing::warn!("no [gateway] accounts_file: every MySQL login is refused (1045)");
-            Arc::new(sprig_auth::StaticAccounts::default())
-        };
-        let fast_cache = Arc::new(sprig_auth::FastCache::new(
-            cfg.clock,
-            sprig_auth::fast_cache::DEFAULT_TTL,
-        ));
-        let login = Arc::new(LoginDeps::new(accounts, fast_cache));
+        let login = cfg.login;
         let hooks = ListenerHooks::new();
         tasks.push(hooks.spawn_follower(cfg.live.clone(), cfg.dc.clone(), stop));
         let settings = SettingsSource::Live {
@@ -257,7 +245,6 @@ impl Frontend for MySqlFrontend {
 pub(crate) struct LoggedIn {
     pub(crate) stream: MaybeTls<TcpStream>,
     pub(crate) proto: ProtoState,
-    pub(crate) account: Arc<Account>,
     pub(crate) exec: Box<dyn SessionExec>,
     pub(crate) db: Option<String>,
     pub(crate) attrs: Vec<(String, String)>,
@@ -414,12 +401,20 @@ async fn login_phase(
     // Login (chapter 05 step 4, chapter 14 "MySQL logins").
     session.set_state(SessionState::Authenticating);
     let tls = matches!(conn.stream, MaybeTls::Tls(_));
-    let mut login = AccountLogin::new(
-        Arc::clone(&shared.cfg.login),
-        persona,
-        &resp.user,
-        conn.peer,
-    );
+    if tls && session.tls.is_none() {
+        session.tls = conn.tls_info();
+    }
+    let mut login = shared
+        .cfg
+        .login
+        .start(login::request(
+            persona,
+            &resp.user,
+            conn.peer,
+            session.tls.as_ref(),
+            resp.caps,
+        ))
+        .await;
     let (verdict, nonce, seq) = {
         let mut raw = RawIo::new(&mut conn.stream, seq);
         let mut io = AuthIo {
@@ -440,19 +435,17 @@ async fn login_phase(
         (v, nonce, raw.seq)
     };
     let mut seq = seq;
-    let account = match verdict {
+    let principal = match verdict {
         AuthVerdict::Refuse(e) => {
             let _ = write_packet(&mut conn.stream, &mut seq, &e.encode(caps)).await;
             return Ok(None);
         }
-        AuthVerdict::Accept => match (login.account().cloned(), login.principal()) {
-            (Some(a), Some(p)) => {
-                session.set_principal(p);
-                a
-            }
-            _ => return Err(SprigError::internal("login accepted without an account")),
+        AuthVerdict::Accept => match login.principal() {
+            Some(p) => p.clone(),
+            None => return Err(SprigError::internal("login accepted without a principal")),
         },
     };
+    session.set_principal(principal.clone());
 
     let proto = ProtoState {
         persona,
@@ -464,13 +457,9 @@ async fn login_phase(
         tls: proto_tls(session.tls.as_ref()),
         nonce,
     };
-    let principal = session
-        .principal
-        .clone()
-        .ok_or_else(|| SprigError::internal("no principal after login"))?;
     let mut exec = shared.cfg.executor.open(&LoginInfo {
-        principal,
-        backend: account.backend.clone(),
+        backend: principal.backend.clone(),
+        principal: principal.clone(),
         persona,
     });
     let db = resp
@@ -496,7 +485,8 @@ async fn login_phase(
     session.set_state(SessionState::Ready);
     tracing::debug!(
         session = %session.id,
-        user = %account.user,
+        user = %principal.user,
+        tenant = principal.tenant_name.as_deref().unwrap_or(""),
         tls = tls,
         client = attrs.iter().find(|(k, _)| k == "_client_name").map(|(_, v)| v.as_str()),
         "logged in"
@@ -504,7 +494,6 @@ async fn login_phase(
     Ok(Some(LoggedIn {
         stream: conn.stream,
         proto,
-        account,
         exec,
         db,
         attrs,

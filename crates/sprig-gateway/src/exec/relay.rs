@@ -35,10 +35,13 @@ use sprig_proto_mysql::resultset::{
 use sprig_proto_mysql::state::ProtoState;
 use sprig_proto_mysql::{Caps, ColumnDef, ErrPacket, StatusFlags, Value};
 
+use sprig_sql::names::{OutputCtx, ResultMapper, map_bytes, map_message};
+
 use super::split::Renamed;
 use crate::backend::BackendSession;
 use crate::backend::state::gateway_var;
 use crate::pipeline::{EndOfRows, ResultSink, RowFormat};
+use crate::tenant::aliases::AccountAliases;
 
 /// How to relay one response.
 #[allow(clippy::struct_excessive_bools)] // one flag per relay option
@@ -137,6 +140,127 @@ pub(crate) struct Infile<'a> {
     pub name: Option<&'a [u8]>,
     /// The client has `LOCAL_FILES` and `sql.local_infile` is on.
     pub allowed: bool,
+}
+
+/// Chapter 07's output mapping for one response (tenant sessions): column
+/// definitions through the statement's [`ResultMapper`], rows through it
+/// when it needs them (else relayed as bytes), and physical names in
+/// errors, `OK` schema changes and messages mapped back to logical ones.
+pub(crate) struct NamesOut<'a> {
+    /// The statement's mapper.
+    pub mapper: &'a mut ResultMapper,
+    /// The tenant's names and accounts.
+    pub ctx: OutputCtx<'a>,
+    /// Backend accounts to show as the session's user.
+    pub aliases: Option<&'a AccountAliases>,
+}
+
+impl NamesOut<'_> {
+    /// A backend error with its message mapped.
+    pub(crate) fn error(&self, e: SprigError) -> SprigError {
+        let mut e = map_error(e, &self.ctx);
+        if let Some(m) = self.aliases.and_then(|a| a.apply(e.message.as_bytes())) {
+            e.message = String::from_utf8_lossy(&m).into_owned();
+        }
+        e
+    }
+
+    /// A text row with backend accounts replaced in its values.
+    fn alias_text(&self, row: Bytes, columns: usize) -> Bytes {
+        let Some(a) = self.aliases else { return row };
+        let Ok(vals) = decode_text_row(&row, columns) else {
+            return row;
+        };
+        let mapped: Vec<Option<Vec<u8>>> =
+            vals.iter().map(|v| v.and_then(|b| a.apply(b))).collect();
+        if mapped.iter().all(Option::is_none) {
+            return row;
+        }
+        let out: Vec<Option<&[u8]>> = vals
+            .iter()
+            .zip(&mapped)
+            .map(|(v, m)| m.as_deref().or(*v))
+            .collect();
+        encode_text_row(out)
+    }
+
+    fn defs(&mut self, defs: &[Bytes], caps: Caps, renames: &[Renamed]) -> Result<Vec<ColumnDef>> {
+        let mut cols = decode_defs(defs, caps, renames)?;
+        self.mapper.column_defs(&mut cols, &self.ctx);
+        let foreign = self.mapper.foreign_names();
+        if foreign > 0 {
+            metrics::counter!("sprig_names_foreign_names_total").increment(foreign);
+        }
+        Ok(cols)
+    }
+
+    /// A binary row with every string value scrubbed (prepared statements
+    /// whose mapper needs rows: the role filters work on text rows, so a
+    /// prepared `SHOW` is scrubbed but not filtered).
+    fn scrub_binary(&self, row: &Bytes, cols: &[ColumnDef]) -> Option<Bytes> {
+        let mut vals = decode_binary_row(row, cols).ok()?;
+        let mut changed = false;
+        for v in &mut vals {
+            if let Value::Bytes(b) = v {
+                let m = map_bytes(b, &self.ctx);
+                if let std::borrow::Cow::Owned(o) = m.text {
+                    *v = Value::Bytes(Bytes::from(o));
+                    changed = true;
+                }
+            }
+            if let (Value::Bytes(b), Some(a)) = (&*v, self.aliases)
+                && let Some(o) = a.apply(b)
+            {
+                *v = Value::Bytes(Bytes::from(o));
+                changed = true;
+            }
+        }
+        if !changed {
+            return None;
+        }
+        encode_binary_row(&vals, cols).ok()
+    }
+}
+
+/// `e` with physical names in its message mapped to logical ones.
+pub(crate) fn map_error(mut e: SprigError, ctx: &OutputCtx<'_>) -> SprigError {
+    if let std::borrow::Cow::Owned(m) = map_message(&e.message, ctx) {
+        e.message = m;
+    }
+    e
+}
+
+/// The `OK` packet's schema change with the physical schema as the
+/// tenant's logical database, so clients see logical names in session
+/// tracking.
+fn map_ok_schema(mut ok: OkPacket, ctx: &OutputCtx<'_>) -> OkPacket {
+    if ok.session_state.is_empty() {
+        return ok;
+    }
+    let Ok(entries) = ok.session_changes() else {
+        return ok;
+    };
+    let mut changed = false;
+    let mapped: Vec<SessionChange> = entries
+        .into_iter()
+        .map(|c| match c {
+            SessionChange::Schema(s) if !s.is_empty() => {
+                let name = String::from_utf8_lossy(&s);
+                match ctx.map.logical(&name) {
+                    Some(db) => {
+                        changed = true;
+                        SessionChange::Schema(Bytes::from(db.name.clone()))
+                    }
+                    None => SessionChange::Schema(s),
+                }
+            }
+            other => other,
+        })
+        .collect();
+    if changed {
+        ok.set_session_changes(&mapped);
+    }
+    ok
 }
 
 /// How a relayed response ended.
@@ -242,10 +366,13 @@ pub(crate) async fn relay(
     bs: &mut BackendSession,
     out: &mut dyn ResultSink,
     r: &Relay<'_>,
+    mut names: Option<&mut NamesOut<'_>>,
 ) -> Result<Relayed> {
     let client_caps = out.wire().caps;
     let mut res = Relayed::default();
     let mut defs: Vec<Bytes> = Vec::new();
+    // The mapped definitions, when names are mapped (rows need them).
+    let mut cols: Vec<ColumnDef> = Vec::new();
     let mut want: u64 = 0;
     let mut begun = r.fetch;
     while let Some(p) = bs.next().await? {
@@ -260,24 +387,42 @@ pub(crate) async fn relay(
                 // With a cursor, the packet after the definitions decides
                 // what the client gets.
                 if defs.len() as u64 == want && !r.cursor {
-                    begin(out, &defs, r, client_caps).await?;
+                    begin(out, &defs, r, client_caps, names.as_deref_mut(), &mut cols).await?;
                     begun = true;
                 }
             }
             PacketKind::ColumnsEof => {
                 let status = p.status().unwrap_or_default();
                 if !begun && r.cursor && status.contains(StatusFlags::CURSOR_EXISTS) {
-                    cursor_opened(out, &defs, r, status, &mut res).await?;
+                    cursor_opened(out, &defs, r, status, &mut res, names.as_deref_mut()).await?;
                     begun = true;
                 } else if !begun {
-                    begin(out, &defs, r, client_caps).await?;
+                    begin(out, &defs, r, client_caps, names.as_deref_mut(), &mut cols).await?;
                     begun = true;
                 }
             }
             PacketKind::Row => {
                 if !begun {
-                    begin(out, &defs, r, client_caps).await?;
+                    begin(out, &defs, r, client_caps, names.as_deref_mut(), &mut cols).await?;
                     begun = true;
+                }
+                if let Some(n) = names.as_deref_mut().filter(|n| n.mapper.needs_rows()) {
+                    match r.format {
+                        RowFormat::Text => {
+                            let mut rows = Vec::new();
+                            n.mapper
+                                .row_packet(&p.payload, cols.len(), &n.ctx, &mut rows)
+                                .map_err(|e| protocol_error(&format!("text row: {e}")))?;
+                            for row in rows {
+                                out.raw_row(n.alias_text(row, cols.len())).await?;
+                            }
+                        }
+                        RowFormat::Binary => match n.scrub_binary(&p.payload, &cols) {
+                            Some(row) => out.raw_row(row).await?,
+                            None => out.raw_row(p.payload).await?,
+                        },
+                    }
+                    continue;
                 }
                 let rewritten = r
                     .conn_status
@@ -298,11 +443,18 @@ pub(crate) async fn relay(
                     continue;
                 }
                 if !begun && r.cursor && status.contains(StatusFlags::CURSOR_EXISTS) {
-                    cursor_opened(out, &defs, r, status, &mut res).await?;
+                    cursor_opened(out, &defs, r, status, &mut res, names.as_deref_mut()).await?;
                     continue;
                 }
                 if !begun {
-                    begin(out, &defs, r, client_caps).await?;
+                    begin(out, &defs, r, client_caps, names.as_deref_mut(), &mut cols).await?;
+                }
+                if let Some(n) = names.as_deref_mut().filter(|n| n.mapper.needs_rows()) {
+                    let mut rows = Vec::new();
+                    n.mapper.finish_packets(&n.ctx, &mut rows);
+                    for row in rows {
+                        out.raw_row(n.alias_text(row, cols.len())).await?;
+                    }
                 }
                 // EndOfRows carries no session-state block.
                 status.remove(StatusFlags::SESSION_STATE_CHANGED);
@@ -317,7 +469,19 @@ pub(crate) async fn relay(
             }
             PacketKind::Ok(ok) => {
                 let status = r.status(ok.status);
-                out.ok(client_ok(ok, status)).await?;
+                let mut ok = client_ok(ok, status);
+                if let Some(n) = names.as_deref() {
+                    ok = map_ok_schema(ok, &n.ctx);
+                    if let std::borrow::Cow::Owned(m) =
+                        map_message(&String::from_utf8_lossy(&ok.info), &n.ctx)
+                    {
+                        ok.info = Bytes::from(m);
+                    }
+                    if let Some(m) = n.aliases.and_then(|a| a.apply(&ok.info)) {
+                        ok.info = Bytes::from(m);
+                    }
+                }
+                out.ok(ok).await?;
                 res.status = Some(status);
             }
             PacketKind::Err(e) => {
@@ -329,6 +493,10 @@ pub(crate) async fn relay(
                     )
                 } else {
                     backend_error(&e)
+                };
+                let err = match names.as_deref() {
+                    Some(n) => n.error(err),
+                    None => err,
                 };
                 out.error(&err).await?;
                 res.errored = true;
@@ -363,7 +531,13 @@ async fn begin(
     defs: &[Bytes],
     r: &Relay<'_>,
     client: Caps,
+    names: Option<&mut NamesOut<'_>>,
+    cols: &mut Vec<ColumnDef>,
 ) -> Result<()> {
+    if let Some(n) = names {
+        *cols = n.defs(defs, r.backend_caps, r.renames)?;
+        return out.begin_rows(cols, r.format).await;
+    }
     if r.raw_defs(client) && r.renames.is_empty() {
         out.begin_rows_raw(defs, r.format).await
     } else {
@@ -380,8 +554,12 @@ async fn cursor_opened(
     r: &Relay<'_>,
     status: StatusFlags,
     res: &mut Relayed,
+    names: Option<&mut NamesOut<'_>>,
 ) -> Result<()> {
-    let cols = decode_defs(defs, r.backend_caps, r.renames)?;
+    let cols = match names {
+        Some(n) => n.defs(defs, r.backend_caps, r.renames)?,
+        None => decode_defs(defs, r.backend_caps, r.renames)?,
+    };
     let mut status = r.status(status);
     status.remove(StatusFlags::SESSION_STATE_CHANGED);
     out.cursor_opened(

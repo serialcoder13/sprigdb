@@ -290,6 +290,7 @@ struct Shared {
 pub struct ListenerManager {
     shared: Arc<Shared>,
     slots: tokio::sync::Mutex<HashMap<&'static str, Slot>>,
+    binds: HashMap<String, SocketAddr>,
 }
 
 impl fmt::Debug for ListenerManager {
@@ -308,7 +309,19 @@ impl ListenerManager {
         Self {
             shared: Arc::new(Shared { frontends, ctx }),
             slots: tokio::sync::Mutex::new(HashMap::new()),
+            binds: HashMap::new(),
         }
+    }
+
+    /// The same manager with this process's own addresses for some
+    /// listeners (`[gateway] listen_override`): they replace the
+    /// `listener.<name>.bind` setting, so a second gateway can run in the
+    /// same DC (development and tests; production gateways share the DC's
+    /// settings).
+    #[must_use]
+    pub fn with_bind_overrides(mut self, binds: HashMap<String, SocketAddr>) -> Self {
+        self.binds = binds;
+        self
     }
 
     /// Makes the listeners match `res`: listeners whose spec changed are
@@ -320,8 +333,11 @@ impl ListenerManager {
             rejected: res.rejected,
         };
         let mut slots = self.slots.lock().await;
-        for spec in res.specs {
+        for mut spec in res.specs {
             let name = spec.name;
+            if let Some(a) = self.binds.get(name) {
+                spec.bind = *a;
+            }
             let slot = slots.entry(name).or_default();
             match self.apply_one(slot, spec, res.drain).await {
                 Ok(true) => report.applied.push(name),

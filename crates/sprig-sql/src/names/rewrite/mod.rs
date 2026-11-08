@@ -41,6 +41,7 @@ use std::ops::Range;
 use sprig_proto_mysql::packets::Persona;
 
 use super::NameError;
+use super::ddl::DdlTarget;
 use super::map::{NameMap, SchemaName};
 use crate::lex::{self, LexOptions};
 
@@ -348,10 +349,24 @@ pub struct StatementInfo {
     pub database: Option<String>,
     /// System-schema references (steps 5 and 6 handle them).
     pub system_refs: Vec<SystemRef>,
+    /// What the statement does to the catalog, for every DDL statement the
+    /// catalog's DDL engine handles ([`DdlTarget`]), with logical names.
+    /// `None` for other statements. A [`StmtKind::Ddl`] or database
+    /// statement without a target (and not [`StatementInfo::nested_ddl`])
+    /// has a shape the classifier did not recognize, or is a setting write
+    /// (`ALTER TABLE t SPRIG SET`); the gateway must not forward such a
+    /// statement past the catalog.
+    pub ddl: Option<DdlTarget>,
+    /// The statement holds DDL the gateway can't route through the catalog:
+    /// inside `BEGIN NOT ATOMIC ... END`, or in the SQL text of `PREPARE
+    /// ... FROM '...'` or `EXECUTE IMMEDIATE '...'`. Stored program bodies
+    /// are definitions and don't count.
+    pub nested_ddl: bool,
     /// Which name finder decided the schema positions.
     pub engine: Engine,
     /// For the AST path: whether the walker found the same schema
-    /// positions. Always true for the walker.
+    /// positions and the same [`StatementInfo::ddl`]. Always true for the
+    /// walker.
     pub engines_agree: bool,
 }
 

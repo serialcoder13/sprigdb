@@ -19,7 +19,7 @@
 //!
 //! `SPRIG_TEST_CONNECTORS_ONLY` (space- or comma-separated) runs a subset,
 //! for example `mysql2,pymysql`; `SPRIG_TEST_CONNECTORS_QUICK=1` passes
-//! `--quick` (drivers and SQLAlchemy, fast checks only: the per-PR run);
+//! `--quick` (drivers and `SQLAlchemy`, fast checks only: the per-PR run);
 //! `run.sh`'s own `SPRIG_CONN_*` variables pass through.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]

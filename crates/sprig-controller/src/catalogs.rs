@@ -231,7 +231,11 @@ impl std::fmt::Debug for ShardMapLocator {
 impl ShardMapLocator {
     /// A locator reading shard maps from `dc` and connecting with `pools`.
     #[must_use]
-    pub fn new(dc: Arc<dyn MetaStore>, pools: Arc<dyn ClusterPools>, naming: CatalogNaming) -> Self {
+    pub fn new(
+        dc: Arc<dyn MetaStore>,
+        pools: Arc<dyn ClusterPools>,
+        naming: CatalogNaming,
+    ) -> Self {
         Self { dc, pools, naming }
     }
 

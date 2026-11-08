@@ -750,6 +750,29 @@ impl Store {
             .ok_or_else(|| SprigError::internal(format!("counter {key} below {n}")))
     }
 
+    /// Creates `counter`'s row at 1 unless it exists: for counters added
+    /// after a catalog was migrated (the DDL path's `sprig.next_group_id`
+    /// and `sprig.next_shard_id`), so older catalogs need no migration.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn ensure_counter<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        counter: Counter,
+    ) -> Result<()> {
+        q.exec_drop(
+            format!(
+                "INSERT INTO {} ({SET_COLS}) VALUES ('tenant', 0, ?, '1', NULL, 'system', \
+                 UTC_TIMESTAMP(6), 0) ON DUPLICATE KEY UPDATE setting_key = setting_key",
+                self.settings
+            ),
+            (counter.key(),),
+        )
+        .await
+        .map_err(map_err)
+    }
+
     /// The next database id.
     ///
     /// # Errors
@@ -1097,7 +1120,113 @@ impl Store {
         rows.into_iter().map(object_row).collect()
     }
 
+    /// Every object of `db`, tombstones included, by id.
+    ///
+    /// # Errors
+    /// As [`object`](Self::object).
+    pub async fn objects_in<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        db: DbId,
+    ) -> Result<Vec<ObjectRow>> {
+        let rows: Vec<Row> = q
+            .exec(
+                format!(
+                    "SELECT {OBJ_COLS} FROM {} WHERE db_id = ? ORDER BY object_id",
+                    self.objects
+                ),
+                (db.0,),
+            )
+            .await
+            .map_err(map_err)?;
+        rows.into_iter().map(object_row).collect()
+    }
+
+    /// Deletes an object row that was never visible (a `creating` row
+    /// whose DDL is rolled back), with its settings rows and schema
+    /// versions. Returns whether it existed.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn delete_object<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        object: ObjectId,
+    ) -> Result<bool> {
+        exec_count(
+            q,
+            format!(
+                "DELETE FROM {} WHERE scope_kind = 'object' AND scope_id = ?",
+                self.settings
+            ),
+            (object.0,),
+        )
+        .await?;
+        exec_count(
+            q,
+            format!("DELETE FROM {} WHERE object_id = ?", self.schema_versions),
+            (object.0,),
+        )
+        .await?;
+        let n = exec_count(
+            q,
+            format!("DELETE FROM {} WHERE object_id = ?", self.objects),
+            (object.0,),
+        )
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// Deletes a database row that was never visible (a `creating` row
+    /// whose DDL is rolled back), with its settings rows. Returns whether
+    /// it existed.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn delete_database<Q: Queryable + Send>(&self, q: &mut Q, db: DbId) -> Result<bool> {
+        exec_count(
+            q,
+            format!(
+                "DELETE FROM {} WHERE scope_kind = 'database' AND scope_id = ?",
+                self.settings
+            ),
+            (db.0,),
+        )
+        .await?;
+        let n = exec_count(
+            q,
+            format!("DELETE FROM {} WHERE db_id = ?", self.databases),
+            (db.0,),
+        )
+        .await?;
+        Ok(n > 0)
+    }
+
     // ---- settings ----
+
+    /// Deletes an internal (`sprig.`) key at tenant scope (transient
+    /// records such as a DDL job's intent). Returns whether it existed.
+    ///
+    /// # Errors
+    /// `Internal` unless `key` starts with `sprig.`; 39070 or a backend
+    /// error.
+    pub async fn delete_internal<Q: Queryable + Send>(&self, q: &mut Q, key: &str) -> Result<bool> {
+        if !key.starts_with("sprig.") {
+            return Err(SprigError::internal(format!(
+                "{key} is not an internal key"
+            )));
+        }
+        let n = exec_count(
+            q,
+            format!(
+                "DELETE FROM {} WHERE scope_kind = 'tenant' AND scope_id = 0 AND setting_key = ?",
+                self.settings
+            ),
+            (key,),
+        )
+        .await?;
+        Ok(n > 0)
+    }
 
     /// One settings row.
     ///

@@ -127,6 +127,25 @@ const VOCAB: &[&str] = &[
     "NOT ATOMIC ",
     "RENAME ",
     "TRUNCATE ",
+    "DROP ",
+    "ALTER ",
+    "TABLE ",
+    "TEMPORARY ",
+    "OR REPLACE ",
+    "IF NOT EXISTS ",
+    "IF EXISTS ",
+    "INDEX ",
+    "TRIGGER ",
+    "VIEW ",
+    "SEQUENCE ",
+    "EVENT ",
+    "DATABASE ",
+    "DEFINER=`root`@`%` ",
+    "CHARACTER SET ",
+    "COLLATE ",
+    "LIKE ",
+    "RENAME TO ",
+    "NOWAIT ",
 ];
 
 fn iterations() -> usize {
@@ -156,6 +175,12 @@ fn check(sql: &[u8], map: &sprig_sql::names::MemoryNameMap, rng: &mut Rng) {
         ctx = ctx.backend_version(110_803);
     }
     if let Ok(r) = rewrite(sql, &ctx) {
+        // Classification never panics, nor does the catalog conversion.
+        for s in &r.statements {
+            if let Some(t) = &s.ddl {
+                let _ = t.to_catalog();
+            }
+        }
         let mut at = 0;
         let mut out = Vec::new();
         for e in &r.edits {
@@ -211,6 +236,13 @@ fn mutated_statements_never_panic() {
         "/*!50001 CREATE ALGORITHM=UNDEFINED */ /*!50001 VIEW `v` AS select `crm`.`t`.`a` from `crm`.`t` */",
         "GRANT SELECT ON crm.* TO bob; LOCK TABLES crm.a READ; SHOW TABLES FROM crm",
         "PREPARE s FROM 'SELECT * FROM crm.t WHERE a = ''x'''",
+        "CREATE OR REPLACE TEMPORARY TABLE IF NOT EXISTS crm.t2 (LIKE billing.t)",
+        "DROP TEMPORARY TABLE IF EXISTS a, crm.b, `my.db`.c; RENAME TABLE IF EXISTS a NOWAIT TO crm.a, crm.b TO b",
+        "ALTER TABLE IF EXISTS crm.t ADD c INT, RENAME TO billing.u; TRUNCATE TABLE crm.t WAIT 5",
+        "/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/ /*!50003 TRIGGER `trg` BEFORE INSERT ON `crm`.`t` FOR EACH ROW SET NEW.a = 1 */",
+        "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `crm` /*!40100 DEFAULT CHARACTER SET utf8mb4 */ /*!80016 DEFAULT ENCRYPTION='N' */",
+        "CREATE OR REPLACE UNIQUE INDEX IF NOT EXISTS i ON crm.t (a); DROP INDEX IF EXISTS i ON crm.t",
+        "ALTER EVENT crm.e ON SCHEDULE EVERY 1 DAY RENAME TO billing.e DO DELETE FROM crm.t",
     ];
     let map = common::acme();
     let mut rng = Rng(0x5eed_0003);

@@ -79,6 +79,15 @@ pub struct StmtInfo {
     pub calc_found_rows: bool,
     /// Session-state effects.
     pub effects: Vec<Effect>,
+    /// Variables set only for this statement (`SET STATEMENT a = 1, b = 2
+    /// FOR ...`, lower case). MariaDB's session tracking reports their
+    /// temporary values as changes, though they revert when the statement
+    /// ends: those reports are ignored.
+    pub scoped_vars: Vec<String>,
+    /// Gateway-owned variables it sets (session tracking, timeouts,
+    /// `wsrep_sync_wait`; lower case). The gateway keeps the client's
+    /// values and restores its own on the connection afterwards.
+    pub sets_gateway_vars: Vec<String>,
 }
 
 impl StmtInfo {
@@ -93,6 +102,8 @@ impl StmtInfo {
             uses_last_insert_id: false,
             calc_found_rows: false,
             effects: Vec::new(),
+            scoped_vars: Vec::new(),
+            sets_gateway_vars: Vec::new(),
         }
     }
 
@@ -120,19 +131,77 @@ impl StmtInfo {
     #[must_use]
     pub fn expects_state_change(&self) -> bool {
         !self.assigns_user_vars.is_empty()
+            || !self.scoped_vars.is_empty()
+            || !self.sets_gateway_vars.is_empty()
             || self.effects.iter().any(|e| !matches!(e, Effect::Call))
     }
 
     /// Classifies statement text conservatively (see the module docs).
     #[must_use]
-    #[allow(clippy::too_many_lines)] // one table of statement kinds
     pub fn classify(sql: &[u8]) -> Self {
-        let toks = tokenize(sql);
+        Self::classify_tokens(&tokenize(sql))
+    }
+
+    /// `SET STATEMENT a = 1, ... FOR <statement>`: the inner statement's
+    /// facts, plus the variables set for it alone and the user variables
+    /// the assignments read.
+    fn classify_set_statement(toks: &[Tok]) -> Self {
+        let mut depth = 0i32;
+        let mut for_at = None;
+        for (i, t) in toks.iter().enumerate().skip(2) {
+            match t {
+                Tok::Punct(p) if p == "(" => depth += 1,
+                Tok::Punct(p) if p == ")" => depth -= 1,
+                Tok::Word(w) if w == "FOR" && depth == 0 => {
+                    for_at = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(f) = for_at else {
+            return StmtInfo::write();
+        };
+        let mut info = Self::classify_tokens(&toks[f + 1..]);
+        let mut at_start = true;
+        depth = 0;
+        for t in &toks[2..f] {
+            match t {
+                Tok::Punct(p) if p == "(" => depth += 1,
+                Tok::Punct(p) if p == ")" => depth -= 1,
+                Tok::Punct(p) if p == "," && depth == 0 => {
+                    at_start = true;
+                    continue;
+                }
+                Tok::UserVar(v) => push_unique(&mut info.reads_user_vars, v),
+                _ => {}
+            }
+            if at_start && depth == 0 {
+                match t {
+                    Tok::Word(w) if w == "SESSION" || w == "LOCAL" => continue,
+                    Tok::SysVar(_, name) => push_unique(&mut info.scoped_vars, name),
+                    t => {
+                        if let Some(name) = t.ident() {
+                            push_unique(&mut info.scoped_vars, &name);
+                        }
+                    }
+                }
+                at_start = false;
+            }
+        }
+        info
+    }
+
+    #[allow(clippy::too_many_lines)] // one table of statement kinds
+    fn classify_tokens(toks: &[Tok]) -> Self {
         let mut info = StmtInfo::write();
         let kw = |i: usize| toks.get(i).and_then(Tok::word);
         let Some(first) = kw(0) else {
             return info;
         };
+        if first == "SET" && kw(1) == Some("STATEMENT") {
+            return Self::classify_set_statement(toks);
+        }
 
         // User variables: reads, and assignments by `@v :=` or `INTO @v`.
         let mut in_into = false;
@@ -214,7 +283,7 @@ impl StmtInfo {
                     info.class = StmtClass::Read;
                 }
             }
-            "SET" => classify_set(&toks, &mut info),
+            "SET" => classify_set(toks, &mut info),
             "BEGIN" if kw(1) != Some("NOT") => info.effects.push(Effect::Begin),
             "START" if kw(1) == Some("TRANSACTION") => info.effects.push(Effect::Begin),
             "COMMIT" => info.effects.push(Effect::Commit),
@@ -241,7 +310,7 @@ impl StmtInfo {
                 if kw(1) == Some("TEMPORARY")
                     || (kw(1) == Some("OR") && kw(3) == Some("TEMPORARY")) =>
             {
-                if let Some(name) = name_after(&toks, "TABLE") {
+                if let Some(name) = name_after(toks, "TABLE") {
                     info.effects.push(Effect::CreateTemp(name));
                 }
             }
@@ -251,7 +320,7 @@ impl StmtInfo {
                         && matches!(kw(2), Some("TABLE" | "TABLES"))) =>
             {
                 let temporary = kw(1) == Some("TEMPORARY");
-                info.effects.push(Effect::DropTables(table_list(&toks)));
+                info.effects.push(Effect::DropTables(table_list(toks)));
                 if !temporary {
                     info.effects.push(Effect::ImplicitCommit);
                 }
@@ -290,11 +359,7 @@ fn classify_set(toks: &[Tok], info: &mut StmtInfo) {
             info.effects.push(Effect::NextTransaction);
             return;
         }
-        Some("ROLE" | "PASSWORD" | "DEFAULT" | "STATEMENT") => {
-            if kw(1) == Some("STATEMENT") {
-                // SET STATEMENT ... FOR <stmt>: changes nothing after it.
-                return;
-            }
+        Some("ROLE" | "PASSWORD" | "DEFAULT") => {
             if kw(1) == Some("ROLE") {
                 info.effects.push(Effect::Untracked("SET ROLE".into()));
             }
@@ -356,7 +421,9 @@ fn classify_set(toks: &[Tok], info: &mut StmtInfo) {
 
 fn note_session_var(name: &str, info: &mut StmtInfo) {
     let lower = name.to_ascii_lowercase();
-    if super::state::var_kind(&lower).is_none() && !super::state::gateway_var(&lower) {
+    if super::state::gateway_var(&lower) {
+        push_unique(&mut info.sets_gateway_vars, &lower);
+    } else if super::state::var_kind(&lower).is_none() {
         info.effects.push(Effect::Untracked(format!("SET {lower}")));
     }
 }
@@ -681,7 +748,46 @@ mod tests {
                 .is_empty()
         );
         assert!(c("SET GLOBAL max_connections = 10").effects.is_empty());
-        assert!(c("SET wait_timeout = 10").effects.is_empty());
+        let w = c("SET wait_timeout = 10");
+        assert!(w.effects.is_empty());
+        assert_eq!(w.sets_gateway_vars, ["wait_timeout"]);
+        // MariaDB Connector/J's start-up statement.
+        let j = c("set autocommit=1, session_track_schema=1, \
+                   session_track_system_variables = CONCAT(@@global.session_track_system_variables, ',auto_increment_increment')");
+        assert!(j.effects.is_empty());
+        assert_eq!(
+            j.sets_gateway_vars,
+            ["session_track_schema", "session_track_system_variables"]
+        );
+        assert!(j.expects_state_change());
+        assert!(
+            c("SET GLOBAL wait_timeout = 10")
+                .sets_gateway_vars
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn set_statement_scopes_its_variables_to_the_inner_statement() {
+        let r =
+            c("SET STATEMENT max_statement_time = 1, @@session.sql_mode = @m FOR SELECT * FROM t");
+        assert_eq!(r.class, StmtClass::Read, "the inner statement decides");
+        assert_eq!(r.scoped_vars, ["max_statement_time", "sql_mode"]);
+        assert_eq!(r.reads_user_vars, ["m"]);
+        assert!(r.effects.is_empty());
+        assert!(r.expects_state_change());
+        let w = c("SET STATEMENT innodb_lock_wait_timeout = 1 FOR SELECT * FROM t FOR UPDATE");
+        assert_eq!(w.class, StmtClass::Write);
+        assert_eq!(w.scoped_vars, ["innodb_lock_wait_timeout"]);
+        assert!(
+            w.effects.is_empty(),
+            "no Untracked pin for a scoped variable"
+        );
+        let f =
+            c("SET STATEMENT sql_mode = (SELECT 'ANSI' FROM dual) FOR INSERT INTO t VALUES (1)");
+        assert_eq!(f.class, StmtClass::Write);
+        assert_eq!(f.scoped_vars, ["sql_mode"]);
+        assert_eq!(c("SET STATEMENT x = 1").class, StmtClass::Write);
     }
 
     #[test]

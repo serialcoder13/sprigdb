@@ -18,8 +18,9 @@
 //! **Ancestors (step 6 hook).** Ancestor rows (`scope_kind = 'ancestor'`)
 //! load like any other, and [`ancestry`](TenantSettings::ancestry) (root
 //! first, from `sprig.ancestry`, set by the catalog cache) puts them in the
-//! chain. Until chapter 08 step 6's `tree_settings` loop writes them, a
-//! catalog has neither, and the chain is tenant, database, object.
+//! chain. Chapter 08 step 6's `tree_settings` loop
+//! (`sprig-controller::tree_settings`) writes both; a catalog it hasn't
+//! reached has neither, and the chain is tenant, database, object.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -570,7 +571,8 @@ impl ClampedValue {
                 format!("{key}: the value at {scope} has the wrong type and is ignored")
             }
             (None, Some(v)) => format!(
-                "{key}: the value at {scope} is outside the bounds in force and is read as {v:?}"
+                "{key}: the value at {scope} is outside the bounds in force and is read as {}",
+                crate::etcd::show_value(v)
             ),
             (None, None) => format!("{key}: the value at {scope} is clamped"),
         };

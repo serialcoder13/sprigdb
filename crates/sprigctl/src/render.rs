@@ -8,10 +8,14 @@ use serde::Serialize;
 use serde_json::Value;
 use sprig_cluster::health::HealthReport;
 use sprig_cluster::profile::{CapabilityProfile, Direction};
-use sprig_controller::admin::types::{ClusterView, ProbeClusterResponse, TenantView};
+use sprig_controller::admin::types::{
+    ClusterView, ProbeClusterResponse, SettingExplanation, SettingKeyView, SettingRowView,
+    SettingStepView, SettingWriteResponse, TenantSettingsResponse, TenantView,
+};
 use sprig_controller::dc::DcView;
 use sprig_meta::bootstrap::DcRecord;
 use sprig_provision::PrecheckReport;
+use sprig_settings::{Bounds, Value as SettingValue, show_bounds, show_value};
 
 /// A serde enum's name, such as `primary_replica` or `AFTER_SYNC`.
 fn name<T: Serialize>(v: &T) -> String {
@@ -469,13 +473,265 @@ pub(crate) fn tenant_show(t: &TenantView) -> String {
     let _ = writeln!(
         s,
         "catalog cluster:   {}",
-        t.cluster.as_ref().map_or("-".to_owned(), ToString::to_string)
+        t.cluster
+            .as_ref()
+            .map_or("-".to_owned(), ToString::to_string)
     );
     let _ = writeln!(s, "catalog version:   {}", t.catalog_version);
     let _ = writeln!(s, "auth version:      {}", t.auth_version);
     let _ = writeln!(s, "settings version:  {}", t.settings_version);
     if !t.created_at.is_empty() {
         let _ = writeln!(s, "created:           {}", t.created_at);
+    }
+    s
+}
+
+// ---- settings ----
+
+fn show_opt_value(v: Option<&SettingValue>) -> String {
+    v.map_or_else(|| "-".to_owned(), show_value)
+}
+
+fn show_opt_bounds(b: Option<&Bounds>) -> String {
+    b.map_or_else(|| "-".to_owned(), show_bounds)
+}
+
+/// Scope kinds, compactly: `all`, or the list.
+fn scopes(s: &[String]) -> String {
+    if s.len() == 6 {
+        "all".to_owned()
+    } else {
+        s.iter()
+            .map(|x| if x == "database" { "db" } else { x.as_str() })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// `sprigctl settings list`.
+#[must_use]
+pub(crate) fn settings_list(keys: &[SettingKeyView]) -> String {
+    let rows: Vec<[String; 6]> = keys
+        .iter()
+        .map(|k| {
+            [
+                k.key.clone(),
+                k.kind.clone(),
+                show_value(&k.default),
+                scopes(&k.scopes),
+                if k.tenant_settable {
+                    "tenants"
+                } else {
+                    "operators"
+                }
+                .to_owned(),
+                k.doc.clone(),
+            ]
+        })
+        .collect();
+    let mut s = table(
+        ["KEY", "TYPE", "DEFAULT", "SCOPES", "WHO", "MEANING"],
+        &rows,
+    );
+    let _ = writeln!(s, "{} keys", keys.len());
+    s
+}
+
+/// `sprigctl settings describe`.
+#[must_use]
+pub(crate) fn settings_describe(k: &SettingKeyView) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "key:            {}", k.key);
+    let _ = writeln!(s, "meaning:        {}", k.doc);
+    let _ = writeln!(s, "type:           {}", k.kind);
+    let _ = writeln!(s, "default:        {}", show_value(&k.default));
+    let _ = writeln!(s, "scopes:         {}", k.scopes.join(", "));
+    let _ = writeln!(s, "hard bounds:    {}", show_bounds(&k.hard_bounds));
+    let _ = writeln!(
+        s,
+        "applies:        {}",
+        match k.apply.as_str() {
+            "live" => "live (next read)",
+            "new_sessions" => "new sessions",
+            "rebind" => "rebind (listeners re-bind)",
+            other => other,
+        }
+    );
+    let _ = writeln!(
+        s,
+        "who may set it: {}",
+        match (k.operator_only, k.tenant_settable) {
+            (true, _) => "operators only (operator_only)",
+            (false, false) => "operators only (no tenant scope accepts it)",
+            (false, true) => "operators, and tenants within bounds",
+        }
+    );
+    let _ = writeln!(s, "owner:          chapter {:02}", k.owner);
+    s
+}
+
+fn step_note(st: &SettingStepView) -> String {
+    let mut note = match st.outcome.as_str() {
+        "effective" => match &st.clamped_to {
+            Some(c) => format!("◄ effective, clamped to {}", show_value(c)),
+            None => "◄ effective".to_owned(),
+        },
+        "overridden" => "overridden".to_owned(),
+        "unset" => "(unset)".to_owned(),
+        "bounds_only" => "bounds only".to_owned(),
+        "not_accepted" => "(n/a: scope not accepted)".to_owned(),
+        "ignored_locked" => "ignored: locked by a wider scope".to_owned(),
+        "ignored_not_allowed" => "ignored: not in an allowed list".to_owned(),
+        "ignored_wrong_type" => "ignored: wrong type".to_owned(),
+        other => other.to_owned(),
+    };
+    if let Some(by) = &st.set_by {
+        let _ = write!(note, "  set by {by}");
+        if let Some(at) = &st.set_at {
+            let _ = write!(note, " {at}");
+        }
+    }
+    if let Some(r) = st.reason.as_ref().filter(|r| !r.is_empty()) {
+        let _ = write!(note, " ({r})");
+    }
+    note
+}
+
+fn context(e: &SettingExplanation) -> String {
+    let c = &e.context;
+    match (&c.tenant, &c.db, &c.object) {
+        (Some(tenant), Some(db), Some(object)) => format!("object {tenant}.{db}.{object}"),
+        (Some(tenant), Some(db), None) => format!("database {tenant}.{db}"),
+        (Some(tenant), _, _) => format!("tenant {tenant}"),
+        _ => match &c.cluster {
+            Some(cl) => format!("cluster {cl}"),
+            None => format!("dc {}", c.dc),
+        },
+    }
+}
+
+/// `sprigctl settings get`: chapter 47's explanation, narrowest scope
+/// first.
+#[must_use]
+pub(crate) fn settings_get(e: &SettingExplanation) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "{} for {} = {}", e.key, context(e), show_value(&e.value));
+    let from = match &e.source_target {
+        Some(t) => format!("{} {t}", e.source),
+        None => e.source.clone(),
+    };
+    let _ = writeln!(
+        s,
+        "from {from}{}; bounds in force below: {}",
+        if e.clamped { ", clamped" } else { "" },
+        show_bounds(&e.bounds)
+    );
+    let rows: Vec<[String; 6]> = e
+        .chain
+        .iter()
+        .rev()
+        .map(|st| {
+            [
+                st.scope.clone(),
+                st.target.clone().unwrap_or_default(),
+                show_opt_value(st.value.as_ref()),
+                show_opt_bounds(st.bounds.as_ref()),
+                show_bounds(&st.bounds_in_force),
+                step_note(st),
+            ]
+        })
+        .collect();
+    s.push_str(&table(
+        ["SCOPE", "TARGET", "VALUE", "BOUNDS", "LIMITS HERE", "NOTE"],
+        &rows,
+    ));
+    s
+}
+
+fn row_text(r: Option<&SettingRowView>) -> String {
+    match r {
+        None => "(nothing)".to_owned(),
+        Some(r) => {
+            let mut parts = vec![format!("value {}", show_opt_value(r.value.as_ref()))];
+            if let Some(b) = &r.bounds {
+                parts.push(format!("bounds {}", show_bounds(b)));
+            }
+            parts.join(", ")
+        }
+    }
+}
+
+/// `sprigctl settings set|reset|bounds|lock|unlock`.
+#[must_use]
+pub(crate) fn settings_write(r: &SettingWriteResponse) -> String {
+    let mut s = String::new();
+    if !r.changed {
+        match &r.current {
+            Some(c) => {
+                let _ = writeln!(
+                    s,
+                    "{} at {}: nothing to change ({})",
+                    r.key,
+                    r.scope,
+                    row_text(Some(c))
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    s,
+                    "{} at {}: nothing to change; no value or bounds are stored there",
+                    r.key, r.scope
+                );
+            }
+        }
+        return s;
+    }
+    let _ = writeln!(s, "{} {} at {} by {}", r.action, r.key, r.scope, r.set_by);
+    let _ = writeln!(s, "  before:  {}", row_text(r.previous.as_ref()));
+    let _ = writeln!(s, "  after:   {}", row_text(r.current.as_ref()));
+    if let Some(v) = r.version {
+        let _ = writeln!(s, "  catalog version {v}");
+    }
+    if let Some(sum) = &r.summary {
+        let _ = writeln!(s, "warning: {sum}");
+    }
+    for w in &r.warnings {
+        let _ = writeln!(s, "  {} = {}: {}", w.scope, show_value(&w.value), w.message);
+    }
+    s
+}
+
+/// `sprigctl tenant settings`.
+#[must_use]
+pub(crate) fn tenant_settings(r: &TenantSettingsResponse) -> String {
+    let rows: Vec<[String; 7]> = r
+        .rows
+        .iter()
+        .map(|x| {
+            [
+                x.scope.clone(),
+                x.target.clone(),
+                x.key.clone(),
+                show_opt_value(x.value.as_ref()),
+                show_opt_bounds(x.bounds.as_ref()),
+                x.set_by.clone(),
+                x.version.to_string(),
+            ]
+        })
+        .collect();
+    let mut s = format!(
+        "tenant {} ({}), catalog version {}\n",
+        r.tenant, r.tenant_id, r.catalog_version
+    );
+    if rows.is_empty() {
+        s.push_str("no settings rows: every key inherits\n");
+    } else {
+        s.push_str(&table(
+            [
+                "SCOPE", "TARGET", "KEY", "VALUE", "BOUNDS", "SET BY", "VERSION",
+            ],
+            &rows,
+        ));
     }
     s
 }

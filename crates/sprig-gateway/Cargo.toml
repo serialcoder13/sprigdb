@@ -14,15 +14,21 @@ async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 metrics.workspace = true
+mysql_async.workspace = true
 rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sprig-auth.workspace = true
+sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
 sprig-proto-mysql.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true
+sprig-sql.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
+toml.workspace = true
 tokio-rustls.workspace = true
 tokio-util = { workspace = true, features = ["codec", "rt"] }
 tracing.workspace = true
@@ -30,7 +36,6 @@ twox-hash.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-mysql_async.workspace = true
 rcgen.workspace = true
 sprig-testkit.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }

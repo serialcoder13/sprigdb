@@ -1,0 +1,5 @@
+tenant acme (42), catalog version 13
+SCOPE     TARGET            KEY                         VALUE  BOUNDS  SET BY    VERSION
+tenant    acme              auto_index.max_per_table    6      max 5   op:kiran  12
+object    acme.shop.orders  auto_index.mode             'on'   -       op:kiran  12
+ancestor  platform          auth.password_lock_minutes  30     -       op:kiran  12

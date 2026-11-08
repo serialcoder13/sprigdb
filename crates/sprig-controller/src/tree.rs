@@ -152,6 +152,11 @@ pub struct DirectoryEntry {
     /// When the tenant was created, RFC 3339 UTC (for people).
     #[serde(default)]
     pub created_at: String,
+    /// Unique to this creation of the tenant (a UUIDv7), so its catalog
+    /// schema can be told from one an earlier tenant with the same id left
+    /// behind. Empty for entries made before it existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub incarnation: String,
 }
 
 impl Versioned for DirectoryEntry {
@@ -254,6 +259,39 @@ pub struct NewTenant {
     pub home_dc: DcId,
     /// The cluster asked for, if any.
     pub placement_hint: Option<ClusterId>,
+}
+
+/// A new entry for `req` as tenant `id` under `parent`: state
+/// `creating`, versions 0, path and depth from the parent.
+fn new_entry(
+    req: &NewTenant,
+    id: TenantId,
+    parent: Option<&StoredEntry>,
+    now: SystemTime,
+) -> DirectoryEntry {
+    let (path, depth) = match parent {
+        Some(p) => (format!("{}{id}/", p.body().path), p.body().depth + 1),
+        None => (format!("/{id}/"), 0),
+    };
+    DirectoryEntry {
+        tenant_id: id,
+        name: req.name.clone(),
+        state: TenantState::Creating,
+        home_dc: req.home_dc.clone(),
+        epoch: 1,
+        catalog_version: 0,
+        auth_version: 0,
+        settings_version: 0,
+        parent_tenant_id: req.parent.map_or(0, |p| p.0),
+        path,
+        depth,
+        child_count: 0,
+        suspended: false,
+        tree_lock: None,
+        placement_hint: req.placement_hint.clone(),
+        created_at: rfc3339(now),
+        incarnation: uuid::Uuid::now_v7().simple().to_string(),
+    }
 }
 
 /// The tenant directory in the global tier.
@@ -450,34 +488,16 @@ impl Directory {
             let ids = self.global.get(&ids_key, Consistency::Linearizable).await?;
             let (next, ids_cmp) = match &ids {
                 Some(kv) => (
-                    Record::<TenantIdCounter>::decode(&kv.value)?.body.next.max(1),
+                    Record::<TenantIdCounter>::decode(&kv.value)?
+                        .body
+                        .next
+                        .max(1),
                     Cmp::ModRev(ids_key.clone(), kv.mod_revision),
                 ),
                 None => (1, Cmp::Missing(ids_key.clone())),
             };
             let id = TenantId(next);
-            let (path, depth) = match &parent {
-                Some(p) => (format!("{}{id}/", p.body().path), p.body().depth + 1),
-                None => (format!("/{id}/"), 0),
-            };
-            let entry = DirectoryEntry {
-                tenant_id: id,
-                name: req.name.clone(),
-                state: TenantState::Creating,
-                home_dc: req.home_dc.clone(),
-                epoch: 1,
-                catalog_version: 0,
-                auth_version: 0,
-                settings_version: 0,
-                parent_tenant_id: req.parent.map_or(0, |p| p.0),
-                path,
-                depth,
-                child_count: 0,
-                suspended: false,
-                tree_lock: None,
-                placement_hint: req.placement_hint.clone(),
-                created_at: rfc3339(now),
-            };
+            let entry = new_entry(req, id, parent.as_ref(), now);
             let mut when = vec![Cmp::Missing(name_key.clone()), ids_cmp];
             let mut then = vec![
                 Op::Put {
@@ -525,6 +545,51 @@ impl Directory {
         Err(SprigError::new(
             SprigCode::MetaUnavailable,
             "the directory kept changing; try again",
+        ))
+    }
+
+    /// Raises `ids/tenant` so the next id is above `used`, the highest id
+    /// found in use elsewhere (a catalog schema on a cluster). Never lowers
+    /// it. Ids are never reused (chapter 23), even when the counter was
+    /// lost while an earlier tenant's schemas stayed on a cluster.
+    ///
+    /// # Errors
+    /// 39500 if the counter kept changing; the store's errors.
+    pub async fn reserve_ids_above(&self, used: u64) -> Result<()> {
+        let ids_key = self.global.tier().key("ids/tenant")?;
+        for _ in 0..WRITE_ATTEMPTS {
+            let ids = self.global.get(&ids_key, Consistency::Linearizable).await?;
+            let (next, cmp) = match &ids {
+                Some(kv) => (
+                    Record::<TenantIdCounter>::decode(&kv.value)?.body.next,
+                    Cmp::ModRev(ids_key.clone(), kv.mod_revision),
+                ),
+                None => (1, Cmp::Missing(ids_key.clone())),
+            };
+            if next > used {
+                return Ok(());
+            }
+            let r = self
+                .global
+                .txn(Txn {
+                    when: vec![cmp],
+                    then: vec![Op::Put {
+                        key: ids_key.clone(),
+                        value: Record::new(TenantIdCounter { next: used + 1 }).encode()?,
+                        lease: None,
+                    }],
+                    otherwise: Vec::new(),
+                })
+                .await?;
+            if r.succeeded {
+                tracing::warn!(from = next, to = used + 1,
+                    "tenant ids raised past an id already in use on a cluster");
+                return Ok(());
+            }
+        }
+        Err(SprigError::new(
+            SprigCode::MetaUnavailable,
+            "the tenant id counter kept changing; try again",
         ))
     }
 
@@ -627,7 +692,10 @@ impl Directory {
             if !matches!(b.state, TenantState::Active | TenantState::Failed) {
                 return Err(SprigError::new(
                     SprigCode::TenantNotReady,
-                    format!("tenant {} is {}; only an active or failed tenant can be deleted", b.name, b.state),
+                    format!(
+                        "tenant {} is {}; only an active or failed tenant can be deleted",
+                        b.name, b.state
+                    ),
                 ));
             }
             let key = self.key(id)?;

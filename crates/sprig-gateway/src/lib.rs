@@ -15,9 +15,14 @@
 //!   with connection ids, `SHOW PROCESSLIST` and `KILL`, the connection
 //!   task wrapper with panic isolation, and disconnect detection;
 //! - [`mysql`]: the MySQL 8.4 and MariaDB front ends (chapter 05 steps 3,
-//!   4, 6, 10 and 12): handshake and TLS upgrade, the auth plugins over the
-//!   interim accounts file, command dispatch, compression and live
-//!   listener hooks;
+//!   4, 6, 10 and 12): handshake and TLS upgrade, the auth plugins over
+//!   chapter 14's `LoginService` (tenant catalogs, or the interim accounts
+//!   file with `[gateway] login_mode = "accounts_file"`), command dispatch,
+//!   compression and live listener hooks;
+//! - [`tenant`]: tenants (M0.3): the catalog cache with the auth module,
+//!   name virtualization (chapter 07) per statement, DDL through the
+//!   catalog (chapter 08 step 10), settings in SQL (step 8) and
+//!   `information_schema.SPRIG_SETTINGS`, the interim backend accounts;
 //! - [`pipeline`]: the `Request`, `Executor` and `ResultSink` boundary
 //!   between front ends and the execution layer (step 9's interfaces), a
 //!   `NullExecutor` and a canned executor for tests.
@@ -33,7 +38,9 @@
 //! - [`exec`]: the pass-through executor (decision D3) and the relay
 //!   engine (chapter 05 steps 7-9): statements to the login's cluster,
 //!   prepared statements across pooled connections, multi-statements,
-//!   `LOCAL INFILE`; requests reach it through the workload hook.
+//!   `LOCAL INFILE`; requests reach it through the workload hook. For a
+//!   catalog login it plans every statement with chapter 07's rewrite and
+//!   maps results, errors and session tracking back to logical names.
 //!
 //! Not yet: the other front ends (chapters 30, 37, 40), limits,
 //! registration and the other `MetaStore` caches (steps 4-10).
@@ -46,6 +53,7 @@ pub mod mysql;
 pub mod pipeline;
 pub mod reads;
 pub mod session;
+pub mod tenant;
 pub mod tls;
 
 use std::sync::Arc;
@@ -105,36 +113,50 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         backend::LiveBackendSettings::new(live.clone(), dc.clone()),
     );
     let _reaper = backends.start();
+    let sessions = Arc::new(SessionTable::new(clock.clone()));
+    // Logins (chapter 14) and, for catalog logins, the tenant services
+    // (chapters 07 and 08).
+    let (login, tenants, login_tasks) = logins(
+        &ctx,
+        &live,
+        Arc::clone(&backends),
+        Arc::clone(&sessions),
+        clock.clone(),
+    )?;
+    let mut executor = exec::PassThrough::new(
+        Arc::clone(&backends),
+        exec::ExecSettingsSource::Live {
+            live: live.clone(),
+            dc: dc.clone(),
+        },
+    );
+    if let Some(t) = &tenants {
+        executor = executor.with_tenants(Arc::clone(t));
+    }
     // The MySQL and MariaDB front ends (chapter 05): requests pass the
-    // workload hook (chapter 12, a no-op until M0.4) into the pass-through
-    // executor (decision D3).
+    // workload hook (chapter 12, a no-op until M0.4) into the executor.
     let mysql = mysql::MySqlStack::start(
         mysql::StackConfig {
-            accounts_file: ctx.config.gateway.accounts_file.clone(),
+            login,
             live: live.clone(),
             dc: dc.clone(),
             hostname: ctx.config.node.id(),
             clock: clock.clone(),
-            executor: pipeline::with_workload(
-                Arc::new(exec::PassThrough::new(
-                    Arc::clone(&backends),
-                    exec::ExecSettingsSource::Live {
-                        live: live.clone(),
-                        dc: dc.clone(),
-                    },
-                )),
-                Arc::new(pipeline::NoWorkload),
-            ),
+            executor: pipeline::with_workload(Arc::new(executor), Arc::new(pipeline::NoWorkload)),
         },
         ctx.shutdown.clone(),
     )?;
-    let listeners = Arc::new(ListenerManager::new(
-        mysql.register(Frontends::new()),
-        Arc::new(
-            GatewayContext::with_sessions(clock.clone(), Arc::new(SessionTable::new(clock)))
-                .with_backends(Arc::clone(&backends)),
-        ),
-    ));
+    let binds = bind_overrides(&ctx)?;
+    let listeners = Arc::new(
+        ListenerManager::new(
+            mysql.register(Frontends::new()),
+            Arc::new(
+                GatewayContext::with_sessions(clock.clone(), sessions)
+                    .with_backends(Arc::clone(&backends)),
+            ),
+        )
+        .with_bind_overrides(binds),
+    );
     // Subscribe before the first apply, so no change falls in between.
     let changes = live.subscribe(listener::live::LISTENER_KEYS);
     let report = listener::live::apply_current(&live, &dc, &certs, &listeners).await;
@@ -164,7 +186,104 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     backends.shutdown();
     let _ = watcher.await;
     mysql.join().await;
+    for t in login_tasks {
+        let _ = t.await;
+    }
+    if let Some(t) = tenants {
+        t.locator.close().await;
+    }
     Ok(())
+}
+
+/// `[gateway] listen_override`: this process's own listener addresses.
+fn bind_overrides(
+    ctx: &RoleContext,
+) -> Result<std::collections::HashMap<String, std::net::SocketAddr>> {
+    let mut binds = std::collections::HashMap::new();
+    for (name, addr) in &ctx.config.gateway.listen_override {
+        let a = addr.parse().map_err(|e| {
+            SprigError::new(
+                sprig_common::SprigCode::ConfigInvalid,
+                format!("[gateway] listen_override.{name} = {addr:?}: {e}"),
+            )
+        })?;
+        tracing::info!(listener = %name, bind = %a, "listener address overridden for this process");
+        binds.insert(name.clone(), a);
+    }
+    Ok(binds)
+}
+
+/// The process's logins by `[gateway] login_mode`: tenant catalogs (the
+/// default, chapter 14) with the tenant services, or the interim accounts
+/// file (decision D1) with its watcher.
+type Logins = (
+    Arc<mysql::login::LoginService>,
+    Option<Arc<tenant::TenantServices>>,
+    Vec<tokio::task::JoinHandle<()>>,
+);
+
+fn logins(
+    ctx: &RoleContext,
+    live: &LiveSettings,
+    backends: Arc<backend::Backends>,
+    sessions: Arc<SessionTable>,
+    clock: Arc<dyn Clock>,
+) -> Result<Logins> {
+    use sprig_auth::{CatalogLogins, FastCache, LoginService, LoginSource, MetaTenants};
+    use sprig_common::config::LoginModeConfig;
+    let fast_cache = Arc::new(FastCache::new(
+        clock.clone(),
+        sprig_auth::fast_cache::DEFAULT_TTL,
+    ));
+    let cfg = &ctx.config.gateway;
+    match cfg.effective_login_mode() {
+        LoginModeConfig::AccountsFile => {
+            let mut tasks = Vec::new();
+            let accounts: Arc<dyn sprig_auth::AccountStore> = if let Some(path) = &cfg.accounts_file
+            {
+                let file = sprig_auth::FileAccounts::open(path)?;
+                tasks.push(
+                    file.spawn_watcher(sprig_auth::accounts::POLL_INTERVAL, ctx.shutdown.clone()),
+                );
+                file
+            } else {
+                tracing::warn!("no [gateway] accounts_file: every MySQL login is refused (1045)");
+                Arc::new(sprig_auth::StaticAccounts::default())
+            };
+            tracing::info!(
+                "logins from the accounts file (login_mode = accounts_file): names pass through"
+            );
+            let svc = LoginService::new(LoginSource::File(accounts), fast_cache).with_clock(clock);
+            Ok((Arc::new(svc), None, tasks))
+        }
+        LoginModeConfig::Catalog => {
+            let tenants = tenant::TenantServices::start(live, backends, sessions, clock.clone())?;
+            let resolver = if let Some(p) = &cfg.backends_file {
+                tenant::backends::TenantBackends::open(p, Arc::clone(&tenants.locator))?
+            } else {
+                tracing::warn!(
+                    "no [gateway] backends_file: catalog logins fail with 39998 until one names a backend account"
+                );
+                tenant::backends::TenantBackends::none(Arc::clone(&tenants.locator))
+            };
+            let catalogs = CatalogLogins::new(
+                Arc::new(MetaTenants::new(
+                    Arc::clone(&tenants.global),
+                    sprig_auth::account::META_TENANTS_TTL,
+                )),
+                Arc::new(tenants.cache.clone()),
+                Arc::new(resolver),
+                Arc::new(sprig_auth::SettingsPolicy::new(
+                    tenants.settings.clone(),
+                    tenants.dc.clone(),
+                )),
+            );
+            tracing::info!("logins from tenant catalogs (login_mode = catalog)");
+            let svc = LoginService::new(LoginSource::Catalog(Arc::new(catalogs)), fast_cache)
+                .with_clock(clock);
+            Ok((Arc::new(svc), Some(tenants), Vec::new()))
+        }
+    }
 }
 
 /// The stores the settings mirrors read: the etcd tiers named by `[meta]`

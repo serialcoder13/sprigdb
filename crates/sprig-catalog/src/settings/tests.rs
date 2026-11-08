@@ -173,7 +173,11 @@ impl SettingAuthorizer for Auth {
     ) -> sprig_common::Result<()> {
         self.0.lock().unwrap().push(need);
         if need == Privilege::AlterObject(SECRET) {
-            return Err(SprigError::standard(1142, *b"42000", "ALTER command denied"));
+            return Err(SprigError::standard(
+                1142,
+                *b"42000",
+                "ALTER command denied",
+            ));
         }
         Ok(())
     }
@@ -251,7 +255,10 @@ impl Env {
         let writer = TenantSettingsWriter::new(
             v,
             registry,
-            Arc::new(FixedEtcd { rows: etcd, dc: dc() }),
+            Arc::new(FixedEtcd {
+                rows: etcd,
+                dc: dc(),
+            }),
             auth.clone(),
             decisions.clone(),
             Arc::new(SystemClock),
@@ -268,7 +275,12 @@ impl Env {
         self.writer.versioner().backend()
     }
 
-    async fn set(&self, target: Target, key: &str, change: SettingChange) -> sprig_common::Result<SetOutcome> {
+    async fn set(
+        &self,
+        target: Target,
+        key: &str,
+        change: SettingChange,
+    ) -> sprig_common::Result<SetOutcome> {
         self.writer
             .set(&SetRequest {
                 tenant: T,
@@ -352,7 +364,12 @@ async fn keys_scopes_principals_and_types_are_checked_first() {
         (Target::Object(ORDERS), LOCK_MINUTES.key, int(5), 39082),
         (Target::Database(SHOP), MAX_DATABASES.key, int(5), 39082),
         (Target::Tenant, MAX_DATABASES.key, int(5), 1227),
-        (Target::Tenant, mp, SettingChange::Set(Value::from("x")), 39084),
+        (
+            Target::Tenant,
+            mp,
+            SettingChange::Set(Value::from("x")),
+            39084,
+        ),
         (
             Target::Tenant,
             mp,
@@ -401,7 +418,10 @@ async fn bounds_of_every_wider_scope_apply() {
     let env = Env::new().await;
     let mp = MAX_PER_TABLE.key;
     // Hard bounds 1-64; global max 8 (etcd).
-    assert_eq!(code(&env.set(Target::Tenant, mp, int(65)).await.unwrap_err()), 39080);
+    assert_eq!(
+        code(&env.set(Target::Tenant, mp, int(65)).await.unwrap_err()),
+        39080
+    );
     let e = env.set(Target::Tenant, mp, int(9)).await.unwrap_err();
     assert_eq!(code(&e), 39080);
     assert!(e.message.contains("max 8"), "{e}");
@@ -409,31 +429,72 @@ async fn bounds_of_every_wider_scope_apply() {
     // dc locks password_lock_minutes: values and bounds are refused, a
     // reset is not.
     let lm = LOCK_MINUTES.key;
-    assert_eq!(code(&env.set(Target::Tenant, lm, int(30)).await.unwrap_err()), 39083);
+    assert_eq!(
+        code(&env.set(Target::Tenant, lm, int(30)).await.unwrap_err()),
+        39083
+    );
     assert_eq!(
         code(
-            &env.set(Target::Tenant, lm, SettingChange::SetBounds(Bounds::max(5.0)))
-                .await
-                .unwrap_err()
+            &env.set(
+                Target::Tenant,
+                lm,
+                SettingChange::SetBounds(Bounds::max(5.0))
+            )
+            .await
+            .unwrap_err()
         ),
         39083
     );
-    assert!(env.set(Target::Tenant, lm, SettingChange::Reset).await.unwrap().version.is_none());
+    assert!(
+        env.set(Target::Tenant, lm, SettingChange::Reset)
+            .await
+            .unwrap()
+            .version
+            .is_none()
+    );
 
     // The parent's bound reaches the tenant and everything below it.
     env.parent_rows(vec![parent_row(mp, Some(json!(3)), Some(Bounds::max(6.0)))])
         .await;
-    assert_eq!(code(&env.set(Target::Tenant, mp, int(7)).await.unwrap_err()), 39080);
-    assert_eq!(code(&env.set(Target::Object(ORDERS), mp, int(7)).await.unwrap_err()), 39080);
+    assert_eq!(
+        code(&env.set(Target::Tenant, mp, int(7)).await.unwrap_err()),
+        39080
+    );
+    assert_eq!(
+        code(
+            &env.set(Target::Object(ORDERS), mp, int(7))
+                .await
+                .unwrap_err()
+        ),
+        39080
+    );
     env.set(Target::Object(ORDERS), mp, int(6)).await.unwrap();
 
     // The tenant's own bound limits its databases and objects, not itself.
-    env.set(Target::Tenant, mp, SettingChange::SetBounds(Bounds::max(4.0)))
-        .await
-        .unwrap();
+    env.set(
+        Target::Tenant,
+        mp,
+        SettingChange::SetBounds(Bounds::max(4.0)),
+    )
+    .await
+    .unwrap();
     env.set(Target::Tenant, mp, int(6)).await.unwrap();
-    assert_eq!(code(&env.set(Target::Database(SHOP), mp, int(5)).await.unwrap_err()), 39080);
-    assert_eq!(code(&env.set(Target::Object(EVENTS), mp, int(5)).await.unwrap_err()), 39080);
+    assert_eq!(
+        code(
+            &env.set(Target::Database(SHOP), mp, int(5))
+                .await
+                .unwrap_err()
+        ),
+        39080
+    );
+    assert_eq!(
+        code(
+            &env.set(Target::Object(EVENTS), mp, int(5))
+                .await
+                .unwrap_err()
+        ),
+        39080
+    );
     env.set(Target::Object(EVENTS), mp, int(4)).await.unwrap();
 
     // A database's allowed list binds its objects only.
@@ -441,35 +502,64 @@ async fn bounds_of_every_wider_scope_apply() {
     env.set(
         Target::Database(SHOP),
         mode,
-        SettingChange::SetBounds(Bounds::allowed([Value::from("on"), Value::from("recommend")])),
+        SettingChange::SetBounds(Bounds::allowed([
+            Value::from("on"),
+            Value::from("recommend"),
+        ])),
     )
     .await
     .unwrap();
     let e = env
-        .set(Target::Object(ORDERS), mode, SettingChange::Set(Value::from("off")))
+        .set(
+            Target::Object(ORDERS),
+            mode,
+            SettingChange::Set(Value::from("off")),
+        )
         .await
         .unwrap_err();
     assert_eq!(code(&e), 39080);
     assert!(e.message.contains("allowed ('recommend', 'on')"), "{e}");
-    env.set(Target::Object(ORDERS), mode, SettingChange::Set(Value::from("on")))
-        .await
-        .unwrap();
+    env.set(
+        Target::Object(ORDERS),
+        mode,
+        SettingChange::Set(Value::from("on")),
+    )
+    .await
+    .unwrap();
     // The privilege check refuses SECRET before any bound is read.
     let e = env
-        .set(Target::Object(SECRET), mode, SettingChange::Set(Value::from("off")))
+        .set(
+            Target::Object(SECRET),
+            mode,
+            SettingChange::Set(Value::from("off")),
+        )
         .await
         .unwrap_err();
     assert_eq!(code(&e), 1142);
     // Locked at the database: its objects can't set the key.
-    env.set(Target::Database(LOGS), mode, SettingChange::SetBounds(Bounds::locked()))
-        .await
-        .unwrap();
+    env.set(
+        Target::Database(LOGS),
+        mode,
+        SettingChange::SetBounds(Bounds::locked()),
+    )
+    .await
+    .unwrap();
     let e = env
-        .set(Target::Object(EVENTS), mode, SettingChange::Set(Value::from("on")))
+        .set(
+            Target::Object(EVENTS),
+            mode,
+            SettingChange::Set(Value::from("on")),
+        )
         .await
         .unwrap_err();
     assert_eq!(code(&e), 39083);
-    assert!(env.auth.0.lock().unwrap().contains(&Privilege::AlterObject(SECRET)));
+    assert!(
+        env.auth
+            .0
+            .lock()
+            .unwrap()
+            .contains(&Privilege::AlterObject(SECRET))
+    );
 }
 
 #[tokio::test]
@@ -487,11 +577,24 @@ async fn refused_writes_allocate_nothing_and_targets_must_exist() {
         assert_eq!(code(&e), want, "{target}");
         assert!(matches!(e.kind, ErrorKind::Standard { .. }));
     }
-    assert_eq!(code(&env.set(Target::Tenant, mp, int(9)).await.unwrap_err()), 39080);
-    assert_eq!(env.directory().await, before, "no version allocated: no gap");
-    assert_eq!(env.mem().tables(T).unwrap().versions.catalog, catalog_before);
+    assert_eq!(
+        code(&env.set(Target::Tenant, mp, int(9)).await.unwrap_err()),
+        39080
+    );
+    assert_eq!(
+        env.directory().await,
+        before,
+        "no version allocated: no gap"
+    );
+    assert_eq!(
+        env.mem().tables(T).unwrap().versions.catalog,
+        catalog_before
+    );
     // Nothing to reset: no version either.
-    let r = env.set(Target::Object(ORDERS), mp, SettingChange::Reset).await.unwrap();
+    let r = env
+        .set(Target::Object(ORDERS), mp, SettingChange::Reset)
+        .await
+        .unwrap();
     assert_eq!(r.version, None);
     assert_eq!(env.directory().await, before);
 }
@@ -510,22 +613,38 @@ async fn the_row_holds_a_value_and_bounds_and_tenant_writes_move_settings_versio
     let r = env.set(Target::Tenant, mp, int(6)).await.unwrap();
     let v2 = r.version.unwrap();
     assert_eq!(env.directory().await["settings_version"], v2);
-    env.set(Target::Tenant, mp, SettingChange::SetBounds(Bounds::max(7.0)))
-        .await
-        .unwrap();
+    env.set(
+        Target::Tenant,
+        mp,
+        SettingChange::SetBounds(Bounds::max(7.0)),
+    )
+    .await
+    .unwrap();
     let row = env.row(SettingScope::Tenant, mp).unwrap();
-    assert_eq!((row.value, row.bounds), (Some(json!(6)), Some(Bounds::max(7.0))));
+    assert_eq!(
+        (row.value, row.bounds),
+        (Some(json!(6)), Some(Bounds::max(7.0)))
+    );
     assert_eq!(row.set_by, "user:7");
     // RESET keeps the bounds, RESET BOUNDS the value; both leave a tombstone.
-    let r = env.set(Target::Tenant, mp, SettingChange::Reset).await.unwrap();
+    let r = env
+        .set(Target::Tenant, mp, SettingChange::Reset)
+        .await
+        .unwrap();
     assert_eq!(r.previous.unwrap().value, Some(Value::Int(6)));
     assert_eq!(r.current.unwrap().bounds, Some(Bounds::max(7.0)));
-    let r = env.set(Target::Tenant, mp, SettingChange::ResetBounds).await.unwrap();
+    let r = env
+        .set(Target::Tenant, mp, SettingChange::ResetBounds)
+        .await
+        .unwrap();
     assert_eq!(r.current, None);
     let row = env.row(SettingScope::Tenant, mp).unwrap();
     assert!(row.is_empty());
     assert_eq!(row.version, r.version.unwrap());
-    assert_eq!(env.directory().await["settings_version"], r.version.unwrap());
+    assert_eq!(
+        env.directory().await["settings_version"],
+        r.version.unwrap()
+    );
 }
 
 #[tokio::test]
@@ -536,19 +655,27 @@ async fn tightened_bounds_warn_and_record_a_decision() {
     env.set(Target::Database(LOGS), mp, int(6)).await.unwrap();
     env.set(Target::Object(EVENTS), mp, int(2)).await.unwrap();
     let r = env
-        .set(Target::Tenant, mp, SettingChange::SetBounds(Bounds::max(5.0)))
+        .set(
+            Target::Tenant,
+            mp,
+            SettingChange::SetBounds(Bounds::max(5.0)),
+        )
         .await
         .unwrap();
     assert_eq!(r.summary.as_deref(), Some("2 values will be clamped"));
     assert_eq!(r.warnings.len(), 2);
     assert!(
-        r.warnings
-            .iter()
-            .any(|w| w.scope == sprig_settings::Scope::Object(T, ORDERS) && w.value == Value::Int(7)),
+        r.warnings.iter().any(
+            |w| w.scope == sprig_settings::Scope::Object(T, ORDERS) && w.value == Value::Int(7)
+        ),
         "{:?}",
         r.warnings
     );
-    assert!(r.warnings[0].message.contains("read as"), "{:?}", r.warnings);
+    assert!(
+        r.warnings[0].message.contains("read as"),
+        "{:?}",
+        r.warnings
+    );
     {
         let d = env.decisions.0.lock().unwrap();
         assert_eq!(d.len(), 1);
@@ -558,7 +685,11 @@ async fn tightened_bounds_warn_and_record_a_decision() {
     }
     // A database bound only counts its own objects.
     let r = env
-        .set(Target::Database(SHOP), mp, SettingChange::SetBounds(Bounds::locked()))
+        .set(
+            Target::Database(SHOP),
+            mp,
+            SettingChange::SetBounds(Bounds::locked()),
+        )
         .await
         .unwrap();
     assert_eq!(r.summary.as_deref(), Some("1 value will be ignored"));
@@ -575,9 +706,13 @@ async fn privileges_follow_the_chapter() {
     env.set(Target::Object(ORDERS), mp, int(3)).await.unwrap();
     env.set(Target::Database(SHOP), mp, int(3)).await.unwrap();
     env.set(Target::Tenant, mp, int(3)).await.unwrap();
-    env.set(Target::Object(ORDERS), mp, SettingChange::SetBounds(Bounds::max(9.0)))
-        .await
-        .unwrap();
+    env.set(
+        Target::Object(ORDERS),
+        mp,
+        SettingChange::SetBounds(Bounds::max(9.0)),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         *env.auth.0.lock().unwrap(),
         vec![
@@ -623,18 +758,27 @@ impl CatalogSource for Via {
 async fn done_when_object_scope_change_applies_within_seconds() {
     let global_registry = Registry::global().unwrap();
     assert!(global_registry.get(OBJECT_LIMIT.key).is_some());
-    let env = Env::with_registry(global_registry, Arc::new(MemSettings::new(global_registry))).await;
+    let env =
+        Env::with_registry(global_registry, Arc::new(MemSettings::new(global_registry))).await;
     let key = OBJECT_LIMIT.key;
-    env.set(Target::Tenant, key, SettingChange::SetBounds(Bounds::max(50.0)))
-        .await
-        .unwrap();
+    env.set(
+        Target::Tenant,
+        key,
+        SettingChange::SetBounds(Bounds::max(50.0)),
+    )
+    .await
+    .unwrap();
 
     // The reader: etcd mirrors (empty), Settings, a cache fed by the
     // directory watch, notifying Settings of every load.
     let dc_store = MemStore::new(Tier::Dc(dc()));
     let live = sprig_settings::LiveSettings::start(
         global_registry,
-        SettingsStores::new(Arc::new(dc_store.with_tier(Tier::Global)), Arc::new(dc_store)).unwrap(),
+        SettingsStores::new(
+            Arc::new(dc_store.with_tier(Tier::Global)),
+            Arc::new(dc_store),
+        )
+        .unwrap(),
     )
     .unwrap();
     live.ready().await;
@@ -671,7 +815,10 @@ async fn done_when_object_scope_change_applies_within_seconds() {
     println!("object-scope change applied in {:?}", started.elapsed());
 
     // Outside the tenant's bounds: refused, nothing changes.
-    let e = env.set(Target::Object(ORDERS), key, int(51)).await.unwrap_err();
+    let e = env
+        .set(Target::Object(ORDERS), key, int(51))
+        .await
+        .unwrap_err();
     assert_eq!(code(&e), 39080);
     assert!(
         tokio::time::timeout(Duration::from_millis(300), w.changed())

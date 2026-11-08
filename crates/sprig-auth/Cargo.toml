@@ -25,7 +25,7 @@ sha1.workspace = true
 sha2.workspace = true
 # Chapter 08: "sprig-auth depends on sprig-catalog, never the reverse" (both
 # layer 2). Not yet a workspace dependency, so by path.
-sprig-catalog = { path = "../sprig-catalog" }
+sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
 sprig-proto-mysql.workspace = true

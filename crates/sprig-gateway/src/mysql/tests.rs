@@ -93,7 +93,7 @@ impl Gateway {
         let accounts = FileAccounts::open(&path).unwrap();
         let clock = Arc::new(SystemClock);
         let login = Arc::new(LoginDeps::new(
-            accounts,
+            sprig_auth::LoginSource::File(accounts),
             Arc::new(FastCache::new(
                 clock.clone(),
                 sprig_auth::fast_cache::DEFAULT_TTL,

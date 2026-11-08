@@ -28,6 +28,7 @@ use super::{
     Edit, EditKind, Engine, RewriteCtx, StatementInfo, StmtKind, SystemRef, SystemSchema, UseTarget,
 };
 use crate::lex::{Token, TokenKind, ident_value, string_value};
+use crate::names::ddl::{AlterOp, DdlKind, DdlName, DdlTarget};
 use crate::names::map::Purpose;
 use crate::names::{NameError, ObjectKind};
 
@@ -37,6 +38,9 @@ type R<T = ()> = Result<T, NameError>;
 pub(super) struct Out {
     pub(super) edits: Vec<Edit>,
     pub(super) statements: Vec<StatementInfo>,
+    /// The current logical database each statement started with, for the
+    /// AST path's unqualified DDL names.
+    pub(super) currents: Vec<Option<String>>,
 }
 
 /// Walks every statement in `src`.
@@ -62,12 +66,16 @@ pub(super) fn walk(src: &[u8], tokens: &[Token], ctx: &RewriteCtx<'_>, depth: u8
         cur: Acc::default(),
         current: ctx.current_db.map(str::to_owned),
         nest: 0,
+        currents: Vec::new(),
     };
     w.run()?;
     w.check_all_classified()?;
+    let mut statements = w.statements;
+    whole_exec_comments(tokens, &mut statements);
     Ok(Out {
         edits: w.edits,
-        statements: w.statements,
+        statements,
+        currents: w.currents,
     })
 }
 
@@ -78,6 +86,15 @@ struct Acc {
     use_target: Option<UseTarget>,
     database: Option<String>,
     system_refs: Vec<SystemRef>,
+    ddl: Option<DdlTarget>,
+    nested_ddl: bool,
+}
+
+/// What `CREATE` modifiers before the object kind said.
+#[derive(Default, Clone, Copy)]
+struct Modifiers {
+    or_replace: bool,
+    temporary: bool,
 }
 
 /// A dotted name: up to four identifier tokens, maybe ending in `.*`.
@@ -244,6 +261,19 @@ const BODY_STARTS: &[&[u8]] = &[
     b"USE",
 ];
 
+/// Words that start a database option (`CREATE`/`ALTER DATABASE`).
+const DB_OPTIONS: &[&[u8]] = &[
+    b"DEFAULT",
+    b"CHARACTER",
+    b"CHAR",
+    b"CHARSET",
+    b"COLLATE",
+    b"COMMENT",
+    b"ENCRYPTION",
+    b"READ",
+    b"UPGRADE",
+];
+
 /// Ends of a statement list inside a compound statement.
 const LIST_ENDS: &[&[u8]] = &[b"END", b"ELSE", b"ELSEIF", b"WHEN", b"UNTIL"];
 
@@ -272,6 +302,8 @@ struct Walker<'a, 'c> {
     /// Recursion depth of the grammar functions, bounded so client input
     /// can't exhaust the stack (chapter 03, "Security conventions").
     nest: u32,
+    /// The current database each statement started with.
+    currents: Vec<Option<String>>,
 }
 
 /// Deepest nesting of subqueries, joins and compound statements accepted.
@@ -353,16 +385,128 @@ impl Walker<'_, '_> {
         a + 1 < self.n() && self.t[a].end == self.t[a + 1].start
     }
 
-    fn eat_if_exists(&mut self) {
-        if self.at(b"IF") && self.kw(self.i + 1, b"EXISTS") {
+    fn eat_if_exists(&mut self) -> bool {
+        let yes = self.at(b"IF") && self.kw(self.i + 1, b"EXISTS");
+        if yes {
             self.i += 2;
+        }
+        yes
+    }
+
+    fn eat_if_not_exists(&mut self) -> bool {
+        let yes = self.at(b"IF") && self.kw(self.i + 1, b"NOT") && self.kw(self.i + 2, b"EXISTS");
+        if yes {
+            self.i += 3;
+        }
+        yes
+    }
+
+    /// MariaDB's `WAIT n` or `NOWAIT` after a table name.
+    fn skip_wait(&mut self) {
+        if self.at(b"WAIT") && self.kind(self.i + 1) == Some(TokenKind::Number) {
+            self.i += 2;
+        } else {
+            self.eat(b"NOWAIT");
         }
     }
 
-    fn eat_if_not_exists(&mut self) {
-        if self.at(b"IF") && self.kw(self.i + 1, b"NOT") && self.kw(self.i + 2, b"EXISTS") {
-            self.i += 3;
+    // ----- DDL targets -----
+
+    /// The logical name a chain in an object position spells: `name` (in
+    /// the current database) or `db.name`.
+    fn ddl_name(&self, c: &Chain) -> Option<DdlName> {
+        match (c.n, c.star, c.long) {
+            (1, false, false) => Some(DdlName::unqualified(
+                &self.value(c.parts[0]),
+                self.current.as_deref(),
+            )),
+            (2, false, false) => Some(DdlName::qualified(
+                &self.value(c.parts[0]),
+                &self.value(c.parts[1]),
+            )),
+            _ => None,
         }
+    }
+
+    /// Records the statement's DDL target: at the top level it is the
+    /// statement's; inside a compound statement the gateway can't route it
+    /// through the catalog; inside a stored body it is a definition.
+    fn set_ddl(&mut self, target: Option<DdlTarget>) {
+        let Some(target) = target else {
+            return;
+        };
+        if self.body > 0 {
+            return;
+        }
+        if self.nest == 1 && self.depth == 0 {
+            self.cur.ddl = Some(target);
+        } else {
+            self.cur.nested_ddl = true;
+        }
+    }
+
+    /// `[DEFAULT] CHARACTER SET [=] x`, `[DEFAULT] COLLATE [=] x` and the
+    /// other database options, to the end of the statement.
+    fn db_options(&mut self) -> (Option<String>, Option<String>, Vec<String>) {
+        let (mut charset, mut collation, mut other) = (None, None, Vec::new());
+        while !self.at_end() {
+            self.eat(b"DEFAULT");
+            if self.at_end() {
+                break;
+            }
+            let word = self.bytes(self.i).to_ascii_uppercase();
+            let is_word = self.kind(self.i) == Some(TokenKind::Word);
+            match word.as_slice() {
+                b"CHARACTER" | b"CHAR" if is_word && self.kw(self.i + 1, b"SET") => {
+                    self.i += 2;
+                    charset = self.option_value();
+                }
+                b"CHARSET" if is_word => {
+                    self.i += 1;
+                    charset = self.option_value();
+                }
+                b"COLLATE" if is_word => {
+                    self.i += 1;
+                    collation = self.option_value();
+                }
+                b"ENCRYPTION" if is_word => {
+                    self.i += 1;
+                    let v = self.option_value();
+                    if !v.is_some_and(|v| v.eq_ignore_ascii_case("n")) {
+                        other.push("ENCRYPTION".to_owned());
+                    }
+                }
+                _ if is_word => {
+                    // COMMENT, READ ONLY, UPGRADE DATA DIRECTORY NAME, ...
+                    other.push(String::from_utf8_lossy(&word).into_owned());
+                    self.i += 1;
+                    while !self.at_end() && !self.kw_any(self.i, DB_OPTIONS) {
+                        self.i += 1;
+                    }
+                }
+                _ => self.i += 1,
+            }
+        }
+        (charset, collation, other)
+    }
+
+    /// `[=] value` of a database option: a word, quoted identifier or
+    /// string, lowercased.
+    fn option_value(&mut self) -> Option<String> {
+        if self.op(self.i, b"=") {
+            self.i += 1;
+        }
+        let j = self.i;
+        let v = match self.kind(j)? {
+            TokenKind::Word | TokenKind::QuotedIdent => self.value(j),
+            TokenKind::String => {
+                let raw = string_value(self.bytes(j), self.ctx.lex.no_backslash_escapes)?;
+                String::from_utf8_lossy(&raw).into_owned()
+            }
+            _ => return None,
+        };
+        self.i += 1;
+        Some(v.to_ascii_lowercase())
     }
 
     /// `(` followed by a query.
@@ -961,6 +1105,7 @@ impl Walker<'_, '_> {
             self.body = 0;
             self.account = false;
             self.creating_cols = false;
+            let current = self.current.clone();
             let kind = self.statement()?;
             // Whatever the grammar above did not consume, as expressions.
             while !self.at_end() {
@@ -978,9 +1123,12 @@ impl Walker<'_, '_> {
                 use_target: acc.use_target,
                 database: acc.database,
                 system_refs: acc.system_refs,
+                ddl: acc.ddl,
+                nested_ddl: acc.nested_ddl,
                 engine: Engine::Lexer,
                 engines_agree: true,
             });
+            self.currents.push(current);
         }
         Ok(())
     }
@@ -1110,15 +1258,31 @@ impl Walker<'_, '_> {
                 self.purpose = Purpose::Ddl;
                 self.i += 1;
                 if self.eat(b"TABLE") || self.eat(b"TABLES") {
+                    let if_exists = self.eat_if_exists();
+                    let mut pairs = Some(Vec::new());
                     loop {
-                        self.object(ObjectKind::Table, false)?;
-                        if self.eat(b"TO") {
-                            self.object(ObjectKind::Table, true)?;
+                        let from = self.object(ObjectKind::Table, false)?;
+                        self.skip_wait();
+                        let to = if self.eat(b"TO") {
+                            self.object(ObjectKind::Table, true)?
+                        } else {
+                            None
+                        };
+                        let pair = from
+                            .zip(to)
+                            .and_then(|(a, b)| self.ddl_name(&a).zip(self.ddl_name(&b)));
+                        match (&mut pairs, pair) {
+                            (Some(ps), Some(p)) => ps.push(p),
+                            _ => pairs = None,
                         }
                         if !self.eat_punct(b',') {
                             break;
                         }
                     }
+                    let target = pairs
+                        .filter(|p| !p.is_empty() && self.at_end())
+                        .map(|pairs| DdlTarget::RenameTables { pairs, if_exists });
+                    self.set_ddl(target);
                     Ok(StmtKind::Ddl)
                 } else {
                     self.account = true;
@@ -1130,7 +1294,13 @@ impl Walker<'_, '_> {
                 self.purpose = Purpose::Ddl;
                 self.i += 1;
                 self.eat(b"TABLE");
-                self.object(ObjectKind::Table, false)?;
+                let c = self.object(ObjectKind::Table, false)?;
+                self.skip_wait();
+                let target = c
+                    .filter(|_| self.at_end())
+                    .and_then(|c| self.ddl_name(&c))
+                    .map(|name| DdlTarget::Truncate { name });
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"GRANT" | b"REVOKE" => self.grant(),
@@ -1324,6 +1494,7 @@ impl Walker<'_, '_> {
         };
         let out = super::rewrite_depth(&inner, self.ctx, self.depth + 1)?;
         for s in out.statements {
+            self.cur.nested_ddl |= s.nested_ddl || s.ddl.is_some();
             self.cur
                 .system_refs
                 .extend(s.system_refs.into_iter().map(|mut r| {
@@ -1346,8 +1517,10 @@ impl Walker<'_, '_> {
     }
 
     /// Skips `DEFINER = user`, `ALGORITHM = x`, `SQL SECURITY x` and the
-    /// like before a `CREATE` or `ALTER` target.
-    fn skip_create_modifiers(&mut self) {
+    /// like before a `CREATE` or `ALTER` target, noting `OR REPLACE` and
+    /// `TEMPORARY`.
+    fn skip_create_modifiers(&mut self) -> Modifiers {
+        let mut m = Modifiers::default();
         loop {
             if self.at(b"DEFINER") {
                 self.i += 1;
@@ -1374,12 +1547,17 @@ impl Walker<'_, '_> {
                 self.i += 1;
             } else if self.at(b"SQL") && self.kw(self.i + 1, b"SECURITY") {
                 self.i += 3;
+            } else if self.at(b"OR") && self.kw(self.i + 1, b"REPLACE") {
+                m.or_replace = true;
+                self.i += 2;
+            } else if self.at(b"TEMPORARY") {
+                m.temporary = true;
+                self.i += 1;
             } else if self.kw_any(
                 self.i,
                 &[
                     b"OR",
                     b"REPLACE",
-                    b"TEMPORARY",
                     b"UNIQUE",
                     b"FULLTEXT",
                     b"SPATIAL",
@@ -1391,16 +1569,37 @@ impl Walker<'_, '_> {
             ) {
                 self.i += 1;
             } else {
-                return;
+                return m;
             }
         }
+    }
+
+    /// A `CREATE` target: the name, then the facts the caller adds.
+    fn create_target(
+        &self,
+        kind: DdlKind,
+        c: Option<Chain>,
+        if_not_exists: bool,
+        m: Modifiers,
+    ) -> Option<DdlTarget> {
+        let name = self.ddl_name(&c?)?;
+        Some(DdlTarget::CreateObject {
+            kind,
+            name,
+            if_not_exists,
+            or_replace: m.or_replace,
+            temporary: m.temporary,
+            parent: None,
+            like: None,
+            as_select: false,
+        })
     }
 
     #[allow(clippy::too_many_lines)]
     fn create(&mut self) -> R<StmtKind> {
         self.purpose = Purpose::Ddl;
         self.i += 1;
-        self.skip_create_modifiers();
+        let m = self.skip_create_modifiers();
         let Some(word) = (self.kind(self.i) == Some(TokenKind::Word))
             .then(|| self.bytes(self.i).to_ascii_uppercase())
         else {
@@ -1410,7 +1609,8 @@ impl Walker<'_, '_> {
         self.i += 1;
         match word.as_slice() {
             b"DATABASE" | b"SCHEMA" => {
-                self.eat_if_not_exists();
+                let if_not_exists = self.eat_if_not_exists();
+                let mut db = None;
                 if self.ident(self.i) {
                     let name = self.value(self.i);
                     if !self.ctx.internal && is_reserved_database(&name) {
@@ -1420,48 +1620,75 @@ impl Walker<'_, '_> {
                         self.mark(&c);
                     }
                     self.i += 1;
-                    self.cur.database = Some(name);
+                    self.cur.database = Some(name.clone());
+                    db = Some(name);
                 }
+                let (charset, collation, other_options) = self.db_options();
+                self.set_ddl(db.map(|name| DdlTarget::CreateDatabase {
+                    name,
+                    if_not_exists,
+                    or_replace: m.or_replace,
+                    charset,
+                    collation,
+                    other_options,
+                }));
                 self.opaque();
                 Ok(StmtKind::CreateDatabase)
             }
             b"TABLE" => {
-                self.eat_if_not_exists();
-                self.object(ObjectKind::Table, true)?;
-                self.create_table_rest()?;
+                let ine = self.eat_if_not_exists();
+                let c = self.object(ObjectKind::Table, true)?;
+                let (like, select) = self.create_table_rest()?;
+                let mut target = self.create_target(DdlKind::Table, c, ine, m);
+                if let Some(DdlTarget::CreateObject {
+                    like: l, as_select, ..
+                }) = &mut target
+                {
+                    *l = like.and_then(|c| self.ddl_name(&c));
+                    *as_select = select;
+                    if like.is_some() && l.is_none() {
+                        target = None;
+                    }
+                }
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"VIEW" => {
-                self.eat_if_not_exists();
-                self.object(ObjectKind::View, true)?;
+                let ine = self.eat_if_not_exists();
+                let c = self.object(ObjectKind::View, true)?;
                 self.view_rest()?;
+                let target = self.create_target(DdlKind::View, c, ine, m);
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"PROCEDURE" | b"FUNCTION" => {
-                self.eat_if_not_exists();
+                let ine = self.eat_if_not_exists();
                 let func = word == b"FUNCTION";
                 // A loadable function: CREATE FUNCTION f RETURNS STRING SONAME 'x'.
                 if func && self.kw(self.i + 1, b"RETURNS") {
                     self.opaque();
                     return Ok(StmtKind::Other);
                 }
-                let kind = if func {
-                    ObjectKind::Function
+                let (kind, dk) = if func {
+                    (ObjectKind::Function, DdlKind::Function)
                 } else {
-                    ObjectKind::Procedure
+                    (ObjectKind::Procedure, DdlKind::Procedure)
                 };
-                self.object(kind, true)?;
+                let c = self.object(kind, true)?;
                 self.routine_rest()?;
+                let target = self.create_target(dk, c, ine, m);
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"TRIGGER" => {
-                self.eat_if_not_exists();
-                self.object(ObjectKind::Trigger, true)?;
+                let ine = self.eat_if_not_exists();
+                let c = self.object(ObjectKind::Trigger, true)?;
                 while !self.at_end() && !self.at(b"ON") {
                     self.i += 1; // BEFORE|AFTER INSERT|UPDATE|DELETE
                 }
+                let mut parent = None;
                 if self.eat(b"ON") {
-                    self.object(ObjectKind::Table, false)?;
+                    parent = self.object(ObjectKind::Table, false)?;
                 }
                 if self.at(b"FOR") && self.kw(self.i + 1, b"EACH") {
                     self.i += 3;
@@ -1470,32 +1697,62 @@ impl Walker<'_, '_> {
                     self.object(ObjectKind::Trigger, false)?;
                 }
                 self.stored_body()?;
+                let parent = parent.and_then(|p| self.ddl_name(&p));
+                let mut target = self.create_target(DdlKind::Trigger, c, ine, m);
+                if let Some(DdlTarget::CreateObject { parent: p, .. }) = &mut target {
+                    *p = parent;
+                    if p.is_none() {
+                        target = None;
+                    }
+                }
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"EVENT" => {
-                self.eat_if_not_exists();
-                self.object(ObjectKind::Event, true)?;
+                let ine = self.eat_if_not_exists();
+                let c = self.object(ObjectKind::Event, true)?;
                 self.event_rest()?;
+                let target = self.create_target(DdlKind::Event, c, ine, m);
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"INDEX" => {
-                self.eat_if_not_exists();
+                let if_not_exists = self.eat_if_not_exists();
+                let mut name = None;
                 if self.ident(self.i) && !self.at(b"ON") {
+                    name = Some(self.value(self.i));
                     self.i += 1;
                 }
                 while !self.at_end() && !self.at(b"ON") {
                     self.i += 1; // USING BTREE
                 }
+                let mut table = None;
                 if self.eat(b"ON") {
-                    self.object(ObjectKind::Table, false)?;
+                    table = self.object(ObjectKind::Table, false)?;
                 }
                 self.expr(Stop::NONE)?;
+                let target =
+                    table
+                        .and_then(|t| self.ddl_name(&t))
+                        .map(|table| DdlTarget::AlterObject {
+                            kind: DdlKind::Table,
+                            name: table,
+                            if_exists: false,
+                            op: AlterOp::CreateIndex {
+                                name,
+                                if_not_exists,
+                                or_replace: m.or_replace,
+                            },
+                        });
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"SEQUENCE" => {
-                self.eat_if_not_exists();
-                self.object(ObjectKind::Sequence, true)?;
+                let ine = self.eat_if_not_exists();
+                let c = self.object(ObjectKind::Sequence, true)?;
                 self.expr(Stop::NONE)?;
+                let target = self.create_target(DdlKind::Sequence, c, ine, m);
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"USER" | b"ROLE" => {
@@ -1510,19 +1767,21 @@ impl Walker<'_, '_> {
         }
     }
 
-    /// After `CREATE TABLE name`.
-    fn create_table_rest(&mut self) -> R {
+    /// After `CREATE TABLE name`: the `LIKE` source, and whether a query
+    /// follows.
+    fn create_table_rest(&mut self) -> R<(Option<Chain>, bool)> {
         if self.eat(b"LIKE") {
-            self.object(ObjectKind::Table, false)?;
-            return Ok(());
+            let c = self.object(ObjectKind::Table, false)?;
+            return Ok((c, false));
         }
         if self.punct(self.i, b'(') && self.kw(self.i + 1, b"LIKE") {
             self.i += 2;
-            self.object(ObjectKind::Table, false)?;
+            let c = self.object(ObjectKind::Table, false)?;
             self.eat_punct(b')');
-            return Ok(());
+            return Ok((c, false));
         }
-        if self.punct(self.i, b'(') && !self.subquery_at(self.i + 1) {
+        let mut select = self.punct(self.i, b'(') && self.subquery_at(self.i + 1);
+        if self.punct(self.i, b'(') && !select {
             self.i += 1;
             self.ddl(Stop::NONE)?;
             self.eat_punct(b')');
@@ -1535,9 +1794,10 @@ impl Walker<'_, '_> {
             self.i += 1;
         }
         if !self.at_end() {
+            select = true;
             self.query()?;
         }
-        Ok(())
+        Ok((None, select))
     }
 
     /// A DDL body or option list: expressions, plus `REFERENCES t` and
@@ -1646,12 +1906,13 @@ impl Walker<'_, '_> {
 
     /// After `CREATE|ALTER EVENT name`: the schedule and options, maybe a
     /// rename, then `DO body`.
-    fn event_rest(&mut self) -> R {
+    fn event_rest(&mut self) -> R<Option<Chain>> {
+        let mut renamed = None;
         loop {
             self.expr(Stop::words(&[b"DO", b"RENAME"]))?;
             if self.at(b"RENAME") && self.kw(self.i + 1, b"TO") {
                 self.i += 2;
-                self.object(ObjectKind::Event, true)?;
+                renamed = self.object(ObjectKind::Event, true)?;
                 continue;
             }
             break;
@@ -1659,7 +1920,7 @@ impl Walker<'_, '_> {
         if self.eat(b"DO") {
             self.stored_body()?;
         }
-        Ok(())
+        Ok(renamed)
     }
 
     /// One statement of a compound body, or a whole single-statement body.
@@ -1818,6 +2079,27 @@ impl Walker<'_, '_> {
         self.expr(Stop::NONE)
     }
 
+    /// An `ALTER` target.
+    fn alter_target(
+        &self,
+        kind: DdlKind,
+        c: Option<Chain>,
+        if_exists: bool,
+        rename_to: Option<Chain>,
+    ) -> Option<DdlTarget> {
+        let name = self.ddl_name(&c?)?;
+        let rename_to = match rename_to {
+            Some(r) => Some(self.ddl_name(&r)?),
+            None => None,
+        };
+        Some(DdlTarget::AlterObject {
+            kind,
+            name,
+            if_exists,
+            op: AlterOp::Change { rename_to },
+        })
+    }
+
     #[allow(clippy::too_many_lines)]
     fn alter(&mut self) -> R<StmtKind> {
         self.purpose = Purpose::Ddl;
@@ -1832,21 +2114,32 @@ impl Walker<'_, '_> {
         self.i += 1;
         match word.as_slice() {
             b"TABLE" => {
-                self.eat_if_exists();
-                self.object(ObjectKind::Table, false)?;
+                let if_exists = self.eat_if_exists();
+                let c = self.object(ObjectKind::Table, false)?;
+                // ALTER TABLE t SPRIG SET (...) writes settings (chapter 08).
+                let settings = self.at(b"SPRIG");
+                let mut renamed = None;
+                let mut other = false;
                 loop {
+                    let before = self.i;
                     self.ddl(Stop::words(&[b"RENAME", b"EXCHANGE"]))?;
+                    other |= self.i != before;
                     if self.at(b"RENAME") {
                         self.i += 1;
                         if self.kw_any(self.i, &[b"COLUMN", b"INDEX", b"KEY", b"CONSTRAINT"]) {
+                            other = true;
                             self.i += 1;
                             continue;
                         }
                         if self.kw_any(self.i, &[b"TO", b"AS"]) {
                             self.i += 1;
                         }
-                        self.object(ObjectKind::Table, true)?;
+                        renamed = self.object(ObjectKind::Table, true)?;
+                        if renamed.is_none() {
+                            other = true;
+                        }
                     } else if self.at(b"EXCHANGE") {
+                        other = true;
                         while !self.at_end() && !self.at(b"TABLE") {
                             self.i += 1;
                         }
@@ -1857,51 +2150,75 @@ impl Walker<'_, '_> {
                         break;
                     }
                 }
+                let target = if settings {
+                    None
+                } else if let (Some(from), Some(to), false) = (c, renamed, other) {
+                    self.ddl_name(&from)
+                        .zip(self.ddl_name(&to))
+                        .map(|p| DdlTarget::RenameTables {
+                            pairs: vec![p],
+                            if_exists,
+                        })
+                } else {
+                    self.alter_target(DdlKind::Table, c, if_exists, renamed)
+                };
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"DATABASE" | b"SCHEMA" => {
-                const OPTIONS: &[&[u8]] = &[
-                    b"CHARACTER",
-                    b"CHARSET",
-                    b"DEFAULT",
-                    b"COLLATE",
-                    b"ENCRYPTION",
-                    b"READ",
-                    b"COMMENT",
-                    b"UPGRADE",
-                ];
-                if self.ident(self.i) && !self.kw_any(self.i, OPTIONS) {
+                let mut explicit = None;
+                if self.ident(self.i) && !self.kw_any(self.i, DB_OPTIONS) && !self.at(b"SPRIG") {
                     let tok = self.i;
                     let name = self.database()?;
                     self.cur.database = Some(name.unwrap_or_else(|| self.value(tok)));
+                    explicit = Some(self.value(tok));
+                }
+                if !self.at(b"SPRIG") {
+                    let (charset, collation, other_options) = self.db_options();
+                    let target = DdlTarget::AlterDatabase {
+                        explicit: explicit.is_some(),
+                        name: explicit.or_else(|| self.current.clone()),
+                        charset,
+                        collation,
+                        other_options,
+                    };
+                    self.set_ddl(Some(target));
                 }
                 self.opaque();
                 Ok(StmtKind::AlterDatabase)
             }
             b"VIEW" => {
-                self.object(ObjectKind::View, false)?;
+                let c = self.object(ObjectKind::View, false)?;
                 self.view_rest()?;
+                let target = self.alter_target(DdlKind::View, c, false, None);
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"PROCEDURE" | b"FUNCTION" => {
-                let kind = if word == b"FUNCTION" {
-                    ObjectKind::Function
+                let (kind, dk) = if word == b"FUNCTION" {
+                    (ObjectKind::Function, DdlKind::Function)
                 } else {
-                    ObjectKind::Procedure
+                    (ObjectKind::Procedure, DdlKind::Procedure)
                 };
-                self.object(kind, false)?;
+                let c = self.object(kind, false)?;
                 self.opaque();
+                let target = self.alter_target(dk, c, false, None);
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"EVENT" => {
-                self.object(ObjectKind::Event, false)?;
-                self.event_rest()?;
+                let c = self.object(ObjectKind::Event, false)?;
+                let renamed = self.event_rest()?;
+                let target = self.alter_target(DdlKind::Event, c, false, renamed);
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"SEQUENCE" => {
-                self.eat_if_exists();
-                self.object(ObjectKind::Sequence, false)?;
+                let if_exists = self.eat_if_exists();
+                let c = self.object(ObjectKind::Sequence, false)?;
                 self.expr(Stop::NONE)?;
+                let target = self.alter_target(DdlKind::Sequence, c, if_exists, None);
+                self.set_ddl(target);
                 Ok(StmtKind::Ddl)
             }
             b"USER" | b"ROLE" => {
@@ -1916,10 +2233,11 @@ impl Walker<'_, '_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn drop(&mut self) -> R<StmtKind> {
         self.purpose = Purpose::Ddl;
         self.i += 1;
-        self.eat(b"TEMPORARY");
+        let temporary = self.eat(b"TEMPORARY");
         let Some(word) = (self.kind(self.i) == Some(TokenKind::Word))
             .then(|| self.bytes(self.i).to_ascii_uppercase())
         else {
@@ -1936,7 +2254,7 @@ impl Walker<'_, '_> {
             b"TRIGGER" => ObjectKind::Trigger,
             b"EVENT" => ObjectKind::Event,
             b"DATABASE" | b"SCHEMA" => {
-                let if_exists = self.at(b"IF");
+                let if_exists = self.at(b"IF") && self.kw(self.i + 1, b"EXISTS");
                 self.eat_if_exists();
                 if self.ident(self.i) {
                     let tok = self.i;
@@ -1952,22 +2270,41 @@ impl Walker<'_, '_> {
                             self.mark(&c);
                         }
                         self.i += 1;
-                        self.cur.database = Some(name);
+                        self.cur.database = Some(name.clone());
                     } else {
                         let logical = self.database()?;
-                        self.cur.database = Some(logical.unwrap_or(name));
+                        self.cur.database = Some(logical.unwrap_or_else(|| name.clone()));
                     }
+                    self.set_ddl(Some(DdlTarget::DropDatabase { name, if_exists }));
                 }
                 self.opaque();
                 return Ok(StmtKind::DropDatabase);
             }
             b"INDEX" => {
+                if self.kw_any(self.i, &[b"ONLINE", b"OFFLINE"]) && !self.kw(self.i + 1, b"ON") {
+                    self.i += 1;
+                }
+                let if_exists = self.eat_if_exists();
+                let mut name = None;
+                if self.ident(self.i) && !self.at(b"ON") {
+                    name = Some(self.value(self.i));
+                }
                 while !self.at_end() && !self.at(b"ON") {
                     self.i += 1;
                 }
+                let mut table = None;
                 if self.eat(b"ON") {
-                    self.object(ObjectKind::Table, false)?;
+                    table = self.object(ObjectKind::Table, false)?;
                 }
+                let target =
+                    name.zip(table.and_then(|t| self.ddl_name(&t)))
+                        .map(|(name, table)| DdlTarget::AlterObject {
+                            kind: DdlKind::Table,
+                            name: table,
+                            if_exists: false,
+                            op: AlterOp::DropIndex { name, if_exists },
+                        });
+                self.set_ddl(target);
                 self.opaque();
                 return Ok(StmtKind::Ddl);
             }
@@ -1985,8 +2322,27 @@ impl Walker<'_, '_> {
                 return Ok(StmtKind::Other);
             }
         };
-        self.eat_if_exists();
-        self.object_list(kind, false)?;
+        let if_exists = self.eat_if_exists();
+        let mut names = Some(Vec::new());
+        loop {
+            let c = self.object(kind, false)?;
+            match (&mut names, c.and_then(|c| self.ddl_name(&c))) {
+                (Some(ns), Some(n)) => ns.push(n),
+                _ => names = None,
+            }
+            if !self.eat_punct(b',') {
+                break;
+            }
+        }
+        let target = names
+            .filter(|n| !n.is_empty())
+            .map(|names| DdlTarget::DropObjects {
+                kind: ddl_kind(kind),
+                names,
+                if_exists,
+                temporary,
+            });
+        self.set_ddl(target);
         self.opaque();
         Ok(StmtKind::Ddl)
     }
@@ -2180,5 +2536,94 @@ impl Walker<'_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+/// The DDL kind of an object kind the `DROP` grammar names.
+const fn ddl_kind(kind: ObjectKind) -> DdlKind {
+    match kind {
+        ObjectKind::View => DdlKind::View,
+        ObjectKind::Sequence => DdlKind::Sequence,
+        ObjectKind::Procedure => DdlKind::Procedure,
+        ObjectKind::Function => DdlKind::Function,
+        ObjectKind::Trigger => DdlKind::Trigger,
+        ObjectKind::Event => DdlKind::Event,
+        _ => DdlKind::Table,
+    }
+}
+
+/// Widens each statement's range to whole executable comments: dump tools
+/// write `START TRANSACTION /*!40100 WITH CONSISTENT SNAPSHOT */` and
+/// `/*!50003 CREATE*/ /*!50017 DEFINER=...*/ /*!50003 TRIGGER ... END */`,
+/// whose markers are trivia, so a range from the first to the last
+/// significant token would cut a comment open at either end. A statement
+/// starting inside a comment starts at its `/*!`; one ending inside a
+/// comment ends after its `*/`, unless another statement shares that
+/// comment (`/*!40101 SET a = 1; SET b = 2 */` keeps its inner ranges).
+fn whole_exec_comments(tokens: &[Token], statements: &mut [StatementInfo]) {
+    // Depth before each token.
+    let mut depth = Vec::with_capacity(tokens.len());
+    let mut open = 0usize;
+    for t in tokens {
+        depth.push(open);
+        match t.kind {
+            TokenKind::ExecOpen => open += 1,
+            TokenKind::ExecClose => open = open.saturating_sub(1),
+            _ => {}
+        }
+    }
+    let at = |pos: usize| tokens.iter().position(|t| t.start as usize >= pos);
+    for i in 0..statements.len() {
+        let prev_end = if i == 0 {
+            0
+        } else {
+            statements[i - 1].range.end
+        };
+        let next_start = statements.get(i + 1).map_or(usize::MAX, |s| s.range.start);
+        let r = statements[i].range.clone();
+        let Some(first) = at(r.start) else { continue };
+        let mut start = r.start;
+        // Back over the openers this statement sits in.
+        let mut back = first;
+        let mut want = depth[first];
+        while want > 0 && back > 0 {
+            back -= 1;
+            let t = tokens[back];
+            if (t.start as usize) < prev_end {
+                break;
+            }
+            if t.kind == TokenKind::ExecOpen && depth[back] < want {
+                start = t.start as usize;
+                want = depth[back];
+            } else if !t.kind.is_trivia() {
+                break;
+            }
+        }
+        // Forward over the closers that bring the depth back.
+        let last = at(r.end).unwrap_or(tokens.len());
+        let mut end = r.end;
+        let mut level = if last < tokens.len() {
+            depth[last]
+        } else {
+            open
+        };
+        let mut fwd = last;
+        while level > want && fwd < tokens.len() {
+            let t = tokens[fwd];
+            if t.start as usize >= next_start {
+                break;
+            }
+            if t.kind == TokenKind::ExecClose {
+                end = t.end as usize;
+                level -= 1;
+            } else if !t.kind.is_trivia() {
+                break;
+            }
+            fwd += 1;
+        }
+        // Unbalanced either way: keep the original range.
+        if level == want {
+            statements[i].range = start..end;
+        }
     }
 }
