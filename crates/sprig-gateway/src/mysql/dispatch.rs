@@ -50,7 +50,7 @@ use sprig_proto_mysql::{Caps, ColumnDef, Command, ErrPacket, PacketCodec, Person
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 
-use super::local::{self, Local, PersonaVar};
+use super::local::{self, Local};
 use super::settings::FrontendSettings;
 use super::sink::WireSink;
 use super::watch::ClientWatch;
@@ -221,7 +221,24 @@ impl CommandLoop {
     async fn serve(&mut self) -> Result<()> {
         loop {
             self.framed.codec_mut().reset_seq();
-            let payload = match self.framed.next().await {
+            // Idle outside a transaction, a close at the safe point (drain,
+            // a stricter listener, a revoked account) happens at once: the
+            // reason's error, unsolicited, then the close (as MySQL's 4031).
+            let idle_close = !self.status.contains(StatusFlags::IN_TRANS);
+            let handle = Arc::clone(self.session.handle());
+            let next = tokio::select! {
+                biased;
+                n = self.framed.next() => Some(n),
+                () = handle.flags().close_wanted(), if idle_close => None,
+            };
+            let Some(next) = next else {
+                if let Some(reason) = self.session.flags().close_reason() {
+                    let _ = self.send_error(&reason.error()).await;
+                    let _ = super::sink::flush(&mut self.framed).await;
+                }
+                return Ok(());
+            };
+            let payload = match next {
                 None => return Ok(()),
                 Some(Err(e)) => {
                     let (code, state) = e.errno();
@@ -765,138 +782,28 @@ impl CommandLoop {
     // ----- answers from the gateway ---------------------------------------
 
     async fn local(&mut self, l: Local) -> Result<Flow> {
-        match l {
-            Local::Variables(items) => self.variables(&items).await,
-            Local::Kill { id, query_only } => self.kill(id, query_only).await,
-            Local::ProcessList { full } => self.process_list(full).await,
-        }
-    }
-
-    async fn variables(&mut self, items: &[(String, PersonaVar)]) -> Result<Flow> {
-        let persona = self.proto.persona;
-        let charset = u16::from(persona.greeting_collation());
-        let mut cols = Vec::with_capacity(items.len());
-        let mut vals = Vec::with_capacity(items.len());
-        for (name, var) in items {
-            cols.push(if var.is_int() {
-                int_column(name, true)
-            } else {
-                text_column(name, charset)
-            });
-            vals.push(match var {
-                PersonaVar::Version => self.settings.version(persona).to_owned(),
-                PersonaVar::VersionComment => {
-                    format!("SprigDB {}", env!("CARGO_PKG_VERSION"))
-                }
-                PersonaVar::ProtocolVersion => "10".to_owned(),
-                PersonaVar::MaxAllowedPacket => self.settings.max_allowed_packet.to_string(),
-                PersonaVar::Hostname => self.shared.cfg.hostname.clone(),
-            });
-        }
-        let row: Vec<Option<&[u8]>> = vals.iter().map(|v| Some(v.as_bytes())).collect();
-        self.synthesized(&cols, &[row]).await
-    }
-
-    /// Sends a synthesized text resultset.
-    async fn synthesized(
-        &mut self,
-        cols: &[ColumnDef],
-        rows: &[Vec<Option<&[u8]>>],
-    ) -> Result<Flow> {
-        let status = self.status;
+        let env = super::answer::LocalEnv {
+            sessions: &self.ctx.sessions,
+            persona: self.proto.persona,
+            version: self.settings.version(self.proto.persona),
+            max_allowed_packet: self.settings.max_allowed_packet,
+            hostname: &self.shared.cfg.hostname,
+            status: self.status,
+            peers: self.ctx.peers.as_deref(),
+        };
         let mut sink = WireSink::new(&mut self.framed, self.proto.persona, self.proto.caps);
-        sink.begin_rows(cols, RowFormat::Text).await?;
-        for r in rows {
-            sink.row(RowValues::Text(r)).await?;
-        }
-        sink.end_rows(EndOfRows {
-            status,
-            warnings: 0,
-        })
-        .await?;
+        super::answer::answer(&l, &self.session, &env, &mut sink).await?;
         Ok(Flow::Continue)
     }
 
-    /// `KILL [CONNECTION | QUERY] id` and `COM_PROCESS_KILL`. Until chapter
-    /// 29's privileges, a session may kill only sessions of its own user
-    /// (MySQL's rule without `CONNECTION_ADMIN`).
+    /// `COM_PROCESS_KILL`.
     async fn kill(&mut self, id: ConnId, query_only: bool) -> Result<Flow> {
-        let me = self.session.principal.as_ref().map(|p| p.user.clone());
-        let my_tenant = self.session.principal.as_ref().and_then(|p| p.tenant);
-        let Some(target) = self.ctx.sessions.get(id) else {
-            return self
-                .send_err(ErrPacket::new(
-                    1094,
-                    *b"HY000",
-                    format!("Unknown thread id: {id}"),
-                ))
-                .await;
-        };
-        let row = target.process_row(self.ctx.sessions.clock().now());
-        if row.user.is_none() || row.user != me || row.tenant != my_tenant {
-            return self
-                .send_err(ErrPacket::new(
-                    1095,
-                    *b"HY000",
-                    format!("You are not owner of thread {id}"),
-                ))
-                .await;
-        }
-        if query_only {
-            target.flags().kill_query();
-        } else {
-            target.flags().kill_conn();
-        }
-        self.send_ok(OkPacket::new(self.status)).await
+        self.local(Local::Kill { id, query_only }).await
     }
 
-    /// `SHOW [FULL] PROCESSLIST` and `COM_PROCESS_INFO`: this gateway's
-    /// sessions of the same user (chapter 29's `PROCESS` privilege later).
+    /// `COM_PROCESS_INFO`.
     async fn process_list(&mut self, full: bool) -> Result<Flow> {
-        let charset = u16::from(self.proto.persona.greeting_collation());
-        let me = self.session.principal.as_ref().map(|p| p.user.clone());
-        let my_tenant = self.session.principal.as_ref().and_then(|p| p.tenant);
-        let cols = vec![
-            int_column("Id", true),
-            text_column("User", charset),
-            text_column("Host", charset),
-            text_column("db", charset),
-            text_column("Command", charset),
-            int_column("Time", false),
-            text_column("State", charset),
-            text_column("Info", charset),
-        ];
-        let rows: Vec<[Option<String>; 8]> = self
-            .ctx
-            .sessions
-            .list()
-            .into_iter()
-            .filter(|r| r.user.is_some() && r.user == me && r.tenant == my_tenant)
-            .map(|r| {
-                let info = r.info.map(|i| {
-                    if full {
-                        i
-                    } else {
-                        i.chars().take(100).collect()
-                    }
-                });
-                [
-                    Some(r.id.0.to_string()),
-                    r.user,
-                    Some(r.host.to_string()),
-                    r.db,
-                    Some(r.command.to_owned()),
-                    Some(r.time.as_secs().to_string()),
-                    Some(r.state.as_str().to_owned()),
-                    info,
-                ]
-            })
-            .collect();
-        let refs: Vec<Vec<Option<&[u8]>>> = rows
-            .iter()
-            .map(|r| r.iter().map(|v| v.as_deref().map(str::as_bytes)).collect())
-            .collect();
-        self.synthesized(&cols, &refs).await
+        self.local(Local::ProcessList { full }).await
     }
 
     /// `COM_STATISTICS`: a status string (not an OK packet).

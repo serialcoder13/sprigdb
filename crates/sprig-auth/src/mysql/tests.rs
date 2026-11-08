@@ -40,7 +40,7 @@ fn registry() -> &'static Registry {
     })
 }
 
-fn snapshot(tenant: TenantId, auth: TenantAuth, auth_version: u64) -> Arc<TenantCatalog> {
+pub(crate) fn snapshot(tenant: TenantId, auth: TenantAuth, auth_version: u64) -> Arc<TenantCatalog> {
     let loaded = Loaded {
         snapshot: Snapshot {
             versions: Versions {
@@ -122,6 +122,8 @@ struct World {
     svc: Arc<LoginService>,
     catalogs: Arc<Catalogs>,
     clock: Arc<ManualClock>,
+    state: Arc<crate::policy::MemLoginState>,
+    audit: Arc<crate::audit::MemoryAudit>,
 }
 
 /// Tenant `acme` (42) with:
@@ -136,7 +138,14 @@ struct World {
 /// 9 nat@% native only "npw"
 /// 10 svc@% "pw", `api_key` only
 /// and tenant `susp` (43, suspended) with 1 carol@% "pw".
-fn world(policy: FixedPolicy) -> World {
+fn world(mut policy: FixedPolicy) -> World {
+    // Rate limits off unless a test asks: they'd slow the timing tests.
+    for key in [
+        crate::settings::DELAY_AFTER_FAILURES.key,
+        crate::settings::IP_FAILURES_PER_MINUTE.key,
+    ] {
+        policy.0.entry(key).or_insert(Value::Int(0));
+    }
     let clock = Arc::new(ManualClock::new());
     let now = clock.wall();
     let mut users: Vec<UserRow> = Vec::new();
@@ -227,10 +236,17 @@ fn world(policy: FixedPolicy) -> World {
         )),
     )
     .with_clock(clock.clone());
+    let state = crate::policy::MemLoginState::new();
+    let audit = crate::audit::MemoryAudit::new();
+    let svc = svc
+        .with_login_state(state.clone())
+        .with_audit(audit.clone());
     World {
         svc: Arc::new(svc),
         catalogs,
         clock,
+        state,
+        audit,
     }
 }
 
@@ -715,4 +731,129 @@ async fn a_saturated_hash_pool_gives_39301() {
         run(&svc, req("acme.alice"), b"pw").await.verdict,
         AuthVerdict::Accept
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_logins_lock_the_account() {
+    let mut p = FixedPolicy::default();
+    p.0.insert(crate::settings::FAILED_LOGIN_ATTEMPTS.key, Value::Int(2));
+    p.0.insert(crate::settings::PASSWORD_LOCK_MINUTES.key, Value::Int(1));
+    let w = world(p);
+    // Two wrong passwords: the second locks (in the shared state).
+    for _ in 0..2 {
+        assert_eq!(
+            err(&run(&w.svc, req("acme.alice"), b"wrong").await.verdict).code,
+            1045
+        );
+    }
+    let row = w.state.row(ACME, UserId(1)).unwrap();
+    assert_eq!(row.consecutive_failures, 2);
+    let until = row.locked_until.unwrap();
+    assert_eq!(until, w.clock.wall() + Duration::from_secs(60));
+    // Unknown users and accounts of other names aren't counted.
+    let _ = run(&w.svc, req("acme.nobody"), b"wrong").await;
+    assert!(w.state.row(ACME, UserId(99)).is_none());
+    let names = w.audit.names();
+    assert_eq!(
+        names,
+        vec![
+            "auth.login_failed",
+            "auth.login_failed",
+            "auth.account_locked",
+            "auth.login_failed"
+        ]
+    );
+    let locked = &w.audit.events()[2];
+    assert_eq!(locked.reason, Some("failed_logins"));
+    assert_eq!(locked.user.as_deref(), Some("alice"));
+    // The lock reaches the login through the cache (here: a new snapshot).
+    let lock = TempLock {
+        user_id: UserId(1),
+        locked_until: until,
+        consecutive_failures: 2,
+    };
+    let acme = TenantAuth::of(&w.catalogs.map.lock().unwrap()[&ACME])
+        .unwrap()
+        .apply(Vec::new(), &[], vec![lock]);
+    w.catalogs
+        .map
+        .lock()
+        .unwrap()
+        .insert(ACME, snapshot(ACME, acme, 8));
+    let e = err(&run(&w.svc, req("acme.alice"), b"pw").await.verdict).clone();
+    assert_eq!(e.code, 3955);
+    let maria = LoginRequest {
+        persona: Persona::MariaDb,
+        ..req("acme.alice")
+    };
+    assert_eq!(err(&run(&w.svc, maria, b"pw").await.verdict).code, 4150);
+    // After a minute it unlocks by itself, and the login clears the row.
+    w.clock.advance(Duration::from_secs(61));
+    let r = run(&w.svc, req("acme.alice"), b"pw").await;
+    assert_eq!(r.verdict, AuthVerdict::Accept);
+    for _ in 0..50 {
+        if w.audit.names().last() == Some(&"auth.account_unlocked") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(w.state.row(ACME, UserId(1)).unwrap().locked_until.is_none());
+    let ev = w.audit.events();
+    let unlocked = ev.iter().find(|e| e.event == "auth.account_unlocked").unwrap();
+    assert_eq!(unlocked.reason, Some("lock_expired"));
+    assert!(ev.iter().any(|e| e.event == "auth.login_succeeded"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tracking_off_counts_nothing() {
+    let w = world(FixedPolicy::default());
+    for _ in 0..3 {
+        let _ = run(&w.svc, req("acme.alice"), b"wrong").await;
+    }
+    assert!(w.state.row(ACME, UserId(1)).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn too_many_failures_from_an_address_refuse_it() {
+    let mut p = FixedPolicy::default();
+    p.0.insert(crate::settings::IP_FAILURES_PER_MINUTE.key, Value::Int(3));
+    p.0.insert(crate::settings::IP_BLOCK_SECONDS.key, Value::Int(60));
+    let w = world(p);
+    let ip: IpAddr = "192.0.2.10".parse().unwrap();
+    for _ in 0..3 {
+        let _ = run(&w.svc, req("acme.nobody"), b"wrong").await;
+        w.svc.admit(ip).unwrap();
+    }
+    let _ = run(&w.svc, req("acme.alice"), b"wrong").await;
+    let e = w.svc.admit(ip).unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::LoginRateLimited));
+    assert!(w.svc.admit("192.0.2.11".parse().unwrap()).is_ok());
+    assert!(w.audit.names().contains(&"auth.rate_limited"));
+    w.clock.advance(Duration::from_secs(60));
+    w.svc.admit(ip).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_failures_are_delayed() {
+    let mut p = FixedPolicy::default();
+    p.0.insert(crate::settings::DELAY_AFTER_FAILURES.key, Value::Int(1));
+    p.0.insert(crate::settings::FAILURE_DELAY_MS.key, Value::Int(300));
+    p.0.insert(crate::settings::FAILURE_DELAY_MAX_MS.key, Value::Int(300));
+    let w = world(p);
+    let first = run(&w.svc, req("acme.alice"), b"wrong").await.took;
+    let second = run(&w.svc, req("acme.alice"), b"wrong").await.took;
+    assert!(
+        second >= first + Duration::from_millis(250),
+        "{first:?} then {second:?}"
+    );
+    // Another address isn't slowed; a success resets.
+    let other = LoginRequest {
+        client_ip: "192.0.2.99".parse().unwrap(),
+        ..req("acme.alice")
+    };
+    let t = run(&w.svc, other, b"wrong").await.took;
+    assert!(t < first + Duration::from_millis(250), "{t:?}");
+    assert_eq!(run(&w.svc, req("acme.alice"), b"pw").await.verdict, AuthVerdict::Accept);
+    let t = run(&w.svc, req("acme.alice"), b"wrong").await.took;
+    assert!(t < first + Duration::from_millis(250), "{t:?}");
 }

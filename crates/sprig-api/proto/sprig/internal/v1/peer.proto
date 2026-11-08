@@ -1,0 +1,88 @@
+// sprig.internal.v1.GatewayPeer: gateways calling each other on 7403
+// (`listener.peer.bind`), with mutual TLS from the internal CA (chapter
+// 04, "Interfaces"). Never exposed to clients.
+syntax = "proto3";
+
+package sprig.internal.v1;
+
+service GatewayPeer {
+  // KILL [QUERY] for a session whose id names this gateway's slot. The
+  // caller has already checked that its user may kill the session's user
+  // (chapter 29); this gateway checks the tenant.
+  rpc Kill(KillRequest) returns (KillReply);
+  // The sessions of this gateway, for SHOW PROCESSLIST across gateways.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsReply);
+  // Starts this gateway's drain (sprigctl gateway drain).
+  rpc Drain(DrainRequest) returns (DrainReply);
+  // A transaction-handle call that landed on another gateway (chapter 37,
+  // "Transactions"), forwarded with the caller's credentials.
+  rpc Forward(ForwardRequest) returns (ForwardReply);
+}
+
+message KillRequest {
+  uint32 connection_id = 1;
+  bool query_only = 2;
+  // The tenant of the caller; 0 for an operator.
+  uint64 tenant_id = 3;
+  // The caller's user: until chapter 29's privileges, a session may kill
+  // only sessions of its own user.
+  string user = 4;
+}
+
+message KillReply {
+  // The session exists on this gateway.
+  bool found = 1;
+  // It belongs to the caller's tenant and user, and was killed.
+  bool killed = 2;
+}
+
+message ListSessionsRequest {
+  // Only this tenant's sessions; 0 for all.
+  uint64 tenant_id = 1;
+}
+
+message SessionRow {
+  uint32 id = 1;
+  string user = 2;
+  string host = 3;
+  string db = 4;
+  string command = 5;
+  uint64 time_s = 6;
+  string state = 7;
+  string info = 8;
+  uint64 tenant_id = 9;
+  string protocol = 10;
+}
+
+message ListSessionsReply {
+  string gateway_id = 1;
+  repeated SessionRow sessions = 2;
+}
+
+message DrainRequest {
+  // Who asked, for the log.
+  string reason = 1;
+}
+
+message DrainReply {
+  // The drain started now (false: it was already draining).
+  bool started = 1;
+}
+
+message ForwardRequest {
+  // The caller's Authorization header, verified again by the owner.
+  string authorization = 1;
+  // "Sql.Execute", "Transactions.Commit" or "Transactions.Rollback".
+  string method = 2;
+  // The request as proto3 JSON.
+  string request_json = 3;
+  // The client address the first gateway saw.
+  string client_addr = 4;
+}
+
+message ForwardReply {
+  // The HTTP status the owner answered with.
+  uint32 http_status = 1;
+  // The REST reply body (a result or an error).
+  string body_json = 2;
+}

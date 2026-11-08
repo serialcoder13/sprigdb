@@ -229,6 +229,9 @@ struct ConnGroup {
     tracker: TaskTracker,
     /// Cancelled to close every connection of the group.
     close: CancellationToken,
+    /// Cancelled to ask the group's connections to close at their next
+    /// safe point ([`ClientConn::close_soon`](crate::frontend::ClientConn)).
+    soft: CancellationToken,
     /// A drain deadline is already scheduled.
     draining: Arc<AtomicBool>,
 }
@@ -239,6 +242,7 @@ impl ConnGroup {
             spec,
             tracker: TaskTracker::new(),
             close: CancellationToken::new(),
+            soft: CancellationToken::new(),
             draining: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -388,9 +392,15 @@ impl ListenerManager {
         let acceptor = match (&spec.cert, spec.tls) {
             (_, TlsMode::Off) => None,
             (None, _) => return Err("TLS mode needs a certificate bundle".into()),
-            (Some(cert), _) => Some(TlsAcceptor::from(
-                tls::server_config(cert.clone(), spec.min_tls).map_err(|e| e.message)?,
-            )),
+            (Some(cert), _) => {
+                let mut cfg = tls::server_config(cert.clone(), spec.min_tls).map_err(|e| e.message)?;
+                if spec.protocol == Protocol::Http {
+                    // ALPN: h2 first, then HTTP/1.1 (chapter 37).
+                    let c = Arc::make_mut(&mut cfg);
+                    c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                }
+                Some(TlsAcceptor::from(cfg))
+            }
         };
         let listener = match &slot.socket {
             Some(b) if b.requested == spec.bind => None,
@@ -488,6 +498,11 @@ impl ListenerManager {
                 groups.append(&mut slot.old);
             }
         }
+        // Every connection is asked to close at its next safe point now;
+        // the ones still open at `timeout` are closed by force.
+        for g in &groups {
+            g.soft.cancel();
+        }
         let all_done = async {
             for g in &groups {
                 g.tracker.wait().await;
@@ -532,9 +547,14 @@ fn retire(
             drain
         };
         tokio::spawn(async move {
+            let soft_after = drain.min(force_after);
+            tokio::select! {
+                () = g.tracker.wait() => return,
+                () = tokio::time::sleep(soft_after) => g.soft.cancel(),
+            }
             tokio::select! {
                 () = g.tracker.wait() => {}
-                () = tokio::time::sleep(force_after) => {
+                () = tokio::time::sleep(force_after.saturating_sub(soft_after)) => {
                     tracing::info!(listener = name, open = g.tracker.len(), "drain time over: closing connections of an older listener generation");
                     g.close.cancel();
                 }

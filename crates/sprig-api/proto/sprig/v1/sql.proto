@@ -1,0 +1,169 @@
+// sprig.v1: SQL and transactions over HTTP (chapter 37, "Packages and
+// services"). Statements run through the same executor as the MySQL wire
+// (chapter 04, "Dispatch into the layers"): the same name virtualization
+// (chapter 07), privileges and errors. Values are the MySQL text-protocol
+// form of each cell, so every client sees exactly what a MySQL client would.
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/struct.proto";
+
+// Runs SQL text in a tenant database.
+service Sql {
+  // Runs `sql` and streams each result: a header with the columns, batches
+  // of rows, then an end with the counts. Over REST: NDJSON with
+  // `Accept: application/x-ndjson`, otherwise one JSON array.
+  rpc Query(QueryRequest) returns (stream QueryResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/sql:query"
+      body: "*"
+    };
+  }
+  // Runs `sql` and returns every result in one reply, up to
+  // `api.rest.max_buffered_bytes` (39785 beyond).
+  rpc Execute(QueryRequest) returns (ExecuteResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/sql:execute"
+      body: "*"
+    };
+  }
+}
+
+// Transaction handles: one backend session kept open across calls, pinned
+// to the gateway that opened it (calls landing elsewhere are forwarded).
+service Transactions {
+  // Starts a transaction and returns its handle.
+  rpc Begin(BeginRequest) returns (Transaction) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/transactions"
+      body: "*"
+    };
+  }
+  // Commits and closes the handle.
+  rpc Commit(EndTransactionRequest) returns (EndTransactionResponse) {
+    option (google.api.http) = {
+      post: "/v1/{transaction=transactions/*}:commit"
+      body: "*"
+    };
+  }
+  // Rolls back and closes the handle.
+  rpc Rollback(EndTransactionRequest) returns (EndTransactionResponse) {
+    option (google.api.http) = {
+      post: "/v1/{transaction=transactions/*}:rollback"
+      body: "*"
+    };
+  }
+}
+
+message QueryRequest {
+  // The logical database, as `USE` names it; "-" for none.
+  string database = 1;
+  // The statement text. Several statements separated by ';' need
+  // `multi_statements`.
+  string sql = 2;
+  // A handle from `Transactions.Begin` ("transactions/<h>"); empty runs the
+  // statement in a fresh autocommit session.
+  string transaction = 3;
+  // Allow several statements in `sql`, as CLIENT_MULTI_STATEMENTS does.
+  bool multi_statements = 4;
+}
+
+// One column of a result.
+message Column {
+  // The column's name as the client sees it (its alias).
+  string name = 1;
+  // The original column name.
+  string org_name = 2;
+  // The table alias.
+  string table = 3;
+  // The original table name.
+  string org_table = 4;
+  // The logical database.
+  string database = 5;
+  // The MySQL type name: BIGINT, VARCHAR, DATETIME, BLOB, ...
+  string type = 6;
+  // The MySQL type code (MYSQL_TYPE_*).
+  uint32 mysql_type = 7;
+  // The column flags (NOT_NULL, UNSIGNED, BINARY, ...).
+  uint32 flags = 8;
+  // The collation id; 63 is binary.
+  uint32 charset = 9;
+  // Digits after the point.
+  uint32 decimals = 10;
+  // The display length.
+  uint64 length = 11;
+  // Values are not UTF-8 text: each is the base64 of its bytes.
+  bool binary = 12;
+}
+
+// The columns of the next result.
+message ResultHeader {
+  // Which result of the request this is, from 0.
+  uint32 index = 1;
+  repeated Column columns = 2;
+}
+
+// Rows of the current result: each row is a list of strings (or base64 for
+// binary columns) and nulls.
+message RowBatch {
+  repeated google.protobuf.ListValue rows = 1;
+}
+
+// The end of one result.
+message ResultEnd {
+  uint32 index = 1;
+  uint64 affected_rows = 2;
+  uint64 last_insert_id = 3;
+  uint32 warnings = 4;
+  string info = 5;
+  // Another result follows.
+  bool more_results = 6;
+}
+
+message QueryResponse {
+  oneof part {
+    ResultHeader header = 1;
+    RowBatch rows = 2;
+    ResultEnd end = 3;
+  }
+}
+
+// One complete result.
+message Result {
+  // Empty for a statement without rows.
+  repeated Column columns = 1;
+  repeated google.protobuf.ListValue rows = 2;
+  uint64 affected_rows = 3;
+  uint64 last_insert_id = 4;
+  uint32 warnings = 5;
+  string info = 6;
+}
+
+message ExecuteResponse {
+  repeated Result results = 1;
+}
+
+message BeginRequest {
+  // The logical database; "-" for none.
+  string database = 1;
+  // START TRANSACTION READ ONLY.
+  bool read_only = 2;
+}
+
+message Transaction {
+  // "transactions/<h>": pass it as `transaction` in later calls.
+  string name = 1;
+  // When the handle expires if left idle, Unix milliseconds.
+  int64 idle_deadline_ms = 2;
+  // When the handle expires whatever happens, Unix milliseconds.
+  int64 deadline_ms = 3;
+}
+
+message EndTransactionRequest {
+  // "transactions/<h>".
+  string transaction = 1;
+}
+
+message EndTransactionResponse {}

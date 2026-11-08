@@ -11,8 +11,19 @@ publish.workspace = true
 [dependencies]
 arc-swap = "1.7"
 async-trait.workspace = true
+# HTTP on 8080/8443 and the peer service on 7403 (chapter 04 steps 4 and
+# 10, chapter 37): hyper-util's server serves HTTP/1.1 and h2 on one
+# connection; tonic runs the gRPC services; base64 for Basic credentials.
+base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"] }
+prost.workspace = true
+prost-types.workspace = true
+sprig-api.workspace = true
+tonic = { workspace = true, features = ["codegen", "router", "channel", "tls-ring"] }
 metrics.workspace = true
 mysql_async.workspace = true
 # Sealed workload samples (chapter 12): randomness for nonces.

@@ -34,6 +34,7 @@ pub mod settings_sql;
 use std::sync::Arc;
 
 use sprig_auth::AuthExtension;
+use sprig_auth::revoke::AuthChanges;
 use sprig_catalog::ddl::DdlEngine;
 use sprig_catalog::{
     AllowAll, CacheConfig, CatalogExtension, CatalogLocator, DirectoryAllocator, DirectoryWatch,
@@ -85,6 +86,9 @@ pub struct TenantServices {
     pub global: Arc<dyn MetaStore>,
     /// Wall-clock time.
     pub clock: Arc<dyn Clock>,
+    /// Chapter 14's auth change feed (revocation), over the cache's load
+    /// feed; chapter 29's privilege cache can follow it too.
+    pub auth_changes: Arc<AuthChanges>,
     _follow: Registration,
 }
 
@@ -133,6 +137,13 @@ impl TenantServices {
             CacheConfig::default(),
         );
         let follow = cache.follow_settings(live);
+        let auth_changes = AuthChanges::start(cache.loads());
+        close_revoked_sessions(
+            auth_changes.subscribe(),
+            Arc::clone(&sessions),
+            settings.clone(),
+            dc.clone(),
+        );
         let catalog = Versioner::new(
             MariaBackend::new(Arc::clone(&dyn_locator)).with_clock(Arc::clone(&clock)),
             Arc::new(DirectoryAllocator::new(Arc::clone(&global))),
@@ -158,7 +169,48 @@ impl TenantServices {
             columns: ColumnRegistry::mariadb_11_8(),
             global,
             clock,
+            auth_changes,
             _follow: follow,
         }))
     }
+}
+
+/// Follows the auth change feed: sessions of users who were dropped or
+/// locked, or lost the password method, close at their next safe point
+/// with 39306, where the tenant's `auth.close_sessions_on_revoke` is on
+/// (chapter 14, "Caching and revocation").
+fn close_revoked_sessions(
+    mut changes: tokio::sync::broadcast::Receiver<Arc<sprig_auth::revoke::AuthChange>>,
+    sessions: Arc<SessionTable>,
+    settings: Settings,
+    dc: DcId,
+) {
+    use sprig_auth::settings::CLOSE_SESSIONS_ON_REVOKE;
+    use tokio::sync::broadcast::error::RecvError;
+    tokio::spawn(async move {
+        loop {
+            let change = match changes.recv().await {
+                Ok(c) => c,
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!(missed = n, "revocation feed lagged");
+                    continue;
+                }
+                Err(RecvError::Closed) => return,
+            };
+            if !change.revoked.iter().any(|r| r.reason.closes_sessions()) {
+                continue;
+            }
+            let ancestry: Vec<_> = change.catalog.ancestry.iter().map(|a| a.id).collect();
+            let ctx = sprig_settings::SettingCtx::process(&dc).for_tenant(change.tenant, &ancestry);
+            if !settings.get(&CLOSE_SESSIONS_ON_REVOKE, &ctx, Some(&change.catalog.settings)) {
+                continue;
+            }
+            for r in change.revoked.iter().filter(|r| r.reason.closes_sessions()) {
+                let n = sessions.close_user(change.tenant, r.user_id);
+                if n > 0 {
+                    tracing::info!(tenant = %change.tenant, user = %r.user_id, reason = r.reason.as_str(), sessions = n, auth_version = change.auth_version, "closing sessions of a revoked user");
+                }
+            }
+        }
+    });
 }

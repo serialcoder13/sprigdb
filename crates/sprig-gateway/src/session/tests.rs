@@ -39,6 +39,7 @@ async fn client_conn() -> (TcpStream, ClientConn) {
         generation: 3,
         in_protocol_tls: InProtocolTls::NotOffered,
         retired: CancellationToken::new(),
+        close_soon: CancellationToken::new(),
         acceptor: None,
     };
     (client, conn)

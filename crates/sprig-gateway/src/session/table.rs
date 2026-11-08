@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use sprig_common::ids::ConnId;
+use sprig_common::ids::{ConnId, TenantId, UserId};
 use sprig_common::time::Clock;
 use sprig_common::{Result, SprigError};
 
@@ -247,6 +247,16 @@ impl SessionTable {
     pub fn close_older_than(&self, listener: &str, generation: u64) -> usize {
         self.mark(CloseReason::ListenerRetired, |h| {
             h.listener == listener && h.listener_gen < generation
+        })
+    }
+
+    /// Marks `close_at_safe_point` on every session of `user` of `tenant`
+    /// (chapter 14, "Caching and revocation": a dropped or locked account).
+    /// Returns how many.
+    pub fn close_user(&self, tenant: TenantId, user: UserId) -> usize {
+        self.mark(CloseReason::Revoked, |h| {
+            let a = h.activity();
+            a.tenant == Some(tenant) && a.user_id == Some(user)
         })
     }
 

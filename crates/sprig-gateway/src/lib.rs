@@ -250,6 +250,8 @@ fn logins(
         sprig_auth::fast_cache::DEFAULT_TTL,
     ));
     let cfg = &ctx.config.gateway;
+    let audit: Arc<dyn sprig_auth::audit::AuditSink> =
+        Arc::new(sprig_auth::audit::LogAudit::new(ctx.config.node.id()));
     match cfg.effective_login_mode() {
         LoginModeConfig::AccountsFile => {
             let mut tasks = Vec::new();
@@ -267,7 +269,9 @@ fn logins(
             tracing::info!(
                 "logins from the accounts file (login_mode = accounts_file): names pass through"
             );
-            let svc = LoginService::new(LoginSource::File(accounts), fast_cache).with_clock(clock);
+            let svc = LoginService::new(LoginSource::File(accounts), fast_cache)
+                .with_clock(clock)
+                .with_audit(audit);
             Ok((Arc::new(svc), None, tasks))
         }
         LoginModeConfig::Catalog => {
@@ -293,8 +297,14 @@ fn logins(
                 )),
             );
             tracing::info!("logins from tenant catalogs (login_mode = catalog)");
+            // Chapter 14: failure counters and temporary locks in the
+            // tenants' catalogs, audit events in the log (target
+            // sprig_audit) until chapter 47's pipeline.
+            let state = sprig_auth::policy::CatalogLoginState::new(tenants.catalog.clone());
             let svc = LoginService::new(LoginSource::Catalog(Arc::new(catalogs)), fast_cache)
-                .with_clock(clock);
+                .with_clock(clock)
+                .with_login_state(Arc::new(state))
+                .with_audit(audit);
             Ok((Arc::new(svc), Some(tenants), Vec::new()))
         }
     }

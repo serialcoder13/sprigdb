@@ -150,6 +150,7 @@ async fn prepare(
         generation: active.generation,
         in_protocol_tls,
         retired: active.group.close.clone(),
+        close_soon: active.group.soft.clone(),
         acceptor,
     })
 }

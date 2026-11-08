@@ -33,6 +33,9 @@ use sprig_common::time::Clock;
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
 use zeroize::Zeroizing;
 
+use crate::audit::{Actor, AuditEvent, AuditSink, events};
+
+use crate::policy::AccountClauses;
 use crate::store::{
     AuthStore, RequireTls, Slot, UserKind, UserRow, UserSource, UserState, VerifierKind,
     VerifierRow,
@@ -401,7 +404,8 @@ pub async fn discard_old_password(
     .await
 }
 
-/// `ACCOUNT LOCK` / `ACCOUNT UNLOCK`.
+/// `ACCOUNT LOCK` / `ACCOUNT UNLOCK`. Unlocking also clears a temporary
+/// lock and the failure count, as MySQL's `ACCOUNT UNLOCK` does.
 ///
 /// # Errors
 /// As [`set_password`].
@@ -411,8 +415,35 @@ pub async fn set_account_locked(
     user: UserId,
     locked: bool,
 ) -> Result<Changed> {
-    with_user(cat, tenant, user, "ALTER USER", move |_, _, row| {
+    let now = SystemTime::now();
+    with_user(cat, tenant, user, "ALTER USER", move |store, q, row| {
         row.account_locked = locked;
+        let id = row.user_id;
+        Box::pin(async move {
+            if !locked {
+                store.clear_login_lock(q, id, now).await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Account policy clauses (`FAILED_LOGIN_ATTEMPTS`, `PASSWORD_LOCK_TIME`,
+/// `PASSWORD EXPIRE INTERVAL`, `PASSWORD HISTORY`, `PASSWORD REUSE
+/// INTERVAL`, `PASSWORD REQUIRE CURRENT`). The caller checks them against
+/// the tenant's bounds first ([`AccountClauses::validate`]).
+///
+/// # Errors
+/// As [`set_password`].
+pub async fn set_clauses(
+    cat: &MariaCatalog,
+    tenant: TenantId,
+    user: UserId,
+    clauses: AccountClauses,
+) -> Result<Changed> {
+    with_user(cat, tenant, user, "ALTER USER", move |_, _, row| {
+        clauses.apply(row);
         Box::pin(async { Ok(()) })
     })
     .await
@@ -486,4 +517,175 @@ pub async fn find_user(
         .user_by_account(&mut conn, name, host)
         .await?
         .map(|u| u.user_id))
+}
+
+/// Account changes with their audit events (chapter 14 step 6,
+/// "Management from above", and step 10): the calls above, made on behalf
+/// of an actor, each emitting one event to the sink, kept in the target
+/// tenant's stream and, when the actor belongs to another (ancestor)
+/// tenant, in the actor's too. A user created by an ancestor's
+/// administrator records the ancestor in `created_by_tenant`.
+///
+/// Chapter 29's account statements (`CREATE USER`, `ALTER USER`, `DROP
+/// USER` after `USE TENANT`) and the Admin API call these.
+pub struct AccountOps<'a> {
+    /// The catalog writer path.
+    pub cat: &'a MariaCatalog,
+    /// The target tenant.
+    pub tenant: TenantId,
+    /// Its name, for the events.
+    pub tenant_name: Option<String>,
+    /// Who acts: an administrator of the tenant or of an ancestor, or an
+    /// operator.
+    pub actor: Actor,
+    /// Where the events go.
+    pub audit: &'a dyn AuditSink,
+    /// Wall-clock time.
+    pub clock: &'a dyn Clock,
+    /// `mysql`, `mariadb` or `admin`: where the change came from.
+    pub protocol: &'static str,
+}
+
+impl std::fmt::Debug for AccountOps<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountOps")
+            .field("tenant", &self.tenant)
+            .field("actor", &self.actor)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AccountOps<'_> {
+    fn event(
+        &self,
+        event: &'static str,
+        user: Option<UserId>,
+        name: &str,
+        host: &str,
+    ) -> AuditEvent {
+        let mut e = AuditEvent::new(event, self.protocol, self.clock.wall());
+        e.tenant = Some(self.tenant);
+        e.tenant_name.clone_from(&self.tenant_name);
+        e.user = Some(name.to_owned());
+        e.host = Some(host.to_owned());
+        e.user_id = user;
+        e.actor = Some(self.actor.clone());
+        e
+    }
+
+    fn done<T>(
+        &self,
+        r: Result<T>,
+        mut e: AuditEvent,
+        user: impl Fn(&T) -> UserId,
+    ) -> Result<T> {
+        match &r {
+            Ok(v) => e.user_id = Some(user(v)),
+            Err(err) => {
+                e.outcome = "refused";
+                e.detail = Some(err.message.clone());
+            }
+        }
+        self.audit.emit(&e);
+        r
+    }
+
+    /// [`create_user`]; `created_by_tenant` is the actor's tenant when it
+    /// isn't the target.
+    ///
+    /// # Errors
+    /// As [`create_user`].
+    pub async fn create_user(&self, new: &NewUser) -> Result<Changed> {
+        let mut new = new.clone();
+        if self.actor.tenant != self.tenant {
+            new.created_by_tenant = self.actor.tenant.0;
+        }
+        let e = self.event(events::USER_CREATED, None, &new.name, &new.host);
+        let r = create_user(self.cat, self.tenant, &new, self.clock).await;
+        self.done(r, e, |c| c.user_id)
+    }
+
+    /// [`drop_user`] of `'name'@'host'` (id `user`).
+    ///
+    /// # Errors
+    /// As [`drop_user`].
+    pub async fn drop_user(&self, user: UserId, name: &str, host: &str) -> Result<Changed> {
+        let e = self.event(events::USER_DROPPED, Some(user), name, host);
+        let r = drop_user(self.cat, self.tenant, user).await;
+        self.done(r, e, |c| c.user_id)
+    }
+
+    /// [`set_account_locked`].
+    ///
+    /// # Errors
+    /// As [`set_account_locked`].
+    pub async fn set_locked(
+        &self,
+        user: UserId,
+        name: &str,
+        host: &str,
+        locked: bool,
+    ) -> Result<Changed> {
+        let ev = if locked {
+            events::ACCOUNT_LOCKED
+        } else {
+            events::ACCOUNT_UNLOCKED
+        };
+        let mut e = self.event(ev, Some(user), name, host);
+        e.reason = Some("manual");
+        let r = set_account_locked(self.cat, self.tenant, user, locked).await;
+        self.done(r, e, |c| c.user_id)
+    }
+
+    /// [`set_password_expired`].
+    ///
+    /// # Errors
+    /// As [`set_password_expired`].
+    pub async fn set_expired(
+        &self,
+        user: UserId,
+        name: &str,
+        host: &str,
+        expired: bool,
+    ) -> Result<Changed> {
+        let mut e = self.event(events::ACCOUNT_CHANGED, Some(user), name, host);
+        e.detail = Some(if expired { "PASSWORD EXPIRE" } else { "PASSWORD EXPIRE cleared" }.into());
+        let r = set_password_expired(self.cat, self.tenant, user, expired).await;
+        self.done(r, e, |c| c.user_id)
+    }
+
+    /// [`set_clauses`].
+    ///
+    /// # Errors
+    /// As [`set_clauses`].
+    pub async fn set_clauses(
+        &self,
+        user: UserId,
+        name: &str,
+        host: &str,
+        clauses: AccountClauses,
+    ) -> Result<Changed> {
+        let mut e = self.event(events::ACCOUNT_CHANGED, Some(user), name, host);
+        e.detail = Some(format!("{clauses:?}"));
+        let r = set_clauses(self.cat, self.tenant, user, clauses).await;
+        self.done(r, e, |c| c.user_id)
+    }
+
+    /// [`set_password`] without policy checks: an administrator's reset
+    /// ([`crate::policy::change_password`] checks the rules).
+    ///
+    /// # Errors
+    /// As [`set_password`].
+    pub async fn reset_password(
+        &self,
+        user: UserId,
+        name: &str,
+        host: &str,
+        password: &[u8],
+        opts: SetPassword,
+    ) -> Result<Changed> {
+        let e = self.event(events::PASSWORD_CHANGED, Some(user), name, host);
+        let r = set_password(self.cat, self.tenant, user, password, opts, self.clock).await;
+        self.done(r, e, |c| c.user_id)
+    }
 }

@@ -1,0 +1,12 @@
+// The `google.api.http` method option (googleapis, Apache-2.0, Google LLC),
+// with the original extension number.
+syntax = "proto3";
+
+package google.api;
+
+import "google/api/http.proto";
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MethodOptions {
+  HttpRule http = 72295728;
+}

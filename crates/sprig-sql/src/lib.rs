@@ -24,7 +24,12 @@
 //!   the gateway side).
 //! - [`settings_stmt`]: settings in SQL (chapter 08 step 8): `SPRIG SET`,
 //!   `RESET`, `BOUNDS`, `SHOW SPRIG SETTINGS` and `ALTER TENANT <name>`.
+//! - [`compat`]: the translator's R0 subset (chapter 28 build steps 1 to
+//!   5): executable comments, emulated variables, the collation map, the
+//!   persona-shaped `information_schema` providers and `SHOW` rewrites,
+//!   result metadata and error mapping on 3306.
 
+pub mod compat;
 pub mod lex;
 pub mod names;
 pub mod settings_stmt;

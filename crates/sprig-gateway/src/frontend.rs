@@ -59,7 +59,7 @@ impl Protocol {
     /// listener changes").
     #[must_use]
     pub const fn closes_at_safe_points(self) -> bool {
-        matches!(self, Protocol::MySql84 | Protocol::MariaDb)
+        matches!(self, Protocol::MySql84 | Protocol::MariaDb | Protocol::Http)
     }
 
     /// The log and metric name.
@@ -95,6 +95,9 @@ pub struct GatewayContext {
     /// Backend pools, routing and read-your-writes (chapter 06); `None`
     /// in contexts built without them (tests of the listener layer).
     pub backends: Option<Arc<crate::backend::Backends>>,
+    /// The other gateways of the DC, through the peer service (chapter 04
+    /// step 10): cross-gateway `KILL`. `None` without registration.
+    pub peers: Option<Arc<crate::peer::Peers>>,
 }
 
 impl GatewayContext {
@@ -112,7 +115,15 @@ impl GatewayContext {
             clock,
             sessions,
             backends: None,
+            peers: None,
         }
+    }
+
+    /// The same context with the peer service's clients.
+    #[must_use]
+    pub fn with_peers(mut self, peers: Arc<crate::peer::Peers>) -> Self {
+        self.peers = Some(peers);
+        self
     }
 
     /// The same context with the gateway's backends.
@@ -272,6 +283,12 @@ pub struct ClientConn {
     /// end's future, which closes the connection. Closing at a safe point
     /// with 39004 first is build step 8, with sessions.
     pub retired: CancellationToken,
+    /// Cancelled when the connection should close at its next safe point:
+    /// at `listener.drain_seconds` after a stricter listener change, or as
+    /// soon as the gateway drains. Front ends that can end gracefully (HTTP:
+    /// `GOAWAY` or `connection: close` after the requests in flight) watch
+    /// it; `retired` follows as the forced close.
+    pub close_soon: CancellationToken,
     pub(crate) acceptor: Option<TlsAcceptor>,
 }
 
@@ -310,6 +327,7 @@ impl ClientConn {
             generation,
             in_protocol_tls,
             retired,
+            close_soon,
             acceptor,
         } = self;
         let (
@@ -335,6 +353,7 @@ impl ClientConn {
             generation,
             in_protocol_tls: InProtocolTls::NotOffered,
             retired,
+            close_soon,
             acceptor: None,
         })
     }

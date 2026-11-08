@@ -66,15 +66,21 @@ use sprig_proto_mysql::auth::{AuthPath, AuthVerdict, LoginFlow, Method, Outcome}
 use sprig_proto_mysql::handshake::NONCE_LEN;
 use sprig_proto_mysql::{ErrPacket, Persona};
 use sprig_provision::credentials::{SecretRef, SecretSource};
-use sprig_settings::{SettingCtx, Settings, Value};
+use sprig_settings::{Bounds, SettingCtx, Settings, Value};
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use crate::account::{TenantDirectory, TenantInfo, parse_login};
 use crate::accounts::{Account, AccountStore, BackendTarget};
+use crate::audit::{self, AuditEvent, AuditSink, NoAudit};
 use crate::cache::{AuthUser, TenantAuth};
 use crate::fast_cache::{FastCache, FastKey};
-use crate::settings::{DEFAULT_PASSWORD_LIFETIME_DAYS, MYSQL_NATIVE_PASSWORD, REQUIRE_TLS};
+use crate::policy::{FailureOutcome, LockLength, LockoutPolicy, LoginStateStore};
+use crate::ratelimit::{DelayKey, DelayRule, FailureDelays, IpLimiter, rate_limited};
+use crate::settings::{
+    DEFAULT_PASSWORD_LIFETIME_DAYS, DELAY_AFTER_FAILURES, FAILURE_DELAY_MAX_MS, FAILURE_DELAY_MS,
+    IP_BLOCK_SECONDS, IP_FAILURES_PER_MINUTE, MYSQL_NATIVE_PASSWORD, REQUIRE_TLS,
+};
 use crate::store::{AccountLimits, AuthMethods, RequireTls, TempLock, UNBOUNDED_LOCK_MICROS};
 use crate::verifier::{FastCacheValue, decoy_verify, verify_native_scramble, verify_scramble};
 
@@ -250,6 +256,19 @@ pub trait PolicySettings: Send + Sync + 'static {
     /// The value of `key` for `catalog`'s tenant; `None` for the key's
     /// default.
     fn resolve(&self, key: &'static str, catalog: &TenantCatalog) -> Option<Value>;
+
+    /// The bounds in force on `key` for `catalog`'s tenant (its ancestors'
+    /// and the operator's); `None` when there are none. Account clauses
+    /// must lie within them (chapter 14, "Policies as settings").
+    fn bounds(&self, _key: &'static str, _catalog: &TenantCatalog) -> Option<Bounds> {
+        None
+    }
+
+    /// The value of a process-level key (dc and global scopes, such as
+    /// `auth.ip_failures_per_minute`); `None` for the default.
+    fn resolve_process(&self, _key: &'static str) -> Option<Value> {
+        None
+    }
 }
 
 /// Every key at its default: tests, and processes without settings.
@@ -268,6 +287,10 @@ pub struct FixedPolicy(pub HashMap<&'static str, Value>);
 
 impl PolicySettings for FixedPolicy {
     fn resolve(&self, key: &'static str, _catalog: &TenantCatalog) -> Option<Value> {
+        self.0.get(key).cloned()
+    }
+
+    fn resolve_process(&self, key: &'static str) -> Option<Value> {
         self.0.get(key).cloned()
     }
 }
@@ -294,6 +317,22 @@ impl PolicySettings for SettingsPolicy {
         let ctx = SettingCtx::process(&self.dc).for_tenant(catalog.tenant, &ancestry);
         self.settings
             .resolve(key, &ctx, Some(&catalog.settings))
+            .ok()
+            .map(|r| r.value)
+    }
+
+    fn bounds(&self, key: &'static str, catalog: &TenantCatalog) -> Option<Bounds> {
+        let ancestry: Vec<TenantId> = catalog.ancestry.iter().map(|a| a.id).collect();
+        let ctx = SettingCtx::process(&self.dc).for_tenant(catalog.tenant, &ancestry);
+        self.settings
+            .resolve(key, &ctx, Some(&catalog.settings))
+            .ok()
+            .map(|r| r.bounds)
+    }
+
+    fn resolve_process(&self, key: &'static str) -> Option<Value> {
+        self.settings
+            .resolve(key, &SettingCtx::process(&self.dc), None)
             .ok()
             .map(|r| r.value)
     }
@@ -361,18 +400,14 @@ impl CatalogLogins {
         self.sni_suffixes.store(Arc::new(suffixes));
     }
 
-    /// Steps 1 and the account match: the target of a login.
-    async fn find(&self, req: &LoginRequest) -> Target {
+    /// Steps 1 and the account match: the target of a login whose user
+    /// part may be `max_user` characters long.
+    async fn find(&self, req: &LoginRequest, max_user: usize) -> Target {
         let Ok(name) = std::str::from_utf8(&req.login_name) else {
             return Target::Decoy;
         };
         let suffixes = self.sni_suffixes.load();
-        let Some(parsed) = parse_login(
-            name,
-            req.sni.as_deref(),
-            &suffixes,
-            max_user_len(req.persona),
-        ) else {
+        let Some(parsed) = parse_login(name, req.sni.as_deref(), &suffixes, max_user) else {
             return Target::Decoy;
         };
         let tenant = match self.tenants.lookup(&parsed.tenant).await {
@@ -439,6 +474,11 @@ pub struct LoginService {
     hash_slots: Arc<Semaphore>,
     slot_wait: Duration,
     clock: Arc<dyn Clock>,
+    /// Failure counters and temporary locks (catalog logins).
+    state: Option<Arc<dyn LoginStateStore>>,
+    audit: Arc<dyn AuditSink>,
+    ips: Arc<IpLimiter>,
+    delays: Arc<FailureDelays>,
 }
 
 impl std::fmt::Debug for LoginService {
@@ -456,12 +496,228 @@ impl LoginService {
     #[must_use]
     pub fn new(source: LoginSource, fast_cache: Arc<FastCache>) -> Self {
         let cpus = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         Self {
             source,
             fast_cache,
             hash_slots: Arc::new(Semaphore::new((cpus / 2).max(1))),
             slot_wait: HASH_SLOT_WAIT,
-            clock: Arc::new(SystemClock),
+            ips: Arc::new(IpLimiter::new(Arc::clone(&clock))),
+            delays: Arc::new(FailureDelays::new(Arc::clone(&clock))),
+            clock,
+            state: None,
+            audit: Arc::new(NoAudit),
+        }
+    }
+
+    /// The same service counting failures and locking accounts in `state`
+    /// (chapter 14, "Lockout and password policies").
+    #[must_use]
+    pub fn with_login_state(mut self, state: Arc<dyn LoginStateStore>) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// The same service auditing to `audit`.
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<dyn AuditSink>) -> Self {
+        self.audit = audit;
+        self
+    }
+
+    /// The audit sink.
+    #[must_use]
+    pub fn audit(&self) -> &Arc<dyn AuditSink> {
+        &self.audit
+    }
+
+    /// The per-address failure limiter.
+    #[must_use]
+    pub fn ip_limiter(&self) -> &Arc<IpLimiter> {
+        &self.ips
+    }
+
+    /// Whether a connection from `ip` may start a login: `Err` (39300) while
+    /// the address is refused for too many failed logins. The front end
+    /// calls it before the greeting and sends the error in its place.
+    ///
+    /// # Errors
+    /// 39300 `ER_SPRIG_LOGIN_RATE_LIMITED`.
+    pub fn admit(&self, ip: IpAddr) -> Result<()> {
+        match self.ips.blocked(ip) {
+            Some(left) => {
+                metrics::counter!("sprig_auth_rate_limited_total", "scope" => "ip").increment(1);
+                Err(rate_limited(ip, left))
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The process-level value of `s` (dc and global scopes).
+    fn process_u64(&self, s: &'static sprig_settings::Setting<u64>) -> u64 {
+        match &self.source {
+            LoginSource::Catalog(c) => c
+                .policy
+                .resolve_process(s.key)
+                .and_then(|v| <u64 as sprig_settings::SettingValue>::from_value(&v))
+                .unwrap_or(s.default),
+            LoginSource::File(_) => s.default,
+        }
+    }
+
+    /// Counts a failed login from `ip`; audits a new block.
+    pub(crate) fn ip_failure(&self, ip: IpAddr, protocol: &'static str) {
+        let per_minute = self.process_u64(&IP_FAILURES_PER_MINUTE);
+        let block = Duration::from_secs(self.process_u64(&IP_BLOCK_SECONDS));
+        if self.ips.record_failure(ip, per_minute, block) {
+            tracing::warn!(%ip, per_minute, block_s = block.as_secs(), "address refused for too many failed logins");
+            let mut e = AuditEvent::new(audit::events::RATE_LIMITED, protocol, self.clock.wall());
+            e.client_ip = Some(ip);
+            e.outcome = "refused";
+            e.reason = Some("ip_failures");
+            e.detail = Some(format!("blocked for {} s", block.as_secs()));
+            self.audit.emit(&e);
+        }
+    }
+
+    /// The failure delay rule for `catalog`'s tenant (defaults without).
+    pub(crate) fn delay_rule(&self, catalog: Option<&TenantCatalog>) -> DelayRule {
+        let (LoginSource::Catalog(cl), Some(c)) = (&self.source, catalog) else {
+            return match &self.source {
+                LoginSource::Catalog(cl) => {
+                    let g = |s: &'static sprig_settings::Setting<u64>| {
+                        cl.policy
+                            .resolve_process(s.key)
+                            .and_then(|v| <u64 as sprig_settings::SettingValue>::from_value(&v))
+                            .unwrap_or(s.default)
+                    };
+                    DelayRule {
+                        after: g(&DELAY_AFTER_FAILURES),
+                        base: Duration::from_millis(g(&FAILURE_DELAY_MS)),
+                        max: Duration::from_millis(g(&FAILURE_DELAY_MAX_MS)),
+                    }
+                }
+                LoginSource::File(_) => DelayRule::default(),
+            };
+        };
+        DelayRule {
+            after: policy_u64(&*cl.policy, &DELAY_AFTER_FAILURES, c),
+            base: Duration::from_millis(policy_u64(&*cl.policy, &FAILURE_DELAY_MS, c)),
+            max: Duration::from_millis(policy_u64(&*cl.policy, &FAILURE_DELAY_MAX_MS, c)),
+        }
+    }
+
+    /// Counts a failure of `key` and waits out its delay (a timer).
+    pub(crate) async fn failure_delay(&self, key: DelayKey, catalog: Option<&TenantCatalog>) {
+        let rule = self.delay_rule(catalog);
+        let d = self.delays.on_failure(key, rule);
+        if !d.is_zero() {
+            metrics::counter!("sprig_auth_rate_limited_total", "scope" => "account").increment(1);
+            tokio::time::sleep(d).await;
+        }
+    }
+
+    /// The lockout policy of `user` (catalog logins only).
+    pub(crate) fn lockout(&self, user: &AuthUser, catalog: &TenantCatalog) -> LockoutPolicy {
+        match (&self.source, &self.state) {
+            (LoginSource::Catalog(cl), Some(_)) => LockoutPolicy::of(&user.row, &*cl.policy, catalog),
+            _ => LockoutPolicy::OFF,
+        }
+    }
+
+    /// After a wrong credential of an existing catalog account: counts it,
+    /// and audits the lock it may start.
+    pub(crate) async fn count_failure(
+        &self,
+        tenant: &TenantInfo,
+        user: &AuthUser,
+        catalog: &TenantCatalog,
+        protocol: &'static str,
+        client_ip: IpAddr,
+    ) {
+        let policy = self.lockout(user, catalog);
+        let Some(state) = self.state.as_ref().filter(|_| policy.tracking()) else {
+            return;
+        };
+        let now = self.clock.wall();
+        match state
+            .record_failure(tenant.id, user.row.user_id, policy, now)
+            .await
+        {
+            Ok(FailureOutcome {
+                failures,
+                locked_until: Some(until),
+            }) => {
+                metrics::counter!("sprig_auth_lockouts_total").increment(1);
+                let mut e = AuditEvent::new(audit::events::ACCOUNT_LOCKED, protocol, now);
+                e.tenant = Some(tenant.id);
+                e.tenant_name = Some(tenant.name.clone());
+                e.user = Some(user.row.name.clone());
+                e.host = Some(user.row.host.clone());
+                e.user_id = Some(user.row.user_id);
+                e.client_ip = Some(client_ip);
+                e.reason = Some("failed_logins");
+                e.detail = Some(format!(
+                    "{failures} consecutive failed logins; locked {}",
+                    match policy.lock {
+                        LockLength::Unbounded => "until ACCOUNT UNLOCK".to_owned(),
+                        _ => format!(
+                            "for {} s",
+                            until.duration_since(now).unwrap_or_default().as_secs()
+                        ),
+                    }
+                ));
+                self.audit.emit(&e);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(tenant = %tenant.name, user = %user.row.name, error = %e, "failed login not counted in the catalog");
+            }
+        }
+    }
+
+    /// After an accepted catalog login: clears a lock that has passed and
+    /// resets a non-zero failure count, in the background.
+    pub(crate) fn after_success(
+        &self,
+        tenant: &TenantInfo,
+        user: &AuthUser,
+        lock: Option<TempLock>,
+        catalog: &TenantCatalog,
+        protocol: &'static str,
+    ) {
+        let Some(state) = self.state.clone() else {
+            return;
+        };
+        let now = self.clock.wall();
+        let (tid, uid) = (tenant.id, user.row.user_id);
+        if let Some(lock) = lock {
+            let audit = Arc::clone(&self.audit);
+            let mut e = AuditEvent::new(audit::events::ACCOUNT_UNLOCKED, protocol, now);
+            e.tenant = Some(tid);
+            e.tenant_name = Some(tenant.name.clone());
+            e.user = Some(user.row.name.clone());
+            e.host = Some(user.row.host.clone());
+            e.user_id = Some(uid);
+            e.reason = Some("lock_expired");
+            tokio::spawn(async move {
+                match state.unlock_expired(tid, uid, lock.locked_until, now).await {
+                    Ok(true) => {
+                        metrics::counter!("sprig_auth_auto_unlocks_total").increment(1);
+                        audit.emit(&e);
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(tenant = %tid, user = %uid, error = %err, "expired lock not cleared");
+                    }
+                }
+            });
+        } else if self.lockout(user, catalog).tracking() {
+            tokio::spawn(async move {
+                if let Err(err) = state.record_success(tid, uid, now).await {
+                    tracing::debug!(tenant = %tid, user = %uid, error = %err, "failure count not reset");
+                }
+            });
         }
     }
 
@@ -476,6 +732,8 @@ impl LoginService {
     /// lock checks).
     #[must_use]
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.ips = Arc::new(IpLimiter::new(Arc::clone(&clock)));
+        self.delays = Arc::new(FailureDelays::new(Arc::clone(&clock)));
         self.clock = clock;
         self
     }
@@ -497,11 +755,29 @@ impl LoginService {
     /// be loaded, runs the same exchange and is refused in
     /// [`LoginFlow::decide`].
     pub async fn start(self: &Arc<Self>, req: LoginRequest) -> MysqlLogin {
+        self.start_as(req, false).await
+    }
+
+    /// Starts an HTTP login (chapter 14, "HTTP on 8080 and 8443"): the same
+    /// tenant resolution, policy order, counters, limits and audit as a
+    /// MySQL login, with user names up to 255 characters and the protocol
+    /// `http` in metrics and events. `req.sni` carries the TLS SNI, or the
+    /// `Host` header without its port. See [`crate::http`].
+    pub async fn start_http(self: &Arc<Self>, req: LoginRequest) -> MysqlLogin {
+        self.start_as(req, true).await
+    }
+
+    async fn start_as(self: &Arc<Self>, req: LoginRequest, http: bool) -> MysqlLogin {
+        let max_user = if http {
+            crate::admin::MAX_NAME
+        } else {
+            max_user_len(req.persona)
+        };
         let target = match &self.source {
-            LoginSource::Catalog(c) => c.find(&req).await,
+            LoginSource::Catalog(c) => c.find(&req, max_user).await,
             LoginSource::File(store) => std::str::from_utf8(&req.login_name)
                 .ok()
-                .filter(|u| !u.is_empty() && u.chars().count() <= max_user_len(req.persona))
+                .filter(|u| !u.is_empty() && u.chars().count() <= max_user)
                 .and_then(|u| store.lookup(u))
                 .map_or(Target::Decoy, Target::File),
         };
@@ -514,6 +790,8 @@ impl LoginService {
             used_password: false,
             slot_timeout: false,
             principal: None,
+            reason: None,
+            http,
         }
     }
 }
@@ -567,6 +845,10 @@ pub struct MysqlLogin {
     used_password: bool,
     slot_timeout: bool,
     principal: Option<Principal>,
+    /// Why the login was refused (the audit and metric reason).
+    reason: Option<&'static str>,
+    /// An HTTP login ([`LoginService::start_http`]).
+    http: bool,
 }
 
 impl std::fmt::Debug for MysqlLogin {
@@ -580,10 +862,33 @@ impl std::fmt::Debug for MysqlLogin {
 }
 
 impl MysqlLogin {
+    /// Why the login was refused, once [`LoginFlow::decide`] refused
+    /// (`bad_credentials`, `locked`, `temp_locked`, `suspended`, `expired`,
+    /// `tls_required`, `unavailable`, `rate_limited`, `no_backend`).
+    #[must_use]
+    pub fn refusal_reason(&self) -> Option<&'static str> {
+        self.reason
+    }
+
     /// Who logged in, once [`LoginFlow::decide`] accepted.
     #[must_use]
     pub fn principal(&self) -> Option<&Principal> {
         self.principal.as_ref()
+    }
+
+    /// The fast path for a clear-text password (HTTP Basic): whether the
+    /// fast cache holds `SHA256(SHA256(password))` for one of the account's
+    /// verifiers. On `false` the caller runs the full path
+    /// ([`LoginFlow::check_password`]).
+    pub fn check_clear_fast(&mut self, password: &[u8]) -> bool {
+        self.used_password |= !password.is_empty();
+        let cache = &self.svc.fast_cache;
+        match &self.target {
+            Target::Catalog(c) if !password.is_empty() => {
+                Self::fast_keys(c).any(|k| cache.verify_password_key(&k, password))
+            }
+            _ => false,
+        }
     }
 
     /// The interim file account, once accepted (the gateway's M0.2 code
@@ -638,9 +943,10 @@ impl MysqlLogin {
     }
 
     fn refuse(&mut self, reason: &'static str, path: AuthPath, err: ErrPacket) -> AuthVerdict {
+        self.reason = Some(reason);
         metrics::counter!(
             "sprig_auth_logins_total",
-            "protocol" => "mysql",
+            "protocol" => self.protocol(),
             "mechanism" => path.as_str(),
             "outcome" => reason,
         )
@@ -656,7 +962,7 @@ impl MysqlLogin {
     fn accept(&mut self, principal: Principal, path: AuthPath) -> AuthVerdict {
         metrics::counter!(
             "sprig_auth_logins_total",
-            "protocol" => "mysql",
+            "protocol" => self.protocol(),
             "mechanism" => path.as_str(),
             "outcome" => if principal.must_change_password { "sandbox" } else { "ok" },
         )
@@ -882,6 +1188,94 @@ impl LoginFlow for MysqlLogin {
     }
 
     async fn decide(&mut self, outcome: Outcome, path: AuthPath) -> AuthVerdict {
+        let verdict = self.decide_now(outcome, path);
+        self.after(&verdict, path).await;
+        verdict
+    }
+}
+
+impl MysqlLogin {
+    fn protocol(&self) -> &'static str {
+        if self.http {
+            return "http";
+        }
+        match self.req.persona {
+            Persona::MySql84 => "mysql",
+            Persona::MariaDb => "mariadb",
+        }
+    }
+
+    /// Who the login was for, as the delay table keys it.
+    fn delay_key(&self) -> DelayKey {
+        match &self.target {
+            Target::Catalog(c) => DelayKey {
+                tenant: Some(c.tenant.id),
+                user: c.user.row.name.clone(),
+                ip: self.req.client_ip,
+            },
+            _ => DelayKey {
+                tenant: None,
+                user: self.shown.clone(),
+                ip: self.req.client_ip,
+            },
+        }
+    }
+
+    /// Counters, locks, rate limits, delays and audit after the decision
+    /// (chapter 14 steps 5, 7 and 10).
+    async fn after(&mut self, verdict: &AuthVerdict, path: AuthPath) {
+        let svc = Arc::clone(&self.svc);
+        let protocol = self.protocol();
+        let now = svc.clock.wall();
+        let mut e = AuditEvent::new(audit::events::LOGIN_SUCCEEDED, protocol, now);
+        e.client_ip = Some(self.req.client_ip);
+        e.mechanism = Some(path.as_str());
+        match &self.target {
+            Target::Catalog(c) => {
+                e.tenant = Some(c.tenant.id);
+                e.tenant_name = Some(c.tenant.name.clone());
+                e.user = Some(c.user.row.name.clone());
+                e.host = Some(c.user.row.host.clone());
+                e.user_id = Some(c.user.row.user_id);
+            }
+            Target::File(a) => e.user = Some(a.user.clone()),
+            Target::Decoy | Target::Unavailable(_) => e.user = Some(self.shown.clone()),
+        }
+        if *verdict == AuthVerdict::Accept {
+            if let Target::Catalog(c) = &self.target {
+                let lock = c.lock.filter(|l| l.locked_until <= now);
+                svc.after_success(&c.tenant, &c.user, lock, &c.catalog, protocol);
+            }
+            svc.delays.on_success(&self.delay_key());
+            if self.principal.as_ref().is_some_and(|p| p.must_change_password) {
+                e.detail = Some("sandbox mode: the password expired".into());
+            }
+            svc.audit.emit(&e);
+            return;
+        }
+        let reason = self.reason.unwrap_or("refused");
+        e.event = audit::events::LOGIN_FAILED;
+        e.outcome = "refused";
+        e.reason = Some(reason);
+        svc.audit.emit(&e);
+        if !matches!(reason, "bad_credentials" | "temp_locked") {
+            return;
+        }
+        if reason == "bad_credentials"
+            && let Target::Catalog(c) = &self.target
+        {
+            svc.count_failure(&c.tenant, &c.user, &c.catalog, protocol, self.req.client_ip)
+                .await;
+        }
+        svc.ip_failure(self.req.client_ip, protocol);
+        let catalog = match &self.target {
+            Target::Catalog(c) => Some(Arc::clone(&c.catalog)),
+            _ => None,
+        };
+        svc.failure_delay(self.delay_key(), catalog.as_deref()).await;
+    }
+
+    fn decide_now(&mut self, outcome: Outcome, path: AuthPath) -> AuthVerdict {
         let persona = self.req.persona;
         if self.slot_timeout {
             let e = ErrPacket::from_error(

@@ -22,6 +22,7 @@
 //!
 //! [`listener_hooks`] retires sessions of a tightened listener (step 12).
 
+pub(crate) mod answer;
 pub mod dispatch;
 pub mod listener_hooks;
 pub(crate) mod local;
@@ -309,6 +310,14 @@ async fn login_phase(
         InProtocolTls::Allowed => TlsPolicy::Optional,
         InProtocolTls::Required => TlsPolicy::Required,
     };
+    // An address refused for too many failed logins gets 39300 in place of
+    // the greeting (chapter 14, "Rate limits").
+    if let Err(e) = shared.cfg.login.admit(conn.peer.ip()) {
+        let p = ErrPacket::from_error(persona, &e);
+        let mut seq = 0;
+        let _ = write_packet(&mut conn.stream, &mut seq, &p.encode(Caps::empty())).await;
+        return Ok(None);
+    }
     let nonce = new_nonce()?;
     let server = server_caps(persona, policy.offered(), settings.compression);
     let hs = greeting(

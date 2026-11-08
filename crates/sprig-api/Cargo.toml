@@ -8,5 +8,22 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-common.workspace = true
+tonic = { workspace = true, features = ["codegen", "router"] }
+tonic-prost.workspace = true
+
+[dev-dependencies]
+# Code generation is checked in (src/gen/); tests/codegen.rs regenerates it
+# with protoc and compares, so building the workspace needs no protoc.
+tonic-prost-build.workspace = true
+
 [lints]
 workspace = true

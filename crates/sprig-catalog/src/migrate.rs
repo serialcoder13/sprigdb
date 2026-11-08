@@ -469,12 +469,28 @@ impl Migrator {
         opts: &MigrateOpts,
     ) -> Result<MigrateReport> {
         let q = quote(schema);
-        exec_text(
-            conn,
-            opts,
-            &format!("CREATE DATABASE IF NOT EXISTS {q} CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"),
-        )
-        .await?;
+        // Only when missing: on Galera even a no-op `CREATE DATABASE IF NOT
+        // EXISTS` is a total-order DDL, which fails the certification of
+        // every catalog transaction in flight on another node (a gateway's
+        // DDL publish, measured: 39071 on every CREATE TABLE while the
+        // controller's loops re-ran their migrations).
+        let exists: Option<i64> = conn
+            .exec_first(
+                "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
+                (schema,),
+            )
+            .await
+            .map_err(map_err)?;
+        if exists.unwrap_or(0) == 0 {
+            exec_text(
+                conn,
+                opts,
+                &format!(
+                    "CREATE DATABASE IF NOT EXISTS {q} CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+                ),
+            )
+            .await?;
+        }
         exec_text(conn, opts, &format!("USE {q}")).await?;
         let mut state = read_state(conn, schema).await?;
         check_readable(&state, &self.supports())?;

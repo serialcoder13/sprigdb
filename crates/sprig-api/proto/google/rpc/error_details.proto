@@ -1,0 +1,26 @@
+// The error details SprigDB sends (googleapis' google/rpc/error_details.proto,
+// Apache-2.0, Google LLC; same field numbers): ErrorInfo with the
+// ER_SPRIG_* name, RetryInfo on retryable errors, BadRequest for fields.
+syntax = "proto3";
+
+package google.rpc;
+
+import "google/protobuf/duration.proto";
+
+message ErrorInfo {
+  string reason = 1;
+  string domain = 2;
+  map<string, string> metadata = 3;
+}
+
+message RetryInfo {
+  google.protobuf.Duration retry_delay = 1;
+}
+
+message BadRequest {
+  message FieldViolation {
+    string field = 1;
+    string description = 2;
+  }
+  repeated FieldViolation field_violations = 1;
+}

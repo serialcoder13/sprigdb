@@ -140,6 +140,18 @@ impl FastCache {
         Self::check(self.get_key(key), nonce, client_response)
     }
 
+    /// The fast path for a clear-text password (HTTP Basic, Redis `AUTH`):
+    /// whether `SHA256(SHA256(password))` equals the value cached for
+    /// `key`, compared in constant time. `false` on a miss.
+    #[must_use]
+    pub fn verify_password_key(&self, key: &FastKey, password: &[u8]) -> bool {
+        use subtle::ConstantTimeEq as _;
+        self.get_key(key).is_some_and(|v| {
+            let given = FastCacheValue::from_password(password);
+            bool::from(v.as_bytes().ct_eq(given.as_bytes()))
+        })
+    }
+
     /// Drops every entry of `tenant`'s user `user`.
     pub fn forget_user(&self, tenant: TenantId, user: UserId) {
         self.entries

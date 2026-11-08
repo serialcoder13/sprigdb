@@ -25,6 +25,9 @@ sprig-testkit = { path = "crates/sprig-testkit" }
 sprig-provision = { path = "crates/sprig-provision" }
 sprig-binlog = { path = "crates/sprig-binlog" }
 sprig-catalog = { path = "crates/sprig-catalog" }
+# The mover (chapter 10) and the R0 sharding pieces it moves (chapter 15).
+sprig-shard = { path = "crates/sprig-shard" }
+sprig-mover = { path = "crates/sprig-mover" }
 
 # Third-party crates. Every licence must be on deny.toml's allow-list (chapter 03).
 async-trait = "0.1"
@@ -106,6 +109,18 @@ sprig-workload = { path = "crates/sprig-workload" }
 ring = "0.17"
 # sprig-advisor (chapter 13): the controller serves its store through the Admin API.
 sprig-advisor = { path = "crates/sprig-advisor" }
+
+# sprig-api (chapter 37) and the gateway's HTTP listeners (chapter 04 step 4):
+# protobuf messages (prost, prost-types: Apache-2.0), tonic's prost codec
+# (MIT), hyper-util's server for HTTP/1.1 and h2 on one port (MIT), base64
+# (MIT/Apache-2.0) for binary cells and handles. Generated code is checked
+# in; tonic-prost-build (MIT) only regenerates it in a test.
+sprig-api = { path = "crates/sprig-api" }
+prost = "0.14"
+prost-types = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+base64 = "0.22"
 # sprig-balancer (chapter 11, M0.6): placement, the decision log, the fleet
 # simulator's planner.
 sprig-balancer = { path = "crates/sprig-balancer" }

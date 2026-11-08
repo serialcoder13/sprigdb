@@ -1,10 +1,31 @@
-//! The `auth.*` keys this crate reads so far (chapter 14,
-//! "Configuration"). Scopes "tree": tenant (and every ancestor), dc and
-//! global, resolved through the tenant's snapshot (chapter 08). All live.
+//! The `auth.*` keys this crate reads (chapter 14, "Configuration").
+//! Scopes "tree": tenant (and every ancestor), dc and global, resolved
+//! through the tenant's snapshot (chapter 08); "process": dc and global.
+//! All live.
 //!
-//! Chapter 14 step 8 registers the rest of the table.
+//! Keys of later steps (tokens, second factors, impersonation, SCRAM,
+//! issuers) are registered with the code that reads them.
+
+use std::borrow::Cow;
 
 use sprig_settings::{Apply, HardBounds, Scopes, Setting};
+
+macro_rules! auth_key {
+    ($(#[$doc:meta])* $name:ident: $t:ty = $key:literal, $default:expr, $scopes:expr, $hard:expr, $text:literal) => {
+        $(#[$doc])*
+        pub static $name: Setting<$t> = Setting {
+            key: $key,
+            default: $default,
+            scopes: $scopes,
+            hard: $hard,
+            apply: Apply::Live,
+            operator_only: false,
+            owner: 14,
+            doc: $text,
+        };
+        sprig_settings::register!($name);
+    };
+}
 
 /// `auth.require_tls`: refuse users who connected without TLS (check 3d).
 pub static REQUIRE_TLS: Setting<bool> = Setting {
@@ -59,3 +80,99 @@ pub static MYSQL_NATIVE_PASSWORD: Setting<bool> = Setting {
     doc: "Store and accept mysql_native_password verifiers",
 };
 sprig_settings::register!(MYSQL_NATIVE_PASSWORD);
+
+auth_key!(
+    /// `auth.failed_login_attempts`: consecutive failures before a
+    /// temporary lock (MySQL's `FAILED_LOGIN_ATTEMPTS`); 0 turns tracking
+    /// off.
+    FAILED_LOGIN_ATTEMPTS: u64 = "auth.failed_login_attempts", 0, Scopes::TREE,
+    HardBounds::range(0, 32_767),
+    "Failed logins in a row before a temporary lock; 0 turns tracking off"
+);
+
+auth_key!(
+    /// `auth.password_lock_minutes`: the temporary lock's length; -1 locks
+    /// until `ACCOUNT UNLOCK`; 0 turns tracking off.
+    PASSWORD_LOCK_MINUTES: i64 = "auth.password_lock_minutes", 0, Scopes::TREE,
+    HardBounds::range(-1, 32_767 * 1440),
+    "Temporary lock length in minutes; -1 until unlocked; 0 turns tracking off"
+);
+
+auth_key!(
+    /// `auth.password_history`: MySQL's `password_history`.
+    PASSWORD_HISTORY: u64 = "auth.password_history", 0, Scopes::TREE,
+    HardBounds::range(0, 4_294_967_295),
+    "Earlier passwords a new password may not repeat"
+);
+
+auth_key!(
+    /// `auth.password_reuse_interval_days`: MySQL's
+    /// `password_reuse_interval`.
+    PASSWORD_REUSE_INTERVAL_DAYS: u64 = "auth.password_reuse_interval_days", 0, Scopes::TREE,
+    HardBounds::range(0, 4_294_967_295),
+    "Days within which a password may not be reused"
+);
+
+auth_key!(
+    /// `auth.password_require_current`: the default of `PASSWORD REQUIRE
+    /// CURRENT`.
+    PASSWORD_REQUIRE_CURRENT: bool = "auth.password_require_current", false, Scopes::TREE,
+    HardBounds::NONE,
+    "Password changes must name the current password (REPLACE)"
+);
+
+/// The levels of `auth.password_policy`.
+pub const PASSWORD_POLICY_LEVELS: &[&str] = &["off", "low", "medium", "strong"];
+
+auth_key!(
+    /// `auth.password_policy`: the levels of MySQL's `validate_password`.
+    PASSWORD_POLICY: Cow<'static, str> = "auth.password_policy", Cow::Borrowed("off"), Scopes::TREE,
+    HardBounds::one_of(PASSWORD_POLICY_LEVELS),
+    "off, low, medium or strong: password strength checks"
+);
+
+auth_key!(
+    /// `auth.delay_after_failures`: failures in a row (account and source
+    /// address) before each further failure is delayed.
+    DELAY_AFTER_FAILURES: u64 = "auth.delay_after_failures", 3, Scopes::TREE,
+    HardBounds::range(0, 1_000_000),
+    "Failed logins in a row (account and address) before failures are delayed; 0 never"
+);
+
+auth_key!(
+    /// `auth.failure_delay_ms`: the first delay, doubled per further
+    /// failure.
+    FAILURE_DELAY_MS: u64 = "auth.failure_delay_ms", 1000, Scopes::TREE,
+    HardBounds::range(0, 3_600_000),
+    "First failure delay in milliseconds, doubling per further failure"
+);
+
+auth_key!(
+    /// `auth.failure_delay_max_ms`: the longest failure delay.
+    FAILURE_DELAY_MAX_MS: u64 = "auth.failure_delay_max_ms", 10_000, Scopes::TREE,
+    HardBounds::range(0, 3_600_000),
+    "Longest failure delay in milliseconds"
+);
+
+auth_key!(
+    /// `auth.ip_failures_per_minute`: failed logins per source address per
+    /// gateway in 60 s before the address is refused.
+    IP_FAILURES_PER_MINUTE: u64 = "auth.ip_failures_per_minute", 30, Scopes::PROCESS,
+    HardBounds::range(0, 1_000_000),
+    "Failed logins per source address per minute before it is refused; 0 never"
+);
+
+auth_key!(
+    /// `auth.ip_block_seconds`: how long such an address is refused.
+    IP_BLOCK_SECONDS: u64 = "auth.ip_block_seconds", 300, Scopes::PROCESS,
+    HardBounds::range(1, 86_400),
+    "How long an address with too many failed logins is refused"
+);
+
+auth_key!(
+    /// `auth.close_sessions_on_revoke`: close sessions of dropped or locked
+    /// users at their next safe point.
+    CLOSE_SESSIONS_ON_REVOKE: bool = "auth.close_sessions_on_revoke", true, Scopes::TREE,
+    HardBounds::NONE,
+    "Close sessions of dropped or locked users at their next safe point"
+);

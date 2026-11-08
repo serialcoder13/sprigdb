@@ -1958,6 +1958,19 @@ dependencies = [
 [[package]]
 name = "sprig-api"
 version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "getrandom 0.3.4",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "sprig-common",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
 
 [[package]]
 name = "sprig-auth"
@@ -2124,15 +2137,22 @@ version = "0.0.1"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "metrics",
  "mysql_async",
+ "prost",
+ "prost-types",
  "rcgen",
  "ring",
  "rustls",
  "serde",
  "serde_json",
+ "sprig-api",
  "sprig-auth",
  "sprig-catalog",
  "sprig-cluster",
@@ -2148,6 +2168,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "toml",
+ "tonic",
  "tracing",
  "twox-hash",
  "zeroize",
@@ -2202,6 +2223,26 @@ dependencies = [
 [[package]]
 name = "sprig-mover"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "metrics",
+ "mysql_async",
+ "serde",
+ "serde_json",
+ "sprig-binlog",
+ "sprig-catalog",
+ "sprig-cluster",
+ "sprig-common",
+ "sprig-meta",
+ "sprig-provision",
+ "sprig-settings",
+ "sprig-shard",
+ "tokio",
+ "tracing",
+ "twox-hash",
+ "uuid",
+]
 
 [[package]]
 name = "sprig-operator"
@@ -2300,6 +2341,12 @@ dependencies = [
 [[package]]
 name = "sprig-shard"
 version = "0.0.1"
+dependencies = [
+ "sprig-catalog",
+ "sprig-common",
+ "sprig-meta",
+ "tokio",
+]
 
 [[package]]
 name = "sprig-sql"

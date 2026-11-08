@@ -143,6 +143,15 @@ macro_rules! sprig_codes {
 sprig_codes! {
     /// The gateway is draining (chapter 04).
     GatewayDraining = 39000, "ER_SPRIG_GATEWAY_DRAINING", "SprigGatewayDraining", SQLSTATE_CONNECTION, true;
+    /// The tenant has `limits.tenant_connections` sessions on this gateway
+    /// already (chapter 04).
+    TenantConnectionLimit = 39001, "ER_SPRIG_TENANT_CONNECTION_LIMIT", "SprigTenantConnectionLimit", *b"08004", true;
+    /// A statement waited longer than `limits.queue_timeout_ms` for an
+    /// admission permit (chapter 04).
+    AdmissionTimeout = 39002, "ER_SPRIG_ADMISSION_TIMEOUT", "SprigAdmissionTimeout", SQLSTATE_GENERAL, true;
+    /// A memory charge failed: the gateway, tenant or user budget is spent
+    /// (chapter 04).
+    MemoryLimit = 39003, "ER_SPRIG_MEMORY_LIMIT", "SprigMemoryLimit", SQLSTATE_GENERAL, true;
     /// The session is closing at a safe point because the listener it
     /// arrived on moved, was disabled or tightened (chapter 04).
     ListenerRetired = 39004, "ER_SPRIG_LISTENER_RETIRED", "SprigListenerRetired", SQLSTATE_CONNECTION, true;
@@ -280,12 +289,12 @@ sprig_codes! {
     /// loaded (catalog or directory unreachable), or hashing is saturated
     /// (chapter 14).
     AuthUnavailable = 39301, "ER_SPRIG_AUTH_UNAVAILABLE", "SprigAuthUnavailable", SQLSTATE_CONNECTION, true;
-    /// The tenant, or a tenant above it in the tree, is suspended; logins
-    /// are refused (chapter 14).
     /// The login came to a data center outside the tenant's allowed ones
     /// and `residency.deny_remote_access` is on (chapter 14, "Credential
     /// residency").
     RemoteAccessDenied = 39302, "ER_SPRIG_REMOTE_ACCESS_DENIED", "SprigRemoteAccessDenied", SQLSTATE_GENERAL, false;
+    /// The tenant, or a tenant above it in the tree, is suspended; logins
+    /// are refused (chapter 14).
     TenantSuspended = 39303, "ER_SPRIG_TENANT_SUSPENDED", "SprigTenantSuspended", SQLSTATE_GENERAL, false;
     /// The session's account was dropped or locked, or its tenant
     /// suspended, while it was connected; the session closes
@@ -314,6 +323,28 @@ sprig_codes! {
     /// An external cluster failed its registration prechecks; the message
     /// lists every missing item (chapter 27). Not yet in Appendix E.
     ClusterPrecheckFailed = 39511, "ER_SPRIG_CLUSTER_PRECHECK_FAILED", "SprigClusterPrecheckFailed", SQLSTATE_GENERAL, false;
+    /// A transaction handle names no open transaction on its gateway
+    /// (chapter 37).
+    TxnHandleUnknown = 39781, "ER_SPRIG_TXN_HANDLE_UNKNOWN", "SprigTxnHandleUnknown", SQLSTATE_GENERAL, false;
+    /// The transaction behind a handle passed its idle or lifetime deadline
+    /// and was rolled back (chapter 37).
+    TxnHandleExpired = 39782, "ER_SPRIG_TXN_HANDLE_EXPIRED", "SprigTxnHandleExpired", SQLSTATE_GENERAL, false;
+    /// A transaction handle belongs to another principal or tenant (chapter
+    /// 37).
+    TxnHandleForbidden = 39783, "ER_SPRIG_TXN_HANDLE_FORBIDDEN", "SprigTxnHandleForbidden", SQLSTATE_GENERAL, false;
+    /// A buffered REST result went over `api.rest.max_buffered_bytes`; use
+    /// NDJSON streaming (chapter 37).
+    ResultTooLarge = 39785, "ER_SPRIG_RESULT_TOO_LARGE", "SprigResultTooLarge", SQLSTATE_GENERAL, false;
+    /// The credential doesn't name one tenant (chapter 37).
+    TenantAmbiguous = 39786, "ER_SPRIG_TENANT_AMBIGUOUS", "SprigTenantAmbiguous", SQLSTATE_GENERAL, false;
+    /// A request body went over `api.max_request_bytes` (chapter 37).
+    RequestTooLarge = 39787, "ER_SPRIG_REQUEST_TOO_LARGE", "SprigRequestTooLarge", SQLSTATE_GENERAL, false;
+    /// A call couldn't be forwarded to the gateway owning its transaction
+    /// handle (chapter 37).
+    ForwardFailed = 39788, "ER_SPRIG_FORWARD_FAILED", "SprigForwardFailed", SQLSTATE_CONNECTION, true;
+    /// gRPC over HTTP/1.1, or another transport the call can't use (chapter
+    /// 37).
+    TransportUnsupported = 39791, "ER_SPRIG_TRANSPORT_UNSUPPORTED", "SprigTransportUnsupported", SQLSTATE_GENERAL, false;
     /// An Admin API request is malformed or names something invalid
     /// (chapter 37). Not yet in Appendix E.
     AdminRequestInvalid = 39792, "ER_SPRIG_ADMIN_REQUEST_INVALID", "SprigAdminRequestInvalid", SQLSTATE_GENERAL, false;
@@ -464,6 +495,16 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::LoginRateLimited => (Code::ResourceExhausted, 429),
         SprigCode::SessionRevoked => (Code::Unauthenticated, 401),
         SprigCode::PlacementUnavailable => (Code::ResourceExhausted, 503),
+        SprigCode::TenantConnectionLimit
+        | SprigCode::AdmissionTimeout
+        | SprigCode::MemoryLimit => (Code::ResourceExhausted, 429),
+        SprigCode::TxnHandleUnknown | SprigCode::TxnHandleExpired => (Code::Aborted, 409),
+        SprigCode::TxnHandleForbidden => (Code::PermissionDenied, 403),
+        SprigCode::ResultTooLarge => (Code::FailedPrecondition, 400),
+        SprigCode::TenantAmbiguous => (Code::Unauthenticated, 401),
+        SprigCode::RequestTooLarge => (Code::InvalidArgument, 413),
+        SprigCode::ForwardFailed => (Code::Unavailable, 503),
+        SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
         SprigCode::AdminUnauthenticated => (Code::Unauthenticated, 401),
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
     };

@@ -103,9 +103,114 @@ pub fn neutralize_edits(src: &[u8], tokens: &[Token], backend_version: u32) -> V
         .collect()
 }
 
+/// A MySQL-only executable comment's body MariaDB understands, spelled
+/// MariaDB's way (chapter 28 build step 1, the R0 subset of the DDL rules):
+/// `mysqldump` and `SHOW CREATE TABLE` on MySQL 8.4 write
+/// `/*!80000 INVISIBLE */` after an invisible index (MariaDB's `IGNORED`),
+/// `/*!80023 INVISIBLE */` after an invisible column (the same word on
+/// MariaDB) and `/*!80003 SRID n */` after a spatial column (MariaDB's
+/// `REF_SYSTEM_ID=n`).
+fn mariadb_body(version: u32, words: &[&[u8]]) -> Option<String> {
+    let up: Vec<String> = words
+        .iter()
+        .map(|w| String::from_utf8_lossy(w).to_ascii_uppercase())
+        .collect();
+    match (version, up.as_slice()) {
+        (80000..=80022, [w]) if w == "INVISIBLE" => Some("IGNORED".to_owned()),
+        (80023.., [w]) if w == "INVISIBLE" => Some("INVISIBLE".to_owned()),
+        (80003.., [srid, n]) if srid == "SRID" && n.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(format!("REF_SYSTEM_ID={n}"))
+        }
+        _ => None,
+    }
+}
+
+/// On the MySQL persona: rewrites each executable comment the persona runs
+/// but MariaDB (at `backend_version`) would skip, when its body is one
+/// MariaDB understands with the same meaning (see [`mariadb_body`]); the
+/// comment becomes that text, so the backend applies it. Other such
+/// comments stay, and MariaDB skips them, as before: the R4 rules cover
+/// the rest (`DEFAULT ENCRYPTION`, `SET` of MySQL-only variables). `None`
+/// when nothing changes.
+#[must_use]
+pub fn expand_for_mariadb(src: &[u8], tokens: &[Token], backend_version: u32) -> Option<Vec<u8>> {
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = tokens[i];
+        if t.kind != TokenKind::ExecOpen {
+            i += 1;
+            continue;
+        }
+        let Some(close) = tokens[i + 1..]
+            .iter()
+            .position(|t| t.kind == TokenKind::ExecClose)
+            .map(|p| i + 1 + p)
+        else {
+            break;
+        };
+        if let Some(m) = ExecMarker::parse(t.bytes(src))
+            && let Some(v) = m.version
+            && !m.mariadb_only
+            && !m.runs_on_mariadb(backend_version)
+        {
+            let words: Vec<&[u8]> = tokens[i + 1..close]
+                .iter()
+                .filter(|t| !t.kind.is_trivia())
+                .map(|t| t.bytes(src))
+                .collect();
+            let plain = tokens[i + 1..close]
+                .iter()
+                .filter(|t| !t.kind.is_trivia())
+                .all(|t| matches!(t.kind, TokenKind::Word | TokenKind::Number));
+            if plain && let Some(body) = mariadb_body(v, &words) {
+                edits.push((t.start as usize, tokens[close].end as usize, body));
+            }
+        }
+        i = close + 1;
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(src.len());
+    let mut at = 0;
+    for (start, end, body) in edits {
+        out.extend_from_slice(&src[at..start]);
+        out.extend_from_slice(body.as_bytes());
+        at = end;
+    }
+    out.extend_from_slice(&src[at..]);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mysql_only_bodies_mariadb_understands_are_expanded() {
+        let opts = crate::lex::LexOptions::mysql84();
+        let run = |s: &str| {
+            let toks = crate::lex::lex(s.as_bytes(), &opts).unwrap();
+            expand_for_mariadb(s.as_bytes(), &toks, 999_999).map(|v| String::from_utf8(v).unwrap())
+        };
+        assert_eq!(
+            run("CREATE TABLE t (a int /*!80023 INVISIBLE */, KEY k (a) /*!80000 INVISIBLE */)")
+                .as_deref(),
+            Some("CREATE TABLE t (a int INVISIBLE, KEY k (a) IGNORED)")
+        );
+        assert_eq!(
+            run("CREATE TABLE g (p point NOT NULL /*!80003 SRID 4326 */)").as_deref(),
+            Some("CREATE TABLE g (p point NOT NULL REF_SYSTEM_ID=4326)")
+        );
+        // Bodies MariaDB lacks stay comments (MariaDB skips them).
+        assert_eq!(run("CREATE DATABASE d /*!80016 DEFAULT ENCRYPTION='N' */"), None);
+        assert_eq!(run("/*!80000 SET SESSION information_schema_stats_expiry=0 */"), None);
+        // Comments MariaDB runs anyway are left alone.
+        assert_eq!(run("/*!40101 SET NAMES utf8mb4 */"), None);
+        // Above the persona's version: a comment for both.
+        assert_eq!(run("CREATE TABLE t (a int /*!90000 INVISIBLE */)"), None);
+    }
 
     fn m(s: &str) -> ExecMarker {
         ExecMarker::parse(s.as_bytes()).unwrap()

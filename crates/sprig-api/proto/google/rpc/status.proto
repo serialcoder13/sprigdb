@@ -1,0 +1,14 @@
+// google.rpc.Status (googleapis, Apache-2.0, Google LLC): the rich error
+// model gRPC errors carry in `grpc-status-details-bin` (chapter 37,
+// "Errors").
+syntax = "proto3";
+
+package google.rpc;
+
+import "google/protobuf/any.proto";
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+  repeated google.protobuf.Any details = 3;
+}

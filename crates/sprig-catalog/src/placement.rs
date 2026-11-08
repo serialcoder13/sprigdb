@@ -56,6 +56,15 @@ pub struct MapRange {
     pub epoch: u64,
     /// Serving or held.
     pub state: RangeState,
+    /// The mover job holding the range (while `Held`) or that last moved
+    /// it (after its cutover committed): the job id's canonical text
+    /// (chapter 10, "Cutover").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// While `Held`: gateways release queued statements by then, in
+    /// milliseconds since the Unix epoch, even if the hold isn't cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_until_ms: Option<u64>,
 }
 
 /// A shard map record (chapter 23, "DC tier"; chapter 15).
@@ -109,6 +118,8 @@ impl ShardMap {
                 cluster_id: cluster,
                 epoch: 1,
                 state: RangeState::Serving,
+                job_id: None,
+                hold_until_ms: None,
             }],
         }
     }

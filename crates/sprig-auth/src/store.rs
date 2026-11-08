@@ -114,17 +114,25 @@ pub const INSERT_USER_COUNTER: &str = "INSERT INTO settings
   ON DUPLICATE KEY UPDATE setting_key = setting_key";
 
 /// The auth module's migrations.
-pub static AUTH_MIGRATIONS: &[Migration] = &[Migration {
-    format: 1,
-    phase: Phase::Expand,
-    name: "users, verifiers, login_state and the user id counter",
-    statements: &[
-        DDL_USERS,
-        DDL_VERIFIERS,
-        DDL_LOGIN_STATE,
-        INSERT_USER_COUNTER,
-    ],
-}];
+pub static AUTH_MIGRATIONS: &[Migration] = &[
+    Migration {
+        format: 1,
+        phase: Phase::Expand,
+        name: "users, verifiers, login_state and the user id counter",
+        statements: &[
+            DDL_USERS,
+            DDL_VERIFIERS,
+            DDL_LOGIN_STATE,
+            INSERT_USER_COUNTER,
+        ],
+    },
+    Migration {
+        format: 2,
+        phase: Phase::Expand,
+        name: "api_keys",
+        statements: &[crate::apikey::DDL_API_KEYS],
+    },
+];
 
 /// The auth module, for [`Migrator::new`](sprig_catalog::Migrator::new).
 pub const AUTH_MODULE: Module = Module {
@@ -602,7 +610,7 @@ const VERIFIER_COLS: &str = "verifier_id, user_id, mechanism, slot, login_form, 
     TIMESTAMPDIFF(MICROSECOND, '1970-01-01', created_at)";
 
 /// `TIMESTAMPADD` of a microsecond parameter: a time parameter.
-const AT: &str = "TIMESTAMPADD(MICROSECOND, ?, '1970-01-01')";
+pub(crate) const AT: &str = "TIMESTAMPADD(MICROSECOND, ?, '1970-01-01')";
 
 /// Rows per `IN (...)` list.
 const IN_CHUNK: usize = 500;
@@ -1018,6 +1026,77 @@ impl AuthStore {
         q: &mut Q,
         user: UserId,
     ) -> Result<Option<LoginStateRow>> {
+        self.read_login_state(q, user, "").await
+    }
+
+    /// The user's login state, locked for update (`SELECT ... FOR UPDATE`)
+    /// in the caller's transaction: the failure counter's read (chapter 14,
+    /// "Counter writes").
+    ///
+    /// # Errors
+    /// As [`login_state`](Self::login_state).
+    pub async fn login_state_for_update<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        user: UserId,
+    ) -> Result<Option<LoginStateRow>> {
+        self.read_login_state(q, user, " FOR UPDATE").await
+    }
+
+    /// Clears the user's temporary lock and failure count (`ACCOUNT
+    /// UNLOCK`, or an expired lock). Returns whether a row changed.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn clear_login_lock<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        user: UserId,
+        now: SystemTime,
+    ) -> Result<bool> {
+        let n = exec_count(
+            q,
+            format!(
+                "UPDATE {} SET locked_until = NULL, consecutive_failures = 0, updated_at = {AT} \
+                 WHERE user_id = ? AND (locked_until IS NOT NULL OR consecutive_failures > 0)",
+                self.login_state
+            ),
+            vec![Value::from(micros(now)), Value::from(user.0)],
+        )
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// Resets a non-zero failure count of an unlocked user (a successful
+    /// login). Returns whether a row changed.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn reset_failures<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        user: UserId,
+        now: SystemTime,
+    ) -> Result<bool> {
+        let n = exec_count(
+            q,
+            format!(
+                "UPDATE {} SET consecutive_failures = 0, updated_at = {AT} \
+                 WHERE user_id = ? AND consecutive_failures > 0 AND locked_until IS NULL",
+                self.login_state
+            ),
+            vec![Value::from(micros(now)), Value::from(user.0)],
+        )
+        .await?;
+        Ok(n > 0)
+    }
+
+    async fn read_login_state<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        user: UserId,
+        suffix: &str,
+    ) -> Result<Option<LoginStateRow>> {
         let rows: Vec<Row> = q
             .exec(
                 format!(
@@ -1026,7 +1105,7 @@ impl AuthStore {
                      TIMESTAMPDIFF(MICROSECOND, '1970-01-01', last_failure_at), \
                      TIMESTAMPDIFF(MICROSECOND, '1970-01-01', last_success_at), \
                      last_success_ip, TIMESTAMPDIFF(MICROSECOND, '1970-01-01', updated_at) \
-                     FROM {} WHERE user_id = ?",
+                     FROM {} WHERE user_id = ?{suffix}",
                     self.login_state
                 ),
                 (user.0,),
@@ -1105,7 +1184,7 @@ impl AuthStore {
 }
 
 /// `TIMESTAMPADD(...)` for a time parameter, or `?` for a NULL one.
-fn opt_at(some: bool) -> &'static str {
+pub(crate) fn opt_at(some: bool) -> &'static str {
     if some { AT } else { "?" }
 }
 
@@ -1219,7 +1298,7 @@ pub(crate) fn micros(t: SystemTime) -> i64 {
         .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX))
 }
 
-fn opt_micros(t: Option<SystemTime>) -> Value {
+pub(crate) fn opt_micros(t: Option<SystemTime>) -> Value {
     Value::from(t.map(micros))
 }
 
@@ -1228,7 +1307,7 @@ pub(crate) fn from_micros(m: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_micros(u64::try_from(m).unwrap_or(0))
 }
 
-fn col<T: mysql_async::prelude::FromValue>(r: &mut Row, i: usize, name: &str) -> Result<T> {
+pub(crate) fn col<T: mysql_async::prelude::FromValue>(r: &mut Row, i: usize, name: &str) -> Result<T> {
     match r.take_opt::<T, usize>(i) {
         Some(Ok(v)) => Ok(v),
         Some(Err(e)) => Err(SprigError::internal(format!(
@@ -1240,11 +1319,11 @@ fn col<T: mysql_async::prelude::FromValue>(r: &mut Row, i: usize, name: &str) ->
     }
 }
 
-fn time(r: &mut Row, i: usize, name: &str) -> Result<SystemTime> {
+pub(crate) fn time(r: &mut Row, i: usize, name: &str) -> Result<SystemTime> {
     Ok(from_micros(col::<i64>(r, i, name)?))
 }
 
-fn opt_time(r: &mut Row, i: usize, name: &str) -> Result<Option<SystemTime>> {
+pub(crate) fn opt_time(r: &mut Row, i: usize, name: &str) -> Result<Option<SystemTime>> {
     Ok(col::<Option<i64>>(r, i, name)?.map(from_micros))
 }
 
@@ -1269,13 +1348,13 @@ pub(crate) fn map_err(e: mysql_async::Error) -> SprigError {
     }
 }
 
-async fn exec<Q: Queryable + Send>(q: &mut Q, sql: String, p: Vec<Value>) -> Result<()> {
+pub(crate) async fn exec<Q: Queryable + Send>(q: &mut Q, sql: String, p: Vec<Value>) -> Result<()> {
     q.exec_drop(sql, Params::Positional(p))
         .await
         .map_err(map_err)
 }
 
-async fn exec_count<Q: Queryable + Send>(q: &mut Q, sql: String, p: Vec<Value>) -> Result<u64> {
+pub(crate) async fn exec_count<Q: Queryable + Send>(q: &mut Q, sql: String, p: Vec<Value>) -> Result<u64> {
     exec(q, sql, p).await?;
     let n: Option<i64> = q.query_first("SELECT ROW_COUNT()").await.map_err(map_err)?;
     Ok(n.and_then(|n| u64::try_from(n).ok()).unwrap_or(0))

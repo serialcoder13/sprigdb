@@ -38,6 +38,7 @@ use sprig_common::Result;
 use sprig_common::ids::UserId;
 
 use crate::account::HostPattern;
+use crate::apikey::{ApiKey, ApiKeyRow};
 use crate::store::{
     AUTH_MIGRATIONS, AuthStore, MODULE, Slot, TempLock, UserRow, VerifierKind, VerifierRow,
 };
@@ -137,6 +138,8 @@ pub struct TenantAuth {
     users: Arc<HashMap<UserId, Arc<AuthUser>>>,
     by_name: Arc<HashMap<String, Arc<[Arc<AuthUser>]>>>,
     locks: Arc<HashMap<UserId, TempLock>>,
+    /// API keys by visible id (revoked ones too, until they're deleted).
+    api_keys: Arc<HashMap<String, Arc<ApiKey>>>,
     bytes: usize,
 }
 
@@ -161,7 +164,10 @@ impl PartialEq for TenantAuth {
                 .map(|(k, v)| (k.clone(), v.iter().map(|u| u.row.user_id).collect()))
                 .collect()
         };
-        users(self) == users(other) && order(self) == order(other) && self.locks == other.locks
+        users(self) == users(other)
+            && order(self) == order(other)
+            && self.locks == other.locks
+            && self.api_keys == other.api_keys
     }
 }
 
@@ -242,8 +248,36 @@ impl TenantAuth {
             users: Arc::new(users),
             by_name,
             locks: Arc::new(locks),
+            api_keys: Arc::clone(&self.api_keys),
             bytes,
         }
+    }
+
+    /// The same state with `changed` API keys replacing their entries
+    /// (`full`: replacing every key).
+    #[must_use]
+    pub fn with_api_keys(mut self, changed: Vec<ApiKeyRow>, full: bool) -> Self {
+        if changed.is_empty() && !full {
+            return self;
+        }
+        let mut keys = if full {
+            HashMap::new()
+        } else {
+            (*self.api_keys).clone()
+        };
+        let old = self.api_keys.len();
+        for r in changed {
+            keys.insert(r.key_id.clone(), Arc::new(ApiKey::new(r)));
+        }
+        self.bytes = self.bytes.saturating_sub(old * KEY_BYTES) + keys.len() * KEY_BYTES;
+        self.api_keys = Arc::new(keys);
+        self
+    }
+
+    /// The API key `key_id`, revoked or not.
+    #[must_use]
+    pub fn api_key(&self, key_id: &str) -> Option<&Arc<ApiKey>> {
+        self.api_keys.get(key_id)
     }
 
     /// The live user `id`.
@@ -291,6 +325,7 @@ impl TenantAuth {
 }
 
 const LOCK_BYTES: usize = 64;
+const KEY_BYTES: usize = 256;
 
 /// `sprig-auth`'s catalog module: the auth tables' migrations, and
 /// [`TenantAuth`] in every snapshot.
@@ -332,11 +367,13 @@ impl CatalogExtension for AuthExtension {
             } else {
                 store.verifiers_of(conn, &ids).await?
             };
-            prev.apply(users, &verifiers, locks)
+            let keys = crate::apikey::keys_since(&store, conn, Some(since)).await?;
+            prev.apply(users, &verifiers, locks).with_api_keys(keys, false)
         } else {
             let users = store.users_since(conn, None).await?;
             let verifiers = store.all_verifiers(conn).await?;
-            TenantAuth::build(users, &verifiers, locks)
+            let keys = crate::apikey::keys_since(&store, conn, None).await?;
+            TenantAuth::build(users, &verifiers, locks).with_api_keys(keys, true)
         };
         Ok(Arc::new(state))
     }

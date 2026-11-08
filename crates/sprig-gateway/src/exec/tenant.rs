@@ -494,16 +494,38 @@ impl PassSession {
                 return self.fail(out, &account_refused()).await;
             };
             let svc = Arc::clone(ts.services());
-            let r = sprig_auth::admin::set_password(
-                &svc.catalog,
-                tenant,
-                uid,
-                &pc.password,
-                sprig_auth::admin::SetPassword {
-                    retain_current: pc.retain_current,
-                    ..sprig_auth::admin::SetPassword::default()
+            // Chapter 14's password rules (strength, history, reuse,
+            // REQUIRE CURRENT), checked against the tenant's settings.
+            let catalog = match ts.catalog() {
+                Some(c) => Arc::clone(c),
+                None => match ts.refresh().await {
+                    Ok(c) => c,
+                    Err(e) => return self.fail(out, &e).await,
                 },
-                &*svc.clock,
+            };
+            let tenant_name = ts.principal.tenant_name.clone();
+            let policy = sprig_auth::SettingsPolicy::new(svc.settings.clone(), svc.dc.clone());
+            let audit = sprig_auth::audit::LogAudit::default();
+            let ctx = sprig_auth::policy::PasswordCtx {
+                tenant_name: tenant_name.as_deref(),
+                cat: &svc.catalog,
+                catalog: &catalog,
+                policy: &policy,
+                audit: &audit,
+                clock: &*svc.clock,
+            };
+            debug_assert_eq!(catalog.tenant, tenant);
+            let r = sprig_auth::policy::change_password(
+                &ctx,
+                uid,
+                &sprig_auth::policy::PasswordChange {
+                    password: &pc.password,
+                    current: pc.current.as_ref().map(|c| c.as_slice()),
+                    retain_current: pc.retain_current,
+                    discard_old: false,
+                    actor: None,
+                    persona: self.persona,
+                },
             )
             .await;
             return match r {

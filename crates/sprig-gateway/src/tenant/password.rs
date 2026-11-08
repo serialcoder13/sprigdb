@@ -24,6 +24,9 @@ pub struct PasswordChange {
     pub password: Zeroizing<Vec<u8>>,
     /// `RETAIN CURRENT PASSWORD`.
     pub retain_current: bool,
+    /// `REPLACE 'current'`: the current password, for `PASSWORD REQUIRE
+    /// CURRENT` (chapter 14).
+    pub current: Option<Zeroizing<Vec<u8>>>,
     /// The statement names another account (refused with 1227).
     pub other_account: bool,
 }
@@ -131,6 +134,7 @@ pub fn parse(sql: &[u8], opts: &LexOptions, user: &str, host: &str) -> Option<Pa
     };
     let mut other = false;
     let mut retain = false;
+    let mut current = None;
     let pw;
     if p.eat("SET") {
         if !p.eat("PASSWORD") {
@@ -164,7 +168,7 @@ pub fn parse(sql: &[u8], opts: &LexOptions, user: &str, host: &str) -> Option<Pa
         pw = p.string()?;
         loop {
             if p.eat("REPLACE") {
-                p.string()?;
+                current = Some(Zeroizing::new(p.string()?));
             } else if p.eat("RETAIN") {
                 if !(p.eat("CURRENT") && p.eat("PASSWORD")) {
                     return None;
@@ -183,6 +187,7 @@ pub fn parse(sql: &[u8], opts: &LexOptions, user: &str, host: &str) -> Option<Pa
     Some(PasswordChange {
         password: Zeroizing::new(pw),
         retain_current: retain,
+        current,
         other_account: other,
     })
 }

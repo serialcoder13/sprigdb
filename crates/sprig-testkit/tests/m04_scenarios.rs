@@ -360,6 +360,25 @@ async fn fill(c: &Cfg, schema: &str, table: &str, rows: u64, select: &str) {
     let _ = q.disconnect().await;
 }
 
+/// Runs a statement, retrying 39071 (`ER_SPRIG_CATALOG_CONFLICT`, SQLSTATE
+/// 40001: "catalog row busy; retry"), which DDL can meet on Galera while
+/// the controller writes the same catalog.
+async fn ddl(g: &mut Conn, sql: &str) {
+    for attempt in 1..=10 {
+        match g.query_drop(sql).await {
+            Ok(()) => return,
+            Err(mysql_async::Error::Server(e)) if e.code == 39071 && attempt < 10 => {
+                println!(
+                    "[retry] 39071 on attempt {attempt}: {}",
+                    &sql[..sql.len().min(60)]
+                );
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => panic!("{sql}: {e}"),
+        }
+    }
+}
+
 /// A small deterministic generator.
 struct Gen(u64);
 
@@ -384,6 +403,28 @@ struct Load {
     v_query: bool,
 }
 
+/// Statements Galera aborted (1213) or that waited too long for a lock
+/// (1205) while a total-order index build held the table: counted, not
+/// fatal (Galera clients retry these, as for any DDL there).
+static ABORTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+trait Tolerate {
+    fn tolerate(self);
+}
+
+impl<T> Tolerate for Result<T, mysql_async::Error> {
+    fn tolerate(self) {
+        match self {
+            Ok(_) => {}
+            Err(mysql_async::Error::Server(e)) if matches!(e.code, 1213 | 1205) => {
+                ABORTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                println!("[aborted] {} {}", e.code, e.message);
+            }
+            Err(e) => panic!("load statement: {e}"),
+        }
+    }
+}
+
 async fn round(
     g: &mut Conn,
     rng: &mut Gen,
@@ -398,14 +439,14 @@ async fn round(
         mark("ex1");
         for _ in 0..4 {
             let cust = rng.next(250);
-            let _: Vec<Row> = g
+            let r: Result<Vec<Row>, _> = g
                 .exec(
                     "SELECT o.id, o.total, o.created_at FROM orders o WHERE o.customer_id = ? \
                      AND o.status IN ('open', 'hold') ORDER BY o.created_at DESC LIMIT 20",
                     (cust,),
                 )
-                .await
-                .unwrap();
+                .await;
+            r.tolerate();
         }
         // Writes: inserts and status updates (worked example 1's write mix).
         g.exec_drop(
@@ -414,14 +455,14 @@ async fn round(
             (rng.next(250), rng.next(10_000)),
         )
         .await
-        .unwrap();
+        .tolerate();
         for _ in 0..3 {
             g.exec_drop(
                 "UPDATE orders SET status = 'paid' WHERE id = ?",
                 (1 + rng.next(n),),
             )
             .await
-            .unwrap();
+            .tolerate();
         }
     }
     if l.ex2 {
@@ -435,28 +476,28 @@ async fn round(
                 rng.next(n / 2)
             ))
             .await
-            .unwrap();
+            .tolerate();
         }
         let (a, k) = (rng.next(200), rng.next(5));
         g.query_drop(format!(
             "SELECT COUNT(*) FROM events WHERE account_id = {a} AND kind = {k}"
         ))
         .await
-        .unwrap();
+        .tolerate();
         for _ in 0..2 {
             g.query_drop(format!(
                 "SELECT id, kind FROM events WHERE account_id = {} ORDER BY id DESC LIMIT 20",
                 rng.next(200)
             ))
             .await
-            .unwrap();
+            .tolerate();
         }
         g.query_drop(format!(
             "SELECT id FROM events WHERE LOWER(source) = 'src{}'",
             rng.next(50)
         ))
         .await
-        .unwrap();
+        .tolerate();
         g.query_drop(format!(
             "INSERT INTO events (account_id, kind, created_at, source, payload) \
              VALUES ({}, {}, NOW(), 'Src1', 'p')",
@@ -464,7 +505,7 @@ async fn round(
             rng.next(5)
         ))
         .await
-        .unwrap();
+        .tolerate();
     }
     if l.trap {
         mark("trap");
@@ -475,13 +516,13 @@ async fn round(
                 lo + 100
             ))
             .await
-            .unwrap();
+            .tolerate();
         }
         if l.trap_d_runs < 12 && rng.next(3) == 0 {
             l.trap_d_runs += 1;
             g.query_drop("SELECT id FROM t WHERE d = 1 ORDER BY c LIMIT 10")
                 .await
-                .unwrap();
+                .tolerate();
         }
     }
     if l.u_query {
@@ -489,7 +530,7 @@ async fn round(
         for _ in 0..3 {
             g.query_drop(format!("SELECT id, b FROM u WHERE a = {}", rng.next(3000)))
                 .await
-                .unwrap();
+                .tolerate();
         }
     }
     if l.u_other {
@@ -498,20 +539,20 @@ async fn round(
             1 + rng.next(30_000)
         ))
         .await
-        .unwrap();
+        .tolerate();
         g.query_drop(format!(
             "SELECT COUNT(*) FROM u WHERE b = {}",
             rng.next(100)
         ))
         .await
-        .unwrap();
+        .tolerate();
     }
     if l.v_query {
         mark("v");
         for _ in 0..3 {
             g.query_drop(format!("SELECT id, b FROM v WHERE a = {}", rng.next(3000)))
                 .await
-                .unwrap();
+                .tolerate();
         }
     }
 }
@@ -535,16 +576,16 @@ async fn chapter_13_scenarios_on_one_topology() {
     // Tenant settings: a 1-hour window evaluated every minute, a low p95
     // bar for the scaled-down tables, no build pause, room for the day's
     // indexes.
-    g.query_drop(
+    ddl(
+        &mut g,
         "SPRIG SET (auto_index.window_hours = 1, auto_index.eval_interval_minutes = 1, \
          auto_index.p95_threshold_ms = 5, auto_index.max_new_per_day = 50, \
          auto_index.rollout_pause_minutes = 0, auto_index.cooldown_hours = 1)",
     )
-    .await
-    .unwrap();
-    g.query_drop(format!("CREATE DATABASE {db}")).await.unwrap();
+    .await;
+    ddl(&mut g, &format!("CREATE DATABASE {db}")).await;
     g.query_drop(format!("USE {db}")).await.unwrap();
-    for ddl in [
+    for ddl_sql in [
         "CREATE TABLE orders (id BIGINT PRIMARY KEY AUTO_INCREMENT, customer_id INT NOT NULL, \
          status VARCHAR(12) NOT NULL, created_at DATETIME NOT NULL, total DECIMAL(10,2) NOT NULL, \
          note VARCHAR(100) NOT NULL, KEY idx_created (created_at)) ENGINE=InnoDB",
@@ -559,7 +600,7 @@ async fn chapter_13_scenarios_on_one_topology() {
         "CREATE TABLE v (id INT PRIMARY KEY, a INT NOT NULL, b INT NOT NULL, \
          pad VARCHAR(100) NOT NULL) ENGINE=InnoDB",
     ] {
-        g.query_drop(ddl).await.unwrap();
+        ddl(&mut g, ddl_sql).await;
     }
     let t0 = Instant::now();
     let schema = physical(&c, &db).await;
@@ -611,10 +652,8 @@ async fn chapter_13_scenarios_on_one_topology() {
     // A user index and a migrated one on u; the migrated origin is what a
     // dump replay records (chapter 13 "Index origins"; the import path is
     // R4), written here as that path will.
-    g.query_drop("CREATE INDEX idx_u_b ON u (b)").await.unwrap();
-    g.query_drop("CREATE INDEX ix_u_mig ON u (pad(16))")
-        .await
-        .unwrap();
+    ddl(&mut g, "CREATE INDEX idx_u_b ON u (b)").await;
+    ddl(&mut g, "CREATE INDEX ix_u_mig ON u (pad(16))").await;
     {
         let s = format!("t{}_sprig", c.tenant_id);
         let mut q = catalog(&c).await;
@@ -632,9 +671,7 @@ async fn chapter_13_scenarios_on_one_topology() {
     }
     // The trap's ORDER BY statement must not qualify by itself: no top-N
     // trigger on t, and it runs fewer than min_runs times.
-    g.query_drop("ALTER TABLE t SPRIG SET (auto_index.top_n = 0)")
-        .await
-        .unwrap();
+    ddl(&mut g, "ALTER TABLE t SPRIG SET (auto_index.top_n = 0)").await;
     println!("[setup] filled in {:.1} s", t0.elapsed().as_secs_f64());
 
     // ---- Phase 1: load until every expected index is built --------------
@@ -795,9 +832,7 @@ async fn chapter_13_scenarios_on_one_topology() {
     // ---- Phase 2: a user index equal to or extending ours retires it ----
     load.v_query = false;
     let v_auto = done["v"].1.name.clone();
-    g.query_drop("CREATE INDEX idx_user_ab ON v (a, b)")
-        .await
-        .unwrap();
+    ddl(&mut g, "CREATE INDEX idx_user_ab ON v (a, b)").await;
     let t2 = Instant::now();
     let mut superseded = None;
     while t2.elapsed() < Duration::from_secs(300) {
@@ -885,6 +920,7 @@ async fn chapter_13_scenarios_on_one_topology() {
     );
     // Every observed index became active on day 8 (the timeline).
     report["seconds_total"] = json!(t0.elapsed().as_secs());
+    report["load_statements_aborted"] = json!(ABORTED.load(std::sync::atomic::Ordering::Relaxed));
     report["created_at_spread_s"] = json!(
         rows.iter()
             .map(|r| r.state_changed_at - r.created_at)
@@ -895,14 +931,14 @@ async fn chapter_13_scenarios_on_one_topology() {
         std::fs::write(&p, serde_json::to_string_pretty(&report).unwrap()).unwrap();
     }
     if skip::var("SPRIG_TEST_M04_KEEP").as_deref() != Some("1") {
-        g.query_drop(format!("DROP DATABASE {db}")).await.unwrap();
+        ddl(&mut g, &format!("DROP DATABASE {db}")).await;
     }
-    g.query_drop(
+    ddl(
+        &mut g,
         "SPRIG RESET (auto_index.window_hours, auto_index.eval_interval_minutes, \
          auto_index.p95_threshold_ms, auto_index.max_new_per_day, auto_index.rollout_pause_minutes, \
          auto_index.cooldown_hours)",
     )
-    .await
-    .unwrap();
+    .await;
     let _ = g.disconnect().await;
 }

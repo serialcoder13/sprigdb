@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use sprig_common::ids::{ConnId, DcId, TenantId};
+use sprig_common::ids::{ConnId, DcId, TenantId, UserId};
 use sprig_common::{CancellationToken, SprigCode, SprigError};
 use tokio::sync::Notify;
 
@@ -128,6 +128,9 @@ pub enum CloseReason {
     /// The session's listener moved, was disabled or tightened (chapter 04,
     /// "Live listener changes"): 39004.
     ListenerRetired,
+    /// The session's account was dropped or locked (chapter 14,
+    /// `auth.close_sessions_on_revoke`): 39306.
+    Revoked,
 }
 
 impl CloseReason {
@@ -142,6 +145,10 @@ impl CloseReason {
                 SprigCode::ListenerRetired,
                 "this listener changed; reconnect",
             ),
+            CloseReason::Revoked => SprigError::new(
+                SprigCode::SessionRevoked,
+                "this session was closed: its account was dropped or locked",
+            ),
         }
     }
 
@@ -149,6 +156,7 @@ impl CloseReason {
         match self {
             CloseReason::Drain => 1,
             CloseReason::ListenerRetired => 2,
+            CloseReason::Revoked => 3,
         }
     }
 
@@ -156,6 +164,7 @@ impl CloseReason {
         match v {
             1 => Some(CloseReason::Drain),
             2 => Some(CloseReason::ListenerRetired),
+            3 => Some(CloseReason::Revoked),
             _ => None,
         }
     }
@@ -237,6 +246,22 @@ impl SessionFlags {
         CloseReason::from_u8(self.close_at_safe_point.load(Ordering::SeqCst))
     }
 
+    /// Resolves once a close at the next safe point is asked for (or the
+    /// connection is killed). A front end waiting idle for the next command
+    /// selects on it, so an idle session closes at once (chapter 04, "Drain"
+    /// step 3).
+    pub async fn close_wanted(&self) {
+        loop {
+            let notified = self.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.close_requested() || self.conn_killed() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Resolves once a `KILL QUERY` or `KILL` is pending.
     pub async fn query_killed(&self) {
         loop {
@@ -262,6 +287,8 @@ struct Activity {
     info: Option<String>,
     since: Option<Instant>,
     tenant: Option<TenantId>,
+    /// The logged-in catalog user, for revocation (chapter 14).
+    user_id: Option<UserId>,
 }
 
 /// A session's shared half: what the [`SessionTable`] holds and other tasks
@@ -507,6 +534,7 @@ impl Session {
             let mut a = self.handle.activity();
             a.user = Some(principal.user.clone());
             a.tenant = principal.tenant;
+            a.user_id = principal.user_id;
         }
         self.principal = Some(principal);
     }

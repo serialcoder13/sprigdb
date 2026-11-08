@@ -43,12 +43,14 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use sprig_common::names::{GIPK_COLUMN, quote};
+use sprig_proto_mysql::packets::Persona;
 
 use super::NameError;
 use super::hide::Visibility;
 use super::map::{LogicalDb, NameMap, Purpose};
 use super::rewrite::{StmtKind, sql_string};
 use super::show::{ProcessRow, SessionSource, database_names};
+use crate::compat::schema::{self, Src};
 use crate::lex::{self, LexOptions, Token, TokenKind, ident_value, string_value};
 
 /// The column lists of `information_schema` tables, in order, per backend
@@ -619,8 +621,25 @@ pub fn rewrite_information_schema(
             )
         })
         .count();
+    let local = |table: &str| {
+        runs_now(kind)
+            .then(|| schema::local_view(table, ctx.lex.persona, &|v| lit(v, ctx)))
+            .flatten()
+    };
     for r in &refs {
         tables.push(r.table.clone());
+        // A table the persona answers in its own shape (chapter 28).
+        if let Some(view) = local(&r.table) {
+            let (alias, _) = alias_at(&tk, r.last + 1);
+            let range = tk.t[r.first].start as usize..tk.t[r.last].end as usize;
+            let replacement = if alias.is_some() {
+                format!("({view})")
+            } else {
+                format!("({view}) AS {}", quote(&r.table))
+            };
+            edits.push((range, replacement));
+            continue;
+        }
         match r.class {
             TableClass::PassThrough => continue,
             TableClass::Denied => return Err(denied(&r.table, ctx)),
@@ -665,6 +684,13 @@ pub fn rewrite_information_schema(
         edits.push((range, replacement));
     }
     for &(j, ref table) in &cols {
+        if local(table).is_some() {
+            edits.push((
+                tk.t[j].start as usize..tk.t[j + 1].end as usize,
+                String::new(),
+            ));
+            continue;
+        }
         match classify_table(table) {
             TableClass::PassThrough => {}
             TableClass::Denied => return Err(denied(table, ctx)),
@@ -1037,50 +1063,57 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
         // No schema of the tenant qualifies: one branch that opens nothing.
         chosen.push(("__sprig_none".to_owned(), String::new()));
     }
+    let mysql = (ctx.lex.persona == Persona::MySql84)
+        .then(|| schema::mysql_view(spec.table, &|v| lit(v, ctx)))
+        .flatten();
+    let shape: Vec<(String, Option<String>)> = match &mysql {
+        Some(v) => v
+            .iter()
+            .map(|(n, src)| {
+                (
+                    (*n).to_owned(),
+                    match src {
+                        Src::Col(_) => None,
+                        Src::Sql(e) => Some(e.clone()),
+                    },
+                )
+            })
+            .collect(),
+        None => cols.iter().map(|c| (c.clone(), None)).collect(),
+    };
     let mut sql = String::with_capacity(512 * chosen.len());
     for (i, (phys, logical)) in chosen.iter().enumerate() {
         if i > 0 {
             sql.push_str(" UNION ALL ");
         }
         sql.push_str("SELECT ");
-        for (k, c) in cols.iter().enumerate() {
+        for (k, (c, computed)) in shape.iter().enumerate() {
             if k > 0 {
                 sql.push_str(", ");
             }
-            let up = c.to_ascii_uppercase();
             let qc = quote(c);
-            if up == spec.restrict || spec.same.contains(&up.as_str()) {
-                let _ = write!(sql, "{} AS {qc}", lit(logical, ctx));
-            } else if spec.schemas.contains(&up.as_str()) {
-                if pairs.is_empty() {
-                    let _ = write!(sql, "NULL AS {qc}");
-                } else {
-                    let _ = write!(sql, "CASE {qc}");
-                    for (p, l) in &pairs {
-                        let _ = write!(sql, " WHEN {} THEN {}", lit(p, ctx), lit(l, ctx));
-                    }
-                    let _ = write!(sql, " ELSE NULL END AS {qc}");
-                }
-            } else if spec.definitions.contains(&up.as_str()) {
-                let mut e = qc.clone();
-                for (p, l) in &pairs {
-                    e = format!(
-                        "REPLACE({e}, {}, {})",
-                        lit(&quote(p), ctx),
-                        lit(&quote(l), ctx)
-                    );
-                }
-                let _ = write!(sql, "{e} AS {qc}");
-            } else {
+            let e = match computed {
+                Some(e) => e.clone(),
+                None => column_sql(spec, c, logical, &pairs, ctx),
+            };
+            if e == qc {
                 sql.push_str(&qc);
+            } else {
+                let _ = write!(sql, "{e} AS {qc}");
             }
         }
+        let p = lit(phys, ctx);
+        let join = if mysql.is_some() && spec.table == "COLUMNS" {
+            schema::json_join(&p, &|v| lit(v, ctx))
+        } else {
+            String::new()
+        };
         let _ = write!(
             sql,
-            " FROM information_schema.{} WHERE {} = {}",
+            " FROM information_schema.{}{join} WHERE {} = {}",
             spec.table,
             quote(spec.restrict),
-            lit(phys, ctx)
+            p
         );
         let vis = &ctx.vis;
         if !vis.internal {
@@ -1104,7 +1137,6 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
         {
             let _ = write!(sql, " AND LEFT({}, 11) <> 'sprig_auto_'", quote(ix));
         }
-        let p = lit(phys, ctx);
         let col_cond = hidden_column_cond("COLUMN_NAME", *vis);
         match (spec.extra, &col_cond) {
             (Extra::Index, Some(cond)) => {
@@ -1140,6 +1172,11 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
                 _ => {}
             }
         }
+        if mysql.is_some()
+            && let Some(f) = schema::mysql_branch_filter(spec.table, &p, &|v| lit(v, ctx))
+        {
+            sql.push_str(&f);
+        }
         for (_, cond) in &push.names {
             let _ = write!(sql, " AND {cond}");
         }
@@ -1147,8 +1184,70 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
     Ok(sql)
 }
 
+/// The expression for the backend's column `c` in a branch of `spec`'s
+/// view over the schema of `logical`: schema names mapped, definitions
+/// unrewritten, other columns as they are.
+fn column_sql(
+    spec: &Spec,
+    c: &str,
+    logical: &str,
+    pairs: &[(String, String)],
+    ctx: &InfoSchemaCtx<'_>,
+) -> String {
+    let up = c.to_ascii_uppercase();
+    let qc = quote(c);
+    if up == spec.restrict || spec.same.contains(&up.as_str()) {
+        lit(logical, ctx)
+    } else if spec.schemas.contains(&up.as_str()) {
+        if pairs.is_empty() {
+            "NULL".to_owned()
+        } else {
+            let mut e = format!("CASE {qc}");
+            for (p, l) in pairs {
+                let _ = write!(e, " WHEN {} THEN {}", lit(p, ctx), lit(l, ctx));
+            }
+            e.push_str(" ELSE NULL END");
+            e
+        }
+    } else if spec.definitions.contains(&up.as_str()) {
+        let mut e = qc;
+        for (p, l) in pairs {
+            e = format!(
+                "REPLACE({e}, {}, {})",
+                lit(&quote(p), ctx),
+                lit(&quote(l), ctx)
+            );
+        }
+        e
+    } else {
+        qc
+    }
+}
+
 fn schemata_view(push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<String, NameError> {
-    let cols = ctx.registry.require("SCHEMATA")?;
+    let mysql = (ctx.lex.persona == Persona::MySql84)
+        .then(|| schema::mysql_view("SCHEMATA", &|v| lit(v, ctx)))
+        .flatten();
+    let shape: Vec<(String, Option<String>)> = match mysql {
+        Some(v) => v
+            .into_iter()
+            .map(|(n, src)| {
+                (
+                    n.to_owned(),
+                    match src {
+                        Src::Col(_) => None,
+                        Src::Sql(e) => Some(e),
+                    },
+                )
+            })
+            .collect(),
+        None => ctx
+            .registry
+            .require("SCHEMATA")?
+            .iter()
+            .map(|c| (c.clone(), None))
+            .collect(),
+    };
     let keep = |name: &str| {
         push.schemas
             .as_ref()
@@ -1159,15 +1258,16 @@ fn schemata_view(push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<String, Nam
     for name in names.iter().filter(|n| keep(n)) {
         let system = super::rewrite::SystemSchema::parse(name).is_some();
         if system {
-            let sel: Vec<String> = cols
+            let sel: Vec<String> = shape
                 .iter()
-                .map(|c| {
+                .map(|(c, _)| {
                     let v = match c.to_ascii_uppercase().as_str() {
                         "CATALOG_NAME" => "'def'".to_owned(),
                         "SCHEMA_NAME" => lit(name, ctx),
                         "DEFAULT_CHARACTER_SET_NAME" => "'utf8mb3'".to_owned(),
                         "DEFAULT_COLLATION_NAME" => "'utf8mb3_general_ci'".to_owned(),
                         "SCHEMA_COMMENT" => "''".to_owned(),
+                        "DEFAULT_ENCRYPTION" => "'NO'".to_owned(),
                         _ => "NULL".to_owned(),
                     };
                     format!("{v} AS {}", quote(c))
@@ -1182,11 +1282,13 @@ fn schemata_view(push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<String, Nam
         let Some(phys) = db.shards.first() else {
             continue;
         };
-        let sel: Vec<String> = cols
+        let sel: Vec<String> = shape
             .iter()
-            .map(|c| {
+            .map(|(c, computed)| {
                 if c.eq_ignore_ascii_case("SCHEMA_NAME") {
                     format!("{} AS {}", lit(name, ctx), quote(c))
+                } else if let Some(e) = computed {
+                    format!("{e} AS {}", quote(c))
                 } else {
                     quote(c)
                 }
@@ -1199,9 +1301,9 @@ fn schemata_view(push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<String, Nam
         ));
     }
     if parts.is_empty() {
-        let sel: Vec<String> = cols
+        let sel: Vec<String> = shape
             .iter()
-            .map(|c| format!("NULL AS {}", quote(c)))
+            .map(|(c, _)| format!("NULL AS {}", quote(c)))
             .collect();
         parts.push(format!("SELECT {} FROM DUAL WHERE 0", sel.join(", ")));
     }
@@ -1209,7 +1311,14 @@ fn schemata_view(push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<String, Nam
 }
 
 fn processlist_view(ctx: &InfoSchemaCtx<'_>) -> Result<String, NameError> {
-    let cols = ctx.registry.require("PROCESSLIST")?;
+    let mysql_cols: Option<Vec<String>> = (ctx.lex.persona == Persona::MySql84)
+        .then(|| schema::mysql_column_names("PROCESSLIST"))
+        .flatten()
+        .map(|v| v.into_iter().map(str::to_owned).collect());
+    let cols: &[String] = match &mysql_cols {
+        Some(v) => v,
+        None => ctx.registry.require("PROCESSLIST")?,
+    };
     let rows = ctx
         .sessions
         .ok_or_else(|| {

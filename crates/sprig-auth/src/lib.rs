@@ -41,10 +41,16 @@
 pub mod account;
 pub mod accounts;
 pub mod admin;
+pub mod apikey;
+pub mod audit;
+pub mod authz;
 pub mod cache;
 mod crypt;
 pub mod fast_cache;
 pub mod mysql;
+pub mod policy;
+pub mod ratelimit;
+pub mod revoke;
 pub mod settings;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
