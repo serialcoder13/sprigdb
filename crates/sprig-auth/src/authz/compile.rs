@@ -11,6 +11,11 @@
 //!   allow iff a in b
 //! ```
 //!
+//! Grants held by name ([`PrivTarget::Named`], kept from a dropped table)
+//! are resolved against the snapshot: onto the table or view with that
+//! name when one exists, else kept by name, where they count for creating
+//! that table ([`Target::Named`]) and for seeing its database.
+//!
 //! SQL is checked coarsely here (an object passes if any column grant
 //! gives the action); MariaDB applies exact column rules through the
 //! user's backend account ([`super::backend`]). A [`CompiledPrivileges`]
@@ -36,6 +41,14 @@ pub enum Target<'a> {
     Database {
         /// The name key.
         db_key: &'a str,
+    },
+    /// A table or view that doesn't exist, by name: creating it, or a
+    /// statement naming a missing table (grants held by name count).
+    Named {
+        /// The database's name key.
+        db_key: &'a str,
+        /// The relation's name key.
+        name_key: &'a str,
     },
     /// An object of an existing database.
     Object {
@@ -65,6 +78,10 @@ pub struct CompiledPrivileges {
     pub columns: HashMap<(ObjectId, String), ActionSet>,
     /// Databases (by id) with any object or column grant.
     pub dbs_with_objects: BTreeSet<DbId>,
+    /// Grants held by name on relations that don't exist in the snapshot,
+    /// by (database key, name key): the table level and every column
+    /// merged (the coarse check).
+    pub named: HashMap<(String, String), ActionSet>,
     /// The roles the set was compiled for (active, then closed).
     pub roles: Vec<RoleId>,
 }
@@ -80,9 +97,22 @@ impl CompiledPrivileges {
         }
     }
 
-    /// Compiles `user`'s privileges with `active` roles active.
+    /// Compiles `user`'s privileges with `active` roles active; grants held
+    /// by name stay by name.
     #[must_use]
     pub fn compile(state: &AuthzState, user: UserId, active: &[RoleId]) -> Self {
+        Self::compile_at(state, &|_, _| None, user, active)
+    }
+
+    /// [`Self::compile`], resolving grants held by name with `relation`:
+    /// the live table or view with a (database key, name key), if any.
+    #[must_use]
+    pub fn compile_at(
+        state: &AuthzState,
+        relation: &dyn Fn(&str, &str) -> Option<(DbId, ObjectId)>,
+        user: UserId,
+        active: &[RoleId],
+    ) -> Self {
         if !state.is_migrated() {
             return Self::everything();
         }
@@ -95,7 +125,33 @@ impl CompiledPrivileges {
             std::iter::once(Grantee::User(user)).chain(roles.iter().map(|r| Grantee::Role(*r)));
         for g in grantees {
             for p in state.privileges_of(g) {
-                c.add(&p.target, p.actions);
+                match &p.target {
+                    PrivTarget::Named {
+                        db_key,
+                        name_key,
+                        column,
+                    } => match (relation(db_key, name_key), column) {
+                        (Some((db, object)), None) => {
+                            c.add(&PrivTarget::Object { db, object }, p.actions);
+                        }
+                        (Some((db, object)), Some(column)) => c.add(
+                            &PrivTarget::Column {
+                                db,
+                                object,
+                                column: column.clone(),
+                            },
+                            p.actions,
+                        ),
+                        (None, _) => {
+                            let e = c
+                                .named
+                                .entry((db_key.clone(), name_key.clone()))
+                                .or_default();
+                            *e = e.union(p.actions);
+                        }
+                    },
+                    t => c.add(t, p.actions),
+                }
             }
         }
         c
@@ -123,6 +179,8 @@ impl CompiledPrivileges {
                 *e = e.union(a);
                 self.dbs_with_objects.insert(*db);
             }
+            // Resolved by compile_at.
+            PrivTarget::Named { .. } => {}
         }
     }
 
@@ -134,6 +192,9 @@ impl CompiledPrivileges {
             Target::Database { db_key } => self
                 .tenant
                 .union(self.dbs.get(db_key).copied().unwrap_or_default()),
+            Target::Named { db_key, name_key } => self
+                .actions_on(Target::Database { db_key })
+                .union(self.named_on(db_key, name_key)),
             Target::Object { db_key, object, .. } => self
                 .actions_on(Target::Database { db_key })
                 .union(self.objects.get(&object).copied().unwrap_or_default()),
@@ -153,9 +214,17 @@ impl CompiledPrivileges {
         }
     }
 
+    fn named_on(&self, db_key: &str, name_key: &str) -> ActionSet {
+        self.named
+            .get(&(db_key.to_owned(), name_key.to_owned()))
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Whether any privilege at all reaches database `db_key` (`USE`,
     /// `SHOW DATABASES`): at the tenant, the database, or any of its
-    /// objects or columns.
+    /// objects or columns, including grants held by name (MySQL lists a
+    /// database for a `tables_priv` row of a missing table too).
     #[must_use]
     pub fn any_in_database(&self, db_key: &str, db: Option<DbId>) -> bool {
         if self.everything {
@@ -163,6 +232,7 @@ impl CompiledPrivileges {
         }
         !self.actions_on(Target::Database { db_key }).is_empty()
             || db.is_some_and(|d| self.dbs_with_objects.contains(&d))
+            || self.named.keys().any(|(d, _)| d == db_key)
     }
 
     /// Whether any privilege reaches object `object` (`SHOW CREATE

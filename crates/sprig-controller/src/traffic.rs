@@ -156,18 +156,16 @@ impl TrafficWindows {
         for r in &batch.rows {
             let ring = rings.entry(TenantId(r.tenant_id)).or_default();
             let pos = ring.iter().position(|(m, _)| *m == batch.minute);
-            let bucket = match pos {
-                Some(i) => &mut ring[i].1,
-                None => {
-                    // Reports arrive roughly in order; keep the ring sorted.
-                    let at = ring
-                        .iter()
-                        .position(|(m, _)| *m > batch.minute)
-                        .unwrap_or(ring.len());
-                    ring.insert(at, (batch.minute, HashMap::new()));
-                    &mut ring[at].1
-                }
-            };
+            let at = pos.unwrap_or_else(|| {
+                // Reports arrive roughly in order; keep the ring sorted.
+                let at = ring
+                    .iter()
+                    .position(|(m, _)| *m > batch.minute)
+                    .unwrap_or(ring.len());
+                ring.insert(at, (batch.minute, HashMap::new()));
+                at
+            });
+            let bucket = &mut ring[at].1;
             let c = bucket.entry(r.client_dc.clone()).or_insert((0, 0));
             c.0 += r.reads;
             c.1 += r.writes;
@@ -175,6 +173,7 @@ impl TrafficWindows {
                 ring.pop_front();
             }
         }
+        #[allow(clippy::cast_precision_loss)] // a gauge
         metrics::gauge!("sprig_controller_traffic_tenants").set(rings.len() as f64);
     }
 

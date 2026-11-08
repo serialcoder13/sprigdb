@@ -5,6 +5,8 @@
 //! ```text
 //! POST /admin/v1/tenants/{name}:move     {"to": "fra1", "max_pause_ms": 5000, "dry_run": false}
 //! GET  /admin/v1/tenants/{name}/move     the move in progress, or the last one
+//! POST /admin/v1/tenants/{name}:pin      pinned_dc = the home DC (and :unpin);
+//!                                        `sprigctl tenant pin` calls it
 //! GET  /admin/v1/tenants/{name}/traffic  the window and the R0 decision
 //! POST /admin/v1/traffic/reports         gateways' counts (no bearer token:
 //!                                        counts only, on the private Admin port)
@@ -60,6 +62,15 @@ impl AdminService {
     pub async fn tenant_move(&self, name: &str) -> Result<MoveView> {
         let t = self.get_tenant(name).await?;
         self.moves()?.status(t.tenant_id, name).await
+    }
+
+    /// Pins `name` to its home DC, or unpins it (`:pin`, `:unpin`).
+    ///
+    /// # Errors
+    /// As [`DcMoves::pin`].
+    pub async fn pin_tenant_dc(&self, name: &str, pin: bool) -> Result<MoveView> {
+        let t = self.get_tenant(name).await?;
+        self.moves()?.pin(t.tenant_id, name, pin).await
     }
 
     /// Adds a gateway's traffic report.

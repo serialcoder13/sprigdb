@@ -95,10 +95,10 @@ impl DcRegistry {
     ///
     /// # Errors
     /// Internal never in practice (the prefix is valid).
-    pub fn start(global: Arc<dyn MetaStore>) -> sprig_common::Result<Self> {
+    pub fn start(global: &Arc<dyn MetaStore>) -> sprig_common::Result<Self> {
         let prefix = Tier::Global.key("dcs/")?;
         Ok(Self {
-            mirror: Mirror::spawn(TierView::over(&global, Tier::Global), prefix),
+            mirror: Mirror::spawn(TierView::over(global, Tier::Global), prefix),
         })
     }
 
@@ -469,7 +469,10 @@ mod tests {
         );
         assert!(matches!(parse_hint(Some("1fra"), None), DcHint::Unknown(_)));
         assert!(matches!(parse_hint(Some("f"), None), DcHint::Unknown(_)));
-        assert!(matches!(parse_hint(Some("fra_1"), None), DcHint::Unknown(_)));
+        assert!(matches!(
+            parse_hint(Some("fra_1"), None),
+            DcHint::Unknown(_)
+        ));
         assert!(matches!(
             parse_hint(Some(&"a".repeat(33)), None),
             DcHint::Unknown(_)
@@ -479,8 +482,14 @@ mod tests {
 
     #[test]
     fn set_statements() {
-        assert_eq!(parse_set(b"SET @sprig_dc = 'fra1'").as_deref(), Some("fra1"));
-        assert_eq!(parse_set(b"set @SPRIG_DC:=\"mum1\";").as_deref(), Some("mum1"));
+        assert_eq!(
+            parse_set(b"SET @sprig_dc = 'fra1'").as_deref(),
+            Some("fra1")
+        );
+        assert_eq!(
+            parse_set(b"set @SPRIG_DC:=\"mum1\";").as_deref(),
+            Some("mum1")
+        );
         assert_eq!(parse_set(b"  SET   @sprig_dc='' ").as_deref(), Some(""));
         assert_eq!(parse_set(b"SET @sprig_dcx = 'a'"), None);
         assert_eq!(parse_set(b"SET @sprig_dc = 'a', @b = 1"), None);

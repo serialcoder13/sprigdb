@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
-use axum::http::Uri;
 use axum::http::StatusCode;
+use axum::http::Uri;
 use axum::routing::get;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::net::TcpListener;
@@ -31,6 +31,22 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{LogFormat, TelemetryConfig};
 use crate::error::{Result, SprigCode, SprigError};
 use crate::time::{Clock, SystemClock};
+
+/// `telemetry.tenant_series_min_rps`, kept here so every role's hot path
+/// reads it without a settings lookup (`sprig_settings::ops` sets it).
+static TENANT_SERIES_MIN_RPS: AtomicU64 = AtomicU64::new(10);
+
+/// Statements per second a tenant needs before its own series appear
+/// (chapter 47, "Metric catalogue").
+#[must_use]
+pub fn tenant_series_min_rps() -> u64 {
+    TENANT_SERIES_MIN_RPS.load(Ordering::Relaxed)
+}
+
+/// Sets [`tenant_series_min_rps`].
+pub fn set_tenant_series_min_rps(rps: u64) {
+    TENANT_SERIES_MIN_RPS.store(rps, Ordering::Relaxed);
+}
 
 /// `/healthz` turns 503 when the watchdog hasn't ticked for this long.
 pub const WATCHDOG_STALE: Duration = Duration::from_secs(5);
@@ -43,6 +59,9 @@ const WATCHDOG_PERIOD: Duration = Duration::from_secs(1);
 /// `ConfigInvalid` for a bad filter; `Internal` if a subscriber is already
 /// installed.
 pub fn init_tracing(cfg: &TelemetryConfig) -> Result<()> {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
     let filter = EnvFilter::try_new(&cfg.bootstrap_log_level).map_err(|e| {
         SprigError::new(
             SprigCode::ConfigInvalid,
@@ -52,9 +71,6 @@ pub fn init_tracing(cfg: &TelemetryConfig) -> Result<()> {
             ),
         )
     })?;
-    use tracing_subscriber::Layer as _;
-    use tracing_subscriber::layer::SubscriberExt as _;
-    use tracing_subscriber::util::SubscriberInitExt as _;
     // Each layer has its own filter: the log filter never hides trace
     // spans, and trace spans pass only to the trace layer and as context.
     let logs = match cfg.log_format {
@@ -306,7 +322,11 @@ impl Health {
         if let Some((path, loaded)) = config {
             match std::fs::read_to_string(&path) {
                 Ok(now) if now == loaded => {
-                    let _ = writeln!(out, "[+]config {} matches the running configuration", path.display());
+                    let _ = writeln!(
+                        out,
+                        "[+]config {} matches the running configuration",
+                        path.display()
+                    );
                 }
                 Ok(_) => {
                     let _ = writeln!(
@@ -366,10 +386,7 @@ async fn healthz(State(s): State<ServerState>) -> (StatusCode, &'static str) {
     }
 }
 
-async fn readyz(
-    State(s): State<ServerState>,
-    uri: Uri,
-) -> (StatusCode, String) {
+async fn readyz(State(s): State<ServerState>, uri: Uri) -> (StatusCode, String) {
     let q = query_params(&uri);
     let state = s.health.state();
     let code = if state == ProcessState::Ready {
@@ -410,7 +427,10 @@ async fn debug_traces(uri: Uri) -> ([(axum::http::HeaderName, &'static str); 1],
     }
     let traces: Vec<&trace::Trace> = traces.iter().map(AsRef::as_ref).collect();
     let body = serde_json::to_string_pretty(&traces).unwrap_or_else(|_| "[]".into());
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], body)
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
 }
 
 async fn metrics_text(State(s): State<ServerState>) -> String {
@@ -529,7 +549,10 @@ mod tests {
         let (code, body) = http_get(addr, "/readyz?verbose").await;
         assert_eq!(code, 200);
         assert!(body.starts_with("ready\n"), "{body}");
-        assert!(body.contains(&format!("[+]process pid={} ", std::process::id())), "{body}");
+        assert!(
+            body.contains(&format!("[+]process pid={} ", std::process::id())),
+            "{body}"
+        );
         assert!(body.contains("[+]config "), "{body}");
         assert!(body.contains("[+]listeners mysql 127.0.0.1:3306"), "{body}");
         std::fs::write(&cfg, "[node]\ndc = \"dc-b\"\n").unwrap();

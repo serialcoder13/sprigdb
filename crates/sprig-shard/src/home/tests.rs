@@ -85,7 +85,10 @@ async fn commit_moves_maps_and_directory_together() {
         assert_eq!(m.tenant_epoch, 4);
     }
     let d = read_home(&*store, T).await.unwrap().unwrap();
-    assert_eq!((d.home_dc.as_str(), d.epoch, d.state.as_str()), ("fra1", 4, "active"));
+    assert_eq!(
+        (d.home_dc.as_str(), d.epoch, d.state.as_str()),
+        ("fra1", 4, "active")
+    );
     assert!(d.migration.is_none());
     assert_eq!(d.raw["extra"], json!([1]));
     assert_eq!(d.raw["catalog_version"], json!(7));
@@ -119,7 +122,12 @@ async fn commit_refuses_without_the_hold_or_the_migration() {
         HomeCommit::Rejected(_)
     ));
     assert_eq!(
-        read_home(&*store, T).await.unwrap().unwrap().home_dc.as_str(),
+        read_home(&*store, T)
+            .await
+            .unwrap()
+            .unwrap()
+            .home_dc
+            .as_str(),
         "mum1"
     );
 }

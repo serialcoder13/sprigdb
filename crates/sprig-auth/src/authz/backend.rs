@@ -12,6 +12,7 @@
 //! | `db.*` | `` ON `t42\_d1\_g1\_s1`.* `` per schema of the database, with the `*.*` actions too (MariaDB uses the most specific matching database row only) |
 //! | `db.t` | `` ON `t42_d1_g1_s1`.`t` `` per schema |
 //! | `db.t (c)` | the column, per schema |
+//! | `db.t` held by name (a dropped table's, `auth.grants_on_drop = keep`) | as `db.t` while a table of that name exists; before that only if it includes `CREATE` (MariaDB refuses others on a missing table), so the user can create it again |
 //! | `db.f` (routine) | `` ON FUNCTION `t42_d1_g1_s1`.`f` `` per schema |
 //!
 //! Only data and object actions reach MariaDB (`SELECT` ... `TRIGGER`,
@@ -51,7 +52,7 @@ use mysql_async::{Conn, Row};
 use sha2::{Digest, Sha256};
 use sprig_catalog::TenantCatalog;
 use sprig_catalog::ddl::shard_schemas;
-use sprig_catalog::store::{DbState, ObjectKind, ObjectState};
+use sprig_catalog::store::{DbState, Namespace, ObjectKind, ObjectState};
 use sprig_common::ids::{TenantId, UserId};
 use sprig_common::names::{AccountName, SchemaName};
 use sprig_common::{Result, SprigError};
@@ -317,12 +318,49 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
                 }
             }
             for p in rest {
-                let (db, object, column) = match &p.target {
-                    PrivTarget::Object { db, object } => (*db, *object, None),
-                    PrivTarget::Column { db, object, column } => (*db, *object, Some(column)),
+                let (d, o, column) = match &p.target {
+                    PrivTarget::Object { db, object } => {
+                        (cat.databases.get(*db), cat.objects.get(*object), None)
+                    }
+                    PrivTarget::Column { db, object, column } => (
+                        cat.databases.get(*db),
+                        cat.objects.get(*object),
+                        Some(column),
+                    ),
+                    // Held by name: the relation with that name, if any.
+                    PrivTarget::Named {
+                        db_key,
+                        name_key,
+                        column,
+                    } => {
+                        let d = cat.database(db_key).filter(|d| d.state == DbState::Active);
+                        let o = d.and_then(|d| {
+                            cat.object(d.db_id, Namespace::Relation, name_key)
+                                .filter(|o| o.state == ObjectState::Active)
+                        });
+                        if o.is_none() {
+                            // No such table yet: MariaDB keeps a table
+                            // grant without the table only when it
+                            // includes CREATE (1146 otherwise), which is
+                            // what lets the user create it again.
+                            if let Some(d) = d
+                                && column.is_none()
+                                && p.actions.has(Action::Create)
+                            {
+                                for s in shard_schemas(tenant, d) {
+                                    add(
+                                        BackendTarget::Table(s.to_string(), name_key.clone()),
+                                        p.actions,
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+                        (d, o, column.as_ref())
+                    }
                     _ => continue,
                 };
-                let (Some(d), Some(o)) = (cat.databases.get(db), cat.objects.get(object)) else {
+                let (Some(d), Some(o)) = (d, o) else {
                     continue;
                 };
                 if d.state != DbState::Active || o.state != ObjectState::Active {
@@ -531,8 +569,16 @@ pub fn plan(
         let mut touched = false;
         for (t, set) in grants {
             let had = found.get(t).copied().unwrap_or_default();
-            let add = set.minus(had);
+            let mut add = set.minus(had);
             let del = had.minus(*set);
+            // MariaDB refuses a table grant on a missing table (1146)
+            // unless the list includes CREATE; repeating CREATE is harmless.
+            if !add.is_empty()
+                && matches!(t, BackendTarget::Table(..))
+                && set.has(Action::Create)
+            {
+                add = add.with(Action::Create);
+            }
             if !add.is_empty() {
                 out.push(Zeroizing::new(format!(
                     "GRANT {} ON {} TO {who}",

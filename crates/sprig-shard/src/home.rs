@@ -141,9 +141,10 @@ pub async fn read_home(global: &dyn MetaStore, tenant: TenantId) -> Result<Optio
     }
 }
 
-/// Changes a directory entry with `f`, compare-and-swap on its revision,
-/// retrying a few times when it changed meanwhile. `f` returns `false` to
-/// leave the entry as it is.
+/// Changes a directory entry with `f` (through [`HomeEntry::raw`]),
+/// compare-and-swap on its revision, retrying a few times when it changed
+/// meanwhile; returns the entry as written. `f` returns `false` to leave
+/// the entry as it is.
 ///
 /// # Errors
 /// 39072 if the tenant has no entry; whatever `f` returns; 39070 if the
@@ -160,20 +161,21 @@ where
         if !f(&mut e)? {
             return Ok(e);
         }
+        let value = e.encode()?;
         let r = global
             .txn(Txn {
                 when: vec![Cmp::ModRev(key.clone(), e.rev)],
                 then: vec![Op::Put {
                     key: key.clone(),
-                    value: e.encode()?,
+                    value: value.clone(),
                     lease: None,
                 }],
                 otherwise: Vec::new(),
             })
             .await?;
         if r.succeeded {
-            e.rev = r.revision;
-            return Ok(e);
+            // The typed fields again, from what was written.
+            return HomeEntry::decode(&value, r.revision);
         }
     }
     Err(SprigError::new(
@@ -227,6 +229,7 @@ fn moved_by_job(m: &ShardMap, holder: &str) -> Result<bool> {
 /// # Errors
 /// The store's errors (the outcome is then unknown: read the maps again);
 /// internal for bad records.
+#[allow(clippy::too_many_lines)] // the checks, then one transaction
 pub async fn commit(store: &Arc<dyn MetaStore>, c: &HomeChange) -> Result<HomeCommit> {
     let src = maps_in(store, &c.from);
     let dst = maps_in(store, &c.to);

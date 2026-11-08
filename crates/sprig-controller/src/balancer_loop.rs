@@ -22,8 +22,10 @@
 //! aggregate of the tenant's recent buckets from the catalog it already
 //! scans (same cluster, same connection): statements per second, busy
 //! milliseconds per second and rows written per second, averaged from the
-//! oldest bucket read (at most `balancer.window_minutes` plus one hour
-//! back) to now. Connections stay unmeasured. A catalog without the
+//! oldest bucket read to now. It reads the buckets that start within
+//! `balancer.window_minutes` of the newest one (so with the default
+//! 60-minute buckets, the current hour), never more than the window plus
+//! an hour back. Connections stay unmeasured. A catalog without the
 //! workload tables reads as no load.
 //!
 //! **Moves.** The controller passes a [`MoveExecutor`] over chapter 10's
@@ -237,7 +239,11 @@ impl BalancerLoop {
             by_cluster.entry(c).or_default().push(t);
         }
         for (c, tenants) in by_cluster {
-            let sizes = match self.scan(&c, &tenants).await {
+            let scan = tokio::time::timeout(CALL_TIMEOUT, self.scan(&c, &tenants));
+            let sizes = match scan
+                .await
+                .unwrap_or_else(|_| Err(timed_out("storage scan")))
+            {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(cluster = %c, error = %e, "balancer storage scan failed");
@@ -262,6 +268,14 @@ impl BalancerLoop {
                 v.add_shard(ShardView::new(ShardKey::new(t.0, 0, 0), c.clone(), load));
             }
         }
+        // Operator pins: a pinned tenant is never a candidate. No view
+        // without them (a plan that ignored pins could move one).
+        sprig_balancer::pins::apply_pins(
+            &mut v,
+            &sprig_balancer::pins::PinStore::new(Arc::clone(&self.dc_store))
+                .list()
+                .await?,
+        );
         Ok((v, qps))
     }
 
@@ -287,7 +301,8 @@ impl BalancerLoop {
         let mut conn = pool.get_conn().await.map_err(scan_err)?;
         let page = sprig_balancer::load::page_size(&mut conn).await?;
         let now = secs(&*self.clock);
-        let since = now.saturating_sub(self.settings().window.as_secs() + 3600);
+        let window = self.settings().window.as_secs();
+        let since = now.saturating_sub(window + 3600);
         let mut out = BTreeMap::new();
         for t in tenants {
             let row: Option<(u64, u64, u64)> = conn
@@ -300,7 +315,7 @@ impl BalancerLoop {
                 .await
                 .map_err(scan_err)?;
             let (schemas, tables, pages) = row.unwrap_or((0, 0, 0));
-            let g = gateway_load(&mut conn, *t, since, now).await;
+            let g = gateway_load(&mut conn, *t, since, window, now).await;
             #[allow(clippy::cast_precision_loss)]
             out.insert(
                 *t,
@@ -337,7 +352,8 @@ impl BalancerLoop {
         }
         let no_mover = sprig_balancer::schedule::NoMover;
         let exec: &dyn MoveExecutor = self.exec.as_deref().unwrap_or(&no_mover);
-        g.scheduler.poll(&view, exec, &*self.log, now).await;
+        let log = BoundedLog(Arc::clone(&self.log));
+        g.scheduler.poll(&view, exec, &log, now).await;
         g.scheduler.annotate(&mut view, now);
         let report = g.planner.rebalance(&view, now);
         let has_mover = self.exec.is_some();
@@ -361,7 +377,7 @@ impl BalancerLoop {
         if dc_mode != BalancerMode::Off {
             let max = settings.max_concurrent_moves_per_dc as usize;
             g.scheduler
-                .schedule(&report, &view, &mode_of, max, exec, &*self.log, now)
+                .schedule(&report, &view, &mode_of, max, exec, &log, now)
                 .await;
         }
         let changes = g.book.observe(&view, &report, now);
@@ -431,12 +447,15 @@ impl BalancerLoop {
     /// The catalog's; 39792 when there is no such decision.
     pub async fn decision(&self, tenant: &str, id: u64) -> Result<DecisionRow> {
         let t = self.tenant_id(tenant).await?;
-        self.log.get(t, id).await?.ok_or_else(|| {
-            SprigError::new(
-                SprigCode::AdminRequestInvalid,
-                format!("tenant {tenant} has no decision {id}"),
-            )
-        })
+        tokio::time::timeout(CALL_TIMEOUT, self.log.get(t, id))
+            .await
+            .unwrap_or_else(|_| Err(timed_out("decision read")))?
+            .ok_or_else(|| {
+                SprigError::new(
+                    SprigCode::AdminRequestInvalid,
+                    format!("tenant {tenant} has no decision {id}"),
+                )
+            })
     }
 
     async fn tenant_id(&self, name: &str) -> Result<TenantId> {
@@ -491,13 +510,15 @@ impl GatewayLoad {
     }
 }
 
-/// Reads `tenant`'s gateway load from its catalog's `workload_stats`
-/// (buckets starting at or after `since`); no load when the catalog has
-/// no workload tables or the read fails.
+/// Reads `tenant`'s gateway load from its catalog's `workload_stats`: the
+/// buckets that start within `window` seconds of its newest one, and not
+/// before `since`; no load when the catalog has no workload tables or the
+/// read fails.
 async fn gateway_load(
     conn: &mut mysql_async::Conn,
     tenant: TenantId,
     since: u64,
+    window: u64,
     now: u64,
 ) -> GatewayLoad {
     let schema = sprig_common::names::SchemaName::catalog(tenant).to_string();
@@ -506,11 +527,12 @@ async fn gateway_load(
          CAST(COALESCE(SUM(total_us), 0) AS UNSIGNED), \
          CAST(COALESCE(SUM(rows_affected), 0) AS UNSIGNED), \
          CAST(COALESCE(MIN(TIMESTAMPDIFF(SECOND, '1970-01-01', bucket_start)), 0) AS UNSIGNED) \
-         FROM {}.workload_stats WHERE bucket_start >= TIMESTAMPADD(SECOND, ?, '1970-01-01')",
-        sprig_common::names::quote(&schema)
+         FROM {t} WHERE bucket_start >= TIMESTAMPADD(SECOND, ?, '1970-01-01') \
+         AND bucket_start >= (SELECT TIMESTAMPADD(SECOND, -?, MAX(bucket_start)) FROM {t})",
+        t = format!("{}.workload_stats", sprig_common::names::quote(&schema))
     );
     match conn
-        .exec_first::<(u64, u64, u64, u64), _, _>(sql, (since,))
+        .exec_first::<(u64, u64, u64, u64), _, _>(sql, (since, window))
         .await
     {
         Ok(Some((n, us, rows, oldest))) if n > 0 => {
@@ -521,6 +543,48 @@ async fn gateway_load(
             tracing::debug!(%tenant, error = %e, "no gateway load for the tenant");
             GatewayLoad::default()
         }
+    }
+}
+
+/// How long one catalog or cluster call of a planning run may take: a
+/// cluster whose connections hang must not stop the loop (or hold the lock
+/// `explain placement` waits on).
+const CALL_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn timed_out(what: &str) -> SprigError {
+    SprigError::new(
+        SprigCode::CatalogUnavailable,
+        format!("{what} timed out after {} s", CALL_TIMEOUT.as_secs()),
+    )
+}
+
+/// The decision log with [`CALL_TIMEOUT`] on every call: a decision that
+/// can't be written in time counts as not written (and an `auto` move
+/// without its decision doesn't start).
+struct BoundedLog(Arc<CatalogDecisionLog>);
+
+#[async_trait::async_trait]
+impl DecisionLog for BoundedLog {
+    async fn record(
+        &self,
+        tenant: TenantId,
+        d: &sprig_balancer::decisions::NewDecision,
+    ) -> Result<u64> {
+        tokio::time::timeout(CALL_TIMEOUT, self.0.record(tenant, d))
+            .await
+            .unwrap_or_else(|_| Err(timed_out("decision write")))
+    }
+
+    async fn update_outcome(
+        &self,
+        tenant: TenantId,
+        id: u64,
+        o: sprig_balancer::decisions::Outcome,
+        at_us: i64,
+    ) -> Result<()> {
+        tokio::time::timeout(CALL_TIMEOUT, self.0.update_outcome(tenant, id, o, at_us))
+            .await
+            .unwrap_or_else(|_| Err(timed_out("decision update")))
     }
 }
 

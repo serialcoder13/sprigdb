@@ -397,7 +397,7 @@ async fn move_method(
     }
 }
 
-/// `{name}:move` (chapter 24).
+/// `{name}:move`, `{name}:pin` and `{name}:unpin` (chapter 24).
 async fn tenant_method(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -415,8 +415,10 @@ async fn tenant_method(
             };
             respond(r.await)
         }
+        Some((t, "pin")) => respond(app.svc.pin_tenant_dc(t, true).await),
+        Some((t, "unpin")) => respond(app.svc.pin_tenant_dc(t, false).await),
         _ => error_response(&invalid(format!(
-            "POST /admin/v1/tenants/{name}: expected {{name}}:move"
+            "POST /admin/v1/tenants/{name}: expected {{name}}:move, :pin or :unpin"
         ))),
     }
 }

@@ -133,7 +133,7 @@ impl TenantServices {
             )
             .with_homes(Arc::clone(&global), Arc::clone(&routing)),
         );
-        crate::dc::install_registry(crate::dc::DcRegistry::start(Arc::clone(&global))?);
+        crate::dc::install_registry(crate::dc::DcRegistry::start(&global)?);
         drop(crate::dc::DcRouting::spawn_reporter(
             &routing,
             Arc::clone(&stores.dc),

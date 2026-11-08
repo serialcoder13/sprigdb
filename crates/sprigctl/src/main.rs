@@ -31,6 +31,9 @@
 //!   [`index`]; `sprigctl explain decision|placement` (chapter 11 step
 //!   7): see [`placement`].
 //!
+//! - `sprigctl check no-restart` (chapter 47 step 6): settings, listener
+//!   and certificate changes under load with no restart; see [`check`].
+//!
 //! Every other command group parses and prints "not implemented yet",
 //! exiting with status 1.
 //!
@@ -39,6 +42,7 @@
 //! gateway's 8443 listener serves it; `--endpoint` or `SPRIGCTL_ENDPOINT`
 //! names it, and `--token-file` or `SPRIGCTL_TOKEN_FILE` its bearer token.
 
+mod check;
 mod client;
 mod cluster;
 mod dcmove;
@@ -379,7 +383,8 @@ fn cli() -> Command {
         .subcommand(index::explain_group())
         .subcommand(mover::shard_group())
         .subcommand(mover::job_group())
-        .subcommand(gateway::group());
+        .subcommand(gateway::group())
+        .subcommand(check::group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -424,7 +429,7 @@ fn main() -> ExitCode {
     };
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
-        "dc" | "cluster" | "settings" | "index" | "job" | "gateway" => true,
+        "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "shard" => name == "move",
@@ -458,6 +463,15 @@ fn main() -> ExitCode {
             "explain" => index::explain(&client, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
+            "check" => check::no_restart(&client, sub, output(&matches))
+                .await
+                .map(|passed| {
+                    if passed {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                }),
             "gateway" => gateway::run(&client, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
@@ -712,11 +726,11 @@ async fn run_tenant(
     match cmd {
         "pin" | "unpin" => {
             placement::run_pin(c, cmd, sub, out).await?;
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         "move" | "traffic" => {
             dcmove::run(c, cmd, sub, m.get_flag("dry-run"), out).await?;
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         "create" => {
             let cluster = sub

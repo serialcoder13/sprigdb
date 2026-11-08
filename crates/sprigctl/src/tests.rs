@@ -564,7 +564,22 @@ fn tenant_commands_parse() {
         full.extend_from_slice(bad);
         assert!(cli().try_get_matches_from(full).is_err(), "{bad:?}");
     }
-    assert!(TENANT_LATER.contains(&"move"));
+    assert!(TENANT_LATER.contains(&"failover"));
+    // Chapter 24: `tenant move` is implemented.
+    assert!(!TENANT_LATER.contains(&"move"));
+    for good in [
+        &["tenant", "move", "acme", "--to", "fra1"][..],
+        &["tenant", "move", "acme", "--to", "fra1", "--max-pause-ms", "3000", "--wait"],
+        &["tenant", "move", "acme", "--status"],
+        &["tenant", "traffic", "acme"],
+    ] {
+        let mut full = vec!["sprigctl"];
+        full.extend_from_slice(good);
+        assert!(cli().try_get_matches_from(full).is_ok(), "{good:?}");
+    }
+    let mut full = vec!["sprigctl"];
+    full.extend_from_slice(&["tenant", "move", "acme"]);
+    assert!(cli().try_get_matches_from(full).is_err(), "move needs --to or --status");
 }
 
 fn tenant_view(id: u64, name: &str, parent: Option<&str>) -> TenantView {

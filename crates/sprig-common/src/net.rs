@@ -30,7 +30,10 @@ fn map() -> &'static HashMap<String, String> {
             .map(|v| parse(&v))
             .unwrap_or_default();
         if !m.is_empty() {
-            tracing::info!(entries = m.len(), "{DIAL_MAP_ENV}: backend addresses are redirected");
+            tracing::info!(
+                entries = m.len(),
+                "{DIAL_MAP_ENV}: backend addresses are redirected"
+            );
         }
         m
     })

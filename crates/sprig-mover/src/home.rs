@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sprig_common::ids::{ClusterId, DcId, JobId, TenantId};
 use sprig_common::Result;
+use sprig_common::ids::{ClusterId, DcId, JobId, TenantId};
 use sprig_meta::MetaStore;
 use sprig_shard::home::{self, HomeChange, HomeCommit};
 
@@ -29,10 +29,11 @@ pub struct HomeMapIo {
 impl std::fmt::Debug for HomeMapIo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HomeMapIo")
+            .field("source", &self.source)
             .field("tenant", &self.tenant)
             .field("from", &self.from)
             .field("to", &self.to)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -146,9 +147,18 @@ mod tests {
         let to = ClusterId::new("fra1-c1").unwrap();
         io.hold(job, 3, u64::MAX).await.unwrap();
         // An older owner can't commit.
-        assert_eq!(io.commit(job, 2, &to).await.unwrap(), CommitOutcome::Rejected);
-        assert_eq!(io.commit(job, 3, &to).await.unwrap(), CommitOutcome::Committed);
-        assert_eq!(io.commit(job, 3, &to).await.unwrap(), CommitOutcome::Committed);
+        assert_eq!(
+            io.commit(job, 2, &to).await.unwrap(),
+            CommitOutcome::Rejected
+        );
+        assert_eq!(
+            io.commit(job, 3, &to).await.unwrap(),
+            CommitOutcome::Committed
+        );
+        assert_eq!(
+            io.commit(job, 3, &to).await.unwrap(),
+            CommitOutcome::Committed
+        );
         assert_eq!(io.release(job, 3).await.unwrap(), Released::Committed);
         let st = io.read().await.unwrap();
         assert_eq!((st.cluster, st.epoch), (to, 2));

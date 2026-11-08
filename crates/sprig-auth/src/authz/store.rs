@@ -178,6 +178,52 @@ pub enum PrivTarget {
         /// case-insensitively).
         column: String,
     },
+    /// `db.t` or `db.t (c)` held by name: the grant of a table or view that
+    /// was dropped with `auth.grants_on_drop = keep`. It applies to the
+    /// relation with that name whenever one exists (see the module docs).
+    Named {
+        /// The database's name key.
+        db_key: String,
+        /// The relation's name key.
+        name_key: String,
+        /// The column, lower case; `None` for the table itself.
+        column: Option<String>,
+    },
+}
+
+/// `name_pattern` of a [`PrivTarget::Named`] row: `` `db`.`t` ``.
+#[must_use]
+pub fn named_pattern(db_key: &str, name_key: &str) -> String {
+    format!(
+        "`{}`.`{}`",
+        db_key.replace('`', "``"),
+        name_key.replace('`', "``")
+    )
+}
+
+/// The database and relation keys of a `name_pattern` written by
+/// [`named_pattern`].
+#[must_use]
+pub fn parse_named(pattern: &str) -> Option<(String, String)> {
+    fn ident(s: &str) -> Option<(String, &str)> {
+        let mut rest = s.strip_prefix('`')?;
+        let mut out = String::new();
+        loop {
+            let i = rest.find('`')?;
+            out.push_str(&rest[..i]);
+            rest = &rest[i + 1..];
+            match rest.strip_prefix('`') {
+                Some(r) => {
+                    out.push('`');
+                    rest = r;
+                }
+                None => return Some((out, rest)),
+            }
+        }
+    }
+    let (db, rest) = ident(pattern)?;
+    let (name, rest) = ident(rest.strip_prefix('.')?)?;
+    rest.is_empty().then_some((db, name))
 }
 
 impl PrivTarget {
@@ -189,16 +235,30 @@ impl PrivTarget {
             PrivTarget::Database(_) => Level::Database,
             PrivTarget::Object { .. } => Level::Object,
             PrivTarget::Column { .. } => Level::Column,
+            PrivTarget::Named { column: None, .. } => Level::Object,
+            PrivTarget::Named { column: Some(_), .. } => Level::Column,
         }
     }
 
     /// `(db_id, object_id, column_name, name_pattern)`.
-    fn parts(&self) -> (u32, u64, &str, &str) {
+    fn parts(&self) -> (u32, u64, String, String) {
         match self {
-            PrivTarget::Tenant => (0, 0, "", ""),
-            PrivTarget::Database(n) => (0, 0, "", n.as_str()),
-            PrivTarget::Object { db, object } => (db.0, object.0, "", ""),
-            PrivTarget::Column { db, object, column } => (db.0, object.0, column.as_str(), ""),
+            PrivTarget::Tenant => (0, 0, String::new(), String::new()),
+            PrivTarget::Database(n) => (0, 0, String::new(), n.clone()),
+            PrivTarget::Object { db, object } => (db.0, object.0, String::new(), String::new()),
+            PrivTarget::Column { db, object, column } => {
+                (db.0, object.0, column.clone(), String::new())
+            }
+            PrivTarget::Named {
+                db_key,
+                name_key,
+                column,
+            } => (
+                0,
+                0,
+                column.clone().unwrap_or_default(),
+                named_pattern(db_key, name_key),
+            ),
         }
     }
 }
@@ -360,16 +420,30 @@ impl AuthzStore {
             let level: String = get(r, 3)?;
             let db = DbId(get(r, 4)?);
             let object = ObjectId(get(r, 5)?);
-            let target = match Level::parse(&level) {
-                Some(Level::Tenant) => PrivTarget::Tenant,
-                Some(Level::Database) => PrivTarget::Database(get(r, 7)?),
-                Some(Level::Object) => PrivTarget::Object { db, object },
-                Some(Level::Column) => PrivTarget::Column {
+            let pattern: String = get(r, 7)?;
+            let named = if object.0 == 0 {
+                parse_named(&pattern)
+            } else {
+                None
+            };
+            let target = match (Level::parse(&level), named) {
+                (Some(Level::Tenant), _) => PrivTarget::Tenant,
+                (Some(Level::Database), _) => PrivTarget::Database(pattern.clone()),
+                (Some(Level::Object | Level::Column), Some((db_key, name_key))) => {
+                    let column: String = get(r, 6)?;
+                    PrivTarget::Named {
+                        db_key,
+                        name_key,
+                        column: (!column.is_empty()).then_some(column),
+                    }
+                }
+                (Some(Level::Object), None) => PrivTarget::Object { db, object },
+                (Some(Level::Column), None) => PrivTarget::Column {
                     db,
                     object,
                     column: get(r, 6)?,
                 },
-                None => continue,
+                (None, _) => continue,
             };
             privileges.push(PrivRow {
                 priv_id: get(r, 0)?,
@@ -447,8 +521,8 @@ impl AuthzStore {
                 Value::from(target.level().as_str()),
                 Value::from(db),
                 Value::from(object),
-                Value::from(column),
-                Value::from(pattern),
+                Value::from(column.as_str()),
+                Value::from(pattern.as_str()),
             ]
         };
         let before: Option<u64> = q
@@ -560,6 +634,135 @@ impl AuthzStore {
                 self.privileges
             ),
             (db.0, object.0),
+        )
+        .await
+        .map_err(map_err)
+    }
+
+    /// `auth.grants_on_drop = keep` for a dropped table or view: its object
+    /// and column rows become [`PrivTarget::Named`] rows for
+    /// `` `db_key`.`name_key` `` (merged into any already there).
+    /// Returns whether there were rows.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn keep_by_name<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        db: DbId,
+        object: ObjectId,
+        db_key: &str,
+        name_key: &str,
+    ) -> Result<bool> {
+        let rows: Vec<(u64, String, u32, String, String, u64, Option<u32>, u64)> = q
+            .exec(
+                format!(
+                    "SELECT grantee_tenant_id, grantee_kind, grantee_id, level, column_name, \
+                     actions, granted_by, granted_by_tenant_id FROM {} \
+                     WHERE db_id = ? AND object_id = ? AND level IN ('object','column') \
+                     AND restriction = 0",
+                    self.privileges
+                ),
+                (db.0, object.0),
+            )
+            .await
+            .map_err(map_err)?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        let pattern = named_pattern(db_key, name_key);
+        for (gt, kind, id, level, column, actions, by, by_t) in rows {
+            q.exec_drop(
+                format!(
+                    "INSERT INTO {} (grantee_tenant_id, grantee_kind, grantee_id, level, db_id, \
+                     object_id, column_name, name_pattern, actions, granted_by, \
+                     granted_by_tenant_id, granted_at) \
+                     VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3)) \
+                     ON DUPLICATE KEY UPDATE actions = actions | VALUES(actions)",
+                    self.privileges
+                ),
+                vec![
+                    Value::from(gt),
+                    Value::from(kind),
+                    Value::from(id),
+                    Value::from(level),
+                    Value::from(column),
+                    Value::from(pattern.as_str()),
+                    Value::from(actions),
+                    Value::from(by),
+                    Value::from(by_t),
+                ],
+            )
+            .await
+            .map_err(map_err)?;
+        }
+        self.forget_object(q, db, object).await?;
+        Ok(true)
+    }
+
+    /// Deletes the [`PrivTarget::Named`] rows of relation `name_key` in
+    /// database `db_key`, or of every relation in it when `name_key` is
+    /// `None`.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn forget_named<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        db_key: &str,
+        name_key: Option<&str>,
+    ) -> Result<()> {
+        let base = format!(
+            "DELETE FROM {} WHERE level IN ('object','column') AND object_id = 0 AND ",
+            self.privileges
+        );
+        match name_key {
+            Some(n) => {
+                q.exec_drop(
+                    format!("{base}name_pattern = ?"),
+                    (named_pattern(db_key, n),),
+                )
+                .await
+            }
+            None => {
+                let prefix = format!("`{}`.", db_key.replace('`', "``"));
+                q.exec_drop(
+                    format!("{base}LEFT(name_pattern, CHAR_LENGTH(?)) = ?"),
+                    (prefix.as_str(), prefix.as_str()),
+                )
+                .await
+            }
+        }
+        .map_err(map_err)
+    }
+
+    /// `auth.grants_on_drop = drop` for a dropped database: deletes its
+    /// `db.*` rows (by name key) and every object and column row of its
+    /// objects (by id).
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn forget_database<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        db: DbId,
+        db_key: &str,
+    ) -> Result<()> {
+        q.exec_drop(
+            format!(
+                "DELETE FROM {} WHERE level = 'database' AND db_id = 0 AND name_pattern = ?",
+                self.privileges
+            ),
+            (db_key,),
+        )
+        .await
+        .map_err(map_err)?;
+        q.exec_drop(
+            format!(
+                "DELETE FROM {} WHERE db_id = ? AND level IN ('object','column')",
+                self.privileges
+            ),
+            (db.0,),
         )
         .await
         .map_err(map_err)

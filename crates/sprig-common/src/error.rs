@@ -306,6 +306,10 @@ sprig_codes! {
     /// A tenant with children can't be dropped (chapter 29; chapter 23's
     /// delete guard).
     TenantHasChildren = 39362, "ER_SPRIG_TENANT_HAS_CHILDREN", "SprigTenantHasChildren", SQLSTATE_GENERAL, false;
+    /// The tenant's authorization engine filters rows of a table the
+    /// statement touches, and the gateway can't apply such a filter yet
+    /// (chapter 29, "Pluggable authorization").
+    RlsUnsupported = 39366, "ER_SPRIG_RLS_UNSUPPORTED", "SprigRlsUnsupported", SQLSTATE_GENERAL, false;
     /// A stored program wasn't recorded with the session's backend account
     /// as its definer; the gateway dropped it again (chapter 29, "Definers
     /// of stored code").
@@ -499,9 +503,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ShardLocked
         | SprigCode::MoveCutoverAborted => (Code::Aborted, 409),
         SprigCode::CatalogFormatTooNew => (Code::FailedPrecondition, 500),
-        SprigCode::BinlogCorrupt
-        | SprigCode::MoveVerifyFailed
-        | SprigCode::ImportVerifyFailed => (Code::DataLoss, 500),
+        SprigCode::BinlogCorrupt | SprigCode::MoveVerifyFailed | SprigCode::ImportVerifyFailed => {
+            (Code::DataLoss, 500)
+        }
         SprigCode::BackendProtocol => (Code::Internal, 502),
         SprigCode::ClusterNotFound
         | SprigCode::UnknownDc
@@ -520,6 +524,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
         | SprigCode::DefinerRefused
+        | SprigCode::RlsUnsupported
         | SprigCode::TxnHandleForbidden => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit

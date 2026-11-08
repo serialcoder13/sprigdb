@@ -39,7 +39,10 @@ pub struct OtlpExporter {
 impl std::fmt::Debug for OtlpExporter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OtlpExporter")
-            .field("endpoint", &*self.endpoint.read().unwrap_or_else(PoisonError::into_inner))
+            .field(
+                "endpoint",
+                &*self.endpoint.read().unwrap_or_else(PoisonError::into_inner),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -123,15 +126,16 @@ async fn send_loop(
             .header("content-type", "application/json")
             .body(Full::new(body))
         {
-            Ok(req) => match tokio::time::timeout(Duration::from_secs(5), client.request(req)).await
-            {
-                Ok(Ok(resp)) => resp.status().is_success(),
-                Ok(Err(e)) => {
-                    tracing::debug!(error = %e, "OTLP export failed");
-                    false
+            Ok(req) => {
+                match tokio::time::timeout(Duration::from_secs(5), client.request(req)).await {
+                    Ok(Ok(resp)) => resp.status().is_success(),
+                    Ok(Err(e)) => {
+                        tracing::debug!(error = %e, "OTLP export failed");
+                        false
+                    }
+                    Err(_) => false,
                 }
-                Err(_) => false,
-            },
+            }
             Err(e) => {
                 tracing::warn!(error = %e, endpoint = %target, "bad OTLP endpoint");
                 false

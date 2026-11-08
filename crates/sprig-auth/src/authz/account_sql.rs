@@ -26,9 +26,9 @@
 use std::collections::BTreeMap;
 
 use sprig_catalog::ddl::{database_key, object_key};
-use sprig_catalog::store::{Namespace, ObjectKind, ObjectState};
+use sprig_catalog::store::{DbState, Namespace, ObjectKind, ObjectState};
 use sprig_catalog::{ChangeOpts, MariaCatalog, TenantCatalog, VersionKind};
-use sprig_common::ids::{DbId, ObjectId, RoleId, TenantId, UserId};
+use sprig_common::ids::{RoleId, TenantId, UserId};
 use sprig_common::time::Clock;
 use sprig_common::{Result, SprigError};
 use sprig_proto_mysql::Persona;
@@ -107,8 +107,10 @@ pub struct AccountCtx<'a> {
     pub current_db: Option<&'a str>,
     /// `lower_case_table_names` of the tenant.
     pub lower_case_table_names: bool,
-    /// The session's privileges.
-    pub privileges: &'a CompiledPrivileges,
+    /// The session's privileges, as the `mysql_grants` engine compiled
+    /// them ([`super::authorizer::SessionGrants`]); anything else holds
+    /// nothing here.
+    pub privileges: &'a dyn super::authorizer::SessionGrants,
     /// The session's active roles.
     pub active_roles: &'a [RoleId],
     /// The tenant's name, for audit events.
@@ -348,6 +350,25 @@ fn dropped_note(name: &str) -> Note {
 
 // ---- resolution ----
 
+/// Column `c` of a table target.
+fn column_of(target: &PrivTarget, c: &str) -> Option<PrivTarget> {
+    match target {
+        PrivTarget::Object { db, object } => Some(PrivTarget::Column {
+            db: *db,
+            object: *object,
+            column: c.to_owned(),
+        }),
+        PrivTarget::Named {
+            db_key, name_key, ..
+        } => Some(PrivTarget::Named {
+            db_key: db_key.clone(),
+            name_key: name_key.clone(),
+            column: Some(c.to_owned()),
+        }),
+        _ => None,
+    }
+}
+
 /// A planned catalog write.
 #[derive(Debug)]
 enum Op {
@@ -357,6 +378,10 @@ enum Op {
         target: PrivTarget,
         actions: ActionSet,
         missing: Option<SprigError>,
+        /// The same grant held by name (a dropped table's, kept by
+        /// `auth.grants_on_drop = keep`), revoked too: both apply to the
+        /// table.
+        twin: Option<PrivTarget>,
     },
     ForgetPrivileges(Grantee),
     Forget(Grantee),
@@ -409,12 +434,22 @@ impl AccountCtx<'_> {
             .or_else(|| state.role_named(&a.name, &a.host).map(Grantee::Role))
     }
 
+    /// The session's compiled privileges; nothing for another engine's.
+    fn p(&self) -> &CompiledPrivileges {
+        static NONE: std::sync::LazyLock<CompiledPrivileges> =
+            std::sync::LazyLock::new(CompiledPrivileges::default);
+        self.privileges
+            .as_any()
+            .downcast_ref::<CompiledPrivileges>()
+            .unwrap_or(&NONE)
+    }
+
     fn admin(&self) -> bool {
-        self.privileges.everything || self.privileges.tenant_admin()
+        self.p().everything || self.p().tenant_admin()
     }
 
     fn has_tenant(&self, a: Action) -> bool {
-        self.admin() || self.privileges.tenant.has(a)
+        self.admin() || self.p().tenant.has(a)
     }
 
     fn require_create_user(&self) -> Result<()> {
@@ -449,8 +484,15 @@ impl AccountCtx<'_> {
         })
     }
 
-    /// The target of `on`, with its level and object type.
-    fn target(&self, on: &GrantOn) -> Result<(PrivTarget, ObjectType, String, String)> {
+    /// The target of `on`, with its level and object type. For `REVOKE`
+    /// (`held_by_name`), a table that doesn't exist resolves to its grants
+    /// held by name, if any (MySQL revokes `tables_priv` rows of missing
+    /// tables too).
+    fn target(
+        &self,
+        on: &GrantOn,
+        held_by_name: Option<&AuthzState>,
+    ) -> Result<(PrivTarget, ObjectType, String, String)> {
         match on {
             GrantOn::Tenant => Ok((
                 PrivTarget::Tenant,
@@ -481,21 +523,42 @@ impl AccountCtx<'_> {
                     ObjectType::Table => no_table(&db, name),
                     k => no_routine(*k, &db, name),
                 };
-                let row = self
-                    .snapshot
-                    .database(&self.db_key(&db))
-                    .ok_or_else(missing)?;
                 let (ns, okind) = match kind {
                     ObjectType::Table => (Namespace::Relation, ObjectKind::Table),
                     ObjectType::Function => (Namespace::Function, ObjectKind::Function),
                     ObjectType::Procedure => (Namespace::Procedure, ObjectKind::Procedure),
                 };
                 let key = object_key(okind, name, self.lower_case_table_names);
-                let obj = self
+                let named = || {
+                    let db_key = self.db_key(&db);
+                    let t = PrivTarget::Named {
+                        db_key: db_key.clone(),
+                        name_key: key.clone(),
+                        column: None,
+                    };
+                    let held = held_by_name.is_some_and(|st| {
+                        st.rows().privileges.iter().any(|p| {
+                            matches!(&p.target, PrivTarget::Named { db_key: d, name_key: n, .. }
+                                if *d == db_key && *n == key)
+                        })
+                    });
+                    (*kind == ObjectType::Table && held)
+                        .then(|| (t, *kind, db.clone(), name.clone()))
+                };
+                let Some(row) = self
+                    .snapshot
+                    .database(&self.db_key(&db))
+                    .filter(|d| d.state == DbState::Active)
+                else {
+                    return named().ok_or_else(missing);
+                };
+                let Some(obj) = self
                     .snapshot
                     .object(row.db_id, ns, &key)
                     .filter(|o| o.state == ObjectState::Active)
-                    .ok_or_else(missing)?;
+                else {
+                    return named().ok_or_else(missing);
+                };
                 Ok((
                     PrivTarget::Object {
                         db: row.db_id,
@@ -559,6 +622,26 @@ impl AccountCtx<'_> {
         Ok((set, cols))
     }
 
+    /// The grant held by name that also applies to the live table or view
+    /// `target` names (see [`Op::Revoke`]).
+    fn twin(&self, target: &PrivTarget) -> Option<PrivTarget> {
+        let (object, column) = match target {
+            PrivTarget::Object { object, .. } => (*object, None),
+            PrivTarget::Column { object, column, .. } => (*object, Some(column.clone())),
+            _ => return None,
+        };
+        let o = self.snapshot.objects.get(object)?;
+        if o.namespace != Namespace::Relation {
+            return None;
+        }
+        let d = self.snapshot.databases.get(o.db_id)?;
+        Some(PrivTarget::Named {
+            db_key: d.name_key.clone(),
+            name_key: o.name_key.clone(),
+            column,
+        })
+    }
+
     /// Whether the session may grant or revoke `actions` on `target`.
     fn may_grant(
         &self,
@@ -570,11 +653,14 @@ impl AccountCtx<'_> {
         if self.admin() {
             return Ok(());
         }
-        let p = self.privileges;
+        let p = self.p();
         let need = actions.with(Action::GrantOption);
         let held = match target {
             PrivTarget::Tenant => p.tenant,
             PrivTarget::Database(k) => p.actions_on(Target::Database { db_key: k }),
+            PrivTarget::Named {
+                db_key, name_key, ..
+            } => p.actions_on(Target::Named { db_key, name_key }),
             PrivTarget::Object { db: d, object } | PrivTarget::Column { db: d, object, .. } => p
                 .actions_on(Target::Object {
                     db_key: &self.db_key(db),
@@ -716,7 +802,7 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
             to,
             grant_option,
         } => {
-            let (target, kind, db, table) = cx.target(on)?;
+            let (target, kind, db, table) = cx.target(on, None)?;
             let level = target.level();
             let (mut actions, cols) = cx.actions(privileges, level, kind, &mut notes)?;
             if *grant_option {
@@ -740,17 +826,9 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
                 if !actions.is_empty() || cols.is_empty() {
                     ops.push(Op::Grant(grantee, target.clone(), actions));
                 }
-                if let PrivTarget::Object { db, object } = &target {
-                    for (c, a) in &cols {
-                        ops.push(Op::Grant(
-                            grantee,
-                            PrivTarget::Column {
-                                db: *db,
-                                object: *object,
-                                column: c.clone(),
-                            },
-                            *a,
-                        ));
+                for (c, a) in &cols {
+                    if let Some(t) = column_of(&target, c) {
+                        ops.push(Op::Grant(grantee, t, *a));
                     }
                 }
             }
@@ -761,7 +839,7 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
             on,
             from,
         } => {
-            let (target, kind, db, table) = cx.target(on)?;
+            let (target, kind, db, table) = cx.target(on, Some(&state))?;
             let level = target.level();
             let (actions, cols) = cx.actions(privileges, level, kind, &mut notes)?;
             let all_cols = cols.values().fold(ActionSet::EMPTY, |a, b| a.union(*b));
@@ -787,24 +865,23 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
                 if !actions.is_empty() {
                     ops.push(Op::Revoke {
                         grantee,
+                        twin: cx.twin(&target),
                         target: target.clone(),
                         actions,
                         missing: missing(),
                     });
                 }
-                if let PrivTarget::Object { db, object } = &target {
-                    for (c, a) in &cols {
-                        ops.push(Op::Revoke {
-                            grantee,
-                            target: PrivTarget::Column {
-                                db: *db,
-                                object: *object,
-                                column: c.clone(),
-                            },
-                            actions: *a,
-                            missing: missing(),
-                        });
-                    }
+                for (c, a) in &cols {
+                    let Some(t) = column_of(&target, c) else {
+                        continue;
+                    };
+                    ops.push(Op::Revoke {
+                        grantee,
+                        twin: cx.twin(&t),
+                        target: t,
+                        actions: *a,
+                        missing: missing(),
+                    });
                 }
             }
             version = apply(cx, ops).await?;
@@ -1244,8 +1321,12 @@ async fn apply(cx: &AccountCtx<'_>, ops: Vec<Op>) -> Result<Option<u64>> {
                     target,
                     actions,
                     missing,
+                    twin,
                 } => {
-                    let before = store.revoke(q, grantee, &target, actions).await?;
+                    let mut before = store.revoke(q, grantee, &target, actions).await?;
+                    if let Some(t) = twin {
+                        before = before.union(store.revoke(q, grantee, &t, actions).await?);
+                    }
                     if before.is_empty()
                         && let Some(e) = missing
                     {
@@ -1283,36 +1364,6 @@ async fn apply(cx: &AccountCtx<'_>, ops: Vec<Op>) -> Result<Option<u64>> {
         Err(e) => {
             let _ = change.rollback().await;
             let _ = cx.catalog.settle(cx.tenant, VersionKind::Auth).await;
-            Err(e)
-        }
-    }
-}
-
-/// Deletes `object`'s privilege rows after it was dropped; `None` when the
-/// module isn't migrated.
-///
-/// # Errors
-/// The catalog's.
-pub async fn forget_object(
-    catalog: &MariaCatalog,
-    tenant: TenantId,
-    db: DbId,
-    object: ObjectId,
-) -> Result<Option<u64>> {
-    let mut c = catalog
-        .change_with(tenant, VersionKind::Auth, ChangeOpts::default())
-        .await?;
-    let r = {
-        let (core, q) = c.tx().parts();
-        AuthzStore::new(core.schema())
-            .forget_object(q, db, object)
-            .await
-    };
-    match r {
-        Ok(()) => Ok(Some(c.commit().await?)),
-        Err(e) => {
-            let _ = c.rollback().await;
-            let _ = catalog.settle(tenant, VersionKind::Auth).await;
             Err(e)
         }
     }

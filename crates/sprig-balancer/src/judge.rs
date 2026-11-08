@@ -272,7 +272,13 @@ impl Judgement {
     /// The reason in plain words, for the decision's summary.
     #[must_use]
     pub fn sentence(&self, shard: &str, from: &str, to: &str, bytes: f64, writes: f64) -> String {
-        let what = format!("{shard} ({:.1} GB, {writes:.0} writes/s)", bytes / GB);
+        // Small shards in MB, so a sentence never says "0.0 GB".
+        let size = if bytes < GB {
+            format!("{:.1} MB", bytes / (1024.0 * 1024.0))
+        } else {
+            format!("{:.1} GB", bytes / GB)
+        };
+        let what = format!("{shard} ({size}, {writes:.0} writes/s)");
         let why_benefit = format!(
             "it sheds {} points from {from}{} and evens {from} and {to} by {} points (benefit {})",
             pts(self.relief),

@@ -106,10 +106,11 @@ pub struct PortableAccounts {
 }
 
 fn hex(b: &[u8]) -> String {
-    b.iter().fold(String::with_capacity(b.len() * 2), |mut s, x| {
-        let _ = write!(s, "{x:02x}");
-        s
-    })
+    b.iter()
+        .fold(String::with_capacity(b.len() * 2), |mut s, x| {
+            let _ = write!(s, "{x:02x}");
+            s
+        })
 }
 
 fn unhex(s: &str) -> Result<Vec<u8>> {
@@ -119,7 +120,7 @@ fn unhex(s: &str) -> Result<Vec<u8>> {
             "a verifier's auth_string_hex is not hex",
         )
     };
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(bad());
     }
     (0..s.len())

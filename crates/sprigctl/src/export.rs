@@ -248,7 +248,11 @@ pub(crate) fn ident(name: &str) -> String {
 
 /// `'name'@'host'`, as SHOW GRANTS FOR takes it.
 fn account(name: &str, host: &str) -> String {
-    format!("'{}'@'{}'", name.replace('\'', "''"), host.replace('\'', "''"))
+    format!(
+        "'{}'@'{}'",
+        name.replace('\'', "''"),
+        host.replace('\'', "''")
+    )
 }
 
 /// The order-independent checksum of a table (see the module docs).
@@ -315,12 +319,24 @@ pub(crate) fn literal_kind(col: &Column) -> Literal {
         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_YEAR,
     };
     match col.column_type() {
-        MYSQL_TYPE_TINY | MYSQL_TYPE_SHORT | MYSQL_TYPE_LONG | MYSQL_TYPE_INT24
-        | MYSQL_TYPE_LONGLONG | MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL | MYSQL_TYPE_FLOAT
-        | MYSQL_TYPE_DOUBLE | MYSQL_TYPE_YEAR => Literal::Number,
+        MYSQL_TYPE_TINY
+        | MYSQL_TYPE_SHORT
+        | MYSQL_TYPE_LONG
+        | MYSQL_TYPE_INT24
+        | MYSQL_TYPE_LONGLONG
+        | MYSQL_TYPE_DECIMAL
+        | MYSQL_TYPE_NEWDECIMAL
+        | MYSQL_TYPE_FLOAT
+        | MYSQL_TYPE_DOUBLE
+        | MYSQL_TYPE_YEAR => Literal::Number,
         MYSQL_TYPE_BIT | MYSQL_TYPE_GEOMETRY => Literal::Binary,
-        MYSQL_TYPE_STRING | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_VARCHAR | MYSQL_TYPE_BLOB
-        | MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB
+        MYSQL_TYPE_STRING
+        | MYSQL_TYPE_VAR_STRING
+        | MYSQL_TYPE_VARCHAR
+        | MYSQL_TYPE_BLOB
+        | MYSQL_TYPE_TINY_BLOB
+        | MYSQL_TYPE_MEDIUM_BLOB
+        | MYSQL_TYPE_LONG_BLOB
             if col.character_set() == 63 =>
         {
             Literal::Binary
@@ -544,17 +560,122 @@ async fn grants_of(conn: &mut Conn, name: &str, host: &str) -> Result<Vec<String
     Ok(lines)
 }
 
+/// Static privileges (MySQL 8.4 and MariaDB); anything else is dynamic.
+const STATIC_PRIVILEGES: &[&str] = &[
+    "ALL PRIVILEGES",
+    "ALTER",
+    "ALTER ROUTINE",
+    "CREATE",
+    "CREATE ROLE",
+    "CREATE ROUTINE",
+    "CREATE TABLESPACE",
+    "CREATE TEMPORARY TABLES",
+    "CREATE USER",
+    "CREATE VIEW",
+    "DELETE",
+    "DELETE HISTORY",
+    "DROP",
+    "DROP ROLE",
+    "EVENT",
+    "EXECUTE",
+    "FILE",
+    "GRANT OPTION",
+    "INDEX",
+    "INSERT",
+    "LOCK TABLES",
+    "PROCESS",
+    "REFERENCES",
+    "RELOAD",
+    "REPLICATION CLIENT",
+    "REPLICATION SLAVE",
+    "SELECT",
+    "SHOW DATABASES",
+    "SHOW VIEW",
+    "SHUTDOWN",
+    "SUPER",
+    "TRIGGER",
+    "UPDATE",
+    "USAGE",
+];
+
+/// Grant lines compared across personas, as a sorted set of single
+/// privileges. The personas print the same grants differently: the MySQL
+/// persona writes an account on host `%` as `` `r`@`%` `` and lists the
+/// dynamic privileges `ALL` implies on a line of their own; the MariaDB
+/// persona writes `` `r` `` and folds them into `ALL PRIVILEGES`. So a
+/// dynamic privilege next to `ALL PRIVILEGES` on the same level isn't
+/// compared.
+pub(crate) fn normalized(lines: &[String]) -> Vec<String> {
+    let mut items: Vec<(String, String)> = Vec::new();
+    for l in lines {
+        let l = l.replace("`@`%`", "`");
+        let parsed = l.strip_prefix("GRANT ").and_then(|rest| {
+            let on = rest.find(" ON ")?;
+            Some((&rest[..on], &rest[on + 4..]))
+        });
+        let Some((privs, target)) = parsed else {
+            items.push((l.clone(), String::new()));
+            continue;
+        };
+        let mut depth = 0i32;
+        let mut start = 0;
+        let mut parts = Vec::new();
+        for (i, ch) in privs.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    parts.push(privs[start..i].trim().to_owned());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(privs[start..].trim().to_owned());
+        for p in parts {
+            items.push((p, target.to_owned()));
+        }
+    }
+    let all: Vec<String> = items
+        .iter()
+        .filter(|(p, _)| p == "ALL PRIVILEGES")
+        .map(|(_, t)| t.clone())
+        .collect();
+    let mut out: Vec<String> = items
+        .into_iter()
+        .filter(|(p, t)| {
+            t.is_empty()
+                || !all.contains(t)
+                || STATIC_PRIVILEGES.contains(&p.split(" (").next().unwrap_or_default().trim())
+        })
+        .map(|(p, t)| {
+            if t.is_empty() {
+                p
+            } else {
+                format!("{p} ON {t}")
+            }
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn data_file(dir: &Path, db: &str, t: &str) -> PathBuf {
     // Logical names may hold any character: hex keeps file names safe.
-    let enc = |s: &str| s.bytes().fold(String::new(), |mut o, b| {
-        if b.is_ascii_alphanumeric() || b == b'_' {
-            o.push(char::from(b));
-        } else {
-            let _ = write!(o, "%{b:02x}");
-        }
-        o
-    });
-    dir.join("data").join(enc(db)).join(format!("{}.sql", enc(t)))
+    let enc = |s: &str| {
+        s.bytes().fold(String::new(), |mut o, b| {
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                o.push(char::from(b));
+            } else {
+                let _ = write!(o, "%{b:02x}");
+            }
+            o
+        })
+    };
+    dir.join("data")
+        .join(enc(db))
+        .join(format!("{}.sql", enc(t)))
 }
 
 fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<(), Failed> {
@@ -595,7 +716,9 @@ fn render(r: &Report, verb: &str) -> String {
         let _ = writeln!(s, "MISMATCH: {m}");
     }
     if verb == "imported" && r.mismatches.is_empty() {
-        s.push_str("verified: every table's checksum and every account's grants match the export\n");
+        s.push_str(
+            "verified: every table's checksum and every account's grants match the export\n",
+        );
     }
     s
 }
@@ -612,7 +735,8 @@ pub(crate) async fn export(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
     {
         return Err(Failed(format!("{} is not empty", dir.display())));
     }
-    std::fs::create_dir_all(dir.join("data")).map_err(|e| Failed(format!("{}: {e}", dir.display())))?;
+    std::fs::create_dir_all(dir.join("data"))
+        .map_err(|e| Failed(format!("{}: {e}", dir.display())))?;
     let view: TenantView = c
         .get(&format!("/admin/v1/tenants/{}", escape(&tenant)))
         .await?;
@@ -662,7 +786,10 @@ pub(crate) async fn export(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
     conn.query_drop("COMMIT").await.map_err(sql_err("COMMIT"))?;
     let mut grants = BTreeMap::new();
     for u in &accounts.users {
-        grants.insert(account(&u.name, &u.host), grants_of(&mut conn, &u.name, &u.host).await?);
+        grants.insert(
+            account(&u.name, &u.host),
+            grants_of(&mut conn, &u.name, &u.host).await?,
+        );
     }
     for (name, host) in &accounts.roles {
         grants.insert(account(name, host), grants_of(&mut conn, name, host).await?);
@@ -671,7 +798,9 @@ pub(crate) async fn export(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
     report.accounts = accounts.users.len() + accounts.roles.len();
     report.settings = own.len();
     if !skipped.is_empty() {
-        report.notes.push(format!("not exported: {}", skipped.join("; ")));
+        report
+            .notes
+            .push(format!("not exported: {}", skipped.join("; ")));
     }
     let manifest = Manifest {
         format: FORMAT,
@@ -686,7 +815,10 @@ pub(crate) async fn export(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
         databases: dbs,
         skipped,
     };
-    write_json(&dir.join("accounts.json"), &AccountsFile { accounts, grants })?;
+    write_json(
+        &dir.join("accounts.json"),
+        &AccountsFile { accounts, grants },
+    )?;
     write_json(&dir.join("settings.json"), &own)?;
     write_json(&dir.join("manifest.json"), &manifest)?;
     print(out, &report, |r| render(r, "exported"));
@@ -694,7 +826,11 @@ pub(crate) async fn export(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
 }
 
 /// The scope of a source setting row in the target tenant.
-pub(crate) fn target_scope(row: &TenantSettingRowView, source: &str, target: &str) -> Option<ScopeRef> {
+pub(crate) fn target_scope(
+    row: &TenantSettingRowView,
+    source: &str,
+    target: &str,
+) -> Option<ScopeRef> {
     let rest = row.target.strip_prefix(source)?;
     let text = match row.scope.as_str() {
         "tenant" => format!("tenant:{target}"),
@@ -745,7 +881,10 @@ pub(crate) async fn import(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
                     },
                 )
                 .await?;
-            eprintln!("created tenant {} ({})", r.tenant.name, r.tenant.tenant_id.0);
+            eprintln!(
+                "created tenant {} ({})",
+                r.tenant.name, r.tenant.tenant_id.0
+            );
         }
         // Accounts first, so the source's administrators log in to the
         // target with their own passwords.
@@ -769,11 +908,16 @@ pub(crate) async fn import(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
             )
             .await?;
         if !r.existing.is_empty() {
-            report
-                .notes
-                .push(format!("accounts already in the target, left alone: {}", r.existing.join(", ")));
+            report.notes.push(format!(
+                "accounts already in the target, left alone: {}",
+                r.existing.join(", ")
+            ));
         }
-        eprintln!("accounts: {} created, {} existing", r.created.len(), r.existing.len());
+        eprintln!(
+            "accounts: {} created, {} existing",
+            r.created.len(),
+            r.existing.len()
+        );
     }
     let mut conn = connect(sub, &arg(sub, "user")).await?;
     if !verify_only {
@@ -821,7 +965,12 @@ pub(crate) async fn import(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
         let mut views: Vec<(&str, &TableEntry)> = manifest
             .databases
             .iter()
-            .flat_map(|d| d.tables.iter().filter(|t| t.kind == "view").map(move |t| (d.name.as_str(), t)))
+            .flat_map(|d| {
+                d.tables
+                    .iter()
+                    .filter(|t| t.kind == "view")
+                    .map(move |t| (d.name.as_str(), t))
+            })
             .collect();
         for _ in 0..4 {
             let mut left = Vec::new();
@@ -839,7 +988,9 @@ pub(crate) async fn import(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
             }
         }
         for (db, v) in &views {
-            report.mismatches.push(format!("view {db}.{} could not be created", v.name));
+            report
+                .mismatches
+                .push(format!("view {db}.{} could not be created", v.name));
         }
         // Roles, then every grant line.
         for (name, host) in &accounts.accounts.roles {
@@ -867,7 +1018,10 @@ pub(crate) async fn import(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
             .ok();
         for row in &settings {
             let Some(scope) = target_scope(row, &manifest.tenant, &target) else {
-                report.notes.push(format!("setting {} at {} {}: no target scope", row.key, row.scope, row.target));
+                report.notes.push(format!(
+                    "setting {} at {} {}: no target scope",
+                    row.key, row.scope, row.target
+                ));
                 continue;
             };
             let path = format!("/admin/v1/settings/{}", escape(&row.key));
@@ -944,7 +1098,7 @@ pub(crate) async fn import(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
             .map(|(n, h)| (n.replace("''", "'"), h.replace("''", "'")))
             .unwrap_or_default();
         match grants_of(&mut conn, &name, &host).await {
-            Ok(got) if &got == want => {}
+            Ok(got) if normalized(&got) == normalized(want) => {}
             Ok(got) => report.mismatches.push(format!(
                 "{who}: grants differ: target {got:?}, export {want:?}"
             )),
@@ -957,12 +1111,16 @@ pub(crate) async fn import(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
     for row in &settings {
         let want_target = row.target.replacen(&manifest.tenant, &target, 1);
         let found = target_rows.rows.iter().any(|r| {
-            r.scope == row.scope && r.target == want_target && r.key == row.key && r.value == row.value
+            r.scope == row.scope
+                && r.target == want_target
+                && r.key == row.key
+                && r.value == row.value
         });
         if !found {
-            report
-                .mismatches
-                .push(format!("setting {} at {} {} missing or different", row.key, row.scope, want_target));
+            report.mismatches.push(format!(
+                "setting {} at {} {} missing or different",
+                row.key, row.scope, want_target
+            ));
         }
     }
     let _ = conn.disconnect().await;
@@ -1018,6 +1176,32 @@ mod tests {
     }
 
     #[test]
+    fn grants_compare_across_personas() {
+        let mysql = vec!["GRANT `reader`@`%` TO `app`@`%`".to_owned()];
+        let mariadb = vec!["GRANT `reader` TO `app`@`%`".to_owned()];
+        assert_eq!(normalized(&mysql), normalized(&mariadb));
+        let mysql = vec![
+            "GRANT ALL PRIVILEGES ON *.* TO `admin`@`%` WITH GRANT OPTION".to_owned(),
+            "GRANT CONNECTION_ADMIN,ROLE_ADMIN,SPRIG_TENANT_ADMIN,WATCH ON *.* TO `admin`@`%` WITH GRANT OPTION".to_owned(),
+        ];
+        let mariadb = vec![
+            "GRANT ALL PRIVILEGES, SPRIG_TENANT_ADMIN ON *.* TO `admin`@`%` WITH GRANT OPTION"
+                .to_owned(),
+        ];
+        assert_eq!(normalized(&mysql), normalized(&mariadb));
+        let cols = vec!["GRANT SELECT (`id`, `name`), INSERT ON `crm`.`c` TO `app`@`%`".to_owned()];
+        assert_eq!(
+            normalized(&cols),
+            vec![
+                "INSERT ON `crm`.`c` TO `app`".to_owned(),
+                "SELECT (`id`, `name`) ON `crm`.`c` TO `app`".to_owned()
+            ]
+        );
+        let other = vec!["GRANT `reader` TO `app`@`10.%`".to_owned()];
+        assert_ne!(normalized(&other), normalized(&mariadb));
+    }
+
+    #[test]
     fn view_definers_are_dropped() {
         let v = "CREATE ALGORITHM=UNDEFINED DEFINER=`admin`@`%` SQL SECURITY DEFINER VIEW `v` AS select 1 AS `x`";
         assert_eq!(
@@ -1039,7 +1223,9 @@ mod tests {
             version: 0,
         };
         assert_eq!(
-            target_scope(&row("tenant", "src"), "src", "dst").unwrap().to_string(),
+            target_scope(&row("tenant", "src"), "src", "dst")
+                .unwrap()
+                .to_string(),
             "tenant:dst"
         );
         assert_eq!(

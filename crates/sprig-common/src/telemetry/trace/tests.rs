@@ -8,8 +8,9 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use super::*;
 
 fn with_tracer<R>(tracer: &Arc<Tracer>, f: impl FnOnce() -> R) -> R {
-    let layer = TraceLayer::new(Arc::clone(tracer))
-        .with_filter(tracing_subscriber::filter::filter_fn(|m| m.target() == TARGET));
+    let layer = TraceLayer::new(Arc::clone(tracer)).with_filter(
+        tracing_subscriber::filter::filter_fn(|m| m.target() == TARGET),
+    );
     let sub = tracing_subscriber::registry().with(layer);
     tracing::subscriber::with_default(sub, f)
 }
@@ -52,9 +53,9 @@ fn traceparent_round_trips_and_rejects_bad_input() {
 fn a_sampled_statement_shows_gateway_then_backend() {
     let tracer = Arc::new(Tracer::new(1.0, 10_000));
     with_tracer(&tracer, || statement(false));
-    let traces = tracer.recent();
-    assert_eq!(traces.len(), 1);
-    let t = &traces[0];
+    let kept = tracer.recent();
+    assert_eq!(kept.len(), 1);
+    let t = &kept[0];
     assert_eq!(t.kept_because, KeptBecause::Sampled);
     assert_eq!(t.spans.len(), 2, "{t:?}");
     let root = t.root().unwrap();
@@ -84,7 +85,10 @@ fn tail_sampling_keeps_failures_and_slow_roots_only() {
 
     tracer.set_policy(0.0, 0);
     with_tracer(&tracer, || statement(false));
-    assert_eq!(tracer.recent().last().unwrap().kept_because, KeptBecause::Slow);
+    assert_eq!(
+        tracer.recent().last().unwrap().kept_because,
+        KeptBecause::Slow
+    );
 }
 
 #[test]

@@ -487,14 +487,15 @@ impl TraceLayer {
 }
 
 /// The trace layer for the process's [`tracer`], filtered to [`TARGET`].
+#[must_use]
 pub fn layer<S>() -> impl tracing_subscriber::Layer<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     use tracing_subscriber::Layer as _;
-    TraceLayer::new(Arc::clone(tracer())).with_filter(tracing_subscriber::filter::filter_fn(
-        |m| m.target() == TARGET,
-    ))
+    TraceLayer::new(Arc::clone(tracer())).with_filter(tracing_subscriber::filter::filter_fn(|m| {
+        m.target() == TARGET
+    }))
 }
 
 impl<S> tracing_subscriber::Layer<S> for TraceLayer

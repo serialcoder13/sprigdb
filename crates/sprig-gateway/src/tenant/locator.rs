@@ -160,7 +160,10 @@ impl GatewayLocator {
             return;
         };
         {
-            let mut r = self.refreshed.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut r = self
+                .refreshed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let now = std::time::Instant::now();
             if r.get(&tenant)
                 .is_some_and(|t| now.duration_since(*t) < std::time::Duration::from_secs(1))

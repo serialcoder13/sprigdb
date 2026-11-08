@@ -24,7 +24,7 @@
 //! | `Tenants.DeleteTenant` | `DELETE /admin/v1/tenants/{name}` |
 //! | `Users.CreateUser` (interim) | `POST /admin/v1/tenants/{name}/users` ([`crate::users`]) |
 //! | `Tenants.ExportAccounts`, `ImportAccounts` (chapter 47) | `GET`, `POST /admin/v1/tenants/{name}/accounts` |
-//! | `Tenants.MoveTenant`, `PinTenant`, `UnpinTenant`, traffic | `/admin/v1/tenants/{name}:move`, `.../move`, `.../traffic`, `/admin/v1/traffic/reports` ([`dcmove`]) |
+//! | `Tenants.MoveTenant`, `PinTenant`, `UnpinTenant`, traffic | `/admin/v1/tenants/{name}:move\|:pin\|:unpin`, `.../move`, `.../traffic`, `/admin/v1/traffic/reports` ([`dcmove`]) |
 //! | `Jobs.ListJobs`, `GetJob`, `CancelJob` | `/admin/v1/jobs[/{job_id}[:cancel]]` ([`jobs`]) |
 //! | `Settings.*` | `/admin/v1/settings[/{key}]`, `/admin/v1/tenants/{name}/settings` ([`crate::settings_admin`]) |
 //! | `Indexes.*`, `Explain.ExplainQuery` | `/admin/v1/tenants/{name}/indexes[/{index}[:action]]`, `.../recommendations`, `.../queries/{fingerprint}:explain` ([`crate::autoindex_admin`]) |

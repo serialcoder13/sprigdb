@@ -359,6 +359,21 @@ async fn skewed_fleet_evens_out_without_oscillating() {
     let _ = e0;
     assert!(jobs().is_empty(), "recommend created jobs: {:?}", jobs());
 
+    // An operator pin on the crowded cluster: that tenant must stay put.
+    let pinned = std::env::var("SPRIG_TEST_BALANCER_PIN").ok();
+    if let Some(p) = &pinned {
+        println!(
+            "\n== sprigctl tenant pin {p}\n{}",
+            ctl(&[
+                "tenant",
+                "pin",
+                p,
+                "--reason",
+                "live_balance: stays on the crowded cluster"
+            ])
+        );
+    }
+
     // 3. Auto.
     set("balancer.mode", "auto");
     let started = Instant::now();
@@ -399,6 +414,13 @@ async fn skewed_fleet_evens_out_without_oscillating() {
         );
     }
     let settled = jobs().len();
+    if let Some(p) = &pinned {
+        let pid = ids[p];
+        assert!(
+            jobs().iter().all(|j| j["tenant"].as_u64() != Some(pid)),
+            "the pinned tenant {p} moved"
+        );
+    }
     let (full1, home1, _) = fleet();
     print_fleet(
         &format!("after {} s of auto", started.elapsed().as_secs()),
@@ -452,6 +474,30 @@ async fn skewed_fleet_evens_out_without_oscillating() {
         spread(&full2)
     );
 
+    // An operator move (of the pinned tenant: only operators move pinned
+    // tenants) is a decision too.
+    let mut home3 = home2.clone();
+    if let Some(p) = &pinned {
+        let to = full2
+            .iter()
+            .filter(|(c, _)| **c != home2[p])
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(c, _)| c.clone())
+            .unwrap();
+        println!(
+            "\n== sprigctl shard move {p} --to {to} --wait\n{}",
+            ctl(&["shard", "move", p, "--to", &to, "--wait"])
+        );
+        let pid = ids[p];
+        let job = jobs()
+            .into_iter()
+            .find(|j| j["tenant"].as_u64() == Some(pid))
+            .unwrap();
+        println!("  job: {}", job);
+        home3 = fleet().1;
+        assert_eq!(home3[p], to, "{p} not on {to} after the operator move");
+    }
+
     // 4. Stop writing and compare.
     stop.store(true, Ordering::Relaxed);
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -462,7 +508,7 @@ async fn skewed_fleet_evens_out_without_oscillating() {
         let expected = w.expected.lock().await.clone();
         let (n, sum, rows) = digest(&pools[t], "bl_app").await;
         assert_eq!(rows, expected, "{t}: rows through the gateway differ");
-        let home = &home2[t];
+        let home = &home3[t];
         let root = pool(writer_port(home), "root", "sprig-dev-root");
         // bl_app's shard schema, t<id>_d<db>_g<g>_s<s>.
         let schema: String = root
@@ -490,14 +536,15 @@ async fn skewed_fleet_evens_out_without_oscillating() {
 
     // Rejected moves and explain output.
     println!("\n== decisions other than the moves");
+    let mut pin_reason = false;
     for (t, id) in &ids {
-        let home = &home2[t];
+        let home = &home3[t];
         let root = pool(writer_port(home), "root", "sprig-dev-root");
         let mut c = root.get_conn().await.unwrap();
         let rows: Vec<(u64, String, String, String, String)> = c
             .query(format!(
                 "SELECT decision_id, mode, outcome, reason_code, summary FROM t{id}_sprig.decisions \
-                 WHERE kind = 'shard.move' ORDER BY decision_id"
+                 WHERE kind LIKE 'shard.%' ORDER BY decision_id"
             ))
             .await
             .unwrap();
@@ -505,11 +552,18 @@ async fn skewed_fleet_evens_out_without_oscillating() {
             if outcome == "succeeded" {
                 continue;
             }
+            if pinned.as_deref() == Some(t.as_str()) && summary.contains("pinned by operator") {
+                pin_reason = true;
+            }
             println!("- {t} #{d} {mode}/{outcome} {reason}: {summary}");
         }
         drop(c);
         root.disconnect().await.unwrap();
     }
+    assert!(
+        pinned.is_none() || pin_reason,
+        "no decision says the pinned tenant was kept by its pin"
+    );
     if let Some((t, list)) = by_tenant.iter().next() {
         let d = list[0]["decision_id"].as_u64().unwrap().to_string();
         println!(

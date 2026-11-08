@@ -110,7 +110,9 @@ pub trait UserAdmin: Send + Sync {
     /// # Errors
     /// As [`TenantUsers::export_accounts`].
     async fn export_accounts(&self, _tenant: &str) -> Result<PortableAccounts> {
-        Err(crate::admin::invalid("this controller doesn't export accounts"))
+        Err(crate::admin::invalid(
+            "this controller doesn't export accounts",
+        ))
     }
 
     /// Creates exported accounts in a tenant (chapter 47).
@@ -122,7 +124,9 @@ pub trait UserAdmin: Send + Sync {
         _tenant: &str,
         _accounts: PortableAccounts,
     ) -> Result<ImportAccountsResponse> {
-        Err(crate::admin::invalid("this controller doesn't import accounts"))
+        Err(crate::admin::invalid(
+            "this controller doesn't import accounts",
+        ))
     }
 }
 
@@ -302,7 +306,13 @@ impl TenantUsers {
             "admin.accounts_imported",
             serde_json::json!({"tenant": tenant, "created": out.created, "existing": out.existing}),
         );
-        tracing::info!(event = "admin.accounts_imported", tenant, created = out.created.len(), existing = out.existing.len(), "accounts imported");
+        tracing::info!(
+            event = "admin.accounts_imported",
+            tenant,
+            created = out.created.len(),
+            existing = out.existing.len(),
+            "accounts imported"
+        );
         Ok(out)
     }
 }

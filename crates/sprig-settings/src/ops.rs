@@ -91,7 +91,6 @@ ops_key!(
 /// Applies the chapter 47 keys to the process's tracer, OTLP exporter and
 /// audit pipeline (those installed) now and after every change. Keep the
 /// returned registration for as long as the role runs.
-#[must_use]
 pub fn apply_live(live: &LiveSettings, dc: &DcId) -> Registration {
     let ctx_dc = dc.clone();
     let ctx = SettingCtx::process(&ctx_dc);
@@ -100,6 +99,7 @@ pub fn apply_live(live: &LiveSettings, dc: &DcId) -> Registration {
         slow_ms: live.get(&TRACE_SLOW_MS, &ctx),
         otlp: live.get(&OTLP_ENDPOINT, &ctx).into_owned(),
         spool_mb: live.get(&AUDIT_SPOOL_MAX_MB, &ctx),
+        tenant_rps: live.get(&TENANT_SERIES_MIN_RPS, &ctx),
     }
     .apply();
     let dc = dc.clone();
@@ -110,6 +110,7 @@ pub fn apply_live(live: &LiveSettings, dc: &DcId) -> Registration {
             slow_ms: m.get(&TRACE_SLOW_MS, &ctx),
             otlp: m.get(&OTLP_ENDPOINT, &ctx).into_owned(),
             spool_mb: m.get(&AUDIT_SPOOL_MAX_MB, &ctx),
+            tenant_rps: m.get(&TENANT_SERIES_MIN_RPS, &ctx),
         }
         .apply();
         Ok(())
@@ -123,11 +124,13 @@ struct Values {
     slow_ms: u64,
     otlp: String,
     spool_mb: u64,
+    tenant_rps: u64,
 }
 
 impl Values {
     fn apply(&self) {
         trace::tracer().set_policy(self.ratio, self.slow_ms);
+        sprig_common::telemetry::set_tenant_series_min_rps(self.tenant_rps);
         if let Some(o) = otlp::global() {
             o.set_endpoint(Some(self.otlp.clone()).filter(|e| !e.is_empty()));
         }

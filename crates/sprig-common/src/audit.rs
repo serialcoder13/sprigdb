@@ -455,8 +455,11 @@ impl Pipeline {
         streams.sort();
         streams.dedup();
         for stream in &streams {
-            let part: Vec<AuditRecord> =
-                batch.iter().filter(|r| r.stream == *stream).cloned().collect();
+            let part: Vec<AuditRecord> = batch
+                .iter()
+                .filter(|r| r.stream == *stream)
+                .cloned()
+                .collect();
             let sink = match stream {
                 AuditStream::Tenant(_) => &self.inner.tenant_sink,
                 AuditStream::Platform => &self.inner.platform_sink,
@@ -506,12 +509,11 @@ impl Pipeline {
             if s.queued.is_empty()
                 && s.segments.len() == 1
                 && s.segments.front().is_some_and(|g| g.last_seq <= last)
+                && let Some(g) = s.segments.pop_front()
             {
-                if let Some(g) = s.segments.pop_front() {
-                    s.spool_bytes = s.spool_bytes.saturating_sub(g.bytes);
-                    *file = None;
-                    let _ = fs::remove_file(g.path);
-                }
+                s.spool_bytes = s.spool_bytes.saturating_sub(g.bytes);
+                *file = None;
+                let _ = fs::remove_file(g.path);
             }
         }
         self.gauge();
@@ -530,6 +532,7 @@ impl Pipeline {
     /// Starts the flusher (every [`FLUSH_PERIOD`] or [`FLUSH_EVENTS`]) and
     /// the shipper (every [`SHIP_PERIOD`]); both flush and ship once more
     /// when `stop` is cancelled.
+    #[must_use = "the task flushes and ships until stop is cancelled; await it to know it finished"]
     pub fn spawn(&self, stop: CancellationToken) -> tokio::task::JoinHandle<()> {
         let p = self.clone();
         tokio::spawn(async move {
@@ -648,9 +651,7 @@ impl DirSink {
                 }
             }
         }
-        out.sort_by(|a, b| {
-            (a.at_ms, &a.instance, a.seq).cmp(&(b.at_ms, &b.instance, b.seq))
-        });
+        out.sort_by(|a, b| (a.at_ms, &a.instance, a.seq).cmp(&(b.at_ms, &b.instance, b.seq)));
         out.dedup_by(|a, b| a.instance == b.instance && a.seq == b.seq);
         Ok(out)
     }

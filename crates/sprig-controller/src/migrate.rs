@@ -144,7 +144,9 @@ pub struct DcMoves {
 
 impl std::fmt::Debug for DcMoves {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DcMoves").field("dc", &self.dc).finish()
+        f.debug_struct("DcMoves")
+            .field("dc", &self.dc)
+            .finish_non_exhaustive()
     }
 }
 
@@ -250,6 +252,7 @@ impl DcMoves {
     /// # Errors
     /// 39550 when the move can't start; 39503 for an unregistered DC; the
     /// stores' errors.
+    #[allow(clippy::too_many_lines)] // the checks, then the three steps
     pub async fn start(
         &self,
         tenant: TenantId,
@@ -416,6 +419,29 @@ impl DcMoves {
         Ok(())
     }
 
+    /// Pins `tenant` to its home DC (`pinned_dc` in its directory entry),
+    /// or unpins it: a pinned tenant doesn't move between DCs.
+    /// `sprigctl tenant pin|unpin` calls it with chapter 11's cluster pin.
+    ///
+    /// # Errors
+    /// 39550 to pin a tenant that is moving; the stores' errors.
+    pub async fn pin(&self, tenant: TenantId, name: &str, pin: bool) -> Result<MoveView> {
+        let e = home::update_home(&*self.global, tenant, |cur| {
+            if pin && cur.state == "migrating" {
+                return Err(refused(format!("tenant {name} is moving")));
+            }
+            let v = if pin {
+                json!(cur.home_dc.as_str())
+            } else {
+                Value::Null
+            };
+            cur.raw.insert("pinned_dc".into(), v);
+            Ok(true)
+        })
+        .await?;
+        Ok(self.view(name, &e, None).await)
+    }
+
     /// The move in progress, or the last one.
     ///
     /// # Errors
@@ -495,7 +521,6 @@ impl DcMoves {
                     self.revert(tenant, &id, &why).await?;
                     return Ok(Outcome::Done);
                 }
-                Some(_) => {}
                 None if str_of(&m, "job").is_none()
                     && self.now_ms().saturating_sub(started) > SUBMIT_GRACE_MS =>
                 {
@@ -503,7 +528,7 @@ impl DcMoves {
                         .await?;
                     return Ok(Outcome::Done);
                 }
-                None => {}
+                _ => {}
             }
             return Ok(Outcome::RequeueAfter(Duration::from_secs(5)));
         }

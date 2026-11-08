@@ -120,7 +120,10 @@ fn config_source(path: Option<&Path>) -> Option<(PathBuf, String)> {
 }
 
 /// Opens, installs and starts the audit pipeline of `[audit]`, if any.
-fn start_audit(config: &ProcessConfig, stop: &CancellationToken) -> Result<Option<tokio::task::JoinHandle<()>>> {
+fn start_audit(
+    config: &ProcessConfig,
+    stop: &CancellationToken,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
     use sprig_common::audit::{self, DirSink, Pipeline};
     let Some(spool) = &config.audit.spool_dir else {
         return Ok(None);
@@ -154,11 +157,7 @@ fn build_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime::Runti
     b.build()
 }
 
-async fn run(
-    role: Role,
-    config: ProcessConfig,
-    source: Option<(PathBuf, String)>,
-) -> Result<()> {
+async fn run(role: Role, config: ProcessConfig, source: Option<(PathBuf, String)>) -> Result<()> {
     let metrics = telemetry::install_metrics()?;
     let addr = config.telemetry.bootstrap_addr;
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {

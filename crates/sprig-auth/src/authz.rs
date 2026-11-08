@@ -1,5 +1,9 @@
 //! Authorization (chapter 29, build steps 1 to 6, the R0 part).
 //!
+//! - [`authorizer`]: the interface the gateway calls for every decision
+//!   ([`Authorizer`], [`SessionGrants`]), chosen per tenant by
+//!   `auth.authorizer`, and the default engine, [`MysqlGrants`], which is
+//!   the rest of this list;
 //! - [`privilege`]: actions as stable bits, levels, the MySQL and MariaDB
 //!   privilege names (step 1);
 //! - [`store`]: the `authz` catalog module (`roles`, `role_edges`,
@@ -21,6 +25,7 @@
 //! (`sprig_sql::access`).
 
 pub mod account_sql;
+pub mod authorizer;
 pub mod backend;
 pub mod compile;
 pub mod definers;
@@ -31,6 +36,7 @@ pub mod state;
 pub mod stmt;
 pub mod store;
 
+pub use authorizer::{Authorizer, MysqlGrants, SessionGrants};
 pub use compile::{CompiledPrivileges, Target};
 pub use privilege::{Action, ActionSet, Level, ObjectType};
 pub use state::{AuthzExtension, AuthzState};

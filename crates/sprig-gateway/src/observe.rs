@@ -14,7 +14,13 @@
 //!   caused) or `backend` (MariaDB unreachable or failed mid-statement);
 //!   see [`classify`]. Silent requests (`COM_STMT_SEND_LONG_DATA`,
 //!   `COM_STMT_CLOSE`) and requests cancelled by `KILL` or a hang-up are not
-//!   counted.
+//!   counted. A tenant whose statements reached
+//!   `telemetry.tenant_series_min_rps` over its last full minute gets its
+//!   own series: the `tenant` label (its id) on
+//!   `sprig_gateway_statements_total` and
+//!   `sprig_gateway_query_duration_seconds`; every other statement has
+//!   `tenant=""`, which PromQL treats as no label, so the series count
+//!   stays bounded by the busy tenants.
 //! - **Traces.** Each request runs inside a `gateway.request` span (target
 //!   [`TARGET`]) carrying the tenant id, protocol and request kind, and an
 //!   incoming W3C `traceparent` query attribute; the backend layer's
@@ -77,6 +83,55 @@ pub fn classify(e: &SprigError) -> &'static str {
             _ if e.protocol().http_status < 500 => "client",
             _ => "sprig",
         },
+    }
+}
+
+const RATE_SHARDS: usize = 16;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy)]
+struct Rate {
+    since: Instant,
+    count: u64,
+    busy: bool,
+}
+
+/// Per-tenant statement rates, sharded to keep the lock short.
+struct TenantRates {
+    shards: [std::sync::Mutex<std::collections::HashMap<u64, Rate>>; RATE_SHARDS],
+}
+
+impl TenantRates {
+    fn get() -> &'static TenantRates {
+        static RATES: std::sync::OnceLock<TenantRates> = std::sync::OnceLock::new();
+        RATES.get_or_init(|| TenantRates {
+            shards: std::array::from_fn(
+                |_| std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+        })
+    }
+
+    /// Counts one statement of `tenant`; `true` while the tenant was at
+    /// `telemetry.tenant_series_min_rps` over its last full window.
+    fn busy(&self, tenant: u64, now: Instant) -> bool {
+        let shard = usize::try_from(tenant % RATE_SHARDS as u64).unwrap_or(0);
+        let mut m = self.shards[shard]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let r = m.entry(tenant).or_insert(Rate {
+            since: now,
+            count: 0,
+            busy: false,
+        });
+        r.count += 1;
+        let elapsed = now.saturating_duration_since(r.since);
+        if elapsed >= RATE_WINDOW {
+            let min = sprig_common::telemetry::tenant_series_min_rps();
+            r.busy = r.count >= min.saturating_mul(elapsed.as_secs());
+            r.since = now;
+            r.count = 0;
+        }
+        r.busy
     }
 }
 
@@ -146,7 +201,9 @@ impl SessionExec for ObservedSession {
         let r = BACKEND_NANOS
             .scope(
                 Arc::clone(&waited),
-                self.inner.execute(cx, req, &mut sink).instrument(span.clone()),
+                self.inner
+                    .execute(cx, req, &mut sink)
+                    .instrument(span.clone()),
             )
             .await;
         let total = started.elapsed();
@@ -159,9 +216,13 @@ impl SessionExec for ObservedSession {
             span.record("error", true);
         }
         let backend = Duration::from_nanos(waited.load(Ordering::Relaxed));
-        metrics::counter!("sprig_gateway_statements_total", "protocol" => protocol, "result" => result)
+        let tenant = match self.tenant {
+            Some(t) if TenantRates::get().busy(t, Instant::now()) => t.to_string(),
+            _ => String::new(),
+        };
+        metrics::counter!("sprig_gateway_statements_total", "protocol" => protocol, "result" => result, "tenant" => tenant.clone())
             .increment(1);
-        metrics::histogram!("sprig_gateway_query_duration_seconds", "protocol" => protocol)
+        metrics::histogram!("sprig_gateway_query_duration_seconds", "protocol" => protocol, "tenant" => tenant)
             .record(total.as_secs_f64());
         metrics::histogram!("sprig_gateway_overhead_seconds", "protocol" => protocol)
             .record(total.saturating_sub(backend).as_secs_f64());
@@ -246,3 +307,24 @@ impl ResultSink for Watch<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+
+    #[test]
+    fn a_tenant_gets_series_after_a_busy_minute() {
+        sprig_common::telemetry::set_tenant_series_min_rps(10);
+        let r = TenantRates::get();
+        let t0 = Instant::now();
+        let tenant = 9_000_001;
+        assert!(!r.busy(tenant, t0));
+        for _ in 0..700 {
+            r.busy(tenant, t0 + Duration::from_secs(1));
+        }
+        // The window closes: 701 statements in 60 s is above 10/s.
+        assert!(r.busy(tenant, t0 + Duration::from_secs(60)));
+        // A quiet minute drops the series again.
+        assert!(!r.busy(tenant, t0 + Duration::from_secs(121)));
+    }
+}

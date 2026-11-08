@@ -39,9 +39,21 @@ async fn events_reach_the_sink_in_order_and_the_spool_is_trimmed() {
     let dir = tmp("ship");
     let sink = MemorySink::new(dc());
     let p = Pipeline::open(&dir, "gw-1", 512, sink.clone(), sink.clone()).unwrap();
-    p.emit(AuditStream::Tenant(TenantId(1)), "auth.login_failed", json!({"user": "a"}));
-    p.emit(AuditStream::Platform, "settings.changed", json!({"key": "k"}));
-    p.emit(AuditStream::Tenant(TenantId(1)), "auth.login_succeeded", json!({}));
+    p.emit(
+        AuditStream::Tenant(TenantId(1)),
+        "auth.login_failed",
+        json!({"user": "a"}),
+    );
+    p.emit(
+        AuditStream::Platform,
+        "settings.changed",
+        json!({"key": "k"}),
+    );
+    p.emit(
+        AuditStream::Tenant(TenantId(1)),
+        "auth.login_succeeded",
+        json!({}),
+    );
     p.flush().unwrap();
     assert!(p.spool_bytes() > 0);
     assert_eq!(p.ship().await.unwrap(), 3);
@@ -96,7 +108,11 @@ async fn a_full_spool_fails_closed_but_keeps_logins_in_memory() {
     let e = p.check().unwrap_err();
     assert_eq!(e.kind, crate::ErrorKind::Sprig(SprigCode::AuditUnavailable));
     // Kept in memory, not spooled.
-    p.emit(AuditStream::Tenant(TenantId(3)), "auth.login_failed", json!({}));
+    p.emit(
+        AuditStream::Tenant(TenantId(3)),
+        "auth.login_failed",
+        json!({}),
+    );
     p.flush().unwrap();
     assert_eq!(p.spool_bytes(), 0);
     assert_eq!(p.backlog(), 1);
@@ -114,7 +130,11 @@ async fn the_dir_sink_writes_the_object_layout_and_deduplicates() {
     let root = dir.join("store");
     let sink = Arc::new(DirSink::new(&root, dc()));
     let p = Pipeline::open(dir.join("spool"), "gw-9", 512, sink.clone(), sink).unwrap();
-    p.emit(AuditStream::Tenant(TenantId(5)), "auth.user_created", json!({"user": "app"}));
+    p.emit(
+        AuditStream::Tenant(TenantId(5)),
+        "auth.user_created",
+        json!({"user": "app"}),
+    );
     p.emit(AuditStream::Platform, "settings.changed", json!({}));
     p.flush().unwrap();
     p.ship().await.unwrap();

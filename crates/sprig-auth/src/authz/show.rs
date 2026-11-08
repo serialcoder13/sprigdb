@@ -12,12 +12,15 @@
 //! ```
 //!
 //! Names are always logical; an object's database is its current name.
-//! Grants on objects that no longer exist aren't shown.
+//! Grants held by name (a dropped table's, `auth.grants_on_drop = keep`)
+//! are shown under that name whether or not the table exists, as MySQL
+//! shows `tables_priv` rows; rows of other objects that no longer exist
+//! aren't shown.
 
 use std::collections::BTreeMap;
 
 use sprig_catalog::TenantCatalog;
-use sprig_catalog::store::{ObjectKind, ObjectState};
+use sprig_catalog::store::{DbState, Namespace, ObjectKind, ObjectState};
 use sprig_common::ids::{ObjectId, RoleId};
 use sprig_proto_mysql::Persona;
 
@@ -46,6 +49,34 @@ fn with_option(set: ActionSet) -> &'static str {
     }
 }
 
+/// An object as `SHOW GRANTS` names it: database, name, type.
+type ObjKey = (String, String, ObjectType);
+
+/// A live object's names; `None` once it is gone.
+fn live_key(cat: &TenantCatalog, id: ObjectId) -> Option<ObjKey> {
+    let o = cat
+        .objects
+        .get(id)
+        .filter(|o| o.state == ObjectState::Active)?;
+    let d = cat.databases.get(o.db_id)?;
+    let kind = match o.kind {
+        ObjectKind::Function => ObjectType::Function,
+        ObjectKind::Procedure => ObjectType::Procedure,
+        _ => ObjectType::Table,
+    };
+    Some((d.name.clone(), o.name.clone(), kind))
+}
+
+/// A grant held by name: the live relation's names when one exists, else
+/// the keys it was kept under.
+fn named_key(cat: &TenantCatalog, db_key: &str, name_key: &str) -> ObjKey {
+    cat.database(db_key)
+        .filter(|d| d.state == DbState::Active)
+        .and_then(|d| cat.object(d.db_id, Namespace::Relation, name_key))
+        .and_then(|o| live_key(cat, o.object_id))
+        .unwrap_or_else(|| (db_key.to_owned(), name_key.to_owned(), ObjectType::Table))
+}
+
 /// The lines of `SHOW GRANTS FOR acc [USING extra]`.
 #[must_use]
 #[allow(clippy::too_many_lines)] // the levels in rendering order
@@ -61,28 +92,42 @@ pub fn render(
     let to = account(acc, is_role, persona);
     let mut tenant = ActionSet::EMPTY;
     let mut dbs: BTreeMap<String, ActionSet> = BTreeMap::new();
-    let mut objects: BTreeMap<ObjectId, ActionSet> = BTreeMap::new();
-    let mut columns: BTreeMap<ObjectId, BTreeMap<String, ActionSet>> = BTreeMap::new();
+    // Objects by (database, name, type) as shown, so a grant held by name
+    // and one on the live table merge into one line.
+    let mut objects: BTreeMap<ObjKey, ActionSet> = BTreeMap::new();
+    let mut columns: BTreeMap<ObjKey, BTreeMap<String, ActionSet>> = BTreeMap::new();
     let grantees =
         std::iter::once(grantee).chain(state.closure(extra).into_iter().map(Grantee::Role));
     for g in grantees {
         for p in state.privileges_of(g) {
-            match &p.target {
-                PrivTarget::Tenant => tenant = tenant.union(p.actions),
+            let (key, column) = match &p.target {
+                PrivTarget::Tenant => {
+                    tenant = tenant.union(p.actions);
+                    continue;
+                }
                 PrivTarget::Database(n) => {
                     let e = dbs.entry(n.clone()).or_default();
                     *e = e.union(p.actions);
+                    continue;
                 }
-                PrivTarget::Object { object, .. } => {
-                    let e = objects.entry(*object).or_default();
+                PrivTarget::Object { object, .. } => (live_key(cat, *object), None),
+                PrivTarget::Column { object, column, .. } => (live_key(cat, *object), Some(column)),
+                PrivTarget::Named {
+                    db_key,
+                    name_key,
+                    column,
+                } => (Some(named_key(cat, db_key, name_key)), column.as_ref()),
+            };
+            let Some(key) = key else {
+                continue;
+            };
+            match column {
+                None => {
+                    let e = objects.entry(key).or_default();
                     *e = e.union(p.actions);
                 }
-                PrivTarget::Column { object, column, .. } => {
-                    let e = columns
-                        .entry(*object)
-                        .or_default()
-                        .entry(column.clone())
-                        .or_default();
+                Some(c) => {
+                    let e = columns.entry(key).or_default().entry(c.clone()).or_default();
                     *e = e.union(p.actions);
                 }
             }
@@ -144,30 +189,13 @@ pub fn render(
         ));
     }
     // db.obj
-    let mut objs: Vec<(String, String, ObjectType, ObjectId)> = Vec::new();
-    for id in objects.keys().chain(columns.keys()) {
-        let Some(o) = cat
-            .objects
-            .get(*id)
-            .filter(|o| o.state == ObjectState::Active)
-        else {
-            continue;
-        };
-        let Some(d) = cat.databases.get(o.db_id) else {
-            continue;
-        };
-        let kind = match o.kind {
-            ObjectKind::Function => ObjectType::Function,
-            ObjectKind::Procedure => ObjectType::Procedure,
-            _ => ObjectType::Table,
-        };
-        objs.push((d.name.clone(), o.name.clone(), kind, *id));
-    }
+    let mut objs: Vec<ObjKey> = objects.keys().chain(columns.keys()).cloned().collect();
     objs.sort();
     objs.dedup();
-    for (db, name, kind, id) in objs {
-        let set = objects.get(&id).copied().unwrap_or_default();
-        let cols = columns.get(&id);
+    for key in objs {
+        let set = objects.get(&key).copied().unwrap_or_default();
+        let cols = columns.get(&key);
+        let (db, name, kind) = key;
         let mut parts: Vec<String> = Vec::new();
         let table_names = render_static(set, Level::Object, kind);
         let all_table = table_names == ["ALL PRIVILEGES"];
