@@ -1904,6 +1904,16 @@ version = "0.0.1"
 [[package]]
 name = "sprig-binlog"
 version = "0.0.1"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "metrics",
+ "mysql_async",
+ "sha1",
+ "sprig-common",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "sprig-catalog"
@@ -1923,6 +1933,7 @@ dependencies = [
  "sprig-settings",
  "tokio",
  "tracing",
+ "twox-hash",
 ]
 
 [[package]]
@@ -1949,8 +1960,20 @@ dependencies = [
 name = "sprig-controller"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
+ "axum",
+ "futures",
+ "metrics",
+ "serde",
+ "serde_json",
+ "sprig-cluster",
  "sprig-common",
+ "sprig-meta",
+ "sprig-provision",
+ "sprig-settings",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1971,10 +1994,12 @@ version = "0.0.1"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "futures",
  "metrics",
  "rcgen",
  "rustls",
  "sprig-common",
+ "sprig-meta",
  "sprig-settings",
  "tokio",
  "tokio-rustls",
@@ -2017,6 +2042,7 @@ dependencies = [
  "async-trait",
  "etcd-client",
  "futures",
+ "metrics",
  "rcgen",
  "serde",
  "serde_json",
@@ -2062,6 +2088,18 @@ version = "0.0.1"
 [[package]]
 name = "sprig-provision"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "mysql_async",
+ "serde",
+ "serde_json",
+ "sprig-cluster",
+ "sprig-common",
+ "sprig-meta",
+ "tokio",
+ "toml",
+ "tracing",
+]
 
 [[package]]
 name = "sprig-redis"
@@ -2079,10 +2117,15 @@ version = "0.0.1"
 name = "sprig-settings"
 version = "0.0.1"
 dependencies = [
+ "futures",
  "linkme",
+ "metrics",
  "serde",
  "serde_json",
  "sprig-common",
+ "sprig-meta",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2105,9 +2148,13 @@ version = "0.0.1"
 name = "sprig-testkit"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
+ "futures",
+ "mysql_async",
  "serde",
  "serde_json",
  "sprig-common",
+ "sprig-meta",
  "tokio",
  "toml",
 ]
@@ -2141,6 +2188,20 @@ name = "sprigctl"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "mysql_async",
+ "serde",
+ "serde_json",
+ "sprig-cluster",
+ "sprig-common",
+ "sprig-controller",
+ "sprig-meta",
+ "sprig-provision",
+ "sprig-settings",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

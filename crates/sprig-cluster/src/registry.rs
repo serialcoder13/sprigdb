@@ -211,6 +211,9 @@ pub struct ClusterRegistry {
     dc: Arc<dyn MetaStore>,
     dc_id: DcId,
     events: broadcast::Sender<ClusterEvent>,
+    /// Extra compares on every DC-tier write, such as the DC leader's
+    /// fencing token ([`with_guard`](Self::with_guard)).
+    guard: Vec<Cmp>,
 }
 
 impl std::fmt::Debug for ClusterRegistry {
@@ -247,7 +250,25 @@ impl ClusterRegistry {
             dc,
             dc_id,
             events,
+            guard: Vec::new(),
         })
+    }
+
+    /// The same registry, with `guard` added to every write in the DC tier:
+    /// a leader passes its fencing token (`Cmp::CreateRev` of its leader
+    /// key) so a deposed leader's late writes never commit. A write that
+    /// fails only its guard returns 39504 `ER_SPRIG_NOT_LEADER`.
+    #[must_use]
+    pub fn with_guard(mut self, guard: Vec<Cmp>) -> Self {
+        self.guard = guard;
+        self
+    }
+
+    fn not_leader() -> SprigError {
+        SprigError::new(
+            SprigCode::NotLeader,
+            "the registry write's leader guard no longer holds",
+        )
     }
 
     /// The data center.
@@ -358,8 +379,9 @@ impl ClusterRegistry {
     /// `rejected`.
     ///
     /// # Errors
-    /// `Internal` for an empty node list or a name already used in this
-    /// data center; 39500 if etcd is unreachable.
+    /// `Internal` for an empty node list; 39105 `ER_SPRIG_CLUSTER_EXISTS`
+    /// for a name already used in this data center; 39500 if etcd is
+    /// unreachable; 39504 if a guard fails.
     pub async fn register(&self, reg: Registration) -> Result<StoredCluster> {
         if reg.nodes.is_empty() {
             return Err(SprigError::internal("a cluster needs at least one node"));
@@ -373,10 +395,13 @@ impl ClusterRegistry {
             .iter()
             .any(|c| c.body().name == reg.name && c.body().admin_state != AdminState::Retired)
         {
-            return Err(SprigError::internal(format!(
-                "a cluster named {:?} already exists in {}",
-                reg.name, self.dc_id
-            )));
+            return Err(SprigError::new(
+                SprigCode::ClusterExists,
+                format!(
+                    "a cluster named {:?} already exists in {}",
+                    reg.name, self.dc_id
+                ),
+            ));
         }
         let (number, cluster_id) = self.allocate_id(&reg.name).await?;
         let body = ClusterRecord {
@@ -400,19 +425,26 @@ impl ClusterRegistry {
         };
         let record = Record::new(body);
         let key = self.record_key(&cluster_id)?;
+        let mut when = vec![Cmp::Missing(key.clone())];
+        when.extend(self.guard.iter().cloned());
         let res = self
             .dc
             .txn(Txn {
-                when: vec![Cmp::Missing(key.clone())],
+                when,
                 then: vec![Op::Put {
-                    key,
+                    key: key.clone(),
                     value: record.encode()?,
                     lease: None,
                 }],
-                otherwise: vec![],
+                otherwise: vec![Op::Get(key)],
             })
             .await?;
         if !res.succeeded {
+            if !self.guard.is_empty()
+                && matches!(res.results.first(), Some(sprig_meta::OpResult::Get(None)))
+            {
+                return Err(Self::not_leader());
+            }
             return Err(SprigError::internal(format!(
                 "cluster record {cluster_id} exists without an id entry"
             )));
@@ -474,18 +506,27 @@ impl ClusterRegistry {
             if next.body.cluster_id != old.cluster_id {
                 return Err(SprigError::internal("a cluster's id never changes"));
             }
+            let mut when = vec![Cmp::ModRev(key.clone(), cur.mod_revision)];
+            when.extend(self.guard.iter().cloned());
             let res = self
                 .dc
                 .txn(Txn {
-                    when: vec![Cmp::ModRev(key.clone(), cur.mod_revision)],
+                    when,
                     then: vec![Op::Put {
                         key: key.clone(),
                         value: next.encode()?,
                         lease: None,
                     }],
-                    otherwise: vec![],
+                    otherwise: vec![Op::Get(key.clone())],
                 })
                 .await?;
+            if !res.succeeded
+                && !self.guard.is_empty()
+                && matches!(res.results.first(),
+                    Some(sprig_meta::OpResult::Get(Some(kv))) if kv.mod_revision == cur.mod_revision)
+            {
+                return Err(Self::not_leader());
+            }
             if res.succeeded {
                 self.emit(events_between(Some(&old), &next.body));
                 return Ok(StoredCluster {

@@ -1,6 +1,6 @@
 [package]
 name = "sprig-controller"
-description = "SprigDB: the controller role"
+description = "SprigDB: the controller role: reconciler runtime, leader election, job dispatch"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,24 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+axum.workspace = true
+futures.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-cluster.workspace = true
 sprig-common.workspace = true
+sprig-meta.workspace = true
+sprig-provision.workspace = true
+sprig-settings.workspace = true
+tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sprig-meta = { workspace = true, features = ["conformance"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

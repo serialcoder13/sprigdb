@@ -1,0 +1,9 @@
+prechecks:    failed (2 blocking)
+  NODE  ADDRESS          ROLE    VERSION                     TLS
+  n1    127.0.0.1:13311  writer  11.8.9-MariaDB-ubu2404-log  TLS_AES_256_GCM_SHA384
+  n2    127.0.0.1:13312  -       -                           -
+blocking:
+  - node n2: binlog_row_image is MINIMAL, needs FULL: SET GLOBAL binlog_row_image = 'FULL'
+  - sprig_repl can't read binlogs: GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO sprig_repl
+advisories:
+  - node n1: require_secure_transport is OFF: SET GLOBAL require_secure_transport = ON

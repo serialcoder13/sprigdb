@@ -196,6 +196,19 @@ fn legacy_xa_rollback_disables_xa() {
 }
 
 #[test]
+fn innodb_binlog_disables_xa_only_with_replicas() {
+    let mut probes = replication();
+    facts_mut(&mut probes[0]).binlog.storage_engine = Some("innodb".into());
+    assert!(
+        !derive_for(TopologyKind::PrimaryReplica, &probes).derived.xa,
+        "prepared XA isn't binlogged, so it can't reach a replica"
+    );
+    let mut probes = single();
+    facts_mut(&mut probes[0]).binlog.storage_engine = Some("innodb".into());
+    assert!(derive_for(TopologyKind::SingleNode, &probes).derived.xa);
+}
+
+#[test]
 fn external_declared_rpo() {
     let probes = vec![probe("n1", &raw("11.8-single"))];
     let mut declared = Declared {
@@ -385,4 +398,27 @@ fn triggers_for_a_full_probe() {
     // A node that didn't answer triggers nothing.
     after[0] = failed("n1", None);
     assert_eq!(full_probe_triggers(&before, &after).len(), 2);
+}
+
+#[test]
+fn deep_only_privilege_tests_carry_over() {
+    let deep = derive(DeriveInput {
+        topology: TopologyKind::Galera,
+        probes: &galera(),
+        declared: None,
+        previous: None,
+    });
+    assert_eq!(deep.privileges.sql_log_bin_settable, Some(true));
+    assert_eq!(deep.privileges.osu_method_settable, Some(true));
+    let mut full = galera();
+    full[0].active = None;
+    let next = derive(DeriveInput {
+        topology: TopologyKind::Galera,
+        probes: &full,
+        declared: None,
+        previous: Some(&deep),
+    });
+    assert_eq!(next.privileges.sql_log_bin_settable, Some(true));
+    assert_eq!(next.privileges.osu_method_settable, Some(true));
+    assert!(diff(&deep, &next).is_empty(), "{:?}", diff(&deep, &next));
 }

@@ -1,0 +1,341 @@
+//! Building a `RegisterCluster` request from `sprigctl cluster register`'s
+//! flags and its `-f` file (chapter 09, "Interfaces"; chapter 27,
+//! "External registration").
+//!
+//! The file is TOML, with chapter 27's fields:
+//!
+//! ```toml
+//! dc = "fra1"
+//! name = "fra1-ext1"
+//! topology = "primary_replica"   # galera | primary_replica | single | external
+//! credentials_ref = "file:/etc/sprigdb/creds/fra1-ext1.toml"  # [sprig_ctl], [sprig_repl]
+//!
+//! [endpoints]                    # or [[nodes]] with node, addr, zone
+//! writer = "db-primary.fra1.internal:3306"
+//! readers = ["db-r1.fra1.internal:3306", "db-r2.fra1.internal:3306"]
+//!
+//! [capacity]
+//! memory_gb = 256
+//!
+//! [declared]
+//! failover = "provider"
+//! rpo_seconds = 0
+//! ```
+//!
+//! Flags override the file. Chapter 27 writes the file in YAML; SprigDB
+//! reads TOML, like `sprigdb.toml` and `--declare`.
+
+use serde::Deserialize;
+use sprig_cluster::record::{Capacity, Declared, NodeSpec, SecretRefs, TopologyKind};
+use sprig_common::ids::{DcId, NodeId};
+use sprig_controller::admin::types::RegisterClusterRequest;
+use sprig_provision::credentials::refs_for;
+
+/// The `-f` file.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClusterFile {
+    dc: Option<DcId>,
+    name: Option<String>,
+    topology: Option<String>,
+    credentials_ref: Option<String>,
+    secrets: Option<SecretRefs>,
+    endpoints: Option<Endpoints>,
+    nodes: Option<Vec<NodeSpec>>,
+    capacity: Option<Capacity>,
+    declared: Option<Declared>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Endpoints {
+    writer: String,
+    #[serde(default)]
+    readers: Vec<String>,
+}
+
+/// The flags of `register`.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RegisterFlags {
+    /// The `-f` file's text.
+    pub(crate) file: Option<String>,
+    /// `--declare`'s text.
+    pub(crate) declare: Option<String>,
+    /// The positional name.
+    pub(crate) name: Option<String>,
+    /// `--dc`.
+    pub(crate) dc: Option<String>,
+    /// `--topology`.
+    pub(crate) topology: Option<String>,
+    /// `--node`, repeated: `[id=]host:port`.
+    pub(crate) nodes: Vec<String>,
+    /// `--credentials`: one reference for both accounts.
+    pub(crate) credentials: Option<String>,
+    /// `--ctl-secret`.
+    pub(crate) ctl_secret: Option<String>,
+    /// `--repl-secret`.
+    pub(crate) repl_secret: Option<String>,
+    /// `--memory-gb`.
+    pub(crate) memory_gb: Option<u64>,
+    /// `--storage-gb`.
+    pub(crate) storage_gb: Option<u64>,
+    /// `--dry-run`.
+    pub(crate) dry_run: bool,
+}
+
+/// A topology name: chapter 27's spellings and the record's.
+///
+/// # Errors
+/// For anything else.
+pub(crate) fn topology(s: &str) -> Result<TopologyKind, String> {
+    match s {
+        "galera" => Ok(TopologyKind::Galera),
+        "primary_replica" | "replication" => Ok(TopologyKind::PrimaryReplica),
+        "single" | "single_node" => Ok(TopologyKind::SingleNode),
+        "external" => Ok(TopologyKind::External),
+        other => Err(format!(
+            "topology {other:?}: expected galera, primary_replica, single or external"
+        )),
+    }
+}
+
+fn node(i: usize, spec: &str) -> Result<NodeSpec, String> {
+    let (id, addr) = match spec.split_once('=') {
+        Some((id, addr)) => (id.to_owned(), addr),
+        None => (format!("n{}", i + 1), spec),
+    };
+    Ok(NodeSpec {
+        node: NodeId::new(id.as_str()).map_err(|e| format!("node {spec:?}: {e}"))?,
+        addr: addr.to_owned(),
+        zone: None,
+    })
+}
+
+/// Merges the file and the flags into a request.
+///
+/// # Errors
+/// A message for a missing or malformed field.
+pub(crate) fn build(flags: &RegisterFlags) -> Result<RegisterClusterRequest, String> {
+    let file: ClusterFile = match &flags.file {
+        Some(text) => toml::from_str(text).map_err(|e| format!("cluster file: {}", e.message()))?,
+        None => ClusterFile::default(),
+    };
+    let name = flags
+        .name
+        .clone()
+        .or(file.name)
+        .ok_or("a cluster name is required")?;
+    let dc = match flags.dc.as_deref() {
+        Some(d) => Some(DcId::new(d).map_err(|e| format!("--dc {d:?}: {e}"))?),
+        None => file.dc,
+    };
+    let topology = topology(
+        flags
+            .topology
+            .as_deref()
+            .or(file.topology.as_deref())
+            .ok_or("a topology is required (--topology)")?,
+    )?;
+    let nodes = if flags.nodes.is_empty() {
+        match (file.nodes, file.endpoints) {
+            (Some(n), None) => n,
+            (None, Some(e)) => std::iter::once(e.writer)
+                .chain(e.readers)
+                .enumerate()
+                .map(|(i, a)| node(i, &a))
+                .collect::<Result<_, _>>()?,
+            (Some(_), Some(_)) => return Err("give [endpoints] or [[nodes]], not both".into()),
+            (None, None) => return Err("nodes are required (--node host:port)".into()),
+        }
+    } else {
+        flags
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| node(i, s))
+            .collect::<Result<_, _>>()?
+    };
+    let shared = flags.credentials.as_ref().or(file.credentials_ref.as_ref());
+    let mut secrets = match (shared, file.secrets) {
+        (Some(r), _) => Some(refs_for(r).map_err(|e| e.message)?),
+        (None, s) => s,
+    };
+    if flags.ctl_secret.is_some() || flags.repl_secret.is_some() {
+        let base = secrets.clone();
+        let pick = |flag: &Option<String>, from: Option<String>, what: &str| {
+            flag.clone().or(from).ok_or(format!(
+                "--{what}-secret is required with the other secret flag"
+            ))
+        };
+        secrets = Some(SecretRefs {
+            ctl: pick(
+                &flags.ctl_secret,
+                base.as_ref().map(|b| b.ctl.clone()),
+                "ctl",
+            )?,
+            repl: pick(&flags.repl_secret, base.map(|b| b.repl), "repl")?,
+        });
+    }
+    let secrets = secrets.ok_or("credentials are required (--credentials file:<path>)")?;
+    let mut capacity = file.capacity.unwrap_or_default();
+    capacity.memory_gb = flags.memory_gb.or(capacity.memory_gb);
+    capacity.storage_gb = flags.storage_gb.or(capacity.storage_gb);
+    let declared = match &flags.declare {
+        Some(text) => Some(declared(text)?),
+        None => file.declared,
+    };
+    Ok(RegisterClusterRequest {
+        dc,
+        name,
+        topology,
+        provisioner: sprig_cluster::record::ProvisionerKind::External,
+        nodes,
+        secrets,
+        capacity,
+        declared,
+        dry_run: flags.dry_run,
+    })
+}
+
+/// `--declare`: a `[declared]` table, or its fields at the top level.
+fn declared(text: &str) -> Result<Declared, String> {
+    let mut t: toml::Table = text
+        .parse()
+        .map_err(|e: toml::de::Error| format!("--declare: {}", e.message()))?;
+    let v = t.remove("declared").unwrap_or(toml::Value::Table(t));
+    v.try_into()
+        .map_err(|e: toml::de::Error| format!("--declare: {}", e.message()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_alone() {
+        let r = build(&RegisterFlags {
+            name: Some("dc-a-galera".into()),
+            dc: Some("dc-a".into()),
+            topology: Some("galera".into()),
+            nodes: vec![
+                "127.0.0.1:13321".into(),
+                "g2=127.0.0.1:13322".into(),
+                "127.0.0.1:13323".into(),
+            ],
+            credentials: Some("file:/c.toml".into()),
+            memory_gb: Some(16),
+            ..RegisterFlags::default()
+        })
+        .unwrap();
+        assert_eq!(r.topology, TopologyKind::Galera);
+        let ids: Vec<&str> = r.nodes.iter().map(|n| n.node.as_str()).collect();
+        assert_eq!(ids, ["n1", "g2", "n3"]);
+        assert_eq!(r.secrets.ctl, "file:/c.toml#sprig_ctl");
+        assert_eq!(r.capacity.memory_gb, Some(16));
+        assert!(!r.dry_run);
+    }
+
+    #[test]
+    fn the_chapter_27_file_with_overrides() {
+        let file = r#"
+            dc = "fra1"
+            name = "fra1-ext1"
+            topology = "primary_replica"
+            credentials_ref = "file:/etc/sprigdb/creds/fra1-ext1.toml"
+            [endpoints]
+            writer = "db-primary.fra1.internal:3306"
+            readers = ["db-r1.fra1.internal:3306", "db-r2.fra1.internal:3306"]
+            [declared]
+            failover = "provider"
+            rpo_seconds = 0
+            replica_dcs = ["fra1"]
+        "#;
+        let r = build(&RegisterFlags {
+            file: Some(file.into()),
+            repl_secret: Some("env:REPL".into()),
+            dry_run: true,
+            ..RegisterFlags::default()
+        })
+        .unwrap();
+        assert_eq!(r.dc.unwrap().as_str(), "fra1");
+        assert_eq!(r.nodes.len(), 3);
+        assert_eq!(r.nodes[2].addr, "db-r2.fra1.internal:3306");
+        assert_eq!(
+            r.secrets.ctl,
+            "file:/etc/sprigdb/creds/fra1-ext1.toml#sprig_ctl"
+        );
+        assert_eq!(r.secrets.repl, "env:REPL");
+        assert_eq!(r.declared.unwrap().rpo_seconds, Some(0));
+        assert!(r.dry_run);
+        let d = build(&RegisterFlags {
+            file: Some(file.into()),
+            declare: Some("rpo_seconds = 5\ntrust = \"asserted\"\n".into()),
+            ..RegisterFlags::default()
+        })
+        .unwrap()
+        .declared
+        .unwrap();
+        assert_eq!(d.rpo_seconds, Some(5));
+        assert!(d.failover.is_none(), "--declare replaces the file's table");
+    }
+
+    #[test]
+    fn missing_and_malformed_fields() {
+        let base = RegisterFlags {
+            name: Some("x".into()),
+            topology: Some("single".into()),
+            nodes: vec!["db:3306".into()],
+            credentials: Some("file:/c.toml".into()),
+            ..RegisterFlags::default()
+        };
+        assert!(build(&base).is_ok());
+        let cases: Vec<(RegisterFlags, &str)> = vec![
+            (
+                RegisterFlags {
+                    name: None,
+                    ..base.clone()
+                },
+                "a cluster name is required",
+            ),
+            (
+                RegisterFlags {
+                    topology: Some("mesh".into()),
+                    ..base.clone()
+                },
+                "topology \"mesh\": expected galera, primary_replica, single or external",
+            ),
+            (
+                RegisterFlags {
+                    nodes: vec![],
+                    ..base.clone()
+                },
+                "nodes are required (--node host:port)",
+            ),
+            (
+                RegisterFlags {
+                    credentials: None,
+                    ..base.clone()
+                },
+                "credentials are required (--credentials file:<path>)",
+            ),
+            (
+                RegisterFlags {
+                    credentials: None,
+                    ctl_secret: Some("env:A".into()),
+                    ..base.clone()
+                },
+                "--repl-secret is required with the other secret flag",
+            ),
+            (
+                RegisterFlags {
+                    file: Some("nme = 1".into()),
+                    ..base.clone()
+                },
+                "cluster file: unknown field `nme`, expected one of `dc`, `name`, `topology`, `credentials_ref`, `secrets`, `endpoints`, `nodes`, `capacity`, `declared`",
+            ),
+        ];
+        for (flags, want) in cases {
+            assert_eq!(build(&flags).unwrap_err(), want);
+        }
+    }
+}

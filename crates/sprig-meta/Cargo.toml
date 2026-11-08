@@ -1,6 +1,6 @@
 [package]
 name = "sprig-meta"
-description = "SprigDB: MetaStore trait, in-memory and etcd stores, keys, versioned records, sessions and election"
+description = "SprigDB: MetaStore trait, in-memory and etcd stores, keys, versioned records, sessions, election and caches"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,7 @@ conformance = ["tokio/test-util"]
 async-trait.workspace = true
 etcd-client = { workspace = true, features = ["tls"] }
 futures.workspace = true
+metrics.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sprig-common.workspace = true

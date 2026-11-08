@@ -19,6 +19,7 @@ sprig-meta.workspace = true
 sprig-settings.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+twox-hash.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

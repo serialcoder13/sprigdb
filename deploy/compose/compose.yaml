@@ -11,6 +11,9 @@
 #   docker compose --profile all up -d           # everything
 #   docker compose --profile all down -v         # stop and delete the data
 #
+# Fault injection (toxiproxy, faultd) and elle-cli have profiles of their
+# own, faults and elle, outside `all`: see the end of this file.
+#
 # Per-node identity follows chapter 27: server_id = cluster_number * 100 +
 # index, gtid_domain_id = cluster_number. Cluster numbers: single 1,
 # replication 2, galera 3. Galera nodes share wsrep_gtid_domain_id 3 and keep
@@ -171,6 +174,41 @@ services:
       galera-2: { condition: service_healthy }
     ports: ["127.0.0.1:13323:3306"]
     volumes: *galera-conf
+
+  # --- fault injection (chapter 46, "Fault injection"): profile faults ----
+  # Start next to a running stack without touching it:
+  #
+  #   docker compose --profile faults up -d toxiproxy faultd
+  #
+  # toxiproxy's API is on 127.0.0.1:18474. Tests create their own proxies
+  # (named sprig-sim-*), listening on 13400-13419 inside the container and
+  # published on the same host ports, with upstreams such as single:3306,
+  # and add toxics to them. faultd runs iptables and tc inside other
+  # containers' network namespaces; sprig-testkit only points it at its own
+  # sprig-sim-* containers.
+  toxiproxy:
+    image: ${TOXIPROXY_IMAGE:-ghcr.io/shopify/toxiproxy:2.12.0}
+    profiles: [faults]
+    networks: [dc-a]
+    ports:
+      - "127.0.0.1:18474:8474"
+      - "127.0.0.1:13400-13419:13400-13419"
+
+  faultd:
+    build: ./faultd
+    image: sprigdb-faultd:dev
+    profiles: [faults]
+    privileged: true
+    pid: host
+    network_mode: none
+
+  # elle-cli for history checks (profile elle; build only, run per check):
+  #   docker compose --profile elle build elle
+  elle:
+    build: ./elle
+    image: sprigdb-elle:dev
+    profiles: [elle]
+    network_mode: none
 
 networks:
   dc-a: {}

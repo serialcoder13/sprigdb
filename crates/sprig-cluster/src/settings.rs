@@ -1,4 +1,4 @@
-//! Chapter 09's settings that steps 1-4 use, declared next to the code
+//! Chapter 09's settings that steps 1-8 use, declared next to the code
 //! (chapter 03, "Declaring a key"), and a typed snapshot of them.
 
 use std::time::Duration;
@@ -68,6 +68,21 @@ ops_key! {
     "Binlog horizon warning"
 }
 ops_key! {
+    /// `cluster.galera_writer_rejoin_seconds`.
+    GALERA_WRITER_REJOIN_SECONDS: u64 = "cluster.galera_writer_rejoin_seconds", 120, 0, 86_400,
+    "Healthy time before a node rejoins the Galera writer set"
+}
+ops_key! {
+    /// `cluster.kill_wait_ms`.
+    KILL_WAIT_MS: u64 = "cluster.kill_wait_ms", 1000, 20, 600_000,
+    "Wait for sessions killed by a fence"
+}
+ops_key! {
+    /// `cluster.fence_lock_wait_seconds`.
+    FENCE_LOCK_WAIT_SECONDS: u64 = "cluster.fence_lock_wait_seconds", 1, 1, 3600,
+    "Lock wait for a rename fence"
+}
+ops_key! {
     /// `cluster.clock_skew_warn_ms`.
     CLOCK_SKEW_WARN_MS: u64 = "cluster.clock_skew_warn_ms", 500, 1, 600_000,
     "Clock skew warning"
@@ -107,6 +122,12 @@ pub struct ClusterSettings {
     pub min_binlog_retention_hours: u64,
     /// Clock skew warning, ms.
     pub clock_skew_warn_ms: u64,
+    /// Healthy time before a node rejoins the Galera writer set.
+    pub galera_writer_rejoin: Duration,
+    /// Wait for sessions a fence killed.
+    pub kill_wait: Duration,
+    /// Lock wait for a rename fence, seconds.
+    pub fence_lock_wait_seconds: u64,
     /// Fleet `lower_case_table_names`.
     pub lower_case_table_names: u32,
 }
@@ -126,6 +147,9 @@ impl Default for ClusterSettings {
             heartbeat_interval: Duration::from_millis(HEARTBEAT_INTERVAL_MS.default),
             min_binlog_retention_hours: MIN_BINLOG_RETENTION_HOURS.default,
             clock_skew_warn_ms: CLOCK_SKEW_WARN_MS.default,
+            galera_writer_rejoin: Duration::from_secs(GALERA_WRITER_REJOIN_SECONDS.default),
+            kill_wait: Duration::from_millis(KILL_WAIT_MS.default),
+            fence_lock_wait_seconds: FENCE_LOCK_WAIT_SECONDS.default,
             lower_case_table_names: LOWER_CASE_TABLE_NAMES.default,
         }
     }
@@ -147,6 +171,11 @@ impl ClusterSettings {
             heartbeat_interval: Duration::from_millis(settings.get(&HEARTBEAT_INTERVAL_MS, ctx)),
             min_binlog_retention_hours: settings.get(&MIN_BINLOG_RETENTION_HOURS, ctx),
             clock_skew_warn_ms: settings.get(&CLOCK_SKEW_WARN_MS, ctx),
+            galera_writer_rejoin: Duration::from_secs(
+                settings.get(&GALERA_WRITER_REJOIN_SECONDS, ctx),
+            ),
+            kill_wait: Duration::from_millis(settings.get(&KILL_WAIT_MS, ctx)),
+            fence_lock_wait_seconds: settings.get(&FENCE_LOCK_WAIT_SECONDS, ctx),
             lower_case_table_names: settings.get(&LOWER_CASE_TABLE_NAMES, ctx),
         }
     }
@@ -165,6 +194,9 @@ mod tests {
         for k in [
             "cluster.health_interval_seconds",
             "cluster.capability_upgrade_sustain_seconds",
+            "cluster.galera_writer_rejoin_seconds",
+            "cluster.kill_wait_ms",
+            "cluster.fence_lock_wait_seconds",
             "cluster.lower_case_table_names",
         ] {
             assert!(reg.get(k).is_some(), "{k}");

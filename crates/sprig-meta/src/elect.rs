@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use sprig_common::Result;
 use sprig_common::time::Clock;
+use sprig_common::{Result, SprigCode, SprigError};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -120,17 +120,49 @@ impl Leadership {
     /// fires the step-down.
     ///
     /// # Errors
-    /// 39500 `ER_SPRIG_META_UNAVAILABLE`, not retryable, with "leadership
-    /// lost" when this process no longer leads; the store's error otherwise.
+    /// 39504 `ER_SPRIG_NOT_LEADER`, not retryable, when this process no
+    /// longer leads; the store's error otherwise.
     pub async fn commit(&self, then: Vec<Op>) -> Result<TxnResult> {
         if !self.is_leading() {
-            return Err(lost_error("leadership"));
+            return Err(not_leader());
         }
         let r = self.session.store().txn(self.guarded(then)).await?;
         if !r.succeeded {
             tracing::warn!(key = %self.key, token = self.token, "guarded txn failed its compare; stepping down");
             self.deposed.send_replace(true);
-            return Err(lost_error("leadership"));
+            return Err(not_leader());
+        }
+        Ok(r)
+    }
+
+    /// Runs `then` if this leadership holds and every compare in `when`
+    /// holds: a guarded write that also checks the records it read (for
+    /// example `ModRev` of a setting record). Unlike [`commit`](Self::commit),
+    /// a failed `when` compare is not a lost leadership: the result comes
+    /// back with `succeeded == false` and the caller re-reads and retries.
+    /// Only a token that no longer holds fires the step-down.
+    ///
+    /// # Errors
+    /// As [`commit`](Self::commit).
+    pub async fn commit_if(&self, when: Vec<Cmp>, then: Vec<Op>) -> Result<TxnResult> {
+        if !self.is_leading() {
+            return Err(not_leader());
+        }
+        let mut txn = self.guarded(then);
+        txn.when.extend(when);
+        txn.otherwise = vec![Op::Get(self.key.clone())];
+        let r = self.session.store().txn(txn).await?;
+        if r.succeeded {
+            return Ok(r);
+        }
+        let still_ours = matches!(
+            r.results.first(),
+            Some(OpResult::Get(Some(kv))) if kv.create_revision == self.token
+        );
+        if !still_ours {
+            tracing::warn!(key = %self.key, token = self.token, "guarded txn failed its compare; stepping down");
+            self.deposed.send_replace(true);
+            return Err(not_leader());
         }
         Ok(r)
     }
@@ -151,6 +183,12 @@ impl Leadership {
         let closed = self.session.close().await;
         deleted.and(closed)
     }
+}
+
+/// The error for work refused because this process no longer leads.
+/// Not retryable: the caller must step down, not retry.
+fn not_leader() -> SprigError {
+    SprigError::new(SprigCode::NotLeader, "leadership lost")
 }
 
 /// Campaigns for leader keys.

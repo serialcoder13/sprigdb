@@ -71,6 +71,7 @@ pub(crate) fn all_passed() -> ActiveProbes {
             vcol_index_online: true,
             oracle_routines: true,
             oracle_routines_any_mode: true,
+            trigger_create: true,
         },
         sql_log_bin_settable: true,
         osu_method_settable: None,

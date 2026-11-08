@@ -22,6 +22,7 @@ sprig-agent = { path = "crates/sprig-agent" }
 sprig-operator = { path = "crates/sprig-operator" }
 sprig-cluster = { path = "crates/sprig-cluster" }
 sprig-testkit = { path = "crates/sprig-testkit" }
+sprig-provision = { path = "crates/sprig-provision" }
 
 # Third-party crates. Every licence must be on deny.toml's allow-list (chapter 03).
 async-trait = "0.1"
@@ -51,6 +52,22 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2.2"
 rcgen = "0.14"
+
+# The binlog client and parser (chapter 10): CRC32 event checksums, zlib for
+# compressed events and columns (pure-Rust backend), SHA-1 for
+# mysql_native_password.
+crc32fast = "1.5"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+sha1 = "0.10"
+
+# xxh3_64 for the Galera writer choice (chapter 09). MIT.
+twox-hash = { version = "2.1", default-features = false, features = ["std", "xxhash3_64"] }
+
+# The Admin API's HTTP client in sprigctl (chapter 47); the server side is
+# axum. hyper and hyper-util are MIT, http-body-util MIT.
+hyper = { version = "1.6", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
 
 [workspace.lints.rust]
 # `deny`, not `forbid`, so vetted spots can opt out with a `SAFETY:` comment

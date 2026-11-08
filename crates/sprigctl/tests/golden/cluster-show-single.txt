@@ -1,0 +1,24 @@
+cluster:      dc-a-c1 (dc-a-single)
+dc:           dc-a
+topology:     single_node
+provisioner:  external
+state:        active
+health:       healthy since 2026-11-07T10:00:00Z
+nodes:        n1 127.0.0.1:13301 [ok, writer]
+profile:      v3
+  server                11.8.9-MariaDB-ubu2404-log (lower_case_table_names 0, InnoDB)
+  semi_sync             disabled
+  binlog                ROW, row image FULL, metadata FULL, gtid_strict_mode yes, expire 604800 s
+  xa                    yes
+  zero_loss_failover    no (expected loss no_replica)
+  read_your_writes      writer_only
+  mover                 source yes, target yes
+  change_feed           full, retention 604800 s
+  fence_methods         revoke_kill, rename
+  validation            -
+  online_index_build    yes
+  enforce_json_schema   yes
+  compiled_logic        yes
+gaps:
+  - node n1: require_secure_transport is OFF: SET GLOBAL require_secure_transport = ON
+tuning:       no plan yet (server tuning is chapter 09 step 10)

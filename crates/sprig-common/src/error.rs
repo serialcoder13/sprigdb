@@ -151,8 +151,56 @@ sprig_codes! {
     SettingLocked = 39083, "ER_SPRIG_SETTING_LOCKED", "SprigSettingLocked", SQLSTATE_GENERAL, false;
     /// The value doesn't parse as the key's type (chapter 08).
     SettingBadValue = 39084, "ER_SPRIG_SETTING_BAD_VALUE", "SprigSettingBadValue", SQLSTATE_GENERAL, false;
+    /// The cluster has no writer for the shard (chapter 09).
+    ClusterUnavailable = 39100, "ER_SPRIG_CLUSTER_UNAVAILABLE", "SprigClusterUnavailable", SQLSTATE_CONNECTION, true;
+    /// A managed cluster fenced itself (chapter 09).
+    ClusterFenced = 39101, "ER_SPRIG_CLUSTER_FENCED", "SprigClusterFenced", SQLSTATE_GENERAL, false;
+    /// A statement needs a capability a cluster holding the object lacks,
+    /// with no fallback (chapter 09).
+    ClusterCapabilityRequired = 39102, "ER_SPRIG_CLUSTER_CAPABILITY_REQUIRED", "SprigClusterCapabilityRequired", SQLSTATE_GENERAL, false;
+    /// A shard fence couldn't be completed (killed sessions didn't stop in
+    /// time, or a rename waited too long); it was rolled back (chapter 09).
+    /// Not yet in Appendix E.
+    ClusterFenceFailed = 39103, "ER_SPRIG_CLUSTER_FENCE_FAILED", "SprigClusterFenceFailed", SQLSTATE_GENERAL, true;
+    /// No cluster has this id in the data center (chapter 09, Admin API).
+    /// Not yet in Appendix E.
+    ClusterNotFound = 39104, "ER_SPRIG_CLUSTER_NOT_FOUND", "SprigClusterNotFound", SQLSTATE_GENERAL, false;
+    /// A cluster with this name already exists in the data center (chapter
+    /// 09, Admin API). Not yet in Appendix E.
+    ClusterExists = 39105, "ER_SPRIG_CLUSTER_EXISTS", "SprigClusterExists", SQLSTATE_GENERAL, false;
+    /// The cluster's admin state doesn't allow the request, such as
+    /// draining a cluster that isn't active (chapter 09). Not yet in
+    /// Appendix E.
+    ClusterStateInvalid = 39106, "ER_SPRIG_CLUSTER_STATE_INVALID", "SprigClusterStateInvalid", SQLSTATE_GENERAL, false;
+    /// A binlog event failed its checksum or doesn't parse (chapter 10). Not
+    /// yet in Appendix E.
+    BinlogCorrupt = 39112, "ER_SPRIG_BINLOG_CORRUPT", "SprigBinlogCorrupt", SQLSTATE_GENERAL, false;
+    /// The binlog stream to a MariaDB node broke or went silent; reconnect
+    /// from the last committed position (chapter 10). Not yet in Appendix E.
+    BinlogDisconnected = 39113, "ER_SPRIG_BINLOG_DISCONNECTED", "SprigBinlogDisconnected", SQLSTATE_CONNECTION, true;
+    /// The server or binlog uses something the reader can't handle, such as
+    /// an unknown checksum algorithm, an encrypted binlog file or an
+    /// authentication plugin it lacks (chapter 10). Not yet in Appendix E.
+    BinlogUnsupported = 39114, "ER_SPRIG_BINLOG_UNSUPPORTED", "SprigBinlogUnsupported", SQLSTATE_GENERAL, false;
     /// The control plane's store is unreachable (chapter 23).
     MetaUnavailable = 39500, "ER_SPRIG_META_UNAVAILABLE", "SprigMetaUnavailable", SQLSTATE_CONNECTION, true;
+    /// This controller no longer leads (or never did): its session was lost
+    /// or a guarded transaction failed its fencing-token compare. The caller
+    /// steps down; it must not retry (chapter 23). Not yet in Appendix E.
+    NotLeader = 39504, "ER_SPRIG_NOT_LEADER", "SprigNotLeader", SQLSTATE_GENERAL, false;
+    /// The data center isn't registered (chapter 24).
+    UnknownDc = 39503, "ER_SPRIG_UNKNOWN_DC", "SprigUnknownDc", SQLSTATE_GENERAL, false;
+    /// The provisioner doesn't support the operation (chapter 27).
+    ProvisionerUnsupported = 39510, "ER_SPRIG_PROVISIONER_UNSUPPORTED", "SprigProvisionerUnsupported", SQLSTATE_GENERAL, false;
+    /// An external cluster failed its registration prechecks; the message
+    /// lists every missing item (chapter 27). Not yet in Appendix E.
+    ClusterPrecheckFailed = 39511, "ER_SPRIG_CLUSTER_PRECHECK_FAILED", "SprigClusterPrecheckFailed", SQLSTATE_GENERAL, false;
+    /// An Admin API request is malformed or names something invalid
+    /// (chapter 37). Not yet in Appendix E.
+    AdminRequestInvalid = 39792, "ER_SPRIG_ADMIN_REQUEST_INVALID", "SprigAdminRequestInvalid", SQLSTATE_GENERAL, false;
+    /// An Admin API request has no valid credential (chapter 37). Not yet
+    /// in Appendix E.
+    AdminUnauthenticated = 39793, "ER_SPRIG_ADMIN_UNAUTHENTICATED", "SprigAdminUnauthenticated", SQLSTATE_GENERAL, false;
     /// `sprigdb.toml` or its environment overrides are invalid. Raised only at
     /// process start; never reaches a client. Not yet in Appendix E.
     ConfigInvalid = 39998, "ER_SPRIG_CONFIG_INVALID", "SprigConfigInvalid", SQLSTATE_GENERAL, false;
@@ -242,9 +290,25 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::SettingOutOfBounds
         | SprigCode::SettingUnknown
         | SprigCode::SettingScopeNotAllowed
-        | SprigCode::SettingBadValue => (Code::InvalidArgument, 400),
-        SprigCode::SettingLocked => (Code::FailedPrecondition, 400),
-        SprigCode::GatewayDraining | SprigCode::MetaUnavailable => (Code::Unavailable, 503),
+        | SprigCode::SettingBadValue
+        | SprigCode::AdminRequestInvalid => (Code::InvalidArgument, 400),
+        SprigCode::SettingLocked
+        | SprigCode::BinlogUnsupported
+        | SprigCode::ClusterCapabilityRequired
+        | SprigCode::ProvisionerUnsupported
+        | SprigCode::ClusterPrecheckFailed => (Code::FailedPrecondition, 400),
+        SprigCode::GatewayDraining
+        | SprigCode::MetaUnavailable
+        | SprigCode::NotLeader
+        | SprigCode::BinlogDisconnected
+        | SprigCode::ClusterUnavailable
+        | SprigCode::ClusterFenced => (Code::Unavailable, 503),
+        SprigCode::BinlogCorrupt => (Code::DataLoss, 500),
+        SprigCode::ClusterFenceFailed => (Code::Aborted, 409),
+        SprigCode::ClusterNotFound | SprigCode::UnknownDc => (Code::NotFound, 404),
+        SprigCode::ClusterExists => (Code::AlreadyExists, 409),
+        SprigCode::ClusterStateInvalid => (Code::FailedPrecondition, 409),
+        SprigCode::AdminUnauthenticated => (Code::Unauthenticated, 401),
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
     };
     ProtocolError {

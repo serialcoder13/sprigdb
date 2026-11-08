@@ -1,0 +1,31 @@
+# A one-DC development deployment on top of compose.yaml (chapter 23,
+# "Bootstrapping the first DC"; single-etcd mode: one etcd serves both the
+# DC tier and the global tier).
+#
+#   docker compose up -d etcd
+#   cargo run -p sprigdb -- --config deploy/compose/sprigdb.dev.toml controller
+#   cargo run -p sprigctl -- --meta http://127.0.0.1:2379 dc list
+#
+# Development only: plain-text etcd, no [tls]. Environment variables
+# override any value, for example SPRIGDB_NODE_ID=ctl-2 and
+# SPRIGDB_TELEMETRY_BOOTSTRAP_ADDR=127.0.0.1:9181 for a second controller.
+
+[node]
+dc = "dc-a"
+id = "ctl-1"
+
+[meta]
+dc_seeds = ["http://127.0.0.1:2379"]
+# Empty or equal to dc_seeds: single-etcd mode.
+global_seeds = []
+deployment_id = "sprigdb-dev"
+
+[controller]
+# The first controller to start writes the deployment id, dcs/dc-a (active)
+# and ids/tenant, once; later starts find them and only verify the id.
+bootstrap = true
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "pretty"
+bootstrap_addr = "127.0.0.1:9180"

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::probe::feed::{self, FeedLevel};
 use crate::probe::{
     ActiveProbes, BinlogFormat, FeatureFlags, NodeFacts, NodeProbe, PrivilegeInfo, RoutineLimits,
     RowImage, RowMetadata, ServerVersion, TableCacheInfo, WaitPoint,
@@ -150,8 +151,11 @@ pub struct Derived {
     pub mover_source: bool,
     /// Shards may be moved onto this cluster.
     pub mover_target: bool,
-    /// The change feed can read here.
+    /// The change feed can read here (its level is at least `degraded`).
     pub feed_source: bool,
+    /// What the change feed can do here (chapter 38).
+    #[serde(default)]
+    pub feed_level: FeedLevel,
     /// How far back the feed can resume from the binlog, seconds; 0 when
     /// logs never expire.
     pub feed_retention_secs: u64,
@@ -315,15 +319,27 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
     if let Some(a) = active {
         privileges.sql_log_bin_settable = Some(a.sql_log_bin_settable);
         privileges.osu_method_settable = a.osu_method_settable;
+    } else {
+        // Only the deep probe tests these; keep what it found.
+        privileges.sql_log_bin_settable = prev.privileges.sql_log_bin_settable;
+        privileges.osu_method_settable = prev.privileges.osu_method_settable;
     }
 
     let mut features = active.map_or(prev.features, |a| a.features);
     features.alter_two_phase = writer.server.binlog_alter_two_phase.is_some();
     features.performance_schema = writer.server.performance_schema;
 
-    // xa := xa_probe.ok AND NOT legacy_xa_rollback_at_disconnect
+    // xa := xa_probe.ok AND NOT legacy_xa_rollback_at_disconnect (checked
+    //       only when present: 11.8 and 12.3 don't have the variable; XA spike)
+    //       AND NOT (binlog in InnoDB AND replicas exist)
+    // With 12.3's InnoDB-stored binlog nothing is logged at XA PREPARE, so a
+    // prepared branch never reaches a replica and can't survive a failover
+    // (binlog spike; chapters 09 and 18). A single node keeps XA.
     let xa_probe = active.map_or(prev.derived.xa, |a| a.xa);
-    let xa = xa_probe && writer.server.legacy_xa_rollback_at_disconnect != Some(true);
+    let prepared_survives_failover = probes.len() <= 1 || b.in_files();
+    let xa = xa_probe
+        && writer.server.legacy_xa_rollback_at_disconnect != Some(true)
+        && prepared_survives_failover;
 
     let all_synced = !probes.is_empty()
         && probes.iter().all(|p| {
@@ -365,17 +381,22 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
     };
 
     // mover_source := a node with log_bin, ROW, FULL image, gtid_strict_mode,
-    // log_slave_updates (replica) and a passing dump probe.
+    // log_slave_updates (replica) and a passing dump probe. The settings
+    // half is the feed check (chapter 38), which also asks Galera nodes for
+    // log_slave_updates.
+    // TODO(sprig-binlog): the dump probe (`ActiveProbes::binlog_dump`) is
+    // never run yet, so `None` (not run) counts as passing here.
     let dump_ok = active.and_then(|a| a.binlog_dump) != Some(false);
-    let source_ok = |f: &NodeFacts| {
-        let b = &f.binlog;
-        b.log_bin
-            && b.format == Some(BinlogFormat::Row)
-            && b.row_image == Some(RowImage::Full)
-            && b.gtid_strict_mode
-            && (!f.is_replica() || b.log_slave_updates)
+    let feed_level = if dump_ok {
+        answered
+            .iter()
+            .map(|f| feed::check(f, feed::DEFAULT_RETENTION_HOURS).level)
+            .max()
+            .unwrap_or_default()
+    } else {
+        FeedLevel::Unsupported
     };
-    let mover_source = dump_ok && answered.iter().any(|f| source_ok(f));
+    let mover_source = feed_level != FeedLevel::Unsupported;
 
     let mut fence_methods = vec![FenceMethod::Rename];
     if privileges.create_user
@@ -403,12 +424,16 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
         mover_source,
         mover_target: privileges.tenant_schemas_all && privileges.tenant_schemas_grant_option,
         feed_source: mover_source,
+        feed_level,
+        // TODO(sprig-binlog): the book's value is now minus the commit time
+        // of the horizon's first event, which needs a binlog read; until
+        // then the expiry setting is the upper bound.
         feed_retention_secs: binlog.expire_logs_seconds,
         fence_methods,
         validation,
         online_index_build: !galera_on,
         enforce_json_schema: features.json_schema_valid,
-        compiled_logic: features.oracle_routines && privileges.set_user,
+        compiled_logic: features.oracle_routines && features.trigger_create && privileges.set_user,
     };
 
     CapabilityProfile {
@@ -584,6 +609,7 @@ const FLAGS: &[Flag] = &[
     flag!("features.vcol_index", features.vcol_index),
     flag!("features.vcol_index_online", features.vcol_index_online),
     flag!("features.oracle_routines", features.oracle_routines),
+    flag!("features.trigger_create", features.trigger_create),
     flag!(
         "features.oracle_routines_any_mode",
         features.oracle_routines_any_mode
@@ -671,6 +697,7 @@ fn values(p: &CapabilityProfile) -> Vec<(&'static str, String)> {
         ),
         ("derived.expected_loss", text(&p.derived.expected_loss)),
         ("derived.ryw", text(&p.derived.ryw)),
+        ("derived.feed_level", text(&p.derived.feed_level)),
         (
             "derived.feed_retention_secs",
             text(&p.derived.feed_retention_secs),
@@ -794,6 +821,9 @@ impl CapabilityPublisher {
                 LossClass::Zero => LossClass::Async,
                 other => other,
             };
+        }
+        if !next.derived.feed_source {
+            next.derived.feed_level = FeedLevel::Unsupported;
         }
         let changes = diff(old, &next);
         if changes.is_empty() {

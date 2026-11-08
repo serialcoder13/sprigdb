@@ -18,8 +18,12 @@
 //! peers, then TLS by mode. Client-speaks-first protocols detect a TLS
 //! `ClientHello` from the first byte; the MySQL family is told what to offer
 //! in-protocol ([`InProtocolTls`](crate::frontend::InProtocolTls)).
+//!
+//! [`live::follow`] re-applies the listeners whenever their settings change
+//! in etcd (chapter 23, "Live reconfiguration: no restarts").
 
 mod conn;
+pub mod live;
 pub mod proxy;
 pub mod settings;
 

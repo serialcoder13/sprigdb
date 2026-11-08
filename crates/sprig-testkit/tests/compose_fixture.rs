@@ -27,6 +27,12 @@ fn stack_starts_answers_and_tears_down_on_drop() {
 
     drop(stack);
     let after = ComposeProject::new(HELLO).name(name).attach();
+    if skip::flag(skip::KEEP) {
+        // SPRIG_TEST_KEEP=1 kept the project; this test owns it, so it
+        // still cleans up.
+        after.down().unwrap();
+        return;
+    }
     assert!(
         after.ps().unwrap().is_empty(),
         "project still has containers"
@@ -46,11 +52,13 @@ fn failed_start_reports_logs_and_cleans_up() {
         "the error should end with the logs: {}",
         err.message
     );
-    if !skip::flag(skip::KEEP) {
-        let after = ComposeProject::new(HELLO)
-            .profile("broken")
-            .name(name)
-            .attach();
+    let after = ComposeProject::new(HELLO)
+        .profile("broken")
+        .name(name)
+        .attach();
+    if skip::flag(skip::KEEP) {
+        after.down().unwrap();
+    } else {
         assert!(
             after.ps().unwrap().is_empty(),
             "project still has containers"

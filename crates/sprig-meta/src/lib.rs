@@ -19,13 +19,16 @@
 //!   fencing tokens and guarded transactions (step 3);
 //! - [`bootstrap`]: the first DC's deployment records (step 7, this
 //!   crate's part);
+//! - [`cache`]: full ([`Mirror`]) and lazy ([`LazyCache`]) caches fed by
+//!   watches (step 4);
 //! - `conformance` (feature `conformance`): one suite every store must
 //!   pass, run here against `MemStore` and, when `SPRIG_TEST_ETCD` names an
 //!   etcd, against `EtcdStore`.
 //!
-//! Not yet: caches (step 4), discovery (step 9).
+//! Not yet: discovery (step 9).
 
 pub mod bootstrap;
+pub mod cache;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 pub mod elect;
@@ -41,6 +44,7 @@ use std::time::Duration;
 use futures::Stream;
 use sprig_common::Result;
 
+pub use cache::{LazyCache, Mirror};
 pub use elect::{Election, Elector, Leader, LeaderRecord, Leadership};
 pub use etcd::{EtcdConfig, EtcdStore, EtcdTls};
 pub use key::{Key, Tier};

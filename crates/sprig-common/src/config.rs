@@ -39,9 +39,9 @@ pub struct ProcessConfig {
     /// Gateway runtime sizing.
     #[serde(default)]
     pub gateway: RuntimeConfig,
-    /// Controller runtime sizing.
+    /// Controller runtime sizing and start-up switches.
     #[serde(default)]
-    pub controller: RuntimeConfig,
+    pub controller: ControllerConfig,
     /// Worker runtime sizing.
     #[serde(default)]
     pub worker: RuntimeConfig,
@@ -87,6 +87,11 @@ pub struct MetaConfig {
     /// Endpoints of the global etcd tier.
     #[serde(default)]
     pub global_seeds: Vec<String>,
+    /// The deployment this process belongs to; must match the global
+    /// `system.deployment_id` setting (chapter 23, "Bootstrapping the first
+    /// DC"). Empty means not configured.
+    #[serde(default)]
+    pub deployment_id: String,
 }
 
 /// `[tls]`: this process's identity for mutual TLS.
@@ -108,6 +113,48 @@ pub struct RuntimeConfig {
     /// Tokio worker threads; 0 means one per CPU.
     #[serde(default)]
     pub worker_threads: usize,
+}
+
+/// `[controller]`: runtime sizing plus the start-up switches of chapter 23.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerConfig {
+    /// Tokio worker threads; 0 means one per CPU.
+    #[serde(default)]
+    pub worker_threads: usize,
+    /// Write the first DC's deployment records when the global tier has
+    /// none (chapter 23, "Bootstrapping the first DC").
+    #[serde(default)]
+    pub bootstrap: bool,
+    /// Campaign for the global leader as well as the DC leader.
+    #[serde(default)]
+    pub global_candidate: bool,
+    /// Where the controller serves the Admin API's REST face (chapter 37)
+    /// until the gateway's HTTP listeners serve it. Port 0 picks a free
+    /// port.
+    #[serde(default = "default_admin_addr")]
+    pub admin_addr: SocketAddr,
+    /// A file holding the bearer token Admin API calls must present. Without
+    /// one, `admin_addr` must be a loopback address.
+    #[serde(default)]
+    pub admin_token_file: Option<PathBuf>,
+}
+
+impl Default for ControllerConfig {
+    fn default() -> Self {
+        Self {
+            worker_threads: 0,
+            bootstrap: false,
+            global_candidate: false,
+            admin_addr: default_admin_addr(),
+            admin_token_file: None,
+        }
+    }
+}
+
+/// The Admin API's default address on a controller: loopback, port 7480.
+fn default_admin_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 7480))
 }
 
 /// Log output format.
@@ -225,15 +272,17 @@ impl ProcessConfig {
             })
     }
 
-    /// The runtime section of `role`.
+    /// The runtime sizing of `role`.
     #[must_use]
-    pub fn runtime(&self, role: crate::Role) -> &RuntimeConfig {
+    pub fn runtime(&self, role: crate::Role) -> RuntimeConfig {
         match role {
-            crate::Role::Gateway => &self.gateway,
-            crate::Role::Controller => &self.controller,
-            crate::Role::Worker => &self.worker,
-            crate::Role::Agent => &self.agent,
-            crate::Role::Operator => &self.operator,
+            crate::Role::Gateway => self.gateway.clone(),
+            crate::Role::Controller => RuntimeConfig {
+                worker_threads: self.controller.worker_threads,
+            },
+            crate::Role::Worker => self.worker.clone(),
+            crate::Role::Agent => self.agent.clone(),
+            crate::Role::Operator => self.operator.clone(),
         }
     }
 }
@@ -355,6 +404,35 @@ mod tests {
 
         let syntax = ProcessConfig::from_toml_and_env("[node\n", env(&[])).unwrap_err();
         assert_eq!(syntax.code(), Some(SprigCode::ConfigInvalid));
+    }
+
+    #[test]
+    fn controller_switches_and_deployment_id() {
+        let c = ProcessConfig::from_toml_and_env(
+            "[node]\ndc = \"mum1\"\n[meta]\ndeployment_id = \"dep-1\"\n[controller]\nbootstrap = true\nworker_threads = 2\n",
+            env(&[("SPRIGDB_CONTROLLER_GLOBAL_CANDIDATE", "true")]),
+        )
+        .unwrap();
+        assert_eq!(c.meta.deployment_id, "dep-1");
+        assert!(c.controller.bootstrap && c.controller.global_candidate);
+        assert_eq!(c.runtime(crate::Role::Controller).worker_threads, 2);
+        let d = ProcessConfig::from_toml_and_env("[node]\ndc = \"mum1\"\n", env(&[])).unwrap();
+        assert!(!d.controller.bootstrap && !d.controller.global_candidate);
+        assert!(d.meta.deployment_id.is_empty());
+        assert_eq!(d.controller.admin_addr.to_string(), "127.0.0.1:7480");
+        assert!(d.controller.admin_token_file.is_none());
+        let admin = ProcessConfig::from_toml_and_env(
+            "[node]\ndc = \"mum1\"\n",
+            env(&[("SPRIGDB_CONTROLLER_ADMIN_ADDR", "0.0.0.0:7481")]),
+        )
+        .unwrap();
+        assert_eq!(admin.controller.admin_addr.port(), 7481);
+        // Controller switches belong to [controller] only.
+        let wrong = ProcessConfig::from_toml_and_env(
+            "[node]\ndc = \"mum1\"\n[gateway]\nbootstrap = true\n",
+            env(&[]),
+        );
+        assert!(wrong.is_err());
     }
 
     #[test]

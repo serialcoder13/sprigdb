@@ -419,3 +419,67 @@ async fn etcd_unreachable_is_39500() {
     let e = f.reg.register(registration("g1")).await.unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::MetaUnavailable));
 }
+
+#[tokio::test]
+async fn guarded_writes_fail_once_the_guard_breaks() {
+    let f = fixture("mum1");
+    let leader = f.dc.tier().key("leader").unwrap();
+    let put = |v: &str| Op::Put {
+        key: leader.clone(),
+        value: v.as_bytes().to_vec(),
+        lease: None,
+    };
+    let r =
+        f.dc.txn(Txn {
+            when: vec![],
+            then: vec![put("a")],
+            otherwise: vec![],
+        })
+        .await
+        .unwrap();
+    let guarded = f
+        .reg
+        .clone()
+        .with_guard(vec![Cmp::CreateRev(leader.clone(), r.revision)]);
+    let a = guarded.register(registration("mum1-g1")).await.unwrap();
+    let id = a.body().cluster_id.clone();
+    guarded
+        .set_admin_state(&id, AdminState::Active, vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        guarded
+            .register(registration("mum1-g1"))
+            .await
+            .unwrap_err()
+            .code(),
+        Some(SprigCode::ClusterExists)
+    );
+    // A new leader: the old token no longer holds.
+    f.dc.txn(Txn {
+        when: vec![],
+        then: vec![Op::Delete(leader.clone())],
+        otherwise: vec![],
+    })
+    .await
+    .unwrap();
+    f.dc.txn(Txn {
+        when: vec![],
+        then: vec![put("b")],
+        otherwise: vec![],
+    })
+    .await
+    .unwrap();
+    let e = guarded
+        .set_admin_state(&id, AdminState::Draining, vec![])
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::NotLeader));
+    let e = guarded.register(registration("mum1-g2")).await.unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::NotLeader));
+    // Unguarded writes still work.
+    f.reg
+        .set_admin_state(&id, AdminState::Draining, vec![])
+        .await
+        .unwrap();
+}

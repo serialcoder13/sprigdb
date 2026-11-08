@@ -10,6 +10,22 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-cluster.workspace = true
+sprig-common.workspace = true
+sprig-controller.workspace = true
+sprig-meta.workspace = true
+sprig-provision.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+mysql_async.workspace = true
+sprig-settings.workspace = true
 
 [lints]
 workspace = true

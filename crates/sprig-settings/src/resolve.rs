@@ -2,8 +2,9 @@
 //! "Setting resolution" and "Setting a value").
 //!
 //! [`MemSettings`] keeps every scope's rows in memory. The etcd mirror
-//! (global, dc, cluster) and the catalog snapshot (tenant, database, object,
-//! ancestor) will feed the same resolver later (chapter 23 step 8).
+//! ([`LiveSettings`](crate::watch::LiveSettings): global, dc, cluster)
+//! builds one as its snapshot; the catalog snapshot (tenant, database,
+//! object, ancestor) will feed the same resolver later.
 
 use std::collections::HashMap;
 
@@ -176,6 +177,26 @@ impl<'r> MemSettings<'r> {
             registry,
             rows: HashMap::new(),
         }
+    }
+
+    /// The registry the rows are checked against.
+    #[must_use]
+    pub fn registry(&self) -> &'r Registry {
+        self.registry
+    }
+
+    /// Stores a row as read from a store, without the write checks: rows in
+    /// etcd were checked when written, and resolution skips values that no
+    /// longer fit. Keys missing from the registry are dropped.
+    pub(crate) fn insert_row(&mut self, scope: Scope, key: &str, entry: Entry) {
+        if let Some(def) = self.registry.get(key) {
+            self.rows.insert((scope, def.key()), entry);
+        }
+    }
+
+    /// Every row.
+    pub(crate) fn rows(&self) -> &HashMap<(Scope, &'static str), Entry> {
+        &self.rows
     }
 
     /// Resolves `key` in `ctx`, following chapter 08's algorithm: walk the

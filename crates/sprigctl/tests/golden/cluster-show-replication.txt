@@ -1,0 +1,25 @@
+cluster:      dc-a-c2 (dc-a-replication)
+dc:           dc-a
+topology:     primary_replica
+provisioner:  external
+state:        active
+health:       healthy since 2026-11-07T10:00:00Z
+nodes:        n1 127.0.0.1:13311 [ok, writer]
+              n2 127.0.0.1:13312 [ok, replica, lag 9201 ms]
+              n3 127.0.0.1:13313 [ok, replica, lag 9201 ms]
+profile:      v3
+  server                11.8.9-MariaDB-ubu2404-log (lower_case_table_names 0, InnoDB)
+  semi_sync             enabled, active, AFTER_SYNC, 2 client(s)
+  binlog                ROW, row image FULL, metadata FULL, gtid_strict_mode yes, expire 604800 s
+  xa                    yes
+  zero_loss_failover    yes (expected loss zero)
+  read_your_writes      gtid_wait
+  mover                 source yes, target yes
+  change_feed           full, retention 604800 s
+  fence_methods         revoke_kill, rename
+  validation            replica_build
+  online_index_build    yes
+  enforce_json_schema   yes
+  compiled_logic        yes
+gaps:         none
+tuning:       no plan yet (server tuning is chapter 09 step 10)

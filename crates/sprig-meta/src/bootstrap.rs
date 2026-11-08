@@ -209,9 +209,11 @@ fn check_id(stored: &[u8], expected: &str) -> Result<()> {
     }
 }
 
-/// Formats a time as RFC 3339 UTC with second precision.
+/// Formats a time as RFC 3339 UTC with second precision, as records store
+/// wall-clock times (`set_at`, chapter 23 "Encoding rules").
+#[must_use]
 #[allow(clippy::many_single_char_names)] // the algorithm's usual names
-fn rfc3339(t: SystemTime) -> String {
+pub fn rfc3339(t: SystemTime) -> String {
     let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let (days, rem) = (secs / 86_400, secs % 86_400);
     let (h, m, s) = (rem / 3600, rem % 3600 / 60, rem % 60);

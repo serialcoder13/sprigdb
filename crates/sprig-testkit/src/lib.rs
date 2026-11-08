@@ -3,19 +3,26 @@
 //! Layer: dev only. Design: [chapter 46](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/46-testing.md) (Testing) of the SprigDB low-level design, with the Compose
 //! setup from chapter 27 ("Development setup").
 //!
-//! This is build step 1 of chapter 46: the harness skeleton. It has
+//! Build steps 1 to 3 of chapter 46:
 //!
-//! - [`env`]: [`Env`], a description of a test environment (data centers,
+//! - [`env`](mod@env): [`Env`], a description of a test environment (data centers,
 //!   MariaDB clusters with their topology and endpoints, etcd tiers), read
 //!   from `SPRIG_TEST_*` variables or a TOML file;
 //! - [`skip`]: the `SPRIG_TEST_*` convention and [`require_env!`], which
 //!   skips a test cleanly when its environment isn't configured;
 //! - [`compose`]: Docker Compose fixtures that start a project, wait for
 //!   health, collect logs on failure and tear down on drop;
-//! - [`util`]: unique names, temporary directories and retry with a timeout.
+//! - [`util`]: unique names, temporary directories and retry with a timeout;
+//! - [`sim`]: deterministic simulation: seeded runs on a paused-clock
+//!   runtime, a simulated network, etcd ([`sim::SimEtcd`]) and clocks,
+//!   fault plans that shrink on failure, and the MariaDB model with its
+//!   conformance scenarios ([`sim::mariadb`]);
+//! - [`faults`]: the [`faults::Faults`] trait, toxiproxy and `faultd` for
+//!   Compose, throwaway `sprig-sim-*` containers, operation histories and
+//!   `elle-cli`.
 //!
-//! Simulation (`sim`), faults, differential testing and the other suites of
-//! chapter 46 come in its later build steps.
+//! Differential testing and the other suites of chapter 46 come in its
+//! later build steps.
 //!
 //! # Using it from another crate
 //!
@@ -34,6 +41,8 @@
 
 pub mod compose;
 pub mod env;
+pub mod faults;
+pub mod sim;
 pub mod skip;
 pub mod util;
 

@@ -1,0 +1,27 @@
+cluster:      dc-a-c3 (dc-a-galera)
+dc:           dc-a
+topology:     galera
+provisioner:  external
+state:        active
+health:       healthy since 2026-11-07T10:00:00Z
+nodes:        n1 127.0.0.1:13321 [ok, galera]
+              n2 127.0.0.1:13322 [ok, galera]
+              n3 127.0.0.1:13323 [ok, galera]
+writers:      epoch 1: n1 (1), n2 (1), n3 (1)
+profile:      v3
+  server                11.8.9-MariaDB-ubu2404-log (lower_case_table_names 0, InnoDB)
+  galera                3 nodes, 3 synced, wsrep_gtid_mode yes, shared domain yes
+  semi_sync             disabled
+  binlog                ROW, row image FULL, metadata FULL, gtid_strict_mode yes, expire 604800 s
+  xa                    no
+  zero_loss_failover    yes (expected loss zero)
+  read_your_writes      wsrep_sync_wait
+  mover                 source yes, target yes
+  change_feed           full, retention 604800 s
+  fence_methods         revoke_kill, rename
+  validation            galera_rsu
+  online_index_build    no
+  enforce_json_schema   yes
+  compiled_logic        yes
+gaps:         none
+tuning:       no plan yet (server tuning is chapter 09 step 10)

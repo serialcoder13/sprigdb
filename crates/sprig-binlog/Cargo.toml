@@ -8,5 +8,18 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+crc32fast.workspace = true
+flate2.workspace = true
+metrics.workspace = true
+sha1.workspace = true
+sprig-common.workspace = true
+tokio = { workspace = true, features = ["io-util", "fs"] }
+tracing.workspace = true
+
+[dev-dependencies]
+mysql_async.workspace = true
+tokio = { workspace = true, features = ["io-util", "fs"] }
+
 [lints]
 workspace = true

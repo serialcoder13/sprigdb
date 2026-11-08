@@ -1,6 +1,6 @@
 [package]
 name = "sprig-settings"
-description = "SprigDB: setting registry, scopes, bounds and resolution"
+description = "SprigDB: setting registry, scopes, bounds, resolution, etcd records and live watches"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,11 +10,18 @@ publish.workspace = true
 
 [dependencies]
 linkme.workspace = true
+metrics.workspace = true
 serde.workspace = true
 sprig-common.workspace = true
+sprig-meta.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 serde_json.workspace = true
+sprig-meta = { workspace = true, features = ["conformance"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

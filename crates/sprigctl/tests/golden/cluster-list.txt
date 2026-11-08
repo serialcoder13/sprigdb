@@ -1,0 +1,4 @@
+ID       NAME              TOPOLOGY         STATE   HEALTH   NODES  PROFILE  ZERO_LOSS  XA
+dc-a-c1  dc-a-single       single_node      active  healthy  1      v3       no         yes
+dc-a-c2  dc-a-replication  primary_replica  active  healthy  3      v3       yes        yes
+dc-a-c3  dc-a-galera       galera           active  healthy  3      v3       yes        no

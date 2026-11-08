@@ -15,6 +15,10 @@
 //! | [`MARIADB_GALERA`] | the Galera nodes | `mysql://…@127.0.0.1:13321,…` |
 //! | [`DOCKER`] | `1` when tests may run `docker compose` | `1` |
 //! | [`ENV_FILE`] | a TOML [`Env`](crate::Env) file | `deploy/compose/env.3dc.toml` |
+//! | [`TOXIPROXY`] | toxiproxy's API (profile `faults`) | `http://127.0.0.1:18474` |
+//! | [`TOXIPROXY_UPSTREAM`] | the single node as toxiproxy reaches it | `single:3306` (default) |
+//! | [`FAULTD`] | the faultd container (profile `faults`) | `sprigdb-dev-faultd-1` |
+//! | [`ELLE`] | how to run elle-cli: `1` (image), an image, or a `.jar` | `1` |
 //!
 //! Rust has no runtime "skipped" status, so a skipped test reports as
 //! passed. CI sets [`STRICT`] in stages that provide the services: there a
@@ -32,6 +36,15 @@ pub const MARIADB_GALERA: &str = "SPRIG_TEST_MARIADB_GALERA";
 pub const DOCKER: &str = "SPRIG_TEST_DOCKER";
 /// Path of a TOML file describing the whole environment ([`crate::Env::load`]).
 pub const ENV_FILE: &str = "SPRIG_TEST_ENV_FILE";
+/// toxiproxy's API URL (chapter 46, "Fault injection").
+pub const TOXIPROXY: &str = "SPRIG_TEST_TOXIPROXY";
+/// The single MariaDB node's address as toxiproxy sees it, inside its
+/// Docker network; `single:3306` when unset.
+pub const TOXIPROXY_UPSTREAM: &str = "SPRIG_TEST_TOXIPROXY_UPSTREAM";
+/// The faultd sidecar's container name.
+pub const FAULTD: &str = "SPRIG_TEST_FAULTD";
+/// How to run elle-cli ([`crate::faults::elle::ElleCli::from_env`]).
+pub const ELLE: &str = "SPRIG_TEST_ELLE";
 /// Set to `1` to turn a missing variable into a test failure (CI).
 pub const STRICT: &str = "SPRIG_TEST_STRICT";
 /// Set to `1` to keep Compose projects running after a test, for debugging.

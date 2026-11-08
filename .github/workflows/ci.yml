@@ -3,7 +3,10 @@
 #   S0  every push and pull request   rustfmt, clippy, unit tests, cargo deny,
 #                                     Compose files validated
 #   S1  pull requests, main           integration tests against Compose (all
-#                                     single-DC profiles), SPRIG_TEST_* set
+#                                     single-DC profiles, plus toxiproxy,
+#                                     faultd and elle-cli), SPRIG_TEST_* set;
+#                                     simulations, 200 seeds per suite
+#                                     (5,000 nightly), tokio's RNG seeded
 #   S2  nightly and on demand         the three-DC layout with netem latency;
 #                                     the same suites against it, on MariaDB
 #                                     11.8 and 12.3
@@ -85,7 +88,7 @@ jobs:
       - name: Validate every profile and the three-DC layout
         working-directory: deploy/compose
         run: |
-          for p in single replication galera all; do
+          for p in single replication galera all faults elle; do
             docker compose --profile "$p" config --quiet
           done
           ./3dc.sh config --quiet
@@ -109,6 +112,10 @@ jobs:
       SPRIG_TEST_MARIADB_SINGLE: mysql://root:sprig-dev-root@127.0.0.1:13301
       SPRIG_TEST_MARIADB_REPLICATION: mysql://root:sprig-dev-root@127.0.0.1:13311,mysql://root:sprig-dev-root@127.0.0.1:13312,mysql://root:sprig-dev-root@127.0.0.1:13313
       SPRIG_TEST_MARIADB_GALERA: mysql://root:sprig-dev-root@127.0.0.1:13321,mysql://root:sprig-dev-root@127.0.0.1:13322,mysql://root:sprig-dev-root@127.0.0.1:13323
+      # Fault injection and Elle (chapter 46, step 3).
+      SPRIG_TEST_TOXIPROXY: http://127.0.0.1:18474
+      SPRIG_TEST_FAULTD: sprigdb-dev-faultd-1
+      SPRIG_TEST_ELLE: "1"
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -120,6 +127,11 @@ jobs:
       - name: Start Compose (all profiles)
         working-directory: deploy/compose
         run: docker compose --profile all up -d
+      - name: Start toxiproxy and faultd, build elle-cli
+        working-directory: deploy/compose
+        run: |
+          docker compose --profile faults up -d --build toxiproxy faultd
+          docker compose --profile elle build elle
       - run: cargo build --workspace --all-targets --locked
       - name: Wait for every service to be healthy
         working-directory: deploy/compose
@@ -130,8 +142,8 @@ jobs:
         working-directory: deploy/compose
         run: |
           mkdir -p "$SPRIG_TEST_LOG_DIR"
-          docker compose --profile all ps --all > "$SPRIG_TEST_LOG_DIR/compose-ps.txt"
-          docker compose --profile all logs --no-color --timestamps > "$SPRIG_TEST_LOG_DIR/compose.log"
+          docker compose --profile all --profile faults ps --all > "$SPRIG_TEST_LOG_DIR/compose-ps.txt"
+          docker compose --profile all --profile faults logs --no-color --timestamps > "$SPRIG_TEST_LOG_DIR/compose.log"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -141,7 +153,41 @@ jobs:
       - name: Stop Compose
         if: always()
         working-directory: deploy/compose
-        run: docker compose --profile all down -v --timeout 10
+        run: docker compose --profile all --profile faults down -v --timeout 10
+
+  simulation:
+    name: S1 simulation (seeded)
+    needs: [fmt, clippy, test]
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # tokio_unstable lets the harness seed tokio's own random choices
+      # (select! order), so a trace mismatch on rerun fails the run.
+      RUSTFLAGS: --cfg tokio_unstable -D warnings
+      SPRIG_SIM_SEEDS: ${{ github.event_name == 'schedule' && '5000' || '200' }}
+      SPRIG_TEST_LOG_DIR: ${{ github.workspace }}/target/test-logs
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tokio-unstable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # No SPRIG_TEST_* variables: only the simulations and unit tests run.
+      - run: cargo nextest run -p sprig-testkit --locked --no-tests=pass
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: sim-regressions
+          path: target/test-logs
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------- S2 ----
   three-dc:
@@ -167,6 +213,11 @@ jobs:
       SPRIG_TEST_MARIADB_SINGLE: mysql://root:sprig-dev-root@127.0.0.1:34306
       SPRIG_TEST_MARIADB_REPLICATION: mysql://root:sprig-dev-root@127.0.0.1:34106,mysql://root:sprig-dev-root@127.0.0.1:34107,mysql://root:sprig-dev-root@127.0.0.1:34108
       SPRIG_TEST_MARIADB_GALERA: mysql://root:sprig-dev-root@127.0.0.1:34206,mysql://root:sprig-dev-root@127.0.0.1:34207,mysql://root:sprig-dev-root@127.0.0.1:34208
+      # toxiproxy joins the three-DC network, in front of iad1's single node.
+      SPRIG_TEST_TOXIPROXY: http://127.0.0.1:18474
+      SPRIG_TEST_TOXIPROXY_UPSTREAM: iad1-db-1:3306
+      SPRIG_TEST_FAULTD: sprigdb-dev-faultd-1
+      SPRIG_TEST_ELLE: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Load the netem qdisc module
@@ -182,6 +233,13 @@ jobs:
           tool: nextest
       - name: Start the three-DC layout
         run: deploy/compose/3dc.sh up -d --build
+      - name: Start toxiproxy (on the three-DC network) and faultd, build elle-cli
+        run: |
+          docker run -d --name sprig-ci-toxiproxy --network sprigdb-3dc_wan \
+            -p 127.0.0.1:18474:8474 -p 127.0.0.1:13400-13419:13400-13419 \
+            ghcr.io/shopify/toxiproxy:2.12.0
+          docker compose -f deploy/compose/compose.yaml --profile faults up -d --build faultd
+          docker compose -f deploy/compose/compose.yaml --profile elle build elle
       - run: cargo build --workspace --all-targets --locked
       - name: Wait for every service to be healthy
         run: deploy/compose/3dc.sh up -d --wait --wait-timeout 600
@@ -209,4 +267,7 @@ jobs:
           if-no-files-found: ignore
       - name: Stop the three-DC layout
         if: always()
-        run: deploy/compose/3dc.sh down -v --timeout 10
+        run: |
+          docker rm -f sprig-ci-toxiproxy || true
+          docker compose -f deploy/compose/compose.yaml --profile faults down --timeout 10 || true
+          deploy/compose/3dc.sh down -v --timeout 10

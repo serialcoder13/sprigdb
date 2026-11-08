@@ -8,6 +8,7 @@
 //! active probes ([`active`]) on one writable node.
 
 pub mod active;
+pub mod feed;
 pub mod grants;
 pub mod parse;
 
@@ -19,6 +20,7 @@ use sprig_common::ids::NodeId;
 use sprig_common::time::{Clock, SystemClock};
 
 pub use active::{ActiveProbes, FeatureFlags};
+pub use feed::{FeedCheck, FeedGap, FeedLevel};
 pub use grants::{Grant, GrantTarget, PrivilegeInfo};
 pub use parse::{
     BinlogFacts, BinlogFormat, GaleraLocalState, GaleraStatus, HeartbeatReading, NodeFacts,
@@ -51,6 +53,8 @@ pub const VARIABLES: &[&str] = &[
     "binlog_checksum",
     "binlog_storage_engine",
     "binlog_alter_two_phase",
+    "binlog_annotate_row_events",
+    "replicate_annotate_row_events",
     "legacy_xa_rollback_at_disconnect",
     "wsrep_on",
     "wsrep_gtid_mode",

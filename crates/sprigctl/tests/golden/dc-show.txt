@@ -1,0 +1,7 @@
+dc:            dc-a
+kind:          full
+state:         active
+dc_epoch:      0
+global_voter:  true
+tags:          -
+leader:        ctl-a (token 12, build 0.0.1)

@@ -1,6 +1,46 @@
 //! `sprig-binlog`: the MariaDB binlog client and event parser.
 //!
-//! Layer: 1 foundations. Design: [chapter 10](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/10-mover.md) (The mover) of the SprigDB low-level design.
+//! Layer: 1 foundations. Design: [chapter 10](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/10-mover.md) (The mover) of the SprigDB low-level design,
+//! with the consumer side in chapter 38 (The change feed).
 //!
-//! **Stub.** Nothing is implemented yet; the crate exists so the workspace
-//! layout matches chapter 03. Planned for M0.1.
+//! This is build step 1 of chapter 10, with step 2's parser additions
+//! (compressed and fragmented events, XA groups, two-phase `ALTER` flags):
+//!
+//! - [`BinlogStream`]: connects to a node as a GTID-aware replica
+//!   (`@mariadb_slave_capability = 4`, `@slave_connect_state`,
+//!   `@master_binlog_checksum`, then `COM_BINLOG_DUMP`) and yields
+//!   [`Event`]s, resuming after any [`GtidPos`];
+//! - [`BinlogFile`]: the same events from binlog files;
+//! - [`Decoder`]: the shared parser: framing, CRC32 checksums, format
+//!   description, `GTID` and `GTID_LIST`, `TABLE_MAP`, rows events v1 and
+//!   v2 and their zlib-compressed forms, 12.3's `PARTIAL_ROW_DATA`
+//!   fragments, `QUERY` (and compressed), `XID`, `XA_PREPARE`,
+//!   `ANNOTATE_ROWS`, heartbeats and incidents;
+//! - [`Value`]: every MariaDB column type decoded from a row image,
+//!   including compressed columns.
+//!
+//! Not here: TLS to the source (the wire client lives here until
+//! `sprig-proto-mysql` exists), authentication plugins other than
+//! `mysql_native_password`, and MariaDB's pre-10.1 temporal format with
+//! fractional seconds, whose width the binlog doesn't record.
+
+pub mod consts;
+pub mod gtid;
+pub mod table_map;
+pub mod value;
+
+mod buf;
+mod compress;
+mod event;
+mod file;
+mod protocol;
+mod stream;
+
+pub use event::{
+    Decoder, Event, EventHeader, GtidFlags, QueryStatus, RowChange, RowsKind, TableFilter, XaId,
+};
+pub use file::BinlogFile;
+pub use gtid::{Gtid, GtidPos};
+pub use stream::{BinlogSource, BinlogStream, StreamOptions};
+pub use table_map::{Column, ColumnType, TableMap};
+pub use value::{Date, DateTime, RowImage, Time, Timestamp, Value};

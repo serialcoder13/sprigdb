@@ -295,6 +295,14 @@ pub struct BinlogFacts {
     /// `binlog_storage_engine` (12.3+): `innodb` when the binlog lives in
     /// `InnoDB`. Empty or absent means files.
     pub storage_engine: Option<String>,
+    /// `binlog_annotate_row_events`: comments reach the binlog (chapter 38).
+    /// `None` when the server didn't report it.
+    #[serde(default)]
+    pub annotate_row_events: Option<bool>,
+    /// `replicate_annotate_row_events`: a replica keeps the annotations it
+    /// applies. `None` when the server didn't report it.
+    #[serde(default)]
+    pub replicate_annotate_row_events: Option<bool>,
     /// `gtid_domain_id`.
     pub gtid_domain_id: u32,
     /// `@@gtid_binlog_pos`.
@@ -624,6 +632,8 @@ fn binlog(raw: &RawCapture) -> BinlogFacts {
             .var("binlog_storage_engine")
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
+        annotate_row_events: raw.var("binlog_annotate_row_events").map(flag),
+        replicate_annotate_row_events: raw.var("replicate_annotate_row_events").map(flag),
         gtid_domain_id: num(raw.var("gtid_domain_id")),
         gtid_binlog_pos: raw.var("gtid_binlog_pos").unwrap_or_default().to_owned(),
         gtid_current_pos: raw.var("gtid_current_pos").unwrap_or_default().to_owned(),

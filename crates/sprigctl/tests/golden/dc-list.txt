@@ -1,0 +1,3 @@
+DC    KIND     STATE    EPOCH  VOTER  TAGS
+dc-a  full     active   0      yes    -
+ams1  witness  joining  0      no     country=NL,jurisdiction=EU

@@ -4,7 +4,8 @@
 //! Every case runs against both stores, so they behave the same wherever
 //! SprigDB relies on it: versions and revisions, guarded transactions,
 //! paging at one revision, watches with replay, progress and compaction,
-//! leases, sessions, election with fencing, and bootstrap.
+//! leases, sessions, election with fencing, bootstrap, and the full and lazy
+//! caches.
 //!
 //! - `MemStore` cases run on a current-thread runtime with tokio's clock
 //!   paused, and the store's leases follow it ([`TokioClock`]), so waits
@@ -13,7 +14,7 @@
 //!   (for example `http://127.0.0.1:23790`) in real time, each case under a
 //!   DC tier of its own. Without the variable they are skipped with a
 //!   message. Compaction is cluster-wide, so the case that compacts runs
-//!   alone.
+//!   alone. Each case's keys are deleted afterwards, also when it fails.
 //!
 //! Cases never assert absolute revisions: on a shared etcd other cases
 //! write concurrently. Other crates (`sprig-testkit`) can run [`CASES`]
@@ -31,13 +32,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures::StreamExt;
 use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt};
 use sprig_common::ids::DcId;
 use sprig_common::time::{Clock, SystemClock};
 use sprig_common::{Result, SprigCode};
 
 use crate::bootstrap::{self, Bootstrap, DcRecord};
+use crate::cache::{LazyCache, Mirror};
 use crate::elect::{self, Election, Elector, LeaderRecord};
 use crate::session::{Session, SessionOpts, TokioClock};
 use crate::{
@@ -155,6 +157,9 @@ cases! {
     deposed_leader_cannot_commit,
     election_hands_over_on_lease_expiry,
     bootstrap_writes_once,
+    mirror_lists_then_follows_writes,
+    lazy_cache_loads_groups_on_first_use,
+    lazy_cache_evicts_least_recently_used,
 }
 
 /// The case named `name`.
@@ -219,18 +224,51 @@ pub fn run_etcd(case: &Case) {
     rt.block_on(async {
         let cfg = EtcdConfig::new(endpoints.split(',').map(str::to_owned).collect());
         let store = EtcdStore::connect(unique_tier(), &cfg).await.unwrap();
+        let cleanup = store.clone();
         let env = Env {
             store: Arc::new(store),
             clock: Arc::new(SystemClock),
         };
-        if case.exclusive {
+        let run = std::panic::AssertUnwindSafe((case.run)(env));
+        let outcome = if case.exclusive {
             let _g = GATE.write().await;
-            (case.run)(env).await;
+            run.catch_unwind().await
         } else {
             let _g = GATE.read().await;
-            (case.run)(env).await;
+            run.catch_unwind().await
+        };
+        // The etcd is shared: leave nothing behind under the case's tier.
+        delete_prefix(&cleanup, &cleanup.tier().root()).await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
         }
     });
+}
+
+/// Deletes every key under `prefix`, best effort.
+pub async fn delete_prefix(store: &dyn MetaStore, prefix: &Key) {
+    loop {
+        let Ok(page) = store.list(prefix, ListOpts::default()).await else {
+            return;
+        };
+        if page.kvs.is_empty() {
+            return;
+        }
+        // etcd allows 128 operations per transaction by default.
+        for chunk in page.kvs.chunks(100) {
+            let ops = chunk.iter().map(|kv| Op::Delete(kv.key.clone())).collect();
+            if store
+                .txn(Txn {
+                    then: ops,
+                    ..Txn::default()
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -774,7 +812,7 @@ mod cases {
                 .await
                 .unwrap_err()
                 .code(),
-            Some(SprigCode::MetaUnavailable)
+            Some(SprigCode::NotLeader)
         );
         b.commit(vec![put(&job, "by b")]).await.unwrap();
         assert_eq!(value(&*s, &job).await.as_deref(), Some("by b"));
@@ -820,7 +858,7 @@ mod cases {
         let raw = s.txn(ea.guarded(&a, vec![put(&job, "a")])).await.unwrap();
         assert!(!raw.succeeded);
         let err = a.commit(vec![put(&job, "a")]).await.unwrap_err();
-        assert_eq!(err.code(), Some(SprigCode::MetaUnavailable));
+        assert_eq!(err.code(), Some(SprigCode::NotLeader));
         assert!(!err.retryable);
         assert!(!a.is_leading());
         tokio::time::timeout(WAIT, a.stepped_down()).await.unwrap();
@@ -870,17 +908,18 @@ mod cases {
         let Tier::Dc(dc) = env.store.tier().clone() else {
             panic!("cases run on a DC tier");
         };
-        // The global keys are shared on a reused etcd: start clean.
+        // The deployment id and the tenant id counter are global keys, shared
+        // by everything on this etcd. Never delete them: if a deployment is
+        // already bootstrapped here (a dev controller, another test run),
+        // skip the case instead. The DC key is this case's own tier.
         let [dep, dc_key, ids] = bootstrap::bootstrap_keys(&dc).unwrap();
-        write(
-            &*g,
-            vec![
-                Op::Delete(dep.clone()),
-                Op::Delete(dc_key.clone()),
-                Op::Delete(ids.clone()),
-            ],
-        )
-        .await;
+        if kv(&*g, &dep).await.is_some() || kv(&*g, &ids).await.is_some() {
+            eprintln!(
+                "skipping bootstrap_writes_once: this store already holds a deployment \
+                 ({dep} or {ids} exists); run it on an empty etcd"
+            );
+            return;
+        }
         assert!(bootstrap::verify_deployment_id(&*g, "dep-1").await.is_err());
 
         let clock = &*env.clock;
@@ -925,5 +964,120 @@ mod cases {
             vec![Op::Delete(dep), Op::Delete(dc_key), Op::Delete(ids)],
         )
         .await;
+    }
+
+    pub(super) async fn mirror_lists_then_follows_writes(env: Env) {
+        let s = &*env.store;
+        let a = env.key("clusters/c1");
+        let b = env.key("clusters/c2");
+        let outside = env.key("clusters-other/x");
+        write(s, vec![put(&a, "a1"), put(&b, "b1"), put(&outside, "x")]).await;
+
+        let m = Mirror::spawn(env.meta(), env.key("clusters/"));
+        tokio::time::timeout(WAIT, m.ready()).await.unwrap();
+        let got: Vec<_> = m.entries().iter().map(|kv| kv.key.clone()).collect();
+        assert_eq!(got, vec![a.clone(), b.clone()]);
+        let listed_at = m.revision();
+        assert!(listed_at > 0);
+
+        let mut changes = m.changes();
+        changes.borrow_and_update();
+        let r = write(s, vec![put(&a, "a2"), Op::Delete(b.clone())]).await;
+        tokio::time::timeout(WAIT, m.wait_for(r)).await.unwrap();
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(m.get(&a).unwrap().value, b"a2");
+        assert_eq!(m.get(&a).unwrap().mod_revision, r);
+        assert!(m.get(&b).is_none());
+        assert_eq!(m.len(), 1);
+
+        // Writes outside the prefix don't reach it.
+        let r = write(s, vec![put(&outside, "y"), put(&b, "b2")]).await;
+        tokio::time::timeout(WAIT, m.wait_for(r)).await.unwrap();
+        assert_eq!(m.len(), 2);
+        assert!(m.get(&outside).is_none());
+
+        // Progress marks move the fresh revision.
+        env.store.progress_all().await.unwrap();
+        let fresh = async {
+            while m.fresh_revision() < r {
+                advance(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(WAIT, fresh).await.unwrap();
+    }
+
+    pub(super) async fn lazy_cache_loads_groups_on_first_use(env: Env) {
+        let s = &*env.store;
+        let m42_0 = env.key("shardmaps/42/0");
+        let m42_1 = env.key("shardmaps/42/1");
+        let m7_0 = env.key("shardmaps/7/0");
+        write(s, vec![put(&m42_0, "a"), put(&m42_1, "b"), put(&m7_0, "c")]).await;
+
+        let c = LazyCache::spawn(env.meta(), env.key("shardmaps/"), 10);
+        assert!(c.cached("42").is_none());
+        let g = tokio::time::timeout(WAIT, c.group("42"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            g.keys().cloned().collect::<Vec<_>>(),
+            vec![m42_0.clone(), m42_1.clone()]
+        );
+        assert_eq!(c.len(), 1);
+        assert!(c.cached("7").is_none(), "groups load only on use");
+        assert!(c.group("a/b").await.is_err());
+
+        // Changes reach a loaded group; other groups stay unloaded.
+        let m42_2 = env.key("shardmaps/42/2");
+        write(
+            s,
+            vec![put(&m42_2, "d"), put(&env.key("shardmaps/7/1"), "e")],
+        )
+        .await;
+        write(s, vec![Op::Delete(m42_0.clone())]).await;
+        let r = write(s, vec![put(&m42_1, "b2")]).await;
+        let caught_up = async {
+            loop {
+                let g = c.cached("42").unwrap();
+                if g.get(&m42_1).is_some_and(|kv| kv.mod_revision == r) {
+                    return g;
+                }
+                advance(Duration::from_millis(10)).await;
+            }
+        };
+        let g = tokio::time::timeout(WAIT, caught_up).await.unwrap();
+        assert_eq!(
+            g.keys().cloned().collect::<Vec<_>>(),
+            vec![m42_1.clone(), m42_2]
+        );
+        assert_eq!(g[&m42_1].value, b"b2");
+        assert!(c.cached("7").is_none());
+        let g7 = c.group("7").await.unwrap();
+        assert_eq!(g7.len(), 2);
+        assert!(c.evict("7"));
+        assert!(c.cached("7").is_none());
+    }
+
+    pub(super) async fn lazy_cache_evicts_least_recently_used(env: Env) {
+        let s = &*env.store;
+        write(
+            s,
+            vec![
+                put(&env.key("shardmaps/1/0"), "1"),
+                put(&env.key("shardmaps/2/0"), "2"),
+                put(&env.key("shardmaps/3/0"), "3"),
+            ],
+        )
+        .await;
+        let c = LazyCache::spawn(env.meta(), env.key("shardmaps/"), 2);
+        c.group("1").await.unwrap();
+        c.group("2").await.unwrap();
+        // Using 1 again makes 2 the least recently used.
+        c.group("1").await.unwrap();
+        c.group("3").await.unwrap();
+        assert_eq!(c.len(), 2);
+        assert!(c.cached("1").is_some());
+        assert!(c.cached("2").is_none());
+        assert!(c.cached("3").is_some());
     }
 }

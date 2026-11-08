@@ -42,6 +42,11 @@ pub struct FeatureFlags {
     /// ... and is callable from a session not in `ORACLE` mode
     /// (chapter 09, open question 5).
     pub oracle_routines_any_mode: bool,
+    /// The probing account can create a trigger that fires. With the binary
+    /// log on, MariaDB refuses `CREATE TRIGGER` without `SUPER` unless
+    /// `log_bin_trust_function_creators = ON` (1419; PL/SQL spike).
+    #[serde(default)]
+    pub trigger_create: bool,
 }
 
 /// What the active probes found.
@@ -100,6 +105,7 @@ pub async fn run(
         let (routines, any_mode) = oracle_routines(ep, timeout, tag).await?;
         out.features.oracle_routines = routines;
         out.features.oracle_routines_any_mode = any_mode;
+        out.features.trigger_create = trigger_create(ep, timeout, tag).await?;
         match xa_round_trip(ep, timeout, tag).await? {
             Ok(()) => out.xa = true,
             Err(why) => out.xa_detail = Some(why),
@@ -244,6 +250,37 @@ async fn oracle_routines(
     ok(s.exec(&format!("DROP PACKAGE IF EXISTS {pkg}")).await)?;
     s.close().await;
     Ok((works, any_mode))
+}
+
+/// The trigger probe (chapter 09, "PL/SQL routines"): an `ORACLE`-mode
+/// `BEFORE INSERT` trigger must be accepted and fill its column.
+async fn trigger_create(
+    ep: &NodeEndpoint,
+    timeout: Duration,
+    tag: u32,
+) -> Result<bool, ProbeError> {
+    let t = format!("__sprig_sys.__sprig_probe_t_{tag:08x}");
+    let t = t.as_str();
+    let mut s = ProbeSession::connect(ep, timeout).await?;
+    let mut works = ok(s.exec("SET SESSION sql_mode = 'ORACLE'").await)?
+        && ok(s
+            .exec(&format!("CREATE TABLE {t} (id INT PRIMARY KEY, a INT)"))
+            .await)?
+        && ok(s
+            .exec(&format!(
+                "CREATE OR REPLACE TRIGGER {t}_bi BEFORE INSERT ON {t} FOR EACH ROW \
+                 BEGIN :NEW.a := :NEW.id * 2; END"
+            ))
+            .await)?
+        && ok(s.exec(&format!("INSERT INTO {t} (id) VALUES (5)")).await)?;
+    if works {
+        let v = ok_val(s.scalar(&format!("SELECT a FROM {t} WHERE id = 5")).await)?.flatten();
+        works = v.as_deref() == Some("10");
+    }
+    // Dropping the table drops its trigger (chapter 09, Security).
+    ok(s.exec(&format!("DROP TABLE IF EXISTS {t}")).await)?;
+    s.close().await;
+    Ok(works)
 }
 
 /// Two XA passes over separate connections. The outer `Result` is for

@@ -24,7 +24,7 @@ CI (`.github/workflows/ci.yml`) runs the same checks on every push.
 
 ### Run a role
 
-The server is one binary; the role is a subcommand (`gateway`, `controller`, `worker`, `agent`, `operator`). Each role serves `/healthz`, `/readyz` and `/metrics` on port 9180 and drains on SIGTERM. The roles are skeletons for now: they start, report ready and shut down cleanly.
+The server is one binary; the role is a subcommand (`gateway`, `controller`, `worker`, `agent`, `operator`). Each role serves `/healthz`, `/readyz` and `/metrics` on port 9180 and drains on SIGTERM. The controller connects to etcd, bootstraps or verifies the deployment, elects a DC leader and runs the job scheduler (below); the other roles are skeletons for now: they start, report ready and shut down cleanly.
 
 ```sh
 SPRIGDB_NODE_DC=dc-a SPRIGDB_TELEMETRY_LOG_FORMAT=pretty cargo run -p sprigdb -- gateway
@@ -40,6 +40,56 @@ dc = "dc-a"
 [telemetry]
 log_format = "pretty"            # json (default) or pretty
 bootstrap_addr = "127.0.0.1:9180"
+```
+
+### Run a controller (one DC)
+
+With the Compose etcd running (below), `deploy/compose/sprigdb.dev.toml` runs a controller in single-etcd mode: the first one to start bootstraps the deployment (`system.deployment_id`, `dcs/dc-a`, `ids/tenant`), then the controllers elect a DC leader that runs the job scheduler and the `registry` loop, which probes every registered cluster and keeps its capability profile and health current. Settings at global, dc and cluster scope are mirrored from etcd and apply live. Start a second one with `SPRIGDB_NODE_ID=ctl-2 SPRIGDB_TELEMETRY_BOOTSTRAP_ADDR=127.0.0.1:9181 SPRIGDB_CONTROLLER_ADMIN_ADDR=127.0.0.1:7481` to see a hand-over on SIGTERM.
+
+Each controller serves the Admin API (chapter 37, REST under `/admin/v1/`) on `[controller] admin_addr`, by default `127.0.0.1:7480`; `sprigctl` talks to it (`--endpoint`, or `SPRIGCTL_ENDPOINT`), never to etcd. A non-loopback address needs `[controller] admin_token_file`, whose token `sprigctl` sends from `--token-file`. Calls that write cluster records go to the DC leader; elsewhere they fail with 39504, naming it.
+
+```sh
+cargo run -p sprigdb -- --config deploy/compose/sprigdb.dev.toml controller
+cargo run -p sprigctl -- dc list
+cargo run -p sprigctl -- dc show dc-a          # includes the current leader
+cargo run -p sprigctl -- dc register ams1 --tags jurisdiction=EU
+```
+
+### Register clusters
+
+`sprigctl cluster register` prechecks a cluster (TLS, grants, the binlog settings the mover and the change feed need, account creation, `sprig_repl`, the capability profile) and registers it as `active`, or refuses it with 39511 and every missing item. Credentials are never stored in etcd: the record names them by reference (`file:<path>` or `env:<name>`), and a credentials file holds a `[sprig_ctl]` and a `[sprig_repl]` table. For the Compose servers, which have self-signed certificates and no system accounts, use root:
+
+```sh
+cat > /tmp/sprig-dev-creds.toml <<'TOML'
+[sprig_ctl]
+user = "root"
+password = "sprig-dev-root"
+tls = "skip_verify"     # development only; the default verifies the certificate
+[sprig_repl]
+user = "root"
+password = "sprig-dev-root"
+tls = "skip_verify"
+TOML
+C=file:/tmp/sprig-dev-creds.toml
+cargo run -p sprigctl -- cluster register dc-a-single --topology single --node 127.0.0.1:13301 --credentials $C
+cargo run -p sprigctl -- cluster register dc-a-repl --topology primary_replica \
+    --node 127.0.0.1:13311 --node 127.0.0.1:13312 --node 127.0.0.1:13313 --credentials $C
+cargo run -p sprigctl -- cluster register dc-a-galera --topology galera \
+    --node 127.0.0.1:13321 --node 127.0.0.1:13322 --node 127.0.0.1:13323 --credentials $C
+cargo run -p sprigctl -- cluster list
+cargo run -p sprigctl -- cluster show dc-a-c2            # nodes, health, profile, gaps
+cargo run -p sprigctl -- cluster probe dc-a-c2 --full     # probe now, with the active probes
+cargo run -p sprigctl -- cluster drain dc-a-c2 --yes
+```
+
+`--dry-run` runs the prechecks only; `-f cluster.toml` takes chapter 27's registration fields (`dc`, `name`, `topology`, `[endpoints]` or `[[nodes]]`, `credentials_ref`, `[capacity]`, `[declared]`); `-o json` prints the API's JSON. `sprigctl`'s text output is pinned by golden files in `crates/sprigctl/tests/golden/`; after an intended change, rewrite them with `SPRIG_UPDATE_GOLDEN=1 cargo test -p sprigctl` and review the diff.
+
+### The M0.1 check
+
+`crates/sprigctl/tests/m01_done_when.rs` is milestone M0.1's "done when" check (chapter 48), ignored by default because it needs the whole Compose stack (`docker compose --profile all up -d --wait`). It runs a controller in its own DC (`m01-<hex>`) against the Compose etcd, registers the single node, the primary with replicas and the Galera cluster with the `sprigctl` binary, checks each capability profile, then switches semi-sync off on the primary and waits for the published profile to lose `zero_loss_failover`, and switches it back on and waits for the upgrade. Semi-sync is restored to its original value whatever happens, and the etcd keys the test wrote are deleted.
+
+```sh
+cargo test -p sprigctl --test m01_done_when -- --ignored --nocapture
 ```
 
 ### Local environment
