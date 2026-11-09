@@ -46,6 +46,7 @@ fn host(db: Arc<dyn DbBridge>) -> Host {
         db,
         outbound: Arc::new(NoOutbound),
         default_db: None,
+        info: serde_json::Value::Null,
     }
 }
 

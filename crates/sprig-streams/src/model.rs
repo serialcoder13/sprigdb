@@ -316,8 +316,8 @@ pub struct Record {
     pub key: Option<Vec<u8>>,
     /// The value; `None` is a tombstone.
     pub value: Option<Vec<u8>>,
-    /// Headers.
-    pub headers: Vec<(String, Vec<u8>)>,
+    /// Headers (`None`: a header without a value).
+    pub headers: Vec<(String, Option<Vec<u8>>)>,
     /// The leader epoch that appended it.
     pub leader_epoch: LeaderEpoch,
 }

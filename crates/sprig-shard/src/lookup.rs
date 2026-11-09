@@ -55,8 +55,9 @@ pub const DDL_LOOKUP_INDEXES: &str = "CREATE TABLE IF NOT EXISTS lookup_indexes 
   UNIQUE KEY uk_name (object_id, index_name)
 ) ENGINE=InnoDB";
 
-/// `foreign_keys` (chapter 19). Created with the module; enforcement
-/// (`sprig-router::fk`) is not built yet.
+/// `foreign_keys` (chapter 19). Created with the module; the router
+/// enforces `gateway` and `reference` rows (`sprig-router::fk`, R3; rows
+/// in [`crate::fk`]).
 pub const DDL_FOREIGN_KEYS: &str = "CREATE TABLE IF NOT EXISTS foreign_keys (
   fk_id            BIGINT UNSIGNED NOT NULL,
   name             VARCHAR(64) NOT NULL,

@@ -109,6 +109,23 @@ pub fn plan(sql: &str, cx: &PlanCtx<'_>) -> Plan {
     }
 }
 
+/// R3: `sql` as a gathered read, after the executor refused its plan at
+/// run time (39420 `why`: a lookup join of a string with a number, a group
+/// key or sort key of a type the gateway can't compare, a sum beyond 38
+/// digits). A gathered read the guard refuses, or a statement that isn't
+/// a `SELECT`, keeps `why`.
+#[must_use]
+pub fn plan_gathered(sql: &str, cx: &PlanCtx<'_>, why: &Rejection) -> Plan {
+    let (body, lock) = split_share_lock(sql);
+    if lock.is_some() || !gather::lifts(why) {
+        return Plan::Reject(why.clone());
+    }
+    match parse(body) {
+        Ok(stmt @ Statement::Query(_)) => gather::plan(&stmt, body, cx, why),
+        _ => Plan::Reject(why.clone()),
+    }
+}
+
 /// A prepared statement's template, parsed once (chapter 17, "Prepared
 /// statements"): the gateway caches it per statement text and plans each
 /// execution from it with the parameters' values, so an execution never
@@ -270,6 +287,17 @@ pub fn plan_prepared(t: &Template, params: &[ParamLit], cx: &PlanCtx<'_>) -> Pre
         kept: Cell::new(false),
     };
     let mut plan = plan_stmt(&stmt, &src, cx).unwrap_or_else(Plan::Reject);
+    // R3: a gathered read runs the template's text with the values written
+    // in where its placeholders were.
+    if let Plan::Reject(r) = &plan
+        && matches!(stmt, Statement::Query(_))
+        && gather::lifts(r)
+    {
+        plan = match fill_placeholders(&t.body, &spans, params) {
+            Some(text) => gather::plan(&stmt, &text, cx, r),
+            None => Plan::Reject(r.clone()),
+        };
+    }
     if let Some(lock) = t.lock {
         add_suffix(&mut plan, lock);
     }
@@ -277,6 +305,31 @@ pub fn plan_prepared(t: &Template, params: &[ParamLit], cx: &PlanCtx<'_>) -> Pre
         placeholders: matches!(plan, Plan::Pass(_)) && src.kept.get(),
         plan,
     }
+}
+
+/// `text` with the `?` placeholder at each of `spans` (line and column, as
+/// the parser recorded them) replaced by its parameter's literal, in text
+/// order; `None` when a position doesn't hold a `?`.
+fn fill_placeholders(text: &str, spans: &[(u64, u64)], params: &[ParamLit]) -> Option<String> {
+    let mut at: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    let mut order = spans.to_vec();
+    order.sort_unstable();
+    for (i, (line, col)) in order.iter().enumerate() {
+        let b = byte_at(text, *line, *col)?;
+        if text.as_bytes().get(b) != Some(&b'?') {
+            return None;
+        }
+        at.push((b, i));
+    }
+    let mut out = String::with_capacity(text.len() + 16 * at.len());
+    let mut last = 0;
+    for (b, i) in at {
+        out.push_str(text.get(last..b)?);
+        out.push_str(&param_expr(params.get(i)?).to_string());
+        last = b + 1;
+    }
+    out.push_str(text.get(last..)?);
+    Some(out)
 }
 
 /// A trailing `LOCK IN SHARE MODE`, split off.
@@ -298,6 +351,12 @@ fn split_share_lock(sql: &str) -> (&str, Option<&'static str>) {
 }
 
 fn add_suffix(p: &mut Plan, lock: &str) {
+    // A locking read isn't gathered: the copies would lock nothing.
+    if let Plan::Gather(g) = p {
+        let r = g.fallback.clone();
+        *p = Plan::Reject(r);
+        return;
+    }
     match p {
         Plan::Pass(t) => t.sql.push_str(lock),
         Plan::Read(r) => r.targets.iter_mut().for_each(|t| t.sql.push_str(lock)),
@@ -314,6 +373,7 @@ fn add_suffix(p: &mut Plan, lock: &str) {
         | Plan::Write(_)
         | Plan::ViaParent(_)
         | Plan::NeedIds(_)
+        | Plan::Gather(_)
         | Plan::Reject(_) => {}
     }
 }
@@ -383,9 +443,16 @@ fn plan_text(sql: &str, cx: &PlanCtx<'_>) -> R<Plan> {
 
 fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
     match stmt {
-        Statement::Query(q) => {
-            plan_query(stmt, q, src, cx).map(|p| lookups::via_lookup(stmt, p, cx))
-        }
+        Statement::Query(q) => match plan_query(stmt, q, src, cx) {
+            Ok(p) => Ok(lookups::via_lookup(stmt, p, cx)),
+            // R3: what the gateway's operators can't split runs once over
+            // copies (a prepared statement's text is filled in by
+            // `plan_prepared`).
+            Err(r) if !src.template && gather::lifts(&r) => {
+                Ok(gather::plan(stmt, src.text, cx, &r))
+            }
+            Err(r) => Err(r),
+        },
         Statement::Insert(_) => plan_insert(stmt, src, cx),
         Statement::Update(_) | Statement::Delete(_) => {
             plan_update_delete(stmt, src, cx).map(|p| lookups::via_lookup(stmt, p, cx))
@@ -425,6 +492,8 @@ fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
                         "EXPLAIN of an INSERT whose rows follow their parents",
                     ),
                 },
+                // Plain EXPLAIN of a gathered read: refused as before.
+                Plan::Gather(g) => Ok(Plan::Reject(g.fallback.clone())),
                 p @ (Plan::Reject(_) | Plan::Explain(_)) => Ok(p),
             }
         }
@@ -2759,6 +2828,14 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
     }
     let (key, key_ordinal, upsert_safe) = match &entry.kind {
         TableKind::Reference { schema } => {
+            if fk::graph_for(cx, &default_schema, &table).is_some()
+                && (ins.replace_into || ins.on.is_some() || ins.ignore)
+            {
+                return reject(
+                    Reason::ForeignKey,
+                    "REPLACE, INSERT IGNORE or an upsert on a reference table with foreign keys",
+                );
+            }
             // Copies follow the primary through the change feed (chapter
             // 15's ref_follow, not built yet): a write is exact only where
             // one copy exists.
@@ -2800,6 +2877,14 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
         && let Some(link) = &entry.parent
     {
         // Chapter 15: a parent member's rows go where their parent is.
+        if fk::graph_for(cx, &default_schema, &entry.name)
+            .is_some_and(|(g, t)| g.as_child(t).next().is_some())
+        {
+            return reject(
+                Reason::ForeignKey,
+                "an INSERT into a parent member whose foreign key to another group the gateway checks",
+            );
+        }
         return parents::plan_insert(stmt, text_src, entry, link, &default_schema, cx);
     }
     if (ins.on.is_some() || ins.replace_into) && !upsert_safe {
@@ -2867,6 +2952,18 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
             return reject(Reason::AutoIncrement, "an INSERT without the key column");
         };
         let shard = route_value(&a.value, entry, class)?;
+        let near = entry.group.shards.get(shard).map(|s| s.cluster.as_str());
+        if let Some(fkw) = fk::insert_work(ins, entry, &[] as &[Box<Vec<Expr>>], &default_schema, near, cx)? {
+            let ts = if src_in.template { None } else { text_src };
+            return Ok(Plan::Write(WritePlan {
+                kind: WriteKind::Insert,
+                targets: vec![one_shard_insert(stmt, ts, entry, shard, loc, &default_schema)],
+                rows: 1,
+                claims: Vec::new(),
+                releases: Vec::new(),
+                fk: Some(fkw),
+            }));
+        }
         return Ok(Plan::Pass(one_shard_insert(
             stmt,
             text_src,
@@ -2893,17 +2990,27 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
     // Chapter 19: the rows' unique lookup values, claimed before the rows
     // are written, in the write's transaction.
     let claims = lookups::insert_claims(ins, entry, pos, &values.rows)?;
+    // Chapter 19 (R3): the parents its rows need, locked before they are
+    // written.
+    let near = by_shard
+        .first()
+        .and_then(|(s, _)| entry.group.shards.get(*s))
+        .map(|s| s.cluster.as_str());
+    let fkw = fk::insert_work(ins, entry, &values.rows, &default_schema, near, cx)?;
     if by_shard.len() == 1 {
-        let t = one_shard_insert(stmt, text_src, entry, by_shard[0].0, loc, &default_schema);
-        if claims.is_empty() {
+        if claims.is_empty() && fkw.is_none() {
+            let t = one_shard_insert(stmt, text_src, entry, by_shard[0].0, loc, &default_schema);
             return Ok(Plan::Pass(t));
         }
+        let ts = if src_in.template { None } else { text_src };
+        let t = one_shard_insert(stmt, ts, entry, by_shard[0].0, loc, &default_schema);
         return Ok(Plan::Write(WritePlan {
             kind: WriteKind::Insert,
             targets: vec![t],
             rows: values.rows.len() as u64,
             claims,
             releases: Vec::new(),
+            fk: fkw,
         }));
     }
     if ins.returning.is_some() {
@@ -2935,6 +3042,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
         rows: values.rows.len() as u64,
         claims,
         releases: Vec::new(),
+        fk: fkw,
     }))
 }
 
@@ -3096,6 +3204,17 @@ fn shard_insert(
 }
 
 fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
+    // Chapter 19 (R3): a write the planner doesn't split over a table
+    // whose foreign keys the gateway keeps would skip them.
+    let check_single_or = |stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>, reason: Reason| {
+        if fk::touches(stmt, cx) {
+            return reject(
+                Reason::ForeignKey,
+                "a multi-table write, or one with a subquery or on a reference table, over tables with foreign keys the gateway keeps",
+            );
+        }
+        check_single_or(stmt, src, cx, reason)
+    };
     let (kind, twjs, selection, order_by, limit, assignments): (
         WriteKind,
         Vec<&sqlparser::ast::TableWithJoins>,
@@ -3171,6 +3290,37 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     lookups::check_update(entry, &|c| {
         assignments.iter().any(|a| assigns_key(&a.target, c))
     })?;
+    let tail = {
+        let (ob, lim) = match stmt {
+            Statement::Update(u) => (
+                u.order_by.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                u.limit.as_ref().map(ToString::to_string),
+            ),
+            Statement::Delete(d) => (
+                d.order_by.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                d.limit.as_ref().map(ToString::to_string),
+            ),
+            _ => (Vec::new(), None),
+        };
+        let mut t = String::new();
+        if !ob.is_empty() {
+            t = format!("ORDER BY {}", ob.join(", "));
+        }
+        if let Some(l) = lim {
+            if !t.is_empty() {
+                t.push(' ');
+            }
+            t.push_str(&format!("LIMIT {l}"));
+        }
+        t
+    };
+    let dml = fk::Dml {
+        delete: kind == WriteKind::Delete,
+        relation: twjs[0].relation.to_string(),
+        selection,
+        tail,
+        assignments: assignments.clone(),
+    };
     // Subqueries inside the write.
     let mut nested = Vec::new();
     collect_queries_stmt(stmt, &mut nested);
@@ -3226,13 +3376,22 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     } else {
         Vec::new()
     };
-    if !releases.is_empty() && shard_list.len() == 1 {
+    // Chapter 19 (R3): parents of new child values, and the children of
+    // the parent rows it changes.
+    let near = entry
+        .group
+        .shards
+        .get(shard_list[0])
+        .map(|s| s.cluster.as_str());
+    let fkw = fk::update_delete_work(&dml, entry, &rel.default_schema, near, cx)?;
+    if (!releases.is_empty() || fkw.is_some()) && shard_list.len() == 1 {
         return Ok(Plan::Write(WritePlan {
             kind,
-            targets: vec![make(shard_list[0], Some(src))],
+            targets: vec![make(shard_list[0], (!src.template).then_some(src))],
             rows: 0,
             claims: Vec::new(),
             releases,
+            fk: fkw,
         }));
     }
     if shards.len() == 1 {
@@ -3261,6 +3420,7 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
         rows: 0,
         claims: Vec::new(),
         releases,
+        fk: fkw,
     }))
 }
 
@@ -3351,6 +3511,8 @@ fn empty_select(
     })
 }
 
+mod fk;
+mod gather;
 mod ids;
 mod lookups;
 mod parents;

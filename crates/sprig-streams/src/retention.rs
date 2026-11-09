@@ -192,23 +192,37 @@ async fn compact_partition<Q: Queryable + Send>(
     lag_ms: i64,
     tomb_ms: i64,
 ) -> Result<u64> {
+    // Read the superseded offsets, then delete them by offset: MariaDB
+    // refuses a multi-table DELETE with an alias without a default
+    // database (1046), which the worker's connections have none of.
     let mut removed = 0u64;
     loop {
-        let r = q
-            .query_iter(format!(
-                "DELETE l FROM {full} l JOIN (SELECT k, MAX(offset_no) AS last FROM {full} \
+        let offsets: Vec<u64> = q
+            .query(format!(
+                "SELECT l.offset_no FROM {full} l JOIN (SELECT k, MAX(offset_no) AS last FROM {full} \
                  WHERE partition_no = {pn} AND k IS NOT NULL GROUP BY k) m \
                  ON l.k = m.k AND l.offset_no < m.last \
-                 WHERE l.partition_no = {pn} AND l.ts < {lag}",
+                 WHERE l.partition_no = {pn} AND l.ts < {lag} LIMIT 5000",
                 pn = p.0,
                 lag = ms_literal(lag_ms)
             ))
             .await
             .map_err(map_err)?;
-        let n = r.affected_rows();
+        if offsets.is_empty() {
+            break;
+        }
+        let list: Vec<String> = offsets.iter().map(ToString::to_string).collect();
+        let r = q
+            .query_iter(format!(
+                "DELETE FROM {full} WHERE partition_no = {} AND offset_no IN ({})",
+                p.0,
+                list.join(",")
+            ))
+            .await
+            .map_err(map_err)?;
+        removed += r.affected_rows();
         drop(r);
-        removed += n;
-        if n == 0 {
+        if offsets.len() < 5000 {
             break;
         }
     }

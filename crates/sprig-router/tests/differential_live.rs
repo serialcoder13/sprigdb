@@ -183,6 +183,14 @@ fn layout() -> Vec<Grp> {
                 ("tickets", "tid"),
                 ("events", "cid"),
                 ("inv_notes", ""),
+                // Chapter 19's foreign keys across groups (R3): children
+                // of `suppliers` (group 902) and `tags` (group 903), and
+                // `ship_items`, whose key to `shipments` stays native.
+                ("parts", "cid"),
+                ("shipments", "cid"),
+                ("ship_items", "cid"),
+                ("contacts", "cid"),
+                ("tag_links", "cid"),
             ],
             // Uneven ranges over both clusters.
             shards: [
@@ -199,7 +207,7 @@ fn layout() -> Vec<Grp> {
         Grp {
             id: 902,
             spec: int,
-            tables: &[("products", "pid")],
+            tables: &[("products", "pid"), ("suppliers", "sid")],
             shards: even(2, &[1, 1]),
         },
         Grp {
@@ -261,9 +269,67 @@ fn ddl_of(table: &str) -> &'static str {
         "tickets" => TICKETS_DDL,
         "events" => EVENTS_DDL,
         "inv_notes" => NOTES_DDL,
+        "suppliers" => SUPPLIERS_DDL,
+        "parts" => PARTS_DDL,
+        "shipments" => SHIPMENTS_DDL,
+        "ship_items" => SHIP_ITEMS_DDL,
+        "contacts" => CONTACTS_DDL,
+        "tag_links" => TAG_LINKS_DDL,
         _ => REF_DDL,
     }
 }
+
+/// A shard's copy of `table`: without the foreign keys the gateway keeps
+/// (chapter 19, R3; `sprig_shard::fk::strip_foreign_keys` on the DDL
+/// path).
+fn shard_ddl_of(table: &str) -> String {
+    let ddl = ddl_of(table);
+    let mut out = ddl.to_owned();
+    for (_, child, name, _, _, _) in FKS {
+        if *child == table
+            && let Some(i) = out.find(&format!(", CONSTRAINT {name} "))
+        {
+            let rest = &out[i + 2..];
+            let end = rest
+                .find(", CONSTRAINT ")
+                .map_or_else(|| rest.rfind(')').unwrap_or(rest.len()), |j| j);
+            out = format!("{}{}", &out[..i], &rest[end..]);
+        }
+    }
+    out
+}
+
+/// Chapter 19's `foreign_keys` rows the suite records, as the DDL path
+/// would: `(fk_id, child, name, child column, parent, parent column)`.
+const FKS: &[(u64, &str, &str, &str, &str, &str)] = &[
+    (9061, "parts", "fk_parts_sup", "sid", "suppliers", "sid"),
+    (9062, "parts", "fk_parts_cc", "cc", "countries", "code"),
+    (9063, "shipments", "fk_ship_sup", "sid", "suppliers", "sid"),
+    (9064, "contacts", "fk_ct_sup", "sid", "suppliers", "sid"),
+    (9065, "tag_links", "fk_tl_tag", "tag", "tags", "tag"),
+];
+const SUPPLIERS_DDL: &str = "CREATE TABLE suppliers (sid INT NOT NULL PRIMARY KEY, \
+     sname VARCHAR(20) COLLATE utf8mb4_general_ci, scode VARCHAR(10)) DEFAULT CHARSET utf8mb4";
+const PARTS_DDL: &str = "CREATE TABLE parts (cid INT NOT NULL, pno INT NOT NULL, sid INT NULL, \
+     cc CHAR(2) NULL, qty INT, PRIMARY KEY (cid, pno), KEY (sid), KEY (cc), \
+     CONSTRAINT fk_parts_sup FOREIGN KEY (sid) REFERENCES suppliers (sid), \
+     CONSTRAINT fk_parts_cc FOREIGN KEY (cc) REFERENCES countries (code)) DEFAULT CHARSET utf8mb4";
+const SHIPMENTS_DDL: &str = "CREATE TABLE shipments (cid INT NOT NULL, shid INT NOT NULL, \
+     sid INT NULL, note VARCHAR(10), PRIMARY KEY (cid, shid), KEY (sid), \
+     CONSTRAINT fk_ship_sup FOREIGN KEY (sid) REFERENCES suppliers (sid) ON DELETE CASCADE) \
+     DEFAULT CHARSET utf8mb4";
+const SHIP_ITEMS_DDL: &str = "CREATE TABLE ship_items (cid INT NOT NULL, shid INT NOT NULL, \
+     item INT NOT NULL, qty INT, PRIMARY KEY (cid, shid, item), \
+     CONSTRAINT fk_si_ship FOREIGN KEY (cid, shid) REFERENCES shipments (cid, shid) ON DELETE CASCADE) \
+     DEFAULT CHARSET utf8mb4";
+const CONTACTS_DDL: &str = "CREATE TABLE contacts (cid INT NOT NULL, ctid INT NOT NULL, sid INT NULL, \
+     PRIMARY KEY (cid, ctid), KEY (sid), \
+     CONSTRAINT fk_ct_sup FOREIGN KEY (sid) REFERENCES suppliers (sid) ON DELETE SET NULL) \
+     DEFAULT CHARSET utf8mb4";
+const TAG_LINKS_DDL: &str = "CREATE TABLE tag_links (cid INT NOT NULL, lid INT NOT NULL, \
+     tag VARCHAR(20) COLLATE utf8mb4_general_ci NULL, PRIMARY KEY (cid, lid), KEY (tag), \
+     CONSTRAINT fk_tl_tag FOREIGN KEY (tag) REFERENCES tags (tag) ON DELETE CASCADE) \
+     DEFAULT CHARSET utf8mb4";
 
 /// The tables whose members fill `_sprig_rk` (chapter 15), with the
 /// column on their shard schemas: a column member and its parent member.
@@ -388,6 +454,7 @@ async fn clear_layout(e: &Env, store: &ShardMapStore) {
         "DELETE m FROM group_members m WHERE m.group_id IN (901, 902, 903, 904)",
         "DELETE FROM table_groups WHERE group_id IN (901, 902, 903, 904, 905)",
         "DELETE FROM lookup_indexes WHERE lookup_id = 9051",
+        "DELETE FROM foreign_keys WHERE fk_id IN (9061, 9062, 9063, 9064, 9065)",
     ] {
         match c.query_drop(sql).await {
             Ok(()) | Err(mysql_async::Error::Server(_)) => {}
@@ -486,7 +553,7 @@ async fn setup(e: &Env, sut: &mut Conn) -> World {
             g.tables.iter().map(|(t, _)| *t).collect()
         };
         for t in tables {
-            c.query_drop(ddl_of(t)).await.unwrap();
+            c.query_drop(shard_ddl_of(t)).await.unwrap();
             add_rk(&mut c, t).await;
         }
         if *s == ref_schema {
@@ -636,6 +703,38 @@ async fn setup(e: &Env, sut: &mut Conn) -> World {
         .insert(&mut c, &lk)
         .await
         .unwrap();
+    // Chapter 19 (R3): the keys across groups, kept by the gateway.
+    for (id, child, name, col, parent, pcol) in FKS {
+        let line = ddl_of(child)
+            .split(", CONSTRAINT ")
+            .find(|x| x.starts_with(&format!("{name} ")))
+            .map(|x| format!("CONSTRAINT `{}`", x.replacen(' ', "` ", 1)))
+            .unwrap();
+        let acts = sprig_shard::fk::parse_line(&line).unwrap();
+        sprig_shard::fk::ForeignKeyCatalog
+            .insert(
+                &mut c,
+                &sprig_shard::fk::ForeignKey {
+                    id: *id,
+                    name: (*name).into(),
+                    child: object(child).0,
+                    child_columns: vec![(*col).into()],
+                    parent: object(parent).0,
+                    parent_columns: vec![(*pcol).into()],
+                    on_delete: acts.on_delete,
+                    on_update: acts.on_update,
+                    enforcement: if *parent == "countries" {
+                        sprig_shard::fk::FkEnforcement::Reference
+                    } else {
+                        sprig_shard::fk::FkEnforcement::Gateway
+                    },
+                    child_lookup: None,
+                    state: sprig_shard::fk::FkState::Enforced,
+                },
+            )
+            .await
+            .unwrap();
+    }
     let lgrp = Grp {
         id: LOOKUP_GROUP,
         spec: lookup_spec(),
@@ -737,7 +836,7 @@ const DDL: &[&str] = &[
 const ACCOUNTS_DDL: &str = "CREATE TABLE accounts (aid INT NOT NULL PRIMARY KEY, \
      email VARCHAR(40) COLLATE utf8mb4_general_ci, cid INT, UNIQUE KEY email (email)) DEFAULT CHARSET utf8mb4";
 /// The suite's tables, parents before children (drops go in reverse).
-const TABLES: [&str; 11] = [
+const TABLES: [&str; 17] = [
     "customers",
     "orders",
     "products",
@@ -749,6 +848,12 @@ const TABLES: [&str; 11] = [
     "tickets",
     "events",
     "inv_notes",
+    "suppliers",
+    "parts",
+    "shipments",
+    "ship_items",
+    "contacts",
+    "tag_links",
 ];
 /// Chapter 19's ID blocks: keyed by its `AUTO_INCREMENT` column.
 const TICKETS_DDL: &str = "CREATE TABLE tickets (tid BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
@@ -1219,6 +1324,318 @@ fn corpus(r: &mut Rng) -> Vec<(String, Cmp)> {
         Bag,
     ));
     v
+}
+
+/// R3's corpus (chapter 17, "Gathered reads (R3)"): statements R1's
+/// operators refuse — window functions, subqueries (correlated or not),
+/// set operations, CTEs (recursive too), derived tables, joins of several
+/// groups or on any condition, aggregates the gateway can't split —
+/// written so the answer is deterministic (windows ordered totally).
+fn corpus_r3(r: &mut Rng) -> Vec<(String, Cmp)> {
+    use Cmp::{Bag, Ordered};
+    let mut v: Vec<(String, Cmp)> = Vec::new();
+    let mut push = |s: &str, m: Cmp| v.push((s.to_owned(), m));
+    // Window functions.
+    push(
+        "SELECT cid, region, RANK() OVER (PARTITION BY region ORDER BY score DESC, cid) FROM customers",
+        Bag,
+    );
+    push(
+        "SELECT cid, SUM(score) OVER (PARTITION BY flag ORDER BY cid ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS s FROM customers ORDER BY cid",
+        Ordered,
+    );
+    push(
+        "SELECT oid, cid, amount, AVG(amount) OVER (PARTITION BY cid) FROM orders",
+        Bag,
+    );
+    push(
+        "SELECT cid, LAG(score) OVER (ORDER BY cid), LEAD(name, 2) OVER (ORDER BY cid) FROM customers",
+        Bag,
+    );
+    push(
+        "SELECT cid, NTILE(4) OVER (ORDER BY cid), PERCENT_RANK() OVER (ORDER BY cid), CUME_DIST() OVER (ORDER BY cid) FROM customers",
+        Bag,
+    );
+    push(
+        "SELECT cid, DENSE_RANK() OVER (ORDER BY rating, cid), FIRST_VALUE(name) OVER (ORDER BY cid) FROM customers",
+        Bag,
+    );
+    push(
+        "SELECT o.oid, o.cid, p.pname, ROW_NUMBER() OVER (PARTITION BY p.cat ORDER BY o.cid, o.oid) FROM orders o JOIN products p ON p.pid = o.pid",
+        Bag,
+    );
+    push(
+        "SELECT cid, COUNT(*) OVER (), MAX(created) OVER (PARTITION BY cc) FROM customers WHERE cid IN (3, 40, 77, 101, 118)",
+        Bag,
+    );
+    // Subqueries.
+    push(
+        "SELECT cid, name FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.cid = c.cid AND o.amount > 100)",
+        Bag,
+    );
+    push(
+        "SELECT cid FROM customers WHERE cid NOT IN (SELECT cid FROM orders)",
+        Bag,
+    );
+    push(
+        "SELECT pid, pname FROM products WHERE pid NOT IN (SELECT pid FROM orders)",
+        Bag,
+    );
+    push(
+        "SELECT pid, pname FROM products WHERE pid NOT IN (SELECT pid FROM orders WHERE pid IS NOT NULL)",
+        Bag,
+    );
+    push(
+        "SELECT cid, (SELECT COUNT(*) FROM orders o WHERE o.cid = c.cid) AS n FROM customers c",
+        Bag,
+    );
+    push(
+        "SELECT cid, score FROM customers WHERE score > (SELECT AVG(score) FROM customers)",
+        Bag,
+    );
+    push(
+        "SELECT p.pid, (SELECT MAX(o.amount) FROM orders o WHERE o.pid = p.pid) FROM products p",
+        Bag,
+    );
+    push(
+        "SELECT o.oid, o.cid FROM orders o WHERE o.pid IN (SELECT pid FROM products WHERE cat = 'tools') AND o.qty > 2",
+        Bag,
+    );
+    push(
+        "SELECT c.cid FROM customers c WHERE c.name IN (SELECT tag FROM tags WHERE cnt > 3)",
+        Bag,
+    );
+    // Set operations.
+    push(
+        "SELECT cid FROM customers INTERSECT SELECT cid FROM orders",
+        Bag,
+    );
+    push(
+        "SELECT cid FROM customers EXCEPT SELECT cid FROM orders",
+        Bag,
+    );
+    push("SELECT cid FROM orders UNION SELECT pid FROM products", Bag);
+    push(
+        "SELECT region FROM customers UNION ALL SELECT cat FROM products",
+        Bag,
+    );
+    push("SELECT name FROM customers UNION SELECT tag FROM tags", Bag);
+    // CTEs and derived tables.
+    push(
+        "WITH big AS (SELECT cid, SUM(amount) s FROM orders GROUP BY cid) SELECT c.name, b.s FROM customers c JOIN big b ON b.cid = c.cid WHERE b.s > 100",
+        Bag,
+    );
+    push(
+        "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 10) SELECT n, (SELECT COUNT(*) FROM customers WHERE cid <= n * 10) FROM seq",
+        Bag,
+    );
+    push(
+        "SELECT t.region, t.n FROM (SELECT region, COUNT(*) n FROM customers GROUP BY region) t WHERE t.n > 1",
+        Bag,
+    );
+    push(
+        "SELECT x.cat, COUNT(*) FROM (SELECT DISTINCT p.cat, o.cid FROM orders o JOIN products p ON p.pid = o.pid) x GROUP BY x.cat",
+        Bag,
+    );
+    // Aggregates the gateway doesn't split.
+    push(
+        "SELECT cid, COUNT(DISTINCT note), MAX(amount) - MIN(amount) FROM orders GROUP BY cid",
+        Bag,
+    );
+    push(
+        "SELECT flag, STDDEV(score), VARIANCE(rating) FROM customers GROUP BY flag",
+        Bag,
+    );
+    push(
+        "SELECT region, COUNT(*) FROM customers GROUP BY region WITH ROLLUP",
+        Bag,
+    );
+    push(
+        "SELECT cc, GROUP_CONCAT(DISTINCT region ORDER BY region SEPARATOR '|') FROM customers GROUP BY cc",
+        Bag,
+    );
+    push(
+        "SELECT SUM(o.amount) / COUNT(DISTINCT o.cid), AVG(p.price) FROM orders o JOIN products p ON p.pid = o.pid",
+        Bag,
+    );
+    // Joins of several groups, on any condition.
+    push(
+        "SELECT c.name, o.oid, p.pname FROM customers c JOIN orders o ON o.cid = c.cid JOIN products p ON p.pid = o.pid JOIN tags t ON t.tag = c.name",
+        Bag,
+    );
+    push(
+        "SELECT c.cid, p.pid FROM customers c JOIN products p ON p.price BETWEEN c.score AND c.score + 10",
+        Bag,
+    );
+    push(
+        "SELECT c.cid, p.pid FROM customers c CROSS JOIN products p WHERE c.cid < 5 AND p.pid < 5",
+        Bag,
+    );
+    push(
+        "SELECT p.pid, o.oid FROM orders o RIGHT JOIN products p ON p.pid = o.pid",
+        Bag,
+    );
+    push(
+        "SELECT c.cid, o.oid FROM customers c JOIN orders o USING (cid) WHERE o.qty > 12",
+        Bag,
+    );
+    push(
+        "SELECT p.pid, t.tag FROM products p JOIN tags t ON t.tag = p.pid",
+        Bag,
+    );
+    push(
+        "SELECT c.cid, k.cname, p.pname FROM customers c JOIN countries k ON k.code = c.cc JOIN orders o ON o.cid = c.cid JOIN products p ON p.pid > o.pid WHERE c.cid < 30 AND p.pid < 12",
+        Bag,
+    );
+    push(
+        "SELECT DISTINCT c.region, p.cat FROM customers c JOIN orders o ON o.cid = c.cid JOIN products p ON p.pid = o.pid",
+        Bag,
+    );
+    push(
+        "SELECT c.cid, p.pid FROM customers c LEFT JOIN products p ON p.pid = c.cid + 1000 WHERE p.pid IS NULL AND c.cid < 20",
+        Bag,
+    );
+    // Ordering R1 can't merge.
+    push("SELECT * FROM customers ORDER BY 2, 1", Ordered);
+    push(
+        "SELECT cid, name FROM customers ORDER BY name COLLATE utf8mb4_bin, cid",
+        Ordered,
+    );
+    // Shard filters: key IN lists prune shards, simple conjuncts filter.
+    for _ in 0..6 {
+        let (a, b, c) = (1 + r.below(125), 1 + r.below(125), 1 + r.below(125));
+        let x = r.below(10);
+        v.push((format!("SELECT o.oid, o.cid, ROW_NUMBER() OVER (ORDER BY o.cid, o.oid) FROM orders o WHERE o.cid IN ({a}, {b}, {c}) AND o.qty > {x}"), Bag));
+        v.push((format!("SELECT c.cid, p.pid, p.price FROM customers c JOIN products p ON p.pid > c.cid WHERE c.cid IN ({a}, {b}) AND p.price > {x} AND c.name LIKE 'a%'"), Bag));
+        v.push((format!("SELECT c.cid, (SELECT COUNT(*) FROM orders o WHERE o.cid = c.cid AND o.qty > {x}) FROM customers c WHERE c.cid BETWEEN {a} AND {}", a + 20), Bag));
+    }
+    v
+}
+
+/// R3's prepared statements (binary protocol): gathered with the values
+/// written in.
+fn prepared_r3(r: &mut Rng) -> Vec<(&'static str, Vec<Value>, Cmp)> {
+    use Cmp::Bag;
+    let mut v = Vec::new();
+    for _ in 0..4 {
+        v.push((
+            "SELECT cid, RANK() OVER (ORDER BY score, cid) FROM customers WHERE region = ?",
+            vec![Value::Bytes(r.pick(REGIONS).as_bytes().to_vec())],
+            Bag,
+        ));
+        v.push((
+            "SELECT o.oid, p.pname FROM orders o JOIN products p ON p.pid > o.pid WHERE o.cid = ? AND p.price < ?",
+            vec![Value::Int(1 + r.below(125) as i64), Value::Double(r.below(300) as f64 + 0.5)],
+            Bag,
+        ));
+        v.push((
+            "SELECT cid FROM customers WHERE cid IN (SELECT cid FROM orders WHERE qty > ?)",
+            vec![Value::Int(r.below(20) as i64)],
+            Bag,
+        ));
+    }
+    v
+}
+
+/// What R3's statements did: compared, refused by reason, and how long the
+/// gateway and the reference took per statement.
+#[derive(Default)]
+struct R3Stats {
+    compared: usize,
+    skipped: usize,
+    sut_ms: Vec<f64>,
+    ref_ms: Vec<f64>,
+}
+
+impl R3Stats {
+    fn pct(v: &[f64], p: f64) -> f64 {
+        let mut v = v.to_vec();
+        v.sort_by(f64::total_cmp);
+        v.get(((v.len() as f64 - 1.0) * p).round() as usize)
+            .copied()
+            .unwrap_or(0.0)
+    }
+    fn line(&self, label: &str) -> String {
+        format!(
+            "r3 {label}: {} statements, {} refused ({:.1}%); gateway p50 {:.1} ms p95 {:.1} ms, reference p50 {:.1} ms p95 {:.1} ms",
+            self.compared,
+            self.skipped,
+            100.0 * self.skipped as f64 / self.compared.max(1) as f64,
+            Self::pct(&self.sut_ms, 0.5),
+            Self::pct(&self.sut_ms, 0.95),
+            Self::pct(&self.ref_ms, 0.5),
+            Self::pct(&self.ref_ms, 0.95),
+        )
+    }
+}
+
+/// Runs R3's corpus through both sides: the answers must match, column
+/// types included.
+async fn r3_reads(
+    sut: &mut Conn,
+    reference: &mut Conn,
+    tally: &mut Tally,
+    st: &mut R3Stats,
+    corpus: &[(String, Cmp)],
+) {
+    for (s, mode) in corpus {
+        let t0 = Instant::now();
+        let a = run(sut, s).await;
+        let t1 = Instant::now();
+        let b = run(reference, s).await;
+        let t2 = Instant::now();
+        r3_check(tally, st, s, *mode, &a, &b);
+        if !matches!(a, Outcome::Err(39420, _)) {
+            st.sut_ms.push((t1 - t0).as_secs_f64() * 1000.0);
+            st.ref_ms.push((t2 - t1).as_secs_f64() * 1000.0);
+        }
+    }
+}
+
+fn r3_check(tally: &mut Tally, st: &mut R3Stats, s: &str, mode: Cmp, a: &Outcome, b: &Outcome) {
+    st.compared += 1;
+    if matches!(a, Outcome::Err(39420, _)) {
+        st.skipped += 1;
+        println!("R3 REFUSED {s}: {a:?}");
+    }
+    if let (Outcome::Rows(ta, _), Outcome::Rows(tb, _)) = (a, b)
+        && ta != tb
+    {
+        tally.compared += 1;
+        tally.mismatches.push(format!(
+            "MISMATCH (column types) {s}\n  sut: {ta:?}\n  reference: {tb:?}"
+        ));
+        return;
+    }
+    tally.check(s, mode, a, b);
+}
+
+/// A gathered read inside a transaction sees the transaction's own
+/// writes; then the transaction rolls back.
+async fn r3_in_txn(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally, st: &mut R3Stats) {
+    let q = "SELECT cid, score, RANK() OVER (ORDER BY score DESC, cid) FROM customers";
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("BEGIN").await.unwrap();
+        c.query_drop("UPDATE customers SET score = score + 1000 WHERE cid IN (1, 60, 120)")
+            .await
+            .unwrap();
+    }
+    let a = run(sut, q).await;
+    let b = run(reference, q).await;
+    r3_check(
+        tally,
+        st,
+        "gathered read inside a transaction",
+        Cmp::Bag,
+        &a,
+        &b,
+    );
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("ROLLBACK").await.unwrap();
+    }
+    let a = run(sut, q).await;
+    let b = run(reference, q).await;
+    r3_check(tally, st, "gathered read after ROLLBACK", Cmp::Bag, &a, &b);
 }
 
 /// DML, each followed by a full comparison of the table it touched.
@@ -1758,6 +2175,12 @@ fn full(t: &str) -> String {
         "accounts" => "SELECT * FROM accounts ORDER BY aid".to_owned(),
         "invoices" => "SELECT * FROM invoices ORDER BY iid".to_owned(),
         "invoice_lines" => "SELECT * FROM invoice_lines ORDER BY iid, line_no".to_owned(),
+        "suppliers" => "SELECT * FROM suppliers ORDER BY sid".to_owned(),
+        "parts" => "SELECT * FROM parts ORDER BY cid, pno".to_owned(),
+        "shipments" => "SELECT * FROM shipments ORDER BY cid, shid".to_owned(),
+        "ship_items" => "SELECT * FROM ship_items ORDER BY cid, shid, item".to_owned(),
+        "contacts" => "SELECT * FROM contacts ORDER BY cid, ctid".to_owned(),
+        "tag_links" => "SELECT cid, lid, LOWER(tag) FROM tag_links ORDER BY cid, lid".to_owned(),
         _ => "SELECT * FROM orders ORDER BY cid, oid".to_owned(),
     }
 }
@@ -1961,6 +2384,272 @@ async fn transactions(
         "orders",
     )
     .await;
+}
+
+/// Chapter 19's foreign keys across groups (R3), against MariaDB's own:
+/// child inserts and updates (1452), parent deletes (1451), `ON DELETE
+/// CASCADE` (with a native cascade below it) and `SET NULL`, a reference
+/// parent, a string key under a case-insensitive collation, transactions,
+/// prepared statements and `foreign_key_checks = 0`. Every statement is
+/// compared, then every table of the keys. Returns the summary line.
+async fn foreign_keys(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -> String {
+    const T: &[&str] = &[
+        "suppliers",
+        "parts",
+        "shipments",
+        "ship_items",
+        "contacts",
+        "tag_links",
+    ];
+    let mut r = Rng(9061);
+    let started = tally.compared;
+    let (mut e1451, mut e1452, mut skipped) = (0usize, 0usize, 0usize);
+    let mut stmts: Vec<String> = Vec::new();
+    let sup: Vec<String> = (1..=24)
+        .map(|s| format!("({s}, {}, 'c{s}')", lit(r.pick(NAMES))))
+        .collect();
+    stmts.push(format!("INSERT INTO suppliers VALUES {}", sup.join(", ")));
+    // Suppliers 1–8 have parts, 9–14 only shipments, 15–18 only
+    // contacts, 19–24 nothing.
+    let key = |r: &mut Rng| {
+        let k = 1 + r.below(120) as i64;
+        if k % 17 == 0 { k + 1 } else { k }
+    };
+    let mut parts = Vec::new();
+    for pno in 1..=60 {
+        let sid = if pno % 9 == 0 {
+            "NULL".to_owned()
+        } else {
+            (1 + r.below(8)).to_string()
+        };
+        let cc = ["'us'", "'de'", "NULL", "'in'"][r.below(4) as usize];
+        parts.push(format!("({}, {pno}, {sid}, {cc}, {})", key(&mut r), r.below(9)));
+    }
+    stmts.push(format!("INSERT INTO parts VALUES {}", parts.join(", ")));
+    let mut ships = Vec::new();
+    let mut items = Vec::new();
+    for shid in 1..=40 {
+        let c = key(&mut r);
+        ships.push(format!("({c}, {shid}, {}, 'n{shid}')", 9 + r.below(6)));
+        for item in 1..=r.below(3) {
+            items.push(format!("({c}, {shid}, {item}, {})", r.below(5)));
+        }
+    }
+    stmts.push(format!("INSERT INTO shipments VALUES {}", ships.join(", ")));
+    if !items.is_empty() {
+        stmts.push(format!("INSERT INTO ship_items VALUES {}", items.join(", ")));
+    }
+    let contacts: Vec<String> = (1..=30)
+        .map(|ct| format!("({}, {ct}, {})", key(&mut r), 15 + r.below(4)))
+        .collect();
+    stmts.push(format!("INSERT INTO contacts VALUES {}", contacts.join(", ")));
+    let links: Vec<String> = (1..=24)
+        .map(|l| {
+            let n = r.pick(&NAMES[1..]);
+            let t = if l % 3 == 0 { n.to_uppercase() } else { n.to_owned() };
+            format!("({}, {l}, {})", key(&mut r), lit(&t))
+        })
+        .collect();
+    stmts.push(format!("INSERT INTO tag_links VALUES {}", links.join(", ")));
+    stmts.extend(
+        [
+            // Child side.
+            "INSERT INTO parts VALUES (1, 900, 3, 'us', 1)",
+            "INSERT INTO parts VALUES (2, 900, 999, NULL, 1)",
+            "INSERT INTO parts VALUES (3, 900, 4, NULL, 1), (40, 900, 998, NULL, 1), (77, 900, 5, 'fr', 2)",
+            "INSERT INTO parts VALUES (5, 900, NULL, 'zz', 1)",
+            "INSERT INTO parts (cid, pno, qty) VALUES (6, 900, 2)",
+            "INSERT INTO parts SET cid = 7, pno = 900, sid = 5",
+            "INSERT INTO parts SET cid = 8, pno = 900, sid = 555",
+            "INSERT INTO parts VALUES (9, 900, 2, 'de', 1), (10, 900, 6, 'in', 1), (11, 900, 7, NULL, 1), (12, 900, 1, 'us', 1)",
+            "UPDATE parts SET sid = 6 WHERE cid = 1 AND pno = 900",
+            "UPDATE parts SET sid = 777 WHERE cid = 1",
+            "UPDATE parts SET sid = NULL, cc = 'fr' WHERE cid = 6",
+            "UPDATE parts SET cc = 'xx' WHERE cid = 9",
+            "UPDATE parts SET qty = qty + 1 WHERE sid = 3",
+            "INSERT INTO tag_links VALUES (9, 900, 'BOB ')",
+            "INSERT INTO tag_links VALUES (9, 901, 'nobody')",
+            "UPDATE tag_links SET tag = 'ALICE' WHERE cid = 9 AND lid = 900",
+            // Parent side.
+            "DELETE FROM suppliers WHERE sid = 3",
+            "DELETE FROM suppliers WHERE sid IN (2, 20)",
+            "DELETE FROM suppliers WHERE sid = 9",
+            "DELETE FROM suppliers WHERE sid IN (10, 11, 21)",
+            "DELETE FROM suppliers WHERE sid = 15",
+            "DELETE FROM suppliers WHERE sid BETWEEN 16 AND 19",
+            "DELETE FROM suppliers WHERE sname = 'nobody at all'",
+            "DELETE FROM suppliers WHERE scode = 'c22'",
+            "UPDATE suppliers SET sname = 'renamed' WHERE sid = 4",
+            "UPDATE suppliers SET sid = 50 WHERE sid = 4",
+            "DELETE FROM parts WHERE sid = 8",
+            "DELETE FROM suppliers WHERE sid = 8",
+            "DELETE FROM suppliers",
+            "DELETE FROM tags WHERE tag = 'ALICE'",
+            "DELETE FROM tags WHERE tag = 'carol'",
+        ]
+        .map(str::to_owned),
+    );
+    for s in &stmts {
+        let a = run(sut, s).await;
+        let b = run(reference, s).await;
+        match (&a, &b) {
+            (Outcome::Err(39420, _), _) => skipped += 1,
+            (_, Outcome::Err(1451, _)) => e1451 += 1,
+            (_, Outcome::Err(1452, _)) => e1452 += 1,
+            _ => {}
+        }
+        tally.check(s, Cmp::Bag, &a, &b);
+        if matches!(a, Outcome::Err(39420, _)) && !matches!(b, Outcome::Err(..)) {
+            for t in T {
+                resync(sut, reference, t).await;
+            }
+        }
+        for t in T {
+            compare_full(sut, reference, tally, &format!("after {s}"), t).await;
+        }
+    }
+    // Transactions: a check inside one, a cascade rolled back.
+    let txn: &[&[&str]] = &[
+        &[
+            "BEGIN",
+            "INSERT INTO parts VALUES (13, 901, 5, NULL, 1)",
+            "DELETE FROM suppliers WHERE sid = 5",
+            "COMMIT",
+        ],
+        &[
+            "BEGIN",
+            "DELETE FROM suppliers WHERE sid IN (12, 13, 14)",
+            "SELECT COUNT(*) FROM shipments WHERE sid IN (12, 13, 14)",
+            "ROLLBACK",
+        ],
+        &[
+            "BEGIN",
+            "INSERT INTO suppliers VALUES (30, 'new', 'c30')",
+            "INSERT INTO parts VALUES (14, 901, 30, 'de', 1), (90, 901, 30, NULL, 1)",
+            "INSERT INTO parts VALUES (15, 901, 31, NULL, 1)",
+            "COMMIT",
+        ],
+    ];
+    for block in txn {
+        for s in *block {
+            let a = run(sut, s).await;
+            let b = run(reference, s).await;
+            match &b {
+                Outcome::Err(1451, _) => e1451 += 1,
+                Outcome::Err(1452, _) => e1452 += 1,
+                _ => {}
+            }
+            tally.check(s, Cmp::Bag, &a, &b);
+        }
+        for t in T {
+            compare_full(sut, reference, tally, "after a transaction", t).await;
+        }
+    }
+    // Prepared statements.
+    let prepared: Vec<(&str, Vec<Value>)> = vec![
+        (
+            "INSERT INTO parts VALUES (?, ?, ?, ?, ?)",
+            vec![16.into(), 902.into(), 6.into(), "in".into(), 1.into()],
+        ),
+        (
+            "INSERT INTO parts VALUES (?, ?, ?, ?, ?)",
+            vec![17.into(), 902.into(), 4004.into(), Value::NULL, 1.into()],
+        ),
+        ("DELETE FROM suppliers WHERE sid = ?", vec![6.into()]),
+        ("DELETE FROM suppliers WHERE sid = ?", vec![23.into()]),
+    ];
+    for (s, p) in prepared {
+        let a = run_exec(sut, s, p.clone()).await;
+        let b = run_exec(reference, s, p).await;
+        match &b {
+            Outcome::Err(1451, _) => e1451 += 1,
+            Outcome::Err(1452, _) => e1452 += 1,
+            _ => {}
+        }
+        tally.check(s, Cmp::Bag, &a, &b);
+        for t in T {
+            compare_full(sut, reference, tally, &format!("after prepared {s}"), t).await;
+        }
+    }
+    // foreign_key_checks = 0 skips the checks on both sides.
+    for s in [
+        "SET foreign_key_checks = 0",
+        "INSERT INTO parts VALUES (18, 903, 4040, 'qq', 1)",
+        "SET foreign_key_checks = 1",
+        "DELETE FROM parts WHERE cid = 18 AND pno = 903",
+    ] {
+        let a = run(sut, s).await;
+        let b = run(reference, s).await;
+        tally.check(s, Cmp::Bag, &a, &b);
+    }
+    for t in T {
+        compare_full(sut, reference, tally, "after foreign_key_checks = 0", t).await;
+    }
+    format!(
+        "foreign keys: {} statements compared, reference 1451 x{e1451} and 1452 x{e1452}, \
+         {skipped} refused (39420)",
+        tally.compared - started
+    )
+}
+
+/// Chapter 19's test: concurrent child inserts against parent deletes
+/// never commit an orphan child. Per round a fresh supplier, then at once
+/// an insert of a part referencing it (another cluster) and its delete;
+/// afterwards every part of the rounds has its supplier. Returns
+/// `(rounds, inserts that won, deletes that won)`.
+async fn fk_race(e: &Env, tally: &mut Tally) -> (usize, usize, usize) {
+    let mut a = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
+    let mut b = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
+    let mut setup = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
+    let rounds = 40usize;
+    let (mut ins_won, mut del_won) = (0, 0);
+    for k in 0..rounds {
+        let sid = 5000 + k as i64;
+        setup
+            .query_drop(format!("INSERT INTO suppliers VALUES ({sid}, 'race', 'r')"))
+            .await
+            .unwrap();
+        let cid = 1 + (k as i64 * 7) % 100;
+        let ins = format!("INSERT INTO parts VALUES ({cid}, {}, {sid}, NULL, 1)", 5000 + k);
+        let del = format!("DELETE FROM suppliers WHERE sid = {sid}");
+        let (x, y) = tokio::join!(run(&mut a, &ins), run(&mut b, &del));
+        match (&x, &y) {
+            (Outcome::Ok(1), Outcome::Err(1451, _)) => ins_won += 1,
+            (Outcome::Err(1452, _), Outcome::Ok(1)) => del_won += 1,
+            // A cross-cluster lock wait broken by the shorter distributed
+            // lock-wait timeout or a deadlock: one side retries later.
+            (Outcome::Err(1205 | 1213 | 39443, _), _) | (_, Outcome::Err(1205 | 1213 | 39443, _)) => {}
+            other => tally
+                .mismatches
+                .push(format!("fk race round {k}: unexpected {other:?}")),
+        }
+    }
+    // Every part of the rounds has its supplier.
+    let parts = run(&mut setup, "SELECT sid FROM parts WHERE pno >= 5000").await;
+    let sups = run(&mut setup, "SELECT sid FROM suppliers WHERE sid >= 5000").await;
+    if let (Outcome::Rows(_, p), Outcome::Rows(_, s)) = (&parts, &sups) {
+        let have: std::collections::HashSet<&Option<String>> = s.iter().map(|r| &r[0]).collect();
+        for row in p {
+            if !have.contains(&row[0]) {
+                tally
+                    .mismatches
+                    .push(format!("fk race: ORPHAN part with supplier {:?}", row[0]));
+            }
+        }
+    } else {
+        tally
+            .mismatches
+            .push(format!("fk race: reads failed {parts:?} {sups:?}"));
+    }
+    setup
+        .query_drop("DELETE FROM parts WHERE pno >= 5000")
+        .await
+        .unwrap();
+    setup
+        .query_drop("DELETE FROM suppliers WHERE sid >= 5000")
+        .await
+        .unwrap();
+    (rounds, ins_won, del_won)
 }
 
 /// Parent members (chapter 15) inside transactions: an invoice and its
@@ -2409,7 +3098,7 @@ async fn split(
             .unwrap();
         tc.query_drop(format!("USE `{s}`")).await.unwrap();
         for (t, _) in g.tables {
-            tc.query_drop(ddl_of(t)).await.unwrap();
+            tc.query_drop(shard_ddl_of(t)).await.unwrap();
             add_rk(&mut tc, t).await;
         }
         w.schemas.push((target, s.clone()));
@@ -3417,6 +4106,21 @@ async fn differential_against_one_unsharded_mariadb() {
         let b = run(&mut reference, s).await;
         tally.check(s, *mode, &a, &b);
     }
+    // R3: what R1 refused, gathered (chapter 17, "Gathered reads (R3)").
+    let r3_corpus = corpus_r3(&mut Rng(seed_value + 7));
+    let mut r3 = R3Stats::default();
+    r3_reads(&mut sut, &mut reference, &mut tally, &mut r3, &r3_corpus).await;
+    for (s, p, mode) in prepared_r3(&mut Rng(seed_value + 8)) {
+        let t0 = Instant::now();
+        let a = run_exec(&mut sut, s, p.clone()).await;
+        let t1 = Instant::now();
+        let b = run_exec(&mut reference, s, p).await;
+        r3.sut_ms.push((t1 - t0).as_secs_f64() * 1000.0);
+        r3.ref_ms.push(t1.elapsed().as_secs_f64() * 1000.0);
+        r3_check(&mut tally, &mut r3, s, mode, &a, &b);
+    }
+    r3_in_txn(&mut sut, &mut reference, &mut tally, &mut r3).await;
+    let r3_before_split = r3.line("before the split");
     let (ddl_have, ddl_of_n) =
         ddl_across_shards(&e, &w, &mut sut, &mut reference, &mut tally).await;
     if ddl_have != ddl_of_n {
@@ -3456,6 +4160,14 @@ async fn differential_against_one_unsharded_mariadb() {
         compare_full(&mut sut, &mut reference, &mut tally, "after a write", table).await;
     }
     lookups(&e, &w, &mut sut, &mut reference, &mut tally).await;
+    let fk_line = foreign_keys(&mut sut, &mut reference, &mut tally).await;
+    let (race_n, race_ins, race_del) = fk_race(&e, &mut tally).await;
+    println!("{fk_line}");
+    println!(
+        "fk race: {race_n} rounds of a child insert against its parent's delete, \
+         {race_ins} inserts won (delete got 1451), {race_del} deletes won (insert got 1452), \
+         no orphan"
+    );
     auto_ids(&e, &w, &mut sut, &mut reference, &mut tally, 1).await;
     let shards0 = layout().remove(0).shards;
     parent_txns(&e, &mut sut, &mut reference, &mut tally, &shards0, 500).await;
@@ -3534,6 +4246,15 @@ async fn differential_against_one_unsharded_mariadb() {
         let b = run_exec(&mut reference, s, p).await;
         tally.check(s, mode, &a, &b);
     }
+    let mut r3_after = R3Stats::default();
+    r3_reads(
+        &mut sut,
+        &mut reference,
+        &mut tally,
+        &mut r3_after,
+        &r3_corpus,
+    )
+    .await;
     transactions(&e, &mut sut, &mut reference, &mut tally, &shards1).await;
     autocommit_off(&e, &mut sut, &mut reference, &mut tally, &shards1).await;
     parent_txns(&e, &mut sut, &mut reference, &mut tally, &shards1, 600).await;
@@ -3605,6 +4326,8 @@ async fn differential_against_one_unsharded_mariadb() {
         tally.mismatches.len()
     );
     println!("skipped by reason: {:?}", tally.reasons);
+    println!("{r3_before_split}");
+    println!("{}", r3_after.line("after the split"));
     println!("ddl: ALTER TABLE reached {ddl_have} of {ddl_of_n} shards");
     if env("SPRIG_TEST_R1_KILL").is_some() {
         println!("kill test: COMMIT failed after a killed branch: {killed}");

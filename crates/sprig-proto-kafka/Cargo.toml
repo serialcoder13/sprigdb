@@ -14,13 +14,15 @@ async-trait.workspace = true
 # SHA-256/512 from ring; nonces from the OS generator.
 base64.workspace = true
 bytes.workspace = true
-# Record batch compression: gzip (pure-Rust backend) and zstd. Snappy and
-# LZ4 have no crate in the tree and are refused (chapter 45, decisions).
+# Record batch compression: gzip (pure-Rust backend), snappy, LZ4 frames
+# and zstd.
 flate2.workspace = true
 getrandom.workspace = true
+lz4_flex.workspace = true
 metrics.workspace = true
 ring.workspace = true
 sprig-common.workspace = true
+snap.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }

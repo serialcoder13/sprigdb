@@ -469,6 +469,80 @@ async fn rename_waits_for_lock_holders_then_fences_and_unfences() {
     .await;
 }
 
+/// Chapter 10, "Cutover": something recreated tables under their old names
+/// while a rename fence held (catalog migrations did, on a fenced
+/// catalog). The unfence drops a recreation only if it is empty and was
+/// created after the fence; otherwise it fails and drops nothing.
+#[tokio::test]
+async fn unfence_drops_only_empty_recreations_made_after_the_fence() {
+    let eps = topology_or_skip!(skip::MARIADB_SINGLE);
+    let t = Tenant::new();
+    let w = eps[0].clone();
+    t.create(&w).await;
+    let sc = t.schema.clone();
+    guarded(
+        async {
+            let opts = FenceOptions::default();
+            let req = t.request(FenceMethod::Rename, FenceScope::Writes);
+            let count = |q: String| {
+                let w = w.clone();
+                async move { scalar(&w, &q).await }
+            };
+            let rows_in_x = format!("SELECT COUNT(*) FROM `{sc}`.x");
+
+            // Empty recreations: dropped, and the real tables come back.
+            let receipt = fence(&req, &w, &[], &opts).await.unwrap();
+            assert!(receipt.fenced_at_unix.is_some());
+            exec(
+                &w,
+                &format!("CREATE TABLE `{sc}`.x (id INT PRIMARY KEY, v INT)"),
+            )
+            .await;
+            exec(&w, &format!("CREATE TABLE `{sc}`.y (id INT PRIMARY KEY)")).await;
+            unfence(&receipt, &w, &opts).await.unwrap();
+            assert_eq!(count(rows_in_x.clone()).await.as_deref(), Some("1"));
+            let fenced_left = format!(
+                "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{sc}' \
+                 AND TABLE_NAME LIKE '\\_\\_sprig\\_f\\_%'"
+            );
+            assert_eq!(count(fenced_left.clone()).await.as_deref(), Some("0"));
+
+            // A recreation with rows: nothing dropped, the unfence fails.
+            let receipt = fence(&req, &w, &[], &opts).await.unwrap();
+            exec(
+                &w,
+                &format!("CREATE TABLE `{sc}`.x (id INT PRIMARY KEY, v INT)"),
+            )
+            .await;
+            exec(&w, &format!("INSERT INTO `{sc}`.x VALUES (7, 7)")).await;
+            let e = unfence(&receipt, &w, &opts).await.unwrap_err();
+            assert_eq!(e.code(), Some(SprigCode::ClusterFenceFailed), "{e}");
+            assert!(e.to_string().contains("has rows"), "{e}");
+            assert!(e.to_string().contains("its fenced name exist"), "{e}");
+            assert_eq!(count(fenced_left.clone()).await.as_deref(), Some("2"));
+            assert_eq!(
+                count(rows_in_x.clone()).await.as_deref(),
+                Some("1"),
+                "the stray"
+            );
+            // A receipt without the fence time proves nothing either.
+            exec(&w, &format!("DELETE FROM `{sc}`.x")).await;
+            let old = sprig_cluster::FenceReceipt {
+                fenced_at_unix: None,
+                ..receipt.clone()
+            };
+            let e = unfence(&old, &w, &opts).await.unwrap_err();
+            assert!(e.to_string().contains("no fence time"), "{e}");
+            // With the fence time, the now empty stray goes.
+            unfence(&receipt, &w, &opts).await.unwrap();
+            assert_eq!(count(rows_in_x).await.as_deref(), Some("1"));
+            assert_eq!(count(fenced_left).await.as_deref(), Some("0"));
+        },
+        t.drop(&w),
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn without_connection_admin_only_rename_remains() {
     let eps = topology_or_skip!(skip::MARIADB_SINGLE);

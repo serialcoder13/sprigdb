@@ -349,6 +349,7 @@ impl ViaParent {
             rows: self.row_probe.len() as u64,
             claims: Vec::new(),
             releases: Vec::new(),
+            fk: None,
         }))
     }
 }
@@ -707,7 +708,7 @@ mod tests {
                 &t,
                 "SELECT * FROM invoices i JOIN invoice_lines l ON l.line_no = i.iid"
             ),
-            Plan::Reject(_) | Plan::LookupJoin(_)
+            Plan::Reject(_) | Plan::LookupJoin(_) | Plan::Gather(_)
         ));
     }
 

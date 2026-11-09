@@ -9,7 +9,7 @@
 //! - [`protocol`]: API keys, served versions, error codes, headers and
 //!   frames;
 //! - [`records`]: record batches v2 with CRC-32C ([`crc32c`]) and
-//!   [`compression`] (gzip, zstd; snappy and LZ4 refused);
+//!   [`compression`] (gzip, snappy, LZ4, zstd);
 //! - [`sasl`]: SASL PLAIN and SCRAM-SHA-256/512 server conversations;
 //! - [`broker`]: the broker front end over traits the gateway implements
 //!   (identity, brokers, topics, offsets, coordinator leases), with the

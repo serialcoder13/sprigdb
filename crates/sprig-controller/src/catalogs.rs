@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mysql_async::{Conn, OptsBuilder, Pool, PoolConstraints, PoolOpts};
-use sprig_catalog::placement::ShardMap;
+use sprig_catalog::placement::{RangeState, ShardMap};
 use sprig_catalog::{CatalogEndpoint, CatalogLocator, Store};
 use sprig_cluster::driver::NodeConnector;
 use sprig_cluster::record::{AdminState, ClusterRecord, NodeSpec};
@@ -555,6 +555,19 @@ impl ShardMapLocator {
 
 #[async_trait::async_trait]
 impl CatalogLocator for ShardMapLocator {
+    async fn held_by(&self, tenant: TenantId) -> Result<Option<String>> {
+        let key = ShardMap::catalog_key(self.dc.tier(), tenant)?;
+        let Some(kv) = self.dc.get(&key, Consistency::Linearizable).await? else {
+            return Ok(None);
+        };
+        Ok(Record::<ShardMap>::decode(&kv.value)?
+            .body
+            .ranges
+            .iter()
+            .find(|r| r.state == RangeState::Held)
+            .map(|r| r.job_id.clone().unwrap_or_else(|| "unknown".to_owned())))
+    }
+
     async fn writer(&self, tenant: TenantId) -> Result<CatalogEndpoint> {
         let cluster = self.cluster_of(tenant).await?.ok_or_else(|| {
             SprigError::new(
@@ -570,6 +583,53 @@ impl CatalogLocator for ShardMapLocator {
             store: Store::new(self.schema(tenant)),
         })
     }
+}
+
+/// Fails with 39070 (retryable) while a mover's cutover holds `tenant`'s
+/// catalog ([`migrate_catalog`]).
+///
+/// # Errors
+/// 39070 while held; the store's errors.
+pub async fn not_held(locator: &dyn CatalogLocator, tenant: TenantId) -> Result<()> {
+    let Some(job) = locator.held_by(tenant).await? else {
+        return Ok(());
+    };
+    tracing::info!(tenant = %tenant, job = %job,
+        "catalog migrations wait: a mover cutover holds the catalog");
+    Err(SprigError::new(
+        SprigCode::CatalogUnavailable,
+        format!(
+            "tenant {tenant}'s catalog is held by mover job {job} for a cutover; catalog \
+             migrations wait until it ends"
+        ),
+    ))
+}
+
+/// Runs `migrator` on `tenant`'s catalog `schema` through `conn`, unless a
+/// mover's cutover holds the catalog (chapter 10, "Cutover"): the cutover
+/// may rename the catalog's tables away, and a migration then would create
+/// empty ones under their names. The migrator itself also refuses a
+/// catalog holding fenced tables; this check keeps the controller from
+/// trying during the whole hold.
+///
+/// # Errors
+/// 39070 (retryable) while the catalog is held; the migrator's errors.
+pub async fn migrate_catalog(
+    locator: &dyn CatalogLocator,
+    tenant: TenantId,
+    conn: &mut Conn,
+    schema: &str,
+    migrator: &sprig_catalog::Migrator,
+) -> Result<()> {
+    not_held(locator, tenant).await?;
+    migrator
+        .run(
+            conn,
+            schema,
+            &sprig_catalog::migrate::MigrateOpts::default(),
+        )
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]

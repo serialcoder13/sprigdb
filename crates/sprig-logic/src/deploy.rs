@@ -290,6 +290,148 @@ pub fn plan_compiled(schema: &str, p: &plsql::Plsql, w: &WrapperSpec<'_>) -> Pla
     }
 }
 
+/// The marker an engine-tier version's SQL function raises, so the
+/// gateway can run it for `SELECT f(constants)`: `[sprig <module>.<version>]`
+/// at the end of its 39876 message.
+pub const SELECT_MARK: &str = "[sprig ";
+
+/// `SELECT db.f(args)` (R7 order 6): a stored function under the logical
+/// name, beside the wrapper procedure of the same name (MariaDB keeps
+/// functions and procedures apart).
+///
+/// A compiled version's function calls the entry procedure and returns
+/// the `output` event's value: its only field, typed, or all its fields
+/// as JSON; any other event fails with 39865 and the event's `message`.
+/// It is `READS SQL DATA`, so only versions that write nothing get one
+/// (`None` otherwise): a stored function needs one of `DETERMINISTIC`,
+/// `NO SQL` or `READS SQL DATA` with the binary log on (1418), and code
+/// that writes belongs in `CALL`. Stored functions also need `SUPER`
+/// with the binary log on (1419), so the gateway creates this one
+/// through `sprig_ctl` with the deploying user as `DEFINER`.
+///
+/// An engine-tier version's function raises 39876 ending in
+/// [`SELECT_MARK`]: the gateway catches it and runs the version for
+/// `SELECT f(constants)` ([`crate::invoke`]).
+#[must_use]
+pub fn select_function(
+    w: &WrapperSpec<'_>,
+    schema: &str,
+    entry: Option<&str>,
+    writes: bool,
+) -> Option<String> {
+    if entry.is_some() && writes {
+        return None;
+    }
+    let params: Vec<(String, Ty)> = wrapper_params(w.func);
+    let decl: Vec<String> = params
+        .iter()
+        .map(|(n, t)| format!("{n} {}", sql_type(*t)))
+        .collect();
+    let out = w.func.event("output").map(|e| e.fields.clone()).unwrap_or_default();
+    let (ret_ty, ret_expr) = match out.as_slice() {
+        [(n, t)] => {
+            let path = quote(&format!(
+                "$.\"{}\"",
+                n.replace('\\', "\\\\").replace('"', "\\\"")
+            ));
+            match t {
+                Ty::Int | Ty::Bool => (
+                    "BIGINT",
+                    format!("CAST(JSON_VALUE(v__result, {path}) AS SIGNED)"),
+                ),
+                Ty::Float => (
+                    "DOUBLE",
+                    format!("CAST(JSON_VALUE(v__result, {path}) AS DOUBLE)"),
+                ),
+                Ty::Str => (
+                    "LONGTEXT CHARACTER SET utf8mb4",
+                    format!("JSON_VALUE(v__result, {path})"),
+                ),
+                Ty::Json | Ty::Null => (
+                    "LONGTEXT CHARACTER SET utf8mb4",
+                    format!(
+                        "CASE WHEN JSON_TYPE(JSON_EXTRACT(v__result, {path})) = 'NULL' THEN NULL \
+                         ELSE JSON_EXTRACT(v__result, {path}) END"
+                    ),
+                ),
+            }
+        }
+        _ => ("LONGTEXT CHARACTER SET utf8mb4", "v__result".to_owned()),
+    };
+    let head = format!(
+        "CREATE OR REPLACE FUNCTION {}.{}({})\n  RETURNS {ret_ty}\n  {}\n  SQL SECURITY {}\n  COMMENT {}\n",
+        bq(schema),
+        bq(w.name),
+        decl.join(", "),
+        if entry.is_some() { "READS SQL DATA" } else { "NO SQL" },
+        if w.definer_security { "DEFINER" } else { "INVOKER" },
+        quote(&format!(
+            "sprig logic module {} version {} ({}, {}) for SELECT",
+            w.module_id,
+            w.version,
+            if entry.is_some() { "mariadb" } else { "engine" },
+            w.func.name
+        ))
+    );
+    let body = match entry {
+        Some(entry) => {
+            let mut call_args: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+            call_args.push("v__event".to_owned());
+            call_args.push("v__result".to_owned());
+            format!(
+                "BEGIN\n  DECLARE v__event VARCHAR(64);\n  DECLARE v__result LONGTEXT;\n  \
+                 DECLARE v__msg VARCHAR(128);\n  \
+                 CALL {}({});\n  \
+                 IF v__event <> 'output' THEN\n    \
+                 SET v__msg = LEFT(CONCAT(v__event, ': ', COALESCE(JSON_VALUE(v__result, '$.message'), v__result)), 128);\n    \
+                 SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = {}, MESSAGE_TEXT = v__msg;\n  \
+                 END IF;\n  RETURN {ret_expr};\nEND",
+                bq(entry),
+                call_args.join(", "),
+                SprigCode::LogicUserError.number(),
+            )
+        }
+        None => {
+            let tail = format!("{SELECT_MARK}{}.{}]", w.module_id, w.version);
+            let name: String = w.name.chars().take(40).collect();
+            let msg = format!(
+                "{name} runs in the engine tier; SQL calls it as CALL or SELECT with constant arguments {tail}"
+            );
+            format!(
+                "BEGIN\n  SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = {}, MESSAGE_TEXT = {};\nEND",
+                SprigCode::LogicEngineUnavailable.number(),
+                quote(&msg)
+            )
+        }
+    };
+    Some(format!("{head}{body}"))
+}
+
+/// The module and version in an engine-tier SQL function's 39876 message.
+#[must_use]
+pub fn select_mark(message: &str) -> Option<(u64, u64)> {
+    let at = message.rfind(SELECT_MARK)?;
+    let rest = message[at + SELECT_MARK.len()..].strip_suffix(']')?;
+    let (m, v) = rest.split_once('.')?;
+    Some((m.parse().ok()?, v.parse().ok()?))
+}
+
+/// The plan for `SELECT db.f(args)`'s function, created through
+/// `sprig_ctl` with `definer` (`` `t1_u7`@`%` ``).
+#[must_use]
+pub fn plan_select(schema: &str, name: &str, sql: String, definer: &str) -> Plan {
+    Plan {
+        schema: schema.to_owned(),
+        routines: vec![Routine {
+            kind: "FUNCTION",
+            name: name.to_owned(),
+            sql,
+            oracle: false,
+        }],
+        definer: Some(definer.to_owned()),
+    }
+}
+
 /// The plan for an engine-tier version: only its wrapper.
 #[must_use]
 pub fn plan_engine(schema: &str, w: &WrapperSpec<'_>) -> Plan {

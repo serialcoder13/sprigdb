@@ -270,6 +270,7 @@ mod tests {
             rows: 3,
             claims: Vec::new(),
             releases: Vec::new(),
+            fk: None,
         });
         let notes = vec![
             note(4, 0, Some(half), 10),

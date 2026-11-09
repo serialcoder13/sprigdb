@@ -42,6 +42,16 @@
 //! is enough). Each migration is recorded after its statements; a crash in
 //! between re-runs the migration, which is why every statement must be
 //! idempotent. Migrations only move forward.
+//!
+//! **Fenced catalogs.** A tenant move's cutover may fence the catalog by
+//! renaming its tables to `__sprig_f_<hex16>` (chapter 09, "Fencing
+//! primitives"; chapter 10, "Cutover"). The renamed catalog looks empty,
+//! so a run would create a second, empty set of tables under the old
+//! names and the unfence could not rename the real ones back. A run
+//! therefore refuses a schema holding fenced tables (39070, retryable),
+//! checking after it read the formats and again before each migration: a
+//! fence that renamed the tables before the read is seen, and one after it
+//! leaves formats that need nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -494,6 +504,7 @@ impl Migrator {
         exec_text(conn, opts, &format!("USE {q}")).await?;
         let mut state = read_state(conn, schema).await?;
         check_readable(&state, &self.supports())?;
+        refuse_fenced(conn, schema).await?;
         let mut report = MigrateReport {
             applied: Vec::new(),
             blocked: Vec::new(),
@@ -518,6 +529,7 @@ impl Migrator {
                     report.blocked.push(r);
                     break;
                 }
+                refuse_fenced(conn, schema).await?;
                 tracing::info!(schema, module = module.name, format = m.format, phase = ?m.phase, name = m.name, "applying catalog migration");
                 for stmt in m.statements {
                     exec_text(conn, opts, stmt).await?;
@@ -598,6 +610,53 @@ impl Migrator {
         })
         .await
     }
+}
+
+/// Fails with 39070 if `schema` holds tables a rename fence moved away
+/// (module docs, "Fenced catalogs").
+async fn refuse_fenced(conn: &mut Conn, schema: &str) -> Result<()> {
+    let fenced = fenced_tables(conn, schema).await?;
+    if fenced.is_empty() {
+        return Ok(());
+    }
+    tracing::warn!(
+        schema,
+        ?fenced,
+        "catalog migrations skipped: the catalog is fenced"
+    );
+    Err(SprigError::new(
+        SprigCode::CatalogUnavailable,
+        format!(
+            "catalog {schema} is fenced (a tenant move's cutover renamed its tables, such as \
+             {}); migrations wait until it is unfenced or the move has finished",
+            fenced[0]
+        ),
+    ))
+}
+
+/// The tables of `schema` named like a rename fence's
+/// (`__sprig_f_<16 hex digits>`, `sprig_cluster::fence::fenced_name`).
+///
+/// # Errors
+/// A backend error if the read fails.
+pub async fn fenced_tables(conn: &mut Conn, schema: &str) -> Result<Vec<String>> {
+    let names: Vec<String> = conn
+        .exec(
+            "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? \
+             AND TABLE_NAME LIKE '\\_\\_sprig\\_f\\_%' ORDER BY TABLE_NAME",
+            (schema,),
+        )
+        .await
+        .map_err(map_err)?;
+    Ok(names.into_iter().filter(|n| is_fenced_name(n)).collect())
+}
+
+/// Whether `table` is a rename fence's name for a table.
+#[must_use]
+pub fn is_fenced_name(table: &str) -> bool {
+    table
+        .strip_prefix("__sprig_f_")
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Runs one statement through the text protocol (DDL can't always be
@@ -741,6 +800,15 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn fenced_names() {
+        assert!(is_fenced_name("__sprig_f_00000000deadbeef"));
+        assert!(!is_fenced_name("__sprig_f_deadbeef"));
+        assert!(!is_fenced_name("__sprig_f_00000000deadbeeg"));
+        assert!(!is_fenced_name("databases"));
+        assert!(!is_fenced_name("__sprig_sl_ckpt"));
+    }
 
     static GOOD: &[Migration] = &[
         Migration {

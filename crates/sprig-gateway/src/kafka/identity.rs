@@ -178,6 +178,10 @@ impl ScramFinish for ScramEnd {
         } else {
             Outcome::WrongCredentials
         };
-        decide(self.login, outcome, AuthPath::Full).await
+        let mut login = self.login;
+        // The client sent a proof of a password: a refusal says "using
+        // password: YES", not the MySQL login's default "NO".
+        login.proof_presented();
+        decide(login, outcome, AuthPath::Full).await
     }
 }

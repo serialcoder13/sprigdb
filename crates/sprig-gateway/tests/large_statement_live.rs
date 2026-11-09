@@ -29,6 +29,7 @@
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
     missing_docs
 )]
 
@@ -142,14 +143,22 @@ async fn large_statements_dont_stall_other_sessions() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let t0 = Instant::now();
+    // The small sessions run on a runtime of their own: this process's
+    // work on the large statements (building them, TLS) must not delay
+    // them and pass for the gateway's stall.
+    let small_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let loops: Vec<_> = (0..8)
-        .map(|_| tokio::spawn(small_loop(url.clone(), Arc::clone(&stop), t0)))
+        .map(|_| small_rt.spawn(small_loop(url.clone(), Arc::clone(&stop), t0)))
         .collect();
     let direct_url = std::env::var("SPRIG_TEST_LARGE_DIRECT").ok();
     let direct: Vec<_> = direct_url
         .iter()
         .flat_map(|u| (0..8).map(move |_| u.clone()))
-        .map(|u| tokio::spawn(small_loop(u, Arc::clone(&stop), t0)))
+        .map(|u| small_rt.spawn(small_loop(u, Arc::clone(&stop), t0)))
         .collect();
 
     // Quiet phase.
@@ -247,6 +256,7 @@ async fn large_statements_dont_stall_other_sessions() {
     for l in direct {
         on_server.extend(l.await.expect("direct loop"));
     }
+    small_rt.shutdown_background();
     big.query_drop("DELETE FROM big").await.unwrap();
     big.disconnect().await.ok();
 

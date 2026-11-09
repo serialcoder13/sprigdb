@@ -1,7 +1,7 @@
 //! Golden bytes, worked out by hand from the AMQP 0-9-1 spec (with
 //! `RabbitMQ`'s errata for field-table tags) and the OASIS AMQP 1.0 spec.
 
-#![allow(clippy::unwrap_used, missing_docs)]
+#![allow(clippy::unwrap_used, clippy::many_single_char_names, missing_docs)]
 
 use bytes::{Bytes, BytesMut};
 use sprig_proto_amqp::v10::message::{Properties, data_section, encode_sections};

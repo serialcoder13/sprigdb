@@ -756,9 +756,110 @@ pub struct Publication {
     pub changes: Vec<FieldChange>,
 }
 
+impl Publication {
+    /// Whether it took away a fact only a deep probe can give back
+    /// ([`deep_only`]): the monitor then schedules a deep probe soon
+    /// instead of waiting for the daily one.
+    #[must_use]
+    pub fn downgrades_deep_only(&self) -> bool {
+        self.changes
+            .iter()
+            .any(|c| c.direction != Direction::Upgrade && deep_only(&c.field))
+    }
+}
+
+/// Whether `field` (a [`FieldChange::field`]) comes from the active probes
+/// or the binlog dump probe, which run only in a deep probe: XA, the
+/// feature statements, the session-variable tests, and the feed verdicts
+/// the dump probe can veto.
+#[must_use]
+pub fn deep_only(field: &str) -> bool {
+    matches!(
+        field,
+        "derived.xa"
+            | "derived.enforce_json_schema"
+            | "derived.compiled_logic"
+            | "derived.mover_source"
+            | "derived.feed_source"
+            | "derived.feed_level"
+            | "privileges.sql_log_bin_settable"
+            | "privileges.osu_method_settable"
+    ) || (field.starts_with("features.")
+        && !matches!(
+            field,
+            "features.alter_two_phase" | "features.performance_schema"
+        ))
+}
+
+/// How much of the cluster one pass saw. A node that didn't answer (a
+/// timeout, a lost connection, a refused login) says nothing about what the
+/// server can do, so a pass that missed nodes publishes only what the nodes
+/// that answered actually showed (chapter 09, "Publishing").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Coverage {
+    /// Every node answered.
+    Complete,
+    /// The writer (the node the active probes run on) answered; another
+    /// node didn't. Facts read on the writer are published; facts that
+    /// depend on every node keep their published values.
+    Writer,
+    /// The writer didn't answer: nothing is published.
+    Blind,
+}
+
+impl Coverage {
+    /// The coverage of `probes`, one per node of the record.
+    #[must_use]
+    pub fn of(topology: TopologyKind, probes: &[NodeProbe]) -> Self {
+        if !probes.is_empty() && probes.iter().all(|p| p.facts().is_some()) {
+            Coverage::Complete
+        } else if crate::probe::active_target(topology, probes).is_some() {
+            Coverage::Writer
+        } else {
+            Coverage::Blind
+        }
+    }
+}
+
+/// Flags derived from every node, not just the writer: kept at their
+/// published values by a [`Coverage::Writer`] pass. Zero-loss failover is
+/// one only on Galera (every node synced); elsewhere it is the writer's
+/// semi-sync, read on the writer.
+const CLUSTER_WIDE_FLAGS: &[&str] = &[
+    "derived.mover_source",
+    "derived.feed_source",
+    "derived.zero_loss_failover",
+];
+
+/// Copies the facts that depend on every node from `old` into `next`;
+/// returns the flags it kept.
+fn keep_cluster_wide(
+    next: &mut CapabilityProfile,
+    old: &CapabilityProfile,
+) -> &'static [&'static str] {
+    let galera = old.galera.is_some() || next.galera.is_some();
+    next.galera.clone_from(&old.galera);
+    next.server.version = old.server.version;
+    next.derived.ryw = old.derived.ryw;
+    next.derived.validation = old.derived.validation;
+    next.derived.feed_level = old.derived.feed_level;
+    next.derived.feed_source = old.derived.feed_source;
+    next.derived.mover_source = old.derived.mover_source;
+    if galera {
+        next.derived.zero_loss_failover = old.derived.zero_loss_failover;
+        next.derived.expected_loss = old.derived.expected_loss;
+        CLUSTER_WIDE_FLAGS
+    } else {
+        &CLUSTER_WIDE_FLAGS[..2]
+    }
+}
+
 /// Publishing with hysteresis: a downgrade is published at once; an upgrade
 /// only after it held for `cluster.capability_upgrade_sustain_seconds`, so a
-/// flapping capability is seen at its worse value.
+/// flapping capability is seen at its worse value. Only what a pass
+/// observed counts ([`Coverage`]): a node that timed out is not a node that
+/// lacks a capability.
 #[derive(Debug, Clone)]
 pub struct CapabilityPublisher {
     published: Option<CapabilityProfile>,
@@ -796,9 +897,25 @@ impl CapabilityPublisher {
         v
     }
 
-    /// Feeds a freshly derived profile observed at `now`; returns what to
-    /// publish, if anything changed.
+    /// Feeds a freshly derived profile observed at `now` by a pass in which
+    /// every node answered; returns what to publish, if anything changed.
     pub fn observe(&mut self, candidate: CapabilityProfile, now: Instant) -> Option<Publication> {
+        self.observe_with(candidate, now, Coverage::Complete)
+    }
+
+    /// [`observe`](Self::observe) for a pass that saw `coverage` of the
+    /// cluster. A [`Coverage::Blind`] pass publishes nothing and leaves
+    /// held upgrades as they were; a [`Coverage::Writer`] pass publishes
+    /// the writer's facts and keeps the cluster-wide ones (Galera
+    /// membership, the lowest version, read-your-writes, validation, the
+    /// feed verdicts) at their published values. The first profile is
+    /// always published.
+    pub fn observe_with(
+        &mut self,
+        candidate: CapabilityProfile,
+        now: Instant,
+        coverage: Coverage,
+    ) -> Option<Publication> {
         let Some(old) = &self.published else {
             let mut first = candidate;
             first.version = first.version.max(1);
@@ -808,8 +925,20 @@ impl CapabilityPublisher {
                 changes: Vec::new(),
             });
         };
+        if coverage == Coverage::Blind {
+            return None;
+        }
         let mut next = candidate;
+        let kept = if coverage == Coverage::Writer {
+            keep_cluster_wide(&mut next, old)
+        } else {
+            &[]
+        };
         for (name, get, set) in FLAGS {
+            if kept.contains(name) {
+                // Not observed: a held upgrade keeps its clock.
+                continue;
+            }
             if !get(old) && get(&next) {
                 let since = *self.pending.entry(name).or_insert(now);
                 if now.saturating_duration_since(since) < self.sustain {

@@ -127,7 +127,7 @@ impl RecordBatch {
     /// attributes, and computes the CRC.
     ///
     /// # Errors
-    /// `UnsupportedCompression` (snappy, LZ4); `Invalid` for more than
+    /// `UnsupportedCompression` (codecs 5 to 7); `Invalid` for more than
     /// `i32::MAX` records or bytes.
     pub fn encode(&self, w: &mut Writer) -> Result<()> {
         let codec = self.compression()?;
@@ -445,7 +445,13 @@ mod tests {
 
     #[test]
     fn round_trip_every_supported_codec() {
-        for codec in [Compression::None, Compression::Gzip, Compression::Zstd] {
+        for codec in [
+            Compression::None,
+            Compression::Gzip,
+            Compression::Snappy,
+            Compression::Lz4,
+            Compression::Zstd,
+        ] {
             let b = sample(i16::from(codec.id()));
             let bytes = b.to_bytes().unwrap();
             let back = RecordBatch::decode(&mut Reader::new(&bytes), 1 << 20).unwrap();
@@ -466,20 +472,20 @@ mod tests {
     }
 
     #[test]
-    fn snappy_and_lz4_batches_are_refused() {
+    fn unknown_codecs_are_refused() {
         let mut bytes = sample(0).to_bytes().unwrap();
-        // Rewrite the attributes to snappy and fix the CRC: the codec check
-        // comes after the CRC.
-        bytes[22] = 0x02;
+        // Rewrite the attributes to codec 5 and fix the CRC: the codec
+        // check comes after the CRC.
+        bytes[22] = 0x05;
         let crc = crc32c::crc32c(&bytes[21..]);
         bytes[17..21].copy_from_slice(&crc.to_be_bytes());
         assert_eq!(
             RecordBatch::decode(&mut Reader::new(&bytes), 1 << 20),
-            Err(CodecError::UnsupportedCompression(2))
+            Err(CodecError::UnsupportedCompression(5))
         );
         assert_eq!(
-            sample(3).to_bytes(),
-            Err(CodecError::UnsupportedCompression(3))
+            sample(6).to_bytes(),
+            Err(CodecError::UnsupportedCompression(6))
         );
     }
 

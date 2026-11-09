@@ -276,6 +276,10 @@ enum Ran {
     /// (1062 naming the value), before anything reached the client:
     /// chapter 19's collision retry takes new values.
     Collision(SprigError),
+    /// The executor refused a read's plan at run time (39420), before
+    /// anything reached the client: chapter 17's gathered read (R3) may
+    /// answer it instead.
+    Regather(SprigError, sprig_router::Rejection),
 }
 
 /// For an `INSERT IGNORE` (several rows, an unqualified table) that took
@@ -1028,7 +1032,7 @@ impl PassSession {
                 .await?
             {
                 Ran::Done(step) => Ok(step),
-                Ran::Stale(e) | Ran::ColumnGone(e) | Ran::Collision(e) => {
+                Ran::Stale(e) | Ran::ColumnGone(e) | Ran::Collision(e) | Ran::Regather(e, _) => {
                     self.fail_mapped(out, e, map).await
                 }
             };
@@ -1039,6 +1043,8 @@ impl PassSession {
         let mut retries = 0usize;
         let mut column_retried = false;
         let mut collisions = 0u32;
+        let mut regather: Option<sprig_router::Rejection> = None;
+        let mut regathered = false;
         loop {
             if layout.hold_for(&text).is_some() {
                 self.wait_hold(&layout, &cache, &text).await;
@@ -1046,9 +1052,13 @@ impl PassSession {
                     layout = l;
                 }
             }
-            let plan = match Box::pin(self.plan_routed(&layout, &text, &cfg)).await {
-                Ok(p) => p,
-                Err(e) => return self.fail(out, &e).await,
+            let plan = if let Some(why) = regather.take() {
+                self.plan_regather(&layout, &text, &cfg, &why)
+            } else {
+                match Box::pin(self.plan_routed(&layout, &text, &cfg)).await {
+                    Ok(p) => p,
+                    Err(e) => return self.fail(out, &e).await,
+                }
             };
             self.note_targets(&plan, &layout);
             let ran = self
@@ -1088,6 +1098,13 @@ impl PassSession {
                     }
                     collisions += 1;
                     metrics::counter!("sprig_ids_collision_retries_total").increment(1);
+                }
+                Ran::Regather(err, why) => {
+                    if regathered {
+                        return self.fail_mapped(out, err, map).await;
+                    }
+                    regathered = true;
+                    regather = Some(why);
                 }
                 Ran::ColumnGone(err) => {
                     let skew = !matches!(err.kind, sprig_common::ErrorKind::Backend { .. });
@@ -1160,9 +1177,44 @@ impl PassSession {
                 Plan::ViaLookup(v) => stack.push(&v.plan),
                 Plan::ViaParent(v) => v.group.shards.iter().for_each(|s| note(&s.schema)),
                 Plan::NeedIds(f) => f.group.shards.iter().for_each(|s| note(&s.schema)),
+                Plan::Gather(g) => g
+                    .tables
+                    .iter()
+                    .flat_map(|t| &t.sources)
+                    .for_each(|t| note(&t.at.schema)),
                 Plan::Explain(_) | Plan::NotRouted | Plan::Reject(_) => {}
             }
         }
+    }
+
+    /// R3: the statement as a gathered read, after its read plan was
+    /// refused at run time (chapter 17, "Gathered reads (R3)").
+    fn plan_regather(
+        &self,
+        layout: &TenantLayout,
+        text: &str,
+        cfg: &sprig_router::RouterConfig,
+        why: &sprig_router::Rejection,
+    ) -> Plan {
+        let default_schema = self
+            .bs
+            .as_ref()
+            .and_then(|bs| bs.vars().schema.clone())
+            .or_else(|| {
+                self.tenant
+                    .as_deref()
+                    .and_then(|ts| ts.schema_of(ts.current.as_deref()))
+            });
+        let cluster = self.main_cluster().to_string();
+        let pcx = PlanCtx {
+            topo: &layout.topo,
+            default_schema: default_schema.as_deref(),
+            session_cluster: &cluster,
+            max_route_values: cfg.max_route_values,
+            lookup_batch: cfg.lookup_batch,
+            ids: self.id_mode(),
+        };
+        sprig_router::plan_gathered(text, &pcx, why)
     }
 
     /// Plans a text statement of the router path. An INSERT that takes
@@ -1565,6 +1617,10 @@ impl PassSession {
                 implicit: false,
                 mark: None,
                 explicit_ids: ids.is_some(),
+                gather: sprig_router::GatherLimits {
+                    max_rows: cfg.gather_max_rows,
+                    max_concurrent: cfg.gather_max_concurrent,
+                },
             };
             let mut budget = Budget::mb(cfg.max_statement_memory_mb);
             let r = sprig_router::execute_to(plan, &mut be, &mut budget, &mut sink).await;
@@ -1607,7 +1663,7 @@ impl PassSession {
                     && stale_code
                     && !legacy_txn
                     && (in_txn
-                        || matches!(plan, Plan::Read(_) | Plan::LookupJoin(_))
+                        || matches!(plan, Plan::Read(_) | Plan::LookupJoin(_) | Plan::Gather(_))
                         || (ids.is_some() && matches!(plan, Plan::Pass(_))));
                 if stale {
                     return Ok(Ran::Stale(e));
@@ -1615,10 +1671,20 @@ impl PassSession {
                 if !started
                     && !in_txn
                     && !legacy_txn
-                    && matches!(plan, Plan::Read(_) | Plan::LookupJoin(_))
+                    && matches!(plan, Plan::Read(_) | Plan::LookupJoin(_) | Plan::Gather(_))
                     && column_gone(&e)
                 {
                     return Ok(Ran::ColumnGone(e));
+                }
+                if !started
+                    && cfg.gather_max_rows > 0
+                    && matches!(
+                        plan,
+                        Plan::Read(_) | Plan::LookupJoin(_) | Plan::ViaLookup(_)
+                    )
+                    && let Some(why) = sprig_router::Rejection::from_error(&e)
+                {
+                    return Ok(Ran::Regather(e, why));
                 }
                 let e = super::tenant::scrub_typed(fail(e));
                 out.error(&e).await?;
@@ -1841,7 +1907,7 @@ impl PassSession {
                         self.moved_under_txn(&layout, &cache, e, &*map, out).await?;
                         Ok(ExecRoute::Answered)
                     }
-                    Ran::Stale(e) | Ran::ColumnGone(e) => {
+                    Ran::Stale(e) | Ran::ColumnGone(e) | Ran::Regather(e, _) => {
                         let e = self.map_error(e);
                         out.error(&e).await?;
                         Ok(ExecRoute::Answered)

@@ -17,6 +17,10 @@
 //! - **Write**: multi-row `INSERT` split by shard, multi-shard `UPDATE`
 //!   and `DELETE`, in one transaction (or a statement savepoint).
 //! - **Explain**: `EXPLAIN FORMAT=SPRIG`.
+//! - **Gather** (R3): a `SELECT` none of the above splits exactly (window
+//!   functions, subqueries, set operations, joins of several groups or on
+//!   any condition) runs once on the session's cluster, over temporary
+//!   copies of the rows it reads ([`gather`]).
 //! - **Reject**: `ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE` (39420) with a
 //!   reason code; never a different answer.
 //!
@@ -35,6 +39,8 @@
 
 pub mod collation;
 pub mod exec;
+pub mod fk;
+pub mod gather;
 pub mod plan;
 pub mod planner;
 pub mod reject;
@@ -47,8 +53,11 @@ pub use exec::{
     Budget, Output, RowSink, ShardBackend, ShardOk, ShardOutcome, ShardRows, ShardStream, execute,
     execute_to,
 };
+pub use gather::{GatherLimits, GatherPlan, Scratch};
 pub use plan::{Plan, ShardAt, Target};
-pub use planner::{ParamLit, PlanCtx, PreparedPlan, Template, parse_template, plan, plan_prepared};
+pub use planner::{
+    ParamLit, PlanCtx, PreparedPlan, Template, parse_template, plan, plan_gathered, plan_prepared,
+};
 pub use reject::{Reason, Rejection};
 pub use settings::RouterConfig;
 pub use topology::{StaticTopology, Topology, TopologyFile};

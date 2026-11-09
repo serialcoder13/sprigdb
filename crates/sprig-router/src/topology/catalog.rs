@@ -367,11 +367,28 @@ fn router_class(spec: &KeySpec) -> Option<KeyClass> {
 /// the session to wait or fail) and reference tables.
 #[must_use]
 pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> StaticTopology {
+    build_with_fks(tenant, groups, tables, &[])
+}
+
+/// [`build`], with the tenant's `foreign_keys` rows (chapter 19): the keys
+/// the gateway keeps (`gateway` and `reference`, `validating` or
+/// `enforced`) between two tables it knows become each database's
+/// [`crate::fk::FkGraph`]. A key with an end the router doesn't know (an
+/// unsharded table) is left to MariaDB.
+#[must_use]
+pub fn build_with_fks(
+    tenant: u64,
+    groups: &[CatalogGroup],
+    tables: &[CatalogTable],
+    fks: &[sprig_shard::fk::ForeignKey],
+) -> StaticTopology {
     let by_id: HashMap<u32, &CatalogGroup> = groups.iter().map(|g| (g.id, g)).collect();
     let mut built: HashMap<(u32, u32), Arc<Group>> = HashMap::new();
     let mut entries: Vec<(String, TableEntry)> = Vec::new();
     // Each entry's unique keys (parents' keys decide co-location).
     let mut uniques: Vec<Vec<Vec<String>>> = Vec::new();
+    // Each entry's object id and shape (foreign keys).
+    let mut shapes: Vec<(u64, Option<TableShape>)> = Vec::new();
     for t in tables {
         let name = t.name.to_ascii_lowercase();
         let mut lookups = Vec::new();
@@ -399,6 +416,7 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                     _ => String::new(),
                 };
                 let shape = create_sql.as_deref().map(TableShape::parse);
+                shapes.push((t.object, shape.clone()));
                 if let Some(s) = &shape {
                     columns.clone_from(&s.visible);
                     unique_keys.clone_from(&s.unique_keys);
@@ -451,6 +469,7 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                 )
             }
             Membership::Reference { clusters } => {
+                shapes.push((t.object, None));
                 let schema = sprig_shard::reference_schema(TenantId(tenant), DbId(t.db));
                 (
                     TableKind::Reference {
@@ -504,6 +523,7 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
         })
         .collect();
     let mut topo = StaticTopology::default();
+    let mut done: Vec<(String, TableEntry)> = Vec::new();
     for ((schema, mut e), c) in entries.into_iter().zip(checked) {
         match (c, e.parent.as_mut()) {
             (Some((lookup, unique)), Some(l)) => {
@@ -512,9 +532,116 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
             }
             _ => e.parent = None,
         }
+        done.push((schema, e));
+    }
+    for (schema, graph) in fk_graphs(fks, &done, &shapes) {
+        topo.set_fk_graph(&schema, graph);
+    }
+    for (schema, e) in done {
         topo.insert(&schema, e);
     }
     topo
+}
+
+/// Each database's foreign keys the gateway keeps, from the catalog rows
+/// whose two ends are in `entries` (with their object ids and shapes in
+/// `shapes`, in the same order).
+fn fk_graphs(
+    fks: &[sprig_shard::fk::ForeignKey],
+    entries: &[(String, TableEntry)],
+    shapes: &[(u64, Option<TableShape>)],
+) -> Vec<(String, crate::fk::FkGraph)> {
+    use crate::fk::{FkGraph, FkRef, ValClass};
+    use sprig_shard::fk::FkEnforcement;
+    let mut graphs: Vec<(String, FkGraph)> = Vec::new();
+    let at = |object: u64| shapes.iter().position(|(o, _)| *o == object && object != 0);
+    for f in fks {
+        if f.enforcement == FkEnforcement::Native || !f.state.checked() {
+            continue;
+        }
+        let (Some(ci), Some(pi)) = (at(f.child), at(f.parent)) else {
+            continue;
+        };
+        let (cs, child) = &entries[ci];
+        let (ps, parent) = &entries[pi];
+        if cs != ps || f.child_columns.len() != f.parent_columns.len() {
+            continue;
+        }
+        let child_shape = shapes[ci].1.as_ref();
+        let parent_shape = shapes[pi].1.as_ref();
+        let class_of = |shape: Option<&TableShape>, col: &str| -> Option<ValClass> {
+            let s = shape?;
+            if let Some((_, class)) = s.column_class(col) {
+                return Some(match class {
+                    sprig_shard::KeyClass::Numeric => ValClass::Num,
+                    sprig_shard::KeyClass::String { .. } => ValClass::Str,
+                    sprig_shard::KeyClass::Binary => ValClass::Bin,
+                    _ => ValClass::Text,
+                });
+            }
+            s.types.get(col).map(|_| ValClass::Text)
+        };
+        let classes: Vec<ValClass> = f
+            .parent_columns
+            .iter()
+            .zip(&f.child_columns)
+            .map(|(p, c)| {
+                class_of(parent_shape, p)
+                    .or_else(|| class_of(child_shape, c))
+                    .unwrap_or(ValClass::Text)
+            })
+            .collect();
+        let g = match graphs.iter().position(|(s, _)| s == cs) {
+            Some(i) => &mut graphs[i].1,
+            None => {
+                graphs.push((
+                    cs.clone(),
+                    FkGraph {
+                        default_schema: cs.clone(),
+                        tables: Vec::new(),
+                        fks: Vec::new(),
+                    },
+                ));
+                &mut graphs.last_mut().expect("just pushed").1
+            }
+        };
+        let mut index = |e: &TableEntry| match g.tables.iter().position(|t| t.name == e.name) {
+            Some(i) => i,
+            None => {
+                g.tables.push(e.clone());
+                g.tables.len() - 1
+            }
+        };
+        let (c, p) = (index(child), index(parent));
+        g.fks.push(FkRef {
+            name: f.name.clone(),
+            child: c,
+            child_ordinals: f
+                .child_columns
+                .iter()
+                .map(|col| child_shape.and_then(|s| s.ordinal(col)))
+                .collect(),
+            child_null_default: f
+                .child_columns
+                .iter()
+                .map(|col| {
+                    child_shape
+                        .and_then(|s| s.types.get(col))
+                        .is_none_or(|d| {
+                            let u = d.to_ascii_uppercase();
+                            !u.contains(" DEFAULT ") || u.contains(" DEFAULT NULL")
+                        })
+                })
+                .collect(),
+            child_columns: f.child_columns.clone(),
+            parent: p,
+            parent_columns: f.parent_columns.clone(),
+            classes,
+            on_delete: f.on_delete,
+            on_update: f.on_update,
+        });
+    }
+    graphs
 }
 
 /// A parent link, checked: the parent's lookup and whether its referenced

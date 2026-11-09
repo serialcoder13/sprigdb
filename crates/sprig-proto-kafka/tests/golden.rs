@@ -21,7 +21,7 @@
 )]
 
 use sprig_proto_kafka::messages::*;
-use sprig_proto_kafka::protocol::SERVED;
+use sprig_proto_kafka::protocol::{ApiRange, DATA_PLANE, SERVED};
 use sprig_proto_kafka::wire::Message;
 use uuid::Uuid;
 
@@ -120,13 +120,17 @@ fn check<M: Message + PartialEq + std::fmt::Debug>(name: &str, v: i16, m: &M, wa
     assert_eq!(&back, m, "{name} v{v}: decoded message differs");
 }
 
+fn range(key: i16) -> &'static ApiRange {
+    SERVED.iter().chain(DATA_PLANE).find(|r| r.key == key).unwrap()
+}
+
 fn versions(key: i16) -> std::ops::RangeInclusive<i16> {
-    let r = SERVED.iter().find(|r| r.key == key).unwrap();
+    let r = range(key);
     r.min..=r.max
 }
 
 fn flex(key: i16, v: i16) -> bool {
-    v >= SERVED.iter().find(|r| r.key == key).unwrap().flexible_min
+    v >= range(key).flexible_min
 }
 
 #[test]
@@ -1351,9 +1355,9 @@ fn partitions_and_configs() {
 fn every_served_api_has_a_golden_case() {
     // Keep this list in step with the tests above.
     let covered = [
-        18, 3, 10, 11, 14, 12, 13, 8, 9, 15, 16, 42, 17, 36, 22, 19, 20, 37, 32, 44,
+        18, 3, 10, 11, 14, 12, 13, 8, 9, 15, 16, 42, 17, 36, 22, 19, 20, 37, 32, 44, 0, 1, 2, 23,
     ];
-    for r in SERVED {
+    for r in SERVED.iter().chain(DATA_PLANE) {
         assert!(covered.contains(&r.key), "API {} has no golden case", r.key);
     }
 }
@@ -1377,4 +1381,389 @@ fn unknown_tagged_fields_survive_a_round_trip() {
     assert_eq!(m.unknown_tagged_fields.len(), 1);
     assert_eq!(m.unknown_tagged_fields[0].tag, 42);
     assert_eq!(m.to_bytes(6).unwrap(), b.out);
+}
+
+#[test]
+fn produce() {
+    let batch = [0x00u8, 0x01, 0x02, 0x03, 0x04];
+    for v in versions(0) {
+        let f = flex(0, v);
+        let mut b = B::new(f);
+        let q = ProduceRequest {
+            transactional_id: None,
+            acks: -1,
+            timeout_ms: 30_000,
+            topic_data: vec![produce_request::TopicProduceData {
+                name: "shop.order_events".into(),
+                partition_data: vec![produce_request::PartitionProduceData {
+                    index: 5,
+                    records: Some(batch.to_vec()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        b.null_str();
+        b.i16(-1);
+        b.i32(30_000);
+        b.arr(1);
+        b.str("shop.order_events");
+        b.arr(1);
+        b.i32(5);
+        b.bytes(&batch);
+        b.tags();
+        b.tags();
+        b.tags();
+        check("ProduceRequest", v, &q, &b.out);
+
+        let mut b = B::new(f);
+        let mut pr = produce_response::PartitionProduceResponse {
+            index: 5,
+            error_code: 0,
+            base_offset: 1205,
+            log_append_time_ms: -1,
+            ..Default::default()
+        };
+        b.arr(1);
+        b.str("shop.order_events");
+        b.arr(1);
+        b.i32(5);
+        b.i16(0);
+        b.i64(1205);
+        b.i64(-1);
+        if v >= 5 {
+            pr.log_start_offset = 7;
+            b.i64(7);
+        }
+        if v >= 8 {
+            pr.record_errors = vec![produce_response::BatchIndexAndErrorMessage {
+                batch_index: 0,
+                batch_index_error_message: None,
+                ..Default::default()
+            }];
+            pr.error_message = Some("39944".into());
+            b.arr(1);
+            b.i32(0);
+            b.null_str();
+            b.tags();
+            b.str("39944");
+        }
+        b.tags();
+        b.tags();
+        b.i32(0);
+        b.tags();
+        let p = ProduceResponse {
+            responses: vec![produce_response::TopicProduceResponse {
+                name: "shop.order_events".into(),
+                partition_responses: vec![pr],
+                ..Default::default()
+            }],
+            throttle_time_ms: 0,
+            ..Default::default()
+        };
+        check("ProduceResponse", v, &p, &b.out);
+    }
+}
+
+#[test]
+fn fetch() {
+    let records = [0xaau8, 0xbb];
+    for v in versions(1) {
+        let f = flex(1, v);
+        let mut b = B::new(f);
+        let mut part = fetch_request::FetchPartition {
+            partition: 5,
+            fetch_offset: 1205,
+            partition_max_bytes: 1_048_576,
+            ..Default::default()
+        };
+        let mut topic = fetch_request::FetchTopic::default();
+        let mut q = FetchRequest {
+            replica_id: -1,
+            max_wait_ms: 500,
+            min_bytes: 1,
+            max_bytes: 52_428_800,
+            isolation_level: 1,
+            ..Default::default()
+        };
+        b.i32(-1);
+        b.i32(500);
+        b.i32(1);
+        b.i32(52_428_800);
+        b.i8(1);
+        if v >= 7 {
+            q.session_id = 0;
+            q.session_epoch = -1;
+            b.i32(0);
+            b.i32(-1);
+        }
+        b.arr(1);
+        if v >= 13 {
+            topic.topic_id = U;
+            b.uuid(U);
+        } else {
+            topic.topic = "shop.order_events".into();
+            b.str("shop.order_events");
+        }
+        b.arr(1);
+        b.i32(5);
+        if v >= 9 {
+            part.current_leader_epoch = 3;
+            b.i32(3);
+        }
+        b.i64(1205);
+        if v >= 12 {
+            part.last_fetched_epoch = -1;
+            b.i32(-1);
+        }
+        if v >= 5 {
+            part.log_start_offset = -1;
+            b.i64(-1);
+        }
+        b.i32(1_048_576);
+        b.tags();
+        b.tags();
+        topic.partitions = vec![part];
+        q.topics = vec![topic];
+        if v >= 7 {
+            b.arr(0);
+        }
+        if v >= 11 {
+            q.rack_id = "dc-a".into();
+            b.str("dc-a");
+        }
+        b.tags();
+        check("FetchRequest", v, &q, &b.out);
+
+        let mut b = B::new(f);
+        let mut p = FetchResponse {
+            throttle_time_ms: 0,
+            ..Default::default()
+        };
+        b.i32(0);
+        if v >= 7 {
+            p.error_code = 0;
+            p.session_id = 0;
+            b.i16(0);
+            b.i32(0);
+        }
+        let mut t = fetch_response::FetchableTopicResponse::default();
+        b.arr(1);
+        if v >= 13 {
+            t.topic_id = U;
+            b.uuid(U);
+        } else {
+            t.topic = "shop.order_events".into();
+            b.str("shop.order_events");
+        }
+        let mut pd = fetch_response::PartitionData {
+            partition_index: 5,
+            error_code: 0,
+            high_watermark: 1206,
+            last_stable_offset: 1206,
+            aborted_transactions: Some(Vec::new()),
+            records: Some(records.to_vec()),
+            ..Default::default()
+        };
+        b.arr(1);
+        b.i32(5);
+        b.i16(0);
+        b.i64(1206);
+        b.i64(1206);
+        if v >= 5 {
+            pd.log_start_offset = 0;
+            b.i64(0);
+        }
+        b.arr(0);
+        if v >= 11 {
+            pd.preferred_read_replica = -1;
+            b.i32(-1);
+        }
+        b.bytes(&records);
+        b.tags();
+        b.tags();
+        b.tags();
+        t.partitions = vec![pd];
+        p.responses = vec![t];
+        check("FetchResponse", v, &p, &b.out);
+        // read_uncommitted: no aborted transactions list at all (null).
+        if v >= 4 {
+            let mut p2 = p.clone();
+            p2.responses[0].partitions[0].aborted_transactions = None;
+            let bytes = p2.to_bytes(v).unwrap();
+            assert_eq!(FetchResponse::from_bytes(&bytes, v).unwrap(), p2);
+            assert_eq!(bytes.len(), b.out.len());
+            assert_ne!(bytes, b.out);
+        }
+    }
+}
+
+#[test]
+fn list_offsets() {
+    for v in versions(2) {
+        let f = flex(2, v);
+        let mut b = B::new(f);
+        let mut part = list_offsets_request::ListOffsetsPartition {
+            partition_index: 5,
+            timestamp: -2,
+            ..Default::default()
+        };
+        let mut q = ListOffsetsRequest {
+            replica_id: -1,
+            ..Default::default()
+        };
+        b.i32(-1);
+        if v >= 2 {
+            q.isolation_level = 1;
+            b.i8(1);
+        }
+        b.arr(1);
+        b.str("shop.order_events");
+        b.arr(1);
+        b.i32(5);
+        if v >= 4 {
+            part.current_leader_epoch = 3;
+            b.i32(3);
+        }
+        b.i64(-2);
+        b.tags();
+        b.tags();
+        b.tags();
+        q.topics = vec![list_offsets_request::ListOffsetsTopic {
+            name: "shop.order_events".into(),
+            partitions: vec![part],
+            ..Default::default()
+        }];
+        check("ListOffsetsRequest", v, &q, &b.out);
+
+        let mut b = B::new(f);
+        let mut p = ListOffsetsResponse::default();
+        if v >= 2 {
+            p.throttle_time_ms = 0;
+            b.i32(0);
+        }
+        let mut pr = list_offsets_response::ListOffsetsPartitionResponse {
+            partition_index: 5,
+            error_code: 0,
+            timestamp: -1,
+            offset: 1200,
+            ..Default::default()
+        };
+        b.arr(1);
+        b.str("shop.order_events");
+        b.arr(1);
+        b.i32(5);
+        b.i16(0);
+        b.i64(-1);
+        b.i64(1200);
+        if v >= 4 {
+            pr.leader_epoch = 3;
+            b.i32(3);
+        }
+        b.tags();
+        b.tags();
+        b.tags();
+        p.topics = vec![list_offsets_response::ListOffsetsTopicResponse {
+            name: "shop.order_events".into(),
+            partitions: vec![pr],
+            ..Default::default()
+        }];
+        check("ListOffsetsResponse", v, &p, &b.out);
+    }
+}
+
+#[test]
+fn offset_for_leader_epoch() {
+    for v in versions(23) {
+        let f = flex(23, v);
+        let mut b = B::new(f);
+        let mut q = OffsetForLeaderEpochRequest::default();
+        if v >= 3 {
+            q.replica_id = -1;
+            b.i32(-1);
+        }
+        b.arr(1);
+        b.str("shop.order_events");
+        b.arr(1);
+        b.i32(5);
+        b.i32(4);
+        b.i32(3);
+        b.tags();
+        b.tags();
+        b.tags();
+        q.topics = vec![offset_for_leader_epoch_request::OffsetForLeaderTopic {
+            topic: "shop.order_events".into(),
+            partitions: vec![offset_for_leader_epoch_request::OffsetForLeaderPartition {
+                partition: 5,
+                current_leader_epoch: 4,
+                leader_epoch: 3,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        check("OffsetForLeaderEpochRequest", v, &q, &b.out);
+
+        let mut b = B::new(f);
+        b.i32(0);
+        b.arr(1);
+        b.str("shop.order_events");
+        b.arr(1);
+        b.i16(0);
+        b.i32(5);
+        b.i32(3);
+        b.i64(1180);
+        b.tags();
+        b.tags();
+        b.tags();
+        let p = OffsetForLeaderEpochResponse {
+            throttle_time_ms: 0,
+            topics: vec![offset_for_leader_epoch_response::OffsetForLeaderTopicResult {
+                topic: "shop.order_events".into(),
+                partitions: vec![offset_for_leader_epoch_response::EpochEndOffset {
+                    error_code: 0,
+                    partition: 5,
+                    leader_epoch: 3,
+                    end_offset: 1180,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        check("OffsetForLeaderEpochResponse", v, &p, &b.out);
+    }
+}
+
+#[test]
+fn fetch_tagged_fields_of_newer_versions_are_kept() {
+    // A v12 partition with CurrentLeader (tag 1), which SprigDB never
+    // sends but a client reading another broker's response decodes.
+    let mut b = B::new(true);
+    b.i32(0);
+    b.i16(0);
+    b.i32(0);
+    b.arr(1);
+    b.str("t.x");
+    b.arr(1);
+    b.i32(0);
+    b.i16(74);
+    b.i64(10);
+    b.i64(10);
+    b.i64(0);
+    b.null_arr();
+    b.i32(-1);
+    b.bytes(&[]);
+    b.uv(1); // one tagged field
+    b.uv(1); // CurrentLeader
+    b.uv(9); // its size
+    b.i32(2);
+    b.i32(7);
+    b.uv(0);
+    b.tags();
+    b.tags();
+    let m = FetchResponse::from_bytes(&b.out, 12).unwrap();
+    let p = &m.responses[0].partitions[0];
+    assert_eq!((p.current_leader.leader_id, p.current_leader.leader_epoch), (2, 7));
+    assert_eq!(m.to_bytes(12).unwrap(), b.out);
 }

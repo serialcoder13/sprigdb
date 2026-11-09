@@ -313,6 +313,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             live.clone(),
             dc.clone(),
         ));
+        let data = Arc::new(kafka::data::GatewayData::start(Arc::clone(t), stop.clone()));
         Arc::new(kafka::KafkaFrontend::start(
             kafka::KafkaDeps {
                 live: live.clone(),
@@ -322,8 +323,10 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
                 topics: Arc::new(kafka::catalog::StreamTopics::new(
                     Arc::clone(t),
                     Arc::clone(&engine),
+                    Arc::clone(&data),
                 )),
                 groups: Arc::new(kafka::catalog::CatalogGroups::new(Arc::clone(t))),
+                data: Some(data),
             },
             stop.clone(),
         ))
@@ -335,14 +338,22 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             live.clone(),
             dc.clone(),
         )),
-        Arc::new(amqp::GatewayQueues::new(
-            tenants.clone(),
-            live.clone(),
-            dc.clone(),
-        )),
+        Arc::new(match &tenants {
+            // Chapter 50 steps 2-10: the queue engine over the catalog.
+            Some(t) => amqp::GatewayQueues::with_engine(
+                Arc::clone(t),
+                live.clone(),
+                dc.clone(),
+                Arc::clone(&stores.dc),
+                gateway_id.clone(),
+                u32::from(sessions.slot()),
+                stop.clone(),
+            ),
+            None => amqp::GatewayQueues::new(None, live.clone(), dc.clone()),
+        }),
         live.clone(),
         dc.clone(),
-        gateway_id.to_string(),
+        gateway_id.clone(),
         u32::from(sessions.slot()),
     ));
     let peer_host = Arc::new(PeerHost {

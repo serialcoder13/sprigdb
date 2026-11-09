@@ -67,6 +67,19 @@ pub enum Reason {
     Lookup,
     /// A statement form the router doesn't distribute.
     Unsupported,
+    /// A stored function or UDF in a statement across shards (it could
+    /// read tables the router doesn't see).
+    Routine,
+    /// MariaDB `FULLTEXT` relevance compared across shards.
+    FulltextRelevance,
+    /// A gathered read (R3) the session can't run: the guard's reason is
+    /// in the detail.
+    Gather,
+    /// A write form that would leave a foreign key the gateway keeps
+    /// (chapter 19, R3) unchecked: a non-literal key value, `INSERT
+    /// IGNORE` or an upsert on a child, `REPLACE` on a parent, a
+    /// multi-table write over such tables.
+    ForeignKey,
 }
 
 impl Reason {
@@ -100,6 +113,10 @@ impl Reason {
             Self::SchemaSkew => "schema_skew",
             Self::Lookup => "lookup",
             Self::Unsupported => "unsupported",
+            Self::Routine => "routine",
+            Self::FulltextRelevance => "fulltext_relevance",
+            Self::Gather => "gather",
+            Self::ForeignKey => "foreign_key",
         }
     }
 }
@@ -138,7 +155,71 @@ impl Rejection {
     }
 }
 
+impl Rejection {
+    /// The rejection a 39420 error carries (its message names the reason
+    /// first, as [`Rejection::error`] writes it).
+    #[must_use]
+    pub fn from_error(e: &SprigError) -> Option<Self> {
+        if e.code() != Some(SprigCode::StatementNotDistributable) {
+            return None;
+        }
+        let rest = e.message.split_once('(')?.1;
+        let (code, detail) = rest.split_once("): ")?;
+        let reason = ALL.iter().copied().find(|r| r.as_str() == code)?;
+        Some(Self::new(reason, detail))
+    }
+}
+
+/// Every reason, for [`Rejection::from_error`].
+const ALL: &[Reason] = &[
+    Reason::JoinCondition,
+    Reason::JoinTypes,
+    Reason::JoinDepth,
+    Reason::CorrelatedSubquery,
+    Reason::DerivedTable,
+    Reason::RecursiveCte,
+    Reason::WindowFunction,
+    Reason::SetOperation,
+    Reason::Aggregate,
+    Reason::Ordering,
+    Reason::LimitedDml,
+    Reason::MultiTableDml,
+    Reason::InsertSelect,
+    Reason::UpsertUnique,
+    Reason::KeyChange,
+    Reason::Variables,
+    Reason::FoundRows,
+    Reason::Locking,
+    Reason::Parse,
+    Reason::Subquery,
+    Reason::AutoIncrement,
+    Reason::InsertKey,
+    Reason::CrossCluster,
+    Reason::SchemaSkew,
+    Reason::Lookup,
+    Reason::Unsupported,
+    Reason::Routine,
+    Reason::FulltextRelevance,
+    Reason::Gather,
+    Reason::ForeignKey,
+];
+
 /// Shorthand for a rejection result.
 pub(crate) fn reject<T>(reason: Reason, detail: impl Into<String>) -> Result<T, Rejection> {
     Err(Rejection::new(reason, detail))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn a_rejection_survives_its_error() {
+        for r in ALL {
+            let x = Rejection::new(*r, "a detail (with parentheses): here");
+            assert_eq!(Rejection::from_error(&x.error()), Some(x));
+        }
+        assert_eq!(Rejection::from_error(&SprigError::internal("x")), None);
+    }
 }

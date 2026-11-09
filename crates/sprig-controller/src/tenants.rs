@@ -65,6 +65,10 @@
 //! counter that was lost (a deployment rebuilt over clusters that kept an
 //! earlier tenant's schemas) can't hand out an id whose schemas exist. The
 //! owner mark is the backstop for a cluster that couldn't be read then.
+//! Ids come from `tenant.id_min..=tenant.id_max` (global keys; by default
+//! every id): the counter starts at the range's lowest id, only schemas
+//! inside the range raise it, and a used-up range fails creation with
+//! 39080. Deployments sharing MariaDB servers take separate ranges.
 //!
 //! Where this differs from the book: chapter 08 runs bootstrap as a job
 //! (`tenant_bootstrap`) through the scheduler; here the Admin API call runs
@@ -98,8 +102,8 @@ use crate::admin::types::{
 use crate::catalogs::ShardMapLocator;
 use crate::monitor::leader_guard;
 use crate::runtime::{LoopCx, LoopTier, MetaEvent, Outcome, Reconciler, WatchSpec};
-use crate::settings::TENANT_MAX_DEPTH;
-use crate::tree::{Directory, DirectoryEntry, NewTenant, StoredEntry, TenantState};
+use crate::settings::{TENANT_ID_MAX, TENANT_ID_MIN, TENANT_MAX_DEPTH};
+use crate::tree::{Directory, DirectoryEntry, IdRange, NewTenant, StoredEntry, TenantState};
 use crate::tree_settings::{SyncOutcome, TreeSync};
 
 /// Other chapters' parts of bootstrap and deletion.
@@ -285,6 +289,17 @@ where
         })
     }
 
+    /// `tenant.id_min..=tenant.id_max` (global keys).
+    fn id_range(&self) -> IdRange {
+        self.live.as_ref().map_or(IdRange::ALL, |l| {
+            let ctx = SettingCtx::process(&self.dc);
+            IdRange {
+                min: l.get(&TENANT_ID_MIN, &ctx),
+                max: l.get(&TENANT_ID_MAX, &ctx),
+            }
+        })
+    }
+
     fn bootstrap_timeout(&self) -> Duration {
         let m = self
             .live
@@ -356,7 +371,8 @@ where
                 },
                 None => None,
             };
-            self.reserve_ids_past_tenant_schemas().await?;
+            let ids = self.id_range();
+            self.reserve_ids_past_tenant_schemas(ids).await?;
             let new = NewTenant {
                 name: req.name.clone(),
                 parent: parent_id,
@@ -365,7 +381,7 @@ where
             };
             let e = self
                 .directory
-                .create(&new, self.max_depth(), self.clock.wall())
+                .create_in(&new, self.max_depth(), ids, self.clock.wall())
                 .await?;
             if let Some(b) = &inherited {
                 crate::residency::write_block(&**self.directory.store(), e.body().tenant_id, b)
@@ -485,13 +501,15 @@ where
     }
 
     /// Raises the directory's id counter past every schema shaped like a
-    /// tenant's on the DC's active clusters (module docs). A cluster that can't be read in
-    /// 5 s is skipped with a warning: the owner mark still keeps its
-    /// schemas from being adopted.
+    /// tenant's on the DC's active clusters (module docs) whose id is in
+    /// `ids` (`tenant.id_min..=tenant.id_max`): another deployment's
+    /// schemas on shared servers, outside the range, don't move it. A
+    /// cluster that can't be read in 5 s is skipped with a warning: the
+    /// owner mark still keeps its schemas from being adopted.
     ///
     /// # Errors
     /// The directory's errors.
-    async fn reserve_ids_past_tenant_schemas(&self) -> Result<()> {
+    async fn reserve_ids_past_tenant_schemas(&self, ids: IdRange) -> Result<()> {
         // The naming around the id: `t` and `_sprig` in production.
         let probe = TenantId(u64::MAX);
         let name = self.locator.schema(probe);
@@ -506,7 +524,12 @@ where
             })
             .await;
             match found {
-                Ok(Ok(ids)) => highest = ids.into_iter().fold(highest, u64::max),
+                Ok(Ok(found)) => {
+                    highest = found
+                        .into_iter()
+                        .filter(|i| ids.contains(*i))
+                        .fold(highest, u64::max);
+                }
                 Ok(Err(e)) => tracing::warn!(cluster = %c, error = %e,
                     "couldn't list tenant schemas before allocating a tenant id"),
                 Err(_) => tracing::warn!(cluster = %c,

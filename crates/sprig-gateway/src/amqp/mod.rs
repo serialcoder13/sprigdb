@@ -7,14 +7,16 @@
 //! - [`identity`]: SASL `PLAIN` and `AMQPLAIN` onto chapter 14's logins,
 //!   with the tenant from the TLS server name, a `tenant.user` name, or
 //!   `listener.amqp.tenant`.
-//! - [`GatewayQueues`]: the queue engine. Until `sprig-queues` (chapter 50
-//!   steps 2–10) exists it is `sprig-proto-amqp`'s in-memory engine, per
-//!   tenant and vhost, behind the same [`QueueBackend`] trait the real one
-//!   will implement; this module maps a vhost to the tenant's logical
-//!   database (`/` to `amqp.default_vhost_database`) and refuses vhosts
-//!   whose database doesn't exist.
+//! - [`GatewayQueues`]: the queue engine. With catalog logins it is
+//!   `sprig-queues`' [`QueueEngine`] over [`queues::GatewayMq`] (the tenant
+//!   catalog, the shard schemas, chapter 29's grants) and
+//!   [`queues::EtcdLeases`]; without them (no tenants) `sprig-proto-amqp`'s
+//!   in-memory engine. Either way a vhost maps to the tenant's logical
+//!   database (`/` to `amqp.default_vhost_database`), and vhosts whose
+//!   database doesn't exist are refused.
 
 pub mod identity;
+pub mod queues;
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -29,6 +31,7 @@ use sprig_proto_amqp::error::MqError;
 use sprig_proto_amqp::mem::{MemBackend, default_database};
 use sprig_proto_amqp::reply_to::DirectReplyTo;
 use sprig_proto_amqp::server::{Config, Services, serve};
+use sprig_queues::{EngineDeps, QueueEngine};
 use sprig_settings::{Apply, HardBounds, LiveSettings, Scopes, Setting, SettingCtx};
 
 use crate::frontend::{ClientConn, Frontend, GatewayContext, Protocol};
@@ -115,13 +118,14 @@ key!(
     "Accept bare queue names and AMQP address v1 forms"
 );
 
-/// The queue engine of the AMQP listeners: vhost to database, then the
-/// in-memory engine.
+/// The queue engine of the AMQP listeners: `sprig-queues` with catalog
+/// logins, else the in-memory engine.
 pub struct GatewayQueues {
     mem: MemBackend,
     tenants: Option<Arc<TenantServices>>,
     live: LiveSettings,
     dc: DcId,
+    engine: Option<Arc<QueueEngine>>,
 }
 
 impl std::fmt::Debug for GatewayQueues {
@@ -149,7 +153,49 @@ impl GatewayQueues {
             tenants,
             live,
             dc,
+            engine: None,
         }
+    }
+
+    /// The `sprig-queues` engine over `tenants` (chapter 50 steps 2–10):
+    /// owner leases in `dc_store` as gateway `gateway_id`, stopped (and
+    /// the leases revoked) at `stop`.
+    #[must_use]
+    pub fn with_engine(
+        tenants: Arc<TenantServices>,
+        live: LiveSettings,
+        dc: DcId,
+        dc_store: Arc<dyn sprig_meta::MetaStore>,
+        gateway_id: String,
+        slot: u32,
+        stop: sprig_common::CancellationToken,
+    ) -> Self {
+        let leases = Arc::new(queues::EtcdLeases::new(dc_store, gateway_id));
+        let engine = Arc::new(QueueEngine::new(EngineDeps {
+            catalog: Arc::new(queues::GatewayMq::new(Arc::clone(&tenants), live.clone())),
+            leases: Arc::clone(&leases) as Arc<dyn sprig_queues::engine::Leases>,
+            temps: Arc::new(sprig_queues::engine::NoTemps),
+            clock: Arc::new(sprig_queues::owner::SystemClock),
+            slot,
+        }));
+        {
+            let e = Arc::clone(&engine);
+            let stop2 = stop.clone();
+            tokio::spawn(async move {
+                stop2.cancelled().await;
+                e.shutdown();
+            });
+        }
+        tokio::spawn(leases.keep(stop));
+        let mut g = Self::new(Some(tenants), live, dc);
+        g.engine = Some(engine);
+        g
+    }
+
+    /// The queue engine, when this gateway runs `sprig-queues`.
+    #[must_use]
+    pub fn engine(&self) -> Option<&Arc<QueueEngine>> {
+        self.engine.as_ref()
     }
 
     fn database(&self, vhost: &str) -> String {
@@ -171,6 +217,9 @@ impl QueueBackend for GatewayQueues {
         conn: ConnKey,
         events: EventSender,
     ) -> std::result::Result<Arc<dyn Vhost>, MqError> {
+        if let Some(e) = &self.engine {
+            return e.open_vhost(principal, vhost, conn, events).await;
+        }
         let db = self.database(vhost);
         if let Some(t) = &self.tenants {
             let cat = t

@@ -82,6 +82,43 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
         Ok(R::decode(&mut r, version)?)
     }
 
+    /// Sends a request without waiting for its response (pipelining);
+    /// returns its correlation id for [`Client::recv`].
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn send<Q: Message>(&mut self, version: i16, q: &Q) -> Result<i32, ClientError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let header = RequestHeader {
+            api_key: Q::API_KEY,
+            api_version: version,
+            correlation_id: id,
+            client_id: Some(self.client_id.clone()),
+            unknown_tagged_fields: Vec::new(),
+        };
+        let frame = request_frame(&header, |w| q.encode(w, version))?;
+        self.stream.write_all(&frame).await?;
+        Ok(id)
+    }
+
+    /// Reads the next response, which must answer correlation id `id` of
+    /// API `R` at `version`.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn recv<R: Message>(&mut self, version: i16, id: i32) -> Result<R, ClientError> {
+        let resp = self.read_frame().await?;
+        let (corr, mut r) = read_response_header(&resp, R::API_KEY, version)?;
+        if corr != id {
+            return Err(ClientError::Refused(
+                -1,
+                format!("correlation id {corr}, expected {id}"),
+            ));
+        }
+        Ok(R::decode(&mut r, version)?)
+    }
+
     /// Sends raw bytes (a hand-made request) and returns the raw response
     /// frame (after its size).
     ///

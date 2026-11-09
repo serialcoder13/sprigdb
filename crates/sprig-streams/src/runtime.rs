@@ -121,12 +121,15 @@ impl Versioned for WatermarkRecord {
     const V: u32 = 1;
 }
 
-/// High watermarks to etcd, at most every `every`.
+/// High watermarks to etcd, at most every `every`. A mark held back by
+/// that limit is written when it ends (a trailing write), so the last
+/// marks of a burst always reach the gateways' long polls.
 pub struct MetaWatermarks {
     dc: Arc<dyn MetaStore>,
     key: String,
     every: Duration,
-    state: Mutex<(Option<Instant>, WatermarkRecord)>,
+    state: Arc<Mutex<(Option<Instant>, WatermarkRecord)>>,
+    trailing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for MetaWatermarks {
@@ -144,16 +147,40 @@ impl MetaWatermarks {
         Self {
             dc,
             key: format!("streams/{tenant}/{}/{shard}", s.0),
-            every: Duration::from_millis(200),
-            state: Mutex::new((
+            every: Duration::from_millis(50),
+            state: Arc::new(Mutex::new((
                 None,
                 WatermarkRecord {
                     epoch: 0,
                     marks: BTreeMap::new(),
                     at_ms: 0,
                 },
-            )),
+            ))),
+            trailing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+}
+
+async fn write_marks(dc: &Arc<dyn MetaStore>, key: &str, rec: WatermarkRecord) {
+    let Ok(key) = dc.tier().key(key) else {
+        return;
+    };
+    let Ok(value) = Record::new(rec).encode() else {
+        return;
+    };
+    let r = dc
+        .txn(Txn {
+            when: Vec::new(),
+            then: vec![Op::Put {
+                key,
+                value,
+                lease: None,
+            }],
+            otherwise: Vec::new(),
+        })
+        .await;
+    if let Err(e) = r {
+        tracing::debug!(error = %e, "stream watermarks not published");
     }
 }
 
@@ -165,32 +192,40 @@ impl Watermarks for MetaWatermarks {
         for (p, o) in marks {
             st.1.marks.insert(p.0, o.0);
         }
-        if st.0.is_some_and(|t| t.elapsed() < self.every) {
+        if let Some(t) = st.0
+            && t.elapsed() < self.every
+        {
+            // Held back: one trailing write when the interval ends.
+            if !self
+                .trailing
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                let wait = self.every.saturating_sub(t.elapsed());
+                let (dc, key, state, trailing) = (
+                    Arc::clone(&self.dc),
+                    self.key.clone(),
+                    Arc::clone(&self.state),
+                    Arc::clone(&self.trailing),
+                );
+                tokio::spawn(async move {
+                    tokio::time::sleep(wait).await;
+                    let rec = {
+                        let mut st = state.lock().await;
+                        trailing.store(false, std::sync::atomic::Ordering::Release);
+                        st.0 = Some(Instant::now());
+                        st.1.at_ms = now_ms();
+                        st.1.clone()
+                    };
+                    write_marks(&dc, &key, rec).await;
+                });
+            }
             return;
         }
         st.0 = Some(Instant::now());
         st.1.at_ms = now_ms();
-        let Ok(key) = self.dc.tier().key(&self.key) else {
-            return;
-        };
-        let Ok(value) = Record::new(st.1.clone()).encode() else {
-            return;
-        };
-        let r = self
-            .dc
-            .txn(Txn {
-                when: Vec::new(),
-                then: vec![Op::Put {
-                    key,
-                    value,
-                    lease: None,
-                }],
-                otherwise: Vec::new(),
-            })
-            .await;
-        if let Err(e) = r {
-            tracing::debug!(error = %e, "stream watermarks not published");
-        }
+        let rec = st.1.clone();
+        drop(st);
+        write_marks(&self.dc, &self.key, rec).await;
     }
 }
 

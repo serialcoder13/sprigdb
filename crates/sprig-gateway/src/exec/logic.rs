@@ -45,6 +45,14 @@ use crate::backend::{BackendSession, StmtInfo};
 use crate::pipeline::{EndOfRows, ExecCtx, ResultSink, RowFormat, RowValues, Wire};
 use crate::tenant::session::LocalWarning;
 
+/// `logic.max_call_depth`'s default (chapter 41).
+const MAX_CALL_DEPTH: u32 = 8;
+
+tokio::task_local! {
+    /// How deep engine-tier calls nest on this session's task.
+    static LOGIC_DEPTH: u32;
+}
+
 /// `logic.function_budget_ms`'s default (chapter 41).
 const FUNCTION_BUDGET_MS: u64 = 5000;
 /// `logic.max_loop_iterations`'s default.
@@ -217,7 +225,50 @@ impl PassSession {
             &mut session,
         )
         .await?;
-        Ok(outcome.notes())
+        let mut notes = outcome.notes();
+        // R7 order 6: `SELECT db.f(args)` through a stored function, which
+        // needs `SUPER` with the binary log on: created as `sprig_ctl`
+        // with the deploying user as `DEFINER` (checked afterwards). A
+        // failure leaves `CALL` working and says why.
+        if let Some(sql) = outcome.select_fn {
+            let account = sprig_auth::authz::backend::account(tenant, user);
+            let definer = format!("`{}`@`%`", account.replace('`', "``"));
+            let plan = sprig_logic::deploy::plan_select(&schema, &decl.name, sql, &definer);
+            let r = async {
+                let pool = svc.locator.ctl_pool(&self.target.cluster).await?;
+                let conn = pool
+                    .get_conn()
+                    .await
+                    .map_err(sprig_logic::deploy::conn_err)?;
+                let mut ctl = sprig_logic::deploy::ConnSession(conn);
+                sprig_logic::deploy::deploy(&mut ctl, &plan).await
+            }
+            .await;
+            match r {
+                Ok(_) => notes.push(format!("SELECT {}(...) is available", decl.name)),
+                Err(e) => {
+                    tracing::warn!(error = %e, name = %decl.name, "the SELECT function of a logic version wasn't created");
+                    notes.push(format!(
+                        "SELECT {}(...) isn't available ({}); CALL works",
+                        decl.name, e.message
+                    ));
+                }
+            }
+        } else if decl.kind == sprig_logic::declare::Kind::Function {
+            // An earlier version's SELECT function would call old code.
+            let plan = sprig_logic::deploy::plan_select(&schema, &decl.name, String::new(), "");
+            if let Ok(pool) = svc.locator.ctl_pool(&self.target.cluster).await
+                && let Ok(conn) = pool.get_conn().await
+            {
+                let mut ctl = sprig_logic::deploy::ConnSession(conn);
+                sprig_logic::deploy::undo(&mut ctl, &plan).await;
+            }
+            notes.push(format!(
+                "SELECT {}(...) isn't available: the function writes data; use CALL",
+                decl.name
+            ));
+        }
+        Ok(notes)
     }
 }
 
@@ -641,9 +692,9 @@ impl PassSession {
                     elapsed_ms = started.elapsed().as_millis(),
                     "engine-tier call"
                 );
-                let defs: Vec<ColumnDef> =
-                    v.columns.iter().map(|c| out_column(c, charset)).collect();
-                let row = v.row(&event, &result);
+                let cols = v.columns_for(&result);
+                let defs: Vec<ColumnDef> = cols.iter().map(|c| out_column(c, charset)).collect();
+                let row = EngineVersion::row_with(&cols, &event, &result);
                 let st = self.status();
                 out.begin_rows(&defs, format).await?;
                 match format {
@@ -657,7 +708,7 @@ impl PassSession {
                     RowFormat::Binary => {
                         let vals: Vec<Value> = row
                             .iter()
-                            .zip(&v.columns)
+                            .zip(&cols)
                             .map(|(t, c)| binary_value(t.as_ref(), c.ty))
                             .collect();
                         out.row(RowValues::Binary(&vals)).await?;
@@ -691,6 +742,23 @@ impl PassSession {
         cx: &mut ExecCtx<'_>,
         marker: &Marker,
     ) -> Result<(Arc<EngineVersion>, String, serde_json::Value)> {
+        // Chapter 41's `logic.max_call_depth`: `db.call` nests engine
+        // calls on this task.
+        let depth = LOGIC_DEPTH.try_with(|d| *d).unwrap_or(0);
+        if depth >= MAX_CALL_DEPTH {
+            return Err(SprigError::new(
+                SprigCode::LogicCallDepth,
+                format!("logic calls nest deeper than logic.max_call_depth = {MAX_CALL_DEPTH}"),
+            ));
+        }
+        Box::pin(LOGIC_DEPTH.scope(depth + 1, self.engine_call_inner(cx, marker))).await
+    }
+
+    async fn engine_call_inner(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        marker: &Marker,
+    ) -> Result<(Arc<EngineVersion>, String, serde_json::Value)> {
         let current = self.current_logical();
         let Some(ts) = self.tenant.as_deref_mut() else {
             return Err(SprigError::internal("no tenant"));
@@ -718,8 +786,8 @@ impl PassSession {
             )
             .await?
         };
-        let prepared = v.runnable()?;
-        let args = prepared.coerce(marker.args.clone())?;
+        let program = v.runnable()?;
+        let args = program.coerce(&v.name, marker.args.clone())?;
         // The code's own database: its budgets, and the default database
         // of its statements (a compiled routine runs in its own schema).
         let db_row = cat.databases.get(sprig_common::ids::DbId(v.db_id)).cloned();
@@ -736,12 +804,20 @@ impl PassSession {
             caps: cx.proto.caps,
         };
         let (tx, mut rx) = mpsc::channel::<DbRequest>(1);
+        let info = serde_json::json!({
+            "user": ts.principal.user.clone(),
+            "tenant": tenant_key,
+            "database": db_row.as_ref().map(|r| r.name.clone()),
+            "function": v.name.clone(),
+            "version": v.version,
+        });
         let host = Host {
             db: Arc::new(ChannelDb(tx)),
             outbound: Arc::new(HttpOutbound::new(policy)),
             default_db: db_row.map(|r| r.name.clone()),
+            info,
         };
-        let run = sprig_logic::engine::run(prepared, args, host, limits);
+        let run = program.run(args, host, limits);
         tokio::pin!(run);
         let outcome = loop {
             tokio::select! {
@@ -780,5 +856,487 @@ impl PassSession {
                 rows: sink.rows,
             },
         })
+    }
+}
+
+// ---- SELECT f(constants) of engine-tier functions (R7 order 6) -------------
+
+/// Held column definitions of a `SELECT` whose result may be replaced.
+enum Held {
+    Defs(Vec<ColumnDef>, RowFormat),
+    Raw(Vec<Bytes>, RowFormat),
+}
+
+/// A sink in front of the client's for a `SELECT` without `FROM`: holds
+/// the column definitions until a row or the end, and catches an
+/// engine-tier SQL function's 39876 (which MariaDB sends after them).
+struct SelectTap<'a> {
+    inner: &'a mut dyn ResultSink,
+    held: Option<Held>,
+    caught: Option<SprigError>,
+}
+
+impl SelectTap<'_> {
+    async fn release(&mut self) -> Result<()> {
+        match self.held.take() {
+            Some(Held::Defs(d, f)) => self.inner.begin_rows(&d, f).await,
+            Some(Held::Raw(d, f)) => self.inner.begin_rows_raw(&d, f).await,
+            None => Ok(()),
+        }
+    }
+}
+
+fn select_marked(e: &SprigError) -> bool {
+    let errno = match e.kind {
+        sprig_common::ErrorKind::Sprig(c) => c.number(),
+        sprig_common::ErrorKind::Backend { errno, .. }
+        | sprig_common::ErrorKind::Standard { errno, .. } => errno,
+    };
+    errno == SprigCode::LogicEngineUnavailable.number()
+        && sprig_logic::deploy::select_mark(&e.message).is_some()
+}
+
+#[async_trait]
+impl ResultSink for SelectTap<'_> {
+    fn wire(&self) -> Wire {
+        self.inner.wire()
+    }
+
+    async fn begin_rows(&mut self, columns: &[ColumnDef], format: RowFormat) -> Result<()> {
+        self.held = Some(Held::Defs(columns.to_vec(), format));
+        Ok(())
+    }
+
+    async fn begin_rows_raw(&mut self, defs: &[Bytes], format: RowFormat) -> Result<()> {
+        self.held = Some(Held::Raw(defs.to_vec(), format));
+        Ok(())
+    }
+
+    async fn row(&mut self, values: RowValues<'_>) -> Result<()> {
+        self.release().await?;
+        self.inner.row(values).await
+    }
+
+    async fn raw_row(&mut self, payload: Bytes) -> Result<()> {
+        self.release().await?;
+        self.inner.raw_row(payload).await
+    }
+
+    async fn end_rows(&mut self, end: EndOfRows) -> Result<()> {
+        self.release().await?;
+        self.inner.end_rows(end).await
+    }
+
+    async fn ok(&mut self, ok: OkPacket) -> Result<()> {
+        self.release().await?;
+        self.inner.ok(ok).await
+    }
+
+    async fn error(&mut self, err: &SprigError) -> Result<()> {
+        if self.caught.is_none() && select_marked(err) {
+            self.held = None;
+            self.caught = Some(SprigError {
+                kind: err.kind,
+                message: err.message.clone(),
+                retryable: err.retryable,
+                source: None,
+            });
+            return Ok(());
+        }
+        self.release().await?;
+        self.inner.error(err).await
+    }
+
+    async fn column_list(&mut self, columns: &[ColumnDef], end: EndOfRows) -> Result<()> {
+        self.inner.column_list(columns, end).await
+    }
+
+    async fn local_infile_request(&mut self, file_name: &[u8]) -> Result<()> {
+        self.inner.local_infile_request(file_name).await
+    }
+
+    async fn local_infile_read(&mut self) -> Result<Bytes> {
+        self.inner.local_infile_read().await
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        self.inner.flush().await
+    }
+
+    fn finished(&self) -> bool {
+        self.caught.is_some() || self.inner.finished()
+    }
+}
+
+impl PassSession {
+    /// A `SELECT` without `FROM` that may call engine-tier functions
+    /// (chapter 41, "Calling code"; R7 order 6). It runs as always; when
+    /// an engine-tier function's SQL form refuses with its mark, the
+    /// gateway runs that function for each of its calls with constant
+    /// arguments (MariaDB has just checked `EXECUTE` on it), puts the
+    /// values in their place as literals, and runs the statement again.
+    /// One function per round; calls with other arguments get the 39876.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn tenant_select(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        sql: Vec<u8>,
+        original: &[u8],
+        more: bool,
+        format: RowFormat,
+        mapper: ResultMapper,
+        map: &dyn NameMap,
+        out: &mut dyn ResultSink,
+    ) -> Result<Step> {
+        let caught = {
+            let mut tap = SelectTap {
+                inner: &mut *out,
+                held: None,
+                caught: None,
+            };
+            let step = self
+                .routed(cx, sql, original, more, format, mapper, map, &mut tap)
+                .await?;
+            match tap.caught.take() {
+                None => {
+                    tap.release().await?;
+                    return Ok(step);
+                }
+                Some(e) => e,
+            }
+        };
+        match self.select_rewrite(cx, original, &caught).await {
+            Ok(Some(text)) => {
+                let text = Bytes::from(text.into_bytes());
+                let attrs = QueryAttrs::default();
+                Box::pin(self.tenant_text(cx, &text, &attrs, more, format, out)).await
+            }
+            Ok(None) => self.fail(out, &caught).await,
+            Err(e) => self.fail(out, &e).await,
+        }
+    }
+
+    /// The statement with the marked function's constant calls replaced
+    /// by their values; `None` when there is nothing to replace.
+    async fn select_rewrite(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        original: &[u8],
+        caught: &SprigError,
+    ) -> Result<Option<String>> {
+        let Some((module_id, version)) = sprig_logic::deploy::select_mark(&caught.message) else {
+            return Ok(None);
+        };
+        let text = String::from_utf8_lossy(original).into_owned();
+        let Some(calls) = invoke::select_calls(&text) else {
+            return Ok(None);
+        };
+        if calls.is_empty() {
+            return Ok(None);
+        }
+        let current = self.current_logical();
+        let Some(ts) = self.tenant.as_deref_mut() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        let cat = match ts.catalog() {
+            Some(c) => Arc::clone(c),
+            None => ts.refresh().await?,
+        };
+        let svc = Arc::clone(ts.services());
+        let ep = svc.locator.writer(ts.tenant).await?;
+        let mut conn = ep.pool.get_conn().await.map_err(|e| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
+        })?;
+        let store = sprig_logic::LogicStore::new(ep.store.schema());
+        let mut mine = Vec::new();
+        for c in calls {
+            let Some(db) = c.db.clone().or_else(|| current.clone()) else {
+                continue;
+            };
+            let Some(row) = cat
+                .database(&db)
+                .or_else(|| cat.database(&db.to_ascii_lowercase()))
+            else {
+                continue;
+            };
+            if let Some(f) = store.callable(&mut conn, row.db_id.0, &c.name).await?
+                && f.module_id == module_id
+                && f.kind == "function"
+            {
+                mine.push(c);
+            }
+        }
+        drop(conn);
+        let mut edits = Vec::new();
+        for c in mine {
+            let marker = Marker {
+                module_id,
+                version,
+                args: c.args,
+            };
+            let (_, event, result) = self.engine_call(cx, &marker).await?;
+            let v = invoke::scalar(&event, &result)?;
+            let lit = eb::literal(&v);
+            edits.push((
+                c.range,
+                match c.alias {
+                    Some(a) => format!("{lit} AS `{}`", a.replace('`', "``")),
+                    None => lit,
+                },
+            ));
+        }
+        if edits.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(invoke::splice(&text, edits)))
+    }
+}
+
+// ---- logic functions as HTTP and gRPC endpoints (R7 order 6) --------------
+
+/// The text an HTTP or gRPC `Functions.Call` sends through the session:
+/// this prefix, then `{"protocol", "name", "args"}` as JSON.
+pub const FUNCTION_CALL_PREFIX: &str = "/* sprig function call */ ";
+
+/// The request in a [`FUNCTION_CALL_PREFIX`] text.
+pub(super) fn function_call_request(text: &[u8]) -> Option<serde_json::Value> {
+    let rest = text.strip_prefix(FUNCTION_CALL_PREFIX.as_bytes())?;
+    serde_json::from_slice(rest).ok()
+}
+
+/// The result row's columns: `event`, then `result` (the event's fields
+/// as a JSON object).
+fn call_columns(charset: u16) -> Vec<ColumnDef> {
+    vec![
+        out_column(
+            &invoke::OutCol {
+                name: "event".into(),
+                ty: OutTy::Event,
+            },
+            charset,
+        ),
+        ColumnDef {
+            col_type: ct::JSON,
+            ..out_column(
+                &invoke::OutCol {
+                    name: "result".into(),
+                    ty: OutTy::Json,
+                },
+                charset,
+            )
+        },
+    ]
+}
+
+impl PassSession {
+    /// `Functions.Call` (chapter 37, "Logic functions as endpoints"): finds
+    /// the function in the session's database, checks it is exposed to the
+    /// caller's protocol (39789), maps named arguments to the signature,
+    /// and runs `CALL db.name(...)` through this session, so `EXECUTE`,
+    /// tiers, budgets and the caller's transaction are a SQL `CALL`'s.
+    /// Outside a transaction the call runs in its own (`START TRANSACTION`
+    /// ... `COMMIT`, rolled back on an error). Answers one row: `event`,
+    /// `result` (the event's fields as JSON).
+    pub(super) async fn tenant_function_call(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        req: serde_json::Value,
+        more: bool,
+        format: RowFormat,
+        out: &mut dyn ResultSink,
+    ) -> Result<Step> {
+        let r = self.function_call(cx, &req).await;
+        match r {
+            Ok((event, result)) => {
+                let charset = cx.proto.collation;
+                let defs = call_columns(charset);
+                let st = self.status();
+                out.begin_rows(&defs, format).await?;
+                let row = [Some(event), Some(result.to_string())];
+                match format {
+                    RowFormat::Text => {
+                        let vals: Vec<Option<&[u8]>> = row
+                            .iter()
+                            .map(|c| c.as_deref().map(str::as_bytes))
+                            .collect();
+                        out.row(RowValues::Text(&vals)).await?;
+                    }
+                    RowFormat::Binary => {
+                        let vals: Vec<Value> = row
+                            .iter()
+                            .map(|t| binary_value(t.as_ref(), OutTy::Str))
+                            .collect();
+                        out.row(RowValues::Binary(&vals)).await?;
+                    }
+                }
+                out.end_rows(EndOfRows {
+                    status: st | StatusFlags::MORE_RESULTS_EXISTS,
+                    warnings: 0,
+                })
+                .await?;
+                let fin = if more {
+                    st | StatusFlags::MORE_RESULTS_EXISTS
+                } else {
+                    st
+                };
+                out.ok(OkPacket::new(fin)).await?;
+                Ok(Step {
+                    errored: false,
+                    status: Some(fin),
+                })
+            }
+            Err(e) => self.fail(out, &e).await,
+        }
+    }
+
+    async fn function_call(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        req: &serde_json::Value,
+    ) -> Result<(String, serde_json::Value)> {
+        let protocol = req["protocol"].as_str().unwrap_or("http").to_owned();
+        let name = req["name"].as_str().unwrap_or_default().to_owned();
+        let db = self
+            .current_logical()
+            .ok_or_else(|| SprigError::standard(1046, *b"3D000", "No database selected"))?;
+        let Some(ts) = self.tenant.as_deref_mut() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        let cat = match ts.catalog() {
+            Some(c) => Arc::clone(c),
+            None => ts.refresh().await?,
+        };
+        let row = cat
+            .database(&db)
+            .or_else(|| cat.database(&db.to_ascii_lowercase()))
+            .cloned()
+            .ok_or_else(|| {
+                SprigError::standard(1049, *b"42000", format!("Unknown database '{db}'"))
+            })?;
+        let svc = Arc::clone(ts.services());
+        let ep = svc.locator.writer(ts.tenant).await?;
+        let callable = {
+            let mut conn = ep.pool.get_conn().await.map_err(|e| {
+                SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable")
+                    .with_source(e)
+            })?;
+            sprig_logic::LogicStore::new(ep.store.schema())
+                .callable(&mut conn, row.db_id.0, &name)
+                .await?
+        };
+        let Some(f) = callable else {
+            return Err(SprigError::new(
+                SprigCode::LogicNotFound,
+                format!("no function {name} in database {db}"),
+            ));
+        };
+        if !f.exposed_to(&protocol) {
+            return Err(SprigError::new(
+                SprigCode::FunctionNotExposed,
+                format!(
+                    "{name} isn't exposed to {protocol}; deploy it with EXPOSE ({protocol}, ...)"
+                ),
+            ));
+        }
+        let params = f.params();
+        let args: Vec<serde_json::Value> = match &req["args"] {
+            serde_json::Value::Null => Vec::new(),
+            serde_json::Value::Array(a) => a.clone(),
+            serde_json::Value::Object(o) => {
+                if let Some(k) = o.keys().find(|k| !params.contains(k)) {
+                    return Err(SprigError::new(
+                        SprigCode::LogicSignatureMismatch,
+                        format!("{name} has no parameter {k} (it takes {})", params.join(", ")),
+                    ));
+                }
+                params
+                    .iter()
+                    .map(|p| o.get(p).cloned().unwrap_or(serde_json::Value::Null))
+                    .collect()
+            }
+            other => vec![other.clone()],
+        };
+        let lits: Vec<String> = args.iter().map(eb::literal).collect();
+        let call = format!(
+            "CALL `{}`.`{}`({})",
+            row.name.replace('`', "``"),
+            f.name.replace('`', "``"),
+            lits.join(", ")
+        );
+        let wire = Wire {
+            persona: self.persona,
+            caps: cx.proto.caps,
+        };
+        let st = self.status();
+        let own = st.contains(StatusFlags::AUTOCOMMIT) && !st.contains(StatusFlags::IN_TRANS);
+        if own {
+            self.session_stmt(cx, "START TRANSACTION", wire).await?;
+        }
+        let r = self
+            .engine_db(
+                cx,
+                DbOp {
+                    shape: eb::Shape::Call,
+                    sql: call,
+                },
+                wire,
+            )
+            .await;
+        if own {
+            let end = if r.is_ok() { "COMMIT" } else { "ROLLBACK" };
+            let e = self.session_stmt(cx, end, wire).await;
+            if r.is_ok() {
+                e?;
+            }
+        }
+        let Reply::Rows { columns, rows } = r? else {
+            return Ok(("output".to_owned(), serde_json::json!({})));
+        };
+        let Some(first) = rows.first() else {
+            return Ok(("output".to_owned(), serde_json::json!({})));
+        };
+        let mut obj = eb::row_object(&columns, first)?;
+        let fields = obj.as_object_mut().map(std::mem::take).unwrap_or_default();
+        let mut fields = fields;
+        let event = fields
+            .shift_remove("event")
+            .and_then(|e| e.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "output".to_owned());
+        // The event's own fields, as declared; undeclared events keep
+        // their non-null fields.
+        let declared: Option<Vec<String>> = f.signature.as_ref().and_then(|s| {
+            s["events"].as_array().and_then(|evs| {
+                evs.iter().find(|e| e["name"] == event.as_str()).map(|e| {
+                    e["fields"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|x| x["name"].as_str().map(str::to_owned))
+                        .collect()
+                })
+            })
+        });
+        let kept: serde_json::Map<String, serde_json::Value> = fields
+            .into_iter()
+            .filter(|(k, v)| match &declared {
+                Some(d) => d.contains(k),
+                None => !v.is_null(),
+            })
+            .collect();
+        Ok((event, serde_json::Value::Object(kept)))
+    }
+
+    /// A statement for the session's own use (transaction control).
+    async fn session_stmt(&mut self, cx: &mut ExecCtx<'_>, sql: &str, wire: Wire) -> Result<()> {
+        self.engine_db(
+            cx,
+            DbOp {
+                shape: eb::Shape::Exec,
+                sql: sql.to_owned(),
+            },
+            wire,
+        )
+        .await
+        .map(|_| ())
     }
 }

@@ -8,16 +8,24 @@
 //! 1. read the record; retired or gone -> forget it
 //! 2. resolve cluster.* for this cluster (cluster > dc > global)
 //! 3. depth: deep at the first pass of a new profile, after a version,
-//!    server_id or Galera membership change, daily, or on `probe --full`;
-//!    full every cluster.probe_interval_seconds; light otherwise
+//!    server_id or Galera membership change, when a deep probe is due
+//!    (below), daily, or on `probe --full`; full every
+//!    cluster.probe_interval_seconds; light otherwise
 //! 4. probe every node as sprig_ctl (a deep probe also reads the binlog
 //!    as sprig_repl: the dump probe); derive the profile; assess health
-//! 5. publish: downgrades at once, upgrades after
+//! 5. publish what the pass observed (coverage: a node that didn't answer
+//!    is not a node without the capability; a pass that missed the writer
+//!    publishes nothing, one that missed another node keeps the
+//!    cluster-wide facts): downgrades at once, upgrades after
 //!    cluster.capability_upgrade_sustain_seconds; health when it changes;
 //!    the Galera writer set when it changes
-//! 6. probing records left by a crashed registration, and rejected ones,
+//! 6. a deep probe is due one sustain period after a published downgrade
+//!    of a deep-only fact (XA, features, the dump probe's verdict), after
+//!    a deep probe whose active probes didn't run, and after a new term
+//!    took the profile over from the record; otherwise daily
+//! 7. probing records left by a crashed registration, and rejected ones,
 //!    pass the registration gates again
-//! 7. again after cluster.health_interval_seconds
+//! 8. again after cluster.health_interval_seconds
 //! ```
 //!
 //! Every write is guarded by the DC leader's fencing token. The state kept
@@ -37,7 +45,7 @@ use sprig_cluster::driver::{BasicDriver, GaleraDriver, NodeConnector, TopologyDr
 use sprig_cluster::health::{ClusterHealth, HealthReport, HeartbeatWriter};
 use sprig_cluster::probe::{NodeProbe, ProbeDepth, Prober};
 use sprig_cluster::profile::{
-    CapabilityPublisher, Direction, FieldChange, full_probe_triggers, registration_gaps,
+    CapabilityPublisher, Coverage, Direction, FieldChange, full_probe_triggers, registration_gaps,
 };
 use sprig_cluster::record::{AdminState, NodeSpec, SecretRefs, TopologyKind, rfc3339};
 use sprig_cluster::registry::{ClusterRegistry, StoredCluster};
@@ -97,6 +105,8 @@ struct ClusterState {
     last_full: Option<Instant>,
     last_deep: Option<Instant>,
     need_deep: bool,
+    /// A deep probe is due at this time (step 6 of the module docs).
+    deep_due: Option<Instant>,
     probing_since: Option<Instant>,
     last_pass: Option<Instant>,
     heartbeat: Option<(sprig_common::ids::NodeId, HeartbeatWriter)>,
@@ -124,6 +134,11 @@ pub struct PassReport {
     pub held: Vec<String>,
     /// Why the next pass goes deep, if it does.
     pub deep_next: Vec<String>,
+    /// How much of the cluster the pass saw; `None` when it only waited.
+    pub coverage: Option<Coverage>,
+    /// When a deep probe is due, if one is scheduled before the daily one.
+    #[serde(skip)]
+    pub deep_due_in: Option<Duration>,
     /// When to look again.
     #[serde(skip)]
     pub next: Duration,
@@ -289,6 +304,8 @@ impl ClusterMonitor {
                     changes: Vec::new(),
                     held: Vec::new(),
                     deep_next: Vec::new(),
+                    coverage: None,
+                    deep_due_in: None,
                     next: settings.health_interval.saturating_sub(since),
                 }));
             }
@@ -306,6 +323,8 @@ impl ClusterMonitor {
                     changes: Vec::new(),
                     held: Vec::new(),
                     deep_next: Vec::new(),
+                    coverage: None,
+                    deep_due_in: None,
                     next: PROBING_GRACE.saturating_sub(waited),
                 }));
             }
@@ -348,9 +367,13 @@ impl ClusterMonitor {
                 settings.capability_upgrade_sustain,
             ));
             if has_facts && st.last_deep.is_none() {
-                // Deep facts were carried in the record; refresh them on
-                // the daily schedule.
+                // Deep facts were carried in the record: the daily
+                // schedule starts now, and one deep probe follows a
+                // sustain period after the takeover, so a deep-only fact
+                // the record lost to an earlier outage comes back within
+                // minutes, not a day.
                 st.last_deep = Some(now);
+                st.deep_due = Some(now + settings.capability_upgrade_sustain);
             }
         }
         if let Some(p) = st.publisher.as_mut() {
@@ -361,6 +384,7 @@ impl ClusterMonitor {
         let depth = force.unwrap_or_else(|| {
             if st.need_deep
                 || !has_facts
+                || st.deep_due.is_some_and(|t| now >= t)
                 || since(st.last_deep).is_none_or(|d| d >= DEEP_PROBE_PERIOD)
             {
                 ProbeDepth::Deep
@@ -474,12 +498,36 @@ impl ClusterMonitor {
             tracing::info!(cluster = %id, triggers = ?deep_next, "a deep probe follows");
         }
         st.need_deep = !deep_next.is_empty();
+        // A deep probe whose active probes didn't run (the writer timed
+        // out under load) is tried again a sustain period later; one that
+        // ran clears the schedule.
+        let retry = settings
+            .capability_upgrade_sustain
+            .max(settings.health_interval);
+        if depth == ProbeDepth::Deep {
+            if probes.iter().any(|p| p.active.is_some()) {
+                st.deep_due = None;
+            } else {
+                tracing::info!(cluster = %id, retry_in_s = retry.as_secs(),
+                    "the active probes didn't run; the deep probe is retried");
+                st.deep_due = Some(now + retry);
+            }
+        }
+        let coverage = Coverage::of(rec.topology, &probes);
+        if coverage != Coverage::Complete {
+            let missed: Vec<String> = probes
+                .iter()
+                .filter_map(|p| p.result.as_ref().err().map(|e| format!("{}: {e}", p.node)))
+                .collect();
+            tracing::debug!(cluster = %id, ?coverage, ?missed,
+                "nodes didn't answer: their capabilities keep the published values");
+        }
         let candidate = d.derive(&probes, rec.declared.as_ref());
         let publisher = st
             .publisher
             .as_mut()
             .ok_or_else(|| sprig_common::SprigError::internal("no publisher"))?;
-        let publication = publisher.observe(candidate, now);
+        let publication = publisher.observe_with(candidate, now, coverage);
         let held: Vec<String> = publisher
             .pending()
             .iter()
@@ -506,6 +554,14 @@ impl ClusterMonitor {
             }
             changes.clone_from(&p.changes);
             stored = registry.publish_profile(id, &p).await?;
+            if p.downgrades_deep_only() {
+                // Only a deep probe gives such a fact back: look again
+                // after one sustain period instead of the next day.
+                let at = now + settings.capability_upgrade_sustain;
+                st.deep_due = Some(st.deep_due.map_or(at, |t| t.min(at)));
+                tracing::info!(cluster = %id, in_s = settings.capability_upgrade_sustain.as_secs(),
+                    "a deep-only capability was downgraded; a deep probe follows");
+            }
         }
         let profile = current.unwrap_or_default();
         let health = d.health(&probes, &profile);
@@ -566,6 +622,8 @@ impl ClusterMonitor {
             changes,
             held,
             deep_next,
+            coverage: Some(coverage),
+            deep_due_in: st.deep_due.map(|t| t.saturating_duration_since(now)),
             next: settings.health_interval,
         }))
     }

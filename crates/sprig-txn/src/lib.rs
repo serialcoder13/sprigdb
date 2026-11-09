@@ -5,7 +5,9 @@
 //!
 //! - [`coordinator`]: [`TxnCoordinator`], one per session: branches per
 //!   cluster, the write rule and `txn.non_xa_policy`, savepoints, and
-//!   commit as local, XA two-phase with a last resource, or best effort.
+//!   commit as local, XA two-phase with a last resource, Sprig 2PC (R3:
+//!   held branches on clusters without XA, with [`redo`] records), or
+//!   best effort.
 //! - [`race`]: deciding by insert race on `__sprig_dtx`, shared by the
 //!   coordinator and the resolver.
 //! - [`resolver`]: finishes in-doubt branches after crashes, drains a
@@ -23,7 +25,8 @@
 //! The controller runs the resolver on the DC leader
 //! (`sprig-controller::txn_resolver`) with [`MapLocator`].
 //!
-//! Not yet (later build steps): Sprig 2PC (R3), client XA rewriting,
+//! Not yet (later build steps): Sprig 2PC's agent relay fence (the gateway
+//! holds the branches itself), client XA rewriting,
 //! eager consistent-snapshot branches, SERIALIZABLE autocommit reads,
 //! waiting for mover holds before prepare, the mover draining prepared
 //! branches before a fence, and `sprigctl txn`.
@@ -36,6 +39,7 @@ pub mod locate;
 pub mod lookup;
 pub mod mysql;
 pub mod race;
+pub mod redo;
 pub mod resolver;
 pub mod settings;
 pub mod xid;
@@ -52,7 +56,8 @@ pub use coordinator::{
 };
 pub use decision::{Decision, DecisionRow};
 pub use locate::{GroupSchemas, MapLocator};
-pub use resolver::{DrainReport, Resolver, ScanReport, SweepReport};
+pub use redo::{RedoBranch, RedoStmt, Replay};
+pub use resolver::{DrainReport, RedoReport, Resolver, ScanReport, SweepReport};
 pub use settings::{NonXaPolicy, ResolverConfig, TxnConfig};
 pub use xid::{AnchorRef, Dtid, DtidGen, Gtrid, Xid};
 

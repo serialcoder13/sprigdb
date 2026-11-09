@@ -467,6 +467,76 @@ async fn live_a_crash_between_statements_and_record_reruns_safely() {
     .await;
 }
 
+/// Chapter 10, "Cutover" (found in R9's live move): a migration run
+/// against a catalog whose tables a rename fence moved away must not
+/// recreate them empty; it waits (39070) until the catalog is unfenced.
+#[tokio::test]
+async fn live_a_fenced_catalog_is_not_migrated() {
+    with_schema("live_fenced_catalog", |pool, schema| async move {
+        migrate(&pool, &schema).await;
+        let mut conn = pool.get_conn().await.unwrap();
+        let tables: Vec<String> = conn
+            .exec(
+                "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? \
+                 ORDER BY TABLE_NAME",
+                (&schema,),
+            )
+            .await
+            .unwrap();
+        assert!(tables.iter().any(|t| t == "databases"), "{tables:?}");
+        // The rename fence's shape: `__sprig_f_<16 hex>` per table.
+        let pairs: Vec<(String, String)> = tables
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.clone(), format!("__sprig_f_{:016x}", 0xfe00 + i)))
+            .collect();
+        let rename = |back: bool| {
+            let parts: Vec<String> = pairs
+                .iter()
+                .map(|(a, b)| {
+                    let (x, y) = if back { (b, a) } else { (a, b) };
+                    format!("`{schema}`.`{x}` TO `{schema}`.`{y}`")
+                })
+                .collect();
+            format!("RENAME TABLE {}", parts.join(", "))
+        };
+        conn.query_drop(rename(false)).await.unwrap();
+        assert_eq!(
+            migrate::fenced_tables(&mut conn, &schema)
+                .await
+                .unwrap()
+                .len(),
+            pairs.len()
+        );
+        let e = Migrator::new(&[])
+            .unwrap()
+            .run(&mut conn, &schema, &MigrateOpts::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::CatalogUnavailable), "{e}");
+        assert!(e.retryable, "{e}");
+        assert!(e.to_string().contains("fenced"), "{e}");
+        let now: Vec<String> = conn
+            .exec(
+                "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? \
+                 AND TABLE_NAME = 'databases'",
+                (&schema,),
+            )
+            .await
+            .unwrap();
+        assert!(now.is_empty(), "nothing recreated: {now:?}");
+        // Unfenced: the catalog is as it was and needs nothing.
+        conn.query_drop(rename(true)).await.unwrap();
+        let r = Migrator::new(&[])
+            .unwrap()
+            .run(&mut conn, &schema, &MigrateOpts::default())
+            .await
+            .unwrap();
+        assert!(r.applied.is_empty(), "{:?}", r.applied);
+    })
+    .await;
+}
+
 // ---- store ----
 
 #[tokio::test]

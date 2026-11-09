@@ -384,7 +384,119 @@ fn module_row(r: Row) -> Result<ModuleRow> {
     })
 }
 
+/// A function or procedure as a caller outside SQL finds it (chapter 37,
+/// "Logic functions as endpoints").
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Callable {
+    /// The module.
+    pub module_id: u64,
+    /// Its name, as stored.
+    pub name: String,
+    /// `function` or `procedure`.
+    pub kind: String,
+    /// `kirun`, `javascript`, `lua`.
+    pub runtime: String,
+    /// The protocols it is exposed to (`sql`, `http`, `grpc`, ...).
+    pub exposure: Vec<String>,
+    /// The active version.
+    pub version: Option<u64>,
+    /// The active version's tier (`mariadb`, `engine`).
+    pub tier: Option<String>,
+    /// The active version's signature (params, events), if any.
+    pub signature: Option<serde_json::Value>,
+}
+
+impl Callable {
+    /// Whether it may be called over `protocol`.
+    #[must_use]
+    pub fn exposed_to(&self, protocol: &str) -> bool {
+        self.exposure.iter().any(|p| p == protocol)
+    }
+
+    /// The parameter names, in call order.
+    #[must_use]
+    pub fn params(&self) -> Vec<String> {
+        self.signature
+            .as_ref()
+            .and_then(|s| s["params"].as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| p["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 impl LogicStore {
+    /// Records a module's `EXPOSE (...)` list (`sql` is always in it).
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn set_exposure(&self, c: &mut Conn, module_id: u64, exposure: &[String]) -> Result<()> {
+        let mut list: Vec<&str> = vec!["sql"];
+        for e in exposure {
+            if !list.contains(&e.as_str()) {
+                list.push(e.as_str());
+            }
+        }
+        c.exec_drop(
+            format!("UPDATE {} SET exposure = ? WHERE module_id = ?", self.modules),
+            (list.join(","), module_id),
+        )
+        .await
+        .map_err(map_err)
+    }
+
+    /// The live function or procedure `name` of `db_id` (functions first),
+    /// with its exposure and active signature.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn callable(&self, c: &mut Conn, db_id: u32, name: &str) -> Result<Option<Callable>> {
+        type R = (
+            u64,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<u64>,
+            Option<String>,
+        );
+        let r: Option<R> = c
+            .exec_first(
+                format!(
+                    "SELECT m.module_id, m.name, m.kind, m.runtime, CAST(m.exposure AS CHAR), \
+                     CAST(v.signature AS CHAR), m.active_version, CAST(v.tier AS CHAR) \
+                     FROM {} m LEFT JOIN {} v \
+                     ON v.module_id = m.module_id AND v.version = m.active_version \
+                     WHERE m.db_id = ? AND m.name = ? AND m.kind IN ('function', 'procedure') \
+                     AND m.state = 'active' ORDER BY m.kind LIMIT 1",
+                    self.modules, self.versions
+                ),
+                (db_id, name),
+            )
+            .await
+            .map_err(map_err)?;
+        Ok(r.map(
+            |(module_id, name, kind, runtime, exposure, signature, version, tier)| Callable {
+                module_id,
+                name,
+                kind,
+                runtime,
+                exposure: exposure
+                    .split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                signature: signature.and_then(|s| serde_json::from_str(&s).ok()),
+                version,
+                tier,
+            },
+        ))
+    }
+
     /// The tables in `schema` (`t<tenant>_sprig`).
     #[must_use]
     pub fn new(schema: &str) -> Self {

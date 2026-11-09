@@ -30,6 +30,14 @@
 //!    means the rows are there, an abort row that they are not.
 //! 6. Cleanup: no commit row is left once its participants finished.
 //!
+//! Sprig 2PC (R3, chapter 18): the same world with policy `sprig_2pc`,
+//! mostly on three Galera clusters and nothing else (no XA anywhere), the
+//! rest mixed with the XA clusters. Held branches record their writes,
+//! prepare by writing redo rows, and commit by deleting them inside the
+//! branch; the resolver replays committed branches whose transaction was
+//! lost and drops aborted ones. The invariants above hold, and no redo
+//! row is left after recovery.
+//!
 //! `SPRIG_SIM_SEEDS=10000 cargo test -p sprig-txn --test sim_txn` runs
 //! the milestone's 10,000 seeds; CI runs the default.
 
@@ -59,6 +67,10 @@ use sprig_txn::{
 
 const TENANT: TenantId = TenantId(1);
 const DTX: &str = "__sprig_dtx";
+const REDO: &str = "__sprig_redo";
+/// The model keys rows by one integer, so the markers (`seq` = MARK in
+/// MariaDB) live in a table of their own.
+const REDO_MARK: &str = "__sprig_redo_mark";
 const T: &str = "t";
 const HOT: i64 = 1_000_000;
 const HORIZON: Duration = Duration::from_secs(30);
@@ -79,6 +91,9 @@ struct Stats {
     crashes: AtomicU64,
     resolver_commits: AtomicU64,
     resolver_rollbacks: AtomicU64,
+    sprig_2pc: AtomicU64,
+    redo_replays: AtomicU64,
+    redo_drops: AtomicU64,
 }
 
 static STATS: std::sync::LazyLock<Stats> = std::sync::LazyLock::new(Stats::default);
@@ -94,7 +109,7 @@ struct ClusterDef {
     xa: bool,
 }
 
-const CLUSTERS: [ClusterDef; 4] = [
+const CLUSTERS: [ClusterDef; 5] = [
     ClusterDef {
         id: "a",
         writer: "a1",
@@ -117,6 +132,12 @@ const CLUSTERS: [ClusterDef; 4] = [
         id: "g2",
         writer: "g2n1",
         schema: "t1_d1_g1_s4",
+        xa: false,
+    },
+    ClusterDef {
+        id: "g3",
+        writer: "g3n1",
+        schema: "t1_d1_g1_s5",
         xa: false,
     },
 ];
@@ -202,11 +223,42 @@ struct SimBranch {
     conn: SimConn,
     env: Arc<Env>,
     schema: &'static str,
+    /// Sprig 2PC: the writes recorded for a held branch.
+    redo: Option<Vec<sprig_txn::RedoStmt>>,
+}
+
+/// A model write as a redo statement: `I|U|D` `|table|key|value`.
+fn redo_of(s: &Stmt) -> Option<String> {
+    match s {
+        Stmt::Insert { t, k, v } => Some(format!("I|{t}|{k}|{v}")),
+        Stmt::Update { t, k, v } => Some(format!("U|{t}|{k}|{v}")),
+        Stmt::Delete { t, k } => Some(format!("D|{t}|{k}|")),
+        _ => None,
+    }
+}
+
+fn stmt_of(r: &str) -> Option<Stmt> {
+    let mut p = r.splitn(4, '|');
+    let (op, t, k, v) = (p.next()?, p.next()?, p.next()?.parse().ok()?, p.next()?);
+    let t = t.to_owned();
+    Some(match op {
+        "I" => Stmt::Insert { t, k, v: v.to_owned() },
+        "U" => Stmt::Update { t, k, v: v.to_owned() },
+        "D" => Stmt::Delete { t, k },
+        _ => return None,
+    })
 }
 
 impl SimBranch {
-    async fn exec(&self, s: &Stmt) -> Outcome {
-        self.conn.exec(s).await
+    async fn exec(&mut self, s: &Stmt) -> Outcome {
+        let o = self.conn.exec(s).await;
+        if let (Some(log), None, Some(sql)) = (self.redo.as_mut(), o.errno(), redo_of(s)) {
+            log.push(sprig_txn::RedoStmt {
+                sql,
+                ..sprig_txn::RedoStmt::default()
+            });
+        }
+        o
     }
 }
 
@@ -214,6 +266,15 @@ impl SimBranch {
 impl BranchConn for SimBranch {
     fn thread_id(&self) -> u64 {
         self.conn.id().0
+    }
+
+    fn start_redo(&mut self, _timestamp_us: u64) -> bool {
+        self.redo = Some(Vec::new());
+        true
+    }
+
+    fn take_redo(&mut self) -> Result<Vec<sprig_txn::RedoStmt>, String> {
+        Ok(self.redo.take().unwrap_or_default())
     }
 
     async fn control(&mut self, ctl: &[Ctl]) -> DbResult<()> {
@@ -240,6 +301,16 @@ impl BranchConn for SimBranch {
                 }
                 Ctl::Savepoint(_) | Ctl::RollbackTo(_) => {
                     return Err(DbError::new(1235, "savepoints are not modelled"));
+                }
+                // The model has no clock to fix.
+                Ctl::SetTimestamp(_) => continue,
+                Ctl::RedoDone { schema, dtid, .. } => {
+                    assert_eq!(schema, self.schema, "one schema per cluster in the sim");
+                    Stmt::Insert {
+                        t: REDO_MARK.to_owned(),
+                        k: dkey(*dtid),
+                        v: format!("done#{}", self.env.now_ms()),
+                    }
                 }
             };
             if let Some(e) = err(&self.conn.exec(&s).await) {
@@ -421,6 +492,204 @@ impl ClusterAdmin for SimAdmin {
         .await
         .map(|_| ())
     }
+
+    async fn insert_redo(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+        gtrid: &sprig_txn::Gtrid,
+        stmts: &[sprig_txn::RedoStmt],
+    ) -> DbResult<()> {
+        assert_eq!(schema, def(cluster).schema);
+        // One row per branch in the model (its key is the dtid).
+        let body: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
+        self.one(
+            cluster,
+            &Stmt::Insert {
+                t: REDO.to_owned(),
+                k: dkey(dtid),
+                v: format!(
+                    "{}#{}#{}",
+                    hex(&gtrid.to_bytes()),
+                    self.env.now_ms(),
+                    body.join(";")
+                ),
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn redo_branches(&self, cluster: &ClusterId) -> DbResult<Vec<sprig_txn::RedoBranch>> {
+        let Outcome::Ok { rows, .. } = self.one(cluster, &Stmt::Scan(REDO.to_owned())).await?
+        else {
+            unreachable!()
+        };
+        let Outcome::Ok { rows: marks, .. } =
+            self.one(cluster, &Stmt::Scan(REDO_MARK.to_owned())).await?
+        else {
+            unreachable!()
+        };
+        let now = self.env.now_ms();
+        let mark_of = |k: i64| -> Option<(sprig_txn::redo::RedoMark, u64)> {
+            marks.iter().find_map(|r| {
+                let mk: i64 = r.first()?.as_deref()?.parse().ok()?;
+                if mk != k {
+                    return None;
+                }
+                let v = r.get(1)?.as_deref()?;
+                let (who, at) = v.split_once('#')?;
+                let m = if who == "done" {
+                    sprig_txn::redo::RedoMark::Done
+                } else {
+                    sprig_txn::redo::RedoMark::Replayed
+                };
+                Some((m, at.parse().ok()?))
+            })
+        };
+        let mut out: Vec<sprig_txn::RedoBranch> = rows
+            .iter()
+            .filter_map(|r| {
+                let k: i64 = r.first()?.as_deref()?.parse().ok()?;
+                let v = r.get(1)?.as_deref()?;
+                let mut p = v.splitn(3, '#');
+                let gtrid = sprig_txn::Gtrid::from_bytes(&unhex(p.next()?)?)?;
+                let created: u64 = p.next()?.parse().ok()?;
+                Some(sprig_txn::RedoBranch {
+                    schema: def(cluster).schema.to_owned(),
+                    dtid: dtid_of(k),
+                    gtrid,
+                    age_seconds: now.saturating_sub(created) / 1000,
+                    statements: 1,
+                    mark: mark_of(k).map(|(m, _)| m),
+                })
+            })
+            .collect();
+        // Markers without statements (a replay's, kept for the retention).
+        for r in &marks {
+            let Some(k) = r.first().and_then(|x| x.as_deref()).and_then(|x| x.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            if out.iter().any(|b| b.dtid == dtid_of(k)) {
+                continue;
+            }
+            let Some((m, at)) = mark_of(k) else { continue };
+            out.push(sprig_txn::RedoBranch {
+                schema: def(cluster).schema.to_owned(),
+                dtid: dtid_of(k),
+                gtrid: sprig_txn::Gtrid {
+                    tenant: TENANT,
+                    dtid: dtid_of(k),
+                    start_ms: 0,
+                    home: shard_ref(0).anchor(),
+                },
+                age_seconds: now.saturating_sub(at) / 1000,
+                statements: 0,
+                mark: Some(m),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn replay_redo(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+    ) -> DbResult<sprig_txn::Replay> {
+        assert_eq!(schema, def(cluster).schema);
+        let c = self.conn(cluster).await?;
+        let k = dkey(dtid);
+        for s in [Stmt::SetLockWaitTimeout(2), Stmt::Begin] {
+            if let Some(e) = err(&c.exec(&s).await) {
+                return Err(e);
+            }
+        }
+        // The marker first: a holder still finishing holds it (this waits,
+        // then finds it), or committed it (a duplicate).
+        match c
+            .exec(&Stmt::Insert {
+                t: REDO_MARK.to_owned(),
+                k,
+                v: format!("replayed#{}", self.env.now_ms()),
+            })
+            .await
+        {
+            Outcome::Ok { .. } => {}
+            Outcome::Err(1062) => {
+                let _ = c.exec(&Stmt::Rollback).await;
+                return Ok(sprig_txn::Replay::Gone);
+            }
+            Outcome::Err(e) => {
+                let _ = c.exec(&Stmt::Rollback).await;
+                return Err(DbError::new(e, "redo marker"));
+            }
+        }
+        let o = c
+            .exec(&Stmt::GetForUpdate {
+                t: REDO.to_owned(),
+                k,
+            })
+            .await;
+        let row = match o {
+            Outcome::Ok { rows, .. } => rows.first().and_then(|r| r.get(1).cloned().flatten()),
+            Outcome::Err(e) => {
+                let _ = c.exec(&Stmt::Rollback).await;
+                return Err(DbError::new(e, "redo read"));
+            }
+        };
+        let Some(v) = row else {
+            let _ = c.exec(&Stmt::Rollback).await;
+            return Ok(sprig_txn::Replay::Gone);
+        };
+        let body = v.splitn(3, '#').nth(2).unwrap_or("");
+        for r in body.split(';').filter(|x| !x.is_empty()) {
+            let s = stmt_of(r).expect("a redo statement the sim wrote");
+            if let Some(e) = err(&c.exec(&s).await) {
+                let _ = c.exec(&Stmt::Rollback).await;
+                if e.errno == 1062 {
+                    return Ok(sprig_txn::Replay::Hazard(format!("{r}: duplicate key")));
+                }
+                return Err(e);
+            }
+        }
+        for s in [
+            Stmt::Delete {
+                t: REDO.to_owned(),
+                k,
+            },
+            Stmt::Commit,
+        ] {
+            if let Some(e) = err(&c.exec(&s).await) {
+                let _ = c.exec(&Stmt::Rollback).await;
+                return Err(e);
+            }
+        }
+        if self.from.as_str() == "ctl" {
+            bump(&STATS.redo_replays);
+        }
+        Ok(sprig_txn::Replay::Applied)
+    }
+
+    async fn delete_redo(&self, cluster: &ClusterId, schema: &str, dtid: Dtid) -> DbResult<()> {
+        assert_eq!(schema, def(cluster).schema);
+        for t in [REDO, REDO_MARK] {
+            self.one(
+                cluster,
+                &Stmt::Delete {
+                    t: t.to_owned(),
+                    k: dkey(dtid),
+                },
+            )
+            .await?;
+        }
+        if self.from.as_str() == "ctl" {
+            bump(&STATS.redo_drops);
+        }
+        Ok(())
+    }
 }
 
 struct SimBackend {
@@ -451,6 +720,7 @@ impl TxnBackend for SimBackend {
             conn,
             env: self.env.clone(),
             schema: d.schema,
+            redo: None,
         })
     }
 
@@ -549,11 +819,22 @@ impl Log {
 struct Scenario {
     policy: NonXaPolicy,
     all_xa: bool,
+    /// Sprig 2PC on Galera only.
+    all_galera: bool,
     crash: Option<(Point, u32)>,
     hot: f64,
 }
 
 impl Scenario {
+    /// Sprig 2PC: mostly three Galera clusters and nothing else.
+    fn sprig(rng: &SimRng) -> Self {
+        let mut sc = Self::random(rng);
+        sc.policy = NonXaPolicy::Sprig2pc;
+        sc.all_xa = false;
+        sc.all_galera = rng.chance(0.8);
+        sc
+    }
+
     fn random(rng: &SimRng) -> Self {
         const POINTS: [Point; 7] = [
             Point::BranchOpened,
@@ -577,6 +858,7 @@ impl Scenario {
                 NonXaPolicy::Reject
             },
             all_xa: rng.chance(0.2),
+            all_galera: false,
             crash,
             hot: if rng.chance(0.5) { 0.4 } else { 0.0 },
         }
@@ -585,6 +867,10 @@ impl Scenario {
     fn clusters(&self) -> Vec<usize> {
         if self.all_xa {
             vec![0, 1]
+        } else if self.all_galera {
+            vec![2, 3, 4]
+        } else if self.policy == NonXaPolicy::Sprig2pc {
+            vec![0, 1, 2, 3, 4]
         } else {
             vec![0, 1, 2, 3]
         }
@@ -666,6 +952,7 @@ async fn session(
                 Ok(o) => {
                     match o.mode {
                         sprig_txn::TxnMode::Xa2pc => bump(&STATS.xa_2pc),
+                        sprig_txn::TxnMode::Sprig2pc => bump(&STATS.sprig_2pc),
                         sprig_txn::TxnMode::BestEffort => bump(&STATS.best_effort),
                         _ => {}
                     }
@@ -692,6 +979,7 @@ fn model(world: &World) -> SimMariaDb {
         );
         m.add_galera("g1", vec![ServerConfig::new("g1n1", 301, 3)], 3);
         m.add_galera("g2", vec![ServerConfig::new("g2n1", 401, 4)], 4);
+        m.add_galera("g3", vec![ServerConfig::new("g3n1", 501, 5)], 5);
     })
 }
 
@@ -699,7 +987,7 @@ async fn setup(env: &Env) {
     let me = Node::from("setup");
     for d in &CLUSTERS {
         let c = env.db.connect(&me, d.writer, None, d.schema).await.unwrap();
-        for t in [T, DTX] {
+        for t in [T, DTX, REDO, REDO_MARK] {
             assert!(
                 c.exec(&Stmt::CreateTable(t.to_owned()))
                     .await
@@ -720,14 +1008,18 @@ async fn setup(env: &Env) {
     }
 }
 
-async fn run(world: World, plan: FaultPlan) -> Result<(), String> {
+async fn run(world: World, plan: FaultPlan, sprig: bool) -> Result<(), String> {
     let db = model(&world);
     let env = Arc::new(Env {
         db: db.clone(),
         origin: tokio::time::Instant::now(),
     });
     setup(&env).await;
-    let sc = Scenario::random(world.rng());
+    let sc = if sprig {
+        Scenario::sprig(world.rng())
+    } else {
+        Scenario::random(world.rng())
+    };
     world.record(format!(
         "scenario policy={:?} all_xa={} crash={:?} hot={}",
         sc.policy, sc.all_xa, sc.crash, sc.hot
@@ -897,9 +1189,31 @@ async fn check(world: &World, env: &Arc<Env>, log: &Log, sc: &Scenario) -> Resul
             }
             _ => {}
         }
-        if sc.policy == NonXaPolicy::Reject && on.contains(&2) && on.contains(&3) {
+        if sc.policy == NonXaPolicy::Reject
+            && [2, 3, 4].iter().filter(|g| on.contains(g)).count() > 1
+        {
             return Err(format!(
                 "txn {tag}: reject policy, but both Galera clusters committed"
+            ));
+        }
+    }
+    // No redo row left: every held branch was finished or replayed.
+    for d in &CLUSTERS {
+        let a = SimAdmin {
+            env: env.clone(),
+            from: Node::from("checker"),
+        };
+        let left: Vec<sprig_txn::RedoBranch> = a
+            .redo_branches(&ClusterId::new(d.id).unwrap())
+            .await
+            .map_err(|e| format!("redo rows on {}: {e}", d.id))?
+            .into_iter()
+            .filter(|b| b.statements > 0 || b.mark == Some(sprig_txn::redo::RedoMark::Done))
+            .collect();
+        if !left.is_empty() {
+            return Err(format!(
+                "cluster {}: redo rows left after recovery: {left:?}",
+                d.id
             ));
         }
     }
@@ -957,7 +1271,7 @@ async fn check(world: &World, env: &Arc<Env>, log: &Log, sc: &Scenario) -> Resul
                 .copied()
                 .filter(|&i| present[i].contains(tag))
                 .collect();
-            if !on.is_empty() && sc.policy == NonXaPolicy::Reject {
+            if !on.is_empty() && sc.policy != NonXaPolicy::BestEffort {
                 return Err(format!("dtid {dtid}: abort recorded but rows on {on:?}"));
             }
         }
@@ -996,19 +1310,47 @@ fn xa_transactions_survive_coordinator_and_participant_crashes() {
                 let n = rng.index(6);
                 FaultPlan::random(rng, &nodes, HORIZON, n)
             },
-            |w, plan| async move { run(w, plan).await.map_err(Into::into) },
+            |w, plan| async move { run(w, plan, false).await.map_err(Into::into) },
         );
+    print_totals("xa");
+}
+
+/// The R3 done-when item: Sprig 2PC passes the XA crash simulations on
+/// all-Galera (coordinator crashes at every step, participant kills,
+/// pauses and partitions), with no partial commit after recovery.
+#[test]
+fn sprig_2pc_survives_coordinator_and_participant_crashes_on_galera() {
+    let nodes: Vec<Node> = ["gw", "ctl", "a1", "b1", "b2", "g1n1", "g2n1", "g3n1"]
+        .into_iter()
+        .map(Node::from)
+        .collect();
+    Sim::new("txn_sprig2pc")
+        .seeds(200)
+        .max_time(Duration::from_secs(3600))
+        .run_with_faults(
+            move |rng| {
+                let n = rng.index(6);
+                FaultPlan::random(rng, &nodes, HORIZON, n)
+            },
+            |w, plan| async move { run(w, plan, true).await.map_err(Into::into) },
+        );
+    print_totals("sprig_2pc");
+}
+
+fn print_totals(what: &str) {
     let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
     let s = &*STATS;
     println!(
-        "sim txn totals: runs {} (determinism reruns included), txns {}, committed {} \
-         (xa_2pc {}, best_effort {}), rejected 39440 {}, rolled back {}, outcome unknown \
+        "sim txn totals ({what}; both tests share the counters when run in one process): \
+         runs {} (determinism reruns included), txns {}, committed {} \
+         (xa_2pc {}, sprig_2pc {}, best_effort {}), rejected 39440 {}, rolled back {}, outcome unknown \
          39441 {}, partial 39442 {}, no answer (gateway crashed) {}; gateway crashes at a \
-         coordinator step {}; resolver XA COMMIT {}, XA ROLLBACK {}",
+         coordinator step {}; resolver XA COMMIT {}, XA ROLLBACK {}, redo replays {}, redo drops {}",
         g(&s.runs),
         g(&s.txns),
         g(&s.committed),
         g(&s.xa_2pc),
+        g(&s.sprig_2pc),
         g(&s.best_effort),
         g(&s.rejected),
         g(&s.rolled_back),
@@ -1018,5 +1360,7 @@ fn xa_transactions_survive_coordinator_and_participant_crashes() {
         g(&s.crashes),
         g(&s.resolver_commits),
         g(&s.resolver_rollbacks),
+        g(&s.redo_replays),
+        g(&s.redo_drops),
     );
 }

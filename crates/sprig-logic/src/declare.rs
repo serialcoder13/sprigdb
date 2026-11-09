@@ -134,6 +134,41 @@ pub struct Declaration {
     pub when_fields: Vec<String>,
     /// Schedules.
     pub schedule: Option<ScheduleSpec>,
+    /// Functions and procedures: the declared parameters, in order. A
+    /// KIRun definition's own parameters win; JavaScript and Lua
+    /// functions take theirs from here.
+    pub params: Vec<Param>,
+    /// Functions: the `RETURNS` type's text, lower case (`double`,
+    /// `decimal(12,2)`).
+    pub returns: Option<String>,
+}
+
+/// One declared parameter: `[IN] name type`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Param {
+    /// The name.
+    pub name: String,
+    /// The type's text, lower case (`bigint`, `varchar(64)`).
+    pub ty: String,
+}
+
+impl Param {
+    /// The engine's type for the SQL type `ty`.
+    #[must_use]
+    pub fn ir_ty(ty: &str) -> sprig_logic_compile::ir::Ty {
+        use sprig_logic_compile::ir::Ty;
+        let t = ty.trim().to_ascii_lowercase();
+        let word: String = t.chars().take_while(char::is_ascii_alphabetic).collect();
+        match word.as_str() {
+            "bool" | "boolean" => Ty::Bool,
+            "tinyint" if t.starts_with("tinyint(1)") => Ty::Bool,
+            "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year"
+            | "serial" => Ty::Int,
+            "decimal" | "dec" | "numeric" | "fixed" | "float" | "double" | "real" => Ty::Float,
+            "json" => Ty::Json,
+            _ => Ty::Str,
+        }
+    }
 }
 
 fn syntax(m: impl Into<String>) -> SprigError {
@@ -269,7 +304,7 @@ pub fn is_declaration(sql: &str) -> bool {
         Some(&"trigger") => words.windows(2).any(|w| w == ["after", "commit"]),
         Some(&"function" | &"procedure") => words
             .windows(2)
-            .any(|w| w[0] == "language" && matches!(w[1], "kirun" | "javascript" | "js")),
+            .any(|w| w[0] == "language" && matches!(w[1], "kirun" | "javascript" | "js" | "lua")),
         _ => false,
     }
 }
@@ -434,6 +469,49 @@ impl P {
     }
 }
 
+/// One parameter's tokens: `[IN] name type ...`.
+fn param(toks: Vec<Tok>) -> Result<Param> {
+    let mut it = toks.into_iter().peekable();
+    if let Some(Tok::Word(w)) = it.peek() {
+        match w.to_ascii_lowercase().as_str() {
+            "in" => {
+                it.next();
+            }
+            "out" | "inout" => {
+                return Err(syntax(
+                    "logic functions take IN parameters only; return values instead of OUT",
+                ));
+            }
+            _ => {}
+        }
+    }
+    let name = match it.next() {
+        Some(Tok::Word(w) | Tok::Name(w)) => w,
+        _ => return Err(syntax("expected a parameter name")),
+    };
+    let mut ty = String::new();
+    for t in it {
+        match t {
+            Tok::Word(w) => {
+                if !ty.is_empty() && !ty.ends_with('(') && !ty.ends_with(',') {
+                    ty.push(' ');
+                }
+                ty.push_str(&w.to_ascii_lowercase());
+            }
+            Tok::Punct(c) => ty.push(c),
+            Tok::Str(s) | Tok::Name(s) => {
+                ty.push(' ');
+                ty.push_str(&s);
+            }
+            Tok::Body(_) => return Err(syntax("unexpected $$ in a parameter")),
+        }
+    }
+    if ty.is_empty() {
+        return Err(syntax(format!("parameter {name} has no type")));
+    }
+    Ok(Param { name, ty })
+}
+
 /// Parses a declaration.
 ///
 /// # Errors
@@ -488,24 +566,42 @@ pub fn parse(sql: &str) -> Result<Declaration> {
         events: Vec::new(),
         when_fields: Vec::new(),
         schedule: None,
+        params: Vec::new(),
+        returns: None,
     };
     match kind {
         Kind::Function | Kind::Procedure => {
-            // A parameter list, skipped (balanced parentheses).
+            // The parameter list: `[IN] name type`, split at top-level
+            // commas (KIRun takes its parameters from the definition).
             if p.peek() == Some(&Tok::Punct('(')) {
                 let mut depth = 0;
+                let mut cur: Vec<Tok> = Vec::new();
+                let mut parts: Vec<Vec<Tok>> = Vec::new();
                 loop {
                     match p.next() {
-                        Some(Tok::Punct('(')) => depth += 1,
+                        Some(Tok::Punct('(')) => {
+                            depth += 1;
+                            if depth > 1 {
+                                cur.push(Tok::Punct('('));
+                            }
+                        }
                         Some(Tok::Punct(')')) => {
                             depth -= 1;
                             if depth == 0 {
                                 break;
                             }
+                            cur.push(Tok::Punct(')'));
                         }
-                        Some(_) => {}
+                        Some(Tok::Punct(',')) if depth == 1 => parts.push(std::mem::take(&mut cur)),
+                        Some(t) => cur.push(t),
                         None => return Err(syntax("unbalanced parameter list")),
                     }
+                }
+                if !cur.is_empty() {
+                    parts.push(cur);
+                }
+                for part in parts {
+                    d.params.push(param(part)?);
                 }
             }
         }
@@ -583,10 +679,25 @@ pub fn parse(sql: &str) -> Result<Declaration> {
         match w.to_ascii_lowercase().as_str() {
             "returns" => {
                 // A type: a word and an optional (n[, m]).
-                p.next();
+                let mut ty = match p.next() {
+                    Some(Tok::Word(w)) => w.to_ascii_lowercase(),
+                    _ => return Err(syntax("RETURNS takes a type")),
+                };
                 if p.peek() == Some(&Tok::Punct('(')) {
-                    while !matches!(p.next(), Some(Tok::Punct(')')) | None) {}
+                    loop {
+                        match p.next() {
+                            Some(Tok::Punct(')')) => {
+                                ty.push(')');
+                                break;
+                            }
+                            Some(Tok::Punct(c)) => ty.push(c),
+                            Some(Tok::Word(w)) => ty.push_str(&w),
+                            Some(_) => {}
+                            None => return Err(syntax("unbalanced RETURNS type")),
+                        }
+                    }
                 }
+                d.returns = Some(ty);
             }
             "language" => {
                 let l = p.ident()?;
@@ -705,6 +816,36 @@ mod tests {
         assert_eq!(d.runtime, Runtime::Javascript);
         assert!(d.deterministic);
         assert_eq!(d.body.trim(), "export default (id) => id * 2;");
+        assert_eq!(
+            d.params,
+            vec![Param {
+                name: "id".into(),
+                ty: "bigint".into()
+            }]
+        );
+        assert_eq!(d.returns.as_deref(), Some("decimal(12,2)"));
+        let s = "CREATE PROCEDURE q(IN a DECIMAL(10, 2) UNSIGNED, b VARCHAR(64) CHARACTER SET utf8mb4,                  `c d` JSON, e TINYINT(1)) LANGUAGE lua AS $$ return a $$";
+        assert!(is_declaration(s));
+        let d = parse(s).unwrap();
+        assert_eq!(d.runtime, Runtime::Lua);
+        let tys: Vec<(&str, &str)> = d
+            .params
+            .iter()
+            .map(|p| (p.name.as_str(), p.ty.as_str()))
+            .collect();
+        assert_eq!(
+            tys,
+            [
+                ("a", "decimal(10,2) unsigned"),
+                ("b", "varchar(64) character set utf8mb4"),
+                ("c d", "json"),
+                ("e", "tinyint(1)")
+            ]
+        );
+        use sprig_logic_compile::ir::Ty;
+        let irs: Vec<Ty> = d.params.iter().map(|p| Param::ir_ty(&p.ty)).collect();
+        assert_eq!(irs, [Ty::Float, Ty::Str, Ty::Json, Ty::Bool]);
+        assert!(parse("CREATE PROCEDURE q(OUT a INT) LANGUAGE js AS $$ $$").is_err());
     }
 
     #[test]

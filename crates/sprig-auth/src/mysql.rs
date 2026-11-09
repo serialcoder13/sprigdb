@@ -1128,6 +1128,13 @@ impl MysqlLogin {
         }
     }
 
+    /// A SCRAM client proof was presented (chapter 45's Kafka SASL): a
+    /// refusal then says `(using password: YES)`, as for any login that
+    /// sent a password.
+    pub fn proof_presented(&mut self) {
+        self.used_password = true;
+    }
+
     /// The account's SCRAM verifier of `kind` for a SCRAM exchange
     /// (chapter 45's Kafka SASL; chapter 30's MongoDB later): the primary
     /// password's, and the secondary's when it shares the primary's salt

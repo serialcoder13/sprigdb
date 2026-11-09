@@ -528,6 +528,10 @@ impl PassSession {
         let sandbox = ts.principal.must_change_password;
         let (user, host) = (ts.principal.user.clone(), ts.principal.host.clone());
 
+        // Chapter 37: `Functions.Call` over HTTP and gRPC (R7 order 6).
+        if !sandbox && let Some(req) = super::logic::function_call_request(text) {
+            return self.tenant_function_call(cx, req, more, format, out).await;
+        }
         // Chapter 41: `CREATE FUNCTION | PROCEDURE ... LANGUAGE kirun |
         // javascript` compiles and deploys through `sprig-logic` (R7).
         if !sandbox && sprig_logic::is_declaration(&String::from_utf8_lossy(text)) {
@@ -1073,6 +1077,10 @@ impl PassSession {
             .get(sp.info.range.clone())
             .map_or_else(|| text.to_vec(), <[u8]>::to_vec);
         let is_call = sp.info.kind == StmtKind::Call;
+        // Chapter 41 (R7 order 6): `SELECT f(constants)` of an engine-tier
+        // function, answered by the gateway (`exec::logic`).
+        let logic_select =
+            sp.info.kind == StmtKind::Select && sprig_logic::invoke::select_candidate(&original);
         // Boxed (clippy's large_futures): the statement paths below are big.
         let route = Box::pin(self.route(cx, sp, &original, more, format, charset, out)).await?;
         match route {
@@ -1081,6 +1089,10 @@ impl PassSession {
             // which the gateway answers itself (`exec::logic`).
             Route::Forward(sql, mapper) if is_call => {
                 Box::pin(self.tenant_call(cx, sql, &original, more, format, mapper, &*map, out))
+                    .await
+            }
+            Route::Forward(sql, mapper) if logic_select => {
+                Box::pin(self.tenant_select(cx, sql, &original, more, format, mapper, &*map, out))
                     .await
             }
             // Chapter 17: through the router when the tenant has shards.

@@ -65,6 +65,9 @@ pub struct AlterStream {
     pub retention_hours: Option<u64>,
     /// `CLEANUP ...`.
     pub cleanup: Option<Cleanup>,
+    /// `[SPRIG] SET (key = value, ...)` and `[SPRIG] RESET (key, ...)`:
+    /// stream settings at the stream's own scope, in order; `None` resets.
+    pub settings: Vec<(String, Option<String>)>,
 }
 
 /// An `INSERT` whose target may be a stream.
@@ -477,6 +480,44 @@ fn options(
     Ok(false)
 }
 
+/// A setting name: words joined by dots (`stream.retention_bytes`).
+fn setting_name(c: &mut Cur<'_>) -> Option<String> {
+    let (mut n, _) = c.ident()?;
+    while c.punct(b'.') && c.peek_at(1).is_some_and(|t| t.kind.is_ident_like()) {
+        c.i += 1;
+        let (more, _) = c.ident()?;
+        n.push('.');
+        n.push_str(&more);
+    }
+    Some(n.to_ascii_lowercase())
+}
+
+/// `SET (k = v, ...)` or `RESET (k, ...)` after `ALTER STREAM s [SPRIG]`.
+fn settings(c: &mut Cur<'_>, reset: bool, out: &mut Vec<(String, Option<String>)>) -> Result<()> {
+    if !c.eat_punct(b'(') {
+        return Err(syntax(&c.near()));
+    }
+    loop {
+        let name = setting_name(c).ok_or_else(|| syntax(&c.near()))?;
+        if reset {
+            out.push((name, None));
+        } else {
+            if !c.eat_op(b"=") {
+                return Err(syntax(&c.near()));
+            }
+            let v = c.string_or_word().ok_or_else(|| syntax(&c.near()))?;
+            out.push((name, Some(v)));
+        }
+        if c.eat_punct(b',') {
+            continue;
+        }
+        if c.eat_punct(b')') {
+            return Ok(());
+        }
+        return Err(syntax(&c.near()));
+    }
+}
+
 fn alter(c: &mut Cur<'_>) -> Result<AlterStream> {
     let name = c.qname().ok_or_else(|| syntax(&c.near()))?;
     let mut a = AlterStream {
@@ -484,6 +525,7 @@ fn alter(c: &mut Cur<'_>) -> Result<AlterStream> {
         partitions: None,
         retention_hours: None,
         cleanup: None,
+        settings: Vec::new(),
     };
     let mut any = false;
     loop {
@@ -494,7 +536,14 @@ fn alter(c: &mut Cur<'_>) -> Result<AlterStream> {
             return Ok(a);
         }
         c.eat_punct(b',');
-        if !options(c, &mut a.partitions, &mut a.retention_hours, &mut a.cleanup)? {
+        let sprig = c.eat("SPRIG");
+        if c.eat("SET") {
+            settings(c, false, &mut a.settings)?;
+        } else if c.eat("RESET") {
+            settings(c, true, &mut a.settings)?;
+        } else if sprig
+            || !options(c, &mut a.partitions, &mut a.retention_hours, &mut a.cleanup)?
+        {
             return Err(syntax(&c.near()));
         }
         any = true;
@@ -632,6 +681,23 @@ mod tests {
         };
         assert_eq!((a.partitions, a.retention_hours), (Some(24), Some(72)));
         assert!(classify(b"ALTER STREAM s", &LexOptions::mariadb()).is_err());
+        let Stmt::Alter(a) = cl(
+            "ALTER STREAM shop.s SET (stream.retention_bytes = 1048576, stream.max_message_bytes = '2000') \
+             RESET (stream.tombstone_hours) SPRIG SET (stream.retention_hours = 5)",
+        ) else {
+            panic!()
+        };
+        assert_eq!(
+            a.settings,
+            vec![
+                ("stream.retention_bytes".into(), Some("1048576".into())),
+                ("stream.max_message_bytes".into(), Some("2000".into())),
+                ("stream.tombstone_hours".into(), None),
+                ("stream.retention_hours".into(), Some("5".into())),
+            ]
+        );
+        assert!(classify(b"ALTER STREAM s SET stream.x = 1", &LexOptions::mariadb()).is_err());
+        assert!(classify(b"ALTER STREAM s SET (stream.x 1)", &LexOptions::mariadb()).is_err());
         assert_eq!(
             cl("DROP STREAM IF EXISTS `orders.changes`"),
             Stmt::Drop {

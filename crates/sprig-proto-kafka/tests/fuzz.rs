@@ -70,6 +70,18 @@ macro_rules! all_messages {
         stable::<DescribeConfigsResponse>(b, v.min(4));
         stable::<IncrementalAlterConfigsRequest>(b, v.min(1));
         stable::<IncrementalAlterConfigsResponse>(b, v.min(1));
+        stable::<ProduceRequest>(b, v.clamp(3, 9));
+        stable::<ProduceResponse>(b, v.clamp(3, 9));
+        stable::<FetchRequest>(b, v.clamp(4, 13));
+        stable::<FetchResponse>(b, v.clamp(4, 13));
+        stable::<ListOffsetsRequest>(b, v.clamp(1, 7));
+        stable::<ListOffsetsResponse>(b, v.clamp(1, 7));
+        stable::<OffsetForLeaderEpochRequest>(b, v.clamp(2, 4));
+        stable::<OffsetForLeaderEpochResponse>(b, v.clamp(2, 4));
+        for c in [0i16, 1, 2, 3, 4] {
+            let _ = sprig_proto_kafka::compression::Compression::from_attributes(c)
+                .map(|c| c.decompress(b, 1 << 16));
+        }
         let _ = RequestHeader::decode(&mut Reader::new(b));
         let _ = RecordBatch::decode_all(b, 1 << 20, true);
     }};

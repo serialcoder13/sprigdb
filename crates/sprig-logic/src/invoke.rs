@@ -29,7 +29,7 @@ use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
 use serde_json::Value;
 use sprig_common::{Result, SprigCode, SprigError};
-use sprig_logic_js::kirun::Prepared;
+use sprig_logic_js::{ParamTy, Program, ScriptSig};
 
 /// The marker column's name.
 pub const MARKER: &str = "__sprig_engine";
@@ -107,9 +107,9 @@ pub struct EngineVersion {
     pub definer: bool,
     /// The tier placement chose.
     pub tier: String,
-    /// The parsed definition (KIRun).
-    pub prepared: Option<Prepared>,
-    /// The result row's columns.
+    /// The parsed version, in its runtime.
+    pub program: Option<Program>,
+    /// The result row's declared columns (see [`EngineVersion::columns_for`]).
     pub columns: Vec<OutCol>,
 }
 
@@ -117,10 +117,10 @@ impl EngineVersion {
     /// Checks that this gateway can run the version.
     ///
     /// # Errors
-    /// 39876 for a runtime this build lacks (JavaScript) or for
-    /// `SQL SECURITY DEFINER` (the fallback tier runs with the caller's
-    /// session only, so far).
-    pub fn runnable(&self) -> Result<&Prepared> {
+    /// 39876 for a runtime this build lacks or for `SQL SECURITY
+    /// DEFINER` (the fallback tier runs with the caller's session only,
+    /// so far).
+    pub fn runnable(&self) -> Result<&Program> {
         let unavailable = |why: &str| {
             Err(SprigError::new(
                 SprigCode::LogicEngineUnavailable,
@@ -132,10 +132,48 @@ impl EngineVersion {
                 "SQL SECURITY DEFINER isn't supported in the engine tier yet; deploy it SQL SECURITY INVOKER",
             );
         }
-        match &self.prepared {
-            Some(p) if self.runtime == "kirun" => Ok(p),
-            _ => unavailable(&format!("the {} runtime isn't built yet", self.runtime)),
+        match &self.program {
+            Some(p) => Ok(p),
+            None => unavailable(&format!("the {} runtime isn't built yet", self.runtime)),
         }
+    }
+
+    /// The result's columns: the declared ones, then any field of
+    /// `result` they lack (JavaScript and Lua procedures declare none),
+    /// typed by its value.
+    #[must_use]
+    pub fn columns_for(&self, result: &Value) -> Vec<OutCol> {
+        let mut cols = self.columns.clone();
+        if let Value::Object(o) = result {
+            for (k, v) in o {
+                if k == "event" || cols.iter().any(|c| &c.name == k) {
+                    continue;
+                }
+                let ty = match v {
+                    Value::Bool(_) => OutTy::Int,
+                    Value::Number(n) if n.is_i64() || n.is_u64() => OutTy::Int,
+                    Value::Number(_) => OutTy::Float,
+                    Value::String(_) => OutTy::Str,
+                    _ => OutTy::Json,
+                };
+                cols.push(OutCol {
+                    name: k.clone(),
+                    ty,
+                });
+            }
+        }
+        cols
+    }
+
+    /// [`EngineVersion::row`] over `cols` ([`EngineVersion::columns_for`]).
+    #[must_use]
+    pub fn row_with(cols: &[OutCol], event: &str, result: &Value) -> Vec<Option<String>> {
+        cols.iter()
+            .map(|c| match c.ty {
+                OutTy::Event => Some(event.to_owned()),
+                ty => cell(result.get(&c.name), ty),
+            })
+            .collect()
     }
 
     /// The result row for an event and its fields, as text (`None` is
@@ -260,6 +298,318 @@ pub fn columns(signature: &Value) -> Vec<OutCol> {
     out
 }
 
+/// A JavaScript or Lua version's signature, from its stored JSON.
+#[must_use]
+pub fn script_sig(signature: &Value) -> ScriptSig {
+    ScriptSig {
+        params: signature["params"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let ty = match p["type"].as_str() {
+                    Some("i64") => ParamTy::Int,
+                    Some("f64") => ParamTy::Float,
+                    Some("bool") => ParamTy::Bool,
+                    Some("json") => ParamTy::Json,
+                    _ => ParamTy::Str,
+                };
+                (p["name"].as_str().unwrap_or_default().to_owned(), ty)
+            })
+            .collect(),
+        scalar: signature["scalar"].as_bool().unwrap_or(false),
+    }
+}
+
+/// The value `SELECT f(…)` and scalar callers see for a call's outcome:
+/// the `output` event's `value` for a function declared `RETURNS`, else
+/// its only field, else its fields as one JSON object.
+///
+/// # Errors
+/// 39865 when the call raised another event (`error`, ...), with its
+/// `message` field or its fields as text.
+pub fn scalar(event: &str, result: &Value) -> Result<Value> {
+    if event != "output" {
+        let msg = result
+            .get("message")
+            .and_then(Value::as_str)
+            .map_or_else(|| mariadb_json(result), str::to_owned);
+        return Err(SprigError::new(
+            SprigCode::LogicUserError,
+            format!("the function raised {event}: {msg}"),
+        ));
+    }
+    Ok(match result {
+        Value::Object(o) if o.len() == 1 => o.values().next().cloned().unwrap_or(Value::Null),
+        Value::Object(o) if o.is_empty() => Value::Null,
+        other => other.clone(),
+    })
+}
+
+// ---- SELECT f(constants) of engine-tier functions (R7 order 6) -------------
+
+/// One call of a function with constant arguments in a `SELECT` without
+/// `FROM`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectCall {
+    /// The database, when the name was qualified.
+    pub db: Option<String>,
+    /// The function's name.
+    pub name: String,
+    /// The arguments.
+    pub args: Vec<Value>,
+    /// Where the call is in the text (bytes).
+    pub range: std::ops::Range<usize>,
+    /// The call's text, when it is a whole select item without an alias:
+    /// the replacement keeps it as the column's name.
+    pub alias: Option<String>,
+}
+
+/// Whether `text` may be a `SELECT` without `FROM` that calls something:
+/// it has a `(` and no `FROM` word outside quotes. Cheap, so the gateway
+/// can ask for every `SELECT`.
+#[must_use]
+pub fn select_candidate(text: &[u8]) -> bool {
+    let mut paren = false;
+    let mut i = 0;
+    while i < text.len() {
+        let c = text[i];
+        match c {
+            b'\'' | b'"' | b'`' => {
+                i += 1;
+                while i < text.len() && text[i] != c {
+                    if text[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => paren = true,
+            b'f' | b'F' => {
+                let word = text.get(i..i + 4).is_some_and(|w| w.eq_ignore_ascii_case(b"from"));
+                let before = i == 0 || !(text[i - 1].is_ascii_alphanumeric() || text[i - 1] == b'_');
+                let after = text
+                    .get(i + 4)
+                    .is_none_or(|b| !(b.is_ascii_alphanumeric() || *b == b'_'));
+                if word && before && after {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    paren
+}
+
+fn byte_offset(text: &str, loc: sqlparser::tokenizer::Location) -> Option<usize> {
+    if loc.line == 0 {
+        return None;
+    }
+    let mut line = 1u64;
+    let mut start = 0usize;
+    for (i, c) in text.char_indices() {
+        if line == loc.line {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            start = i + 1;
+        }
+    }
+    if line != loc.line {
+        return None;
+    }
+    let col = usize::try_from(loc.column.saturating_sub(1)).ok()?;
+    text[start..]
+        .char_indices()
+        .nth(col)
+        .map(|(i, _)| start + i)
+        .or_else(|| (col == text[start..].chars().count()).then_some(text.len()))
+}
+
+/// The end of the call whose name starts at `from`: just past the `)`
+/// matching the first `(` after it.
+fn call_end(text: &str, from: usize) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut i = from + text[from..].find('(')?;
+    let mut depth = 0usize;
+    while i < b.len() {
+        match b[i] {
+            q @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' && q != b'`' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn const_value(e: &sqlparser::ast::Expr) -> Option<Value> {
+    use sqlparser::ast::{Expr, UnaryOperator, Value as V};
+    match e {
+        Expr::Nested(x) => const_value(x),
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => match const_value(expr)? {
+            Value::Number(n) => n
+                .as_i64()
+                .map(|i| Value::from(-i))
+                .or_else(|| n.as_f64().map(|f| Value::from(-f))),
+            _ => None,
+        },
+        Expr::Value(v) => Some(match &v.value {
+            V::Number(n, _) => n
+                .parse::<i64>()
+                .map(Value::from)
+                .or_else(|_| n.parse::<f64>().map(Value::from))
+                .ok()?,
+            V::SingleQuotedString(s) | V::DoubleQuotedString(s) => Value::String(s.clone()),
+            V::Boolean(b) => Value::Bool(*b),
+            V::Null => Value::Null,
+            _ => return None,
+        }),
+        _ => None,
+    }
+}
+
+/// The calls with constant arguments in `text`, a `SELECT` without `FROM`
+/// or `WHERE`; `None` for anything else.
+#[must_use]
+pub fn select_calls(text: &str) -> Option<Vec<SelectCall>> {
+    use sqlparser::ast::{
+        Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectNamePart, SelectItem,
+        SetExpr, Spanned, Statement, Visit, Visitor,
+    };
+    let stmts =
+        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, text).ok()?;
+    let [Statement::Query(q)] = stmts.as_slice() else {
+        return None;
+    };
+    let SetExpr::Select(sel) = q.body.as_ref() else {
+        return None;
+    };
+    if !sel.from.is_empty() || sel.selection.is_some() {
+        return None;
+    }
+    struct Calls<'a> {
+        text: &'a str,
+        whole: Option<usize>,
+        out: Vec<SelectCall>,
+    }
+    impl Visitor for Calls<'_> {
+        type Break = ();
+        fn pre_visit_expr(&mut self, e: &Expr) -> std::ops::ControlFlow<()> {
+            let Expr::Function(f) = e else {
+                return std::ops::ControlFlow::Continue(());
+            };
+            let parts: Vec<String> = f
+                .name
+                .0
+                .iter()
+                .filter_map(|p| match p {
+                    ObjectNamePart::Identifier(i) => Some(i.value.clone()),
+                    ObjectNamePart::Function(_) => None,
+                })
+                .collect();
+            let args = match &f.args {
+                FunctionArguments::List(l) if l.duplicate_treatment.is_none() && l.clauses.is_empty() => l
+                    .args
+                    .iter()
+                    .map(|a| match a {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(x)) => const_value(x),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<Value>>>(),
+                _ => None,
+            };
+            let start = f
+                .name
+                .0
+                .first()
+                .and_then(|p| byte_offset(self.text, p.span().start));
+            if let (Some(args), Some(start), 1..=2) = (args, start, parts.len())
+                && let Some(end) = call_end(self.text, start)
+            {
+                let (db, name) = if parts.len() == 2 {
+                    (Some(parts[0].clone()), parts[1].clone())
+                } else {
+                    (None, parts[0].clone())
+                };
+                let alias = (self.whole == Some(start)).then(|| self.text[start..end].to_owned());
+                self.out.push(SelectCall {
+                    db,
+                    name,
+                    args,
+                    range: start..end,
+                    alias,
+                });
+            }
+            std::ops::ControlFlow::Continue(())
+        }
+    }
+    let mut calls = Calls {
+        text,
+        whole: None,
+        out: Vec::new(),
+    };
+    for item in &sel.projection {
+        let (e, whole) = match item {
+            SelectItem::UnnamedExpr(e) => (e, true),
+            SelectItem::ExprWithAlias { expr, .. } => (expr, false),
+            _ => continue,
+        };
+        calls.whole = match e {
+            Expr::Function(f) if whole => f
+                .name
+                .0
+                .first()
+                .and_then(|p| byte_offset(text, p.span().start)),
+            _ => None,
+        };
+        let _ = e.visit(&mut calls);
+    }
+    // Nested calls inside a replaced call go with it.
+    let mut out: Vec<SelectCall> = Vec::new();
+    for c in calls.out {
+        if !out
+            .iter()
+            .any(|o| o.range.start <= c.range.start && c.range.end <= o.range.end)
+        {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// `text` with each range replaced (ranges don't overlap).
+#[must_use]
+pub fn splice(text: &str, mut edits: Vec<(std::ops::Range<usize>, String)>) -> String {
+    edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+    let mut s = text.to_owned();
+    for (r, with) in edits {
+        if r.end <= s.len() && s.is_char_boundary(r.start) && s.is_char_boundary(r.end) {
+            s.replace_range(r, &with);
+        }
+    }
+    s
+}
+
 type Key = (u64, u64, u64);
 
 /// Versions already loaded, by (tenant, module, version). Versions never
@@ -327,12 +677,16 @@ pub async fn load(
             format!("{name} version {version} isn't an engine-tier version"),
         ));
     }
-    let prepared = if runtime == "kirun" {
-        Some(Prepared::new(&source)?)
-    } else {
-        None
-    };
     let sig: Value = serde_json::from_str(&signature).unwrap_or_default();
+    let program = match runtime.as_str() {
+        "kirun" | "javascript" | "lua" => Some(Program::new(
+            &runtime,
+            &name,
+            &source,
+            script_sig(&sig),
+        )?),
+        _ => None,
+    };
     let v = Arc::new(EngineVersion {
         module_id,
         version,
@@ -341,7 +695,7 @@ pub async fn load(
         runtime,
         definer: security == "definer",
         tier,
-        prepared,
+        program,
         columns: columns(&sig),
     });
     if let Ok(mut m) = CACHE.lock() {
@@ -390,7 +744,7 @@ mod tests {
             runtime: "kirun".into(),
             definer: false,
             tier: "engine".into(),
-            prepared: None,
+            program: None,
             columns: columns(&sig),
         };
         let names: Vec<&str> = v.columns.iter().map(|c| c.name.as_str()).collect();
@@ -410,5 +764,47 @@ mod tests {
             ]
         );
         assert!(v.runnable().is_err());
+    }
+
+    #[test]
+    fn select_calls_with_constants() {
+        assert!(select_candidate(b"SELECT shop.quote(7, 3)"));
+        assert!(!select_candidate(b"SELECT f(1) FROM t"));
+        assert!(select_candidate(b"SELECT f('from'), `from`(2)"));
+        assert!(!select_candidate(b"SELECT 1"));
+        let t = "SELECT shop.quote(7, -3) , total(2.5) AS t, upper(x(1)), f(col), g('it''s', NULL, TRUE)";
+        let c = select_calls(t).unwrap();
+        let got: Vec<(Option<&str>, &str, &str, Option<&str>)> = c
+            .iter()
+            .map(|c| (c.db.as_deref(), c.name.as_str(), &t[c.range.clone()], c.alias.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Some("shop"), "quote", "shop.quote(7, -3)", Some("shop.quote(7, -3)")),
+                (None, "total", "total(2.5)", None),
+                (None, "x", "x(1)", None),
+                (None, "g", "g('it''s', NULL, TRUE)", Some("g('it''s', NULL, TRUE)")),
+            ]
+        );
+        assert_eq!(c[0].args, vec![json!(7), json!(-3)]);
+        assert_eq!(c[3].args, vec![json!("it's"), Value::Null, json!(true)]);
+        assert!(select_calls("SELECT f(1) FROM t").is_none());
+        let s = splice(
+            "SELECT\n  é(1), f(2)",
+            vec![(9..14, "7 AS `é(1)`".into()), (16..20, "8".into())],
+        );
+        assert_eq!(s, "SELECT\n  7 AS `é(1)`, 8");
+        let c = select_calls("SELECT\n  é(1), f(2)").unwrap();
+        assert_eq!(c[0].range, 9..14);
+        assert_eq!(c[1].range, 16..20);
+        assert_eq!(scalar("output", &json!({"total": 1240})).unwrap(), json!(1240));
+        assert_eq!(scalar("output", &json!({"a": 1, "b": 2})).unwrap(), json!({"a": 1, "b": 2}));
+        assert_eq!(
+            scalar("error", &json!({"message": "not enough stock"}))
+                .unwrap_err()
+                .message,
+            "the function raised error: not enough stock"
+        );
     }
 }

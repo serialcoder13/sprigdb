@@ -1,10 +1,10 @@
 //! Chapter 17's settings (`router.*`), declared next to the code (chapter
 //! 03, "Declaring a key"), and [`RouterConfig`], what one statement reads.
 //!
-//! Only the keys the R1 router uses are registered; the R3 keys
-//! (`router.datafusion.*`), the cluster-local fallback, pull-out
-//! subqueries, backend statement caching and shadow mode wait for their
-//! code. Scopes follow the chapter's table: **T** is tenant, dc and
+//! Only the keys the router uses are registered: R1's, and R3's
+//! `router.gather.*` for gathered reads; the cluster-local fallback,
+//! pull-out subqueries, backend statement caching and shadow mode wait for
+//! their code. Scopes follow the chapter's table: **T** is tenant, dc and
 //! global; **G** is dc and global (one value per gateway).
 
 use sprig_settings::{Apply, HardBounds, Scopes, Setting, SettingCtx};
@@ -62,6 +62,20 @@ key! {
     "Cached plans per gateway"
 }
 
+key! {
+    /// `router.gather.max_rows` (R3): rows a gathered read may copy; 0
+    /// turns gathered reads off (the statements are refused with 39420 as
+    /// before).
+    GATHER_MAX_ROWS = "router.gather.max_rows", TENANT_DC, 100_000, 0, 100_000_000,
+    "Rows a gathered read may copy (0: off)"
+}
+key! {
+    /// `router.gather.max_concurrent` (R3): gathered reads one gateway
+    /// runs at once (read when the first one runs).
+    GATHER_MAX_CONCURRENT = "router.gather.max_concurrent", GATEWAY, 4, 1, 1024,
+    "Gathered reads per gateway at once"
+}
+
 /// What the router reads for one tenant: chapter 17's keys, resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouterConfig {
@@ -77,6 +91,10 @@ pub struct RouterConfig {
     pub stale_map_retries: usize,
     /// `router.plan_cache_entries`.
     pub plan_cache_entries: usize,
+    /// `router.gather.max_rows` (0: gathered reads off).
+    pub gather_max_rows: u64,
+    /// `router.gather.max_concurrent`.
+    pub gather_max_concurrent: usize,
 }
 
 impl Default for RouterConfig {
@@ -88,6 +106,8 @@ impl Default for RouterConfig {
             lookup_batch: to_usize(LOOKUP_BATCH_SIZE.default),
             stale_map_retries: to_usize(STALE_MAP_RETRIES.default),
             plan_cache_entries: to_usize(PLAN_CACHE_ENTRIES.default),
+            gather_max_rows: GATHER_MAX_ROWS.default,
+            gather_max_concurrent: to_usize(GATHER_MAX_CONCURRENT.default),
         }
     }
 }
@@ -111,6 +131,8 @@ impl RouterConfig {
             lookup_batch: to_usize(get(&LOOKUP_BATCH_SIZE, ctx)).max(1),
             stale_map_retries: to_usize(get(&STALE_MAP_RETRIES, ctx)),
             plan_cache_entries: to_usize(get(&PLAN_CACHE_ENTRIES, ctx)),
+            gather_max_rows: get(&GATHER_MAX_ROWS, ctx),
+            gather_max_concurrent: to_usize(get(&GATHER_MAX_CONCURRENT, ctx)).max(1),
         }
     }
 }
@@ -134,6 +156,8 @@ mod tests {
             ("router.lookup_batch_size", 256),
             ("router.stale_map_retries", 2),
             ("router.plan_cache_entries", 10_000),
+            ("router.gather.max_rows", 100_000),
+            ("router.gather.max_concurrent", 4),
         ] {
             let def = reg
                 .get(k)

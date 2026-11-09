@@ -305,6 +305,10 @@ sprig_codes! {
     /// An explicit `AUTO_INCREMENT` value lies in an ID block another
     /// gateway still holds (chapter 19).
     IdValueReserved = 39463, "ER_SPRIG_ID_VALUE_RESERVED", "SprigIdValueReserved", SQLSTATE_GENERAL, false;
+    /// A cascading foreign-key action across groups the gateway can't
+    /// apply: more than 15 levels, or an `ON UPDATE CASCADE` it can't map
+    /// (chapter 19).
+    FkActionNotDistributed = 39462, "ER_SPRIG_FK_ACTION_NOT_DISTRIBUTED", "SprigFkActionNotDistributed", SQLSTATE_GENERAL, false;
     /// A split, merge or move job already holds the shard (chapter 20).
     ShardBusy = 39470, "ER_SPRIG_SHARD_BUSY", "SprigShardBusy", SQLSTATE_GENERAL, true;
     /// The group isn't `active`, the range is a single hash, or the split
@@ -324,6 +328,9 @@ sprig_codes! {
     /// A statement's rows held in the gateway passed
     /// `router.max_statement_memory_mb` (chapter 17).
     RouterMemoryLimit = 39422, "ER_SPRIG_ROUTER_MEMORY_LIMIT", "SprigRouterMemoryLimit", SQLSTATE_GENERAL, false;
+    /// A runtime row limit of the router was passed: a gathered read
+    /// copied more than `router.gather.max_rows` rows (chapter 17).
+    PlanLimitExceeded = 39421, "ER_SPRIG_PLAN_LIMIT_EXCEEDED", "SprigPlanLimitExceeded", SQLSTATE_GENERAL, false;
     /// Too many failed logins from this address: it is refused for
     /// `auth.ip_block_seconds` before the greeting (chapter 14, "Rate
     /// limits").
@@ -440,6 +447,9 @@ sprig_codes! {
     /// data center's clusters: nothing is in doubt (`sprigctl txn show` and
     /// `resolve`, chapter 18).
     TxnNotInDoubt = 39447, "ER_SPRIG_TXN_NOT_IN_DOUBT", "SprigTxnNotInDoubt", SQLSTATE_GENERAL, false;
+    /// A held branch (Sprig 2PC, chapter 18) ran a statement that doesn't
+    /// replay to the same result; the transaction is rolled back.
+    HeldBranchStatement = 39446, "ER_SPRIG_HELD_BRANCH_STATEMENT", "SprigHeldBranchStatement", SQLSTATE_GENERAL, false;
     /// A tenant move between data centers can't start: the tenant is
     /// pinned, not active, already homed in the target, already moving,
     /// or the target has no cluster for it (chapter 24).
@@ -534,6 +544,9 @@ sprig_codes! {
     /// A call couldn't be forwarded to the gateway owning its transaction
     /// handle (chapter 37).
     ForwardFailed = 39788, "ER_SPRIG_FORWARD_FAILED", "SprigForwardFailed", SQLSTATE_CONNECTION, true;
+    /// A logic function called over HTTP or gRPC that isn't exposed to
+    /// that protocol (chapter 37, "Logic functions as endpoints").
+    FunctionNotExposed = 39789, "ER_SPRIG_FUNCTION_NOT_EXPOSED", "SprigFunctionNotExposed", SQLSTATE_GENERAL, false;
     /// gRPC over HTTP/1.1, or another transport the call can't use (chapter
     /// 37).
     TransportUnsupported = 39791, "ER_SPRIG_TRANSPORT_UNSUPPORTED", "SprigTransportUnsupported", SQLSTATE_GENERAL, false;
@@ -586,6 +599,10 @@ sprig_codes! {
     LogicTierUnavailable = 39868, "ER_SPRIG_LOGIC_TIER_UNAVAILABLE", "SprigLogicTierUnavailable", SQLSTATE_GENERAL, false;
     /// Concurrent deploys of one module (chapter 41).
     LogicVersionConflict = 39869, "ER_SPRIG_LOGIC_VERSION_CONFLICT", "SprigLogicVersionConflict", SQLSTATE_GENERAL, true;
+    /// The logic engine's queue is full; retryable (chapter 41).
+    LogicEngineBusy = 39871, "ER_SPRIG_LOGIC_ENGINE_BUSY", "SprigLogicEngineBusy", SQLSTATE_GENERAL, true;
+    /// Nested `db.call` past `logic.max_call_depth` (chapter 41).
+    LogicCallDepth = 39872, "ER_SPRIG_LOGIC_CALL_DEPTH", "SprigLogicCallDepth", SQLSTATE_GENERAL, false;
     /// Bad cron text or time zone of a schedule (chapter 41).
     LogicScheduleInvalid = 39873, "ER_SPRIG_LOGIC_SCHEDULE_INVALID", "SprigLogicScheduleInvalid", SQLSTATE_GENERAL, false;
     /// Arguments don't match the signature (chapter 41).
@@ -787,6 +804,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::MoveSourceDiverged
         | SprigCode::InheritCopyStale
         | SprigCode::InheritFederatedUnavailable
+        | SprigCode::LogicEngineBusy
         | SprigCode::StreamSequencingTimeout => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
@@ -800,13 +818,15 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ShardBusy
         | SprigCode::LogicUserError
         | SprigCode::LogicRuntimeError
+        | SprigCode::LogicCallDepth
         | SprigCode::LogicVersionConflict
         | SprigCode::MoveCutoverAborted
         | SprigCode::ShardMapChanged
         | SprigCode::DdlFailed => (Code::Aborted, 409),
-        SprigCode::CrossClusterWriteRejected | SprigCode::TooManyBranches => {
-            (Code::FailedPrecondition, 400)
-        }
+        SprigCode::CrossClusterWriteRejected
+        | SprigCode::TooManyBranches
+        | SprigCode::FkActionNotDistributed
+        | SprigCode::HeldBranchStatement => (Code::FailedPrecondition, 400),
         SprigCode::CommitOutcomeUnknown | SprigCode::DtxRolledBack | SprigCode::PartialCommit => {
             (Code::Aborted, 409)
         }
@@ -820,6 +840,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::AutoIndexNotFound
         | SprigCode::FeedSubscriptionNotFound
         | SprigCode::LogicNotFound
+        | SprigCode::FunctionNotExposed
         | SprigCode::JobNotFound
         | SprigCode::TxnNotInDoubt
         | SprigCode::SpaceNotFound
@@ -875,7 +896,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::AdmissionTimeout
         | SprigCode::MemoryLimit
         | SprigCode::LogicBudgetExceeded
-        | SprigCode::RouterMemoryLimit => (Code::ResourceExhausted, 429),
+        | SprigCode::RouterMemoryLimit
+        | SprigCode::PlanLimitExceeded => (Code::ResourceExhausted, 429),
         SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts => {
             (Code::ResourceExhausted, 503)
         }

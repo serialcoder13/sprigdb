@@ -12,14 +12,19 @@
 //!   [`Leases`](crate::group::Leases), through the group
 //!   [`Coordinator`];
 //! - [`DataPlane`]: Produce, Fetch, ListOffsets and OffsetForLeaderEpoch
-//!   (build steps 10 and 11). Not built yet: without one, those APIs are
-//!   not advertised and a request for them closes the connection, as
-//!   Kafka does for an API it doesn't serve.
+//!   (build steps 10 and 11; [`data::DataService`]). Without one, those
+//!   APIs are not advertised and a request for them closes the connection,
+//!   as Kafka does for an API it doesn't serve.
 //!
 //! **Requests are handled one at a time per connection, in order**, as a
 //! Kafka broker does (it mutes a connection while a request is in flight),
 //! so responses keep the order clients pipeline them in; a JoinGroup that
-//! waits for a rebalance holds its connection, not others.
+//! waits for a rebalance holds its connection, not others. The one
+//! exception is a produce's wait for sequencing ([`DataReply::Later`]): it
+//! runs while the connection's next requests are read and handled, at most
+//! [`MAX_IN_FLIGHT`] at once, and its response still goes out in request
+//! order. An idempotent producer's batches are therefore appended in the
+//! order it sent them, but wait for their offsets together.
 //!
 //! **Authentication is required.** Before it, only ApiVersions,
 //! SaslHandshake and SaslAuthenticate are served; anything else closes the
@@ -28,6 +33,7 @@
 //! (tokens in SaslAuthenticate) both work.
 
 mod admin;
+pub mod data;
 mod groups;
 mod meta;
 
@@ -137,20 +143,43 @@ pub struct Session {
     pub client_id: String,
 }
 
+/// Responses waiting to be written, per connection.
+pub const MAX_IN_FLIGHT: usize = 16;
+
+/// A data plane response.
+pub enum DataReply {
+    /// The response body.
+    Now(Vec<u8>),
+    /// The response body, once this finishes; it runs while the
+    /// connection's next requests are served (a produce's wait for
+    /// sequencing).
+    Later(std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, CodecError>> + Send>>),
+}
+
+impl std::fmt::Debug for DataReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Now(b) => f.debug_tuple("Now").field(&b.len()).finish(),
+            Self::Later(_) => f.write_str("Later"),
+        }
+    }
+}
+
 /// Produce, Fetch, ListOffsets and OffsetForLeaderEpoch: chapter 45 build
-/// steps 10 and 11, which need the sequencer. The broker advertises
-/// [`DataPlane::apis`] and hands their requests over whole.
+/// steps 10 and 11. The broker advertises [`DataPlane::apis`] and hands
+/// their requests over whole.
 #[async_trait]
 pub trait DataPlane: Send + Sync + 'static {
     /// The APIs and versions it serves.
     fn apis(&self) -> Vec<ApiRange>;
-    /// Serves one request; returns the response body (without header).
+    /// Serves one request: the response body (without header), now or
+    /// later. An error closes the connection.
     async fn handle(
         &self,
         s: &Session,
         h: &RequestHeader,
         body: &[u8],
-    ) -> Result<Vec<u8>, CodecError>;
+    ) -> Result<DataReply, CodecError>;
     /// The current leader epoch of a partition, for Metadata v7+.
     async fn leader_epoch(&self, p: &Principal, stream_id: u64, partition: i32) -> i32;
 }
@@ -295,6 +324,16 @@ pub(crate) enum Reply {
     Body(Vec<u8>),
     /// Send this body, then close (failed authentication).
     BodyThenClose(Vec<u8>, String),
+    /// The body once this task ends.
+    Later(tokio::task::JoinHandle<Result<Vec<u8>, CodecError>>),
+}
+
+/// What the connection's writer sends, in order.
+enum Out {
+    /// A raw SASL token frame (SaslHandshake v0).
+    Raw(Vec<u8>),
+    /// A response to `(api, version, correlation id)`.
+    Reply(i16, i16, i32, Reply),
 }
 
 fn body<M: Message>(m: &M, v: i16) -> Result<Reply, ConnError> {
@@ -343,10 +382,83 @@ impl Broker {
         info: ConnInfo,
         close: CancellationToken,
     ) -> Result<(), ConnError> {
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Out>(MAX_IN_FLIGHT);
+        let reader = self.read_loop(&mut rd, info, close, tx);
+        let writer = async {
+            while let Some(o) = rx.recv().await {
+                match o {
+                    Out::Raw(b) => wr.write_all(&b).await?,
+                    Out::Reply(api_key, api_version, correlation_id, reply) => {
+                        let (b, close_after) = match reply {
+                            Reply::Body(b) => (b, None),
+                            Reply::BodyThenClose(b, why) => (b, Some(why)),
+                            Reply::Later(h) => match h.await {
+                                Ok(Ok(b)) => (b, None),
+                                Ok(Err(e)) => {
+                                    return Err(ConnError::Protocol(format!(
+                                        "encoding a response: {e}"
+                                    )));
+                                }
+                                Err(e) => {
+                                    return Err(ConnError::Protocol(format!(
+                                        "a {} request failed: {e}",
+                                        protocol::api_name(api_key)
+                                    )));
+                                }
+                            },
+                        };
+                        let frame =
+                            protocol::response_frame(api_key, api_version, correlation_id, |w| {
+                                w.raw(&b);
+                                Ok(())
+                            })
+                            .map_err(|e| ConnError::Protocol(e.to_string()))?;
+                        wr.write_all(&frame).await?;
+                        if let Some(why) = close_after {
+                            wr.flush().await?;
+                            return Err(ConnError::Auth(why));
+                        }
+                    }
+                }
+            }
+            wr.flush().await?;
+            Ok::<(), ConnError>(())
+        };
+        tokio::pin!(reader);
+        tokio::pin!(writer);
+        tokio::select! {
+            w = &mut writer => w,
+            r = &mut reader => {
+                // The reader is done (the client closed, or a request
+                // can't be served): send what is queued first.
+                let w = writer.await;
+                r.and(w)
+            }
+        }
+    }
+
+    /// Reads and handles requests, queueing their responses for the
+    /// writer in order.
+    async fn read_loop<R: AsyncRead + Unpin + Send>(
+        &self,
+        stream: &mut R,
+        info: ConnInfo,
+        close: CancellationToken,
+        tx: tokio::sync::mpsc::Sender<Out>,
+    ) -> Result<(), ConnError> {
         let mut c = Conn {
             info,
             sasl: SaslState::Start,
             principal: None,
+        };
+        let send = |o: Out| {
+            let tx = tx.clone();
+            async move {
+                tx.send(o)
+                    .await
+                    .map_err(|_| ConnError::Protocol("the connection's writer stopped".into()))
+            }
         };
         loop {
             let mut size = [0u8; 4];
@@ -379,17 +491,14 @@ impl Broker {
             if let SaslState::Handshaken { raw: true, .. }
             | SaslState::ScramFinal { raw: true, .. } = c.sasl
             {
-                let (token, fail) = match self.sasl_step(&mut c, &frame).await {
-                    Ok(t) => (t, None),
-                    Err(e) => (Vec::new(), Some(e)),
+                let token = match self.sasl_step(&mut c, &frame).await {
+                    Ok(t) => t,
+                    Err(e) => return Err(ConnError::Auth(e)),
                 };
-                if let Some(e) = fail {
-                    return Err(ConnError::Auth(e));
-                }
                 let mut out = Vec::with_capacity(token.len() + 4);
                 out.extend_from_slice(&u32::try_from(token.len()).unwrap_or(0).to_be_bytes());
                 out.extend_from_slice(&token);
-                stream.write_all(&out).await?;
+                send(Out::Raw(out)).await?;
                 continue;
             }
             let mut r = Reader::new(&frame);
@@ -399,7 +508,7 @@ impl Broker {
             let name = protocol::api_name(header.api_key);
             let reply = self.dispatch(&mut c, &header, r.rest()).await;
             let result = match &reply {
-                Ok(Reply::Body(_)) => "ok",
+                Ok(Reply::Body(_) | Reply::Later(_)) => "ok",
                 Ok(Reply::BodyThenClose(..)) => "auth_failed",
                 Err(_) => "error",
             };
@@ -407,24 +516,17 @@ impl Broker {
                 .increment(1);
             metrics::histogram!("sprig_kafka_request_duration_seconds", "api" => name)
                 .record(started.elapsed().as_secs_f64());
-            let (b, close_after) = match reply? {
-                Reply::Body(b) => (b, None),
-                Reply::BodyThenClose(b, why) => (b, Some(why)),
-            };
-            let frame = protocol::response_frame(
+            let reply = reply?;
+            let closing = matches!(reply, Reply::BodyThenClose(..));
+            send(Out::Reply(
                 header.api_key,
                 header.api_version,
                 header.correlation_id,
-                |w| {
-                    w.raw(&b);
-                    Ok(())
-                },
-            )
-            .map_err(|e| ConnError::Protocol(e.to_string()))?;
-            stream.write_all(&frame).await?;
-            if let Some(why) = close_after {
-                stream.flush().await?;
-                return Err(ConnError::Auth(why));
+                reply,
+            ))
+            .await?;
+            if closing {
+                return Ok(());
             }
         }
     }
@@ -489,11 +591,11 @@ impl Broker {
             api::DESCRIBE_CONFIGS => self.describe_configs(&s, decode(b, v)?, v).await,
             api::INCREMENTAL_ALTER_CONFIGS => self.alter_configs(&s, decode(b, v)?, v).await,
             _ => match &self.data {
-                Some(d) => d
-                    .handle(&s, h, b)
-                    .await
-                    .map(Reply::Body)
-                    .map_err(|e| ConnError::Protocol(e.to_string())),
+                Some(d) => match d.handle(&s, h, b).await {
+                    Ok(DataReply::Now(b)) => Ok(Reply::Body(b)),
+                    Ok(DataReply::Later(f)) => Ok(Reply::Later(tokio::spawn(f))),
+                    Err(e) => Err(ConnError::Protocol(e.to_string())),
+                },
                 None => Err(ConnError::Protocol("no data plane".into())),
             },
         }

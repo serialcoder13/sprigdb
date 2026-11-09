@@ -223,6 +223,9 @@ pub struct Host {
     /// compiled routine's names resolve in its own schema. `None` leaves
     /// them to the session's current database.
     pub default_db: Option<String>,
+    /// What JavaScript and Lua code sees as `ctx`: `user`, `tenant`,
+    /// `database`, `function`, `version` (an object; `null` for none).
+    pub info: Value,
 }
 
 impl std::fmt::Debug for Host {
@@ -564,7 +567,9 @@ impl SprigDb {
                 ("found".to_owned(), Schema::of_boolean("found")),
             ]),
             Shape::Many => Map::from([("rows".to_owned(), Schema::of_any("rows"))]),
-            Shape::Exec => Map::from([("affected".to_owned(), Schema::of_long("affected"))]),
+            Shape::Exec | Shape::Call => {
+                Map::from([("affected".to_owned(), Schema::of_long("affected"))])
+            }
         };
         let sig = FunctionSignature::new(name)
             .set_namespace("Sprig.Db")

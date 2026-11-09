@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use sprig_auth::admin::{self, NewUser};
 use sprig_auth::portable::PortableAccounts;
 use sprig_auth::store::AUTH_MODULE;
-use sprig_catalog::migrate::MigrateOpts;
 use sprig_catalog::{CatalogLocator, MariaCatalog, Migrator, Module};
 use sprig_common::ids::{TenantId, UserId};
 use sprig_common::time::Clock;
@@ -196,9 +195,14 @@ impl TenantUsers {
         // hook existed. Idempotent.
         let ep = self.locator.writer(id).await?;
         let mut conn = crate::catalogs::acquire(&ep.pool, "auth tables").await?;
-        Migrator::new(&[AUTH_MODULE, sprig_auth::authz::AUTHZ_MODULE])?
-            .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
-            .await?;
+        crate::catalogs::migrate_catalog(
+            &*self.locator,
+            id,
+            &mut conn,
+            ep.store.schema(),
+            &Migrator::new(&[AUTH_MODULE, sprig_auth::authz::AUTHZ_MODULE])?,
+        )
+        .await?;
         drop(conn);
         let mut new = NewUser::new(req.user.clone(), req.password.as_bytes());
         if let Some(h) = &req.host {
@@ -269,9 +273,14 @@ impl TenantUsers {
         let id = self.active(tenant).await?;
         let ep = self.locator.writer(id).await?;
         let mut conn = crate::catalogs::acquire(&ep.pool, "auth tables").await?;
-        Migrator::new(&[AUTH_MODULE, sprig_auth::authz::AUTHZ_MODULE])?
-            .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
-            .await?;
+        crate::catalogs::migrate_catalog(
+            &*self.locator,
+            id,
+            &mut conn,
+            ep.store.schema(),
+            &Migrator::new(&[AUTH_MODULE, sprig_auth::authz::AUTHZ_MODULE])?,
+        )
+        .await?;
         drop(conn);
         let mut out = ImportAccountsResponse::default();
         for a in &accounts.users {

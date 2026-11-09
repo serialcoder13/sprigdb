@@ -1124,7 +1124,7 @@ impl Conn<'_> {
             }
             return Ok(());
         }
-        buf.extend_from_slice(&payload);
+        buf.extend_from_slice(payload);
         if buf.len() as u64 > max {
             let e = MqError::new(
                 MqCode::MessageTooLarge,

@@ -253,6 +253,53 @@ pub struct CommittedOffset {
     pub metadata: Option<String>,
 }
 
+/// `stream_groups.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupRowState {
+    /// No members.
+    Empty,
+    /// Members with an assignment.
+    Stable,
+    /// Deleted.
+    Dead,
+}
+
+impl GroupRowState {
+    /// The catalog's text.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Stable => "stable",
+            Self::Dead => "dead",
+        }
+    }
+
+    /// From the catalog's text (unknown text reads as `empty`).
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "stable" => Self::Stable,
+            "dead" => Self::Dead,
+            _ => Self::Empty,
+        }
+    }
+}
+
+/// A consumer group's durable part (`stream_groups`): membership lives in
+/// its coordinator's memory (chapter 45, "Consumer groups").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupRow {
+    /// The group id.
+    pub group: String,
+    /// `consumer` for Kafka clients, `http` for HTTP consumers.
+    pub protocol_type: String,
+    /// The generation.
+    pub generation: u32,
+    /// The state.
+    pub state: GroupRowState,
+}
+
 /// Reads and writes the module's tables in one catalog schema.
 #[derive(Debug, Clone)]
 pub struct StreamsStore {
@@ -437,6 +484,133 @@ impl StreamsStore {
         )
         .await
         .map_err(map_err)
+    }
+
+    /// Every committed offset of a group (OffsetFetch without topics),
+    /// by stream and partition.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn group_offsets<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        group: &str,
+    ) -> Result<Vec<CommittedOffset>> {
+        let rows: Vec<(u64, u32, u64, Option<u32>, Option<String>)> = q
+            .exec(
+                format!(
+                    "SELECT stream_id, partition_no, offset_no, leader_epoch, metadata FROM {} \
+                     WHERE group_name = ? ORDER BY stream_id, partition_no",
+                    self.t("stream_offsets")
+                ),
+                (group,),
+            )
+            .await
+            .map_err(map_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(s, p, o, e, m)| CommittedOffset {
+                group: group.to_owned(),
+                stream: StreamId(s),
+                partition: PartitionNo(p),
+                offset: o,
+                leader_epoch: e,
+                metadata: m,
+            })
+            .collect())
+    }
+
+    /// Writes a consumer group's durable part (`stream_groups`).
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn save_group<Q: Queryable + Send>(&self, q: &mut Q, g: &GroupRow) -> Result<()> {
+        q.exec_drop(
+            format!(
+                "INSERT INTO {} (group_name, protocol_type, generation, state, updated_at) \
+                 VALUES (?, ?, ?, ?, UTC_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE \
+                 protocol_type = VALUES(protocol_type), generation = VALUES(generation), \
+                 state = VALUES(state), updated_at = VALUES(updated_at)",
+                self.t("stream_groups")
+            ),
+            (
+                g.group.as_str(),
+                g.protocol_type.as_str(),
+                g.generation,
+                g.state.as_str(),
+            ),
+        )
+        .await
+        .map_err(map_err)
+    }
+
+    /// A group's row, unless it is dead or missing.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn load_group<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        group: &str,
+    ) -> Result<Option<GroupRow>> {
+        let row: Option<(String, u32, String)> = q
+            .exec_first(
+                format!(
+                    "SELECT protocol_type, generation, CAST(state AS CHAR) FROM {} \
+                     WHERE group_name = ? AND state <> 'dead'",
+                    self.t("stream_groups")
+                ),
+                (group,),
+            )
+            .await
+            .map_err(map_err)?;
+        Ok(row.map(|(protocol_type, generation, state)| GroupRow {
+            group: group.to_owned(),
+            protocol_type,
+            generation,
+            state: GroupRowState::parse(&state),
+        }))
+    }
+
+    /// Every live group, by name.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn list_groups<Q: Queryable + Send>(&self, q: &mut Q) -> Result<Vec<GroupRow>> {
+        let rows: Vec<(String, String, u32, String)> = q
+            .query(format!(
+                "SELECT group_name, protocol_type, generation, CAST(state AS CHAR) FROM {} \
+                 WHERE state <> 'dead' ORDER BY group_name",
+                self.t("stream_groups")
+            ))
+            .await
+            .map_err(map_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(group, protocol_type, generation, state)| GroupRow {
+                group,
+                protocol_type,
+                generation,
+                state: GroupRowState::parse(&state),
+            })
+            .collect())
+    }
+
+    /// Deletes a group's row and its committed offsets (call inside a
+    /// transaction to make both one change).
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn delete_group<Q: Queryable + Send>(&self, q: &mut Q, group: &str) -> Result<()> {
+        for t in ["stream_offsets", "stream_groups"] {
+            q.exec_drop(
+                format!("DELETE FROM {} WHERE group_name = ?", self.t(t)),
+                (group,),
+            )
+            .await
+            .map_err(map_err)?;
+        }
+        Ok(())
     }
 
     /// A group's committed offsets on a stream.

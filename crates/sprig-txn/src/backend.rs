@@ -135,6 +135,19 @@ pub enum Ctl {
         /// The row.
         row: DecisionRow,
     },
+    /// `SET timestamp = <s.us>` (a held branch's fixed clock, so `NOW()`
+    /// replays the same) or `SET timestamp = DEFAULT`.
+    SetTimestamp(Option<u64>),
+    /// Sprig 2PC's phase 2 inside a held branch, before its `COMMIT`: the
+    /// `done` marker row in `schema.__sprig_redo`.
+    RedoDone {
+        /// The anchor schema.
+        schema: String,
+        /// The transaction.
+        dtid: Dtid,
+        /// Its gtrid.
+        gtrid: crate::xid::Gtrid,
+    },
 }
 
 impl Ctl {
@@ -161,6 +174,15 @@ impl Ctl {
             Ctl::RollbackTo(n) => format!("ROLLBACK TO SAVEPOINT `{}`", n.replace('`', "``")),
             Ctl::LockWaitTimeout(n) => format!("SET SESSION innodb_lock_wait_timeout = {n}"),
             Ctl::InsertDecision { schema, row } => insert_decision_sql(schema, row),
+            Ctl::SetTimestamp(Some(us)) => {
+                format!("SET timestamp = {}.{:06}", us / 1_000_000, us % 1_000_000)
+            }
+            Ctl::SetTimestamp(None) => "SET timestamp = DEFAULT".to_owned(),
+            Ctl::RedoDone {
+                schema,
+                dtid,
+                gtrid,
+            } => crate::redo::mark_sql(schema, *dtid, gtrid, crate::redo::RedoMark::Done),
         }
     }
 }
@@ -200,6 +222,27 @@ pub trait BranchConn: Send + 'static {
     /// The first statement's error; [`DbError::is_lost`] when the
     /// connection broke.
     async fn control(&mut self, ctl: &[Ctl]) -> DbResult<()>;
+
+    /// Sprig 2PC (R3): from now on, record every write this connection
+    /// runs, with its replay context, for a held branch's redo
+    /// ([`crate::redo`]); `Savepoint` and `RollbackTo` keep the record in
+    /// step. Returns whether the connection can (the default can't: such
+    /// a backend never holds branches, and its writes follow
+    /// `txn.non_xa_policy = reject`).
+    fn start_redo(&mut self, timestamp_us: u64) -> bool {
+        let _ = timestamp_us;
+        false
+    }
+
+    /// The writes recorded since [`Self::start_redo`], in order, and stops
+    /// recording.
+    ///
+    /// # Errors
+    /// A statement that doesn't replay to the same result (chapter 18's
+    /// determinism rule): the reason.
+    fn take_redo(&mut self) -> Result<Vec<crate::redo::RedoStmt>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// What the coordinator needs to know about a cluster (chapter 09's
@@ -279,6 +322,46 @@ pub trait ClusterAdmin: Send + Sync {
 
     /// Deletes a decision row (resolver only).
     async fn delete_decision(&self, cluster: &ClusterId, schema: &str, dtid: Dtid) -> DbResult<()>;
+
+    /// Sprig 2PC's prepare (R3): a held branch's redo rows, in one
+    /// autocommit transaction (the table is created when missing).
+    async fn insert_redo(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+        gtrid: &crate::xid::Gtrid,
+        stmts: &[crate::redo::RedoStmt],
+    ) -> DbResult<()> {
+        let _ = (cluster, schema, dtid, gtrid, stmts);
+        Err(DbError::new(1235, "this backend keeps no redo"))
+    }
+
+    /// Every held branch with redo rows on the cluster.
+    async fn redo_branches(&self, cluster: &ClusterId) -> DbResult<Vec<crate::redo::RedoBranch>> {
+        let _ = cluster;
+        Ok(Vec::new())
+    }
+
+    /// Replays a committed held branch from its redo rows in one
+    /// transaction that also inserts its `replayed` marker (first) and
+    /// deletes the statement rows (resolver only).
+    async fn replay_redo(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+    ) -> DbResult<crate::redo::Replay> {
+        let _ = (cluster, schema, dtid);
+        Err(DbError::new(1235, "this backend keeps no redo"))
+    }
+
+    /// Deletes a branch's redo rows, its marker included (an aborted
+    /// branch, or one whose holder committed).
+    async fn delete_redo(&self, cluster: &ClusterId, schema: &str, dtid: Dtid) -> DbResult<()> {
+        let _ = (cluster, schema, dtid);
+        Err(DbError::new(1235, "this backend keeps no redo"))
+    }
 }
 
 /// Finds where an anchor's decision rows live now.

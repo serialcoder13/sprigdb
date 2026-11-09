@@ -42,10 +42,13 @@ pub mod err {
     pub const OFFSET_OUT_OF_RANGE: i16 = 1;
     pub const CORRUPT_MESSAGE: i16 = 2;
     pub const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+    pub const INVALID_FETCH_SIZE: i16 = 4;
     pub const LEADER_NOT_AVAILABLE: i16 = 5;
     pub const NOT_LEADER_OR_FOLLOWER: i16 = 6;
     pub const REQUEST_TIMED_OUT: i16 = 7;
     pub const MESSAGE_TOO_LARGE: i16 = 10;
+    pub const RECORD_LIST_TOO_LARGE: i16 = 18;
+    pub const INVALID_REQUIRED_ACKS: i16 = 21;
     pub const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
     pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
     pub const NOT_COORDINATOR: i16 = 16;
@@ -59,6 +62,7 @@ pub mod err {
     pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;
     pub const GROUP_AUTHORIZATION_FAILED: i16 = 30;
     pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
+    pub const INVALID_TIMESTAMP: i16 = 32;
     pub const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
     pub const ILLEGAL_SASL_STATE: i16 = 34;
     pub const UNSUPPORTED_VERSION: i16 = 35;
@@ -69,14 +73,24 @@ pub mod err {
     pub const INVALID_CONFIG: i16 = 40;
     pub const INVALID_REQUEST: i16 = 42;
     pub const POLICY_VIOLATION: i16 = 44;
+    pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
+    pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
+    pub const INVALID_PRODUCER_EPOCH: i16 = 47;
+    pub const INVALID_TXN_STATE: i16 = 48;
     pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
     pub const SASL_AUTHENTICATION_FAILED: i16 = 58;
+    pub const KAFKA_STORAGE_ERROR: i16 = 56;
+    pub const UNKNOWN_PRODUCER_ID: i16 = 59;
     pub const NON_EMPTY_GROUP: i16 = 68;
     pub const GROUP_ID_NOT_FOUND: i16 = 69;
+    pub const FENCED_LEADER_EPOCH: i16 = 74;
+    pub const UNKNOWN_LEADER_EPOCH: i16 = 75;
     pub const UNSUPPORTED_COMPRESSION_TYPE: i16 = 76;
+    pub const OFFSET_NOT_AVAILABLE: i16 = 78;
     pub const MEMBER_ID_REQUIRED: i16 = 79;
     pub const GROUP_MAX_SIZE_REACHED: i16 = 81;
     pub const FENCED_INSTANCE_ID: i16 = 82;
+    pub const INVALID_RECORD: i16 = 87;
     pub const UNKNOWN_TOPIC_ID: i16 = 100;
 }
 
@@ -88,10 +102,16 @@ pub mod sprig {
     pub const STREAM_APPEND_ONLY: u16 = 39941;
     pub const STREAM_EXISTS: u16 = 39942;
     pub const STREAM_PARTITIONS_DECREASE: u16 = 39943;
+    pub const STREAM_RECORD_TOO_LARGE: u16 = 39944;
+    pub const STREAM_SEQUENCING_TIMEOUT: u16 = 39946;
+    pub const STREAM_OFFSET_OUT_OF_RANGE: u16 = 39947;
+    pub const STREAM_TRUNCATED: u16 = 39948;
+    pub const KAFKA_ACKS_ZERO: u16 = 39950;
     pub const KAFKA_TRANSACTIONS_UNSUPPORTED: u16 = 39951;
     pub const KAFKA_UNSUPPORTED_API: u16 = 39952;
     pub const KAFKA_SASL_FAILED: u16 = 39953;
     pub const KAFKA_NOT_COORDINATOR: u16 = 39954;
+    pub const STREAM_COMPACT_NEEDS_KEY: u16 = 39955;
 }
 
 /// One served API: its key and version range.
@@ -126,10 +146,10 @@ macro_rules! range {
     };
 }
 
-/// The APIs this build serves and advertises in ApiVersions (chapter 45,
-/// "Kafka APIs served"). Produce, Fetch, ListOffsets and
-/// OffsetForLeaderEpoch join when steps 10 and 11 are built (see
-/// [`crate::broker::DataPlane`]).
+/// The APIs the broker itself serves and advertises in ApiVersions
+/// (chapter 45, "Kafka APIs served"). Produce, Fetch, ListOffsets and
+/// OffsetForLeaderEpoch are [`DATA_PLANE`]'s, advertised when the broker
+/// has a [`crate::broker::DataPlane`].
 pub const SERVED: &[ApiRange] = &[
     range!(api::METADATA, 0, 12, metadata_request),
     range!(api::OFFSET_COMMIT, 0, 8, offset_commit_request),
@@ -158,10 +178,36 @@ pub const SERVED: &[ApiRange] = &[
     ),
 ];
 
-/// The served range of `key`, if any.
+/// The data plane's APIs (chapter 45 build steps 10 and 11), served by
+/// [`crate::broker::data::DataService`].
+pub const DATA_PLANE: &[ApiRange] = &[
+    range!(api::PRODUCE, 3, 9, produce_request),
+    range!(api::FETCH, 4, 13, fetch_request),
+    range!(api::LIST_OFFSETS, 1, 7, list_offsets_request),
+    range!(
+        api::OFFSET_FOR_LEADER_EPOCH,
+        2,
+        4,
+        offset_for_leader_epoch_request
+    ),
+];
+
+/// The served range of `key`, if any (the broker's own APIs).
 #[must_use]
 pub fn served(key: i16) -> Option<&'static ApiRange> {
     SERVED.iter().find(|r| r.key == key)
+}
+
+/// The first flexible version of every API SprigDB knows, served by the
+/// broker or by the data plane: request and response headers follow it
+/// whether or not the API is advertised. `None` for an unknown API.
+#[must_use]
+pub fn flexible_min(key: i16) -> Option<i16> {
+    SERVED
+        .iter()
+        .chain(DATA_PLANE)
+        .find(|r| r.key == key)
+        .map(|r| r.flexible_min)
 }
 
 /// The metric and log name of an API key.
@@ -217,8 +263,8 @@ impl RequestHeader {
     /// for flexible versions, 1 otherwise. Unknown APIs are read as 1.
     #[must_use]
     pub fn version_for(api_key: i16, api_version: i16) -> i16 {
-        match served(api_key) {
-            Some(r) if api_version >= r.flexible_min => 2,
+        match flexible_min(api_key) {
+            Some(f) if api_version >= f => 2,
             _ => 1,
         }
     }
@@ -272,8 +318,8 @@ pub fn response_header_version(api_key: i16, api_version: i16) -> i16 {
     if api_key == api::API_VERSIONS {
         return 0;
     }
-    match served(api_key) {
-        Some(r) if api_version >= r.flexible_min => 1,
+    match flexible_min(api_key) {
+        Some(f) if api_version >= f => 1,
         _ => 0,
     }
 }
@@ -379,6 +425,33 @@ mod tests {
                 InitProducerIdRequest::MAX_VERSION,
             ),
         ];
+        let data: &[(i16, i16, i16)] = &[
+            (
+                api::PRODUCE,
+                ProduceRequest::MIN_VERSION,
+                ProduceRequest::MAX_VERSION,
+            ),
+            (
+                api::FETCH,
+                FetchRequest::MIN_VERSION,
+                FetchRequest::MAX_VERSION,
+            ),
+            (
+                api::LIST_OFFSETS,
+                ListOffsetsRequest::MIN_VERSION,
+                ListOffsetsRequest::MAX_VERSION,
+            ),
+            (
+                api::OFFSET_FOR_LEADER_EPOCH,
+                OffsetForLeaderEpochRequest::MIN_VERSION,
+                OffsetForLeaderEpochRequest::MAX_VERSION,
+            ),
+        ];
+        for (k, lo, hi) in data {
+            let r = DATA_PLANE.iter().find(|r| r.key == *k).unwrap();
+            assert!(r.min >= *lo && r.max <= *hi, "{}", api_name(*k));
+            assert!(served(*k).is_none());
+        }
         for (k, lo, hi) in defs {
             let r = served(*k).unwrap();
             assert!(r.min >= *lo && r.max <= *hi, "{}", api_name(*k));
@@ -401,8 +474,19 @@ mod tests {
         assert_eq!(response_header_version(api::API_VERSIONS, 3), 0);
         assert_eq!(response_header_version(api::METADATA, 9), 1);
         assert_eq!(response_header_version(api::SASL_HANDSHAKE, 1), 0);
-        // An API SprigDB doesn't serve reads as header v1.
-        assert_eq!(RequestHeader::version_for(api::PRODUCE, 9), 1);
+        // The data plane's APIs follow their own flexible versions, even
+        // when no data plane is attached.
+        assert_eq!(RequestHeader::version_for(api::PRODUCE, 8), 1);
+        assert_eq!(RequestHeader::version_for(api::PRODUCE, 9), 2);
+        assert_eq!(response_header_version(api::PRODUCE, 9), 1);
+        assert_eq!(RequestHeader::version_for(api::FETCH, 11), 1);
+        assert_eq!(RequestHeader::version_for(api::FETCH, 12), 2);
+        assert_eq!(response_header_version(api::FETCH, 12), 1);
+        assert_eq!(response_header_version(api::LIST_OFFSETS, 6), 1);
+        assert_eq!(response_header_version(api::LIST_OFFSETS, 5), 0);
+        assert_eq!(RequestHeader::version_for(api::OFFSET_FOR_LEADER_EPOCH, 4), 2);
+        // An API SprigDB doesn't know reads as header v1.
+        assert_eq!(RequestHeader::version_for(57, 9), 1);
     }
 
     #[test]

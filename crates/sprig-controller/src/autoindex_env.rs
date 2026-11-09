@@ -34,7 +34,6 @@ use sprig_advisor::autoindex::stats::StatsReader;
 use sprig_advisor::autoindex::store::{AUTOINDEX_MODULE, AutoIndexStore, DecisionLog};
 use sprig_advisor::autoindex::validate::ValidationSettings;
 use sprig_catalog::cache::{Loaded, TenantCatalog};
-use sprig_catalog::migrate::MigrateOpts;
 use sprig_catalog::{CatalogLocator, Migrator, ObjectState, ddl::shard_schemas};
 use sprig_cluster::driver::{DdlKind, NodeConnector, TableTraits, ddl_method_for};
 use sprig_cluster::health::ClusterHealth;
@@ -269,12 +268,8 @@ pub fn resolve_object(
 #[async_trait::async_trait]
 impl AutoIndexEnv for ControllerEnv {
     async fn catalog(&self, tenant: TenantId) -> Result<(Conn, AutoIndexStore)> {
-        let ep = self
-            .sessions
-            .as_ref()
-            .unwrap_or(&self.locator)
-            .writer(tenant)
-            .await?;
+        let locator = self.sessions.as_ref().unwrap_or(&self.locator);
+        let ep = locator.writer(tenant).await?;
         let mut conn = crate::catalogs::acquire(&ep.pool, "auto_index pass").await?;
         // Tenants bootstrapped before the module joined bootstrap get its
         // tables here; the migrator is idempotent.
@@ -284,9 +279,14 @@ impl AutoIndexEnv for ControllerEnv {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(&tenant);
         if !migrated {
-            Migrator::new(&[AUTOINDEX_MODULE])?
-                .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
-                .await?;
+            crate::catalogs::migrate_catalog(
+                locator,
+                tenant,
+                &mut conn,
+                ep.store.schema(),
+                &Migrator::new(&[AUTOINDEX_MODULE])?,
+            )
+            .await?;
             self.migrated
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

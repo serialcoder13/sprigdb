@@ -453,3 +453,231 @@ fn deep_only_privilege_tests_carry_over() {
     assert_eq!(next.privileges.osu_method_settable, Some(true));
     assert!(diff(&deep, &next).is_empty(), "{:?}", diff(&deep, &next));
 }
+
+/// Derives with `previous`, as the drivers do.
+fn derive_after(
+    topology: TopologyKind,
+    probes: &[NodeProbe],
+    previous: &CapabilityProfile,
+) -> CapabilityProfile {
+    derive(DeriveInput {
+        topology,
+        probes,
+        declared: None,
+        previous: Some(previous),
+    })
+}
+
+#[test]
+fn coverage_of_a_pass() {
+    assert_eq!(
+        Coverage::of(TopologyKind::PrimaryReplica, &replication()),
+        Coverage::Complete
+    );
+    let mut probes = replication();
+    probes[2] = failed("n3", None);
+    assert_eq!(
+        Coverage::of(TopologyKind::PrimaryReplica, &probes),
+        Coverage::Writer
+    );
+    probes[0] = failed("n1", None);
+    assert_eq!(
+        Coverage::of(TopologyKind::PrimaryReplica, &probes),
+        Coverage::Blind,
+        "a replica answering alone doesn't stand for the writer"
+    );
+    assert_eq!(
+        Coverage::of(TopologyKind::SingleNode, &[failed("n1", Some(1040))]),
+        Coverage::Blind
+    );
+    assert_eq!(Coverage::of(TopologyKind::SingleNode, &[]), Coverage::Blind);
+}
+
+/// The dev clusters' flapping (9 Nov): every probe of a loaded host timed
+/// out, the pass derived an empty profile, and XA, `log_bin`, the mover and
+/// feed verdicts and read-your-writes were published as downgrades.
+#[test]
+fn a_pass_nothing_answered_publishes_nothing() {
+    let t0 = Instant::now();
+    let good = derive_for(TopologyKind::PrimaryReplica, &replication());
+    let mut pubr = CapabilityPublisher::new(Some(good.clone()), Duration::from_secs(60));
+    let timed_out = [failed("n1", None), failed("n2", None), failed("n3", None)];
+    let blind = derive_after(TopologyKind::PrimaryReplica, &timed_out, &good);
+    assert!(
+        !blind.derived.xa,
+        "derive alone would read the timeout as a no"
+    );
+    let coverage = Coverage::of(TopologyKind::PrimaryReplica, &timed_out);
+    assert_eq!(coverage, Coverage::Blind);
+    assert!(pubr.observe_with(blind.clone(), t0, coverage).is_none());
+    assert_eq!(pubr.published(), Some(&good));
+    // The same pass read as complete is the old behaviour: downgrades.
+    let mut old = CapabilityPublisher::new(Some(good.clone()), Duration::from_secs(60));
+    let fields: Vec<String> = old
+        .observe(blind, t0)
+        .unwrap()
+        .changes
+        .into_iter()
+        .map(|c| c.field)
+        .collect();
+    for f in [
+        "derived.xa",
+        "binlog.log_bin",
+        "derived.mover_source",
+        "derived.ryw",
+    ] {
+        assert!(fields.iter().any(|x| x == f), "{f} in {fields:?}");
+    }
+}
+
+/// A blind pass leaves a held upgrade's clock alone: it neither restarts
+/// nor completes the sustain period.
+#[test]
+fn a_blind_pass_keeps_held_upgrades() {
+    let sustain = Duration::from_secs(60);
+    let t0 = Instant::now();
+    let mut fallen = replication();
+    facts_mut(&mut fallen[0]).semi_sync.master_active = false;
+    let bad = derive_for(TopologyKind::PrimaryReplica, &fallen);
+    let good = derive_for(TopologyKind::PrimaryReplica, &replication());
+    let mut pubr = CapabilityPublisher::new(Some(bad.clone()), sustain);
+    assert!(pubr.observe(good.clone(), t0).is_none());
+    assert!(pubr.pending().contains(&"derived.zero_loss_failover"));
+    let blind = derive_after(TopologyKind::PrimaryReplica, &[failed("n1", None)], &bad);
+    assert!(
+        pubr.observe_with(blind, t0 + Duration::from_secs(30), Coverage::Blind)
+            .is_none()
+    );
+    assert!(pubr.pending().contains(&"derived.zero_loss_failover"));
+    let up = pubr.observe(good, t0 + sustain).unwrap();
+    assert!(up.profile.derived.zero_loss_failover);
+}
+
+/// A replica that timed out: the writer's facts publish, the facts that
+/// depend on every node keep their values.
+#[test]
+fn a_pass_missing_a_replica_publishes_only_the_writers_facts() {
+    let t0 = Instant::now();
+    let good = derive_for(TopologyKind::PrimaryReplica, &replication());
+    let mut pubr = CapabilityPublisher::new(Some(good.clone()), Duration::from_secs(60));
+    let mut probes = replication();
+    probes[0].active = None;
+    probes[1] = failed("n2", None);
+    probes[2] = failed("n3", None);
+    let cand = derive_after(TopologyKind::PrimaryReplica, &probes, &good);
+    assert_eq!(
+        cand.derived.ryw,
+        RywMethod::WriterOnly,
+        "no replica answered"
+    );
+    assert_eq!(cand.derived.validation, None);
+    let cov = Coverage::of(TopologyKind::PrimaryReplica, &probes);
+    assert_eq!(cov, Coverage::Writer);
+    assert!(
+        pubr.observe_with(cand, t0, cov).is_none(),
+        "nothing observed changed"
+    );
+
+    // What the writer itself shows is published: semi-sync fell back.
+    facts_mut(&mut probes[0]).semi_sync.master_active = false;
+    let cand = derive_after(TopologyKind::PrimaryReplica, &probes, &good);
+    let p = pubr
+        .observe_with(cand, t0 + Duration::from_secs(5), cov)
+        .unwrap();
+    let fields: Vec<&str> = p.changes.iter().map(|c| c.field.as_str()).collect();
+    assert!(fields.contains(&"semi_sync.active"), "{fields:?}");
+    assert!(fields.contains(&"derived.zero_loss_failover"), "{fields:?}");
+    assert_eq!(p.profile.derived.ryw, RywMethod::GtidWait, "kept");
+    assert_eq!(
+        p.profile.derived.validation,
+        Some(ValidationMethod::ReplicaBuild),
+        "kept"
+    );
+
+    // Back to complete: the writer-only facts are as observed, and the
+    // zero-loss upgrade waits for the sustain period as always.
+    let back = derive_after(TopologyKind::PrimaryReplica, &replication(), &p.profile);
+    assert!(
+        pubr.observe(back, t0 + Duration::from_secs(10)).is_none(),
+        "upgrade held"
+    );
+}
+
+/// On Galera, zero-loss failover needs every node synced: a node that
+/// timed out keeps the published value.
+#[test]
+fn galera_zero_loss_is_kept_while_a_node_is_silent() {
+    let t0 = Instant::now();
+    let good = derive_for(TopologyKind::Galera, &galera());
+    let mut pubr = CapabilityPublisher::new(Some(good.clone()), Duration::from_secs(60));
+    let mut probes = galera();
+    probes[0].active = None;
+    probes[2] = failed("n3", None);
+    let cand = derive_after(TopologyKind::Galera, &probes, &good);
+    assert!(!cand.derived.zero_loss_failover);
+    let cov = Coverage::of(TopologyKind::Galera, &probes);
+    assert_eq!(cov, Coverage::Writer);
+    assert!(pubr.observe_with(cand.clone(), t0, cov).is_none());
+    assert!(pubr.published().unwrap().derived.zero_loss_failover);
+    // Every node answering and one of them a donor is an observation.
+    let mut donor = galera();
+    donor[0].active = None;
+    facts_mut(&mut donor[2])
+        .galera
+        .as_mut()
+        .unwrap()
+        .local_state = GaleraLocalState::DonorDesynced;
+    let cand = derive_after(TopologyKind::Galera, &donor, &good);
+    let p = pubr
+        .observe_with(cand, t0, Coverage::of(TopologyKind::Galera, &donor))
+        .unwrap();
+    assert!(!p.profile.derived.zero_loss_failover);
+}
+
+#[test]
+fn deep_only_fields() {
+    for f in [
+        "derived.xa",
+        "derived.mover_source",
+        "derived.feed_level",
+        "features.vector",
+        "privileges.sql_log_bin_settable",
+    ] {
+        assert!(deep_only(f), "{f}");
+    }
+    for f in [
+        "binlog.log_bin",
+        "features.alter_two_phase",
+        "features.performance_schema",
+        "derived.ryw",
+        "privileges.create_user",
+    ] {
+        assert!(!deep_only(f), "{f}");
+    }
+    let t0 = Instant::now();
+    let good = derive_for(TopologyKind::SingleNode, &single());
+    let mut no_xa = single();
+    no_xa[0].active.as_mut().unwrap().xa = false;
+    let mut pubr = CapabilityPublisher::new(Some(good.clone()), Duration::from_secs(60));
+    let p = pubr
+        .observe(derive_for(TopologyKind::SingleNode, &no_xa), t0)
+        .unwrap();
+    assert!(p.downgrades_deep_only());
+    let mut fallen = single();
+    facts_mut(&mut fallen[0]).binlog.gtid_strict_mode = false;
+    let mut pubr = CapabilityPublisher::new(Some(good), Duration::from_secs(60));
+    let mut cand = derive_for(TopologyKind::SingleNode, &fallen);
+    // Keep the feed verdict as it was, to look at the binlog flag alone.
+    cand.derived.mover_source = true;
+    cand.derived.feed_source = true;
+    cand.derived.feed_level = pubr.published().unwrap().derived.feed_level;
+    let p = pubr.observe(cand, t0).unwrap();
+    assert!(
+        p.changes
+            .iter()
+            .any(|c| c.field == "binlog.gtid_strict_mode"),
+        "{:?}",
+        p.changes
+    );
+    assert!(!p.downgrades_deep_only(), "{:?}", p.changes);
+}

@@ -70,6 +70,9 @@ pub enum ParticipantKind {
     Xa,
     /// The last resource: committed with the decision row.
     Last,
+    /// A held branch (Sprig 2PC, R3): redo rows, finished in phase 2 or
+    /// replayed by the resolver.
+    Held,
 }
 
 /// One writing branch, as the decision row lists it.
@@ -102,6 +105,7 @@ pub fn encode_participants(ps: &[Participant]) -> Vec<u8> {
             let k = match p.kind {
                 ParticipantKind::Xa => 'x',
                 ParticipantKind::Last => 'l',
+                ParticipantKind::Held => 'h',
             };
             let shards: Vec<String> = p.shards.iter().map(ToString::to_string).collect();
             format!("{k}:{}:{}", p.cluster, shards.join(","))
@@ -123,6 +127,7 @@ pub fn decode_participants(b: &[u8]) -> Vec<Participant> {
             let kind = match it.next()? {
                 "x" => ParticipantKind::Xa,
                 "l" => ParticipantKind::Last,
+                "h" => ParticipantKind::Held,
                 _ => return None,
             };
             let cluster = ClusterId::new(it.next()?).ok()?;

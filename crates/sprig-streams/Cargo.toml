@@ -10,6 +10,8 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+# Binary Kafka header values in the outbox's headers JSON.
+base64.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
@@ -27,6 +29,9 @@ sprig-sql.workspace = true
 sqlparser.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# Event ids of Kafka appends (UUIDv7), chosen before the insert so the
+# producer can find their offsets.
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

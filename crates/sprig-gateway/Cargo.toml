@@ -61,6 +61,8 @@ sprig-streams = { path = "../sprig-streams" }
 sprig-proto-kafka = { path = "../sprig-proto-kafka" }
 # Chapter 50: AMQP 0-9-1 and 1.0 on 5672 and 5671 (R9).
 sprig-proto-amqp = { path = "../sprig-proto-amqp" }
+# Chapter 50: the queue engine behind AMQP (R9).
+sprig-queues = { path = "../sprig-queues" }
 uuid.workspace = true
 # Hierarchical data inheritance (chapter 42, R6).
 sprig-inherit = { path = "../sprig-inherit" }

@@ -1689,6 +1689,13 @@ pub trait CatalogLocator: Send + Sync + 'static {
     async fn reader(&self, tenant: TenantId) -> Result<CatalogEndpoint> {
         self.writer(tenant).await
     }
+    /// The mover job holding the catalog's shard map for a cutover, if one
+    /// does (chapter 10, "Cutover"): catalog migrations wait for it, as
+    /// the cutover may rename the catalog's tables away. The default knows
+    /// of no holds.
+    async fn held_by(&self, _tenant: TenantId) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// A fixed map from tenants to catalogs.

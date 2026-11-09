@@ -57,6 +57,10 @@ pub struct Outcome {
     pub entry: Option<String>,
     /// The account the routines run as.
     pub definer: String,
+    /// `SELECT db.f(args)`'s stored function (functions only; see
+    /// [`deploy::select_function`]), for the gateway to create through
+    /// `sprig_ctl` with the deploying user as `DEFINER`.
+    pub select_fn: Option<String>,
 }
 
 impl Outcome {
@@ -118,6 +122,93 @@ pub async fn engine_check(d: &Declaration) -> Result<()> {
             ),
         ));
     }
+    if d.definer_security {
+        return Err(SprigError::new(
+            SprigCode::LogicUnsupported,
+            format!(
+                "{} runs in the engine tier, which can't run SQL SECURITY DEFINER code yet; \
+                 deploy it SQL SECURITY INVOKER",
+                d.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The signature-only IR of a JavaScript or Lua function: its declared
+/// parameters, and `output {value}` when it declares `RETURNS`. The
+/// wrapper procedure and the engine-tier call read only these.
+#[must_use]
+pub fn script_function(d: &Declaration) -> sprig_logic_compile::Function {
+    use crate::declare::Param;
+    use sprig_logic_compile::ir::{EventDef, Param as IrParam};
+    sprig_logic_compile::Function {
+        name: d.name.clone(),
+        params: d
+            .params
+            .iter()
+            .map(|p| IrParam {
+                name: p.name.clone(),
+                ty: Param::ir_ty(&p.ty),
+                min: None,
+                max: None,
+            })
+            .collect(),
+        events: d
+            .returns
+            .as_deref()
+            .map(|r| {
+                vec![EventDef {
+                    name: "output".to_owned(),
+                    fields: vec![("value".to_owned(), Param::ir_ty(r))],
+                }]
+            })
+            .unwrap_or_default(),
+        locals: Vec::new(),
+        body: Vec::new(),
+    }
+}
+
+/// The engine's signature of a JavaScript or Lua declaration.
+#[must_use]
+pub fn script_sig(d: &Declaration) -> sprig_logic_js::ScriptSig {
+    sprig_logic_js::ScriptSig {
+        params: d
+            .params
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    param_ty(crate::declare::Param::ir_ty(&p.ty)),
+                )
+            })
+            .collect(),
+        scalar: d.returns.is_some(),
+    }
+}
+
+/// The engine's parameter type for an IR type.
+#[must_use]
+pub fn param_ty(t: sprig_logic_compile::ir::Ty) -> sprig_logic_js::ParamTy {
+    use sprig_logic_compile::ir::Ty;
+    use sprig_logic_js::ParamTy;
+    match t {
+        Ty::Int => ParamTy::Int,
+        Ty::Float => ParamTy::Float,
+        Ty::Bool => ParamTy::Bool,
+        Ty::Json => ParamTy::Json,
+        Ty::Str | Ty::Null => ParamTy::Str,
+    }
+}
+
+/// What a JavaScript or Lua version must pass before it is recorded: its
+/// source compiles in its runtime, and it isn't `SQL SECURITY DEFINER`
+/// (the engine tier runs with the caller's session only, as for KIRun).
+///
+/// # Errors
+/// 39861 for source that doesn't compile; 39862 for `DEFINER`.
+pub fn script_check(d: &Declaration) -> Result<()> {
+    sprig_logic_js::Program::new(d.runtime.as_str(), &d.name, &d.body, script_sig(d))?;
     if d.definer_security {
         return Err(SprigError::new(
             SprigCode::LogicUnsupported,
@@ -193,10 +284,22 @@ pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -
         compile_max_cost: t.compile_max_cost,
         definer_security: d.definer_security,
     };
-    let compiled = compile(d.runtime, &d.body, &cols, &opts)?;
+    let mut compiled = compile(d.runtime, &d.body, &cols, &opts)?;
+    let script = matches!(
+        d.runtime,
+        sprig_logic_compile::Runtime::Javascript | sprig_logic_compile::Runtime::Lua
+    );
+    if script {
+        // No compiler front end yet: the declaration gives the signature
+        // (parameters, `RETURNS`), and the version runs in the engine tier.
+        compiled.ir = Some(script_function(d));
+    }
     let placed = placement::place(&compiled, d.tier, t.single_shard)?;
     if placed.tier == Tier::Engine && d.runtime == sprig_logic_compile::Runtime::Kirun {
         engine_check(d).await?;
+    }
+    if script {
+        script_check(d)?;
     }
     if store
         .module(t.catalog, t.db_id, kind, &d.name)
@@ -211,7 +314,7 @@ pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -
             .update_options(t.catalog, &module, t.catalog_version)
             .await?;
     }
-    let signature = compiled.ir.as_ref().map_or(serde_json::Value::Null, |f| {
+    let mut signature = compiled.ir.as_ref().map_or(serde_json::Value::Null, |f| {
         serde_json::json!({
             "params": f.params.iter().map(|p| serde_json::json!({"name": p.name, "type": p.ty.name()})).collect::<Vec<_>>(),
             "events": f.events.iter().map(|e| serde_json::json!({
@@ -220,6 +323,12 @@ pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -
             })).collect::<Vec<_>>(),
         })
     });
+    if script {
+        signature["scalar"] = serde_json::Value::Bool(d.returns.is_some());
+        if let Some(r) = &d.returns {
+            signature["returns"] = serde_json::Value::String(r.clone());
+        }
+    }
     let plsql_text = compiled.plsql.as_ref().map(|p| p.statements.join(";\n\n"));
     store
         .add_version(
@@ -237,6 +346,7 @@ pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -
             },
         )
         .await?;
+    let mut select_fn = None;
     let plan = match (&compiled.ir, placed.tier, &compiled.plsql) {
         (Some(f), tier, p) => {
             let w = WrapperSpec {
@@ -247,6 +357,18 @@ pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -
                 module_id: module.module_id,
                 version,
             };
+            if d.kind == crate::declare::Kind::Function {
+                let entry = match (tier, p) {
+                    (Tier::MariaDb, Some(p)) => Some(p.entry.as_str()),
+                    _ => None,
+                };
+                select_fn = deploy::select_function(
+                    &w,
+                    t.shard_schema,
+                    entry,
+                    !compiled.analysis.writes.is_empty(),
+                );
+            }
             match (tier, p) {
                 (Tier::MariaDb, Some(p)) => Some(deploy::plan_compiled(t.shard_schema, p, &w)),
                 _ => Some(deploy::plan_engine(t.shard_schema, &w)),
@@ -269,6 +391,9 @@ pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -
     store
         .activate(t.catalog, module.module_id, version, t.catalog_version)
         .await?;
+    store
+        .set_exposure(t.catalog, module.module_id, &d.exposure)
+        .await?;
     tracing::info!(
         module = module.module_id,
         version,
@@ -282,6 +407,7 @@ pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -
         entry: compiled.plsql.as_ref().map(|p| p.entry.clone()),
         placement: placed,
         definer,
+        select_fn,
     })
 }
 

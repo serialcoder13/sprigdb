@@ -42,13 +42,13 @@ use sprig_common::time::SystemClock;
 use sprig_meta::conformance::{ETCD_ENV, delete_prefix, unique_tier};
 use sprig_meta::{EtcdConfig, EtcdStore, MemStore, Tier};
 use sprig_settings::{
-    Apply, Bounds, HardBounds, OwnedCtx, Registry, ScopeKind, Scopes, Setting, SettingChange,
-    Settings, SettingsStores, Value,
+    Apply, Bounds, HardBounds, LiveSettings, OwnedCtx, Registry, ScopeKind, Scopes, Setting,
+    SettingChange, Settings, SettingsStores, Value,
 };
 
 use super::*;
 use crate::catalogs::{CatalogNaming, StaticPools};
-use crate::tree::NewTenant;
+use crate::tree::{IdRange, NewTenant};
 use crate::tree_settings::TreeSync;
 
 const MARIADB_ENV: &str = "SPRIG_TEST_MARIADB_SINGLE";
@@ -780,6 +780,90 @@ async fn live_catalog_schemas_are_never_reused() {
                 );
             }
             let _ = conn.disconnect().await;
+        }
+    })
+    .await;
+}
+
+/// `tenant.id_min..=tenant.id_max` (ctlfix, 9 Nov): only tenant-shaped
+/// schemas inside the range raise the id counter, so another deployment's
+/// schemas on the same servers no longer pull this one's ids into its
+/// range, and a used-up range refuses with 39080.
+#[tokio::test]
+async fn live_tenant_ids_stay_in_the_deployments_range() {
+    let Some(url) = std::env::var(MARIADB_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        eprintln!("skipped live_tenant_ids_stay_in_the_deployments_range: set {MARIADB_ENV}");
+        return;
+    };
+    let pools = StaticPools::new().with_url(cid("lt-c1"), &url).unwrap();
+    with_env(pools, Some(&url), |env| {
+        let url = url.clone();
+        async move {
+            // Live settings with the range 10..=12 at global scope.
+            let g = MemStore::new(Tier::Global);
+            let d = g.with_tier(Tier::Dc(env.service.dc().clone()));
+            for (k, v) in [("tenant.id_min", 10), ("tenant.id_max", 12)] {
+                g.txn(sprig_meta::Txn {
+                    when: vec![],
+                    then: vec![sprig_meta::Op::Put {
+                        key: g.tier().key(&format!("settings/{k}")).unwrap(),
+                        value: format!(r#"{{"v":1,"value":{v},"set_by":"test"}}"#).into_bytes(),
+                        lease: None,
+                    }],
+                    otherwise: vec![],
+                })
+                .await
+                .unwrap();
+            }
+            let live = LiveSettings::start(
+                Registry::global().unwrap(),
+                SettingsStores::new(Arc::new(g.clone()), Arc::new(d)).unwrap(),
+            )
+            .unwrap();
+            live.ready().await;
+            let service = TenantService::new(
+                Arc::clone(&env.dc_store),
+                env.locator.clone(),
+                Arc::clone(&env.tree),
+                Arc::new(NoHooks),
+                Arc::new(SystemClock),
+                Some(live.clone()),
+            )
+            .unwrap();
+            assert_eq!(service.id_range(), IdRange { min: 10, max: 12 });
+            let mut conn = mysql_async::Conn::new(mysql_async::Opts::from_url(&url).unwrap())
+                .await
+                .unwrap();
+            // Another deployment's catalog (id 100, outside the range) and
+            // an earlier one of this deployment's (id 10, inside).
+            for id in [100, 10] {
+                conn.query_drop(format!(
+                    "CREATE DATABASE `{}` COMMENT 'sprig tenant {id} elsewhere'",
+                    env.locator.schema(TenantId(id))
+                ))
+                .await
+                .unwrap();
+            }
+            let req = |n: &str| CreateTenantRequest {
+                name: env.name(n),
+                parent: None,
+                cluster: None,
+            };
+            let a = service.create(&req("a"), &[]).await.unwrap();
+            assert_eq!(a.tenant.tenant_id, TenantId(11), "past 10, not past 100");
+            let b = service.create(&req("b"), &[]).await.unwrap();
+            assert_eq!(b.tenant.tenant_id, TenantId(12));
+            let e = service.create(&req("c"), &[]).await.unwrap_err();
+            assert_eq!(code(&e), 39080, "{e}");
+            assert!(e.message.contains("10..=12"), "{e}");
+            for n in ["a", "b"] {
+                service.delete(&env.name(n), &[]).await.unwrap();
+            }
+            let _ = conn.disconnect().await;
+            drop(live);
         }
     })
     .await;

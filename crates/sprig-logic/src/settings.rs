@@ -115,6 +115,7 @@ pub fn limits(
         memory_bytes: s.get(&MEMORY_LIMIT_MB, ctx, t) << 20,
         max_data_ops: s.get(&MAX_DATA_OPS, ctx, t),
         max_rows_read: s.get(&MAX_ROWS_READ, ctx, t),
+        ..Limits::default()
     };
     let outbound = OutboundPolicy {
         allow: allowlist(&s.get(&OUTBOUND_ALLOWLIST, ctx, t)),

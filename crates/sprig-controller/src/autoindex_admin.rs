@@ -78,7 +78,6 @@ use sprig_advisor::autoindex::store::{
 };
 use sprig_catalog::cache::{Loaded, TenantCatalog};
 use sprig_catalog::ddl::backend::DdlBackend;
-use sprig_catalog::migrate::MigrateOpts;
 use sprig_catalog::{CatalogLocator, MariaCatalog, Migrator};
 use sprig_common::ids::{DcId, Fingerprint, ObjectId, TenantId};
 use sprig_common::time::Clock;
@@ -574,9 +573,14 @@ impl AutoIndexService {
         }
         let ep = self.locator.writer(id).await?;
         let mut conn = crate::catalogs::acquire(&ep.pool, "auto_index admin").await?;
-        Migrator::new(&[AUTOINDEX_MODULE])?
-            .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
-            .await?;
+        crate::catalogs::migrate_catalog(
+            &*self.locator,
+            id,
+            &mut conn,
+            ep.store.schema(),
+            &Migrator::new(&[AUTOINDEX_MODULE])?,
+        )
+        .await?;
         Ok(TenantRead {
             id,
             name: name.to_owned(),

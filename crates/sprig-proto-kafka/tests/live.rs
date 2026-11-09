@@ -11,8 +11,14 @@
 //! ```
 //!
 //! The listener must have `listener.kafka.tls = optional` (the test uses
-//! both plaintext and TLS). With `SPRIG_KAFKA_SCRAM=1` the user has a
-//! `scram_sha_256` verifier and SCRAM-SHA-256 must succeed.
+//! both plaintext and TLS). With `SPRIG_KAFKA_SCRAM=1` the user's password
+//! was set by a build that stores SCRAM verifiers (chapter 14), and
+//! SCRAM-SHA-256 and SCRAM-SHA-512 must both succeed.
+//!
+//! `live_scram_upgrade_on_login` checks chapter 14's upgrade on login: with
+//! `SPRIG_KAFKA_LEGACY_USER` and `SPRIG_KAFKA_LEGACY_PASSWORD` naming an
+//! account whose SCRAM verifiers were deleted, SCRAM fails, a PLAIN login
+//! over TLS succeeds, and SCRAM then succeeds with both mechanisms.
 
 #![allow(
     clippy::unwrap_used,
@@ -223,7 +229,7 @@ async fn live_kafka_front_end() {
             mech.name(),
             r.as_ref().map(|()| "ok")
         );
-        if mech == ScramMechanism::Sha256 && env("SPRIG_KAFKA_SCRAM").is_some() {
+        if env("SPRIG_KAFKA_SCRAM").is_some() {
             r.unwrap();
             let m: MetadataResponse = s.call(12, &MetadataRequest::default()).await.unwrap();
             assert!(!m.brokers.is_empty());
@@ -574,4 +580,82 @@ async fn live_kafka_front_end() {
         assert_eq!(m.topics[0].error_code, err::UNKNOWN_TOPIC_OR_PARTITION);
     }
     println!("live run: {:?}", t0.elapsed());
+}
+
+async fn scram_login(mech: ScramMechanism, user: &str, password: &str) -> Result<(), ClientError> {
+    let mut s = connect(false).await;
+    s.sasl_scram(mech, user, password).await?;
+    let m: MetadataResponse = s.call(12, &MetadataRequest::default()).await.unwrap();
+    assert!(!m.brokers.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs a running gateway with the kafka listener"]
+async fn live_scram_upgrade_on_login() {
+    let (Some(user), Some(pw)) = (
+        env("SPRIG_KAFKA_LEGACY_USER"),
+        env("SPRIG_KAFKA_LEGACY_PASSWORD"),
+    ) else {
+        println!("skipped: set SPRIG_KAFKA_LEGACY_USER and SPRIG_KAFKA_LEGACY_PASSWORD");
+        return;
+    };
+    // No SCRAM verifiers yet: both mechanisms fail at the proof.
+    for mech in [ScramMechanism::Sha256, ScramMechanism::Sha512] {
+        match scram_login(mech, &user, &pw).await {
+            Err(ClientError::Refused(58, m)) => println!("{} before: 58 {m}", mech.name()),
+            other => panic!("{} before the upgrade: {other:?}", mech.name()),
+        }
+    }
+    // A PLAIN login over TLS sees the password and stores them.
+    let mut c = connect(true).await;
+    let t0 = Instant::now();
+    c.sasl_plain(&user, &pw).await.unwrap();
+    println!("PLAIN over TLS: {:?}", t0.elapsed());
+    for mech in [ScramMechanism::Sha512, ScramMechanism::Sha256] {
+        loop {
+            match scram_login(mech, &user, &pw).await {
+                Ok(()) => break,
+                Err(ClientError::Refused(58, _)) if t0.elapsed() < Duration::from_secs(10) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                other => panic!("{} after the upgrade: {other:?}", mech.name()),
+            }
+        }
+        println!(
+            "{} works {:?} after the PLAIN login",
+            mech.name(),
+            t0.elapsed()
+        );
+    }
+    // A wrong password still fails.
+    assert!(matches!(
+        scram_login(ScramMechanism::Sha512, &user, "wrong-password").await,
+        Err(ClientError::Refused(58, _))
+    ));
+}
+
+/// Chapter 14's dual passwords over SCRAM: with `SPRIG_KAFKA_DUAL_USER` and
+/// `SPRIG_KAFKA_DUAL_PASSWORDS` (`new,old`) naming an account changed with
+/// `RETAIN CURRENT PASSWORD`, both passwords log in with both mechanisms.
+#[tokio::test]
+#[ignore = "needs a running gateway with the kafka listener"]
+async fn live_scram_dual_passwords() {
+    let (Some(user), Some(pws)) = (
+        env("SPRIG_KAFKA_DUAL_USER"),
+        env("SPRIG_KAFKA_DUAL_PASSWORDS"),
+    ) else {
+        println!("skipped: set SPRIG_KAFKA_DUAL_USER and SPRIG_KAFKA_DUAL_PASSWORDS");
+        return;
+    };
+    for pw in pws.split(',') {
+        for mech in [ScramMechanism::Sha256, ScramMechanism::Sha512] {
+            scram_login(mech, &user, pw).await.unwrap();
+            println!("{} with {pw}: ok", mech.name());
+        }
+    }
+    assert!(matches!(
+        scram_login(ScramMechanism::Sha256, &user, "neither").await,
+        Err(ClientError::Refused(58, _))
+    ));
 }

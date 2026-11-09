@@ -8,18 +8,19 @@
 //!   gateway's slot) and coordinator leases in etcd
 //!   (`stream-groups/<tenant_id>/<group>`);
 //! - [`catalog`]: topics as streams (read from the tenant's catalog
-//!   snapshot, changed with stream DDL run as the user), and consumer
-//!   groups in `stream_groups` and `stream_offsets`.
-//!
-//! Produce, Fetch, ListOffsets and OffsetForLeaderEpoch are build steps 10
-//! and 11 ([`sprig_proto_kafka::broker::DataPlane`]); until they plug in,
-//! the broker doesn't advertise them.
+//!   snapshot, filtered by privilege, changed with stream DDL run as the
+//!   user), and consumer groups in `stream_groups` and `stream_offsets`
+//!   through `sprig-streams`' store;
+//! - [`data`]: Produce, Fetch, ListOffsets and OffsetForLeaderEpoch (build
+//!   steps 10 and 11) over `sprig-streams`' publish and log reader, as
+//!   `sprig-proto-kafka`'s data plane.
 
 // Kafka API and config names fill the docs.
 #![allow(clippy::doc_markdown)]
 
 pub mod catalog;
 pub mod cluster;
+pub mod data;
 pub mod identity;
 
 use std::borrow::Cow;
@@ -86,6 +87,13 @@ key!(
     "Delay of the first rebalance of an empty consumer group"
 );
 
+key!(
+    /// `kafka.fetch_max_wait_ms`: the cap on a fetch's wait for records.
+    FETCH_MAX_WAIT_MS: u64 = "kafka.fetch_max_wait_ms", 500, TENANT_GLOBAL,
+    HardBounds::range(0, 30_000),
+    "Cap on a Kafka fetch's wait for new records"
+);
+
 /// The Kafka front end: one broker for every connection of the listener.
 pub struct KafkaFrontend {
     broker: Arc<Broker>,
@@ -111,6 +119,8 @@ pub struct KafkaDeps {
     pub topics: Arc<dyn sprig_proto_kafka::topics::Topics>,
     /// Groups' durable part.
     pub groups: Arc<dyn sprig_proto_kafka::group::GroupStore>,
+    /// Produce, Fetch, ListOffsets, OffsetForLeaderEpoch.
+    pub data: Option<Arc<dyn sprig_proto_kafka::broker::data::StreamData>>,
 }
 
 impl std::fmt::Debug for KafkaDeps {
@@ -166,7 +176,10 @@ impl KafkaFrontend {
             cluster: d.cluster,
             topics: d.topics,
             groups,
-            data: None,
+            data: d.data.map(|s| {
+                Arc::new(sprig_proto_kafka::broker::data::DataService::new(s))
+                    as Arc<dyn sprig_proto_kafka::broker::DataPlane>
+            }),
             config: Arc::new(move || {
                 let ctx = SettingCtx::process(&dc);
                 let mechs = live.get(&SASL_MECHANISMS, &ctx);

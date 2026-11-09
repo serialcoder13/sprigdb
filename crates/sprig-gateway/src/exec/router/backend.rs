@@ -151,6 +151,8 @@ pub(super) struct GwBackend<'a> {
     /// The plan's INSERTs write values from chapter 19's ID blocks: their
     /// OK packets' insert ids aren't `LAST_INSERT_ID()`.
     pub explicit_ids: bool,
+    /// `router.gather.*` (chapter 17, "Gathered reads (R3)").
+    pub gather: sprig_router::GatherLimits,
 }
 
 impl GwBackend<'_> {
@@ -240,6 +242,15 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
 
     fn in_transaction(&self) -> bool {
         self.coord.in_txn() || self.legacy_txn
+    }
+
+    fn foreign_key_checks(&self) -> bool {
+        // Chapter 19: `foreign_key_checks = 0` skips the gateway's checks.
+        self.main
+            .vars()
+            .vars
+            .get("foreign_key_checks")
+            .is_none_or(|v| !matches!(v.to_ascii_uppercase().as_str(), "0" | "OFF"))
     }
 
     async fn begin_write(&mut self, targets: &[Target], budget: &mut Budget) -> Result<()> {
@@ -341,6 +352,50 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
         self.parallel
     }
 
+    async fn open_scratch(&mut self) -> Result<Option<Box<dyn sprig_router::Scratch>>> {
+        // Session state the gateway doesn't track can't be copied.
+        if self
+            .main
+            .pins()
+            .reasons()
+            .iter()
+            .any(|r| matches!(r, crate::backend::pins::PinReason::Untracked))
+        {
+            return Ok(None);
+        }
+        let mut bs = session_on(
+            &self.factory.backends,
+            &self.factory.target,
+            &self.factory.opts,
+            &self.main_cluster,
+            &self.main_cluster,
+            self.main.vars(),
+        );
+        bs.set_causal(self.main.causal().clone());
+        Ok(Some(Box::new(GwScratch {
+            cluster: self.main_cluster.to_string(),
+            stream: GwStream {
+                bs,
+                want: 0,
+                pending: None,
+                warnings: 0,
+                done: false,
+            },
+        })))
+    }
+
+    fn gather_limits(&self) -> sprig_router::GatherLimits {
+        self.gather
+    }
+
+    fn has_temporary_tables(&self) -> bool {
+        self.main
+            .pins()
+            .reasons()
+            .iter()
+            .any(|r| matches!(r, crate::backend::pins::PinReason::TempTables(_)))
+    }
+
     async fn lookup_claim(&mut self, c: &sprig_router::plan::Claim) -> Result<()> {
         let owner = OwnerRef {
             pk: c.owner_pk.clone(),
@@ -419,6 +474,10 @@ pub(super) struct GwStream {
 #[async_trait::async_trait]
 impl ShardStream for GwStream {
     async fn start(&mut self, sql: &str) -> Result<Option<Vec<ColumnDef>>> {
+        // A gathered read's scratch connection runs several statements.
+        self.done = false;
+        self.pending = None;
+        self.warnings = 0;
         let info = StmtInfo::classify(sql.as_bytes());
         self.bs.query(&info, sql.as_bytes()).await?;
         let caps = self.bs.backend_caps().unwrap_or_default();
@@ -494,5 +553,43 @@ impl ShardStream for GwStream {
 
     fn warnings(&self) -> u16 {
         self.warnings
+    }
+}
+
+/// A gathered read's connection (chapter 17, "Gathered reads (R3)"): a
+/// `BackendSession` of its own on the session's cluster, with the
+/// session's state. Its temporary tables pin it to the writer; once they
+/// are dropped it goes back to its pool, otherwise it is closed.
+struct GwScratch {
+    cluster: String,
+    stream: GwStream,
+}
+
+#[async_trait::async_trait]
+impl sprig_router::Scratch for GwScratch {
+    fn cluster(&self) -> &str {
+        &self.cluster
+    }
+
+    async fn run(&mut self, sql: &str, budget: &mut Budget) -> Result<ShardOutcome> {
+        run_on(&mut self.stream.bs, sql, budget).await
+    }
+
+    async fn start(&mut self, sql: &str) -> Result<Option<Vec<ColumnDef>>> {
+        self.stream.start(sql).await
+    }
+
+    async fn next_row(&mut self) -> Result<Option<sprig_router::exec::Row>> {
+        self.stream.next_row().await
+    }
+
+    fn warnings(&self) -> u16 {
+        self.stream.warnings()
+    }
+
+    async fn finish(mut self: Box<Self>, clean: bool) {
+        if !clean {
+            self.stream.bs.close().await;
+        }
     }
 }

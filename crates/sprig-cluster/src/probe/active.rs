@@ -117,12 +117,20 @@ pub async fn run(
     Ok(out)
 }
 
+/// Whether a statement's failure is a "no" from the server: a server error
+/// that isn't load ([`ProbeError::is_transient`]). A busy server's lock
+/// wait timeout or `max_statement_time` says nothing about the capability,
+/// so it fails the whole run (inconclusive) instead of clearing a flag.
+fn refused(e: &ProbeError) -> bool {
+    e.is_server_error() && !e.is_transient()
+}
+
 /// `Ok(true)` if the statement ran, `Ok(false)` if the server refused it,
 /// `Err` for anything else.
 fn ok(r: Result<(), ProbeError>) -> Result<bool, ProbeError> {
     match r {
         Ok(()) => Ok(true),
-        Err(e) if e.is_server_error() => {
+        Err(e) if refused(&e) => {
             tracing::debug!(error = %e, "probe statement refused");
             Ok(false)
         }
@@ -134,7 +142,7 @@ fn ok(r: Result<(), ProbeError>) -> Result<bool, ProbeError> {
 fn ok_val<T>(r: Result<T, ProbeError>) -> Result<Option<T>, ProbeError> {
     match r {
         Ok(v) => Ok(Some(v)),
-        Err(e) if e.is_server_error() => {
+        Err(e) if refused(&e) => {
             tracing::debug!(error = %e, "probe query refused");
             Ok(None)
         }
@@ -345,11 +353,14 @@ async fn xa_pass(
     ];
     for step in &steps {
         if let Err(e) = a.exec(step).await {
-            if !e.is_server_error() {
+            if e.is_server_error() {
+                // Refused or busy, the branch isn't prepared: roll it back.
+                let _ = a.exec(&format!("XA ROLLBACK {lit}")).await;
+                a.close().await;
+            }
+            if !refused(&e) {
                 return Err(e);
             }
-            let _ = a.exec(&format!("XA ROLLBACK {lit}")).await;
-            a.close().await;
             return Ok(Err(format!(
                 "{}: {e}",
                 step.split(' ').take(2).collect::<Vec<_>>().join(" ")
@@ -362,8 +373,11 @@ async fn xa_pass(
     let mut b = ProbeSession::connect(ep, timeout).await?;
     let finish = if commit { "XA COMMIT" } else { "XA ROLLBACK" };
     let mut last = String::from("not seen in XA RECOVER");
-    // The server detaches the branch asynchronously after the disconnect.
-    for _ in 0..20 {
+    // The server detaches the branch asynchronously after the disconnect;
+    // a loaded server takes longer, so the wait is the probe timeout (at
+    // least a second), not a fixed count.
+    let until = std::time::Instant::now() + timeout.max(Duration::from_secs(1));
+    while std::time::Instant::now() < until {
         let Some(rows) = ok_val(b.rows("XA RECOVER").await)? else {
             b.close().await;
             return Ok(Err("XA RECOVER refused".to_owned()));
@@ -378,7 +392,7 @@ async fn xa_pass(
                     last.clear();
                     break;
                 }
-                Err(e) if e.is_server_error() => last = format!("{finish}: {e}"),
+                Err(e) if refused(&e) => last = format!("{finish}: {e}"),
                 Err(e) => return Err(e),
             }
         }

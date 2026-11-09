@@ -197,6 +197,10 @@ pub fn rewrite_select(
     }))
 }
 
+/// A `DATETIME(3)` column `ts` as ms since the Unix epoch, whatever the
+/// session's time zone.
+const TS_MS: &str = "CAST(TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', ts) DIV 1000 AS SIGNED)";
+
 /// Limits of one read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadLimits {
@@ -235,7 +239,9 @@ pub struct LogReader {
 }
 
 impl LogReader {
-    /// A partition's bounds.
+    /// A partition's bounds. The leader epoch is the log shard's current
+    /// one (its sequencer's), which is at least that of the partition's
+    /// last append.
     ///
     /// # Errors
     /// 39940 for an unknown partition; the backend's.
@@ -245,30 +251,154 @@ impl LogReader {
         s: StreamId,
         p: PartitionNo,
     ) -> Result<Bounds> {
-        let row: Option<(u64, u64, u32)> = q
-            .exec_first(
+        let rows: Vec<(u32, u64, u64, u32)> = q
+            .exec(
                 format!(
-                    "SELECT log_start, next_offset, leader_epoch FROM {}.{} \
-                     WHERE stream_id = ? AND partition_no = ?",
+                    "SELECT partition_no, log_start, next_offset, leader_epoch FROM {}.{} \
+                     WHERE stream_id = ? AND partition_no IN (?, ?)",
                     quote(&self.schema),
                     quote(CKPT_TABLE)
                 ),
-                (s.0, p.0),
+                (s.0, p.0, SHARD_ROW),
             )
             .await
             .map_err(crate::maria::map_err)?;
-        let (start, hw, epoch) = row.ok_or_else(|| {
-            SprigError::new(
-                SprigCode::StreamNotFound,
-                format!("stream {} has no partition {}", s.0, p.0),
-            )
-        })?;
-        let _ = SHARD_ROW;
+        let shard_epoch = rows
+            .iter()
+            .find(|r| r.0 == SHARD_ROW)
+            .map_or(0, |r| r.3);
+        let (_, start, hw, epoch) = rows
+            .iter()
+            .find(|r| r.0 == p.0 && p.0 != SHARD_ROW)
+            .copied()
+            .ok_or_else(|| {
+                SprigError::new(
+                    SprigCode::StreamNotFound,
+                    format!("stream {} has no partition {}", s.0, p.0),
+                )
+            })?;
         Ok(Bounds {
             log_start: Offset(start),
             high_watermark: Offset(hw),
-            leader_epoch: LeaderEpoch(epoch),
+            leader_epoch: LeaderEpoch(epoch.max(shard_epoch)),
         })
+    }
+
+    /// The current leader epoch of every partition of stream `s` on this
+    /// log shard (Metadata).
+    ///
+    /// # Errors
+    /// The backend's.
+    pub async fn epochs<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        s: StreamId,
+    ) -> Result<Vec<(PartitionNo, LeaderEpoch)>> {
+        let rows: Vec<(u32, u32)> = q
+            .exec(
+                format!(
+                    "SELECT partition_no, leader_epoch FROM {}.{} WHERE stream_id = ?",
+                    quote(&self.schema),
+                    quote(CKPT_TABLE)
+                ),
+                (s.0,),
+            )
+            .await
+            .map_err(crate::maria::map_err)?;
+        let shard = rows
+            .iter()
+            .find(|r| r.0 == SHARD_ROW)
+            .map_or(0, |r| r.1);
+        Ok(rows
+            .into_iter()
+            .filter(|r| r.0 != SHARD_ROW)
+            .map(|(p, e)| (PartitionNo(p), LeaderEpoch(e.max(shard))))
+            .collect())
+    }
+
+    /// The first record of partition `p` with a timestamp at or after
+    /// `ts_ms`: its offset and timestamp (Kafka's ListOffsets by time).
+    /// With `ts_ms = None`, the record with the largest timestamp (the
+    /// earliest of equals).
+    ///
+    /// # Errors
+    /// The backend's.
+    pub async fn offset_for_time<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        s: StreamId,
+        p: PartitionNo,
+        ts_ms: Option<i64>,
+    ) -> Result<Option<(Offset, i64)>> {
+        let table = format!("{}.{}", quote(&self.schema), quote(&log_table(s)));
+        let row: Option<(u64, i64)> = match ts_ms {
+            Some(ts) => {
+                let day = crate::ddl::day_literal(crate::ddl::day_of_ms(ts));
+                q.exec_first(
+                    format!(
+                        "SELECT offset_no, {TS_MS} FROM {table} WHERE partition_no = ? \
+                         AND day >= {day} AND ts >= ? ORDER BY offset_no LIMIT 1"
+                    ),
+                    (p.0, crate::publish::datetime_value(ts)),
+                )
+                .await
+            }
+            None => {
+                q.exec_first(
+                    format!(
+                        "SELECT offset_no, {TS_MS} FROM {table} WHERE partition_no = ? \
+                         ORDER BY ts DESC, offset_no LIMIT 1"
+                    ),
+                    (p.0,),
+                )
+                .await
+            }
+        }
+        .map_err(crate::maria::map_err)?;
+        Ok(row.map(|(o, t)| (Offset(o), t)))
+    }
+
+    /// Where epoch `epoch`'s records end in partition `p` (Kafka's
+    /// OffsetForLeaderEpoch): the largest epoch at most `epoch` that
+    /// appended records still in the log (or `epoch` itself), and the
+    /// first offset appended by a later epoch, or the high watermark.
+    ///
+    /// # Errors
+    /// As [`LogReader::bounds`].
+    pub async fn epoch_end<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        s: StreamId,
+        p: PartitionNo,
+        epoch: LeaderEpoch,
+    ) -> Result<(LeaderEpoch, Offset)> {
+        let b = self.bounds(q, s, p).await?;
+        if epoch >= b.leader_epoch {
+            return Ok((b.leader_epoch, b.high_watermark));
+        }
+        let table = format!("{}.{}", quote(&self.schema), quote(&log_table(s)));
+        let end: Option<Option<u64>> = q
+            .exec_first(
+                format!(
+                    "SELECT MIN(offset_no) FROM {table} WHERE partition_no = ? AND leader_epoch > ?"
+                ),
+                (p.0, epoch.0),
+            )
+            .await
+            .map_err(crate::maria::map_err)?;
+        let found: Option<Option<u32>> = q
+            .exec_first(
+                format!(
+                    "SELECT MAX(leader_epoch) FROM {table} WHERE partition_no = ? AND leader_epoch <= ?"
+                ),
+                (p.0, epoch.0),
+            )
+            .await
+            .map_err(crate::maria::map_err)?;
+        Ok((
+            LeaderEpoch(found.flatten().unwrap_or(epoch.0)),
+            end.flatten().map_or(b.high_watermark, Offset),
+        ))
     }
 
     /// Records of partition `p` from offset `from` (chapter 45's fetch,
@@ -305,7 +435,7 @@ impl LogReader {
         )> = q
             .exec(
                 format!(
-                    "SELECT offset_no, CAST(UNIX_TIMESTAMP(ts) * 1000 AS SIGNED), k, v, \
+                    "SELECT offset_no, {TS_MS}, k, v, \
                      CAST(headers AS CHAR), leader_epoch FROM {}.{} \
                      WHERE partition_no = ? AND offset_no >= ? AND offset_no < ? \
                      ORDER BY offset_no LIMIT ?",
@@ -325,20 +455,7 @@ impl LogReader {
             }
             bytes += size;
             let headers = h
-                .and_then(|h| {
-                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&h).ok()
-                })
-                .map(|m| {
-                    m.into_iter()
-                        .map(|(k, v)| {
-                            let b = match v {
-                                serde_json::Value::String(s) => s.into_bytes(),
-                                other => other.to_string().into_bytes(),
-                            };
-                            (k, b)
-                        })
-                        .collect()
-                })
+                .map(|h| crate::publish::headers_of_json(&h))
                 .unwrap_or_default();
             records.push(Record {
                 partition: p,

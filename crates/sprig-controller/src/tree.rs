@@ -248,6 +248,71 @@ pub fn validate_name(name: &str) -> Result<()> {
     }
 }
 
+/// The tenant ids a deployment may hand out, `tenant.id_min` to
+/// `tenant.id_max` inclusive. Deployments that share MariaDB servers (the
+/// development stack's private controllers) each take their own range, so
+/// the counter's jump past existing `t<id>_` schemas never lands in
+/// another deployment's ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdRange {
+    /// The lowest id.
+    pub min: u64,
+    /// The highest id.
+    pub max: u64,
+}
+
+impl IdRange {
+    /// Every id: the defaults of `tenant.id_min` and `tenant.id_max`.
+    #[allow(clippy::cast_sign_loss)] // i64::MAX is positive
+    pub const ALL: IdRange = IdRange {
+        min: 1,
+        max: i64::MAX as u64,
+    };
+
+    /// 39080 if the range is empty, or if `next`, the id the counter
+    /// would hand out, is past it.
+    fn check(&self, next: Option<u64>) -> Result<()> {
+        if self.min > self.max {
+            return Err(SprigError::new(
+                SprigCode::SettingOutOfBounds,
+                format!(
+                    "tenant.id_min ({}) is above tenant.id_max ({}): no tenant id can be allocated",
+                    self.min, self.max
+                ),
+            ));
+        }
+        match next {
+            Some(n) if n > self.max => Err(SprigError::new(
+                SprigCode::SettingOutOfBounds,
+                format!(
+                    "no tenant id left in this deployment's range {self} \
+                     (tenant.id_min..=tenant.id_max): the next id would be {n}; raise \
+                     tenant.id_max or give the deployment a new range"
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether `id` is in the range.
+    #[must_use]
+    pub fn contains(&self, id: u64) -> bool {
+        (self.min..=self.max).contains(&id)
+    }
+}
+
+impl Default for IdRange {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+impl std::fmt::Display for IdRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..={}", self.min, self.max)
+    }
+}
+
 /// What [`Directory::create`] writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTenant {
@@ -466,7 +531,24 @@ impl Directory {
         max_depth: u32,
         now: SystemTime,
     ) -> Result<StoredEntry> {
+        self.create_in(req, max_depth, IdRange::ALL, now).await
+    }
+
+    /// [`create`](Self::create) with an id from `ids` only: a counter
+    /// below the range starts at its lowest id.
+    ///
+    /// # Errors
+    /// As [`create`](Self::create); 39080 when the range is empty or used
+    /// up (the next id would be past `tenant.id_max`).
+    pub async fn create_in(
+        &self,
+        req: &NewTenant,
+        max_depth: u32,
+        ids_allowed: IdRange,
+        now: SystemTime,
+    ) -> Result<StoredEntry> {
         validate_name(&req.name)?;
+        ids_allowed.check(None)?;
         let ids_key = self.global.tier().key("ids/tenant")?;
         let name_key = self.name_key(&req.name)?;
         for _ in 0..WRITE_ATTEMPTS {
@@ -491,11 +573,12 @@ impl Directory {
                     Record::<TenantIdCounter>::decode(&kv.value)?
                         .body
                         .next
-                        .max(1),
+                        .max(ids_allowed.min),
                     Cmp::ModRev(ids_key.clone(), kv.mod_revision),
                 ),
-                None => (1, Cmp::Missing(ids_key.clone())),
+                None => (ids_allowed.min, Cmp::Missing(ids_key.clone())),
             };
+            ids_allowed.check(Some(next))?;
             let id = TenantId(next);
             let entry = new_entry(req, id, parent.as_ref(), now);
             let mut when = vec![Cmp::Missing(name_key.clone()), ids_cmp];

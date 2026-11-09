@@ -9,8 +9,13 @@
 //!     o = decide_by_race(home anchor of the gtrid, dtid)
 //!     XA COMMIT or XA ROLLBACK it; 1397 while still listed: a live connection
 //!       owns it, retry on the next scan
+//!   for each held branch with redo rows on C older than min_age (Sprig 2PC, R3):
+//!     o = decide_by_race(home anchor of its gtrid, dtid)
+//!     commit: replay its statements and delete the rows, in one transaction
+//!     abort:  delete the rows
 //!   sweep: delete commit and pending rows whose prepared participants are
-//!     all finished, and abort rows past the retention period
+//!     all finished (no XA branch listed, no redo row left), and abort rows
+//!     past the retention period
 //! ```
 //!
 //! Age is measured from when the resolver first saw the branch prepared,
@@ -46,6 +51,26 @@ pub struct ScanReport {
     pub unresolved: usize,
     /// Age of the oldest listed branch, since first seen.
     pub oldest: Duration,
+}
+
+/// What one pass over a cluster's redo rows did (Sprig 2PC, R3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RedoReport {
+    /// Held branches with redo rows.
+    pub listed: usize,
+    /// Younger than `txn.resolver_min_age_seconds`: the coordinator's job.
+    pub young: usize,
+    /// Committed branches replayed.
+    pub replayed: usize,
+    /// Rows left by a holder that finished meanwhile.
+    pub gone: usize,
+    /// Aborted branches whose rows were deleted.
+    pub dropped: usize,
+    /// Replays refused because a statement changed a different number
+    /// of rows (the rows stay; an operator decides).
+    pub hazards: usize,
+    /// Not decided yet.
+    pub unresolved: usize,
 }
 
 /// What a drain did.
@@ -245,6 +270,110 @@ impl Resolver {
         Ok(r)
     }
 
+    /// Decides one held branch and replays or drops its redo rows; a
+    /// finished branch's rows are deleted (a replay's marker only after
+    /// `txn.abort_record_retention_hours`).
+    async fn finish_redo(
+        &self,
+        cluster: &ClusterId,
+        b: &crate::redo::RedoBranch,
+        r: &mut RedoReport,
+    ) {
+        match b.mark {
+            Some(crate::redo::RedoMark::Done) => {
+                if self
+                    .admin
+                    .delete_redo(cluster, &b.schema, b.dtid)
+                    .await
+                    .is_ok()
+                {
+                    r.gone += 1;
+                }
+                return;
+            }
+            Some(crate::redo::RedoMark::Replayed) => {
+                if b.age_seconds >= self.config().abort_retention.as_secs()
+                    && self
+                        .admin
+                        .delete_redo(cluster, &b.schema, b.dtid)
+                        .await
+                        .is_ok()
+                {
+                    r.gone += 1;
+                }
+                return;
+            }
+            None => {}
+        }
+        let Ok(d) = self.decide(&b.gtrid).await else {
+            r.unresolved += 1;
+            return;
+        };
+        match d {
+            Decision::Commit => match self.admin.replay_redo(cluster, &b.schema, b.dtid).await {
+                Ok(crate::redo::Replay::Applied) => {
+                    r.replayed += 1;
+                    metrics::counter!("sprig_txn_redo_replays_total", "result" => "applied")
+                        .increment(1);
+                    tracing::info!(%cluster, dtid = %b.dtid, "resolver replayed a held branch");
+                }
+                Ok(crate::redo::Replay::Gone) => r.gone += 1,
+                Ok(crate::redo::Replay::Hazard(why)) => {
+                    r.hazards += 1;
+                    metrics::counter!("sprig_txn_redo_replays_total", "result" => "hazard")
+                        .increment(1);
+                    tracing::error!(%cluster, dtid = %b.dtid, %why,
+                        "a committed held branch can't be replayed exactly: its rows changed \
+                         since it prepared; the redo rows stay for an operator");
+                }
+                Err(_) => r.unresolved += 1,
+            },
+            Decision::Abort => {
+                if self
+                    .admin
+                    .delete_redo(cluster, &b.schema, b.dtid)
+                    .await
+                    .is_ok()
+                {
+                    r.dropped += 1;
+                } else {
+                    r.unresolved += 1;
+                }
+            }
+            Decision::Pending => r.unresolved += 1,
+        }
+    }
+
+    /// Sprig 2PC (R3): replays committed held branches whose redo rows are
+    /// older than `txn.resolver_min_age_seconds`, and drops aborted ones.
+    ///
+    /// # Errors
+    /// 39100 when the rows can't be listed.
+    pub async fn scan_redo(&self, cluster: &ClusterId) -> Result<RedoReport> {
+        let held = self.admin.redo_branches(cluster).await.map_err(|e| {
+            SprigError::new(
+                SprigCode::ClusterUnavailable,
+                format!("redo rows on {cluster}: {e}"),
+            )
+        })?;
+        let min_age = self.config().min_age.as_secs();
+        let mut r = RedoReport {
+            listed: held.len(),
+            ..RedoReport::default()
+        };
+        for b in &held {
+            if b.mark.is_none() && b.age_seconds < min_age {
+                r.young += 1;
+                continue;
+            }
+            self.finish_redo(cluster, b, &mut r).await;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!("sprig_txn_held_branches", "cluster" => cluster.to_string())
+            .set((r.young + r.unresolved + r.hazards) as f64);
+        Ok(r)
+    }
+
     /// Finishes every prepared coordinator branch of `tenant` on `cluster`
     /// now, whatever its age (the mover before a fence, DDL before a
     /// step). Branches still prepared at `deadline` are counted in
@@ -260,6 +389,15 @@ impl Resolver {
     ) -> Result<DrainReport> {
         let mut rep = DrainReport::default();
         loop {
+            // Held branches (Sprig 2PC): replayed or dropped, whatever age.
+            if let Ok(held) = self.admin.redo_branches(cluster).await {
+                let mut r = RedoReport::default();
+                for b in held.iter().filter(|b| b.gtrid.tenant == tenant) {
+                    self.finish_redo(cluster, b, &mut r).await;
+                }
+                rep.committed += r.replayed;
+                rep.rolled_back += r.dropped;
+            }
             let xids: Vec<Xid> = self
                 .admin
                 .xa_recover(cluster)
@@ -313,6 +451,7 @@ impl Resolver {
         let cfg = self.config();
         let min_age = cfg.min_age.as_secs();
         let mut recovered: BTreeMap<ClusterId, Option<Vec<Xid>>> = BTreeMap::new();
+        let mut redo: BTreeMap<ClusterId, Option<Vec<crate::xid::Dtid>>> = BTreeMap::new();
         let mut rep = SweepReport::default();
         for (schema, row) in rows {
             let age = row.age_seconds.unwrap_or(0);
@@ -335,6 +474,32 @@ impl Resolver {
                         }
                         match recovered.get(&p.cluster) {
                             Some(Some(l)) if !l.iter().any(|x| x.gtrid.dtid == row.dtid) => {}
+                            _ => finished = false,
+                        }
+                    }
+                    // A held participant's redo rows may still be replayed:
+                    // the commit row must outlive them.
+                    for p in row
+                        .participants
+                        .iter()
+                        .filter(|p| p.kind == ParticipantKind::Held)
+                    {
+                        if !redo.contains_key(&p.cluster) {
+                            let l = self
+                                .admin
+                                .redo_branches(&p.cluster)
+                                .await
+                                .ok()
+                                .map(|v| {
+                                    v.into_iter()
+                                        .filter(|b| b.statements > 0)
+                                        .map(|b| b.dtid)
+                                        .collect()
+                                });
+                            redo.insert(p.cluster.clone(), l);
+                        }
+                        match redo.get(&p.cluster) {
+                            Some(Some(l)) if !l.contains(&row.dtid) => {}
                             _ => finished = false,
                         }
                     }
@@ -375,6 +540,9 @@ impl Resolver {
             for c in clusters() {
                 if let Err(e) = self.scan(&c).await {
                     tracing::warn!(cluster = %c, error = %e, "resolver scan failed");
+                }
+                if let Err(e) = self.scan_redo(&c).await {
+                    tracing::warn!(cluster = %c, error = %e, "resolver redo scan failed");
                 }
                 if let Err(e) = self.sweep(&c).await {
                     tracing::warn!(cluster = %c, error = %e, "resolver sweep failed");

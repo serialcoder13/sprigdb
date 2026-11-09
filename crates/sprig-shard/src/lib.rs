@@ -36,6 +36,8 @@
 //! - [`lookup`]: unique and automatic lookup indexes, the consistent-lookup
 //!   claim and release, routing through lookups, build and orphan scan
 //!   (chapter 19).
+//! - [`fk`]: foreign keys across groups, the `foreign_keys` rows the
+//!   router enforces (chapter 19, R3).
 //! - [`pins`]: chapter 16's sharding pins (`SPRIG PIN`): the `group_pins`
 //!   table, the conflict rules (39410) and the split-group rule (39411).
 //! - [`colocate`]: chapter 22's SQL part: the type map from SQL types to
@@ -44,6 +46,7 @@
 
 pub mod collation;
 pub mod colocate;
+pub mod fk;
 pub mod groups;
 pub mod hash;
 pub mod home;

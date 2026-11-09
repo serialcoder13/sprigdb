@@ -30,7 +30,9 @@ pub enum BranchKind {
     Local,
     /// `XA START`: can prepare.
     Xa,
-    /// R3: held by a node agent.
+    /// R3, Sprig 2PC: a `START TRANSACTION` on a cluster without XA whose
+    /// writes are recorded; it prepares by writing them as redo rows
+    /// ([`crate::redo`]) and stays open with its locks.
     Held,
 }
 
@@ -298,6 +300,13 @@ fn backend_error(e: &DbError) -> SprigError {
     }
 }
 
+fn wall_us(clock: &dyn Clock) -> u64 {
+    clock
+        .wall()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(0))
+}
+
 fn wall_ms(clock: &dyn Clock) -> u64 {
     clock
         .wall()
@@ -421,7 +430,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
                 non_xa.push(c);
             }
         }
-        if non_xa.len() > 1 && self.cfg.policy != NonXaPolicy::BestEffort {
+        if non_xa.len() > 1 && self.cfg.policy == NonXaPolicy::Reject {
             return Err(self.rejected(non_xa[0], non_xa[1]));
         }
         Ok(())
@@ -483,7 +492,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         if intent == Intent::Write
             && !caps.xa
             && let Some(j) = self.last_resource
-            && self.cfg.policy != NonXaPolicy::BestEffort
+            && self.cfg.policy == NonXaPolicy::Reject
         {
             return Err(self.rejected(&self.branches[j].cluster, cluster));
         }
@@ -496,12 +505,27 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             .await
             .map_err(|e| backend_error(&e))?;
         let home = self.branches.is_empty();
-        let kind = if caps.xa && !(home && self.cfg.tenant_all_xa) {
+        let mut kind = if caps.xa && !(home && self.cfg.tenant_all_xa) {
             BranchKind::Xa
         } else {
             BranchKind::Local
         };
-        if kind == BranchKind::Xa && self.dtid.is_none() {
+        // Sprig 2PC (R3): a branch on a cluster without XA records its
+        // writes, so it can prepare as a held branch if it isn't the last
+        // resource. Its clock is fixed, so NOW() replays the same.
+        let mut held_ts = None;
+        if kind == BranchKind::Local && !caps.xa && self.cfg.policy == NonXaPolicy::Sprig2pc {
+            let ts = wall_us(&*self.clock);
+            if conn.start_redo(ts) {
+                kind = BranchKind::Held;
+                held_ts = Some(ts);
+            } else if intent == Intent::Write
+                && let Some(j) = self.last_resource
+            {
+                return Err(self.rejected(&self.branches[j].cluster, cluster));
+            }
+        }
+        if matches!(kind, BranchKind::Xa | BranchKind::Held) && self.dtid.is_none() {
             self.dtid = Some(self.dtids.next());
             self.start_ms = wall_ms(&*self.clock);
         }
@@ -529,6 +553,9 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         } else {
             None
         };
+        if let Some(ts) = held_ts {
+            ctl.push(Ctl::SetTimestamp(Some(ts)));
+        }
         if let Some(x) = &xid {
             ctl.push(Ctl::XaStart(x.clone()));
         } else {
@@ -588,6 +615,11 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             return Ok(());
         }
         let b = &self.branches[i];
+        // Sprig 2PC: the first held writer is the last resource; later
+        // ones prepare with redo rows.
+        if b.kind == BranchKind::Held && self.last_resource.is_none() {
+            self.last_resource = Some(i);
+        }
         // A Local branch can't prepare, whatever its cluster supports.
         if b.kind == BranchKind::Local {
             match self.last_resource {
@@ -893,11 +925,13 @@ impl<B: TxnBackend> TxnCoordinator<B> {
     async fn abort_all(&mut self, reason: &'static str) {
         let admin = self.admin.clone();
         let restore = self.cfg.session_lock_wait_timeout_s;
+        let dtid = self.dtid;
+        let gtrid = self.gtrid(dtid.unwrap_or(sprig_common::ids::TxnId(0)));
         join_all(self.branches.iter_mut().map(|b| {
             let admin = admin.clone();
             async move {
                 if b.phase == XaPhase::Prepared {
-                    finish_prepared(&*admin, b, false).await;
+                    finish_prepared(&*admin, b, false, dtid, &gtrid).await;
                 } else {
                     end_branch(b, false, restore).await;
                 }
@@ -1006,34 +1040,39 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         }
         self.end_readers(|i| i != l).await;
         self.hook(Point::BeforePrepare).await;
-        // Phase 1: XA END + XA PREPARE, one round trip each, in parallel.
+        let dtid = self.dtid.expect("XA and held branches have a dtid");
+        let gtrid = self.gtrid(dtid);
+        // Phase 1, in parallel: XA END + XA PREPARE in one round trip; a
+        // held branch writes its redo rows (autocommit, another
+        // connection) and stays open with its locks.
         let deadline = self.cfg.prepare_timeout;
         let mut failed: Option<DbError> = None;
         {
+            let admin = self.admin.clone();
             let futs = self
                 .branches
                 .iter_mut()
                 .enumerate()
                 .filter(|(i, _)| prepared.contains(i))
-                .map(|(_, b)| async move {
-                    let x = b.xid.clone().expect("prepared branches are XA");
-                    let r = match tokio::time::timeout(
-                        deadline,
-                        b.conn.control(&[Ctl::XaEnd(x.clone()), Ctl::XaPrepare(x)]),
-                    )
-                    .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => Err(DbError::lost("prepare timed out")),
-                    };
-                    match &r {
-                        Ok(()) => b.phase = XaPhase::Prepared,
-                        // Unknown whether it prepared: treat it as
-                        // prepared, so the rollback finds it either way.
-                        Err(e) if e.is_lost() => b.phase = XaPhase::Prepared,
-                        Err(_) => {}
+                .map(|(_, b)| {
+                    let admin = admin.clone();
+                    let gtrid = gtrid.clone();
+                    async move {
+                        let r = match tokio::time::timeout(deadline, prepare_one(&*admin, b, dtid, &gtrid))
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(_) => Err(DbError::lost("prepare timed out")),
+                        };
+                        match &r {
+                            Ok(()) => b.phase = XaPhase::Prepared,
+                            // Unknown whether it prepared: treat it as
+                            // prepared, so the rollback finds it either way.
+                            Err(e) if e.is_lost() => b.phase = XaPhase::Prepared,
+                            Err(_) => {}
+                        }
+                        r
                     }
-                    r
                 });
             for r in join_all(futs).await {
                 if let Err(e) = r {
@@ -1043,10 +1082,19 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         }
         if let Some(e) = failed {
             self.abort_all("prepare_failed").await;
+            if e.errno == UNREPLAYABLE {
+                return Err(SprigError::new(
+                    SprigCode::HeldBranchStatement,
+                    format!(
+                        "a held branch (Sprig 2PC) ran a statement that doesn't replay to the same \
+                         result ({}); the transaction was rolled back",
+                        e.message
+                    ),
+                ));
+            }
             return Err(rollback_error(&e));
         }
         self.hook(Point::Prepared).await;
-        let dtid = self.dtid.expect("XA branches have a dtid");
         let coordinator = self.cfg.coordinator_id.clone();
         let participants: Vec<Participant> = writers
             .iter()
@@ -1055,6 +1103,8 @@ impl<B: TxnBackend> TxnCoordinator<B> {
                 shards: self.branches[i].shards.clone(),
                 kind: if i == l {
                     ParticipantKind::Last
+                } else if self.branches[i].kind == BranchKind::Held {
+                    ParticipantKind::Held
                 } else {
                     ParticipantKind::Xa
                 },
@@ -1103,6 +1153,11 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         }
         if lb.lowered {
             ctl.push(Ctl::LockWaitTimeout(self.cfg.session_lock_wait_timeout_s));
+        }
+        if lb.kind == BranchKind::Held {
+            // The last resource commits itself: its record isn't needed.
+            let _ = lb.conn.take_redo();
+            ctl.push(Ctl::SetTimestamp(None));
         }
         let res = lb.conn.control(&ctl).await;
         let decided = match res {
@@ -1174,15 +1229,41 @@ impl<B: TxnBackend> TxnCoordinator<B> {
                 ),
             ));
         }
+        let held = prepared
+            .iter()
+            .any(|&i| self.branches[i].kind == BranchKind::Held);
         Ok(CommitOutcome {
             mode: if self.best_effort {
                 TxnMode::BestEffort
+            } else if held {
+                TxnMode::Sprig2pc
             } else {
                 TxnMode::Xa2pc
             },
             dtid: Some(dtid),
             stragglers,
         })
+    }
+
+    /// The gtrid of this transaction (an XA branch's, or what a held
+    /// branch's redo rows record).
+    fn gtrid(&self, dtid: Dtid) -> Gtrid {
+        self.branches
+            .iter()
+            .find_map(|b| b.xid.as_ref().map(|x| x.gtrid.clone()))
+            .unwrap_or_else(|| Gtrid {
+                tenant: self.tenant,
+                dtid,
+                start_ms: self.start_ms,
+                home: self.branches.first().map_or(
+                    AnchorRef {
+                        db: DbId(0),
+                        group: GroupId(0),
+                        hash_point: 0,
+                    },
+                    |b| b.anchor.anchor(),
+                ),
+            })
     }
 
     /// Ends read-only branches early (`pred` selects which).
@@ -1245,6 +1326,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         let admin = self.admin.clone();
         let hooks = self.hooks.clone();
         let dtid = self.dtid;
+        let gtrid = self.gtrid(dtid.unwrap_or(sprig_common::ids::TxnId(0)));
         let wait = self.cfg.phase2_wait;
         let futs = self
             .branches
@@ -1254,8 +1336,9 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             .map(|(_, b)| {
                 let admin = admin.clone();
                 let hooks = hooks.clone();
+                let gtrid = gtrid.clone();
                 async move {
-                    let ok = finish_prepared(&*admin, b, true).await;
+                    let ok = finish_prepared(&*admin, b, true, dtid, &gtrid).await;
                     if ok && let Some(h) = &hooks {
                         h.at(dtid, Point::Phase2Branch).await;
                     }
@@ -1361,6 +1444,10 @@ async fn commit_one<C: BranchConn>(b: &mut Branch<C>, restore: u32) -> DbResult<
     if b.lowered {
         ctl.push(Ctl::LockWaitTimeout(restore));
     }
+    if b.kind == BranchKind::Held {
+        let _ = b.conn.take_redo();
+        ctl.push(Ctl::SetTimestamp(None));
+    }
     let r = b.conn.control(&ctl).await;
     b.phase = XaPhase::Done;
     r
@@ -1389,7 +1476,93 @@ async fn end_branch<C: BranchConn>(b: &mut Branch<C>, commit: bool, restore: u32
     if r.is_ok() && b.lowered {
         let _ = b.conn.control(&[Ctl::LockWaitTimeout(restore)]).await;
     }
+    if b.kind == BranchKind::Held {
+        let _ = b.conn.take_redo();
+        if r.is_ok() {
+            let _ = b.conn.control(&[Ctl::SetTimestamp(None)]).await;
+        }
+    }
     b.phase = XaPhase::Done;
+}
+
+/// Errno of a prepare refused because a held branch ran a statement that
+/// doesn't replay (39446).
+const UNREPLAYABLE: u16 = 39446;
+
+/// Phase 1 for one branch: `XA END` + `XA PREPARE`, or a held branch's
+/// redo rows.
+async fn prepare_one<C: BranchConn>(
+    admin: &dyn ClusterAdmin,
+    b: &mut Branch<C>,
+    dtid: Dtid,
+    gtrid: &Gtrid,
+) -> DbResult<()> {
+    if b.kind == BranchKind::Held {
+        let stmts = b
+            .conn
+            .take_redo()
+            .map_err(|why| DbError::new(UNREPLAYABLE, why))?;
+        if stmts.is_empty() {
+            // Locking reads only: nothing to replay.
+            return Ok(());
+        }
+        return admin
+            .insert_redo(&b.cluster, &b.anchor.schema, dtid, gtrid, &stmts)
+            .await;
+    }
+    let x = b.xid.clone().expect("prepared branches are XA or held");
+    b.conn.control(&[Ctl::XaEnd(x.clone()), Ctl::XaPrepare(x)]).await
+}
+
+/// Finishes a prepared held branch: on commit, its `done` marker goes in
+/// inside it and it commits (one fact: data in, branch finished), then the
+/// rows are deleted; on abort it rolls back and the rows are deleted from
+/// the admin. Returns whether it
+/// is known finished; a commit that fails rolls the branch back and
+/// leaves the rows to the resolver, which replays them.
+async fn finish_held<C: BranchConn>(
+    admin: &dyn ClusterAdmin,
+    b: &mut Branch<C>,
+    commit: bool,
+    dtid: Option<Dtid>,
+    gtrid: &Gtrid,
+) -> bool {
+    b.phase = XaPhase::Done;
+    let Some(dtid) = dtid else {
+        let _ = b.conn.control(&[Ctl::Rollback]).await;
+        return true;
+    };
+    if commit {
+        let ctl = [
+            Ctl::RedoDone {
+                schema: b.anchor.schema.clone(),
+                dtid,
+                gtrid: gtrid.clone(),
+            },
+            Ctl::Commit,
+            Ctl::SetTimestamp(None),
+        ];
+        match b.conn.control(&ctl).await {
+            Ok(()) => {
+                // Finished: the rows can go (the resolver deletes them
+                // otherwise).
+                let _ = admin.delete_redo(&b.cluster, &b.anchor.schema, dtid).await;
+                true
+            }
+            Err(e) => {
+                if !e.is_lost() {
+                    let _ = b.conn.control(&[Ctl::Rollback, Ctl::SetTimestamp(None)]).await;
+                }
+                false
+            }
+        }
+    } else {
+        let _ = b.conn.control(&[Ctl::Rollback, Ctl::SetTimestamp(None)]).await;
+        admin
+            .delete_redo(&b.cluster, &b.anchor.schema, dtid)
+            .await
+            .is_ok()
+    }
 }
 
 /// Finishes a prepared branch with `XA COMMIT` (or `XA ROLLBACK`) on its
@@ -1400,7 +1573,12 @@ async fn finish_prepared<C: BranchConn>(
     admin: &dyn ClusterAdmin,
     b: &mut Branch<C>,
     commit: bool,
+    dtid: Option<Dtid>,
+    gtrid: &Gtrid,
 ) -> bool {
+    if b.kind == BranchKind::Held {
+        return finish_held(admin, b, commit, dtid, gtrid).await;
+    }
     let Some(x) = b.xid.clone() else {
         return true;
     };

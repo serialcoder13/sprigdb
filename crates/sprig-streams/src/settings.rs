@@ -1,9 +1,10 @@
 //! The `stream.*` keys this crate reads (chapter 45, "Configuration").
 //!
-//! Registered here: the keys the core uses. `stream.change_snapshot` (no
-//! snapshots yet), `stream.produce_wait_ms`, `stream.sequencer_max_restarts`
-//! and the `kafka.*` and `listener.kafka.*` keys belong to steps not built
-//! yet and are not registered.
+//! Registered here: the keys the core uses, and `stream.produce_wait_ms`
+//! (Kafka's produce). `stream.change_snapshot` (no snapshots yet) and
+//! `stream.sequencer_max_restarts` belong to steps not built yet and are
+//! not registered; the `kafka.*` and `listener.kafka.*` keys are the
+//! gateway's.
 
 use sprig_settings::{Apply, HardBounds, Scopes, Setting};
 
@@ -78,6 +79,84 @@ key!(
     "Batching window of a stream sequencer"
 );
 
+/// `stream.produce_wait_ms`: how long a Kafka produce waits for its
+/// records' offsets (chapter 45, "Produce").
+pub static PRODUCE_WAIT_MS: Setting<u64> = Setting {
+    key: "stream.produce_wait_ms",
+    default: 2000,
+    scopes: Scopes(0b10_0100),
+    hard: HardBounds::range(0, 600_000),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 45,
+    doc: "How long a Kafka produce waits for its records' offsets",
+};
+sprig_settings::register!(PRODUCE_WAIT_MS);
+
+/// The settings `ALTER STREAM ... SET (...)` sets on one stream (object
+/// scope).
+pub const STREAM_SCOPED: &[&Setting<u64>] = &[
+    &RETENTION_HOURS,
+    &RETENTION_BYTES,
+    &MAX_MESSAGE_BYTES,
+    &COMPACTION_LAG_MINUTES,
+    &TOMBSTONE_HOURS,
+];
+
+/// One stream-scoped setting of `ALTER STREAM ... SET | RESET`: its key and
+/// value (`None`: reset to the inherited value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingChange {
+    /// The setting.
+    pub key: &'static str,
+    /// The new value, or `None` to reset.
+    pub value: Option<u64>,
+}
+
+/// Checks `name = value` for a stream: a key of [`STREAM_SCOPED`] and a
+/// whole number inside its hard bounds.
+///
+/// # Errors
+/// The text of a refusal (the caller wraps it).
+pub fn stream_setting(name: &str, value: Option<&str>) -> Result<SettingChange, String> {
+    let s = STREAM_SCOPED
+        .iter()
+        .find(|s| s.key == name)
+        .ok_or_else(|| {
+            format!(
+                "'{name}' can't be set on a stream; stream settings are {}",
+                STREAM_SCOPED
+                    .iter()
+                    .map(|s| s.key)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    let Some(v) = value else {
+        return Ok(SettingChange {
+            key: s.key,
+            value: None,
+        });
+    };
+    let n: u64 = v
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{v}' is not a whole number for {name}"))?;
+    #[allow(clippy::cast_precision_loss)]
+    let f = n as f64;
+    if s.hard.min.is_some_and(|m| f < m) || s.hard.max.is_some_and(|m| f > m) {
+        return Err(format!(
+            "{n} is outside {name}'s bounds ({} to {})",
+            s.hard.min.unwrap_or(0.0),
+            s.hard.max.unwrap_or(f64::MAX)
+        ));
+    }
+    Ok(SettingChange {
+        key: s.key,
+        value: Some(n),
+    })
+}
+
 /// Retention and compaction settings of one stream, resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retention {
@@ -126,6 +205,24 @@ pub fn parse_retention(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_settings() {
+        assert_eq!(
+            stream_setting("stream.retention_bytes", Some("1000")),
+            Ok(SettingChange {
+                key: "stream.retention_bytes",
+                value: Some(1000)
+            })
+        );
+        assert_eq!(
+            stream_setting("stream.max_message_bytes", None).unwrap().value,
+            None
+        );
+        assert!(stream_setting("stream.max_message_bytes", Some("0")).is_err());
+        assert!(stream_setting("stream.partitions_default", Some("3")).is_err());
+        assert!(stream_setting("stream.retention_hours", Some("x")).is_err());
+    }
 
     #[test]
     fn retention_text() {

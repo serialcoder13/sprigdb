@@ -74,6 +74,11 @@ sha1 = "0.10"
 
 # xxh3_64 for the Galera writer choice (chapter 09). MIT.
 twox-hash = { version = "2.1", default-features = false, features = ["std", "xxhash3_64"] }
+# Kafka record batch compression (chapter 45): snappy (BSD-3-Clause, no
+# dependencies) and LZ4 frames (MIT; its frame checksum uses twox-hash's
+# xxhash32 above). Approved by Kiran, 9 November 2026.
+snap = "=1.1.2"
+lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode", "frame", "checked-decode"] }
 
 # The Admin API's HTTP client in sprigctl (chapter 47); the server side is
 # axum. hyper and hyper-util are MIT, http-body-util MIT.

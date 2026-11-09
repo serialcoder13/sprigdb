@@ -635,6 +635,7 @@ impl SourceIo for MysqlSource {
             renamed,
             killed: Vec::new(),
             writer_pos: fence::GtidPos::default(),
+            fenced_at_unix: None,
         };
         serde_json::to_value(r).map_err(|e| SprigError::internal(e.to_string()))
     }

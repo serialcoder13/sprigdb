@@ -272,3 +272,43 @@ async fn entries_keep_fields_this_build_does_not_know() {
     assert_eq!(after["residency"]["pinned"], "mum1");
     assert_eq!(after["state"], "active");
 }
+
+/// `tenant.id_min..=tenant.id_max`: a counter below the range starts at
+/// its lowest id, and a used-up or empty range is a clear 39080.
+#[tokio::test]
+async fn ids_come_from_the_deployments_range() {
+    let d = dir();
+    let range = IdRange { min: 500, max: 501 };
+    let a = d
+        .create_in(&new("a", None), 64, range, now())
+        .await
+        .unwrap();
+    assert_eq!(a.body().tenant_id, TenantId(500));
+    let b = d
+        .create_in(&new("b", None), 64, range, now())
+        .await
+        .unwrap();
+    assert_eq!(b.body().tenant_id, TenantId(501));
+    let e = d
+        .create_in(&new("c", None), 64, range, now())
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), 39080, "{e}");
+    assert!(
+        e.message.contains("500..=501") && e.message.contains("502"),
+        "{e}"
+    );
+    assert!(d.by_name("c").await.unwrap().is_none(), "nothing written");
+    // A wider range continues from the counter.
+    let c = d
+        .create_in(&new("c", None), 64, IdRange { min: 500, max: 600 }, now())
+        .await
+        .unwrap();
+    assert_eq!(c.body().tenant_id, TenantId(502));
+    let e = d
+        .create_in(&new("e", None), 64, IdRange { min: 9, max: 8 }, now())
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), 39080, "{e}");
+    assert!(IdRange::ALL.contains(1) && !IdRange::ALL.contains(0));
+}

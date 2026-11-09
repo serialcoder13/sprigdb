@@ -383,6 +383,38 @@ pub fn privileges(ts: &TenantSession, cat: &TenantCatalog) -> Arc<dyn SessionGra
     p
 }
 
+/// The privileges of `user` at `cat` with the roles active at login, for
+/// front ends without a SQL session (the Kafka listener, chapter 45): every
+/// right for a principal without a user id (operators), none when the
+/// engine is unknown. Not cached; callers cache by `(cat.version,
+/// cat.auth_version)`.
+#[must_use]
+pub fn grants_of(
+    svc: &TenantServices,
+    cat: &TenantCatalog,
+    user: Option<sprig_common::ids::UserId>,
+) -> Arc<dyn SessionGrants> {
+    let Some(user) = user else {
+        return Arc::new(CompiledPrivileges::everything());
+    };
+    let Some(engine) = engine_for(svc, cat) else {
+        return nothing();
+    };
+    let all = svc.settings.get(
+        &ACTIVATE_ALL_ROLES_ON_LOGIN,
+        &cat.setting_ctx(&svc.dc),
+        Some(&cat.settings),
+    );
+    let roles = engine.active_roles(cat, user, None, all);
+    engine.session(
+        cat,
+        &Subject {
+            user,
+            roles: &roles,
+        },
+    )
+}
+
 /// What [`account_statement`] answers.
 #[derive(Debug)]
 pub enum AccountAnswer {

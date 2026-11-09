@@ -111,8 +111,9 @@ pub struct StmtSettings {
 pub enum StreamsChange {
     /// A new stream, and its `stream.retention_hours` at its own scope.
     Insert(StreamDef, Option<u64>),
-    /// A changed stream, and a new `stream.retention_hours`.
-    Update(StreamDef, Option<u64>),
+    /// A changed stream, and settings set (`Some`) or reset (`None`) at its
+    /// own scope (`RETENTION` is `stream.retention_hours`).
+    Update(StreamDef, Vec<crate::settings::SettingChange>),
     /// A dropped stream.
     Delete(StreamDef),
 }
@@ -426,7 +427,10 @@ async fn create(c: &grammar::CreateStream, cx: &Ctx<'_>, host: &mut dyn Host) ->
     };
     host.ddl(
         &outbox_slot,
-        &[ddl::outbox_sql(&outbox_slot.schema, id, cleanup)],
+        &[
+            ddl::outbox_sql(&outbox_slot.schema, id, cleanup),
+            crate::publish::producer_table_sql(&outbox_slot.schema, id),
+        ],
     )
     .await?;
     host.ddl(
@@ -441,7 +445,10 @@ async fn create(c: &grammar::CreateStream, cx: &Ctx<'_>, host: &mut dyn Host) ->
         let _ = host
             .ddl(
                 &outbox_slot,
-                &[ddl::drop_outbox_sql(&outbox_slot.schema, id)],
+                &[
+                    ddl::drop_outbox_sql(&outbox_slot.schema, id),
+                    crate::publish::drop_producer_table_sql(&outbox_slot.schema, id),
+                ],
             )
             .await;
         let _ = host
@@ -459,6 +466,20 @@ async fn alter(a: &grammar::AlterStream, cx: &Ctx<'_>, host: &mut dyn Host) -> R
     let (_, s) = stream_of(cx, host, &a.name).ok_or_else(|| not_found(&db_name, &a.name.name))?;
     if !host.allowed(Privilege::Alter, &db_name, None, &s.name) {
         return Err(denied(host, Privilege::Alter, &s.name));
+    }
+    let mut changes: Vec<crate::settings::SettingChange> = a
+        .retention_hours
+        .map(|h| crate::settings::SettingChange {
+            key: crate::settings::RETENTION_HOURS.key,
+            value: Some(h),
+        })
+        .into_iter()
+        .collect();
+    for (k, v) in &a.settings {
+        let c = crate::settings::stream_setting(k, v.as_deref()).map_err(|m| {
+            SprigError::standard(1231, *b"42000", format!("ALTER STREAM '{}': {m}", s.name))
+        })?;
+        changes.push(c);
     }
     let mut def = (*s).clone();
     if let Some(n) = a.partitions {
@@ -502,8 +523,7 @@ async fn alter(a: &grammar::AlterStream, cx: &Ctx<'_>, host: &mut dyn Host) -> R
         }
         def.cleanup = c;
     }
-    host.commit(&StreamsChange::Update(def, a.retention_hours))
-        .await?;
+    host.commit(&StreamsChange::Update(def, changes)).await?;
     Ok(Handled::Ok { affected: 0 })
 }
 
@@ -524,7 +544,13 @@ async fn remove(def: &StreamDef, host: &mut dyn Host) -> Result<()> {
     for slot in &def.outbox {
         let p = phys(*slot);
         let _ = host
-            .ddl(&p, &[ddl::drop_outbox_sql(&p.schema, def.id)])
+            .ddl(
+                &p,
+                &[
+                    ddl::drop_outbox_sql(&p.schema, def.id),
+                    crate::publish::drop_producer_table_sql(&p.schema, def.id),
+                ],
+            )
             .await;
     }
     for l in &def.log {
@@ -607,12 +633,7 @@ fn publish(
     cx: &Ctx<'_>,
     host: &mut dyn Host,
 ) -> Result<Handled> {
-    if s.kind == StreamKind::Changes {
-        return Err(append_only(&format!(
-            "'{}' is a change topic: only SprigDB writes it",
-            s.name
-        )));
-    }
+    crate::publish::check_target(s)?;
     if i.on_duplicate {
         return Err(append_only(
             "INSERT ... ON DUPLICATE KEY UPDATE on a stream",

@@ -171,6 +171,12 @@ pub struct FenceReceipt {
     /// `@@gtid_binlog_pos` after the fence (`Rename`: `@@last_gtid`, the
     /// rename's own GTID). No write to the shard follows it in the binlog.
     pub writer_pos: GtidPos,
+    /// `Rename`: the writer's `UNIX_TIMESTAMP()` just before the rename. A
+    /// table under a renamed table's own name created at or after it is a
+    /// stray recreation, which [`unfence`] may drop if it is empty; `None`
+    /// in planned receipts and in receipts written before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fenced_at_unix: Option<u64>,
 }
 
 /// Tunables of a fence, from `cluster.*` settings.
@@ -469,6 +475,7 @@ async fn revoke_kill(
         renamed: Vec::new(),
         killed: Vec::new(),
         writer_pos: GtidPos::default(),
+        fenced_at_unix: None,
     };
     let r = revoke_then_kill(req, &mut s, kill_on, opts, &mut receipt).await;
     if let Err(e) = r {
@@ -752,7 +759,7 @@ async fn rename(
         .map_err(|e| fail_with("connect to the writer", e))?;
     let r = rename_on(req, &mut s, opts).await;
     s.close().await;
-    let (renamed, pos) = r?;
+    let (renamed, pos, fenced_at) = r?;
     Ok(FenceReceipt {
         tenant: req.tenant,
         method: FenceMethod::Rename,
@@ -762,6 +769,7 @@ async fn rename(
         renamed,
         killed: Vec::new(),
         writer_pos: pos,
+        fenced_at_unix: fenced_at,
     })
 }
 
@@ -769,7 +777,7 @@ async fn rename_on(
     req: &FenceRequest,
     s: &mut ProbeSession,
     opts: &FenceOptions,
-) -> Result<(Vec<RenamedTable>, GtidPos)> {
+) -> Result<(Vec<RenamedTable>, GtidPos, Option<u64>)> {
     s.exec(&format!(
         "SET SESSION lock_wait_timeout = {}",
         opts.lock_wait_seconds
@@ -803,8 +811,13 @@ async fn rename_on(
             .scalar("SELECT @@gtid_binlog_pos")
             .await
             .map_err(|e| fail_with("read @@gtid_binlog_pos", e))?;
-        return Ok((renamed, GtidPos(pos.unwrap_or_default())));
+        return Ok((renamed, GtidPos(pos.unwrap_or_default()), None));
     }
+    let fenced_at = s
+        .scalar("SELECT UNIX_TIMESTAMP()")
+        .await
+        .map_err(|e| fail_with("read the server time", e))?
+        .and_then(|v| v.parse().ok());
     // One atomic statement: it waits for metadata-lock holders, and later
     // statements queue behind it, so no write follows it in the binlog.
     s.exec(&rename_sql(&renamed, false))
@@ -824,7 +837,7 @@ async fn rename_on(
             .map_err(|e| fail_with("read @@gtid_binlog_pos", e))?
             .unwrap_or_default(),
     };
-    Ok((renamed, GtidPos(pos)))
+    Ok((renamed, GtidPos(pos), fenced_at))
 }
 
 /// Undoes a fence exactly as its receipt says: grants are restored and
@@ -887,26 +900,108 @@ async fn unfence_on(
             .collect();
         let has = |schema: &str, t: &str| present.contains(&(schema.to_owned(), t.to_owned()));
         let mut back = Vec::new();
+        let mut strays = Vec::new();
         for r in &receipt.renamed {
             match (has(&r.schema, &r.to), has(&r.schema, &r.from)) {
                 (true, false) => back.push(r.clone()),
                 (false, true) => {} // already back
-                (true, true) => {
-                    return Err(SprigError::internal(format!(
-                        "unfence: both {}.{} and its fenced name exist",
-                        r.schema, r.from
-                    )));
-                }
+                (true, true) => strays.push(r.clone()),
                 (false, false) => {
                     tracing::warn!(schema = %r.schema, table = %r.from, "unfence: table is gone");
                 }
             }
+        }
+        if !strays.is_empty() {
+            drop_strays(s, &strays, receipt.fenced_at_unix).await?;
+            back.extend(strays);
         }
         if !back.is_empty() {
             s.exec(&rename_sql(&back, true)).await?;
         }
     }
     regrant(s, &receipt.revoked).await
+}
+
+/// Both a renamed table and a table under its old name exist: something
+/// recreated the table while the fence held (catalog migrations did, on a
+/// fenced catalog: chapter 10, "Cutover"). The recreation is dropped only
+/// if it is provably a stray: created at or after the fence
+/// (`fenced_at`, the writer's clock) and empty, checked under a write lock
+/// so nothing can fill it in between. Otherwise nothing is dropped and the
+/// unfence fails, naming each table and why: an operator decides.
+async fn drop_strays(
+    s: &mut ProbeSession,
+    strays: &[RenamedTable],
+    fenced_at: Option<u64>,
+) -> Result<()> {
+    let name = |r: &RenamedTable| format!("{}.{}", quote(&r.schema), quote(&r.from));
+    let conflict = |why: String| {
+        SprigError::new(
+            SprigCode::ClusterFenceFailed,
+            format!(
+                "unfence: both a table and its fenced name exist, and the table isn't provably a \
+                 stray recreation ({why}); nothing was dropped: compare them, drop the wrong one \
+                 and retry"
+            ),
+        )
+    };
+    let Some(fenced_at) = fenced_at else {
+        let names: Vec<String> = strays.iter().map(name).collect();
+        return Err(conflict(format!(
+            "{}: the fence receipt has no fence time",
+            names.join(", ")
+        )));
+    };
+    let locks: Vec<String> = strays
+        .iter()
+        .map(|r| format!("{} WRITE", name(r)))
+        .collect();
+    s.exec(&format!("LOCK TABLES {}", locks.join(", "))).await?;
+    let checked = async {
+        let mut why = Vec::new();
+        for r in strays {
+            let created = s
+                .scalar(&format!(
+                    "SELECT UNIX_TIMESTAMP(CREATE_TIME) FROM information_schema.TABLES \
+                     WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {}",
+                    literal(&r.schema),
+                    literal(&r.from)
+                ))
+                .await?
+                .and_then(|v| v.split('.').next().and_then(|n| n.parse::<u64>().ok()));
+            let has_rows = s
+                .scalar(&format!("SELECT 1 FROM {} LIMIT 1", name(r)))
+                .await?
+                .is_some();
+            match created {
+                _ if has_rows => why.push(format!("{} has rows", name(r))),
+                Some(c) if c >= fenced_at => {}
+                Some(c) => why.push(format!(
+                    "{} was created at {c}, before the fence at {fenced_at}",
+                    name(r)
+                )),
+                None => why.push(format!("{} has no creation time", name(r))),
+            }
+        }
+        Ok::<_, ProbeError>(why)
+    }
+    .await;
+    let r = match checked {
+        Ok(why) if why.is_empty() => {
+            let names: Vec<String> = strays.iter().map(name).collect();
+            let dropped = s.exec(&format!("DROP TABLE {}", names.join(", "))).await;
+            if dropped.is_ok() {
+                tracing::warn!(tables = ?names, fenced_at,
+                    "unfence: dropped empty tables recreated under fenced names after the fence");
+            }
+            dropped.map_err(SprigError::from)
+        }
+        Ok(why) => Err(conflict(why.join("; "))),
+        Err(e) => Err(SprigError::from(e)),
+    };
+    let unlocked = s.exec("UNLOCK TABLES").await;
+    r?;
+    unlocked.map_err(SprigError::from)
 }
 
 #[cfg(test)]

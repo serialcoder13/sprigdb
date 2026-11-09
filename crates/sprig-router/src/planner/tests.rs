@@ -40,9 +40,12 @@ fn p(sql: &str) -> Plan {
     plan(sql, &cx)
 }
 
+/// Why R1's operators refuse `sql`: the rejection, or the reason a
+/// gathered read (R3) records for it.
 fn reason(sql: &str) -> Reason {
     match p(sql) {
         Plan::Reject(r) => r.reason,
+        Plan::Gather(g) => g.fallback.reason,
         other => panic!("{sql}: expected a rejection, got {other:?}"),
     }
 }

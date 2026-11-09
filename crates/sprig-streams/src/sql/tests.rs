@@ -258,7 +258,7 @@ async fn create_publish_read_drop() {
     .await
     .unwrap();
     assert!(
-        matches!(m.committed.last(), Some(StreamsChange::Update(d, None)) if d.partitions == 6 && d.cleanup == Cleanup::Compact)
+        matches!(m.committed.last(), Some(StreamsChange::Update(d, c)) if c.is_empty() && d.partitions == 6 && d.cleanup == Cleanup::Compact)
     );
     assert!(m.ddl.iter().any(|s| s.contains("(41, 5, 0, 0, 0, '')")));
     assert!(

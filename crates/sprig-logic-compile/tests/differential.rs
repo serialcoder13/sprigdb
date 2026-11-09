@@ -286,6 +286,7 @@ impl Suite {
             // Every statement is qualified with the schema, as the gateway
             // qualifies them with the code's database.
             default_db: Some(ENGINE.to_owned()),
+            info: J::Null,
         };
         let limits = sprig_logic_js::Limits {
             max_loop_iterations: max_loops,

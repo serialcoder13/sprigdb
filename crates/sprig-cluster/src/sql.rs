@@ -128,6 +128,24 @@ impl ProbeError {
         self.errno.is_some()
     }
 
+    /// The failure says something about the server's load, not its
+    /// capabilities: a timeout or lost connection, or a server error a
+    /// busy server returns to any statement (lock wait timeout 1205,
+    /// deadlock 1213, query interrupted 1317, statement time exceeded
+    /// 1969, too many connections 1040 and 1203, connection killed 1927,
+    /// shutdown in progress 1053, idle disconnect 4031). An active probe
+    /// that fails this way is inconclusive, never a "no".
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self.errno {
+            None => true,
+            Some(n) => matches!(
+                n,
+                1040 | 1053 | 1203 | 1205 | 1213 | 1317 | 1927 | 1969 | 4031
+            ),
+        }
+    }
+
     /// Authentication failed (1045), or the address answers as another
     /// server than the record pinned ([`WRONG_NODE`]): the node is
     /// `broken`, not unreachable.
@@ -325,5 +343,23 @@ mod tests {
         let s = format!("{ep:?}");
         assert!(!s.contains("secret"), "{s}");
         assert!(s.contains("127.0.0.1:13301"));
+    }
+
+    #[test]
+    fn load_errors_are_transient_refusals_are_not() {
+        let e = |errno, timeout| ProbeError {
+            errno,
+            message: String::new(),
+            timeout,
+        };
+        assert!(e(None, true).is_transient());
+        assert!(e(None, false).is_transient(), "a lost connection");
+        for n in [1040, 1205, 1213, 1317, 1969, 4031] {
+            assert!(e(Some(n), false).is_transient(), "{n}");
+        }
+        // XA refused under Galera, unknown table, access denied: answers.
+        for n in [1235, 1146, 1142, 1399] {
+            assert!(!e(Some(n), false).is_transient(), "{n}");
+        }
     }
 }

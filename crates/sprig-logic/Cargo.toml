@@ -23,6 +23,9 @@ sprig-common.workspace = true
 # After-commit triggers read the change feed (chapter 38).
 sprig-feed.workspace = true
 sprig-logic-compile = { path = "../sprig-logic-compile" }
+# `SELECT f(constants)` of engine-tier functions: the calls are found in
+# the client's text (R7 order 6).
+sqlparser.workspace = true
 # The fallback tier (R7 order 4): the native KIRun runtime.
 sprig-logic-js.workspace = true
 sprig-meta.workspace = true

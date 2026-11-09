@@ -252,6 +252,90 @@ async fn probing_records_get_a_grace_period_and_guards_hold() {
     let _ = &f.global;
 }
 
+/// Chapter 09, "Publishing": a pass in which no node answered (a loaded
+/// host's timeouts) publishes nothing; the record keeps XA and the binlog
+/// facts, a new term schedules a deep probe one sustain period after it
+/// takes the profile over, and a deep probe whose active probes didn't run
+/// is retried a sustain period later rather than the next day.
+#[tokio::test]
+async fn a_silent_cluster_keeps_its_published_capabilities() {
+    use sprig_cluster::probe::ServerVersion;
+    use sprig_cluster::profile::{CapabilityProfile, Publication};
+
+    let f = fixture("mon-e").await;
+    let guard = lead(&f.dc).await;
+    let reg = f.monitor.registry().clone();
+    let s = reg
+        .register(unreachable("q1", TopologyKind::SingleNode))
+        .await
+        .unwrap();
+    let id = s.body().cluster_id.clone();
+    reg.set_admin_state(&id, AdminState::Active, vec![])
+        .await
+        .unwrap();
+    let mut good = CapabilityProfile::default();
+    good.server.version = Some(ServerVersion::new(11, 8, 9));
+    good.server.default_storage_engine = "InnoDB".into();
+    good.binlog.log_bin = true;
+    good.binlog.gtid_strict_mode = true;
+    good.derived.xa = true;
+    good.derived.mover_source = true;
+    good.derived.feed_source = true;
+    let published = reg
+        .publish_profile(
+            &id,
+            &Publication {
+                profile: good,
+                changes: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let version = published.body().profile_version;
+
+    let r = f
+        .monitor
+        .pass(&id, None, guard.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.depth, Some(ProbeDepth::Full), "facts carried: not deep");
+    assert_eq!(r.coverage, Some(Coverage::Blind));
+    assert!(r.changes.is_empty(), "{:?}", r.changes);
+    let rec = r.cluster.unwrap();
+    assert_eq!(rec.body().profile_version, version);
+    let p = rec.body().profile.as_ref().unwrap();
+    assert!(p.derived.xa && p.binlog.log_bin && p.binlog.gtid_strict_mode);
+    assert!(p.derived.mover_source && p.derived.feed_source);
+    assert_eq!(
+        rec.body().health.as_ref().unwrap().state,
+        ClusterHealth::Unknown,
+        "the silence shows in health instead"
+    );
+    let sustain = f.monitor.settings_for(Some(&id)).capability_upgrade_sustain;
+    let due = r.deep_due_in.expect("a deep probe follows the takeover");
+    assert!(
+        due <= sustain && due + Duration::from_secs(5) > sustain,
+        "{due:?}"
+    );
+
+    // A deep probe that couldn't run its active probes: retried later.
+    let r = f
+        .monitor
+        .pass(&id, Some(ProbeDepth::Deep), guard)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.depth, Some(ProbeDepth::Deep));
+    assert!(r.changes.is_empty(), "{:?}", r.changes);
+    let due = r.deep_due_in.expect("the failed deep probe is retried");
+    assert!(due > Duration::from_secs(5) && due <= sustain, "{due:?}");
+    let rec = r.cluster.unwrap();
+    assert_eq!(rec.body().profile_version, version);
+    assert!(rec.body().profile.as_ref().unwrap().derived.xa);
+    drop(f.live);
+}
+
 #[tokio::test]
 async fn record_events_schedule_and_passes_debounce() {
     let f = fixture("mon-c").await;

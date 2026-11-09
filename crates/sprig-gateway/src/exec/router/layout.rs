@@ -121,6 +121,8 @@ pub(crate) struct ShardingState {
     pub copies: Vec<CopyRow>,
     /// Lookup indexes (chapter 19's `lookup_indexes`).
     pub lookups: Vec<LookupRow>,
+    /// Foreign keys (chapter 19's `foreign_keys`; R3).
+    pub fks: Vec<sprig_shard::fk::ForeignKey>,
 }
 
 impl ExtState for ShardingState {
@@ -131,6 +133,7 @@ impl ExtState for ShardingState {
             .sum::<usize>()
             + 64 * (self.groups.len() + self.copies.len())
             + 128 * self.lookups.len()
+            + 160 * self.fks.len()
     }
 }
 
@@ -243,8 +246,33 @@ impl CatalogExtension for ShardingExtension {
         } else {
             Vec::new()
         };
+        // Chapter 19's foreign keys (R3): the rows the gateway keeps.
+        let has_fks: Option<u64> = conn
+            .exec_first(
+                "SELECT COUNT(*) FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'foreign_keys'",
+                (schema.as_str(),),
+            )
+            .await
+            .map_err(db_err)?;
+        let fks: Vec<sprig_shard::fk::FkTuple> = if has_fks.unwrap_or(0) > 0 {
+            conn.query(format!(
+                "SELECT fk_id, name, child_object_id, CAST(child_columns AS CHAR), \
+                        parent_object_id, CAST(parent_columns AS CHAR), on_delete, on_update, \
+                        enforcement, child_lookup_id, state \
+                 FROM `{schema}`.foreign_keys ORDER BY fk_id"
+            ))
+            .await
+            .map_err(db_err)?
+        } else {
+            Vec::new()
+        };
         let mut state = ShardingState {
             migrated: true,
+            fks: fks
+                .into_iter()
+                .filter_map(sprig_shard::fk::from_tuple)
+                .collect(),
             ..ShardingState::default()
         };
         for (id, kind, spec) in groups {
@@ -543,7 +571,8 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
             member,
         });
     }
-    let topo = sprig_router::topology::catalog::build(tenant.0, &groups, &tables);
+    let topo =
+        sprig_router::topology::catalog::build_with_fks(tenant.0, &groups, &tables, &state.fks);
     let mut epochs = HashMap::new();
     for (_, e) in topo.entries() {
         if e.is_reference() {

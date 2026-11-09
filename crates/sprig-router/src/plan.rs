@@ -300,6 +300,10 @@ pub struct WritePlan {
     /// Lookups whose values the deleted rows release (chapter 19,
     /// `release`), read before the delete.
     pub releases: Vec<Release>,
+    /// Foreign keys across groups (chapter 19, R3): parents locked before
+    /// child rows are written, children probed (or their actions applied)
+    /// before parent rows change.
+    pub fk: Option<Box<crate::fk::FkWork>>,
 }
 
 /// One value an inserted row claims in a unique lookup.
@@ -510,6 +514,9 @@ pub enum Plan {
     NeedIds(Box<IdFill>),
     /// `EXPLAIN FORMAT=SPRIG`: the plan of the statement.
     Explain(Box<Plan>),
+    /// A gathered read (R3): the rows copied to the session's cluster and
+    /// the statement run there over the copies.
+    Gather(Box<crate::gather::GatherPlan>),
     /// No exact plan.
     Reject(Rejection),
 }
@@ -528,6 +535,7 @@ impl Plan {
             Self::ViaParent(_) => "via_parent",
             Self::NeedIds(_) => "need_ids",
             Self::Explain(_) => "explain",
+            Self::Gather(_) => "gather",
             Self::Reject(_) => "reject",
         }
     }

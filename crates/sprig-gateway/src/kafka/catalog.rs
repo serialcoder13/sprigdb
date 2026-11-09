@@ -15,17 +15,14 @@
 //! | CreatePartitions | ``ALTER STREAM `db`.`s` PARTITIONS n`` |
 //! | IncrementalAlterConfigs | ``ALTER STREAM ... RETENTION / CLEANUP`` |
 //!
-//! `retention.bytes` and `max.message.bytes` can't be set per topic yet:
-//! SQL has no statement that sets a setting on one stream, so they follow
-//! the database's and tenant's `stream.retention_bytes` and
-//! `stream.max_message_bytes`, and setting them is refused with
-//! `INVALID_CONFIG`.
+//! | `retention.ms`, `retention.bytes`, `max.message.bytes` | ``ALTER STREAM ... SET (stream.retention_hours = h, stream.retention_bytes = b, stream.max_message_bytes = m)``, or `RESET (...)` when deleted |
+//!
+//! A topic is listed (and described) only to users who may read or write
+//! its stream (chapter 29's `SELECT` or `INSERT`, on the stream or its
+//! database; for a change topic, `SELECT` on its table).
 //!
 //! **Groups** ([`CatalogGroups`]) are `stream_groups` and `stream_offsets`
-//! in `t<tenant>_sprig`. Offsets are written with `sprig-streams`'
-//! `StreamsStore::commit_offset`; the group rows, the listing and the
-//! deletion are this module's own statements on the same tables (marked
-//! "adapter": `sprig-streams` has no API for them yet).
+//! in `t<tenant>_sprig`, through `sprig-streams`' `StreamsStore`.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -33,7 +30,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mysql_async::prelude::Queryable;
 use sprig_catalog::{CatalogLocator, Freshness, TenantCatalog};
 use sprig_common::SprigError;
 use sprig_common::ids::{ObjectId, TenantId};
@@ -43,6 +39,7 @@ use sprig_proto_kafka::topics::{
     Cleanup, NewTopic, Principal, TopicConfigs, TopicDefaults, TopicError, TopicInfo, TopicKind,
     Topics,
 };
+use sprig_streams::store::{GroupRow, GroupRowState};
 use sprig_streams::{StreamDef, StreamsState};
 use uuid::Uuid;
 
@@ -64,6 +61,7 @@ fn quote(id: &str) -> String {
 pub struct StreamTopics {
     svc: Arc<TenantServices>,
     engine: Arc<SqlEngine>,
+    data: Arc<super::data::GatewayData>,
 }
 
 impl std::fmt::Debug for StreamTopics {
@@ -75,17 +73,6 @@ impl std::fmt::Debug for StreamTopics {
 /// Splits `<database>.<stream>`.
 fn split(name: &str) -> Result<(&str, &str), TopicError> {
     sprig_proto_kafka::mem::split_topic(name)
-}
-
-/// SQL has no way yet to set a setting on one stream (`ALTER TABLE ...
-/// SPRIG SET` doesn't resolve streams), so these two are set at the
-/// database or tenant.
-fn per_stream_bytes() -> TopicError {
-    TopicError::new(
-        err::INVALID_CONFIG,
-        "retention.bytes and max.message.bytes can't be set on one stream yet: set \
-         stream.retention_bytes or stream.max_message_bytes on the database or tenant",
-    )
 }
 
 /// A SprigDB error as a Kafka one.
@@ -102,6 +89,7 @@ fn topic_error(e: &SprigError) -> TopicError {
             1049 => err::UNKNOWN_TOPIC_OR_PARTITION,
             1050 => err::TOPIC_ALREADY_EXISTS,
             1064 => err::INVALID_REQUEST,
+            1231 => err::INVALID_CONFIG,
             _ => err::UNKNOWN_SERVER_ERROR,
         },
     };
@@ -109,10 +97,15 @@ fn topic_error(e: &SprigError) -> TopicError {
 }
 
 impl StreamTopics {
-    /// Topics of `svc`'s tenants, changed through `engine`.
+    /// Topics of `svc`'s tenants, changed through `engine`, listed as
+    /// `data`'s privileges allow.
     #[must_use]
-    pub fn new(svc: Arc<TenantServices>, engine: Arc<SqlEngine>) -> Self {
-        Self { svc, engine }
+    pub fn new(
+        svc: Arc<TenantServices>,
+        engine: Arc<SqlEngine>,
+        data: Arc<super::data::GatewayData>,
+    ) -> Self {
+        Self { svc, engine, data }
     }
 
     async fn catalog(&self, p: &Principal) -> Result<Arc<TenantCatalog>, TopicError> {
@@ -184,6 +177,9 @@ impl StreamTopics {
             .all()
             .filter(|d| d.state == sprig_streams::model::StreamState::Active)
             .find(|d| d.name == stream && cat.databases.get(d.db).is_some_and(|r| r.name == db))?;
+        if !self.data.visible(p, cat, def) {
+            return None;
+        }
         self.info(p, cat, def)
     }
 
@@ -238,27 +234,52 @@ impl StreamTopics {
         old: TopicConfigs,
         new: TopicConfigs,
     ) -> Result<(), TopicError> {
-        if new.retention_bytes != old.retention_bytes
-            || new.max_message_bytes != old.max_message_bytes
-        {
-            return Err(per_stream_bytes());
-        }
         let (db, s) = split(name)?;
         let target = format!("{}.{}", quote(db), quote(s));
         let mut alter = Vec::new();
+        let mut set = Vec::new();
+        let mut reset = Vec::new();
         if new.retention_ms != old.retention_ms {
             match new.retention_ms {
-                Some(ms) if ms >= 0 => alter.push(format!(
-                    "RETENTION '{} hours'",
+                Some(ms) if ms >= 0 => set.push(format!(
+                    "stream.retention_hours = {}",
                     sprig_proto_kafka::topics::retention_hours(ms)
                 )),
-                _ => {
+                Some(_) => {
                     return Err(TopicError::new(
                         err::INVALID_CONFIG,
-                        "retention.ms: no time limit (-1) and resetting to the inherited value are not supported yet",
+                        "retention.ms: no time limit (-1) is not supported yet; the longest is \
+                         87600 hours",
                     ));
                 }
+                None => reset.push("stream.retention_hours"),
             }
+        }
+        if new.retention_bytes != old.retention_bytes {
+            match new.retention_bytes {
+                // Kafka's -1 is SprigDB's 0: no size limit.
+                Some(-1) => set.push("stream.retention_bytes = 0".to_owned()),
+                Some(0) => {
+                    return Err(TopicError::new(
+                        err::INVALID_CONFIG,
+                        "retention.bytes: 0 would keep nothing; use -1 for no size limit",
+                    ));
+                }
+                Some(b) => set.push(format!("stream.retention_bytes = {b}")),
+                None => reset.push("stream.retention_bytes"),
+            }
+        }
+        if new.max_message_bytes != old.max_message_bytes {
+            match new.max_message_bytes {
+                Some(m) => set.push(format!("stream.max_message_bytes = {m}")),
+                None => reset.push("stream.max_message_bytes"),
+            }
+        }
+        if !set.is_empty() {
+            alter.push(format!("SET ({})", set.join(", ")));
+        }
+        if !reset.is_empty() {
+            alter.push(format!("RESET ({})", reset.join(", ")));
         }
         if new.cleanup != old.cleanup {
             alter.push(format!(
@@ -282,6 +303,7 @@ impl Topics for StreamTopics {
         let mut out: Vec<TopicInfo> = st
             .all()
             .filter(|d| d.state == sprig_streams::model::StreamState::Active)
+            .filter(|d| self.data.visible(p, &cat, d))
             .filter_map(|d| self.info(p, &cat, d))
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -330,9 +352,6 @@ impl Topics for StreamTopics {
                 err::TOPIC_ALREADY_EXISTS,
                 format!("39942 ER_SPRIG_STREAM_EXISTS: {} already exists", t.name),
             ));
-        }
-        if t.configs.retention_bytes.is_some() || t.configs.max_message_bytes.is_some() {
-            return Err(per_stream_bytes());
         }
         if t.configs.retention_ms.is_some_and(|ms| ms < 0) {
             return Err(TopicError::new(
@@ -571,27 +590,19 @@ impl GroupStore for CatalogGroups {
         group: &str,
         only: Option<&[(u64, i32)]>,
     ) -> Result<Vec<CommittedOffset>, StoreError> {
-        // Adapter: all of a group's offsets in one read.
         let (mut conn, schema) = self.conn(tenant).await?;
-        let rows: Vec<(u64, u32, u64, Option<u32>, Option<String>)> = conn
-            .exec(
-                format!(
-                    "SELECT stream_id, partition_no, offset_no, leader_epoch, metadata FROM {}.stream_offsets \
-                     WHERE group_name = ? ORDER BY stream_id, partition_no",
-                    quote(&schema)
-                ),
-                (group,),
-            )
+        let rows = sprig_streams::StreamsStore::new(schema)
+            .group_offsets(&mut conn, group)
             .await
             .map_err(store_err)?;
         Ok(rows
             .into_iter()
-            .map(|(s, p, o, e, m)| CommittedOffset {
-                stream_id: s,
-                partition: i32::try_from(p).unwrap_or(i32::MAX),
-                offset: i64::try_from(o).unwrap_or(i64::MAX),
-                leader_epoch: e.and_then(|e| i32::try_from(e).ok()),
-                metadata: m,
+            .map(|o| CommittedOffset {
+                stream_id: o.stream.0,
+                partition: i32::try_from(o.partition.0).unwrap_or(i32::MAX),
+                offset: i64::try_from(o.offset).unwrap_or(i64::MAX),
+                leader_epoch: o.leader_epoch.and_then(|e| i32::try_from(e).ok()),
+                metadata: o.metadata,
             })
             .filter(|c| only.is_none_or(|k| k.contains(&(c.stream_id, c.partition))))
             .collect())
@@ -603,25 +614,19 @@ impl GroupStore for CatalogGroups {
         g: &StoredGroup,
         state: GroupState,
     ) -> Result<(), StoreError> {
-        // Adapter: the group row.
         let (mut conn, schema) = self.conn(tenant).await?;
-        conn.exec_drop(
-            format!(
-                "INSERT INTO {}.stream_groups (group_name, protocol_type, generation, state, updated_at) \
-                 VALUES (?, ?, ?, ?, UTC_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE \
-                 protocol_type = VALUES(protocol_type), generation = VALUES(generation), \
-                 state = VALUES(state), updated_at = VALUES(updated_at)",
-                quote(&schema)
-            ),
-            (
-                g.group.as_str(),
-                g.protocol_type.as_str(),
-                u32::try_from(g.generation).unwrap_or(0),
-                state.stored(),
-            ),
-        )
-        .await
-        .map_err(store_err)
+        sprig_streams::StreamsStore::new(schema)
+            .save_group(
+                &mut conn,
+                &GroupRow {
+                    group: g.group.clone(),
+                    protocol_type: g.protocol_type.clone(),
+                    generation: u32::try_from(g.generation).unwrap_or(0),
+                    state: GroupRowState::parse(state.stored()),
+                },
+            )
+            .await
+            .map_err(store_err)
     }
 
     async fn load_group(
@@ -630,39 +635,29 @@ impl GroupStore for CatalogGroups {
         group: &str,
     ) -> Result<Option<StoredGroup>, StoreError> {
         let (mut conn, schema) = self.conn(tenant).await?;
-        let row: Option<(String, u32)> = conn
-            .exec_first(
-                format!(
-                    "SELECT protocol_type, generation FROM {}.stream_groups WHERE group_name = ? AND state <> 'dead'",
-                    quote(&schema)
-                ),
-                (group,),
-            )
+        let row = sprig_streams::StreamsStore::new(schema)
+            .load_group(&mut conn, group)
             .await
             .map_err(store_err)?;
-        Ok(row.map(|(pt, g)| StoredGroup {
-            group: group.to_owned(),
-            protocol_type: pt,
-            generation: i32::try_from(g).unwrap_or(i32::MAX),
+        Ok(row.map(|r| StoredGroup {
+            group: r.group,
+            protocol_type: r.protocol_type,
+            generation: i32::try_from(r.generation).unwrap_or(i32::MAX),
         }))
     }
 
     async fn list_groups(&self, tenant: u64) -> Result<Vec<StoredGroup>, StoreError> {
         let (mut conn, schema) = self.conn(tenant).await?;
-        let rows: Vec<(String, String, u32)> = conn
-            .query(format!(
-                "SELECT group_name, protocol_type, generation FROM {}.stream_groups \
-                 WHERE state <> 'dead' ORDER BY group_name",
-                quote(&schema)
-            ))
+        let rows = sprig_streams::StreamsStore::new(schema)
+            .list_groups(&mut conn)
             .await
             .map_err(store_err)?;
         Ok(rows
             .into_iter()
-            .map(|(g, pt, gen_)| StoredGroup {
-                group: g,
-                protocol_type: pt,
-                generation: i32::try_from(gen_).unwrap_or(i32::MAX),
+            .map(|r| StoredGroup {
+                group: r.group,
+                protocol_type: r.protocol_type,
+                generation: i32::try_from(r.generation).unwrap_or(i32::MAX),
             })
             .collect())
     }
@@ -673,14 +668,10 @@ impl GroupStore for CatalogGroups {
             .start_transaction(mysql_async::TxOpts::default())
             .await
             .map_err(store_err)?;
-        for t in ["stream_offsets", "stream_groups"] {
-            tx.exec_drop(
-                format!("DELETE FROM {}.{t} WHERE group_name = ?", quote(&schema)),
-                (group,),
-            )
+        sprig_streams::StreamsStore::new(schema)
+            .delete_group(&mut tx, group)
             .await
             .map_err(store_err)?;
-        }
         tx.commit().await.map_err(store_err)
     }
 }

@@ -180,6 +180,30 @@ pub trait ShardBackend: Send {
         1
     }
 
+    /// A connection of its own on the session's cluster, with the
+    /// session's state, for a gathered read (R3); it serves inside a
+    /// transaction too (it reads only its own temporary tables). `None`
+    /// when the backend can't open one (the statement is refused as
+    /// before).
+    ///
+    /// # Errors
+    /// The backend's errors.
+    async fn open_scratch(&mut self) -> Result<Option<Box<dyn crate::gather::Scratch>>> {
+        Ok(None)
+    }
+
+    /// `router.gather.*` for this statement; the default turns gathering
+    /// off.
+    fn gather_limits(&self) -> crate::gather::GatherLimits {
+        crate::gather::GatherLimits::default()
+    }
+
+    /// Whether the session holds temporary tables of its own (a gathered
+    /// read that also reads unsharded tables would miss them).
+    fn has_temporary_tables(&self) -> bool {
+        false
+    }
+
     /// Chapter 19's `claim` of one value an inserted row holds, in the
     /// write's transaction (after [`Self::begin_write`]). The default
     /// refuses: a backend without lookup sessions can't keep them exact.
@@ -210,6 +234,12 @@ pub trait ShardBackend: Send {
             Reason::Lookup,
             "this backend doesn't maintain lookups",
         ))
+    }
+
+    /// `@@foreign_key_checks` of the session: when off, the gateway's
+    /// foreign-key checks and actions are skipped (chapter 19).
+    fn foreign_key_checks(&self) -> bool {
+        true
     }
 
     /// The routing hashes of the rows holding `probe`'s values (chapter
@@ -333,6 +363,7 @@ pub async fn execute(
         Plan::LookupJoin(j) => lookup_join(j, be, budget).await,
         Plan::Write(w) => write(w, be, budget).await,
         Plan::Explain(p) => explain(p, be, budget).await,
+        Plan::Gather(g) => crate::gather::execute(g, be, budget, None).await,
         Plan::Pass(t) => match be.run(t, &t.sql, budget).await? {
             ShardOutcome::Rows(r) => Ok(Output::Rows {
                 columns: r.columns,
@@ -483,6 +514,10 @@ pub async fn execute_to(
         metrics::histogram!("sprig_router_fanout_shards")
             .record(u32::try_from(r.targets.len()).map_or(f64::MAX, f64::from));
         return stream_scatter(r, streams, be.max_parallel(), budget, sink).await;
+    }
+    if let Plan::Gather(g) = plan {
+        metrics::counter!("sprig_router_statements_total", "plan" => "gather").increment(1);
+        return crate::gather::execute(g, be, budget, Some(sink)).await;
     }
     execute(plan, be, budget).await
 }
@@ -1747,6 +1782,40 @@ async fn lookups_before(
     Ok(())
 }
 
+/// A statement a foreign-key action planned (chapter 19, R3), run inside
+/// the write that caused it: no transaction or savepoint of its own.
+///
+/// # Errors
+/// The shards' errors, 1451, 1452, 39462.
+pub(crate) async fn run_nested(
+    plan: &Plan,
+    be: &mut dyn ShardBackend,
+    budget: &mut Budget,
+    depth: usize,
+) -> Result<()> {
+    match plan {
+        Plan::Pass(t) => be.run(t, &t.sql, budget).await.map(|_| ()),
+        Plan::Write(w) => {
+            lookups_before(w, be, budget).await?;
+            if let Some(f) = &w.fk {
+                Box::pin(crate::fk::before_write(f, be, budget, depth)).await?;
+            }
+            for t in &w.targets {
+                be.run(t, &t.sql, budget).await?;
+            }
+            Ok(())
+        }
+        Plan::ViaLookup(v) => {
+            let p = narrow(v, be).await?;
+            Box::pin(run_nested(&p, be, budget, depth)).await
+        }
+        Plan::Reject(r) => Err(r.error()),
+        _ => Err(SprigError::internal(
+            "a foreign-key action planned as something other than a write",
+        )),
+    }
+}
+
 async fn write(w: &WritePlan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Result<Output> {
     metrics::histogram!("sprig_router_fanout_shards")
         .record(u32::try_from(w.targets.len()).map_or(f64::MAX, f64::from));
@@ -1755,7 +1824,14 @@ async fn write(w: &WritePlan, be: &mut dyn ShardBackend, budget: &mut Budget) ->
     };
     let _ = first;
     be.begin_write(&w.targets, budget).await?;
-    if let Err(e) = lookups_before(w, be, budget).await {
+    let before = async {
+        lookups_before(w, be, budget).await?;
+        if let Some(f) = &w.fk {
+            crate::fk::before_write(f, be, budget, 0).await?;
+        }
+        Ok::<(), SprigError>(())
+    };
+    if let Err(e) = before.await {
         if let Err(u) = be.end_write(&w.targets, false, budget).await {
             tracing::warn!(error = %u, "undoing a failed write's lookups");
         }
@@ -2040,6 +2116,36 @@ async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Re
                 "gateway".into(),
                 format!("{}: {}", r.reason.as_str(), r.detail),
             );
+        }
+        Plan::Gather(g) => {
+            let top = rows.push(
+                None,
+                "Gather",
+                "session's cluster".into(),
+                format!(
+                    "the statement runs once over temporary copies ({}): {}",
+                    g.fallback.reason.as_str(),
+                    g.sql
+                ),
+            );
+            for t in &g.tables {
+                let detail = match &t.filter {
+                    Some(f) => format!("rows where {f}"),
+                    None => "every row".into(),
+                };
+                rows.push(
+                    Some(top),
+                    "Copy",
+                    format!(
+                        "{}.{}: {} of {} shards",
+                        t.schema,
+                        t.name,
+                        t.sources.len(),
+                        t.shards_total
+                    ),
+                    detail,
+                );
+            }
         }
         Plan::Explain(_)
         | Plan::NotRouted

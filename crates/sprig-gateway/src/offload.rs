@@ -268,7 +268,7 @@ mod tests {
         });
     }
 
-    /// A large read arrives whole, yielding every PACE_BYTES.
+    /// A large read arrives whole, yielding every `PACE_BYTES`.
     #[tokio::test]
     async fn a_paced_stream_reads_everything_and_yields() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

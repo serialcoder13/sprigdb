@@ -293,10 +293,45 @@ impl Host for GwHost<'_> {
                             store.put_setting(tx, &retention(def, *h)).await?;
                         }
                     }
-                    StreamsChange::Update(def, h) => {
+                    StreamsChange::Update(def, changes) => {
                         streams.update(tx, def).await?;
-                        if let Some(h) = h {
-                            store.put_setting(tx, &retention(def, *h)).await?;
+                        // A change topic's settings are its table's.
+                        let scope = SettingScope::Object(ObjectId(
+                            def.source_object.map_or(def.id.0, |o| o.0),
+                        ));
+                        for c in changes {
+                            match c.value {
+                                Some(v) => {
+                                    store
+                                        .put_setting(
+                                            tx,
+                                            &SettingRow {
+                                                scope,
+                                                key: c.key.to_owned(),
+                                                value: Some(serde_json::json!(v)),
+                                                bounds: None,
+                                                set_by: set_by.clone(),
+                                                set_at: SystemTime::now(),
+                                                version,
+                                            },
+                                        )
+                                        .await?;
+                                }
+                                None => {
+                                    store
+                                        .reset_setting(
+                                            tx,
+                                            scope,
+                                            c.key,
+                                            true,
+                                            false,
+                                            &set_by,
+                                            SystemTime::now(),
+                                            version,
+                                        )
+                                        .await?;
+                                }
+                            }
                         }
                     }
                     StreamsChange::Delete(def) => streams.delete(tx, def.id).await?,

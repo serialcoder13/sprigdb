@@ -36,6 +36,9 @@ pub enum Shape {
     Many,
     /// `Exec`: affected rows.
     Exec,
+    /// `db.call`: one `CALL` of a logic function, built by [`call_op`];
+    /// its row is `event`, then the event's fields.
+    Call,
 }
 
 impl Shape {
@@ -46,6 +49,7 @@ impl Shape {
             Shape::One => "Sprig.Db.QueryOne",
             Shape::Many => "Sprig.Db.Query",
             Shape::Exec => "Sprig.Db.Exec",
+            Shape::Call => "db.call",
         }
     }
 }
@@ -350,6 +354,7 @@ pub fn bind(shape: Shape, sql: &str, args: &[Value], at: &str) -> Result<DbOp> {
                 match shape {
                     Shape::One | Shape::Many => "one SELECT statement",
                     Shape::Exec => "one INSERT, REPLACE, UPDATE or DELETE statement",
+                    Shape::Call => "one CALL statement",
                 }
             ),
         ));
@@ -375,6 +380,111 @@ fn first_word_fits(sql: &str, shape: Shape) -> bool {
     match shape {
         Shape::One | Shape::Many => matches!(w.as_str(), "SELECT" | "WITH" | "VALUES"),
         Shape::Exec => matches!(w.as_str(), "INSERT" | "REPLACE" | "UPDATE" | "DELETE"),
+        Shape::Call => w == "CALL",
+    }
+}
+
+/// The shape `db.sql` gives a statement by its first word: DML is
+/// [`Shape::Exec`], anything else [`Shape::Many`] (which [`bind`] then
+/// checks is a query).
+#[must_use]
+pub fn shape_of(sql: &str) -> Shape {
+    if first_word_fits(sql, Shape::Exec) {
+        Shape::Exec
+    } else {
+        Shape::Many
+    }
+}
+
+/// `db.call(name, ...args)`: a `CALL` of the logic function `name`
+/// (`fn` or `db.fn`, plain names only), each argument a literal. It runs
+/// through the caller's session like any statement, so `EXECUTE` is
+/// checked and an engine-tier callee runs nested (chapter 41's
+/// `logic.max_call_depth`).
+///
+/// # Errors
+/// 39860 for a name that isn't `[db.]name` of letters, digits, `_` and `$`.
+pub fn call_op(name: &str, args: &[Value]) -> Result<DbOp> {
+    let parts: Vec<&str> = name.split('.').collect();
+    let ok = (1..=2).contains(&parts.len())
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars().count() <= 64
+                && p.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        });
+    if !ok {
+        return Err(SprigError::new(
+            SprigCode::LogicNotFound,
+            format!("db.call: {name:?} isn't a function name"),
+        ));
+    }
+    let quoted: Vec<String> = parts.iter().map(|p| format!("`{p}`")).collect();
+    let lits: Vec<String> = args.iter().map(literal).collect();
+    Ok(DbOp {
+        shape: Shape::Call,
+        sql: format!("CALL {}({})", quoted.join("."), lits.join(", ")),
+    })
+}
+
+/// A reply as the script engines (JavaScript, Lua) hand it to code:
+/// `db.sql` rows as an array of objects, `db.sqlOne` one object or
+/// `null`, `db.exec` `{affected}`, `db.call` `{event, fields}`. Rows read
+/// are charged to `st`.
+///
+/// # Errors
+/// 39864 past `logic.max_rows_read`; 39866 for `sqlOne` with several
+/// rows, or a reply of the wrong kind; see [`cell`].
+pub fn script_value(
+    shape: Shape,
+    reply: Reply,
+    st: &crate::budget::RunState,
+    at: &str,
+) -> Result<Value> {
+    match (shape, reply) {
+        (Shape::Exec, Reply::Affected(n)) => Ok(serde_json::json!({ "affected": n })),
+        (Shape::Many | Shape::One | Shape::Call, Reply::Rows { columns, rows }) => {
+            st.read_rows(rows.len() as u64)?;
+            match shape {
+                Shape::One => {
+                    if rows.len() > 1 {
+                        return Err(SprigError::new(
+                            SprigCode::LogicRuntimeError,
+                            format!("db.sqlOne at {at} returned more than one row"),
+                        ));
+                    }
+                    rows.first()
+                        .map_or(Ok(Value::Null), |r| row_object(&columns, r))
+                }
+                Shape::Call => {
+                    let Some(r) = rows.first() else {
+                        return Ok(serde_json::json!({ "event": "output", "fields": {} }));
+                    };
+                    let mut fields = row_object(&columns, r)?;
+                    let event = fields
+                        .as_object_mut()
+                        .and_then(|o| o.shift_remove("event"))
+                        .unwrap_or_else(|| Value::String("output".to_owned()));
+                    Ok(serde_json::json!({ "event": event, "fields": fields }))
+                }
+                _ => {
+                    let mut list = Vec::with_capacity(rows.len());
+                    for r in &rows {
+                        list.push(row_object(&columns, r)?);
+                    }
+                    Ok(Value::Array(list))
+                }
+            }
+        }
+        (Shape::Call, Reply::Affected(_)) => {
+            Ok(serde_json::json!({ "event": "output", "fields": {} }))
+        }
+        (shape, _) => Err(SprigError::new(
+            SprigCode::LogicRuntimeError,
+            format!(
+                "{} at {at}: the statement returned the wrong kind of result",
+                shape.function()
+            ),
+        )),
     }
 }
 

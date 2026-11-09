@@ -51,6 +51,10 @@ pub struct Limits {
     pub max_data_ops: u64,
     /// `logic.max_rows_read`.
     pub max_rows_read: u64,
+    /// The setting the wall time comes from, for messages
+    /// (`logic.function_budget_ms`; `redis.lua_time_limit_ms` for Redis
+    /// scripts, chapter 40).
+    pub wall_setting: &'static str,
 }
 
 impl Default for Limits {
@@ -62,6 +66,7 @@ impl Default for Limits {
             memory_bytes: 64 << 20,
             max_data_ops: 1000,
             max_rows_read: 100_000,
+            wall_setting: "logic.function_budget_ms",
         }
     }
 }
@@ -96,6 +101,7 @@ pub struct RunState {
     held: AtomicU64,
     peak: AtomicU64,
     cancel: AtomicBool,
+    stopped: AtomicBool,
     tripped: Mutex<Option<SprigError>>,
 }
 
@@ -112,6 +118,7 @@ impl RunState {
             held: AtomicU64::new(0),
             peak: AtomicU64::new(0),
             cancel: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             tripped: Mutex::new(None),
         }
     }
@@ -163,7 +170,8 @@ impl RunState {
         let l = &self.limits;
         let what = match b {
             Budget::Wall => format!(
-                "wall time: the call ran past logic.function_budget_ms = {} ms",
+                "wall time: the call ran past {} = {} ms",
+                l.wall_setting,
                 l.wall.as_millis()
             ),
             Budget::Steps => format!(
@@ -203,6 +211,35 @@ impl RunState {
         {
             *t = Some(e);
         }
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the run must stop now: tripped, cancelled or past its wall
+    /// time (which trips it). The QuickJS interrupt handler and the Lua
+    /// count hook ask this; a `true` can't be caught by the code.
+    #[must_use]
+    pub fn interrupted(&self) -> bool {
+        if self.stopped.load(Ordering::Relaxed) {
+            return true;
+        }
+        if let Err(e) = self.check_time() {
+            self.trip(e);
+            return true;
+        }
+        false
+    }
+
+    /// Records `bytes` as the run's current heap (an engine's own count),
+    /// keeping the peak.
+    pub fn heap(&self, bytes: u64) {
+        self.held.store(bytes, Ordering::Relaxed);
+        self.peak.fetch_max(bytes, Ordering::Relaxed);
+    }
+
+    /// Counts `n` steps without checking the limit (engines whose steps
+    /// are VM instructions, reported but not budgeted).
+    pub fn count_steps(&self, n: u64) {
+        self.steps.fetch_add(n, Ordering::Relaxed);
     }
 
     /// The tripped error, if any.

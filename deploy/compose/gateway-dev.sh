@@ -50,6 +50,16 @@
 # SPRIG_CTL_TELEMETRY_PORT (9180) and SPRIG_GW_TELEMETRY_PORT (9190). up
 # records them in the state directory, so status and down need only
 # SPRIG_GATEWAY_DEV_STATE; while an instance is up, its recorded values win.
+#
+# Tenant ids (SPRIG_TENANT_ID_BASE): instances share the MariaDB servers, so
+# each must hand out its own tenant ids. up sets the global settings
+# tenant.id_min = base and tenant.id_max = base + 99,999; the controller then
+# starts its id counter at the base, jumps only past t<id>_ schemas inside
+# that range, and refuses to create a tenant past its end (39080). A second
+# instance on its own etcd gets the base MySQL port x 100,000 by default
+# (24306 gives 2,430,600,000 to 2,430,699,999); the default instance on the
+# shared etcd gets no range unless SPRIG_TENANT_ID_BASE is set.
+# SPRIG_TENANT_ID_BASE=none sets no range. down removes the two settings.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -70,6 +80,18 @@ ctl_telemetry_port=${ctl_telemetry_port:-${SPRIG_CTL_TELEMETRY_PORT:-9180}}
 gw_telemetry_port=${gw_telemetry_port:-${SPRIG_GW_TELEMETRY_PORT:-9190}}
 wk_telemetry_port=${wk_telemetry_port:-${SPRIG_WK_TELEMETRY_PORT:-9185}}
 login_mode=${login_mode:-${SPRIG_GATEWAY_LOGIN_MODE:-catalog}}
+# The tenant id range's base (header); "none" for no range.
+if [[ -z ${tenant_id_base:-} ]]; then
+    if [[ -n ${SPRIG_TENANT_ID_BASE:-} ]]; then
+        tenant_id_base=$SPRIG_TENANT_ID_BASE
+    elif [[ $etcd != http://127.0.0.1:2379 ]]; then
+        tenant_id_base=$((mysql_port * 100000))
+    else
+        tenant_id_base=none
+    fi
+fi
+[[ $tenant_id_base == none || $tenant_id_base =~ ^[1-9][0-9]*$ ]] ||
+    { echo "gateway-dev: SPRIG_TENANT_ID_BASE must be a positive number or none" >&2; exit 1; }
 case $login_mode in catalog | accounts_file) ;; *) echo "gateway-dev: SPRIG_GATEWAY_LOGIN_MODE must be catalog or accounts_file" >&2; exit 1 ;; esac
 # The tenants catalog mode creates, each with the user app.
 tenants=(acme globex)
@@ -173,6 +195,22 @@ set_setting() {
 
 get_setting() {
     etcd_get "/sprig/dc/$dc/settings/$1" | jq -c '.value' 2>/dev/null || true
+}
+
+# A setting record at global scope.
+set_global_setting() {
+    etcd_put "/sprig/g/settings/$1" "$(jq -cn --argjson v "$2" \
+        '{v: 1, value: $v, set_by: "op:gateway-dev", reason: "deploy/compose/gateway-dev.sh"}')"
+}
+
+# The global keys of the tenant id range (header, SPRIG_TENANT_ID_BASE).
+id_range_settings=(tenant.id_min tenant.id_max)
+
+set_id_range() {
+    [[ $tenant_id_base == none ]] && return
+    set_global_setting tenant.id_min "$tenant_id_base"
+    set_global_setting tenant.id_max "$((tenant_id_base + 99999))"
+    say "tenant ids $tenant_id_base to $((tenant_id_base + 99999)) (tenant.id_min, tenant.id_max)"
 }
 
 # --- processes ---------------------------------------------------------------
@@ -420,7 +458,7 @@ up() {
     printf '%s\n' "etcd=$etcd" "mysql_port=$mysql_port" "mariadb_port=$mariadb_port" \
         "admin_port=$admin_port" "ctl_telemetry_port=$ctl_telemetry_port" \
         "gw_telemetry_port=$gw_telemetry_port" "wk_telemetry_port=$wk_telemetry_port" \
-        "login_mode=$login_mode" >"$state/env"
+        "login_mode=$login_mode" "tenant_id_base=$tenant_id_base" >"$state/env"
 
     # Ports held by anything other than our processes.
     local port
@@ -480,6 +518,7 @@ up() {
     # 15 minutes (chapter 12, workload.flush_seconds).
     set_setting workload.flush_seconds 10
     dev_self_fence
+    set_id_range
 
     start gateway deploy/compose/sprigdb.gateway.dev.toml gateway
     wait_ready gateway "$gw_ready"
@@ -538,6 +577,11 @@ down() {
     for key in "${settings[@]}"; do
         n=$((n + $(etcd_del "/sprig/dc/$dc/settings/$key")))
     done
+    if [[ $tenant_id_base != none ]]; then
+        for key in "${id_range_settings[@]}"; do
+            n=$((n + $(etcd_del "/sprig/g/settings/$key")))
+        done
+    fi
     if [[ -f $state/clusters ]]; then
         while read -r id number; do
             n=$((n + $(etcd_del "/sprig/dc/$dc/clusters/$id")))
@@ -590,6 +634,11 @@ status() {
             local value
             value=$(get_setting "$key")
             say "setting $key = ${value:-(unset: the built-in default)}"
+        done
+        for key in "${id_range_settings[@]}"; do
+            local value
+            value=$(etcd_get "/sprig/g/settings/$key" | jq -c '.value' 2>/dev/null || true)
+            say "setting $key (global) = ${value:-(unset: the built-in default)}"
         done
     else
         say "no etcd at $etcd"

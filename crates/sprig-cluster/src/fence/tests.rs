@@ -179,8 +179,10 @@ fn receipts_round_trip() {
         renamed: Vec::new(),
         killed: vec![(NodeId::new("n2").unwrap(), 812)],
         writer_pos: GtidPos("0-1-42".into()),
+        fenced_at_unix: None,
     };
     let json = serde_json::to_value(&r).unwrap();
+    assert!(json.get("fenced_at_unix").is_none(), "omitted when unknown");
     assert_eq!(json["writer_pos"], "0-1-42");
     assert_eq!(json["method"], "revoke_kill");
     assert_eq!(json["killed"][0][1], 812);

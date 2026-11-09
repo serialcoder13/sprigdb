@@ -92,6 +92,21 @@ key! {
     "Deepest tenant tree (root at depth 0)"
 }
 
+key! {
+    /// `tenant.id_min`: the lowest tenant id this deployment allocates.
+    /// The id counter starts here, and only `t<id>_` schemas inside the
+    /// range raise it (chapter 23, "Tenant ids").
+    TENANT_ID_MIN: u64 = "tenant.id_min", 1, Scopes(0b10_0000), 1, i64::MAX, 23,
+    "Lowest tenant id this deployment allocates"
+}
+key! {
+    /// `tenant.id_max`: the highest tenant id this deployment allocates;
+    /// past it, tenant creation fails with 39080.
+    #[allow(clippy::cast_sign_loss)] // i64::MAX is positive
+    TENANT_ID_MAX: u64 = "tenant.id_max", i64::MAX as u64, Scopes(0b10_0000), 1, i64::MAX, 23,
+    "Highest tenant id this deployment allocates"
+}
+
 /// A snapshot of the controller's keys, resolved for one DC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlSettings {

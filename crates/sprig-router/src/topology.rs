@@ -306,6 +306,13 @@ pub trait Topology: Send + Sync {
     /// Whether `sql` may name a table this topology knows: a cheap word
     /// scan that lets statements over unsharded tables skip the parser.
     fn mentions(&self, sql: &str) -> bool;
+
+    /// The foreign keys the gateway keeps in the logical database whose
+    /// default schema is `schema` (chapter 19, R3), if any.
+    fn fk_graph(&self, schema: &str) -> Option<Arc<crate::fk::FkGraph>> {
+        let _ = schema;
+        None
+    }
 }
 
 /// A key value, as the router extracts it from a literal.
@@ -331,6 +338,8 @@ pub fn even_ranges(n: u32) -> Vec<u64> {
 pub struct StaticTopology {
     tables: HashMap<(String, String), TableEntry>,
     words: HashSet<String>,
+    /// Per default schema, the foreign keys the gateway keeps.
+    fks: HashMap<String, Arc<crate::fk::FkGraph>>,
 }
 
 impl StaticTopology {
@@ -339,6 +348,13 @@ impl StaticTopology {
         self.words.insert(entry.name.clone());
         self.tables
             .insert((schema.to_ascii_lowercase(), entry.name.clone()), entry);
+    }
+
+    /// Sets the foreign keys of the database whose default schema is
+    /// `schema`.
+    pub fn set_fk_graph(&mut self, schema: &str, graph: crate::fk::FkGraph) {
+        self.fks
+            .insert(schema.to_ascii_lowercase(), Arc::new(graph));
     }
 
     /// Whether no table is known.
@@ -404,6 +420,10 @@ impl Topology for StaticTopology {
             }
         }
         false
+    }
+
+    fn fk_graph(&self, schema: &str) -> Option<Arc<crate::fk::FkGraph>> {
+        self.fks.get(&schema.to_ascii_lowercase()).cloned()
     }
 }
 
