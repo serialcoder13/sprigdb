@@ -32,6 +32,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt as _};
@@ -231,6 +232,14 @@ impl CommandLoop {
             let idle_close = !self.status.contains(StatusFlags::IN_TRANS);
             let handle = Arc::clone(self.session.handle());
             let mut watch_close = idle_close;
+            // The client's `wait_timeout`, when it set one: an idle session
+            // is closed as the servers close it. MySQL 8.0.24 and later
+            // first send 4031 (ER_CLIENT_INTERACTION_TIMEOUT); MariaDB
+            // closes silently.
+            let idle = self.exec.idle_timeout();
+            let idle_sleep = tokio::time::sleep(idle.unwrap_or(Duration::from_secs(86_400)));
+            tokio::pin!(idle_sleep);
+            let mut timed_out = false;
             let next = loop {
                 tokio::select! {
                     biased;
@@ -243,8 +252,30 @@ impl CommandLoop {
                         }
                         watch_close = false;
                     }
+                    () = &mut idle_sleep, if idle.is_some() => {
+                        timed_out = true;
+                        break None;
+                    }
                 }
             };
+            if timed_out {
+                tracing::debug!(session = %self.session.id, "idle session closed: the client's wait_timeout passed");
+                if self.proto.persona == Persona::MySql84 {
+                    let p = ErrPacket::new(
+                        4031,
+                        *b"HY000",
+                        "The client was disconnected by the server because of inactivity. \
+                         See wait_timeout and interactive_timeout for configuring this behavior."
+                            .to_owned(),
+                    );
+                    let _ = <ClientFramed as SinkExt<Bytes>>::send(
+                        &mut self.framed,
+                        p.encode(self.proto.caps),
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
             let Some(next) = next else {
                 tracing::debug!(session = %self.session.id, "idle session closed: the gateway is draining");
                 return Ok(());

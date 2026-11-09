@@ -2,17 +2,23 @@
 //! packet framing, the handshake with `mysql_native_password`, text queries,
 //! `COM_REGISTER_SLAVE` and `COM_BINLOG_DUMP`.
 //!
-//! `sprig-proto-mysql` will own the full codec (chapter 05); this module
-//! moves there when it exists. TLS is not implemented yet.
+//! `sprig-proto-mysql` owns the full codec (chapter 05); this module keeps
+//! the little a binlog client needs. TLS follows the standard upgrade: an
+//! SSL request after the greeting, the TLS handshake, then the handshake
+//! response inside TLS ([`crate::tls`]).
 
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use sha1::{Digest, Sha1};
 use sprig_common::{SprigCode, SprigError};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::TcpStream;
 
 use crate::buf::{Buf, corrupt, disconnected, put_lenenc, unsupported};
+use crate::tls::{BinlogTls, tls_error};
 
 const MAX_PAYLOAD: usize = 0xff_ffff;
 
@@ -20,6 +26,7 @@ const MAX_PAYLOAD: usize = 0xff_ffff;
 const CLIENT_LONG_PASSWORD: u32 = 1;
 const CLIENT_LONG_FLAG: u32 = 4;
 const CLIENT_PROTOCOL_41: u32 = 0x200;
+const CLIENT_SSL: u32 = 0x800;
 const CLIENT_TRANSACTIONS: u32 = 0x2000;
 const CLIENT_SECURE_CONNECTION: u32 = 0x8000;
 const CLIENT_MULTI_RESULTS: u32 = 0x2_0000;
@@ -29,26 +36,81 @@ const CLIENT_PLUGIN_AUTH_LENENC: u32 = 0x20_0000;
 /// Largest packet the client accepts (1 GiB), sent in the handshake.
 const MAX_PACKET: u32 = 1 << 30;
 
+/// The socket under the packets: plain TCP, or TLS over it.
+enum Stream {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+    /// Only while the connection is being upgraded.
+    Upgrading,
+}
+
+fn upgrading() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "TLS upgrade in progress")
+}
+
+impl AsyncRead for Stream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Stream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+            Stream::Upgrading => Poll::Ready(Err(upgrading())),
+        }
+    }
+}
+
+impl AsyncWrite for Stream {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Stream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+            Stream::Upgrading => Poll::Ready(Err(upgrading())),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Stream::Plain(s) => Pin::new(s).poll_flush(cx),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+            Stream::Upgrading => Poll::Ready(Err(upgrading())),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Stream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            Stream::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+            Stream::Upgrading => Poll::Ready(Ok(())),
+        }
+    }
+}
+
 /// A connection to a MariaDB server.
 pub(crate) struct Conn {
-    io: BufReader<TcpStream>,
+    io: BufReader<Stream>,
     seq: u8,
     /// The server's version string.
     pub(crate) server_version: String,
     /// The server's connection id.
     pub(crate) connection_id: u32,
+    /// The negotiated TLS version (`TLSv1_3`, ...), `None` for plain text.
+    pub(crate) tls_version: Option<String>,
 }
 
 /// A text result set: rows of nullable strings.
 pub(crate) type Rows = Vec<Vec<Option<String>>>;
 
 impl Conn {
-    /// Connects and authenticates.
+    /// Connects and authenticates, over TLS when `tls` is given.
     pub(crate) async fn connect(
         host: &str,
         port: u16,
         user: &str,
         password: &str,
+        tls: Option<&BinlogTls>,
         timeout: Duration,
     ) -> Result<Self, SprigError> {
         let addr = format!("{host}:{port}");
@@ -58,18 +120,25 @@ impl Conn {
             .map_err(|e| disconnected(format!("connecting to {addr}: {e}")).with_source(e))?;
         tcp.set_nodelay(true).ok();
         let mut conn = Conn {
-            io: BufReader::with_capacity(64 * 1024, tcp),
+            io: BufReader::with_capacity(64 * 1024, Stream::Plain(tcp)),
             seq: 0,
             server_version: String::new(),
             connection_id: 0,
+            tls_version: None,
         };
-        tokio::time::timeout(timeout, conn.handshake(user, password))
+        let tls = tls.map(|t| (t, host));
+        tokio::time::timeout(timeout, conn.handshake(user, password, tls))
             .await
             .map_err(|_| disconnected(format!("handshake with {addr} timed out")))??;
         Ok(conn)
     }
 
-    async fn handshake(&mut self, user: &str, password: &str) -> Result<(), SprigError> {
+    async fn handshake(
+        &mut self,
+        user: &str,
+        password: &str,
+        tls: Option<(&BinlogTls, &str)>,
+    ) -> Result<(), SprigError> {
         let greeting = self.read_packet().await?;
         if greeting.first() == Some(&0xff) {
             return Err(server_error(&greeting));
@@ -106,7 +175,7 @@ impl Conn {
         if server_caps & needed != needed {
             return Err(unsupported("server lacks protocol 4.1 authentication"));
         }
-        let caps = CLIENT_LONG_PASSWORD
+        let mut caps = CLIENT_LONG_PASSWORD
             | CLIENT_LONG_FLAG
             | CLIENT_PROTOCOL_41
             | CLIENT_TRANSACTIONS
@@ -114,12 +183,19 @@ impl Conn {
             | CLIENT_MULTI_RESULTS
             | CLIENT_PLUGIN_AUTH
             | (server_caps & CLIENT_PLUGIN_AUTH_LENENC);
+        if let Some((tls, host)) = tls {
+            if server_caps & CLIENT_SSL == 0 {
+                return Err(tls_error(
+                    "the server does not offer TLS (no ssl_cert/ssl_key configured?)",
+                ));
+            }
+            caps |= CLIENT_SSL;
+            self.write_packet(&ssl_request(caps)).await?;
+            self.start_tls(tls, host).await?;
+        }
         let auth = auth_response(&plugin, password, &scramble)?;
-        let mut out = Vec::with_capacity(128);
-        out.extend_from_slice(&caps.to_le_bytes());
-        out.extend_from_slice(&MAX_PACKET.to_le_bytes());
-        out.push(45); // utf8mb4_general_ci
-        out.extend_from_slice(&[0u8; 23]);
+        let mut out = ssl_request(caps);
+        out.reserve(96);
         out.extend_from_slice(user.as_bytes());
         out.push(0);
         if caps & CLIENT_PLUGIN_AUTH_LENENC != 0 {
@@ -148,6 +224,30 @@ impl Conn {
                 _ => return Err(corrupt("unexpected packet during authentication")),
             }
         }
+    }
+
+    /// Runs the TLS handshake on the socket, after the SSL request.
+    async fn start_tls(&mut self, tls: &BinlogTls, host: &str) -> Result<(), SprigError> {
+        let config = tls.client_config()?;
+        let name = tls.name_for(host)?;
+        let old = std::mem::replace(&mut self.io, BufReader::new(Stream::Upgrading));
+        if !old.buffer().is_empty() {
+            return Err(corrupt("unexpected bytes before the TLS handshake"));
+        }
+        let Stream::Plain(tcp) = old.into_inner() else {
+            return Err(tls_error("the connection is already encrypted"));
+        };
+        let stream = tokio_rustls::TlsConnector::from(config)
+            .connect(name, tcp)
+            .await
+            .map_err(|e| tls_error(format!("handshake with {host}: {e}")))?;
+        self.tls_version = stream
+            .get_ref()
+            .1
+            .protocol_version()
+            .map(|v| format!("{v:?}"));
+        self.io = BufReader::with_capacity(64 * 1024, Stream::Tls(Box::new(stream)));
+        Ok(())
     }
 
     /// Runs a statement and returns its rows (none for statements that
@@ -298,6 +398,17 @@ impl Conn {
     }
 }
 
+/// The SSL request: the first 32 bytes of the handshake response
+/// (capabilities, largest packet, collation, 23 zero bytes).
+fn ssl_request(caps: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32);
+    out.extend_from_slice(&caps.to_le_bytes());
+    out.extend_from_slice(&MAX_PACKET.to_le_bytes());
+    out.push(45); // utf8mb4_general_ci
+    out.extend_from_slice(&[0u8; 23]);
+    out
+}
+
 fn io_err(e: std::io::Error) -> SprigError {
     disconnected(format!("binlog connection: {e}")).with_source(e)
 }
@@ -359,6 +470,16 @@ mod tests {
         // Deterministic: SHA1 of the inputs.
         assert_eq!(r, native_password("secret", scramble));
         assert_ne!(r, native_password("secret2", scramble));
+    }
+
+    #[test]
+    fn ssl_request_is_the_response_prefix() {
+        let r = ssl_request(CLIENT_PROTOCOL_41 | CLIENT_SSL);
+        assert_eq!(r.len(), 32);
+        assert_eq!(&r[..4], &(CLIENT_PROTOCOL_41 | CLIENT_SSL).to_le_bytes());
+        assert_eq!(&r[4..8], &MAX_PACKET.to_le_bytes());
+        assert_eq!(r[8], 45);
+        assert!(r[9..].iter().all(|b| *b == 0));
     }
 
     #[test]

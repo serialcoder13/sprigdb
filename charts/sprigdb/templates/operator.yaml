@@ -21,9 +21,14 @@ rules:
   - apiGroups: [""]
     resources: [services]
     verbs: [get, list, watch, create, update, patch, delete]
+  # delete: retire removes mariadb-operator's generated password Secrets.
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get, create, patch]
+    verbs: [get, create, patch, delete]
+  # retire deletes a retired cluster's volume claims.
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [list, delete]
   - apiGroups: [""]
     resources: [events]
     verbs: [create]

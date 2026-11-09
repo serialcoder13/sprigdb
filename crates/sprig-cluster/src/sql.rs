@@ -53,6 +53,49 @@ impl NodeEndpoint {
     pub fn addr(&self) -> String {
         format!("{}:{}", self.opts.ip_or_hostname(), self.opts.tcp_port())
     }
+
+    /// The binlog reader's view of this endpoint: the same address, account
+    /// and TLS (chapter 10). Endpoints built from a cluster's credentials
+    /// always carry TLS, so the reader verifies the server against the
+    /// credential's CA (`tls = "verify"`, `ca_file`) or encrypts without
+    /// verifying (`skip_verify`); an endpoint without TLS options (a
+    /// development URL) reads in plain text.
+    pub async fn binlog_source(&self) -> sprig_binlog::BinlogSource {
+        let src = sprig_binlog::BinlogSource::new(
+            self.opts.ip_or_hostname(),
+            self.opts.tcp_port(),
+            self.opts.user().unwrap_or_default(),
+            self.opts.pass().unwrap_or_default(),
+        );
+        match self.opts.ssl_opts() {
+            Some(ssl) => src.with_tls(binlog_tls(ssl).await),
+            None => src,
+        }
+    }
+}
+
+/// mysql_async's TLS options as the binlog reader's: the CA files are read
+/// now (a CA that can't be read is logged and left out, so verification
+/// fails rather than passing). A check that skips only the host name (not
+/// something credentials produce) verifies fully.
+async fn binlog_tls(ssl: &mysql_async::SslOpts) -> sprig_binlog::BinlogTls {
+    let mut tls = if ssl.accept_invalid_certs() {
+        sprig_binlog::BinlogTls::skip_verify()
+    } else {
+        sprig_binlog::BinlogTls::verify(None)
+    };
+    let mut pem = Vec::new();
+    for root in ssl.root_certs() {
+        match root.read().await {
+            Ok(b) => pem.extend_from_slice(&b),
+            Err(e) => tracing::warn!(error = %e, "CA certificate not read"),
+        }
+    }
+    if !ssl.root_certs().is_empty() {
+        tls.ca_pem = Some(pem);
+    }
+    tls.server_name = ssl.tls_hostname_override().map(str::to_owned);
+    tls
 }
 
 /// Why a probe statement or connection failed.

@@ -420,6 +420,14 @@ impl Reconciler {
                     Phase::Provisioning
                 };
                 status.message = Some(why);
+                // A pod restarted after a failover boots in domain 0, and the
+                // cluster may stay not Ready for long (a broken replica):
+                // keep the domain on every node that answers (kind, r2kind).
+                if let Some(n) = old.cluster_number.filter(|n| *n > 0)
+                    && old.cluster_id.is_some()
+                {
+                    self.domain_while_waiting(&sc, &ns, n).await;
+                }
             }
             self.write_status(raw, &sc, &ns, status.clone()).await?;
             return Ok(Outcome {
@@ -550,6 +558,35 @@ impl Reconciler {
                 requeue
             },
         })
+    }
+
+    /// Best effort: `gtid_domain_id` on the nodes of a registered cluster
+    /// whose `MariaDB` isn't Ready.
+    async fn domain_while_waiting(&self, sc: &SprigCluster, ns: &str, domain: u32) {
+        let name = &sc.metadata.name;
+        let Ok(Some(root)) = self
+            .secret_value(ns, &format!("{name}-root"), "password")
+            .await
+        else {
+            return;
+        };
+        let target = BootstrapTarget {
+            cluster: name.clone(),
+            writer: self.writer_addr(sc, ns),
+            nodes: self.pod_addrs(sc, ns),
+            root_password: root,
+            ctl_password: String::new(),
+            repl_password: String::new(),
+        };
+        match self.accounts.ensure_domain(&target, domain).await {
+            Ok(changed) if changed > 0 => {
+                tracing::info!(cluster = %name, changed, domain, "gtid_domain_id set live while not Ready");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(cluster = %name, error = %e, "gtid_domain_id while not Ready");
+            }
+        }
     }
 
     /// The `SprigCluster`s of pool `pool`.

@@ -93,8 +93,16 @@ pub fn account_sql(ctl_password: &str, repl_password: &str) -> Vec<String> {
         "GRANT ALL PRIVILEGES ON `t%`.* TO 'sprig_ctl'@'%' WITH GRANT OPTION".into(),
         "GRANT ALL PRIVILEGES ON `__sprig_sys`.* TO 'sprig_ctl'@'%' WITH GRANT OPTION".into(),
         "GRANT SUPER, CREATE USER, PROCESS, CONNECTION ADMIN, BINLOG MONITOR, SLAVE MONITOR, \
-         RELOAD, READ_ONLY ADMIN ON *.* TO 'sprig_ctl'@'%'"
+         RELOAD, READ_ONLY ADMIN, BINLOG ADMIN, SET USER ON *.* TO 'sprig_ctl'@'%'"
             .into(),
+        // Chapter 09's full list: on kind the probes reported these three
+        // missing (SET USER gates compiled logic). The gateway's per-user
+        // backend accounts (chapter 29) read the grant tables as sprig_ctl.
+        "GRANT SELECT ON mysql.db TO 'sprig_ctl'@'%'".into(),
+        "GRANT SELECT ON mysql.global_priv TO 'sprig_ctl'@'%'".into(),
+        "GRANT SELECT ON mysql.tables_priv TO 'sprig_ctl'@'%'".into(),
+        "GRANT SELECT ON mysql.columns_priv TO 'sprig_ctl'@'%'".into(),
+        "GRANT SELECT ON mysql.procs_priv TO 'sprig_ctl'@'%'".into(),
         format!("CREATE USER IF NOT EXISTS 'sprig_repl'@'%' IDENTIFIED BY {repl} REQUIRE SSL"),
         format!("ALTER USER 'sprig_repl'@'%' IDENTIFIED BY {repl} REQUIRE SSL"),
         "GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO 'sprig_repl'@'%'".into(),
@@ -176,6 +184,33 @@ impl MysqlAccounts {
     }
 }
 
+impl MysqlAccounts {
+    /// Sets `gtid_domain_id` (and Galera's) on one node; 1 if it changed.
+    async fn set_domain(&self, addr: &str, root: &str, domain: u32) -> Result<usize> {
+        let mut c = self.pool(addr, root)?.get_conn().await.map_err(server)?;
+        let cur: Option<(u32, Option<i64>)> = c
+            .query_first("SELECT @@GLOBAL.gtid_domain_id, @@GLOBAL.wsrep_on")
+            .await
+            .map_err(server)?;
+        let Some((cur, wsrep)) = cur else {
+            return Ok(0);
+        };
+        let mut changed = 0;
+        if cur != domain {
+            c.query_drop(format!("SET GLOBAL gtid_domain_id = {domain}"))
+                .await
+                .map_err(server)?;
+            changed = 1;
+        }
+        if wsrep == Some(1) {
+            c.query_drop(format!("SET GLOBAL wsrep_gtid_domain_id = {domain}"))
+                .await
+                .map_err(server)?;
+        }
+        Ok(changed)
+    }
+}
+
 fn server(e: impl std::fmt::Display) -> SprigError {
     SprigError::new(
         SprigCode::ClusterUnavailable,
@@ -198,31 +233,27 @@ impl SystemAccounts for MysqlAccounts {
     }
 
     async fn ensure_domain(&self, t: &BootstrapTarget, domain: u32) -> Result<usize> {
+        // Every node that answers gets the domain, even when another is
+        // down (a pod restarted after a failover comes back in domain 0
+        // while the cluster isn't Ready); the first error comes back after.
         let mut changed = 0;
+        let mut first_err = None;
         for addr in &t.nodes {
-            let mut c = self
-                .pool(addr, &t.root_password)?
-                .get_conn()
-                .await
-                .map_err(server)?;
-            let cur: Option<(u32, Option<i64>)> = c
-                .query_first("SELECT @@GLOBAL.gtid_domain_id, @@GLOBAL.wsrep_on")
-                .await
-                .map_err(server)?;
-            let Some((cur, wsrep)) = cur else { continue };
-            if cur != domain {
-                c.query_drop(format!("SET GLOBAL gtid_domain_id = {domain}"))
-                    .await
-                    .map_err(server)?;
-                changed += 1;
-            }
-            if wsrep == Some(1) {
-                c.query_drop(format!("SET GLOBAL wsrep_gtid_domain_id = {domain}"))
-                    .await
-                    .map_err(server)?;
+            match self.set_domain(addr, &t.root_password, domain).await {
+                Ok(c) => changed += c,
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
             }
         }
-        Ok(changed)
+        match first_err {
+            Some(e) if changed == 0 => Err(e),
+            Some(e) => {
+                tracing::debug!(error = %e, "gtid_domain_id not set on every node");
+                Ok(changed)
+            }
+            None => Ok(changed),
+        }
     }
 }
 
@@ -250,6 +281,11 @@ mod tests {
         assert!(sql[0].contains("'ab\\'c'"));
         assert!(sql.iter().all(|s| !s.contains("REQUIRE SUBJECT")));
         assert!(sql.iter().any(|s| s.contains("REPLICATION SLAVE")));
+        assert!(
+            sql.iter()
+                .any(|s| s.contains("BINLOG ADMIN, SET USER ON *.*"))
+        );
+        assert!(sql.iter().any(|s| s.contains("SELECT ON mysql.db")));
         let p = generate_password().unwrap_or_default();
         assert_eq!(p.len(), 48);
         assert!(p.bytes().all(|b| b.is_ascii_hexdigit()));

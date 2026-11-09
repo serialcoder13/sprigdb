@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 
 use super::*;
 
@@ -185,4 +186,100 @@ async fn explicit_values_keep_later_values_above_them() {
     // Another gateway's later block starts past the raise too.
     let b = BlockAllocator::new(Arc::clone(&src), BlockConfig::default());
     assert!(b.take(SeqId(1), 1, &s).await.unwrap().first > 1_000_002);
+}
+
+/// A recorded block: `[start, end)`, its holder and its lease's end.
+type HeldBlock = (i128, i128, &'static str, std::time::Instant);
+
+/// A gateway's view of a shared [`MemSource`]: its blocks are recorded
+/// under its name and a lease, as `CatalogSequences::held_by` records them.
+struct Held {
+    src: Arc<MemSource>,
+    name: &'static str,
+    lease: Duration,
+    blocks: Arc<StdMutex<Vec<HeldBlock>>>,
+}
+
+#[async_trait::async_trait]
+impl SequenceSource for Held {
+    async fn fetch(&self, seq: SeqId, size: u128) -> Result<(i128, i128)> {
+        let r = self.src.fetch(seq, size).await?;
+        self.blocks.lock().unwrap().push((
+            r.0,
+            r.1,
+            self.name,
+            std::time::Instant::now() + self.lease,
+        ));
+        Ok(r)
+    }
+    async fn raise(&self, seq: SeqId, v: i128) -> Result<()> {
+        self.src.raise(seq, v).await
+    }
+    async fn ordering(&self, seq: SeqId) -> Result<Ordering> {
+        self.src.ordering(seq).await
+    }
+    fn lease(&self) -> Option<Duration> {
+        Some(self.lease)
+    }
+    async fn explicit(&self, seq: SeqId, v: i128) -> Result<Explicit> {
+        let next = *self.src.next.lock().unwrap();
+        if v >= next {
+            self.src.raise(seq, v).await?;
+            return Ok(Explicit::Free);
+        }
+        let now = std::time::Instant::now();
+        Ok(self
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(a, z, h, until)| *a <= v && v < *z && *h != self.name && now < *until)
+            .map_or(Explicit::Free, |(_, z, _, _)| Explicit::Reserved {
+                end: *z,
+            }))
+    }
+}
+
+#[tokio::test]
+async fn explicit_values_in_another_gateways_block_are_refused_until_its_lease_ends() {
+    let src = Arc::new(MemSource::default());
+    let blocks = Arc::new(StdMutex::new(Vec::new()));
+    let lease = Duration::from_millis(300);
+    let gw = |name| {
+        BlockAllocator::new(
+            Held {
+                src: Arc::clone(&src),
+                name,
+                lease,
+                blocks: Arc::clone(&blocks),
+            },
+            BlockConfig::default(),
+        )
+    };
+    let (a, b) = (gw("a"), gw("b"));
+    let s = AutoIncSession::default();
+    // B holds [1, 17) and has used 1.
+    assert_eq!(b.take(SeqId(1), 1, &s).await.unwrap().first, 1);
+    // A value inside B's block: B could still generate it, so A refuses.
+    let e = a.explicit(SeqId(1), 10).await.unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::IdValueReserved));
+    // A value in A's own block is A's to skip; one past every block raises.
+    let own = a.take(SeqId(1), 1, &s).await.unwrap().first;
+    a.explicit(SeqId(1), own + 3).await.unwrap();
+    assert!(a.take(SeqId(1), 1, &s).await.unwrap().first > own + 3);
+    a.explicit(SeqId(1), 5000).await.unwrap();
+    // B never hands out a value A wrote: its block ends below 5000, its next
+    // starts above it.
+    let mut seen = Vec::new();
+    for _ in 0..40 {
+        seen.push(b.take(SeqId(1), 1, &s).await.unwrap().first);
+    }
+    assert!(seen.iter().all(|v| *v != 5000 && *v != own + 3));
+    assert!(seen.windows(2).all(|w| w[0] < w[1]));
+    // After B's lease ends, the rest of its block is a gap, and a value in
+    // it may be written.
+    let last = *seen.last().unwrap();
+    tokio::time::sleep(lease + Duration::from_millis(50)).await;
+    a.explicit(SeqId(1), last + 1).await.unwrap();
+    assert!(b.take(SeqId(1), 1, &s).await.unwrap().first > last + 1);
 }

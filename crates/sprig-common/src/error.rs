@@ -302,6 +302,9 @@ sprig_codes! {
     IdBlockUnavailable = 39460, "ER_SPRIG_ID_BLOCK_UNAVAILABLE", "SprigIdBlockUnavailable", SQLSTATE_GENERAL, true;
     /// A lookup shard is unreachable for a claim (chapter 19).
     LookupUnavailable = 39461, "ER_SPRIG_LOOKUP_UNAVAILABLE", "SprigLookupUnavailable", SQLSTATE_CONNECTION, true;
+    /// An explicit `AUTO_INCREMENT` value lies in an ID block another
+    /// gateway still holds (chapter 19).
+    IdValueReserved = 39463, "ER_SPRIG_ID_VALUE_RESERVED", "SprigIdValueReserved", SQLSTATE_GENERAL, false;
     /// A split, merge or move job already holds the shard (chapter 20).
     ShardBusy = 39470, "ER_SPRIG_SHARD_BUSY", "SprigShardBusy", SQLSTATE_GENERAL, true;
     /// The group isn't `active`, the range is a single hash, or the split
@@ -726,6 +729,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ShardedTenantMove
         | SprigCode::PinConflict
         | SprigCode::PinNeedsRekey
+        | SprigCode::IdValueReserved
         | SprigCode::DdlUnsupported
         | SprigCode::DdlShardDrift => (Code::FailedPrecondition, 400),
         SprigCode::GatewayDraining

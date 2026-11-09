@@ -34,6 +34,7 @@ const PB: &str = "/apis/k8s.mariadb.com/v1alpha1/namespaces/sprigdb/physicalback
 const SVC: &str = "/api/v1/namespaces/sprigdb/services";
 const SECRETS: &str = "/api/v1/namespaces/sprigdb/secrets";
 const EVENTS: &str = "/api/v1/namespaces/sprigdb/events";
+const PVCS: &str = "/api/v1/namespaces/sprigdb/persistentvolumeclaims";
 
 #[derive(Default)]
 struct FakeAccounts {
@@ -442,12 +443,29 @@ async fn pools_keep_their_minimum_and_provision_up_to_the_maximum() {
         .as_str()
         .unwrap()
         .to_owned();
+    // The StatefulSet's volume claims, which Kubernetes keeps.
+    for (n, inst) in [
+        ("storage-default-1-0", "default-1"),
+        ("storage-default-1-1", "default-1"),
+        ("storage-default-2-0", "default-2"),
+    ] {
+        w.api.put(
+            PVCS,
+            json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+                "metadata": {"name": n, "namespace": NS,
+                    "labels": {"app.kubernetes.io/instance": inst}}}),
+        );
+    }
     prov.retire(&sprig_common::ids::ClusterId::new(id).unwrap())
         .await
         .unwrap();
     assert!(w.api.get(SC, "default-1").is_none());
     assert!(w.api.get(MDB, "default-1").is_none());
     assert!(!w.api.names(SVC).iter().any(|n| n.starts_with("default-1-")));
+    assert_eq!(w.api.names(PVCS), vec!["storage-default-2-0".to_owned()]);
+    assert!(w.api.get(SECRETS, "default-1-root").is_none());
+    let creds = w.api.get(SECRETS, "sprigdb-cluster-credentials").unwrap();
+    assert!(creds["data"]["default-1.toml"].is_null());
 }
 
 #[tokio::test]

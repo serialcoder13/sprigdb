@@ -15,7 +15,8 @@
 //! Everything SprigDB tunes later is set live with `SET GLOBAL`; this is
 //! only what a node starts with. On Kubernetes mariadb-operator owns
 //! `server_id`, replication, semi-sync, `read_only` at boot, Galera's
-//! `wsrep_*` and TLS, so [`Platform::Kubernetes`] leaves them out.
+//! `wsrep_*` and TLS, so [`Platform::Kubernetes`] leaves them out, except
+//! `wsrep_gtid_mode`, which mariadb-operator leaves off.
 
 use std::fmt::Write as _;
 
@@ -283,6 +284,11 @@ pub fn render(n: &NodeSettings) -> String {
         line("binlog_format", &"ROW", "Galera needs it");
         line("innodb_autoinc_lock_mode", &2, "Galera needs it");
     }
+    if !vm && n.role == NodeRole::Galera {
+        // mariadb-operator turns it on only for its multi-cluster
+        // topology, and registration requires it (found on kind).
+        line("wsrep_gtid_mode", &"ON", "mariadb-operator leaves it OFF");
+    }
     out.push_str(&s);
     out.push_str(
         "# table_open_cache, table_definition_cache, innodb_open_files and\n\
@@ -373,6 +379,8 @@ mod tests {
         assert_eq!(get(&c, "gtid_domain_id"), Some("9"));
         let unknown = NodeSettings::new(Platform::Kubernetes, NodeRole::Galera, 0, 1, 4 << 30);
         assert_eq!(get(&render(&unknown), "gtid_domain_id"), None);
+        assert_eq!(get(&render(&unknown), "wsrep_gtid_mode"), Some("ON"));
+        assert_eq!(get(&render(&unknown), "wsrep_on"), None);
         assert_eq!(get(&c, "log_bin"), Some("mariadb-bin"));
     }
 }

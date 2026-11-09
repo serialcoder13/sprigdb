@@ -66,6 +66,11 @@ fn replication_follows_the_table() {
         r["replica"]["bootstrapFrom"]["physicalBackupTemplateRef"]["name"],
         "fra1-c7-backup"
     );
+    // Without a backup there is nothing to bootstrap from, and
+    // mariadb-operator refuses `recovery` alone.
+    let mut nb = sc(Topology::Replication, 3);
+    nb.spec.backup = None;
+    assert!(mariadb(&nb, &cfg())["spec"]["replication"]["replica"].is_null());
     assert_eq!(
         s["storage"],
         json!({"size": "500Gi", "storageClassName": "fast-ssd"})
@@ -181,7 +186,10 @@ fn one_service_per_pod_and_their_addresses() {
     // NodePort: the node-port host when one is configured (kind).
     let np = json!({"spec": {"type": "NodePort", "clusterIP": "10.96.4.5",
         "ports": [{"port": 3306, "nodePort": 31104}]}});
-    assert_eq!(advertised_for(&np, &cfg()).as_deref(), Some("10.96.4.5:3306"));
+    assert_eq!(
+        advertised_for(&np, &cfg()).as_deref(),
+        Some("10.96.4.5:3306")
+    );
     let mut c = cfg();
     c.node_port_host = Some("127.0.0.1".into());
     assert_eq!(advertised_for(&np, &c).as_deref(), Some("127.0.0.1:31104"));

@@ -6,7 +6,10 @@
 //! `create` adds a `SprigCluster` to the spec's pool (within
 //! `maxClusters`; the reconcile loop does the rest) or, without a pool,
 //! creates one from the spec; `retire` deletes the `SprigCluster`, and
-//! owner references delete its `MariaDB`, backups and Services. A cluster
+//! owner references delete its `MariaDB`, backups and Services; `retire`
+//! deletes what owner references don't reach: the volume claims,
+//! mariadb-operator's generated password Secrets and the cluster's entry
+//! in the credentials Secret. A cluster
 //! is retired only after the controller drained it (chapter 11).
 
 use std::sync::Arc;
@@ -20,7 +23,16 @@ use crate::crd::{
     self, BackupSpec, FailoverDriver, MariaDbImage, SPRIG_CLUSTER, SPRIG_CLUSTER_POOL,
     SprigCluster, SprigClusterPool, SprigClusterSpec, StorageSpec,
 };
+use crate::kube::{ApiResource, KubeError, SECRET};
 use crate::reconcile::Reconciler;
+
+/// `v1` `PersistentVolumeClaim`.
+pub const PVC: ApiResource = ApiResource {
+    group: "",
+    version: "v1",
+    kind: "PersistentVolumeClaim",
+    plural: "persistentvolumeclaims",
+};
 
 /// [`Provisioner`] over the operator's custom resources.
 pub struct KubernetesProvisioner {
@@ -61,7 +73,7 @@ pub fn cluster_spec(spec: &ClusterSpec) -> SprigClusterSpec {
             size: format!("{storage_gb}Gi"),
             storage_class_name: None,
         },
-        failover_driver: FailoverDriver::Operator,
+        failover_driver: FailoverDriver::Sprig,
         backup: (!spec.backup_target.is_empty()).then(|| BackupSpec {
             schedule: "0 2 * * *".into(),
             target: spec.backup_target.clone(),
@@ -169,6 +181,53 @@ impl Provisioner for KubernetesProvisioner {
             .delete(&SPRIG_CLUSTER, &ns, name)
             .await
             .map_err(|e| kerr(&e))?;
+        // The StatefulSet's volume claims outlive it (Kubernetes keeps
+        // them by default; found on kind): a retired cluster's go too.
+        // They are deleted once their pods are gone.
+        for pvc in self
+            .rec
+            .kube()
+            .list(
+                &PVC,
+                &ns,
+                Some(&format!("app.kubernetes.io/instance={name}")),
+            )
+            .await
+            .map_err(|e| kerr(&e))?
+        {
+            if let Some(n) = pvc["metadata"]["name"].as_str() {
+                self.rec
+                    .kube()
+                    .delete(&PVC, &ns, n)
+                    .await
+                    .map_err(|e| kerr(&e))?;
+            }
+        }
+        // mariadb-operator's generated passwords aren't owned by the
+        // `MariaDB` and stay behind, and so would the system accounts'
+        // passwords in the credentials Secret (found on kind).
+        for secret in [format!("{name}-root"), format!("{name}-repl-password")] {
+            self.rec
+                .kube()
+                .delete(&SECRET, &ns, &secret)
+                .await
+                .map_err(|e| kerr(&e))?;
+        }
+        let creds = &self.rec.config().credentials_secret;
+        match self
+            .rec
+            .kube()
+            .merge_patch(
+                &SECRET,
+                &ns,
+                creds,
+                &serde_json::json!({"data": {format!("{name}.toml"): null}}),
+            )
+            .await
+        {
+            Ok(_) | Err(KubeError::NotFound) => {}
+            Err(e) => return Err(kerr(&e)),
+        }
         Ok(JobId::new_v7())
     }
 }

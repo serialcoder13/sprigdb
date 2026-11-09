@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Runs MySQL Connector/J's own JDBC test suite (src/test/java of the tag in
+  versions.txt) against the released driver of the same version, with
+  Maven instead of the upstream Ant build (which needs a hand-assembled
+  jardeps directory). run.sh mounts the clone's src/test at /work/src/test.
+  Left out, as upstream's run without an X Plugin URL leaves them out:
+  testsuite/x (X DevAPI) and testsuite/perf.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>dev.sprigdb.clients</groupId>
+  <artifactId>mysql-connector-j-suite</artifactId>
+  <version>1</version>
+
+  <properties>
+    <connector.version>9.7.0</connector.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <testsuite.url>jdbc:mysql://localhost:3306/cjtest</testsuite.url>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <version>${connector.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.13.4</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-launcher</artifactId>
+      <version>1.13.4</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <testSourceDirectory>src/test/java</testSourceDirectory>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.14.0</version>
+        <configuration>
+          <testExcludes>
+            <testExclude>testsuite/x/**</testExclude>
+            <testExclude>testsuite/perf/**</testExclude>
+            <testExclude>com/mysql/cj/xdevapi/**</testExclude>
+          </testExcludes>
+          <failOnError>true</failOnError>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.3</version>
+        <configuration>
+          <includes>
+            <include>**/*Test.java</include>
+          </includes>
+          <excludes>
+            <exclude>testsuite/x/**</exclude>
+            <exclude>testsuite/perf/**</exclude>
+            <exclude>com/mysql/cj/xdevapi/**</exclude>
+          </excludes>
+          <argLine>-Dfile.encoding=UTF-8 -Xmx384m</argLine>
+          <systemPropertyVariables>
+            <com.mysql.cj.testsuite.url>${testsuite.url}</com.mysql.cj.testsuite.url>
+          </systemPropertyVariables>
+          <testFailureIgnore>true</testFailureIgnore>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

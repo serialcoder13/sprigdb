@@ -110,9 +110,19 @@ suite_run() {
   docker run --rm --name "$PREFIX-$SUITE-$$" --memory "$MEM" --memory-swap "$MEM" ${NET[@]+"${NET[@]}"} \
     -v "$SRC:/src:ro" -v "$RESULTS/raw:/out" \
     -e TARGET_HOST="$TARGET" -e TARGET_PORT="$PORT" -e TARGET_USER="$USER_" -e TARGET_PASS="$PASS" \
-    -e PERSONA="$PERSONA" -e FILTER="$FILTER" -e LOGIN_PREFIX="$LOGIN_PREFIX" \
+    -e PERSONA="$PERSONA" -e FILTER="$FILTER" -e LOGIN_PREFIX="$LOGIN_PREFIX" -e EXCLUDE_RE="$EXCLUDE_RE" \
     ${opts[@]+"${opts[@]}"} "$@"
 }
+
+# Tests the expected file excludes on this target (`exclude` lines): for
+# example ones whose load would hurt a shared development cluster.
+EXCLUDES=$(docker run --rm --name "$PREFIX-excludes-$$" --memory 128m -v "$HERE:/clients:ro" python:3.12-slim-bookworm \
+  python3 -I /clients/summarize.py excludes "/clients/expected/$SUITE.txt" "$TARGET_LABEL")
+[[ -n $EXCLUDES ]] && echo "$SUITE $TARGET_LABEL: excluded: $(echo $EXCLUDES)"
+printf '%s\n' "$EXCLUDES" | sed '/^$/d' >"$RESULTS/raw/excludes.txt"
+# One regex alternation of the excluded names, the part after the last '.'
+# (go test names, pytest functions, poku paths: globs become .*).
+EXCLUDE_RE=$(sed -e 's/.*[.]\([A-Za-z_][A-Za-z0-9_]*\)$/\1/' -e 's/[*]/.*/g' "$RESULTS/raw/excludes.txt" | paste -sd'|' -)
 
 setup=${SPRIG_CLIENTS_SETUP:-1}
 start=$(date +%s)
@@ -125,7 +135,7 @@ case $SUITE in
     suite_run -v "$SRC_ROOT/.cache/go-build:/root/.cache/go-build" -v "$SRC_ROOT/.cache/go-mod:/go/pkg/mod" \
       -e MYSQL_TEST_DBNAME=gotest -e MYSQL_TEST_CONCURRENT=1 -- golang:1.25-bookworm \
       sh -c 'export MYSQL_TEST_USER=$TARGET_USER MYSQL_TEST_PASS=$TARGET_PASS MYSQL_TEST_ADDR=$TARGET_HOST:$TARGET_PORT;
-             cd /src && go test -json -count=1 -timeout 25m ${FILTER:+-run "$FILTER"} . > /out/go-test.json 2> /out/go-test.err; true' ||
+             cd /src && go test -json -count=1 -timeout 25m ${FILTER:+-run "$FILTER"} ${EXCLUDE_RE:+-skip "^($EXCLUDE_RE)\$"} . > /out/go-test.json 2> /out/go-test.err; true' ||
       true
     ;;
   mysql2)
@@ -138,7 +148,7 @@ case $SUITE in
       sh -c 'export MYSQL_HOST=$TARGET_HOST MYSQL_PORT=$TARGET_PORT MYSQL_USER=$TARGET_USER MYSQL_PASSWORD=$TARGET_PASS;
              mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
              npm ci --no-audit --no-fund > /out/npm.log 2>&1 &&
-             npx poku ${FILTER:-} > /out/poku.log 2>&1; true' ||
+             npx poku ${EXCLUDE_RE:+--exclude="$EXCLUDE_RE"} ${FILTER:-} > /out/poku.log 2>&1; true' ||
       true
     ;;
   pymysql)
@@ -164,7 +174,7 @@ case $SUITE in
                       {\"host\": \"%s\", \"port\": %s, \"user\": \"%stest2\", \"password\": \"some password\", \"database\": \"test2\"}]" \
                "$TARGET_HOST" "$TARGET_PORT" "$TARGET_USER" "$TARGET_PASS" "$TARGET_HOST" "$TARGET_PORT" "$LOGIN_PREFIX" \
                > pymysql/tests/databases.json &&
-             python -m pytest -p no:cacheprovider -q --junitxml=/out/junit.xml ${FILTER:+-k "$FILTER"} pymysql > /out/pytest.log 2>&1; true' ||
+             python -m pytest -p no:cacheprovider -q --junitxml=/out/junit.xml ${FILTER:+-k "$FILTER"} ${EXCLUDE_RE:+-k "not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))"} pymysql > /out/pytest.log 2>&1; true' ||
       true
     ;;
   mysqlclient)
@@ -179,7 +189,7 @@ case $SUITE in
              pip install -q . -r requirements.txt "SQLAlchemy>=2,<3" > /out/pip.log 2>&1 &&
              printf "[MySQLdb-tests]\nhost = %s\nport = %s\nuser = %s\npassword = %s\ndatabase = mysqldb_test\ndefault-character-set = utf8mb4\n" \
                "$TARGET_HOST" "$TARGET_PORT" "$TARGET_USER" "$TARGET_PASS" > /tmp/target.cnf &&
-             TESTDB=/tmp/target.cnf python -m pytest -p no:cacheprovider -q --junitxml=/out/junit.xml ${FILTER:+-k "$FILTER"} tests > /out/pytest.log 2>&1; true' ||
+             TESTDB=/tmp/target.cnf python -m pytest -p no:cacheprovider -q --junitxml=/out/junit.xml ${FILTER:+-k "$FILTER"} ${EXCLUDE_RE:+-k "not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))"} tests > /out/pytest.log 2>&1; true' ||
       true
     ;;
   mariadb-connector-j)
@@ -191,7 +201,25 @@ case $SUITE in
     suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -e MAVEN_OPTS=-Xmx192m -e TEST_DB_DATABASE=testj -- maven:3.9-eclipse-temurin-21 \
       sh -c 'export TEST_DB_HOST=$TARGET_HOST TEST_DB_PORT=$TARGET_PORT TEST_DB_USER=$TARGET_USER TEST_DB_PASSWORD=$TARGET_PASS;
              mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
-             mvn -B test -Dmaven.test.failure.ignore=true -Dsurefire.timeout=1500 -DargLine=-Xmx320m \
+             sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" /out/excludes.txt > /tmp/excludes;
+             mvn -B test -Dsurefire.excludesFile=/tmp/excludes -Dmaven.test.failure.ignore=true -Dsurefire.timeout=1500 -DargLine=-Xmx320m \
+               ${FILTER:+-Dtest="$FILTER" -Dsurefire.failIfNoSpecifiedTests=false} > /out/mvn.log 2>&1;
+             mkdir -p /out/junit && cp target/surefire-reports/*.xml /out/junit/ 2>/dev/null; true' ||
+      true
+    ;;
+  mysql-connector-j)
+    # The JDBC suite (testsuite.simple, testsuite.regression and the unit
+    # tests under com/), built by mysql-connector-j/pom.xml against the
+    # released driver of the same tag; a database cjtest and a login with
+    # every privilege, no TLS. The URL is the suite's only input.
+    [[ $setup == 1 ]] && sql -e "DROP DATABASE IF EXISTS cjtest; CREATE DATABASE cjtest"
+    FORMAT=junit
+    mkdir -p "$SRC_ROOT/.cache/m2"
+    suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -v "$HERE/mysql-connector-j/pom.xml:/pom.xml:ro" -e MAVEN_OPTS=-Xmx192m -- maven:3.9-eclipse-temurin-21 \
+      sh -c 'mkdir -p /work/src && cp /pom.xml /work/ && cp -r /src/src/test /work/src/ && cd /work &&
+             url="jdbc:mysql://$TARGET_HOST:$TARGET_PORT/cjtest?user=$TARGET_USER&password=$TARGET_PASS&sslMode=DISABLED&allowPublicKeyRetrieval=true";
+             sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" /out/excludes.txt > /tmp/excludes;
+             mvn -B test -Dsurefire.excludesFile=/tmp/excludes -Dtestsuite.url="$url" -Dsurefire.timeout=1500 \
                ${FILTER:+-Dtest="$FILTER" -Dsurefire.failIfNoSpecifiedTests=false} > /out/mvn.log 2>&1;
              mkdir -p /out/junit && cp target/surefire-reports/*.xml /out/junit/ 2>/dev/null; true' ||
       true

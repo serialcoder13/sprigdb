@@ -16,8 +16,10 @@
 //! `REPLICATION SLAVE` (1227), a binlog that isn't open, a start position
 //! the server can't find, a checksum algorithm or event format the reader
 //! doesn't know, corrupt events, an authentication plugin the reader
-//! doesn't speak, and a server that refuses plain-text connections (the
-//! reader has no TLS yet). Compressed binlogs (`log_bin_compress`) decode
+//! doesn't speak, and a TLS failure (a server without TLS, a certificate
+//! the credential's CA doesn't sign, or a plain-text source refused by
+//! `require_secure_transport`). The reader uses the endpoint's TLS: the
+//! credential's `tls` and `ca_file` (r2opfix). Compressed binlogs (`log_bin_compress`) decode
 //! and pass, and so do encrypted ones (`encrypt_binlog = ON`): the server
 //! decrypts the events before sending them, and the stream skips the
 //! file's `START_ENCRYPTION` event it sends first (measured on 12.3).
@@ -63,7 +65,7 @@ pub enum DumpFailureKind {
     NoBinlog,
     /// The server couldn't start the dump at the position (1236).
     Position,
-    /// The server refuses the reader's plain-text connection.
+    /// TLS failed, or the server refuses a plain-text connection.
     Transport,
     /// The binlog uses something the reader doesn't support: a checksum
     /// algorithm, an event format or an authentication plugin.
@@ -165,8 +167,8 @@ impl DumpProbe {
 /// dump ends (at most [`MAX_EVENTS`]), and disconnects. The whole probe is bounded by `timeout`
 /// (`cluster.probe_timeout_ms`). Never fails: failures are in the result.
 ///
-/// The reader speaks plain text only, so `ep`'s TLS options are not used
-/// (`sprig-binlog` has no TLS yet).
+/// The reader uses `ep`'s TLS options ([`NodeEndpoint::binlog_source`]):
+/// the credential's CA and verification mode.
 pub async fn run(ep: &NodeEndpoint, from: &str, timeout: Duration) -> DumpProbe {
     let start = Instant::now();
     let mut out = DumpProbe {
@@ -214,7 +216,7 @@ async fn read(
         ),
         fix: "check @@gtid_binlog_pos on the node".to_owned(),
     })?;
-    let src = source(ep);
+    let src = source(ep).await;
     let mut opts = StreamOptions::new(probe_server_id());
     opts.non_blocking = true;
     opts.connect_timeout = timeout;
@@ -270,14 +272,9 @@ async fn read(
     }
 }
 
-/// The binlog reader's view of an endpoint.
-fn source(ep: &NodeEndpoint) -> BinlogSource {
-    BinlogSource::new(
-        ep.opts.ip_or_hostname(),
-        ep.opts.tcp_port(),
-        ep.opts.user().unwrap_or_default(),
-        ep.opts.pass().unwrap_or_default(),
-    )
+/// The binlog reader's view of an endpoint, TLS included.
+async fn source(ep: &NodeEndpoint) -> BinlogSource {
+    ep.binlog_source().await
 }
 
 /// A random id in the probe's range.
@@ -307,16 +304,15 @@ pub fn classify(e: &SprigError) -> DumpFailure {
                 return fail(
                     DumpFailureKind::Transport,
                     Some(errno),
-                    "the binlog reader has no TLS yet: allow sprig_repl plain-text connections \
-                     (require_secure_transport = OFF and no REQUIRE SSL on sprig_repl)",
+                    "the reader connected without TLS: give the sprig_repl credential \
+                     tls = \"verify\" and the cluster's ca_file",
                 );
             }
             match errno {
                 1045 => fail(
                     DumpFailureKind::Login,
                     Some(errno),
-                    "check the sprig_repl credential; the account must allow plain-text \
-                     connections (no REQUIRE SSL) while the binlog reader has no TLS",
+                    "check the sprig_repl credential (user, password, and REQUIRE clauses)",
                 ),
                 1227 | 1142 | 1044 => fail(
                     DumpFailureKind::Privilege,
@@ -341,6 +337,12 @@ pub fn classify(e: &SprigError) -> DumpFailure {
                 ),
             }
         }
+        ErrorKind::Sprig(SprigCode::BinlogUnsupported) if msg.starts_with("TLS:") => fail(
+            DumpFailureKind::Transport,
+            None,
+            "check the sprig_repl credential's tls and ca_file against the server's \
+             certificate (ssl_cert, ssl_key, and the CA that signed them)",
+        ),
         ErrorKind::Sprig(SprigCode::BinlogUnsupported) => {
             let fix = if lower.contains("authentication plugin") {
                 "ALTER USER sprig_repl IDENTIFIED VIA mysql_native_password USING \

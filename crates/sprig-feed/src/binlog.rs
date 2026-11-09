@@ -461,6 +461,16 @@ impl StaticClusters {
                     .tcp_port(src.port)
                     .user(Some(src.user.clone()))
                     .pass(Some(src.password.clone()))
+                    .ssl_opts(src.tls.as_ref().map(|t| {
+                        // The source's TLS for the position queries too.
+                        let ssl = mysql_async::SslOpts::default()
+                            .with_danger_accept_invalid_certs(t.skip_verify)
+                            .with_danger_skip_domain_validation(t.skip_verify);
+                        match &t.ca_file {
+                            Some(ca) => ssl.with_root_certs(vec![ca.clone().into()]),
+                            None => ssl,
+                        }
+                    }))
                     .pool_opts(
                         PoolOpts::new()
                             .with_constraints(PoolConstraints::new(0, 2).unwrap_or_default())

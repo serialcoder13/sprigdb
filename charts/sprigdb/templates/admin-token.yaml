@@ -1,0 +1,15 @@
+{{- /* The Admin API's bearer token. The controller listens on 0.0.0.0:7480,
+     and refuses a non-loopback admin_addr without admin_token_file (found
+     on kind); the operator and the settings Job present it. Generated once,
+     kept across upgrades. */}}
+{{- $old := lookup "v1" "Secret" .Release.Namespace "sprigdb-admin-token" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sprigdb-admin-token
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  token: {{ if $old }}{{ index $old.data "token" }}{{ else }}{{ randAlphaNum 48 | b64enc }}{{ end }}

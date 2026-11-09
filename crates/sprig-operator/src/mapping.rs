@@ -7,7 +7,7 @@
 //! |---|---|
 //! | `topology: galera` | `galera.enabled`, `sst: mariabackup`, `recovery.enabled` |
 //! | `topology: replication` | `replication.enabled`, `semiSyncEnabled`, `semiSyncWaitPoint: AfterSync`, `semiSyncBootAsReplica`, `gtidStrictMode`, `syncBinlog: 1` |
-//! | `failoverDriver` | `replication.primary.autoFailover` |
+//! | `failoverDriver` | `replication.primary.autoFailover` (`true` only for `operator`; `sprig`, the default, has SprigDB choose the replica: [`crate::failover`]) |
 //! | `topology: single`, `nodes` | `replicas` |
 //! | baseline settings | `myCnf`, at creation only |
 //! | `storage` | `storage.size`, `storageClassName` |
@@ -15,13 +15,13 @@
 //! | fence agent | `sidecarContainers` |
 //! | spread | `topologySpreadConstraints`, `podDisruptionBudget` |
 //! | `backup` | `PhysicalBackup`, `PointInTimeRecovery` |
-//! | new and broken replicas | `replica.bootstrapFrom.physicalBackupTemplateRef`, `replica.recovery.enabled` |
+//! | new and broken replicas (with a backup) | `replica.bootstrapFrom.physicalBackupTemplateRef`, `replica.recovery.enabled` |
 //!
 //! [`update_patch`] is the merge patch for an existing `MariaDB`: the
 //! desired object without `spec.myCnf` (a change would roll every pod; live
-//! settings use `SET GLOBAL`) and without `replication.primary.podIndex`
-//! (mariadb-operator moves the primary; SprigDB never touches it after
-//! creation).
+//! settings use `SET GLOBAL`), without the immutable `gtidDomainId`, and
+//! without `replication.primary.podIndex` (only a failover moves it: the
+//! failover watch, or mariadb-operator with `failoverDriver: operator`).
 
 use serde_json::{Value, json};
 
@@ -199,11 +199,15 @@ pub fn mariadb(sc: &SprigCluster, cfg: &OperatorConfig) -> Value {
                     "podIndex": 0,
                     "autoFailover": spec.failover_driver == FailoverDriver::Operator,
                 },
-                "replica": {"recovery": {"enabled": true}},
             });
+            // mariadb-operator's webhook refuses `replica.recovery` without
+            // `bootstrapFrom` (found on kind, mariadb-operator 26.10.2), so
+            // both come with a backup.
             if spec.backup.is_some() {
-                r["replica"]["bootstrapFrom"] =
-                    json!({"physicalBackupTemplateRef": {"name": backup_name(name)}});
+                r["replica"] = json!({
+                    "bootstrapFrom": {"physicalBackupTemplateRef": {"name": backup_name(name)}},
+                    "recovery": {"enabled": true},
+                });
             }
             s["replication"] = r;
         }

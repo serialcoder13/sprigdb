@@ -290,6 +290,13 @@ pub trait SessionExec: Send {
     /// executor that sees statements fingerprints and records them through
     /// it (chapter 12). Executors that don't ignore it.
     fn attach_capture(&mut self, _capture: crate::workload::SessionCapture) {}
+
+    /// The `wait_timeout` the client set for its session, if it set one:
+    /// the front end closes the session after that long without a command,
+    /// as MySQL and MariaDB do. `None`: no limit from the client.
+    fn idle_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// The client side of a response, as an executor sees it.
@@ -536,6 +543,10 @@ impl SessionExec for HookedSession {
 
     fn attach_capture(&mut self, capture: crate::workload::SessionCapture) {
         self.inner.attach_capture(capture);
+    }
+
+    fn idle_timeout(&self) -> Option<std::time::Duration> {
+        self.inner.idle_timeout()
     }
 }
 

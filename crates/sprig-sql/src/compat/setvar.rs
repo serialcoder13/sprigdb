@@ -6,6 +6,7 @@
 //! |---|---|
 //! | `SET [SESSION] sql_mode = 'v'` (a string, a number or `DEFAULT`) | the backend value of `v` ([`super::sqlmode`]); 1231 when MySQL 8.4 refuses `v` |
 //! | `SET [SESSION] max_execution_time = n` | `max_statement_time = n / 1000` |
+//! | `SET [SESSION] cte_max_recursion_depth = n` | `max_recursive_iterations = n` |
 //! | `SELECT /*+ MAX_EXECUTION_TIME(n) */ ...` | `SET STATEMENT max_statement_time = n / 1000 FOR SELECT ...` |
 //! | `/*+ SET_VAR(v = x) */` after the statement's first word | `SET STATEMENT v = x FOR ...` |
 //!
@@ -96,7 +97,7 @@ fn target_name(t: &[Token], sql: &[u8], i: &mut usize) -> Option<String> {
 #[allow(clippy::too_many_lines)] // one pass over the assignments
 pub fn rewrite_set(sql: &[u8], opts: &LexOptions) -> Option<SetRewrite> {
     let has = |n: &[u8]| sql.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
-    if !has(b"sql_mode") && !has(b"max_execution_time") {
+    if !has(b"sql_mode") && !has(b"max_execution_time") && !has(b"cte_max_recursion_depth") {
         return None;
     }
     let tokens = lex::lex(sql, opts).ok()?;
@@ -186,6 +187,23 @@ pub fn rewrite_set(sql: &[u8], opts: &LexOptions) -> Option<SetRewrite> {
                     let name_end = t[i - 1].end as usize;
                     edits.push((start..name_end, "SESSION max_statement_time".to_owned()));
                     edits.push((v.start as usize..v.end as usize, value));
+                }
+                // MySQL's name for MariaDB's `max_recursive_iterations`
+                // (both default to 1000): mysql2's suite sets it before a
+                // deep recursive CTE.
+                Some("cte_max_recursion_depth")
+                    if v.kind == TokenKind::Number
+                        || (v.kind == TokenKind::Word
+                            && vtext.eq_ignore_ascii_case(b"DEFAULT")) =>
+                {
+                    let name_end = t[i - 1].end as usize;
+                    edits.push((
+                        start..name_end,
+                        "SESSION max_recursive_iterations".to_owned(),
+                    ));
+                    if v.kind == TokenKind::Word {
+                        edits.push((v.start as usize..v.end as usize, "1000".to_owned()));
+                    }
                 }
                 _ => {}
             }
@@ -378,6 +396,20 @@ mod tests {
             set("SET sql_mode = NULL"),
             Some(SetRewrite::Refused(_))
         ));
+    }
+
+    #[test]
+    fn cte_max_recursion_depth_is_mariadbs_max_recursive_iterations() {
+        assert_eq!(
+            text(set("SET SESSION cte_max_recursion_depth = 100000")),
+            "SET SESSION max_recursive_iterations = 100000"
+        );
+        assert_eq!(
+            text(set(
+                "SET cte_max_recursion_depth = DEFAULT; WITH RECURSIVE c AS (SELECT 1) SELECT * FROM c"
+            )),
+            "SET SESSION max_recursive_iterations = 1000; WITH RECURSIVE c AS (SELECT 1) SELECT * FROM c"
+        );
     }
 
     #[test]

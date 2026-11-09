@@ -299,6 +299,13 @@ impl PassSession {
         if self.router.in_txn() {
             s |= StatusFlags::IN_TRANS;
         }
+        // As the servers do in every OK and EOF: clients pick their string
+        // escaping by this bit (go-sql-driver's interpolateParams, the
+        // `mysql` and `mariadb` clients' parsers), so an answer the gateway
+        // makes itself (DDL, account statements) must carry it too.
+        if self.lex_opts().0.no_backslash_escapes {
+            s |= StatusFlags::NO_BACKSLASH_ESCAPES;
+        }
         s
     }
 
@@ -911,6 +918,14 @@ impl PassSession {
 
 #[async_trait]
 impl SessionExec for PassSession {
+    fn idle_timeout(&self) -> Option<Duration> {
+        // The client's own value (a gateway-owned variable, chapter 06):
+        // backend connections keep the gateway's.
+        let v = self.bs.as_ref()?.vars().gateway_vars.get("wait_timeout")?;
+        let secs: u64 = v.trim().parse().ok()?;
+        (secs > 0).then(|| Duration::from_secs(secs))
+    }
+
     async fn execute(
         &mut self,
         cx: &mut ExecCtx<'_>,

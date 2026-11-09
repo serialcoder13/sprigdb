@@ -39,8 +39,11 @@ spec:
             # Every cluster's system-account credentials, written by the
             # operator; updated in place, re-read at each connection.
             - {name: creds, mountPath: /etc/sprigdb/creds, readOnly: true}
+            - {name: admin-token, mountPath: /etc/sprigdb/admin, readOnly: true}
       volumes:
         {{- include "sprigdb.tlsVolumes" (dict "root" . "role" "controller" "secret" "sprigdb-controller-tls") | nindent 8 }}
+        - name: admin-token
+          secret: {secretName: sprigdb-admin-token}
         - name: creds
           secret: {secretName: sprigdb-cluster-credentials, optional: true}
 ---

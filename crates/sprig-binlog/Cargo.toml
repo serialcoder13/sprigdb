@@ -12,10 +12,15 @@ publish.workspace = true
 crc32fast.workspace = true
 flate2.workspace = true
 metrics.workspace = true
+# TLS to the source (chapter 10): rustls with ring, as the backend client
+# (sprig-proto-mysql), with Mozilla's roots when no CA is given.
+rustls.workspace = true
 sha1.workspace = true
 sprig-common.workspace = true
 tokio = { workspace = true, features = ["io-util", "fs"] }
+tokio-rustls.workspace = true
 tracing.workspace = true
+webpki-roots = "1.0"
 
 [dev-dependencies]
 mysql_async.workspace = true

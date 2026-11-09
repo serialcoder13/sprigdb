@@ -7,7 +7,7 @@
 //!
 //! - `SPRIG_KIND_API`: the API server, `https://127.0.0.1:<port>`;
 //! - `SPRIG_KIND_CA`: its CA bundle (PEM file);
-//! - `SPRIG_KIND_TOKEN`: a file with the operator ServiceAccount's token
+//! - `SPRIG_KIND_TOKEN`: a file with the operator `ServiceAccount`'s token
 //!   (`kubectl create token sprigdb-operator`), so the calls run under the
 //!   chart's Role;
 //! - `SPRIG_KIND_NS`: the namespace (default `sprigdb`);
@@ -18,7 +18,12 @@
 //! The operator itself runs in the cluster; this test only drives the
 //! provisioner's two operations and prints what they did.
 
-#![allow(clippy::unwrap_used, clippy::print_stdout)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::print_stdout,
+    clippy::too_many_lines,
+    clippy::cast_precision_loss
+)]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -91,7 +96,12 @@ async fn kind_create_and_retire() {
                         c["metadata"]["annotations"]["sprigdb.io/job-id"].as_str()
                             == Some(job.to_string().as_str())
                     })
-                    .map(|c| c["metadata"]["name"].as_str().unwrap_or_default().to_owned());
+                    .map(|c| {
+                        c["metadata"]["name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned()
+                    });
                 println!("create pool={pool} job={job} cluster={name:?}");
                 assert!(name.is_some(), "no SprigCluster carries job {job}");
             }
@@ -108,4 +118,118 @@ async fn kind_create_and_retire() {
         let job = prov.retire(&ClusterId::new(id).unwrap()).await.unwrap();
         println!("retire cluster={id} job={job}");
     }
+}
+
+/// Acknowledged writes through a gateway while the primary fails over:
+/// `SPRIG_KIND_WORKLOAD=<host>:<port>,<user>,<password>,<seconds>,<out file>`.
+/// One connection (re-made after an error, 100 ms later) inserts rows
+/// `id = 1, 2, ...` into `app.acks` in autocommit; every insert the
+/// gateway acknowledged goes to the out file, one id per line, and errors
+/// are printed with their time. `SPRIG_KIND_VERIFY=<same>` instead reads
+/// the table back and fails if an acknowledged id is missing.
+#[tokio::test]
+async fn kind_ack_workload() {
+    use mysql_async::prelude::Queryable;
+    use std::io::Write as _;
+    use std::time::{Duration, Instant};
+    let (mode, raw) = match (env("SPRIG_KIND_WORKLOAD"), env("SPRIG_KIND_VERIFY")) {
+        (Some(w), _) => ("write", w),
+        (None, Some(v)) => ("verify", v),
+        (None, None) => {
+            println!("SPRIG_KIND_WORKLOAD not set: skipped");
+            return;
+        }
+    };
+    let f: Vec<&str> = raw.split(',').collect();
+    let (host, port) = f[0].rsplit_once(':').unwrap();
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host.to_owned())
+        .tcp_port(port.parse().unwrap())
+        .user(Some(f[1].to_owned()))
+        .pass(Some(f[2].to_owned()))
+        .prefer_socket(false);
+    let secs: u64 = f[3].parse().unwrap();
+    let out = PathBuf::from(f[4]);
+    if mode == "verify" {
+        let mut c = mysql_async::Conn::new(opts).await.unwrap();
+        let have: Vec<i64> = c.query("SELECT id FROM app.acks").await.unwrap();
+        let have: std::collections::HashSet<i64> = have.into_iter().collect();
+        let acked: Vec<i64> = std::fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.parse().ok())
+            .collect();
+        let lost: Vec<&i64> = acked.iter().filter(|i| !have.contains(i)).collect();
+        println!(
+            "verify: acked={} in_table={} lost={} first_lost={:?}",
+            acked.len(),
+            have.len(),
+            lost.len(),
+            lost.iter().take(10).collect::<Vec<_>>()
+        );
+        c.disconnect().await.unwrap();
+        assert!(lost.is_empty(), "acknowledged writes lost: {lost:?}");
+        return;
+    }
+    let mut file = std::fs::File::create(&out).unwrap();
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(secs);
+    let mut conn: Option<mysql_async::Conn> = None;
+    let (mut id, mut acked, mut errors) = (0i64, 0u64, 0u64);
+    let mut last_ok: Option<Duration> = None;
+    let mut longest_gap = Duration::ZERO;
+    while Instant::now() < deadline {
+        if conn.is_none() {
+            match mysql_async::Conn::new(opts.clone()).await {
+                Ok(c) => conn = Some(c),
+                Err(e) => {
+                    errors += 1;
+                    println!("{:>8.3}s connect: {e}", start.elapsed().as_secs_f64());
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+        }
+        id += 1;
+        let c = conn.as_mut().unwrap();
+        let r = tokio::time::timeout(
+            Duration::from_secs(10),
+            c.exec_drop("INSERT INTO app.acks (id, v) VALUES (?, 'w')", (id,)),
+        )
+        .await;
+        match r {
+            Ok(Ok(())) => {
+                writeln!(file, "{id}").unwrap();
+                acked += 1;
+                let now = start.elapsed();
+                if let Some(l) = last_ok {
+                    longest_gap = longest_gap.max(now.saturating_sub(l));
+                }
+                last_ok = Some(now);
+            }
+            Ok(Err(e)) => {
+                errors += 1;
+                println!("{:>8.3}s insert {id}: {e}", start.elapsed().as_secs_f64());
+                conn = None;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(_) => {
+                errors += 1;
+                println!(
+                    "{:>8.3}s insert {id}: timed out",
+                    start.elapsed().as_secs_f64()
+                );
+                conn = None;
+            }
+        }
+    }
+    file.flush().unwrap();
+    if let Some(c) = conn {
+        let _ = c.disconnect().await;
+    }
+    println!(
+        "workload: attempted={id} acked={acked} errors={errors} longest_gap_ms={} rate={:.0}/s",
+        longest_gap.as_millis(),
+        acked as f64 / secs as f64
+    );
 }

@@ -750,13 +750,13 @@ const TABLES: [&str; 11] = [
     "events",
     "inv_notes",
 ];
-/// Chapter 19's ID blocks: keyed by its AUTO_INCREMENT column.
+/// Chapter 19's ID blocks: keyed by its `AUTO_INCREMENT` column.
 const TICKETS_DDL: &str = "CREATE TABLE tickets (tid BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
      title VARCHAR(20) COLLATE utf8mb4_bin, qty INT) DEFAULT CHARSET utf8mb4";
-/// Keyed by `cid`; its AUTO_INCREMENT column only names rows.
+/// Keyed by `cid`; its `AUTO_INCREMENT` column only names rows.
 const EVENTS_DDL: &str = "CREATE TABLE events (eid INT NOT NULL AUTO_INCREMENT, cid INT NOT NULL, \
      note VARCHAR(20) COLLATE utf8mb4_bin, PRIMARY KEY (cid, eid), KEY (eid)) DEFAULT CHARSET utf8mb4";
-/// A parent member of `invoices` with its own AUTO_INCREMENT column.
+/// A parent member of `invoices` with its own `AUTO_INCREMENT` column.
 const NOTES_DDL: &str = "CREATE TABLE inv_notes (nid INT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
      iid INT NOT NULL, body VARCHAR(20) COLLATE utf8mb4_bin, KEY (iid), \
      CONSTRAINT fk_in_inv FOREIGN KEY (iid) REFERENCES invoices (iid) ON DELETE CASCADE) \
@@ -2440,6 +2440,7 @@ async fn split(
         while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
             let k = keys[n % keys.len().max(1)];
             n += 1;
+            let t0 = Instant::now();
             match run(
                 &mut c,
                 &format!("SELECT cid, name FROM customers WHERE cid = {k}"),
@@ -2450,7 +2451,10 @@ async fn split(
                 // rows; only an error is wrong here (the corpus checks
                 // the rows afterwards).
                 Outcome::Rows(..) => {}
-                other => errors.push(format!("cid {k}: {other:?}")),
+                other => errors.push(format!(
+                    "cid {k}: {other:?} after {} ms",
+                    t0.elapsed().as_millis()
+                )),
             }
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
@@ -2491,6 +2495,7 @@ async fn split(
             let _ = sc.query_drop(format!("KILL {t}")).await;
         }
     }
+    let fenced_at = Instant::now();
     for (t, _) in g.tables {
         sc.query_drop(format!(
             "RENAME TABLE `{src_schema}`.`{t}` TO `{src_schema}`.`__fenced_{t}`"
@@ -2580,6 +2585,7 @@ async fn split(
     next.version += 1;
     next.next_shard_id = n2 + 1;
     cas(e, &w.store, rev, &next).await;
+    let fence_ms = fenced_at.elapsed().as_millis();
     tokio::time::sleep(Duration::from_millis(700)).await;
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let (n, errors) = reader.await.unwrap();
@@ -2596,7 +2602,7 @@ async fn split(
         _ => None,
     };
     println!(
-        "split: {} keys moved to {}, {n} point reads during the cutover, {} errors",
+        "split: {} keys moved to {}, {n} point reads during the cutover, {} errors, fenced {fence_ms} ms before the map moved",
         moving.len(),
         e.cluster(target).0,
         errors.len()
@@ -2672,19 +2678,33 @@ async fn kill_branch(e: &Env, sut: &mut Conn, tally: &mut Tally, shards: &[Sh]) 
         .await
         .unwrap();
     // The branch on the second cluster: the tenant's backend account's
-    // connection with an open transaction.
-    let mut c2 = root(e, 1, None).await;
-    let threads: Vec<u64> = c2
-        .query(format!(
-            "SELECT t.trx_mysql_thread_id FROM information_schema.INNODB_TRX t \
-             JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id \
-             WHERE p.USER LIKE 't{}\\_u%'",
-            e.tenant
-        ))
-        .await
-        .unwrap();
-    for t in &threads {
-        let _ = c2.query_drop(format!("KILL {t}")).await;
+    // connection with an open transaction. A Galera cluster's branch may
+    // sit on any node: `SPRIG_TEST_R1_KILL_NODES` lists the other nodes'
+    // root endpoints to search too.
+    let mut nodes = vec![e.cluster(1).1.clone()];
+    nodes.extend(
+        env("SPRIG_TEST_R1_KILL_NODES")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.trim().to_owned()),
+    );
+    let mut threads: Vec<u64> = Vec::new();
+    for node in &nodes {
+        let mut c2 = connect(node, "root", &e.root_password, None).await;
+        let found: Vec<u64> = c2
+            .query(format!(
+                "SELECT t.trx_mysql_thread_id FROM information_schema.INNODB_TRX t \
+                 JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id \
+                 WHERE p.USER LIKE 't{}\\_u%'",
+                e.tenant
+            ))
+            .await
+            .unwrap();
+        for t in &found {
+            let _ = c2.query_drop(format!("KILL {t}")).await;
+        }
+        threads.extend(found);
     }
     let commit = run(sut, "COMMIT").await;
     let after = run(
@@ -2697,8 +2717,503 @@ async fn kill_branch(e: &Env, sut: &mut Conn, tally: &mut Tally, shards: &[Sh]) 
         threads.len(),
         e.cluster(1).0
     );
+    if threads.is_empty() {
+        // Nothing was killed (the branch is on a node the suite didn't
+        // search): the transaction commits, which the summary line shows.
+        return false;
+    }
     tally.check("rows after a killed branch", Cmp::Ordered, &after, &before);
-    !threads.is_empty() && matches!(commit, Outcome::Err(..))
+    matches!(commit, Outcome::Err(..))
+}
+
+/// An INSERT's OK packet (affected rows, insert id), or its error; with
+/// `params`, through the binary protocol.
+async fn ok_of(c: &mut Conn, sql: &str, params: Option<Vec<Value>>) -> Result<(u64, u64), u16> {
+    fn server(sql: &str, e: mysql_async::Error) -> u16 {
+        match e {
+            mysql_async::Error::Server(e) => e.code,
+            e => panic!("{sql}: {e}"),
+        }
+    }
+    match params {
+        None => match c.query_iter(sql).await {
+            Err(e) => Err(server(sql, e)),
+            Ok(res) => {
+                let out = (res.affected_rows(), res.last_insert_id().unwrap_or(0));
+                res.drop_result().await.map_err(|e| server(sql, e))?;
+                Ok(out)
+            }
+        },
+        Some(p) => match c.exec_iter(sql, Params::Positional(p)).await {
+            Err(e) => Err(server(sql, e)),
+            Ok(res) => {
+                let out = (res.affected_rows(), res.last_insert_id().unwrap_or(0));
+                res.drop_result().await.map_err(|e| server(sql, e))?;
+                Ok(out)
+            }
+        },
+    }
+}
+
+/// `LAST_INSERT_ID()`, `@@identity` and `@@last_insert_id`.
+async fn last_ids(c: &mut Conn) -> (u64, u64, u64) {
+    c.query_first("SELECT LAST_INSERT_ID(), @@identity, @@last_insert_id")
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// One ID-block statement of [`auto_ids`]: its text (`{p}` is the tag
+/// prefix of its rows), the table, and the tag and id columns.
+struct IdStmt {
+    sql: String,
+    params: Option<Vec<Value>>,
+    table: &'static str,
+    tag: &'static str,
+    id: &'static str,
+    /// The series' step (`auto_increment_increment`).
+    step: u64,
+}
+
+/// Chapter 19's ID blocks on sharded tables: `tickets` (keyed by its
+/// `AUTO_INCREMENT` column), `events` (keyed by `cid`, the `AUTO_INCREMENT`
+/// column beside it) and `inv_notes` (a parent member). The values differ
+/// from the reference's, so the checks are the ones chapter 46 allows:
+/// the same affected rows and the same rows apart from the ids; on both
+/// sides each statement's generated rows hold `LAST_INSERT_ID()`,
+/// `+ step`, … in order, and the OK packet's insert id is that first
+/// value; an explicit-only statement leaves `LAST_INSERT_ID()` alone; the
+/// gateway's values increase; and no value appears twice across shards.
+async fn auto_ids(
+    e: &Env,
+    w: &World,
+    sut: &mut Conn,
+    reference: &mut Conn,
+    tally: &mut Tally,
+    round: u32,
+) {
+    let big = 100_000 * u64::from(round) + 777;
+    let tk = |sql: &str| IdStmt {
+        sql: sql.to_owned(),
+        params: None,
+        table: "tickets",
+        tag: "title",
+        id: "tid",
+        step: 1,
+    };
+    let ev = |sql: &str| IdStmt {
+        sql: sql.to_owned(),
+        params: None,
+        table: "events",
+        tag: "note",
+        id: "eid",
+        step: 1,
+    };
+    let nt = |sql: &str| IdStmt {
+        sql: sql.to_owned(),
+        params: None,
+        table: "inv_notes",
+        tag: "body",
+        id: "nid",
+        step: 1,
+    };
+    let many = |n: usize, f: &dyn Fn(usize) -> String| -> String {
+        (0..n).map(f).collect::<Vec<_>>().join(", ")
+    };
+    let mut stmts = vec![
+        tk("INSERT INTO tickets (title, qty) VALUES ('{p}g00', 1)"),
+        tk(&format!(
+            "INSERT INTO tickets (title, qty) VALUES {}",
+            many(8, &|j| format!("('{{p}}g{j:02}', {j})"))
+        )),
+        tk(
+            "INSERT INTO tickets (tid, title, qty) VALUES (NULL, '{p}g00', 1), (0, '{p}g01', 2), \
+            (DEFAULT, '{p}g02', 3), ('0', '{p}g03', 4)",
+        ),
+        tk("INSERT INTO tickets SET title = '{p}g00', qty = 4"),
+        tk("INSERT INTO tickets VALUES (NULL, '{p}g00', 5)"),
+        // Explicit values: LAST_INSERT_ID() stays; later values are above.
+        tk(&format!(
+            "INSERT INTO tickets (tid, title, qty) VALUES ({big}, '{{p}}x00', 6)"
+        )),
+        tk("INSERT INTO tickets (title, qty) VALUES ('{p}g00', 7)"),
+        tk(&format!(
+            "INSERT INTO tickets (tid, title, qty) VALUES (NULL, '{{p}}g00', 1), (-{round}, '{{p}}x01', 2), \
+             (NULL, '{{p}}g01', 3)"
+        )),
+        tk("INSERT IGNORE INTO tickets (title, qty) VALUES ('{p}g00', 8), ('{p}g01', 9)"),
+        tk("REPLACE INTO tickets (title, qty) VALUES ('{p}g00', 10)"),
+        tk(
+            "INSERT INTO tickets (title, qty) VALUES ('{p}g00', 11), ('{p}g01', 12) \
+            ON DUPLICATE KEY UPDATE qty = qty + 100",
+        ),
+        ev(&format!(
+            "INSERT INTO events (cid, note) VALUES {}",
+            many(10, &|j| format!("({}, '{{p}}g{j:02}')", j + 1))
+        )),
+        ev("INSERT INTO events SET cid = 33, note = '{p}g00'"),
+        ev("INSERT INTO events VALUES (NULL, 34, '{p}g00'), (0, 35, '{p}g01')"),
+        nt(
+            "INSERT INTO inv_notes (iid, body) VALUES (20, '{p}g00'), (21, '{p}g01'), (22, '{p}g02'), \
+            (23, '{p}g03'), (24, '{p}g04')",
+        ),
+        nt("INSERT INTO inv_notes SET iid = 25, body = '{p}g00'"),
+    ];
+    // auto_increment_increment and _offset: the series 3, 8, 13, …
+    let stepped = stmts.len();
+    stmts.push(IdStmt {
+        step: 5,
+        ..tk("INSERT INTO tickets (title, qty) VALUES ('{p}g00', 1), ('{p}g01', 2), ('{p}g02', 3)")
+    });
+    stmts.push(IdStmt {
+        step: 5,
+        ..ev("INSERT INTO events (cid, note) VALUES (1, '{p}g00'), (2, '{p}g01'), (3, '{p}g02')")
+    });
+    // Prepared inserts (binary protocol).
+    let prepared = stmts.len();
+    stmts.push(IdStmt {
+        params: Some(vec![Value::from("{p}g00"), Value::from(3)]),
+        ..tk("INSERT INTO tickets (title, qty) VALUES (?, ?)")
+    });
+    stmts.push(IdStmt {
+        params: Some(vec![
+            Value::from(5),
+            Value::from("{p}g00"),
+            Value::from(6),
+            Value::from("{p}g01"),
+        ]),
+        ..ev("INSERT INTO events (cid, note) VALUES (?, ?), (?, ?)")
+    });
+    stmts.push(IdStmt {
+        params: Some(vec![Value::from(30), Value::from("{p}g00")]),
+        ..nt("INSERT INTO inv_notes (iid, body) VALUES (?, ?)")
+    });
+    // Inside a transaction spanning shards.
+    let in_txn = stmts.len();
+    stmts.push(ev(
+        "INSERT INTO events (cid, note) VALUES (7, '{p}g00'), (8, '{p}g01'), (9, '{p}g02')",
+    ));
+    // Per sequence (table): this gateway's values increase.
+    let mut last_sut: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    let mut generated = 0usize;
+    for (i, st) in stmts.iter().enumerate() {
+        let p = format!("r{round}s{i}");
+        let sql = st.sql.replace("{p}", &p);
+        let params = st.params.as_ref().map(|v| {
+            v.iter()
+                .map(|x| match x {
+                    Value::Bytes(b) => Value::from(String::from_utf8_lossy(b).replace("{p}", &p)),
+                    other => other.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut seen: Vec<Result<(u64, u64), u16>> = Vec::new();
+        for (side, c) in [("sut", &mut *sut), ("reference", &mut *reference)] {
+            if i == stepped {
+                c.query_drop("SET SESSION auto_increment_increment = 5, auto_increment_offset = 3")
+                    .await
+                    .unwrap();
+            }
+            if i == in_txn {
+                c.query_drop("BEGIN").await.unwrap();
+            }
+            let before = last_ids(c).await.0;
+            let r = ok_of(c, &sql, params.clone()).await;
+            let (lid, identity, lid_var) = last_ids(c).await;
+            if i == in_txn {
+                c.query_drop("COMMIT").await.unwrap();
+            }
+            if i == stepped + 1 {
+                c.query_drop("SET SESSION auto_increment_increment = 1, auto_increment_offset = 1")
+                    .await
+                    .unwrap();
+            }
+            seen.push(r);
+            let Ok((affected, ok_id)) = r else { continue };
+            if identity != lid || lid_var != lid {
+                tally.mismatches.push(format!(
+                    "ID BLOCKS {side} {sql}: LAST_INSERT_ID() {lid}, @@identity {identity}, \
+                     @@last_insert_id {lid_var}"
+                ));
+            }
+            // The statement's rows, by tag: generated (g) and explicit (x).
+            let rows: Vec<(String, i64)> = c
+                .query(format!(
+                    "SELECT {tag}, {id} FROM {t} WHERE {tag} LIKE '{p}%' ORDER BY {tag}",
+                    tag = st.tag,
+                    id = st.id,
+                    t = st.table
+                ))
+                .await
+                .unwrap();
+            let gen_ids: Vec<i64> = rows
+                .iter()
+                .filter(|(t, _)| t[p.len()..].starts_with('g'))
+                .map(|(_, v)| *v)
+                .collect();
+            let mut bad = Vec::new();
+            if gen_ids.is_empty() {
+                if lid != before {
+                    bad.push(format!(
+                        "an explicit-only insert moved LAST_INSERT_ID() {before} → {lid}"
+                    ));
+                }
+            } else if affected > 0 {
+                if ok_id != lid {
+                    bad.push(format!("OK insert id {ok_id}, LAST_INSERT_ID() {lid}"));
+                }
+                for (j, v) in gen_ids.iter().enumerate() {
+                    let want = lid as i64 + j as i64 * st.step as i64;
+                    if *v != want {
+                        bad.push(format!("generated row {j} has {v}, not {want}"));
+                    }
+                }
+                if st.step == 5 && gen_ids.iter().any(|v| (v - 3) % 5 != 0) {
+                    bad.push(format!("values {gen_ids:?} outside the series 3 + 5k"));
+                }
+                if i == 6 && (lid as i64) <= big as i64 {
+                    bad.push(format!("{lid} is not above the explicit {big}"));
+                }
+                if side == "sut" {
+                    generated += gen_ids.len();
+                    let prev = last_sut.entry(st.table).or_default();
+                    if lid <= *prev {
+                        bad.push(format!("{lid} is not above this gateway's previous {prev}"));
+                    }
+                    *prev = lid;
+                }
+            }
+            if !bad.is_empty() {
+                tally
+                    .mismatches
+                    .push(format!("ID BLOCKS {side} {sql}: {}", bad.join("; ")));
+            }
+        }
+        tally.check(
+            &sql,
+            Cmp::Bag,
+            &seen[0].map_or_else(|c| Outcome::Err(c, String::new()), |(a, _)| Outcome::Ok(a)),
+            &seen[1].map_or_else(|c| Outcome::Err(c, String::new()), |(a, _)| Outcome::Ok(a)),
+        );
+        if i == prepared {
+            // (the prepared ones ran through the binary protocol)
+        }
+    }
+    // NO_AUTO_VALUE_ON_ZERO: 0 is a value.
+    for c in [&mut *sut, &mut *reference] {
+        let mode: String = c
+            .query_first("SELECT @@SESSION.sql_mode")
+            .await
+            .unwrap()
+            .unwrap();
+        c.query_drop(format!(
+            "SET SESSION sql_mode = '{}'",
+            if mode.is_empty() {
+                "NO_AUTO_VALUE_ON_ZERO".to_owned()
+            } else {
+                format!("{mode},NO_AUTO_VALUE_ON_ZERO")
+            }
+        ))
+        .await
+        .unwrap();
+        let r = ok_of(
+            c,
+            &format!(
+                "INSERT INTO events (eid, cid, note) VALUES (0, {}, 'r{round}zero')",
+                40 + round
+            ),
+            None,
+        )
+        .await;
+        c.query_drop(format!("SET SESSION sql_mode = '{mode}'"))
+            .await
+            .unwrap();
+        let zero: Option<i64> = c
+            .query_first(format!(
+                "SELECT eid FROM events WHERE note = 'r{round}zero'"
+            ))
+            .await
+            .unwrap();
+        if r.is_err() || zero != Some(0) {
+            tally.mismatches.push(format!(
+                "ID BLOCKS NO_AUTO_VALUE_ON_ZERO: {r:?}, eid {zero:?}"
+            ));
+        }
+    }
+    tally.compared += 1;
+    // The same rows apart from the ids.
+    for (t, cols) in [
+        ("tickets", "title, qty"),
+        ("events", "cid, note"),
+        ("inv_notes", "iid, body"),
+    ] {
+        let sql = format!("SELECT {cols} FROM {t}");
+        let a = run(sut, &sql).await;
+        let b = run(reference, &sql).await;
+        tally.check(&sql, Cmp::Bag, &a, &b);
+    }
+    let dups = ids_unique(e, w).await;
+    tally.compared += 1;
+    for d in &dups {
+        tally.mismatches.push(format!("ID BLOCKS DUPLICATE {d}"));
+    }
+    println!(
+        "id blocks (round {round}): {} statements, {generated} generated values, {} duplicates across shards",
+        stmts.len() + 1,
+        dups.len()
+    );
+}
+
+/// Values of the ID-block columns that more than one row holds, read
+/// from every shard of group 901 directly (explicit values at or below 0
+/// are the client's own).
+async fn ids_unique(e: &Env, w: &World) -> Vec<String> {
+    let (m, _) = w.store.load(e.tenant, GroupId(901)).await.unwrap();
+    let mut out = Vec::new();
+    for (t, col) in [("tickets", "tid"), ("events", "eid"), ("inv_notes", "nid")] {
+        let mut seen: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+        for r in &m.ranges {
+            let schema = shard_schema(e.tenant, w.db_id, GroupId(901), r.shard);
+            let i = e
+                .clusters
+                .iter()
+                .position(|(c, _)| *c == r.cluster)
+                .unwrap();
+            let mut c = root(e, i, None).await;
+            let vals: Vec<i64> = c
+                .query(format!(
+                    "SELECT {col} FROM `{schema}`.`{t}` WHERE {col} > 0"
+                ))
+                .await
+                .unwrap();
+            for v in vals {
+                if let Some(other) = seen.insert(v, schema.clone()) {
+                    out.push(format!("{t}.{col} = {v} on {other} and {schema}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Concurrent inserts through two gateways (chapter 19: unique across
+/// gateways, increasing per gateway): `tasks` sessions per gateway each
+/// run `n` multi-row inserts into `events` (rows on every shard) and
+/// `tickets`; afterwards no id is held twice on any shard, each session's
+/// `LAST_INSERT_ID()` values increase, and every row is there. The rows
+/// are deleted again, so the reference comparison stays exact.
+async fn two_gateways(e: &Env, w: &World, second: &str, tally: &mut Tally) {
+    let tasks = 8usize;
+    let n = 40usize;
+    let started = Instant::now();
+    let mut handles = Vec::new();
+    for (g, addr) in [e.gateway.clone(), second.to_owned()]
+        .into_iter()
+        .enumerate()
+    {
+        for k in 0..tasks {
+            let (addr, user, pass, db) = (
+                addr.clone(),
+                e.user.clone(),
+                e.password.clone(),
+                e.db.clone(),
+            );
+            handles.push(tokio::spawn(async move {
+                let mut c = connect(&addr, &user, &pass, Some(&db)).await;
+                let mut errors = Vec::new();
+                // Per table: this session's values increase.
+                let mut last = [0u64; 2];
+                let mut rows = 0usize;
+                for i in 0..n {
+                    let width = 1 + (i % 4);
+                    let tag = format!("w{g}t{k}i{i}");
+                    let (sql, t) = if i % 3 == 2 {
+                        (
+                            format!(
+                                "INSERT INTO tickets (title, qty) VALUES {}",
+                                (0..width)
+                                    .map(|j| format!("('{tag}j{j}', {j})"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            "tickets",
+                        )
+                    } else {
+                        (
+                            format!(
+                                "INSERT INTO events (cid, note) VALUES {}",
+                                (0..width)
+                                    .map(|j| format!(
+                                        "({}, '{tag}j{j}')",
+                                        1 + (i * 7 + j * 13 + k) % 120
+                                    ))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            "events",
+                        )
+                    };
+                    match ok_of(&mut c, &sql, None).await {
+                        Ok((a, id)) => {
+                            rows += a as usize;
+                            let prev = &mut last[usize::from(t == "tickets")];
+                            if id <= *prev {
+                                errors.push(format!("{t}: {id} after {prev} in one session"));
+                            }
+                            *prev = id;
+                        }
+                        Err(code) => errors.push(format!("{sql}: error {code}")),
+                    }
+                }
+                (rows, errors)
+            }));
+        }
+    }
+    let mut rows = 0usize;
+    for h in handles {
+        let (r, errs) = h.await.unwrap();
+        rows += r;
+        for m in errs {
+            tally.mismatches.push(format!("TWO GATEWAYS {m}"));
+        }
+    }
+    let secs = started.elapsed().as_secs_f64();
+    let dups = ids_unique(e, w).await;
+    for d in &dups {
+        tally.mismatches.push(format!("TWO GATEWAYS DUPLICATE {d}"));
+    }
+    let mut c = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
+    let have: u64 = {
+        let a: u64 = c
+            .query_first("SELECT COUNT(*) FROM events WHERE note LIKE 'w%'")
+            .await
+            .unwrap()
+            .unwrap();
+        let b: u64 = c
+            .query_first("SELECT COUNT(*) FROM tickets WHERE title LIKE 'w%'")
+            .await
+            .unwrap()
+            .unwrap();
+        a + b
+    };
+    tally.compared += 1;
+    if have as usize != rows {
+        tally
+            .mismatches
+            .push(format!("TWO GATEWAYS: {rows} rows inserted, {have} found"));
+    }
+    println!(
+        "two gateways: {} sessions, {rows} rows in {} statements, {secs:.1} s, {} duplicate ids across shards",
+        2 * tasks,
+        2 * tasks * n,
+        dups.len()
+    );
+    c.query_drop("DELETE FROM events WHERE note LIKE 'w%'")
+        .await
+        .unwrap();
+    c.query_drop("DELETE FROM tickets WHERE title LIKE 'w%'")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2777,6 +3292,7 @@ async fn differential_against_one_unsharded_mariadb() {
         compare_full(&mut sut, &mut reference, &mut tally, "after a write", table).await;
     }
     lookups(&e, &w, &mut sut, &mut reference, &mut tally).await;
+    auto_ids(&e, &w, &mut sut, &mut reference, &mut tally, 1).await;
     let shards0 = layout().remove(0).shards;
     parent_txns(&e, &mut sut, &mut reference, &mut tally, &shards0, 500).await;
     transactions(&e, &mut sut, &mut reference, &mut tally, &shards0).await;
@@ -2857,6 +3373,11 @@ async fn differential_against_one_unsharded_mariadb() {
     transactions(&e, &mut sut, &mut reference, &mut tally, &shards1).await;
     autocommit_off(&e, &mut sut, &mut reference, &mut tally, &shards1).await;
     parent_txns(&e, &mut sut, &mut reference, &mut tally, &shards1, 600).await;
+    // ID blocks again on the split layout, then through two gateways.
+    auto_ids(&e, &w, &mut sut, &mut reference, &mut tally, 2).await;
+    if let Some(second) = env("SPRIG_TEST_R1_GATEWAY2") {
+        two_gateways(&e, &w, &second, &mut tally).await;
+    }
     compare_full(
         &mut sut,
         &mut reference,

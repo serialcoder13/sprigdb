@@ -178,6 +178,13 @@ impl Stmt {
                     p.param_type = u16::from(column_type::LONG_BLOB);
                 }
             }
+            // MySQL 8 clients bind JSON values as type 245 (mysql2 does for
+            // arrays and objects); MariaDB refuses that parameter type with
+            // 1210 ("Incorrect arguments to mysqld_stmt_execute"). The value
+            // is the JSON text, so it goes as a string.
+            if p.type_code() == column_type::JSON {
+                p.param_type = u16::from(column_type::VAR_STRING);
+            }
             p.name = Bytes::new();
             let _ = persona;
         }

@@ -1,0 +1,21 @@
+# PyMySQL (versions.txt) through run.sh: every outcome other than pass.
+# Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (summarize.py). Test ids are pytest's junit classname.name.
+
+# Through the gateway the test sends a 16 MiB SELECT: @@max_allowed_packet
+# reads 64 MiB (gateway.max_allowed_packet_bytes) while the development
+# clusters keep 16 MiB (gaps row 30). On a debug gateway, lexing it also held
+# a runtime worker long enough for the chapter 25 watchdog to abort the
+# process (9 November 2026). Plain servers answer 16 MiB and the test returns.
+gateway-* exclude *.test_largedata :: 16 MiB statement; backend limit 16 MiB (gaps row 30); watchdog abort on a debug gateway
+
+# Upstream CI's own skips: plugins and setups the suite needs but run.sh
+# doesn't install (ed25519, sha256 over a socket, dialog, PAM, unix socket).
+* skip *.TestAuthentication.testAuthEd25519 :: no ed25519 plugin installed (upstream CI installs it)
+* skip *.TestAuthentication.testAuthSHA256 :: needs sha256_password users or a unix socket
+* skip *.TestAuthentication.testDialogAuth* :: dialog plugin not installed
+* skip *.TestAuthentication.testPamAuth* :: PAMSERVICE not set
+* skip *.TestAuthentication.testSocketAuth* :: unix_socket plugin / socket connection
+* skip *.TestNewIssues.test_issue_35 :: upstream: requires manual intervention
+* skip *.TestOldIssues.test_issue_17 :: upstream: requires a legacy MySQL configuration
+* skip *.TestNextset.test_multi_cursor :: upstream: skipped unconditionally

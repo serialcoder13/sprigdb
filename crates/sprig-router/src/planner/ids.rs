@@ -231,5 +231,44 @@ impl IdFill {
     }
 }
 
+impl IdFill {
+    /// For an `INSERT IGNORE` into an unqualified table: the read of the
+    /// lowest of the generated values `first`, `first + step`, … (`count`)
+    /// that was inserted, and the statement's row count. MariaDB reports
+    /// the first generated value it really inserted; when the statement
+    /// skipped rows, the gateway reads it back.
+    #[must_use]
+    pub fn readback_sql(&self, first: i128, step: i128, count: u64) -> Option<(String, u64)> {
+        let Statement::Insert(ins) = &self.stmt else {
+            return None;
+        };
+        let one_name =
+            matches!(&ins.table, sqlparser::ast::TableObject::TableName(n) if n.0.len() == 1);
+        if !ins.ignore || !one_name || count == 0 {
+            return None;
+        }
+        let rows = match &ins.source {
+            Some(q) => match &*q.body {
+                SetExpr::Values(v) => v.rows.len() as u64,
+                _ => return None,
+            },
+            None => 1,
+        };
+        let q = |s: &str| format!("`{}`", s.replace('`', "``"));
+        let values: Vec<String> = (0..i128::from(count))
+            .map(|k| (first + k * step).to_string())
+            .collect();
+        Some((
+            format!(
+                "SELECT MIN({c}) FROM {t} WHERE {c} IN ({v})",
+                c = q(&self.column),
+                t = q(&self.table),
+                v = values.join(", ")
+            ),
+            rows,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests;

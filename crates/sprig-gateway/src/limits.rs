@@ -702,6 +702,10 @@ impl SessionExec for LimitedSession {
     fn attach_capture(&mut self, capture: crate::workload::SessionCapture) {
         self.inner.attach_capture(capture);
     }
+
+    fn idle_timeout(&self) -> Option<std::time::Duration> {
+        self.inner.idle_timeout()
+    }
 }
 
 #[cfg(test)]

@@ -74,7 +74,7 @@ impl ErrPacket {
         Ok(Self {
             code,
             sqlstate,
-            message: String::from_utf8_lossy(r.rest()).into_owned(),
+            message: message_from_wire(r.rest()),
         })
     }
 
@@ -89,7 +89,7 @@ impl ErrPacket {
         if caps.contains(Caps::PROTOCOL_41) {
             w.u8(b'#').bytes(&self.sqlstate);
         }
-        w.bytes(msg.as_bytes());
+        w.bytes(&message_to_wire(msg));
         w.into_bytes()
     }
 
@@ -147,6 +147,60 @@ impl ErrPacket {
             message,
         )
     }
+}
+
+/// The first of 256 private-use code points (plane 16) that stand for the
+/// bytes of an error message that aren't UTF-8. A server writes its messages
+/// in the session's `character_set_results`, which may be `koi8r` or
+/// `latin1`: the gateway keeps such bytes exactly, so a relayed message
+/// reaches the client as the server wrote it.
+const RAW_BYTE_BASE: u32 = 0x10_FF00;
+
+/// An error message's bytes as a `String`: UTF-8 as is, every other byte as
+/// its private-use stand-in ([`message_to_wire`] reverses it).
+#[must_use]
+pub fn message_from_wire(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut rest = bytes;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                return out;
+            }
+            Err(e) => {
+                let (good, bad) = rest.split_at(e.valid_up_to());
+                out.push_str(std::str::from_utf8(good).unwrap_or_default());
+                let n = e.error_len().unwrap_or(bad.len());
+                for &b in &bad[..n] {
+                    if let Some(c) = char::from_u32(RAW_BYTE_BASE + u32::from(b)) {
+                        out.push(c);
+                    }
+                }
+                rest = &bad[n..];
+            }
+        }
+    }
+}
+
+/// The bytes to send for an error message: the private-use stand-ins of
+/// [`message_from_wire`] become their bytes again.
+#[must_use]
+pub fn message_to_wire(s: &str) -> std::borrow::Cow<'_, [u8]> {
+    let raw = |c: char| (RAW_BYTE_BASE..=RAW_BYTE_BASE + 0xFF).contains(&u32::from(c));
+    if !s.chars().any(raw) {
+        return std::borrow::Cow::Borrowed(s.as_bytes());
+    }
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if raw(c) {
+            out.push(u8::try_from(u32::from(c) - RAW_BYTE_BASE).unwrap_or(b'?'));
+        } else {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// The longest prefix of `s` that fits in `max` bytes without splitting a
@@ -365,6 +419,24 @@ fn persona_std(persona: Persona, errno: u16, sqlstate: [u8; 5]) -> (u16, [u8; 5]
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn non_utf8_messages_keep_their_bytes() {
+        // KOI8-R "МояТаблица" inside a MariaDB 1064 message (mysql2 #433).
+        let mut payload = vec![0xFF, 0x28, 0x04, b'#'];
+        payload.extend_from_slice(b"42000near '`");
+        let koi8r = [0xED, 0xCF, 0xD1, 0xF4, 0xC1, 0xC2, 0xCC, 0xC9, 0xC3, 0xC1];
+        payload.extend_from_slice(&koi8r);
+        payload.extend_from_slice(b"' at line 1");
+        let e = super::ErrPacket::decode(&payload).unwrap();
+        assert!(e.message.starts_with("near '`"));
+        let again = e.encode(super::Caps::PROTOCOL_41);
+        assert_eq!(&again[..], &payload[..]);
+        // UTF-8 stays UTF-8.
+        let utf8 = "Таблица".as_bytes();
+        assert_eq!(super::message_from_wire(utf8), "Таблица");
+        assert_eq!(&*super::message_to_wire("Таблица"), utf8);
+    }
+
     use super::*;
 
     #[test]

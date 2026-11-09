@@ -25,5 +25,6 @@ data:
     [controller]
     global_candidate = {{ $.Values.controller.globalCandidate }}
     admin_addr = "0.0.0.0:7480"
+    admin_token_file = "/etc/sprigdb/admin/token"
     {{- end }}
 {{- end }}

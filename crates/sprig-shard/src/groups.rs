@@ -91,6 +91,12 @@ pub static SHARDING_MIGRATIONS: &[Migration] = &[
         name: "group_pins (chapter 16's SPRIG PIN)",
         statements: &[crate::pins::DDL_GROUP_PINS],
     },
+    Migration {
+        format: 4,
+        phase: Phase::Expand,
+        name: "sequence_blocks (chapter 19's leased ID blocks)",
+        statements: &[crate::ids::DDL_SEQUENCE_BLOCKS],
+    },
 ];
 
 /// The `sharding` module, for `sprig_catalog::Migrator::new`.

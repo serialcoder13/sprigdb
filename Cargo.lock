@@ -2252,10 +2252,13 @@ dependencies = [
  "flate2",
  "metrics",
  "mysql_async",
+ "rustls",
  "sha1",
  "sprig-common",
  "tokio",
+ "tokio-rustls",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]

@@ -39,6 +39,21 @@ pub const DDL_SEQUENCES: &str = "CREATE TABLE IF NOT EXISTS sequences (
   UNIQUE KEY uk_object (object_id, column_name)
 ) ENGINE=InnoDB";
 
+/// `sequence_blocks` (chapter 19), in `t<tenant>_sprig`: the blocks
+/// gateways hold and may still use, each under a lease. Rows whose lease
+/// ended are deleted at the next fetch of the sequence.
+pub const DDL_SEQUENCE_BLOCKS: &str = "CREATE TABLE IF NOT EXISTS sequence_blocks (
+  seq_id        BIGINT UNSIGNED NOT NULL,
+  start_value   DECIMAL(20,0) NOT NULL,
+  end_value     DECIMAL(20,0) NOT NULL,
+  holder        VARCHAR(64) NOT NULL,
+  lease_until   DATETIME(6) NOT NULL,
+  PRIMARY KEY (seq_id, start_value)
+) ENGINE=InnoDB";
+
+/// How long a block may hand out values by default (`ids.block_lease_seconds`).
+pub const BLOCK_LEASE: Duration = Duration::from_secs(60);
+
 /// A `sequences` row id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SeqId(pub u64);
@@ -136,6 +151,34 @@ pub trait SequenceSource: Send + Sync + 'static {
     async fn raise(&self, seq: SeqId, v: i128) -> Result<()>;
     /// The sequence's ordering.
     async fn ordering(&self, seq: SeqId) -> Result<Ordering>;
+    /// How long a fetched block may hand out values, from just before the
+    /// fetch was sent (`None`: forever). The source records each block it
+    /// hands out with this lease, so an explicit value can be checked
+    /// against the blocks other gateways may still use.
+    fn lease(&self) -> Option<Duration> {
+        None
+    }
+    /// An explicit value `v` is about to be written: raises `next_value`
+    /// past it when it is at or above it, else reports whether a block
+    /// another gateway may still use holds it.
+    async fn explicit(&self, seq: SeqId, v: i128) -> Result<Explicit> {
+        self.raise(seq, v).await?;
+        Ok(Explicit::Free)
+    }
+}
+
+/// What [`SequenceSource::explicit`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Explicit {
+    /// No gateway can generate the value any more (`next_value` is past
+    /// it, raised if needed).
+    Free,
+    /// A block another gateway holds, under a lease that hasn't ended,
+    /// contains the value: writing it could duplicate a generated one.
+    Reserved {
+        /// The first value after that block.
+        end: i128,
+    },
 }
 
 /// Block-size limits (`ids.block_size_min`, `ids.block_size_max`,
@@ -174,10 +217,34 @@ struct BlockState {
     /// Cached values below this are dropped (`ALTER TABLE ... AUTO_INCREMENT`,
     /// explicit values).
     floor: i128,
-    /// The catalog's `next_value` is known to be above this: the highest
-    /// value this gateway raised it past.
-    raised: i128,
+    /// The current block's first value.
+    cur_start: i128,
+    /// When the current block's lease ends here (no values after it).
+    cur_until: Option<Instant>,
+    /// When the spare's lease ends here.
+    spare_until: Option<Instant>,
     ordering: Option<Ordering>,
+}
+
+impl BlockState {
+    /// Installs `[start, end)` as the current block.
+    fn install(&mut self, r: (i128, i128), until: Option<Instant>) {
+        self.cur = Some(r);
+        self.cur_start = r.0;
+        self.cur_until = until;
+        self.cur_size = u128::try_from(r.1 - r.0).unwrap_or(0);
+        self.since = Some(Instant::now());
+    }
+
+    /// Whether `v` lies in a block this gateway holds and may still use.
+    fn holds(&self, v: i128) -> bool {
+        let live = |u: Option<Instant>| u.is_none_or(|u| Instant::now() < u);
+        self.cur
+            .is_some_and(|(_, end)| self.cur_start <= v && v < end && live(self.cur_until))
+            || self
+                .spare
+                .is_some_and(|(a, z)| a <= v && v < z && live(self.spare_until))
+    }
 }
 
 struct Inner<S> {
@@ -243,31 +310,40 @@ impl<S: SequenceSource> BlockAllocator<S> {
         b.floor = b.floor.max(n);
     }
 
-    /// An explicit value `v` was written (chapter 19, "Explicit values"):
-    /// this gateway's later values are above it, and the catalog's
-    /// `next_value` is raised past it unless a block this gateway holds
-    /// already ends above it (the catalog is then past it too). Raises go
-    /// to the catalog once per new maximum.
+    /// An explicit value `v` is about to be written (chapter 19,
+    /// "Explicit values"). This gateway's later values are above it. Unless
+    /// `v` lies in a block this gateway holds (then no other gateway can
+    /// generate it), the source checks it: at or above `next_value` it is
+    /// raised past it; inside a block another gateway may still use, the
+    /// value is refused (39463), because that gateway could generate it.
     ///
     /// # Errors
-    /// 39460 when the catalog can't be raised.
+    /// 39463 for a value another gateway's block holds; 39460 when the
+    /// catalog can't be reached.
     pub async fn explicit(&self, seq: SeqId, v: i128) -> Result<()> {
         let st = self.state(seq);
         let mut b = st.lock().await;
-        b.floor = b.floor.max(v.saturating_add(1));
-        let held = b
-            .cur
-            .map(|(_, end)| end)
-            .into_iter()
-            .chain(b.spare.map(|(_, end)| end))
-            .max()
-            .unwrap_or(i128::MIN);
-        if v < held || v < b.raised {
-            return Ok(());
+        if !b.holds(v)
+            && let Explicit::Reserved { end } = self.inner.src.explicit(seq, v).await?
+        {
+            return Err(SprigError::new(
+                SprigCode::IdValueReserved,
+                format!(
+                    "AUTO_INCREMENT value {v} lies in an ID block another gateway still holds; \
+                     use a value of at least {end}, or leave the column out"
+                ),
+            ));
         }
-        self.inner.src.raise(seq, v).await?;
-        b.raised = b.raised.max(v.saturating_add(1));
+        b.floor = b.floor.max(v.saturating_add(1));
         Ok(())
+    }
+
+    /// When a block fetched at `started` stops handing out values: 90% of
+    /// the source's lease, so this gateway stops before the catalog's
+    /// record of the lease ends (clocks need only run at about the same
+    /// rate, not agree).
+    fn until(&self, started: Instant) -> Option<Instant> {
+        self.inner.src.lease().map(|l| started + l.mul_f64(0.9))
     }
 
     fn state(&self, seq: SeqId) -> Arc<Mutex<BlockState>> {
@@ -308,6 +384,10 @@ impl<S: SequenceSource> BlockAllocator<S> {
     /// Takes `count` values of the series out of `[next, end)`, if they fit.
     fn carve(b: &mut BlockState, count: u64, s: &AutoIncSession) -> Option<IdRun> {
         let (next, end) = b.cur?;
+        if b.cur_until.is_some_and(|u| Instant::now() >= u) {
+            // The lease ended: the rest of the block is a gap.
+            return None;
+        }
         let first = s.first_at_or_after(next.max(b.floor));
         let step = i128::from(s.increment.max(1));
         let last = first + i128::from(count.saturating_sub(1)) * step;
@@ -329,6 +409,7 @@ impl<S: SequenceSource> BlockAllocator<S> {
         let this = self.clone();
         let st = Arc::clone(st);
         tokio::spawn(async move {
+            let started = Instant::now();
             let got = this.inner.src.fetch(seq, size).await;
             let mut b = st.lock().await;
             b.prefetching = false;
@@ -341,6 +422,7 @@ impl<S: SequenceSource> BlockAllocator<S> {
                     // keep values increasing per gateway, drop this one.
                     if b.cur.is_none_or(|(_, end)| r.0 >= end) {
                         b.spare = Some(r);
+                        b.spare_until = this.until(started);
                     }
                 }
                 Err(e) => tracing::warn!(seq = seq.0, error = %e, "ID block prefetch failed"),
@@ -385,15 +467,15 @@ impl<S: SequenceSource> IdAllocator for BlockAllocator<S> {
             if let Some(spare) = b.spare.take()
                 && b.cur.is_none_or(|(_, end)| spare.0 >= end)
             {
-                b.cur = Some(spare);
-                b.cur_size = u128::try_from(spare.1 - spare.0).unwrap_or(0);
-                b.since = Some(Instant::now());
+                let until = b.spare_until.take();
+                b.install(spare, until);
                 if let Some(run) = Self::carve(&mut b, count, s) {
                     self.maybe_prefetch(seq, &mut b, &st);
                     return Ok(run);
                 }
             }
             let size = self.block_size(&b).max(need);
+            let started = Instant::now();
             let mut r = self.inner.src.fetch(seq, size).await?;
             if r.1 <= b.floor {
                 // The catalog is behind an `AUTO_INCREMENT = n` this
@@ -404,9 +486,8 @@ impl<S: SequenceSource> IdAllocator for BlockAllocator<S> {
             self.inner
                 .fetched
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            b.cur = Some(r);
+            b.install(r, self.until(started));
             b.cur_size = size;
-            b.since = Some(Instant::now());
             if let Some(run) = Self::carve(&mut b, count, s) {
                 self.maybe_prefetch(seq, &mut b, &st);
                 return Ok(run);
@@ -437,6 +518,10 @@ fn exhausted() -> SprigError {
 pub struct CatalogSequences {
     pool: Pool,
     schema: String,
+    /// Who holds the blocks this source fetches (a gateway's coordinator
+    /// id); empty: blocks aren't recorded and never expire.
+    holder: String,
+    lease: Duration,
 }
 
 impl CatalogSequences {
@@ -446,7 +531,96 @@ impl CatalogSequences {
         Self {
             pool,
             schema: schema.into(),
+            holder: String::new(),
+            lease: BLOCK_LEASE,
         }
+    }
+
+    /// Records each fetched block in `sequence_blocks` as held by `holder`
+    /// for `lease`, and checks explicit values against other holders'
+    /// blocks.
+    #[must_use]
+    pub fn held_by(mut self, holder: impl Into<String>, lease: Duration) -> Self {
+        self.holder = holder.into();
+        self.lease = lease;
+        self
+    }
+
+    /// Creates `sequence_blocks` if this catalog predates it.
+    ///
+    /// # Errors
+    /// 39460 when the catalog can't be reached; MariaDB's errors.
+    pub async fn ensure_tables(&self) -> Result<()> {
+        let mut c = self.pool.get_conn().await.map_err(unavailable)?;
+        c.query_drop(DDL_SEQUENCE_BLOCKS.replace(
+            "sequence_blocks (",
+            &format!("{}.sequence_blocks (", quote(&self.schema)),
+        ))
+        .await
+        .map_err(db_err)
+    }
+
+    fn lease_ms(&self) -> u64 {
+        u64::try_from(self.lease.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    async fn explicit_once(&self, seq: SeqId, v: i128) -> Result<Explicit> {
+        let mut c = self.pool.get_conn().await.map_err(unavailable)?;
+        let mut tx = c
+            .start_transaction(TxOpts::default())
+            .await
+            .map_err(db_err)?;
+        // The row lock orders this with every fetch of the sequence.
+        let next: Option<String> = tx
+            .exec_first(
+                format!(
+                    "SELECT CAST(next_value AS CHAR) FROM {}.sequences WHERE seq_id = ? FOR UPDATE",
+                    quote(&self.schema)
+                ),
+                (seq.0,),
+            )
+            .await
+            .map_err(db_err)?;
+        let next: i128 = next.and_then(|n| n.parse().ok()).ok_or_else(|| {
+            SprigError::new(
+                SprigCode::IdBlockUnavailable,
+                format!("sequence {} doesn't exist", seq.0),
+            )
+        })?;
+        let out = if v >= next {
+            // Every block handed out so far is below `next`: none holds v.
+            tx.exec_drop(
+                format!(
+                    "UPDATE {}.sequences SET next_value = ?, updated_at = UTC_TIMESTAMP(6)
+                     WHERE seq_id = ?",
+                    quote(&self.schema)
+                ),
+                ((v + 1).to_string(), seq.0),
+            )
+            .await
+            .map_err(db_err)?;
+            Explicit::Free
+        } else {
+            let held: Option<String> = tx
+                .exec_first(
+                    format!(
+                        "SELECT CAST(end_value AS CHAR) FROM {}.sequence_blocks
+                         WHERE seq_id = ? AND start_value <= ? AND end_value > ? AND holder <> ?
+                           AND lease_until > UTC_TIMESTAMP(6)
+                         ORDER BY start_value DESC LIMIT 1",
+                        quote(&self.schema)
+                    ),
+                    (seq.0, v.to_string(), v.to_string(), self.holder.as_str()),
+                )
+                .await
+                .map_err(db_err)?;
+            match held.and_then(|e| e.parse().ok()) {
+                Some(end) => Explicit::Reserved { end },
+                None => Explicit::Free,
+            }
+        };
+        tx.commit().await.map_err(db_err)?;
+        Ok(out)
     }
 
     /// Creates a sequence row (at the first split: `next = MAX(col) + 1`).
@@ -552,6 +726,35 @@ impl CatalogSequences {
         )
         .await
         .map_err(db_err)?;
+        if !self.holder.is_empty() {
+            // The block, under its lease; blocks whose lease ended can't
+            // hand out values any more and go.
+            tx.exec_drop(
+                format!(
+                    "DELETE FROM {}.sequence_blocks WHERE seq_id = ? AND lease_until <= UTC_TIMESTAMP(6)",
+                    quote(&self.schema)
+                ),
+                (seq.0,),
+            )
+            .await
+            .map_err(db_err)?;
+            tx.exec_drop(
+                format!(
+                    "INSERT INTO {}.sequence_blocks (seq_id, start_value, end_value, holder, lease_until)
+                     VALUES (?, ?, ?, ?, UTC_TIMESTAMP(6) + INTERVAL ? * 1000 MICROSECOND)",
+                    quote(&self.schema)
+                ),
+                (
+                    seq.0,
+                    next.to_string(),
+                    end.to_string(),
+                    self.holder.as_str(),
+                    self.lease_ms(),
+                ),
+            )
+            .await
+            .map_err(db_err)?;
+        }
         tx.commit().await.map_err(db_err)?;
         Ok((next, end))
     }
@@ -623,6 +826,14 @@ impl SequenceSource for CatalogSequences {
             .map_err(db_err)
         })
         .await
+    }
+
+    fn lease(&self) -> Option<Duration> {
+        (!self.holder.is_empty()).then_some(self.lease)
+    }
+
+    async fn explicit(&self, seq: SeqId, v: i128) -> Result<Explicit> {
+        retry(|| self.explicit_once(seq, v)).await
     }
 
     async fn ordering(&self, seq: SeqId) -> Result<Ordering> {

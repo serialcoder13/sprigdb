@@ -11,6 +11,7 @@ use crate::consts::{dump_flags, event_type};
 use crate::event::{Decoder, Event, EventHeader, TableFilter};
 use crate::gtid::GtidPos;
 use crate::protocol::{Conn, server_error};
+use crate::tls::BinlogTls;
 
 /// Where to read a binlog from: one MariaDB node and an account with
 /// `REPLICATION SLAVE` (and `BINLOG MONITOR` for `@@gtid_binlog_pos`).
@@ -24,6 +25,10 @@ pub struct BinlogSource {
     pub user: String,
     /// Password.
     pub password: String,
+    /// TLS; `None` is plain text, for development servers only. Sources
+    /// built from a cluster's credentials always have it (chapter 27: no
+    /// plain-text connections to managed clusters).
+    pub tls: Option<BinlogTls>,
 }
 
 impl fmt::Debug for BinlogSource {
@@ -32,12 +37,13 @@ impl fmt::Debug for BinlogSource {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("user", &self.user)
+            .field("tls", &self.tls)
             .finish_non_exhaustive()
     }
 }
 
 impl BinlogSource {
-    /// A source from its parts.
+    /// A plain-text source from its parts; add TLS with [`Self::with_tls`].
     pub fn new(
         host: impl Into<String>,
         port: u16,
@@ -49,12 +55,21 @@ impl BinlogSource {
             port,
             user: user.into(),
             password: password.into(),
+            tls: None,
         }
     }
 
+    /// The same source over TLS.
+    #[must_use]
+    pub fn with_tls(mut self, tls: BinlogTls) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     /// Parses `mysql://user:password@host:port`, the form `sprig-testkit`
-    /// uses; a path or query after the address is ignored. Percent-escapes
-    /// are not decoded.
+    /// uses. A path is ignored; of the query, `tls=verify` (with an
+    /// optional `ca_file=<path>`) or `tls=skip_verify` turns TLS on, and
+    /// other keys are ignored. Percent-escapes are not decoded.
     ///
     /// # Errors
     /// `ER_SPRIG_CONFIG_INVALID` if the URL lacks a user or host.
@@ -69,7 +84,20 @@ impl BinlogSource {
             .strip_prefix("mysql://")
             .or_else(|| url.strip_prefix("mariadb://"))
             .ok_or_else(|| bad("want mysql://user:password@host:port"))?;
+        let query = rest.split_once('?').map_or("", |(_, q)| q);
         let rest = rest.split(['/', '?']).next().unwrap_or(rest);
+        let mut tls = None;
+        let mut ca_file = None;
+        for kv in query.split('&').filter(|kv| !kv.is_empty()) {
+            match kv.split_once('=').unwrap_or((kv, "")) {
+                ("tls", "verify") => tls = Some(false),
+                ("tls", "skip_verify") => tls = Some(true),
+                ("tls", "off" | "disabled") => tls = None,
+                ("tls", other) => return Err(bad(&format!("tls={other}"))),
+                ("ca_file", path) => ca_file = Some(path.into()),
+                _ => {}
+            }
+        }
         let (cred, addr) = rest.rsplit_once('@').ok_or_else(|| bad("no user"))?;
         let (user, password) = cred.split_once(':').unwrap_or((cred, ""));
         let (host, port) = match addr.rsplit_once(':') {
@@ -79,7 +107,12 @@ impl BinlogSource {
         if user.is_empty() || host.is_empty() {
             return Err(bad("empty user or host"));
         }
-        Ok(Self::new(host, port, user, password))
+        let src = Self::new(host, port, user, password);
+        Ok(match tls {
+            Some(true) => src.with_tls(BinlogTls::skip_verify()),
+            Some(false) => src.with_tls(BinlogTls::verify(ca_file)),
+            None => src,
+        })
     }
 }
 
@@ -180,6 +213,7 @@ pub struct BinlogStream {
     server_version: String,
     non_blocking: bool,
     ended: bool,
+    tls_version: Option<String>,
 }
 
 impl fmt::Debug for BinlogStream {
@@ -206,6 +240,7 @@ impl BinlogStream {
             src.port,
             &src.user,
             &src.password,
+            src.tls.as_ref(),
             opts.connect_timeout,
         )
         .await?;
@@ -259,9 +294,11 @@ impl BinlogStream {
         decoder.set_server_decrypts(true);
         let silence = opts.heartbeat * opts.silence_periods.max(1);
         let server_version = conn.server_version.clone();
+        let tls_version = conn.tls_version.clone();
         tracing::debug!(
             host = %src.host,
             port = src.port,
+            tls = conn.tls_version.as_deref().unwrap_or("off"),
             from = %from,
             server_id = opts.server_id,
             "binlog stream started"
@@ -274,6 +311,7 @@ impl BinlogStream {
             server_version,
             non_blocking: opts.non_blocking,
             ended: false,
+            tls_version,
         })
     }
 
@@ -337,6 +375,12 @@ impl BinlogStream {
     pub fn server_version(&self) -> &str {
         &self.server_version
     }
+
+    /// The negotiated TLS version (`TLSv1_3`, ...); `None` for plain text.
+    #[must_use]
+    pub fn tls_version(&self) -> Option<&str> {
+        self.tls_version.as_deref()
+    }
 }
 
 /// An EOF packet: what ends a non-blocking dump.
@@ -369,6 +413,14 @@ mod tests {
             (s.host.as_str(), s.port, s.password.as_str()),
             ("db", 3306, "")
         );
+        let s = BinlogSource::from_url("mysql://u:p@h:1?tls=verify&ca_file=/ca.pem").unwrap();
+        assert_eq!(
+            s.tls,
+            Some(BinlogTls::verify(Some("/ca.pem".into())))
+        );
+        let s = BinlogSource::from_url("mysql://u:p@h:1?tls=skip_verify").unwrap();
+        assert_eq!(s.tls, Some(BinlogTls::skip_verify()));
+        assert!(BinlogSource::from_url("mysql://u:p@h:1?tls=maybe").is_err());
         assert!(BinlogSource::from_url("http://x").is_err());
         assert!(BinlogSource::from_url("mysql://host:1").is_err());
         assert!(!format!("{s:?}").contains("password"));

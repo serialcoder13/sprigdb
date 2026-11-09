@@ -168,12 +168,9 @@ impl ClusterAccess {
         Ok(Self {
             cluster: rec.cluster_id.clone(),
             topology: rec.topology,
-            repl: BinlogSource::new(
-                r.opts.ip_or_hostname(),
-                r.opts.tcp_port(),
-                r.opts.user().unwrap_or_default(),
-                r.opts.pass().unwrap_or_default(),
-            ),
+            // The credential's TLS too: managed clusters' sprig_repl is
+            // REQUIRE SSL (r2opfix).
+            repl: r.binlog_source().await,
             writer,
             nodes,
             domain,

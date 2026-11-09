@@ -94,10 +94,13 @@ impl Services {
         locator: &Arc<crate::tenant::locator::GatewayLocator>,
     ) -> Arc<ids::TenantIds> {
         let mut m = self.ids.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(
-            m.entry(tenant)
-                .or_insert_with(|| Arc::new(ids::TenantIds::new(Arc::clone(locator), tenant))),
-        )
+        Arc::clone(m.entry(tenant).or_insert_with(|| {
+            Arc::new(ids::TenantIds::new(
+                Arc::clone(locator),
+                tenant,
+                self.coordinator_id.clone(),
+            ))
+        }))
     }
 }
 
@@ -110,6 +113,8 @@ pub(crate) struct IdsTaken {
     step: i128,
     /// Some row took a generated value (else only explicit values).
     generated: bool,
+    /// How many values were generated.
+    count: u64,
 }
 
 /// Chapters 17's and 18's settings as one session resolved them, with
@@ -188,6 +193,11 @@ pub(crate) struct RouterState {
     touched: HashMap<String, u64>,
     /// The ID-block values the statement being run took (chapter 19).
     ids: Option<IdsTaken>,
+    /// Collision retries of the prepared statement being run.
+    collisions: u32,
+    /// For an `INSERT IGNORE` with ID-block values: the read of the first
+    /// value it really inserted, and its row count.
+    readback: Option<(Plan, u64)>,
 }
 
 impl std::fmt::Debug for RouterState {
@@ -262,6 +272,48 @@ enum Ran {
     /// (`schema_skew`), as a schema change dropping a column leaves them
     /// for a moment (chapter 21, decision D8).
     ColumnGone(SprigError),
+    /// A generated `AUTO_INCREMENT` value met a row that already holds it
+    /// (1062 naming the value), before anything reached the client:
+    /// chapter 19's collision retry takes new values.
+    Collision(SprigError),
+}
+
+/// For an `INSERT IGNORE` (several rows, an unqualified table) that took
+/// ID-block values: the read of the lowest of them that was inserted, and
+/// the statement's row count.
+fn readback_plan(
+    f: &sprig_router::plan::IdFill,
+    t: &IdsTaken,
+    pcx: &PlanCtx<'_>,
+) -> Option<(Plan, u64)> {
+    if !t.generated || t.count < 2 {
+        return None;
+    }
+    let (sql, rows) = f.readback_sql(t.first, t.step, t.count)?;
+    match sprig_router::plan(&sql, pcx) {
+        p @ (Plan::Read(_) | Plan::Pass(_)) => Some((p, rows)),
+        _ => None,
+    }
+}
+
+/// Chapter 19's collision retries per statement.
+const COLLISION_RETRIES: u32 = 3;
+
+/// Whether `e` is a duplicate-key error on one of the values `t` generated.
+fn collides(e: &SprigError, t: &IdsTaken) -> bool {
+    if !t.generated || !matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1062, .. }) {
+        return false;
+    }
+    let Some(v) = e
+        .message
+        .split_once("Duplicate entry '")
+        .and_then(|(_, rest)| rest.split_once("' for key"))
+        .and_then(|(v, _)| v.parse::<i128>().ok())
+    else {
+        return false;
+    };
+    let k = (v - t.first) / t.step.max(1);
+    v >= t.first && (v - t.first) % t.step.max(1) == 0 && k < i128::from(t.count)
 }
 
 /// `lookup.lock_wait_seconds`' default (chapter 19): Pre sessions' lock
@@ -976,7 +1028,9 @@ impl PassSession {
                 .await?
             {
                 Ran::Done(step) => Ok(step),
-                Ran::Stale(e) | Ran::ColumnGone(e) => self.fail_mapped(out, e, map).await,
+                Ran::Stale(e) | Ran::ColumnGone(e) | Ran::Collision(e) => {
+                    self.fail_mapped(out, e, map).await
+                }
             };
         }
         // `autocommit = 0`: a statement that reads or writes opens a
@@ -984,6 +1038,7 @@ impl PassSession {
         self.implicit_begin(&text);
         let mut retries = 0usize;
         let mut column_retried = false;
+        let mut collisions = 0u32;
         loop {
             if layout.hold_for(&text).is_some() {
                 self.wait_hold(&layout, &cache, &text).await;
@@ -1026,6 +1081,13 @@ impl PassSession {
                         Some((l, _)) => layout = l,
                         None => return self.fail_mapped(out, err, map).await,
                     }
+                }
+                Ran::Collision(err) => {
+                    if collisions >= COLLISION_RETRIES {
+                        return self.fail_mapped(out, err, map).await;
+                    }
+                    collisions += 1;
+                    metrics::counter!("sprig_ids_collision_retries_total").increment(1);
                 }
                 Ran::ColumnGone(err) => {
                     let skew = !matches!(err.kind, sprig_common::ErrorKind::Backend { .. });
@@ -1154,6 +1216,7 @@ impl PassSession {
             || f.finish(taken.first, taken.step, &pcx),
             |p| p,
         );
+        self.router.readback = readback_plan(f, &taken, &pcx);
         self.router.ids = Some(taken);
         Ok(next)
     }
@@ -1201,6 +1264,7 @@ impl PassSession {
             || f.finish(taken.first, taken.step, &pcx),
             |p| p,
         );
+        self.router.readback = readback_plan(f, &taken, &pcx);
         pp.plan = next;
         pp.placeholders = false;
         self.router.ids = Some(taken);
@@ -1247,11 +1311,13 @@ impl PassSession {
                 first: r.first,
                 step: r.step,
                 generated: true,
+                count: r.count,
             },
             None => IdsTaken {
                 first: 0,
                 step: 1,
                 generated: false,
+                count: 0,
             },
         })
     }
@@ -1460,6 +1526,9 @@ impl PassSession {
         let main_cluster = self.main_cluster();
         let legacy_txn = self.legacy_txn();
         let ids = self.router.ids.take();
+        let readback = self.router.readback.take();
+        // `Some(None)`: none of the generated rows was inserted.
+        let mut inserted_first: Option<Option<u64>> = None;
         let accounts = Accounts(self.tenant.as_deref().and_then(|t| t.auth()));
         let ctx = OutputCtx {
             map,
@@ -1498,7 +1567,24 @@ impl PassSession {
                 explicit_ids: ids.is_some(),
             };
             let mut budget = Budget::mb(cfg.max_statement_memory_mb);
-            sprig_router::execute_to(plan, &mut be, &mut budget, &mut sink).await
+            let r = sprig_router::execute_to(plan, &mut be, &mut budget, &mut sink).await;
+            // `INSERT IGNORE` that skipped rows: MariaDB reports the first
+            // generated value it really inserted (chapter 19).
+            if let (Ok(Output::Ok(ok)), Some((rb, rows))) = (&r, &readback)
+                && ok.affected > 0
+                && ok.affected < *rows
+            {
+                inserted_first = Some(
+                    match sprig_router::execute(rb, &mut be, &mut budget).await {
+                        Ok(Output::Rows { rows, .. }) => rows
+                            .first()
+                            .and_then(|r| r.first().cloned().flatten())
+                            .and_then(|b| std::str::from_utf8(&b).ok()?.parse::<u64>().ok()),
+                        _ => ids.map(|t| u64::try_from(t.first).unwrap_or(0)),
+                    },
+                );
+            }
+            r
         };
         let mut status = self.status();
         if more {
@@ -1508,6 +1594,7 @@ impl PassSession {
         let out = sink.out;
         let fail = |e: SprigError| map_error(e, &ctx);
         match result {
+            Err(e) if !started && ids.is_some_and(|t| collides(&e, &t)) => Ok(Ran::Collision(e)),
             Err(e) => {
                 let in_txn = self.router.in_txn();
                 let stale_code = matches!(e.kind, sprig_common::ErrorKind::Backend { errno, .. }
@@ -1551,9 +1638,12 @@ impl PassSession {
                 if let Some(t) = ids
                     && t.generated
                 {
-                    let first = u64::try_from(t.first).unwrap_or(0);
-                    p.last_insert_id = if ok.affected > 0 { first } else { 0 };
-                    if ok.affected > 0
+                    let first = match inserted_first {
+                        Some(f) => f,
+                        None => (ok.affected > 0).then(|| u64::try_from(t.first).unwrap_or(0)),
+                    };
+                    p.last_insert_id = first.unwrap_or(0);
+                    if let Some(first) = first
                         && let Some(bs) = self.bs.as_mut()
                     {
                         bs.vars_mut().last_insert_id = first;
@@ -1730,8 +1820,23 @@ impl PassSession {
                         out,
                     )
                     .await?;
+                if !matches!(ran, Ran::Collision(_)) {
+                    self.router.collisions = 0;
+                }
                 match ran {
                     Ran::Done(step) => Ok(ExecRoute::Done(step.status)),
+                    // Chapter 19: new values, the statement again.
+                    Ran::Collision(_) if self.router.collisions < COLLISION_RETRIES => {
+                        self.router.collisions += 1;
+                        metrics::counter!("sprig_ids_collision_retries_total").increment(1);
+                        Box::pin(self.routed_execute(cx, sql, values, cursor, out)).await
+                    }
+                    Ran::Collision(e) => {
+                        self.router.collisions = 0;
+                        let e = self.map_error(e);
+                        out.error(&e).await?;
+                        Ok(ExecRoute::Answered)
+                    }
                     Ran::Stale(e) if self.router.in_txn() => {
                         self.moved_under_txn(&layout, &cache, e, &*map, out).await?;
                         Ok(ExecRoute::Answered)

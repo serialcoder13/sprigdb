@@ -25,8 +25,8 @@ use sprig_common::names::SchemaName;
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
 use sprig_router::plan::IdFill;
 use sprig_shard::ids::{
-    AutoIncSession, BlockAllocator, BlockConfig, CatalogSequences, IdAllocator, IdRun, Ordering,
-    SeqId, SequenceSource,
+    AutoIncSession, BLOCK_LEASE, BlockAllocator, BlockConfig, CatalogSequences, Explicit,
+    IdAllocator, IdRun, Ordering, SeqId, SequenceSource,
 };
 
 use crate::tenant::locator::GatewayLocator;
@@ -43,6 +43,9 @@ fn unavailable(e: &SprigError) -> SprigError {
 pub(super) struct GwSequences {
     locator: Arc<GatewayLocator>,
     tenant: TenantId,
+    /// This gateway process (its coordinator id): the holder of the
+    /// blocks it fetches.
+    holder: String,
 }
 
 impl GwSequences {
@@ -60,10 +63,10 @@ impl GwSequences {
             .ctl_pool(&cluster)
             .await
             .map_err(|e| unavailable(&e))?;
-        Ok(CatalogSequences::new(
-            pool,
-            SchemaName::catalog(self.tenant).to_string(),
-        ))
+        Ok(
+            CatalogSequences::new(pool, SchemaName::catalog(self.tenant).to_string())
+                .held_by(self.holder.clone(), BLOCK_LEASE),
+        )
     }
 }
 
@@ -88,6 +91,18 @@ impl SequenceSource for GwSequences {
     async fn ordering(&self, seq: SeqId) -> Result<Ordering> {
         self.catalog().await?.ordering(seq).await
     }
+
+    fn lease(&self) -> Option<std::time::Duration> {
+        Some(BLOCK_LEASE)
+    }
+
+    async fn explicit(&self, seq: SeqId, v: i128) -> Result<Explicit> {
+        let r = self.catalog().await?.explicit(seq, v).await;
+        if matches!(r, Ok(Explicit::Reserved { .. })) {
+            metrics::counter!("sprig_ids_reserved_refusals_total").increment(1);
+        }
+        r
+    }
 }
 
 /// One tenant's ID blocks in this gateway.
@@ -95,15 +110,25 @@ pub(super) struct TenantIds {
     alloc: BlockAllocator<GwSequences>,
     /// Sequences whose row is known to exist.
     ready: Mutex<HashSet<u64>>,
+    /// `sequence_blocks` is known to exist.
+    tables: std::sync::atomic::AtomicBool,
     /// One creation at a time in this gateway.
     creating: tokio::sync::Mutex<()>,
 }
 
 impl TenantIds {
-    pub(super) fn new(locator: Arc<GatewayLocator>, tenant: TenantId) -> Self {
+    pub(super) fn new(locator: Arc<GatewayLocator>, tenant: TenantId, holder: String) -> Self {
         Self {
-            alloc: BlockAllocator::new(GwSequences { locator, tenant }, BlockConfig::default()),
+            alloc: BlockAllocator::new(
+                GwSequences {
+                    locator,
+                    tenant,
+                    holder,
+                },
+                BlockConfig::default(),
+            ),
             ready: Mutex::new(HashSet::new()),
+            tables: std::sync::atomic::AtomicBool::new(false),
             creating: tokio::sync::Mutex::new(()),
         }
     }
@@ -146,6 +171,12 @@ impl TenantIds {
         }
         let src = &self.alloc.source();
         let cat = src.catalog().await?;
+        if !self.tables.load(std::sync::atomic::Ordering::Relaxed) {
+            // A catalog migrated before the leased blocks' table.
+            cat.ensure_tables().await.map_err(|e| unavailable(&e))?;
+            self.tables
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if !cat.exists(SeqId(f.seq)).await? {
             let next = first_value(src, f).await?;
             match cat

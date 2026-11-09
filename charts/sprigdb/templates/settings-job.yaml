@@ -13,10 +13,17 @@ spec:
     spec:
       restartPolicy: OnFailure
       automountServiceAccountToken: false
+      volumes:
+        - name: admin-token
+          secret: {secretName: sprigdb-admin-token}
       containers:
         - name: settings
           image: {{ include "sprigdb.image" . }}
           command: ["/bin/sh", "-c"]
+          env:
+            - {name: SPRIGCTL_TOKEN_FILE, value: /etc/sprigdb/admin/token}
+          volumeMounts:
+            - {name: admin-token, mountPath: /etc/sprigdb/admin, readOnly: true}
           args:
             - |
               set -e

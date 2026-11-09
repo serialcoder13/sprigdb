@@ -25,8 +25,10 @@
 //! - [`annotate`]: the SprigDB statement comment the change feed reads
 //!   from `ANNOTATE_ROWS` events (chapter 38, build step 1).
 //!
-//! Not here: TLS to the source (the wire client lives here until
-//! `sprig-proto-mysql` exists), authentication plugins other than
+//! - [`BinlogTls`]: TLS to the source (verify against the cluster's CA by
+//!   default, or encrypt without verifying for development servers).
+//!
+//! Not here: authentication plugins other than
 //! `mysql_native_password`, MariaDB's pre-10.1 temporal format with
 //! fractional seconds, whose width the binlog doesn't record, and
 //! encrypted binlog files read directly ([`BinlogFile`] refuses them: only
@@ -44,6 +46,7 @@ mod event;
 mod file;
 mod protocol;
 mod stream;
+mod tls;
 
 pub use annotate::{OpHint, SprigComment, parse_comment};
 pub use event::{
@@ -52,5 +55,6 @@ pub use event::{
 pub use file::BinlogFile;
 pub use gtid::{Gtid, GtidPos};
 pub use stream::{BinlogSource, BinlogStream, StreamOptions};
+pub use tls::BinlogTls;
 pub use table_map::{Column, ColumnType, TableMap};
 pub use value::{Date, DateTime, RowImage, Time, Timestamp, Value};

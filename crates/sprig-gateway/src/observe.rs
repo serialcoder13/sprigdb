@@ -248,6 +248,10 @@ impl SessionExec for ObservedSession {
     fn attach_capture(&mut self, capture: crate::workload::SessionCapture) {
         self.inner.attach_capture(capture);
     }
+
+    fn idle_timeout(&self) -> Option<std::time::Duration> {
+        self.inner.idle_timeout()
+    }
 }
 
 /// A sink that notes the class of an error relayed through it (a backend

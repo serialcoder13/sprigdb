@@ -1,0 +1,7 @@
+# mysql2 (versions.txt) through run.sh: every outcome other than pass, one
+# line per test file (poku reports files). Format: <target-glob>
+# <fail|skip|flaky|exclude> <test-glob> :: <reason> (summarize.py).
+#
+# test/global (5 files) runs only when the login may SET GLOBAL
+# (tools/common.js hasPrivileges): a tenant login gets 1227, so through the
+# gateway poku leaves them out and they don't appear in the counts.

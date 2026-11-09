@@ -18,7 +18,9 @@ The expected file has one line per outcome other than pass:
 
 <target-glob> matches the target label (baseline-mariadb, baseline-mysql,
 gateway-mariadb, gateway-mysql); <test-glob> matches the test id. The first
-matching line wins. `flaky` accepts any outcome.
+matching line wins. `flaky` accepts any outcome. `exclude` lines name tests
+run.sh doesn't run at all on that target (`summarize.py excludes <expected>
+<target>` prints them); they count as skipped if they show up.
 """
 
 import fnmatch
@@ -116,17 +118,17 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 def parse_poku(raw):
     """poku's compact reporter prints one line per test file:
-    `✔ <path> ›` / `✘ <path> ›` (and skipped files with a ⏭/◯ mark)."""
+    ` PASS  <path>` or ` FAIL  <path>`, then the failure's details."""
     result = {}
     path = os.path.join(raw, "poku.log")
     with open(path, encoding="utf-8", errors="replace") as f:
         lines = [ANSI.sub("", l.rstrip("\n")) for l in f]
     for i, line in enumerate(lines):
-        m = re.match(r"^\s*([✔✘✗◯⏭])\s+(\S+\.(?:test\.)?[cm]?[jt]s)\b", line)
+        m = re.match(r"^\s*(PASS|FAIL|SKIP|✔|✘|✗|◯|⏭)\s+(\S+\.[cm]?[jt]s)\s*$", line)
         if not m:
             continue
         mark, name = m.groups()
-        status = {"✔": "pass", "✘": "fail", "✗": "fail"}.get(mark, "skip")
+        status = {"PASS": "pass", "✔": "pass", "FAIL": "fail", "✘": "fail", "✗": "fail"}.get(mark, "skip")
         msg = ""
         if status == "fail":
             for nxt in lines[i + 1 : i + 40]:
@@ -149,7 +151,7 @@ def load_expected(path, target):
                 continue
             head, _, reason = line.partition(" :: ")
             parts = head.split(None, 2)
-            if len(parts) != 3 or parts[1] not in ("fail", "skip", "flaky"):
+            if len(parts) != 3 or parts[1] not in ("fail", "skip", "flaky", "exclude"):
                 sys.exit(f"{path}:{n}: bad line: {line}")
             tglob, status, test = parts
             if not reason.strip():
@@ -167,6 +169,11 @@ def expected_for(rules, test):
 
 
 def main():
+    if sys.argv[1] == "excludes":
+        for test, status, _, _ in load_expected(sys.argv[2], sys.argv[3]):
+            if status == "exclude":
+                print(test)
+        return
     suite, target, fmt, results, expected = sys.argv[1:6]
     raw = os.path.join(results, "raw")
     parser = {"gojson": parse_gojson, "junit": parse_junit, "poku": parse_poku}[fmt]
@@ -184,6 +191,8 @@ def main():
             used.add(n)
         if want == "flaky":
             continue
+        if want == "exclude":
+            want = "skip"
         if status == "fail" and want != "fail":
             bad.append(f"UNEXPECTED FAIL  {name}: {msg}")
         elif want == "fail" and status != "fail":
