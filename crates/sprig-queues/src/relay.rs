@@ -288,7 +288,7 @@ pub enum Answer {
     /// Done (confirm, attach, hold).
     Done,
     /// A get: the delivery and the messages left.
-    Got(Option<(WireDelivery, u32)>),
+    Got(Option<Box<(WireDelivery, u32)>>),
     /// Purged or deleted messages.
     Count(u32),
     /// Ready messages and consumers.
@@ -386,13 +386,11 @@ pub fn score(gateway: &str, tenant: u64, object: u64) -> u64 {
 /// The rendezvous choice among `candidates` (ties by name).
 #[must_use]
 pub fn rendezvous(candidates: &[String], tenant: u64, object: u64) -> Option<&String> {
-    candidates
-        .iter()
-        .max_by(|a, b| {
-            score(a, tenant, object)
-                .cmp(&score(b, tenant, object))
-                .then_with(|| b.cmp(a))
-        })
+    candidates.iter().max_by(|a, b| {
+        score(a, tenant, object)
+            .cmp(&score(b, tenant, object))
+            .then_with(|| b.cmp(a))
+    })
 }
 
 fn next_id() -> u64 {
@@ -570,7 +568,7 @@ impl Remote {
                 }
                 Some(Pending::Get(r)) => {
                     let v = result.and_then(|a| match a {
-                        Answer::Got(Some((d, n))) => Ok(Some((d.delivery()?, n))),
+                        Answer::Got(Some(b)) => Ok(Some((b.0.delivery()?, b.1))),
                         _ => Ok(None),
                     });
                     let _ = r.send(v);
@@ -591,15 +589,26 @@ impl Remote {
             },
             Down::Deliver { consumer, d } => {
                 let id = ConsumerId(consumer);
-                if let Some((sink, _)) = self.consumers.get(&id) {
-                    match d.delivery() {
-                        Ok(d) => {
-                            let _ = sink.deliver(id, d);
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "unreadable relayed delivery dropped");
-                        }
+                let did = d.id;
+                let taken = match (self.consumers.get(&id), d.delivery()) {
+                    (Some((sink, _)), Ok(d)) => sink.deliver(id, d),
+                    (_, Err(e)) => {
+                        tracing::warn!(error = %e, "unreadable relayed delivery");
+                        false
                     }
+                    (None, _) => false,
+                };
+                if !taken {
+                    // Nobody here takes it (the consumer or its
+                    // connection is gone): back to the queue at once, and
+                    // the consumer ends at the owner.
+                    let conn = self.consumers.remove(&id).map_or(0, |(_, c)| c.0);
+                    let _ = self.send(Up::Cancel { consumer });
+                    let _ = self.send(Up::Settle {
+                        conn,
+                        any: conn == 0,
+                        items: vec![(did, Settlement::Requeue { failed: false })],
+                    });
                 }
             }
             Down::Cancelled { consumer, reason } => {
@@ -846,7 +855,7 @@ impl QueueEngine {
                             conns.insert(conn);
                             let (tx, rx) = oneshot::channel();
                             waits.push(reply_of(req, rx, |g: Option<(Delivery, u32)>| {
-                                Answer::Got(g.map(|(d, n)| (WireDelivery::of(&d), n)))
+                                Answer::Got(g.map(|(d, n)| Box::new((WireDelivery::of(&d), n))))
                             }));
                             Cmd::Get { holder: holder(conn), no_ack, lease_ms, reply: tx }
                         }
@@ -978,7 +987,10 @@ impl PeerTransport for MemPeers {
         if lock(&self.down).contains(to) {
             return Err(moved(format!("gateway {to} can't be reached")));
         }
-        let Some(inner) = lock(&self.engines).get(to).and_then(std::sync::Weak::upgrade) else {
+        let Some(inner) = lock(&self.engines)
+            .get(to)
+            .and_then(std::sync::Weak::upgrade)
+        else {
             return Err(moved(format!("gateway {to} can't be reached")));
         };
         let engine = QueueEngine { inner };
@@ -1098,8 +1110,14 @@ mod tests {
         };
         let mut b = BytesMut::new();
         p.encode(&mut b);
-        let m = msg::rebuild(0, "x".into(), "k".into(), b.freeze(), Bytes::from_static(b"hi"))
-            .unwrap_or_else(|_| unreachable!());
+        let m = msg::rebuild(
+            0,
+            "x".into(),
+            "k".into(),
+            b.freeze(),
+            Bytes::from_static(b"hi"),
+        )
+        .unwrap_or_else(|_| unreachable!());
         let w = WireMsg::of(&m);
         assert_eq!(w.message().ok().as_ref(), Some(&m));
         let mut dead = m.clone();

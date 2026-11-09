@@ -125,6 +125,9 @@ fn start(store: &MemStore, cache_bytes: u64) -> Owner {
         tokens: None,
         clock: Arc::new(SystemClock),
         events: ev,
+        grace_ms: 0,
+        move_after_ms: 0,
+        no_move_before_ms: 0,
     };
     let (tx, rx) = mpsc::unbounded_channel();
     let s: Arc<dyn MsgStore> = Arc::new(store.clone());
@@ -159,6 +162,8 @@ async fn attach(
             no_ack: false,
             exclusive: false,
             priority: 0,
+            held: Vec::new(),
+            from: None,
         },
         tx,
     ));

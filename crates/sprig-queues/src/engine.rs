@@ -258,6 +258,11 @@ impl VShared {
             return Some(Arc::clone(q));
         }
         let e = self.engine.upgrade()?;
+        if let Some(o) = e.deps.temps.others(&self.r)
+            && let Some(q) = o.queues.values().find(|q| q.id == id)
+        {
+            return Some(Arc::clone(q));
+        }
         e.deps
             .catalog
             .topology(&self.r)
@@ -274,8 +279,12 @@ impl VShared {
             .unwrap_or_default()
     }
 
-    /// The owner slot of `q`, created (and its owner started) if needed.
+    /// The owner slot of `q`, created (and its owner found) if needed.
     pub(crate) fn slot(self: &Arc<Self>, q: &Arc<QueueDef>) -> OwnerHandle {
+        self.slot_mode(q, false)
+    }
+
+    fn slot_mode(self: &Arc<Self>, q: &Arc<QueueDef>, serve: bool) -> OwnerHandle {
         let mut owners = lock(&self.owners);
         if let Some(h) = owners.get(&q.id)
             && h.alive()
@@ -283,14 +292,16 @@ impl VShared {
             return h.clone();
         }
         let (tx, rx) = mpsc::unbounded_channel();
+        let (ktx, krx) = watch::channel(SlotKind::Resolving);
         let h = OwnerHandle {
             queue: q.id,
             tx,
             epoch: 0,
+            kind: krx,
         };
         owners.insert(q.id, h.clone());
         drop(owners);
-        tokio::spawn(Arc::clone(self).start_owner(Arc::clone(q), rx));
+        tokio::spawn(Arc::clone(self).run_slot(Arc::clone(q), rx, ktx, serve));
         h
     }
 
@@ -299,17 +310,50 @@ impl VShared {
         lock(&self.owners).get(&id).filter(|h| h.alive()).cloned()
     }
 
-    async fn start_owner(self: Arc<Self>, q: Arc<QueueDef>, mut rx: mpsc::UnboundedReceiver<Cmd>) {
-        let Some(e) = self.engine.upgrade() else {
-            return;
-        };
+    /// The slot a relay stream from another gateway feeds: the owner must
+    /// run here. Waits while the slot is still finding its owner; a slot
+    /// that relays elsewhere is 39260 (the opener looks again).
+    pub(crate) async fn serve_slot(
+        self: &Arc<Self>,
+        q: &Arc<QueueDef>,
+    ) -> Result<(OwnerHandle, CancellationToken), MqError> {
+        let h = self.slot_mode(q, true);
+        let mut k = h.kind.clone();
+        let wait = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let cur = k.borrow_and_update().clone();
+                match cur {
+                    SlotKind::Resolving => {
+                        if k.changed().await.is_err() {
+                            return SlotKind::Gone;
+                        }
+                    }
+                    other => return other,
+                }
+            }
+        })
+        .await;
+        match wait {
+            Ok(SlotKind::Local(done)) => Ok((h, done)),
+            Ok(SlotKind::Remote(g)) => Err(MqError::new(
+                MqCode::OwnerMoved,
+                format!("queue '{}' is owned by gateway {g}", q.name),
+            )),
+            Ok(_) | Err(_) => Err(MqError::new(
+                MqCode::OwnerMoved,
+                format!("queue '{}' has no owner here", q.name),
+            )),
+        }
+    }
+
+    fn owner_params(&self, e: &Inner, q: &Arc<QueueDef>, no_move_before_ms: i64) -> OwnerParams {
         let s = e.deps.catalog.settings(&self.r);
         let topo = e.deps.catalog.topology(&self.r);
-        let cfg = QueueCfg::of(&q, &topo.policies, s.delivery_limit_default);
-        let params = OwnerParams {
+        let cfg = QueueCfg::of(q, &topo.policies, s.delivery_limit_default);
+        OwnerParams {
             tenant: self.r.tenant,
             db: self.r.db_id,
-            queue: Arc::clone(&q),
+            queue: Arc::clone(q),
             cfg,
             batch_rows: s.batch_rows,
             cache_bytes: s.cache_bytes,
@@ -320,58 +364,265 @@ impl VShared {
             tokens: e.deps.catalog.token_key(self.r.tenant),
             clock: Arc::clone(&e.deps.clock),
             events: self.events.clone(),
-        };
-        if q.temp_on.is_some() {
-            let store: Arc<dyn MsgStore> = Arc::clone(&self.mem) as Arc<dyn MsgStore>;
-            owner::run(params, store, rx).await;
-            return;
+            grace_ms: i64::try_from(s.takeover_grace_ms).unwrap_or(2000),
+            move_after_ms: if e.deps.placement.is_some() && e.deps.peers.is_some() {
+                i64::try_from(s.owner_move_after_ms).unwrap_or(0)
+            } else {
+                0
+            },
+            no_move_before_ms,
         }
-        let fail = |rx: &mut mpsc::UnboundedReceiver<Cmd>, err: MqError| {
-            owner::fail_all(rx, &err);
-            lock(&self.owners).remove(&q.id);
+    }
+
+    fn queue_ref(&self, e: &Inner, q: &QueueDef) -> QueueRef {
+        QueueRef {
+            tenant: self.r.tenant,
+            db_id: self.r.db_id,
+            db: self.r.db.clone(),
+            vhost: self.r.name.clone(),
+            queue_id: q.id,
+            queue: q.name.clone(),
+            from: e.deps.leases.me().to_owned(),
+        }
+    }
+
+    /// The gateway a queue's owner should be on when no one holds its
+    /// lease: a live move target, else the rendezvous choice. `None`
+    /// without placement or candidates.
+    async fn choose(&self, e: &Inner, object: u64) -> (Option<String>, i64) {
+        let Some(pl) = &e.deps.placement else {
+            return (None, 0);
         };
-        let lost = match e.deps.leases.acquire(self.r.tenant, q.id).await {
-            Ok(Acquired::Mine(t)) => t,
-            Ok(Acquired::Held(g)) => {
-                fail(
+        let cands = pl.candidates(self.r.tenant).await;
+        if cands.is_empty() {
+            return (None, 0);
+        }
+        let cooldown = i64::try_from(self.settings().owner_move_cooldown_ms).unwrap_or(0);
+        if let Some((g, at)) = pl.preferred(self.r.tenant, object).await
+            && cands.contains(&g)
+        {
+            return (Some(g), at.saturating_add(cooldown));
+        }
+        (
+            crate::relay::rendezvous(&cands, self.r.tenant, object).cloned(),
+            0,
+        )
+    }
+
+    /// Whether this gateway may own the vhost's queues (it is one of the
+    /// placement's candidates, or there is no placement).
+    async fn may_own_here(&self, e: &Inner) -> bool {
+        match &e.deps.placement {
+            None => true,
+            Some(pl) => {
+                let c = pl.candidates(self.r.tenant).await;
+                c.is_empty() || c.iter().any(|g| g == e.deps.leases.me())
+            }
+        }
+    }
+
+    /// Takes the lease here: the owner runs here, or (`Held`) relays to
+    /// the holder.
+    async fn take_lease(&self, e: &Inner, q: &QueueDef, serve: bool) -> Result<Plan, MqError> {
+        match e.deps.leases.acquire(self.r.tenant, q.id).await? {
+            Acquired::Mine(lost) => match e.deps.catalog.store(&self.r).await {
+                Ok(store) => Ok(Plan::Local { lost, store }),
+                Err(err) => {
+                    e.deps.leases.release(self.r.tenant, q.id).await;
+                    Err(err)
+                }
+            },
+            Acquired::Held(g) if e.deps.peers.is_none() => Err(MqError::new(
+                MqCode::OwnerMoved,
+                format!(
+                    "queue '{}' is served by gateway {g}; connect there (no queue relay between gateways on this one)",
+                    q.name
+                ),
+            )),
+            Acquired::Held(g) if serve => Err(MqError::new(
+                MqCode::OwnerMoved,
+                format!("queue '{}' is owned by gateway {g}", q.name),
+            )),
+            Acquired::Held(g) => Ok(Plan::Remote(g)),
+        }
+    }
+
+    /// Where a slot's owner is.
+    async fn resolve(&self, e: &Inner, q: &QueueDef, serve: bool) -> Result<Plan, MqError> {
+        let me = e.deps.leases.me();
+        if let Some(g) = &q.temp_on {
+            return if g == me {
+                Ok(Plan::Temp)
+            } else if serve || e.deps.peers.is_none() {
+                Err(MqError::new(
+                    MqCode::OwnerMoved,
+                    format!("queue '{}' lives on gateway {g}", q.name),
+                ))
+            } else {
+                Ok(Plan::Remote(g.clone()))
+            };
+        }
+        if serve || e.deps.peers.is_none() {
+            return self.take_lease(e, q, serve).await;
+        }
+        match e.deps.leases.holder(self.r.tenant, q.id).await? {
+            Some(g) if g == me => self.take_lease(e, q, false).await,
+            Some(g) => Ok(Plan::Remote(g)),
+            None => match self.choose(e, q.id).await {
+                (Some(g), _) if g != me => Ok(Plan::Remote(g)),
+                _ => self.take_lease(e, q, false).await,
+            },
+        }
+    }
+
+    /// A slot: finds the owner and serves the commands, here or over the
+    /// relay, looking again when the owner moves.
+    async fn run_slot(
+        self: Arc<Self>,
+        q: Arc<QueueDef>,
+        mut rx: mpsc::UnboundedReceiver<Cmd>,
+        kind: watch::Sender<SlotKind>,
+        serve: bool,
+    ) {
+        let Some(e) = self.engine.upgrade() else {
+            return;
+        };
+        let mut forced: Option<String> = None;
+        let mut ready: Option<Plan> = None;
+        let mut rounds = 0u32;
+        let mut window = e.deps.clock.now_ms();
+        loop {
+            if self.stop.is_cancelled() {
+                owner::fail_all(
                     &mut rx,
-                    MqError::new(
+                    &MqError::new(MqCode::OwnerMoved, "the gateway is stopping"),
+                );
+                break;
+            }
+            // Damping: an owner that keeps moving is given up on for now.
+            let now = e.deps.clock.now_ms();
+            if now - window > 2_000 {
+                window = now;
+                rounds = 0;
+            }
+            rounds += 1;
+            if rounds > 8 {
+                owner::fail_all(
+                    &mut rx,
+                    &MqError::new(
                         MqCode::OwnerMoved,
-                        format!(
-                            "queue '{}' is served by gateway {g}; connect there (the queue relay between gateways is not available)",
-                            q.name
-                        ),
+                        format!("queue '{}': its owner keeps moving", q.name),
                     ),
                 );
-                return;
+                break;
             }
-            Err(err) => {
-                fail(&mut rx, err);
-                return;
-            }
-        };
-        let store = match e.deps.catalog.store(&self.r).await {
-            Ok(s) => s,
-            Err(err) => {
-                e.deps.leases.release(self.r.tenant, q.id).await;
-                fail(&mut rx, err);
-                return;
-            }
-        };
-        // A lost lease stops the owner (its next write would be fenced
-        // anyway).
-        if let Some(h) = self.slot_of(q.id) {
-            let stop = self.stop.clone();
-            tokio::spawn(async move {
-                tokio::select! {
-                    () = lost.cancelled() => { let _ = h.send(Cmd::Stop); }
-                    () = stop.cancelled() => { let _ = h.send(Cmd::Stop); }
-                    () = h.tx.closed() => {}
+            let plan = if let Some(p) = ready.take() {
+                Ok(p)
+            } else {
+                match forced.take() {
+                    Some(g) if g != e.deps.leases.me() => Ok(Plan::Remote(g)),
+                    _ => self.resolve(&e, &q, serve).await,
                 }
-            });
+            };
+            let plan = match plan {
+                Ok(p) => p,
+                Err(err) => {
+                    owner::fail_all(&mut rx, &err);
+                    break;
+                }
+            };
+            match plan {
+                Plan::Temp => {
+                    let done = CancellationToken::new();
+                    let _ = kind.send(SlotKind::Local(done.clone()));
+                    let store: Arc<dyn MsgStore> = Arc::clone(&self.mem) as Arc<dyn MsgStore>;
+                    let _ = owner::run_owned(self.owner_params(&e, &q, i64::MAX), store, rx).await;
+                    done.cancel();
+                    break;
+                }
+                Plan::Local { lost, store } => {
+                    let done = CancellationToken::new();
+                    let _ = kind.send(SlotKind::Local(done.clone()));
+                    let (_, no_move_before) = if e.deps.placement.is_some() {
+                        self.choose(&e, q.id).await
+                    } else {
+                        (None, 0)
+                    };
+                    // A lost lease stops the owner (its next write would
+                    // be fenced anyway).
+                    if let Some(h) = self.slot_of(q.id) {
+                        let stop = self.stop.clone();
+                        let done2 = done.clone();
+                        tokio::spawn(async move {
+                            tokio::select! {
+                                () = lost.cancelled() => { let _ = h.send(Cmd::Stop); }
+                                () = stop.cancelled() => { let _ = h.send(Cmd::Stop); }
+                                () = done2.cancelled() => {}
+                                () = h.tx.closed() => {}
+                            }
+                        });
+                    }
+                    let exit =
+                        owner::run_owned(self.owner_params(&e, &q, no_move_before), store, rx)
+                            .await;
+                    done.cancel();
+                    e.deps.leases.release(self.r.tenant, q.id).await;
+                    match exit {
+                        Exit::Stopped => break,
+                        Exit::HandedOff { to, rx: back } => {
+                            tracing::info!(queue = %q.name, to = %to, "queue owner handed off");
+                            rx = back;
+                            forced = Some(to);
+                        }
+                    }
+                }
+                Plan::Remote(g) => {
+                    let _ = kind.send(SlotKind::Remote(g.clone()));
+                    let Some(peers) = e.deps.peers.clone() else {
+                        owner::fail_all(
+                            &mut rx,
+                            &MqError::new(MqCode::OwnerMoved, "no queue relay"),
+                        );
+                        break;
+                    };
+                    let link = match peers.open(&g, self.queue_ref(&e, &q)).await {
+                        Ok(l) => l,
+                        Err(err) => {
+                            // A chosen owner that can't be reached: if no
+                            // one holds the lease, own the queue here.
+                            if q.temp_on.is_none()
+                                && self.may_own_here(&e).await
+                                && matches!(
+                                    e.deps.leases.holder(self.r.tenant, q.id).await,
+                                    Ok(None)
+                                )
+                                && let Ok(p @ Plan::Local { .. }) =
+                                    self.take_lease(&e, &q, true).await
+                            {
+                                ready = Some(p);
+                                continue;
+                            }
+                            tracing::debug!(queue = %q.name, gateway = %g, error = %err, "queue owner unreachable");
+                            owner::fail_all(&mut rx, &err);
+                            break;
+                        }
+                    };
+                    match crate::relay::remote(link, &mut rx).await {
+                        RemoteEnd::Stopped => break,
+                        RemoteEnd::Lost(err) => {
+                            tracing::debug!(queue = %q.name, gateway = %g, error = %err, "queue relay ended; looking for the owner again");
+                            let _ = kind.send(SlotKind::Resolving);
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                        }
+                    }
+                }
+            }
         }
-        owner::run(params, store, rx).await;
-        e.deps.leases.release(self.r.tenant, q.id).await;
+        let _ = kind.send(SlotKind::Gone);
+        let mut o = lock(&self.owners);
+        if o.get(&q.id).is_some_and(|h| !h.alive()) {
+            o.remove(&q.id);
+        }
     }
 
     /// Re-attaches a consumer whose owner moved.
@@ -410,6 +661,8 @@ impl VShared {
                     no_ack: rec.no_ack,
                     exclusive: rec.exclusive,
                     priority: rec.priority,
+                    held: lock(&rec.held).iter().copied().collect(),
+                    from: None,
                 };
                 if !h.send(Cmd::Attach(spec, tx)) {
                     continue;
@@ -482,7 +735,7 @@ impl VShared {
                 t.clone()
             };
             if let Some(e) = self.engine.upgrade() {
-                e.deps.temps.publish(&self.r, &set);
+                e.deps.temps.publish(&self.r, &set).await;
             }
         } else if let Some(e) = self.engine.upgrade()
             && let Err(err) = e
@@ -620,7 +873,9 @@ impl VShared {
             if lease.is_none() {
                 continue;
             }
-            if durable.is_none() {
+            // A store a shard move left behind is opened again where the
+            // tenant's map points now.
+            if durable.as_ref().is_none_or(|s| s.stale()) {
                 durable = deps.catalog.store(&self.r).await.ok();
             }
             if let Some(s) = &durable {
@@ -629,6 +884,27 @@ impl VShared {
         }
         if lease.is_some() {
             deps.leases.release(self.r.tenant, fwd_object).await;
+        }
+    }
+
+    /// Hands a queue's owner to gateway `to` (the owner follows its
+    /// consumers): records the move, then tells the owner, which drains
+    /// its batch and gives the slot its waiting commands to relay there.
+    async fn move_owner(self: Arc<Self>, queue: u64, to: String) {
+        let Some(e) = self.engine.upgrade() else {
+            return;
+        };
+        let (Some(pl), Some(_)) = (&e.deps.placement, &e.deps.peers) else {
+            return;
+        };
+        if !pl.candidates(self.r.tenant).await.contains(&to) {
+            return;
+        }
+        pl.prefer(self.r.tenant, queue, &to, e.deps.clock.now_ms())
+            .await;
+        if let Some(h) = self.slot_of(queue) {
+            tracing::info!(queue, to = %to, "queue owner follows its consumers");
+            let _ = h.send(Cmd::HandOff(to));
         }
     }
 
@@ -646,6 +922,10 @@ impl VShared {
                         o.remove(&queue);
                     }
                 }
+                OwnerEvent::MoveWanted { queue, to } => {
+                    let v = Arc::clone(&self);
+                    tokio::spawn(async move { v.move_owner(queue, to).await });
+                }
                 OwnerEvent::AutoDelete { queue } => {
                     if let Some(q) = self.queue_by_id(queue) {
                         let v = Arc::clone(&self);
@@ -655,6 +935,19 @@ impl VShared {
             }
         }
     }
+}
+
+/// Where a slot's owner runs.
+enum Plan {
+    /// Here, under the lease.
+    Local {
+        lost: CancellationToken,
+        store: Arc<dyn MsgStore>,
+    },
+    /// Here, in memory (a temporary queue of this gateway).
+    Temp,
+    /// On that gateway, through the relay.
+    Remote(String),
 }
 
 /// The forwarder lease's object id: this bit plus the database id.
@@ -669,6 +962,9 @@ pub(crate) struct LocalSink {
 
 impl DeliverySink for LocalSink {
     fn deliver(&self, consumer: ConsumerId, d: Delivery) -> bool {
+        if !self.rec.no_ack {
+            lock(&self.rec.held).insert(d.id);
+        }
         let _ = self
             .rec
             .credit_out
@@ -702,6 +998,9 @@ impl DeliverySink for LocalSink {
 
 pub(crate) struct Inner {
     pub(crate) deps: EngineDeps,
+    /// Acknowledgements inside SQL sessions' open transactions, by
+    /// session: told to their owners when the transaction ends.
+    pub(crate) txn_holds: Mutex<HashMap<u64, Vec<(i64, crate::token::TokenData)>>>,
     vhosts: Mutex<HashMap<(u64, u32), Arc<VShared>>>,
     temp_ids: AtomicU64,
     stop: CancellationToken,
@@ -735,6 +1034,7 @@ impl QueueEngine {
         Self {
             inner: Arc::new(Inner {
                 deps,
+                txn_holds: Mutex::new(HashMap::new()),
                 vhosts: Mutex::new(HashMap::new()),
                 temp_ids: AtomicU64::new(1),
                 stop: CancellationToken::new(),

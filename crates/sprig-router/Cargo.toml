@@ -31,6 +31,8 @@ tracing.workspace = true
 # The differential suite (chapter 46) talks to the gateway and to a
 # reference MariaDB.
 mysql_async.workspace = true
+# Its LOAD DATA LOCAL INFILE cases hand mysql_async a stream (R3).
+futures.workspace = true
 proptest.workspace = true
 # The suite writes table groups and shard maps as chapters 15 and 20 do.
 sprig-catalog.workspace = true

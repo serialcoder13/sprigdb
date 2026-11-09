@@ -724,3 +724,125 @@ mod tests {
         );
     }
 }
+
+/// [`TempSet`] as other gateways read it (the temporary-queue registry,
+/// chapter 50's lead choice: not in the catalog): JSON, with arguments as
+/// base64 of AMQP table entries.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TempWire {
+    v: u32,
+    queues: Vec<TempQueueWire>,
+    bindings: Vec<TempBindingWire>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TempQueueWire {
+    id: u64,
+    name: String,
+    qtype: String,
+    durable: bool,
+    auto_delete: bool,
+    exclusive: Option<(String, u64)>,
+    args: String,
+    lanes: u16,
+    on: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TempBindingWire {
+    source: String,
+    dest: String,
+    to_exchange: bool,
+    key: String,
+    args: String,
+}
+
+fn table_b64(t: &FieldTable) -> String {
+    use base64::Engine as _;
+    let mut b = bytes::BytesMut::new();
+    t.encode_entries(&mut b);
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+
+fn b64_table(s: &str) -> FieldTable {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .ok()
+        .and_then(|b| FieldTable::decode_entries(&b, 0).ok())
+        .unwrap_or_default()
+}
+
+impl TempSet {
+    /// The registry form.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let w = TempWire {
+            v: 1,
+            queues: self
+                .queues
+                .values()
+                .map(|q| TempQueueWire {
+                    id: q.id,
+                    name: q.name.clone(),
+                    qtype: q.qtype.as_str().to_owned(),
+                    durable: q.durable,
+                    auto_delete: q.auto_delete,
+                    exclusive: q.exclusive.as_ref().map(|o| (o.gateway.clone(), o.conn)),
+                    args: table_b64(&q.arguments),
+                    lanes: q.lanes,
+                    on: q.temp_on.clone().unwrap_or_default(),
+                })
+                .collect(),
+            bindings: self
+                .bindings
+                .iter()
+                .map(|b| TempBindingWire {
+                    source: b.source.clone(),
+                    dest: b.dest.clone(),
+                    to_exchange: b.dest_kind == DestKind::Exchange,
+                    key: b.key.clone(),
+                    args: table_b64(&b.arguments),
+                })
+                .collect(),
+        };
+        serde_json::to_vec(&w).unwrap_or_default()
+    }
+
+    /// From the registry form; `None` for something unreadable.
+    #[must_use]
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let w: TempWire = serde_json::from_slice(b).ok()?;
+        let mut s = TempSet::default();
+        for q in w.queues {
+            let def = QueueDef {
+                id: q.id,
+                name: q.name.clone(),
+                qtype: QType::parse(&q.qtype)?,
+                durable: q.durable,
+                exclusive: q
+                    .exclusive
+                    .map(|(gateway, conn)| ExclusiveOwner { gateway, conn }),
+                auto_delete: q.auto_delete,
+                arguments: b64_table(&q.args),
+                lanes: q.lanes,
+                temp_on: (!q.on.is_empty()).then_some(q.on),
+            };
+            s.queues.insert(q.name, Arc::new(def));
+        }
+        for b in w.bindings {
+            s.bindings.push(BindingDef {
+                source: b.source,
+                dest: b.dest,
+                dest_kind: if b.to_exchange {
+                    DestKind::Exchange
+                } else {
+                    DestKind::Queue
+                },
+                key: b.key,
+                arguments: b64_table(&b.args),
+            });
+        }
+        Some(s)
+    }
+}

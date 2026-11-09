@@ -157,6 +157,10 @@ impl PassSession {
     #[allow(clippy::too_many_lines)] // the deploy, then the SELECT function
     async fn logic_deploy(&mut self, cx: &mut ExecCtx<'_>, text: &Bytes) -> Result<Vec<String>> {
         let decl = sprig_logic::declare::parse(&String::from_utf8_lossy(text))?;
+        // R9: triggers ON STREAM and ON QUEUE (`exec::msg_trigger`).
+        if decl.source.is_some() {
+            return Box::pin(self.logic_deploy_message(cx, decl)).await;
+        }
         if matches!(
             decl.kind,
             sprig_logic::declare::Kind::Validation
@@ -298,11 +302,11 @@ impl PassSession {
 // ---- engine-tier calls (R7 order 4) ----------------------------------------
 
 /// A request from the KIRun run to this session: one statement.
-type DbRequest = (DbOp, oneshot::Sender<Result<Reply>>);
+pub(super) type DbRequest = (DbOp, oneshot::Sender<Result<Reply>>);
 
 /// The run's `db`: statements go to the session's loop, which runs them
 /// through [`PassSession::tenant_text`].
-struct ChannelDb(mpsc::Sender<DbRequest>);
+pub(super) struct ChannelDb(pub(super) mpsc::Sender<DbRequest>);
 
 #[async_trait]
 impl DbBridge for ChannelDb {
@@ -851,7 +855,7 @@ impl PassSession {
                 biased;
                 r = &mut run => break r,
                 Some((op, reply)) = rx.recv() => {
-                    if !opened && matches!(op.shape, eb::Shape::Exec | eb::Shape::Call) {
+                    if !opened && matches!(op.shape, eb::Shape::Exec | eb::Shape::Call | eb::Shape::Sprig) {
                         let st = self.status();
                         if st.contains(StatusFlags::AUTOCOMMIT) && !st.contains(StatusFlags::IN_TRANS) {
                             if let Err(e) = self.session_stmt(cx, "START TRANSACTION", wire).await {
@@ -882,7 +886,12 @@ impl PassSession {
     }
 
     /// One `Sprig.Db.*` statement, run as if the client had sent it.
-    async fn engine_db(&mut self, cx: &mut ExecCtx<'_>, op: DbOp, wire: Wire) -> Result<Reply> {
+    pub(super) async fn engine_db(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        op: DbOp,
+        wire: Wire,
+    ) -> Result<Reply> {
         let mut sink = Collect {
             wire,
             columns: Vec::new(),

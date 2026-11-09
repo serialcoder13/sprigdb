@@ -160,14 +160,16 @@ impl JobHandler for StreamSequencer {
     }
 
     fn class(&self) -> JobClass {
-        JobClass::Other
+        JobClass::Consumer
     }
 
     async fn run(&self, cx: &JobCtx) -> std::result::Result<Value, String> {
         let tenant = TenantId(cx.spec["tenant"].as_u64().ok_or("spec.tenant is missing")?);
         let stream = StreamId(cx.spec["stream"].as_u64().ok_or("spec.stream is missing")?);
         let env: Arc<dyn JobEnv> = Arc::new(self.0.clone());
-        match run_job(env, tenant, stream, cx.cancel.clone(), &Progress(cx)).await {
+        // A child token: the sequencer stops itself when its stream is
+        // dropped, and the job must still record its end then.
+        match run_job(env, tenant, stream, cx.cancel.child_token(), &Progress(cx)).await {
             Ok(JobEnd::Gone) => Ok(json!({"end": "gone", "stream": stream.0})),
             // Fenced or lost: another sequencer runs; the controller
             // replaces this job if none does.

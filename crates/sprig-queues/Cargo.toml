@@ -38,6 +38,10 @@ uuid.workspace = true
 lapin = { version = "=4.12.3", default-features = false, features = ["default-runtime"] }
 fe2o3-amqp = { version = "=0.18.4", default-features = false }
 proptest.workspace = true
+# The live shard-move test runs a mover worker in process (chapter 10).
+sprig-cluster.workspace = true
+sprig-mover.workspace = true
+sprig-shard.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "test-util", "rt-multi-thread"] }
 rustls.workspace = true
 rustls-pemfile.workspace = true

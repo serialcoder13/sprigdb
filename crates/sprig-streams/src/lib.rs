@@ -22,7 +22,9 @@
 //! - [`retention`]: day partitions ahead, time and size retention,
 //!   compaction, and the outbox sweep (step 7);
 //! - [`read`]: reading the log by partition and offset, the high
-//!   watermark, and the long-poll wait, for the Kafka front end.
+//!   watermark, and the long-poll wait, for the Kafka front end;
+//! - [`offsets`]: committing an offset inside the caller's transaction
+//!   (`sprig.commit_offset`, `db.commitOffset`, triggers on streams).
 //!
 //! Not built here: the Kafka codec and broker (`sprig-proto-kafka`, steps
 //! 8–13), HTTP and gRPC consumers (14), consumer-group coordination (only
@@ -44,6 +46,7 @@ pub mod grammar;
 pub mod maria;
 pub mod memlog;
 pub mod model;
+pub mod offsets;
 pub mod partition;
 pub mod publish;
 pub mod read;

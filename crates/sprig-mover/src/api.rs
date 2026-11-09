@@ -136,10 +136,17 @@ pub enum Routing {
         /// The table group.
         group: u32,
     },
-    /// By a new key's hash (R3).
-    NewKey {
-        /// The new key's specification, as chapter 15 writes it.
-        key: String,
+    /// By a new key's hash (R3, chapter 16's online re-key): every row of
+    /// the group's members is hashed again under `key` from its own
+    /// `columns`, and goes to the target whose range holds the new hash.
+    Rekey {
+        /// The table group (it keeps its id; its shards are replaced).
+        group: u32,
+        /// The new key's `KeySpec`, as `table_groups.key_spec` stores it.
+        key: serde_json::Value,
+        /// Per member table name, the columns that supply the new key,
+        /// in key order.
+        columns: std::collections::BTreeMap<String, Vec<String>>,
     },
 }
 
@@ -376,13 +383,41 @@ impl JobSpec {
         }
     }
 
-    /// The table group of a hash-range job.
+    /// The table group of a hash-range job (split, merge, shard move or
+    /// re-key).
     #[must_use]
     pub fn group(&self) -> Option<u32> {
         match self.routing {
-            Routing::HashRange { group } => Some(group),
+            Routing::HashRange { group } | Routing::Rekey { group, .. } => Some(group),
             _ => None,
         }
+    }
+
+    /// A re-key of table group `group` (chapter 16, "Online re-key"):
+    /// `sources` are all of the group's shards, on one cluster, each
+    /// `(shard, its schemas, its range)`; `targets` are new shards
+    /// `(shard, range)` on `to` covering the whole hash space. Rows route
+    /// by `key` (a `KeySpec` as JSON) over each member's `columns`.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)] // the job's parts, as `reshard` plus the key
+    pub fn rekey(
+        tenant: TenantId,
+        group: u32,
+        from: &ClusterId,
+        sources: Vec<(u32, Vec<String>, HashRange)>,
+        to: &ClusterId,
+        targets: Vec<(u32, HashRange)>,
+        key: serde_json::Value,
+        columns: std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        let mut s = Self::reshard(tenant, group, from, sources, to, targets);
+        s.kind = JobKind::Rekey;
+        s.routing = Routing::Rekey {
+            group,
+            key,
+            columns,
+        };
+        s
     }
 }
 

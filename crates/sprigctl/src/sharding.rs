@@ -9,6 +9,7 @@
 //! sprigctl shard merge acme 3 6 7
 //! sprigctl shard move acme 3 4 --to dc-a-c2      # one shard of group 3
 //! sprigctl shard move acme --to dc-a-c2          # the whole tenant (R0)
+//! sprigctl shard rekey acme 3 --key customer_id [--member events=cust] [--shards 4] [--to dc-a-c2]
 //! sprigctl advisor run acme
 //! sprigctl advisor show acme [run]
 //! sprigctl advisor apply acme <run>
@@ -79,6 +80,34 @@ pub(crate) fn shard_subcommands(cmd: Command) -> Command {
             .arg(group())
             .arg(Arg::new("left").required(true).help("The lower shard"))
             .arg(Arg::new("right").required(true).help("The upper shard")),
+    )
+    .subcommand(
+        Command::new("rekey")
+            .about("Re-key a table group online: move its rows to new shards routed by another column")
+            .arg(tenant())
+            .arg(group())
+            .arg(
+                Arg::new("key")
+                    .long("key")
+                    .required(true)
+                    .help("The new key's column, in every member"),
+            )
+            .arg(
+                Arg::new("member")
+                    .long("member")
+                    .action(clap::ArgAction::Append)
+                    .help("table=column: a member's own column for the new key (repeatable)"),
+            )
+            .arg(
+                Arg::new("shards")
+                    .long("shards")
+                    .help("How many new shards (default: as many as now, at least 2)"),
+            )
+            .arg(
+                Arg::new("to")
+                    .long("to")
+                    .help("The cluster for the new shards (default: the group's)"),
+            ),
     )
 }
 
@@ -216,6 +245,21 @@ pub(crate) async fn run_shard(
             "group": num::<u32>(m, "group")?, "kind": "merge",
             "left": num::<u32>(m, "left")?, "right": num::<u32>(m, "right")?,
         }),
+        "rekey" => {
+            let mut members = serde_json::Map::new();
+            for v in m.get_many::<String>("member").into_iter().flatten() {
+                let Some((t, col)) = v.split_once('=') else {
+                    return Err(Failed(format!("--member {v}: expected table=column")));
+                };
+                members.insert(t.trim().to_owned(), json!(col.trim()));
+            }
+            json!({
+                "group": num::<u32>(m, "group")?, "kind": "rekey",
+                "column": m.get_one::<String>("key").cloned().unwrap_or_default(),
+                "members": members, "shards": num::<u32>(m, "shards")?,
+                "to": m.get_one::<String>("to"),
+            })
+        }
         "move" => {
             let (Some(g), Some(s)) = (num::<u32>(m, "group")?, num::<u32>(m, "shard")?) else {
                 return Ok(false);

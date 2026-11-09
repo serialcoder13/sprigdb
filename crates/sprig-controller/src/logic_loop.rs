@@ -12,6 +12,12 @@
 //!   module, schema, run); the index follows next_fire_at
 //! ```
 //!
+//! triggers on streams and queues (R9): each index entry
+//!   logic/msg/<tenant>/<binding> without a live `logic_stream_trigger` or
+//!   `logic_queue_trigger` job → submit one (spec: tenant, binding), in the
+//!   `consumer` job class; the job removes the entry when its stream or
+//!   queue is gone
+//!
 //! Logic jobs carry their tenant in the spec, not in `tenant_id`, so a
 //! long-running trigger doesn't count as the tenant's running job for
 //! dispatch's per-tenant rules (exclusive kinds, `control.tenant_jobs_per_hour`).
@@ -112,6 +118,33 @@ impl LogicLoop {
             )
             .await?;
             tracing::info!(tenant = %s.tenant, binding, job = %id, "after-commit trigger job submitted");
+        }
+        Ok(())
+    }
+
+    /// Triggers on streams and queues (see the module docs).
+    async fn message_triggers(&self, cx: &LoopCx, live: &HashSet<(u64, u64)>) -> Result<()> {
+        let l = cx.leader()?;
+        for e in sprig_logic::messages::list_index(cx.dc.as_ref()).await? {
+            if live.contains(&(e.tenant.0, e.binding)) {
+                continue;
+            }
+            let id = submit(
+                l,
+                cx.clock.as_ref(),
+                NewJob {
+                    kind: e.job_kind().into(),
+                    class: JobClass::Consumer,
+                    tenant_id: None,
+                    clusters: Vec::new(),
+                    priority: 0,
+                    cause: "logic".into(),
+                    zone: None,
+                    spec: json!({"tenant": e.tenant.0, "binding": e.binding}),
+                },
+            )
+            .await?;
+            tracing::info!(tenant = %e.tenant, binding = e.binding, kind = e.job_kind(), job = %id, "trigger on a stream or queue: job submitted");
         }
         Ok(())
     }
@@ -247,6 +280,7 @@ impl Reconciler for LogicLoop {
     async fn reconcile(&self, cx: &LoopCx, _key: &LogicTick) -> Result<Outcome> {
         let jobs = list_jobs(cx.dc.as_ref()).await?;
         let mut live_triggers = HashSet::new();
+        let mut live_msg = HashSet::new();
         let mut running = HashSet::new();
         for j in &jobs {
             let job = j.job();
@@ -259,6 +293,12 @@ impl Reconciler for LogicLoop {
             {
                 live_triggers.insert((t, b));
             }
+            if (job.kind == sprig_logic::messages::STREAM_JOB_KIND
+                || job.kind == sprig_logic::messages::QUEUE_JOB_KIND)
+                && let (Some(t), Some(b)) = (spec["tenant"].as_u64(), spec["binding"].as_u64())
+            {
+                live_msg.insert((t, b));
+            }
             if job.kind == schedule::JOB_KIND
                 && let Some(r) = spec["run"].as_str()
             {
@@ -267,6 +307,9 @@ impl Reconciler for LogicLoop {
         }
         if let Err(e) = self.triggers(cx, &live_triggers).await {
             tracing::warn!(error = %e, "logic loop: triggers");
+        }
+        if let Err(e) = self.message_triggers(cx, &live_msg).await {
+            tracing::warn!(error = %e, "logic loop: triggers on streams and queues");
         }
         if let Err(e) = self.schedules(cx, &running).await {
             tracing::warn!(error = %e, "logic loop: schedules");

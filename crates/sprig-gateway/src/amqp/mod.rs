@@ -16,6 +16,7 @@
 //!   database doesn't exist are refused.
 
 pub mod identity;
+pub mod peer;
 pub mod queues;
 
 use std::borrow::Cow;
@@ -118,6 +119,13 @@ key!(
     "Accept bare queue names and AMQP address v1 forms"
 );
 
+/// The temporary-queue registry, relay and placement of the engine.
+type RelayParts = (
+    Arc<dyn sprig_queues::engine::TempRegistry>,
+    Option<Arc<dyn sprig_queues::relay::PeerTransport>>,
+    Option<Arc<dyn sprig_queues::relay::Placement>>,
+);
+
 /// The queue engine of the AMQP listeners: `sprig-queues` with catalog
 /// logins, else the in-memory engine.
 pub struct GatewayQueues {
@@ -160,7 +168,13 @@ impl GatewayQueues {
     /// The `sprig-queues` engine over `tenants` (chapter 50 steps 2–10):
     /// owner leases in `dc_store` as gateway `gateway_id`, stopped (and
     /// the leases revoked) at `stop`.
+    ///
+    /// With `relay` (the peer service is on), queues are shared by every
+    /// gateway of the tenant's home DC: owners are placed by rendezvous
+    /// hashing and follow their consumers, other gateways relay to them,
+    /// and temporary queues are published in etcd.
     #[must_use]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)] // the engine's footing, one each
     pub fn with_engine(
         tenants: Arc<TenantServices>,
         live: LiveSettings,
@@ -168,15 +182,36 @@ impl GatewayQueues {
         dc_store: Arc<dyn sprig_meta::MetaStore>,
         gateway_id: String,
         slot: u32,
+        relay: Option<peer::GatewayRelay>,
         stop: sprig_common::CancellationToken,
     ) -> Self {
-        let leases = Arc::new(queues::EtcdLeases::new(dc_store, gateway_id));
+        let leases = Arc::new(queues::EtcdLeases::new(
+            Arc::clone(&dc_store),
+            gateway_id.clone(),
+        ));
+        let (temps, peers, placement): RelayParts = match relay {
+            Some(r) => {
+                let temps = Arc::new(peer::EtcdTemps::new(Arc::clone(&dc_store), gateway_id));
+                tokio::spawn(Arc::clone(&temps).run(stop.clone()));
+                (
+                    temps,
+                    Some(Arc::new(r)),
+                    Some(Arc::new(peer::GatewayPlacement::new(
+                        Arc::clone(&dc_store),
+                        peer::home_of(Arc::clone(&tenants.locator)),
+                    ))),
+                )
+            }
+            None => (Arc::new(sprig_queues::engine::NoTemps), None, None),
+        };
         let engine = Arc::new(QueueEngine::new(EngineDeps {
             catalog: Arc::new(queues::GatewayMq::new(Arc::clone(&tenants), live.clone())),
             leases: Arc::clone(&leases) as Arc<dyn sprig_queues::engine::Leases>,
-            temps: Arc::new(sprig_queues::engine::NoTemps),
+            temps,
             clock: Arc::new(sprig_queues::owner::SystemClock),
             slot,
+            peers,
+            placement,
         }));
         {
             let e = Arc::clone(&engine);
@@ -264,11 +299,25 @@ impl AmqpFrontend {
         node: String,
         slot: u32,
     ) -> Self {
+        Self::with_replies(identity, backend, live, dc, node, DirectReplyTo::new(slot))
+    }
+
+    /// The front end with a given direct reply-to registry (a key shared
+    /// by the DC's gateways and a relay to them, [`peer::reply_key`]).
+    #[must_use]
+    pub fn with_replies(
+        identity: Arc<identity::AmqpIdentity>,
+        backend: Arc<dyn QueueBackend>,
+        live: LiveSettings,
+        dc: DcId,
+        node: String,
+        replies: Arc<DirectReplyTo>,
+    ) -> Self {
         Self {
             services: Services {
                 identity,
                 backend,
-                replies: DirectReplyTo::new(slot),
+                replies,
             },
             live,
             dc,

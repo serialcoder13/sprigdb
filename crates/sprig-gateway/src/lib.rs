@@ -75,6 +75,8 @@ pub mod registry;
 pub mod session;
 pub mod tenant;
 pub mod tls;
+// Chapter 41 (R9): workers' runs of triggers on streams and queues.
+pub mod triggers;
 pub mod workload;
 pub mod write_load;
 
@@ -331,30 +333,47 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             stop.clone(),
         ))
     });
-    // AMQP on 5672 and 5671 (chapter 50, R9).
-    let amqp_fe = Arc::new(amqp::AmqpFrontend::new(
+    // AMQP on 5672 and 5671 (chapter 50, R9). The queue relay to other
+    // gateways' owners and the direct reply-to key the DC's gateways share
+    // go over the peer service.
+    let queue_relay = amqp::peer::GatewayRelay::new(Arc::clone(&stores.dc), peer_tls.clone());
+    let replies = match amqp::peer::reply_key(stores.dc.as_ref()).await {
+        Some(k) => sprig_proto_amqp::reply_to::DirectReplyTo::with_key(u32::from(sessions.slot()), &k),
+        None => sprig_proto_amqp::reply_to::DirectReplyTo::new(u32::from(sessions.slot())),
+    };
+    replies.set_relay(Arc::new(queue_relay.clone()));
+    let amqp_queues = Arc::new(match &tenants {
+        // Chapter 50 steps 2-10: the queue engine over the catalog.
+        Some(t) => amqp::GatewayQueues::with_engine(
+            Arc::clone(t),
+            live.clone(),
+            dc.clone(),
+            Arc::clone(&stores.dc),
+            gateway_id.clone(),
+            u32::from(sessions.slot()),
+            Some(queue_relay),
+            stop.clone(),
+        ),
+        None => amqp::GatewayQueues::new(None, live.clone(), dc.clone()),
+    });
+    let queue_peer = amqp_queues.engine().map(|e| {
+        amqp::peer::QueuePeerService::new(
+            Arc::clone(e),
+            Arc::clone(&replies),
+            u32::from(sessions.slot()),
+        )
+    });
+    let amqp_fe = Arc::new(amqp::AmqpFrontend::with_replies(
         Arc::new(amqp::identity::AmqpIdentity::new(
             Arc::clone(&login),
             live.clone(),
             dc.clone(),
         )),
-        Arc::new(match &tenants {
-            // Chapter 50 steps 2-10: the queue engine over the catalog.
-            Some(t) => amqp::GatewayQueues::with_engine(
-                Arc::clone(t),
-                live.clone(),
-                dc.clone(),
-                Arc::clone(&stores.dc),
-                gateway_id.clone(),
-                u32::from(sessions.slot()),
-                stop.clone(),
-            ),
-            None => amqp::GatewayQueues::new(None, live.clone(), dc.clone()),
-        }),
+        amqp_queues,
         live.clone(),
         dc.clone(),
         gateway_id.clone(),
-        u32::from(sessions.slot()),
+        replies,
     ));
     let peer_host = Arc::new(PeerHost {
         login: Arc::clone(&login),
@@ -362,6 +381,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         sessions: Arc::clone(&sessions),
         gateway_id: gateway_id.clone(),
         lifecycle: lifecycle.clone(),
+        queue_peer,
     });
     let binds = bind_overrides(&ctx)?;
     let peer_bind = match binds.get("peer") {
@@ -528,10 +548,23 @@ struct PeerHost {
     sessions: Arc<SessionTable>,
     gateway_id: String,
     lifecycle: lifecycle::Lifecycle,
+    /// Chapter 50's queue relay, when the queue engine runs here.
+    queue_peer: Option<amqp::peer::QueuePeerService>,
 }
 
 #[async_trait::async_trait]
 impl peer::PeerHost for PeerHost {
+    fn queue_peer(&self) -> Option<amqp::peer::QueuePeerService> {
+        self.queue_peer.clone()
+    }
+
+    fn logic_peer(&self) -> Option<triggers::LogicPeerService> {
+        Some(triggers::LogicPeerService::new(
+            Arc::clone(&self.login),
+            Arc::clone(&self.core.engine),
+        ))
+    }
+
     fn sessions(&self) -> &Arc<SessionTable> {
         &self.sessions
     }

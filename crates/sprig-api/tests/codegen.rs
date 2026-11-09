@@ -13,6 +13,8 @@ const PROTOS: &[&str] = &[
     "sprig/v1/functions.proto",
     "sprig/admin/v1/admin.proto",
     "sprig/internal/v1/peer.proto",
+    "sprig/internal/logic/v1/logic.proto",
+    "sprig/internal/v1/queues.proto",
     "grpc/health/v1/health.proto",
     "google/rpc/status.proto",
     "google/rpc/error_details.proto",

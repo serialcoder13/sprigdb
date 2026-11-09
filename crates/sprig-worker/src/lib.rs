@@ -10,6 +10,8 @@
 
 pub mod inherit;
 pub mod logic;
+// Chapter 41 (R9): triggers on streams and queues.
+pub mod msg_triggers;
 pub mod permit;
 pub mod runtime;
 // Chapter 45 (R9): stream sequencers.
@@ -146,11 +148,27 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     )?);
     // Chapter 45's stream sequencers, on the logic jobs' pools and feeds.
     let streams_env = streams::StreamsEnv::from_logic(&env);
+    // Chapter 41 (R9): triggers on streams and queues, run in gateways.
+    let peer_pems = cfg
+        .tls
+        .as_ref()
+        .map(msg_triggers::PeerPems::from_config)
+        .transpose()?;
+    let msg_env = msg_triggers::MsgEnv {
+        dc: dc_logic.clone(),
+        locator: Arc::clone(&env.locator),
+        pools: Arc::clone(&env.pools),
+        gateways: Arc::new(msg_triggers::Gateways::new(dc_logic.clone(), peer_pems)),
+        opts: env.opts.clone(),
+        budget: env.trigger_budget,
+    };
     let jobs = runtime::WorkerRuntime::new(dc_logic, Arc::new(SystemClock), worker.clone())
         .with_handler(Arc::new(logic::LogicTrigger(env.clone())))
         .with_handler(Arc::new(logic::LogicSchedule(env)))
         .with_handler(Arc::new(inherit::InheritCopy(inherit_env)))
-        .with_handler(Arc::new(streams::StreamSequencer(streams_env)));
+        .with_handler(Arc::new(streams::StreamSequencer(streams_env)))
+        .with_handler(Arc::new(msg_triggers::StreamTrigger(msg_env.clone())))
+        .with_handler(Arc::new(msg_triggers::QueueTrigger(msg_env)));
     ctx.health.set_ready();
     tracing::info!(%role, %worker, "ready: running mover and logic jobs");
     let shutdown = ctx.shutdown.clone();

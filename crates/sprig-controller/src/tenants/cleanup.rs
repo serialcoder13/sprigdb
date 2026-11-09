@@ -4,8 +4,8 @@
 //! ```text
 //! cleanup(T), state deleting, every step idempotent (a crash resumes):
 //! 1. mover jobs of T in this DC: cancel those before their cutover; end the
-//!    retention of retaining ones now, flagged purge_tenant; wait (39072,
-//!    Blocked) until every one is done or rolled_back
+//!    retention of retaining ones now, flagged purge_tenant; wait (the loop
+//!    looks again every 2 s) until every one is done or rolled_back
 //! 2. hooks.dropping; refuse (39072) while the catalog lists live databases;
 //!    read the catalog's database ids
 //! 3. on every cluster of the DC but rejected and retired ones (default

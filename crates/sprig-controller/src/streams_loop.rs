@@ -103,7 +103,9 @@ impl Reconciler for StreamsLoop {
                 cx.clock.as_ref(),
                 NewJob {
                     kind: JOB_KIND.into(),
-                    class: JobClass::Other,
+                    // Their own pool: one job per stream, for as long as
+                    // it exists (r9triggers).
+                    class: JobClass::Consumer,
                     tenant_id: None,
                     clusters: Vec::new(),
                     priority: 0,

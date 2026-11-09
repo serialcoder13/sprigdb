@@ -341,6 +341,121 @@ async fn placement_is_recorded_before_the_catalog() {
     .await;
 }
 
+/// A move's retaining job of tenant `tenant`, as the mover writes it.
+fn retaining_job(id: &str, tenant: TenantId) -> sprig_mover::JobRecord {
+    let v = serde_json::json!({
+        "job_id": id, "kind": "move_shard", "tenant_id": tenant.0,
+        "spec": {"kind": "move_shard", "tenant": tenant.0,
+            "sources": [{"cluster": "lt-c1", "shard": 0, "schemas": []}],
+            "targets": [{"cluster": "lt-c2", "shard": 0, "schemas": []}],
+            "routing": {"kind": "whole"}, "cutover": {"kind": "auto"},
+            "verify": {"kind": "full"}, "requested_by": "test"},
+        "state": "retaining", "retain_until_ms": u64::MAX / 2,
+        "created_ms": 1, "updated_ms": 1, "v": 1
+    });
+    serde_json::from_value(v).unwrap()
+}
+
+/// Regression (decision TD9): a tenant moved within the last 24 hours
+/// waits for its move job to drop the old copy. The tenant loop looks
+/// again within seconds ([`CLEANUP_JOBS_RECHECK`]), not after the 30 s of
+/// a blocked key, which outlasted `gateway-dev.sh down`'s wait: the
+/// controller was stopped with the new home's catalog, accounts and name
+/// rows still there. Once the job is done, cleanup moves on to the
+/// clusters (here unreachable, so it fails instead of waiting).
+#[tokio::test]
+async fn a_deletion_waiting_for_its_move_is_looked_at_again_within_seconds() {
+    use sprig_meta::elect::LeaderRecord;
+    use sprig_meta::elect::{Election, Elector};
+    use sprig_meta::session::SessionOpts;
+
+    let pools = StaticPools::new()
+        .with_url(cid("lt-c1"), "mysql://u:p@127.0.0.1:1")
+        .unwrap();
+    with_env(pools, None, |env| async move {
+        let _ = env.create("m", None, None).await.unwrap_err();
+        let id = env
+            .service
+            .directory()
+            .require(&env.name("m"))
+            .await
+            .unwrap()
+            .body()
+            .tenant_id;
+        env.service.fail(id, "test").await.unwrap();
+        let jobs = sprig_mover::JobStore::new(Arc::clone(&env.dc_store), Arc::new(SystemClock));
+        let rec = retaining_job("01a1c0ba-c97a-73f2-9f66-ea0d92ef9001", id);
+        let r = env
+            .dc_store
+            .txn(Txn {
+                when: Vec::new(),
+                then: vec![Op::Put {
+                    key: env
+                        .dc_store
+                        .tier()
+                        .key(&format!("mover/jobs/{}", rec.job_id.0))
+                        .unwrap(),
+                    value: Record::new(rec.clone()).encode().unwrap(),
+                    lease: None,
+                }],
+                otherwise: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(r.succeeded);
+        // Delete: the job's retention ends now, and cleanup waits for it.
+        let v = env.service.delete(&env.name("m"), &[]).await.unwrap();
+        assert_eq!(v.state, "deleting");
+        let (after, rev) = jobs.get(&rec.job_id).await.unwrap();
+        assert!(after.purge_tenant);
+        assert!(after.retain_until_ms.unwrap() <= jobs.now_ms());
+        assert_eq!(
+            env.service.cleanup(id, &[]).await.unwrap(),
+            Cleanup::WaitingForJobs(1)
+        );
+        // The loop looks again soon, not as a blocked key.
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let key = env.dc_store.tier().key("leader").unwrap();
+        let leadership = Election::new(
+            Arc::clone(&env.dc_store),
+            Arc::clone(&clock),
+            SessionOpts::new(Duration::from_secs(5)),
+        )
+        .campaign(
+            &key,
+            &LeaderRecord {
+                holder: "ctl".to_owned(),
+                dc: None,
+                build: "test".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let (cx, _stop) = crate::runtime::tests::cx_for(
+            &crate::runtime::Stores {
+                dc: Arc::clone(&env.dc_store),
+                global: Arc::clone(&env.global),
+            },
+            &clock,
+            Some(leadership),
+            crate::settings::ControlSettings::default(),
+        );
+        let lp = TenantLifecycle::new(Arc::clone(&env.service));
+        let out = lp.reconcile(&cx, &id).await.unwrap();
+        assert_eq!(out, Outcome::RequeueAfter(CLEANUP_JOBS_RECHECK));
+        assert!(CLEANUP_JOBS_RECHECK <= Duration::from_secs(5));
+        // The worker finishes the job: cleanup goes on to the catalog's
+        // cluster (unreachable here) instead of waiting.
+        let mut done = after.clone();
+        done.state = sprig_mover::JobState::Done;
+        assert!(jobs.put_if(&done, rev).await.unwrap().is_some());
+        let e = env.service.cleanup(id, &[]).await.unwrap_err();
+        assert_ne!(code(&e), 39072, "{e}");
+        assert!(env.service.directory().get(id).await.unwrap().is_some());
+    })
+    .await;
+}
+
 fn database(id: DbId, v: u64) -> DatabaseRow {
     DatabaseRow {
         db_id: id,

@@ -17,7 +17,8 @@
 //!
 //! - [`invoke`]: calling an engine-tier version through its wrapper's
 //!   marker row, on the fallback runtime ([`engine`]);
-//! - [`settings`]: the fallback tier's budgets and outbound allowlist.
+//! - [`settings`]: the fallback tier's budgets and outbound allowlist;
+//! - [`messages`]: triggers on streams and queues (R9).
 //!
 //! Not yet: validations, triggers, schedules, computed fields, QuickJS
 //! for JavaScript, invocation from other protocols, rollout and rollback,
@@ -38,6 +39,8 @@ pub mod declare;
 pub mod deploy;
 pub mod enforce;
 pub mod invoke;
+pub mod messages;
+pub mod msgrun;
 pub mod placement;
 pub mod schedule;
 pub mod service;

@@ -83,11 +83,18 @@ pub enum Action {
     /// `SET_ANY_DEFINER` (MariaDB `SET USER`): any tenant account as
     /// `DEFINER`.
     SetAnyDefiner = 31,
+    /// `SPRIG_SINK_ADMIN`: create, alter and drop sinks and connections
+    /// (chapter 51); granted by name only.
+    SinkAdmin = 32,
+    /// `SPRIG_FAN_IN`: read every member's instance of an inherited
+    /// definition, as fan-in readers and sinks do (chapters 42, 51);
+    /// granted by name only.
+    FanIn = 33,
 }
 
 impl Action {
     /// Every action, in bit order.
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 34] = [
         Action::Select,
         Action::Insert,
         Action::Update,
@@ -120,6 +127,8 @@ impl Action {
         Action::ConnectionAdmin,
         Action::SystemVariablesAdmin,
         Action::SetAnyDefiner,
+        Action::SinkAdmin,
+        Action::FanIn,
     ];
 
     /// The bit.
@@ -165,6 +174,8 @@ impl Action {
             Action::ConnectionAdmin => "CONNECTION_ADMIN",
             Action::SystemVariablesAdmin => "SYSTEM_VARIABLES_ADMIN",
             Action::SetAnyDefiner => "SET_ANY_DEFINER",
+            Action::SinkAdmin => "SPRIG_SINK_ADMIN",
+            Action::FanIn => "SPRIG_FAN_IN",
         }
     }
 
@@ -180,6 +191,8 @@ impl Action {
                 | Action::ConnectionAdmin
                 | Action::SystemVariablesAdmin
                 | Action::SetAnyDefiner
+                | Action::SinkAdmin
+                | Action::FanIn
                 | Action::Watch
                 | Action::BypassRls
         )
@@ -321,17 +334,20 @@ pub enum ObjectType {
 
 /// Actions grantable at the tenant level: every tenant-safe static and
 /// dynamic privilege.
-pub const TENANT_ACTIONS: ActionSet = ActionSet(u64::MAX >> 32);
+pub const TENANT_ACTIONS: ActionSet = ActionSet(u64::MAX >> 30);
 
 /// Actions of `ALL [PRIVILEGES] ON *.*`: everything tenant-scoped but
-/// `GRANT OPTION`, `SPRIG_TENANT_ADMIN` and `BYPASS RLS`, which are always
+/// `GRANT OPTION`, `SPRIG_TENANT_ADMIN`, `BYPASS RLS`, `SPRIG_SINK_ADMIN` and
+/// `SPRIG_FAN_IN`, which are always
 /// granted by name (chapter 29: the bootstrap admin holds `ALL` and
 /// `SPRIG_TENANT_ADMIN`).
 pub const ALL_TENANT: ActionSet = ActionSet(
     TENANT_ACTIONS.0
         & !Action::GrantOption.bit()
         & !Action::TenantAdmin.bit()
-        & !Action::BypassRls.bit(),
+        & !Action::BypassRls.bit()
+        & !Action::SinkAdmin.bit()
+        & !Action::FanIn.bit(),
 );
 
 /// Actions grantable at the database level (MySQL's `db` table).
@@ -463,6 +479,8 @@ const NAMES: &[(&str, Action)] = &[
     ("SYSTEM_VARIABLES_ADMIN", Action::SystemVariablesAdmin),
     ("SET_ANY_DEFINER", Action::SetAnyDefiner),
     ("SET USER", Action::SetAnyDefiner),
+    ("SPRIG_SINK_ADMIN", Action::SinkAdmin),
+    ("SPRIG_FAN_IN", Action::FanIn),
 ];
 
 /// Server-wide privileges of either server: dropped in a tenant.

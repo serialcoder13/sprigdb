@@ -184,6 +184,68 @@ impl MysqlTarget {
         }
     }
 
+    /// A re-key's target digests of source table `t`'s key range (see
+    /// `ShardRoute::rekey_digests`).
+    async fn rekey_digests(
+        &self,
+        r: &Arc<ShardRoute>,
+        t: &TableMeta,
+        after: Option<&Row>,
+        last: &Row,
+    ) -> Result<Vec<RowDigest>> {
+        let Some(rk) = r.rekey.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let cols = rk.columns_of(t)?;
+        let bare = ShardRoute::without_rk(t);
+        let mut all = Vec::new();
+        let num = |v: Option<&Value>| match v {
+            Some(Value::UInt(u)) => Some(*u),
+            Some(Value::Int(i)) => Some(u64::from_ne_bytes(i.to_ne_bytes())),
+            Some(Value::Bytes(b)) => String::from_utf8_lossy(b).parse().ok(),
+            _ => None,
+        };
+        for schema in r.targets_of(&t.schema) {
+            let tt = ShardRoute::retarget(&bare, &schema);
+            let mut exprs = format!(
+                "{}, {}, {}",
+                sql::digest_list(&tt),
+                quote(crate::route::RK_COLUMN),
+                quote(crate::route::RK_PREV_COLUMN)
+            );
+            for &i in &cols {
+                exprs.push_str(", ");
+                exprs.push_str(&quote(&t.columns[i].name));
+            }
+            let (q, p) = sql::range(&tt, &tt.name, &exprs, after, last);
+            let mut c = self.conn().await?;
+            let rows: Vec<MyRow> = c
+                .exec(q, Params::Positional(p))
+                .await
+                .map_err(|e| db_err("target digests", &e))?;
+            let n = t.pk.len();
+            for row in rows {
+                let vals: Vec<Value> = row.unwrap();
+                let key_values: Vec<Value> = vals.iter().take(n).cloned().collect();
+                let d = RowDigest {
+                    key: TableMeta::key_of_values(&key_values),
+                    key_values,
+                    hash: num(vals.get(n)).unwrap_or(0),
+                };
+                let want = sprig_shard::rk::hash_values(&rk.key, &vals[(n + 3).min(vals.len())..])
+                    .ok();
+                all.push((
+                    schema.clone(),
+                    d,
+                    num(vals.get(n + 1)),
+                    num(vals.get(n + 2)),
+                    want,
+                ));
+            }
+        }
+        Ok(r.rekey_digests(t, all))
+    }
+
     async fn exists(&self, c: &mut Conn, schema: &str, table: &str) -> Result<bool> {
         let n: Option<u64> = c
             .exec_first(
@@ -266,6 +328,16 @@ impl TargetIo for MysqlTarget {
                 c.query_drop(create)
                     .await
                     .map_err(|e| db_err("create a table", &e))?;
+                if self.route.as_ref().is_some_and(|r| r.rekey.is_some()) {
+                    // Which source shard each row came from (verification).
+                    c.query_drop(format!(
+                        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} BIGINT UNSIGNED NULL INVISIBLE",
+                        quote(&t.name),
+                        crate::route::RK_PREV_COLUMN
+                    ))
+                    .await
+                    .map_err(|e| db_err("add the re-key's column", &e))?;
+                }
             }
         }
         // Views may need other views first: retry until nothing changes.
@@ -515,6 +587,9 @@ impl TargetIo for MysqlTarget {
         after: Option<&Row>,
         last: &Row,
     ) -> Result<Vec<RowDigest>> {
+        if let Some(r) = self.route.as_ref().filter(|r| r.rekey.is_some()) {
+            return self.rekey_digests(r, t, after, last).await;
+        }
         if let Some(r) = &self.route {
             let r = r.clone();
             let mut all = Vec::new();

@@ -1823,6 +1823,224 @@ fn dml(r: &mut Rng) -> Vec<(String, &'static str)> {
     v
 }
 
+/// `LOAD DATA LOCAL INFILE` on `c`, the client sending `data`.
+async fn load(c: &mut Conn, sql: &str, data: &[u8]) -> Outcome {
+    use futures::StreamExt as _;
+    let bytes = bytes::Bytes::copy_from_slice(data);
+    c.set_infile_handler(async move {
+        Ok(futures::stream::iter(vec![Ok(bytes)]).boxed())
+    });
+    run(c, sql).await
+}
+
+/// R3's write forms (chapter 17, "`INSERT … SELECT` and `LOAD DATA`
+/// (R3)"): `INSERT … SELECT` into, out of and across sharded tables, with
+/// `IGNORE`, upserts, `REPLACE`, errors, aggregates, subqueries and
+/// transactions, and `LOAD DATA LOCAL INFILE` with its field and line
+/// options; every statement's answer and the whole table afterwards are
+/// compared, and none may be refused.
+#[allow(clippy::too_many_lines)] // the cases, in order
+async fn write_forms(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -> String {
+    let before = tally.compared;
+    let refused_before = tally.skipped;
+    let mut errors = 0usize;
+    let mut stmts = 0usize;
+    // An unsharded table, made through the gateway on both sides.
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("DROP TABLE IF EXISTS wf_totals").await.unwrap();
+        c.query_drop(
+            "CREATE TABLE wf_totals (cid INT NOT NULL PRIMARY KEY, n INT, amt DECIMAL(14,2)) \
+             DEFAULT CHARSET utf8mb4",
+        )
+        .await
+        .unwrap();
+    }
+    let cases: Vec<(&str, &str)> = vec![
+        // Into the same sharded table, keys moved to other shards.
+        (
+            "INSERT INTO customers (cid, name, region, score, rating, created, flag, cc) \
+             SELECT cid + 6000, name, region, score, rating, created, flag, cc FROM customers \
+             WHERE cid <= 40",
+            "customers",
+        ),
+        // Duplicates skipped, then a duplicate failing the whole statement.
+        (
+            "INSERT IGNORE INTO customers (cid, name) SELECT cid + 6000, 'dup' FROM customers \
+             WHERE cid <= 50",
+            "customers",
+        ),
+        (
+            "INSERT INTO customers (cid, name) SELECT cid + 6000, 'x' FROM customers \
+             WHERE cid BETWEEN 45 AND 60",
+            "customers",
+        ),
+        // Upserts: inserted, then updated (2 per row).
+        (
+            "INSERT INTO customers (cid, name, score) SELECT cid + 7000, name, score FROM customers \
+             WHERE cid <= 20 ON DUPLICATE KEY UPDATE score = VALUES(score) + 1",
+            "customers",
+        ),
+        (
+            "INSERT INTO customers (cid, name, score) SELECT cid + 7000, name, score FROM customers \
+             WHERE cid <= 25 ON DUPLICATE KEY UPDATE score = VALUES(score) + 1",
+            "customers",
+        ),
+        (
+            "REPLACE INTO customers (cid, name) SELECT cid, CONCAT(name, '!') FROM customers \
+             WHERE cid BETWEEN 7001 AND 7010",
+            "customers",
+        ),
+        // Across groups and clusters.
+        (
+            "INSERT INTO products (pid, pname, price, cat) SELECT cid + 9000, name, score, \
+             LEFT(region, 10) FROM customers WHERE cid <= 30",
+            "products",
+        ),
+        // Aggregates and a subquery (a gathered read) as the source.
+        (
+            "INSERT INTO invoices (iid, cid, total, memo) SELECT 8000 + cid, cid, SUM(amount), \
+             'agg' FROM orders GROUP BY cid HAVING COUNT(*) > 1",
+            "invoices",
+        ),
+        (
+            "INSERT INTO orders (oid, cid, pid, amount, qty, note) SELECT oid + 5000, cid, pid, \
+             amount, qty, note FROM orders WHERE cid IN (SELECT cid FROM customers WHERE flag = 1)",
+            "orders",
+        ),
+        // A join across groups as the source, with strings that need care.
+        (
+            "INSERT INTO orders (oid, cid, pid, amount, qty, note) SELECT 7000 + c.cid, c.cid, \
+             p.pid, p.price, 1, CONCAT('it''s ', p.cat) FROM customers c JOIN products p \
+             ON p.pid = c.cid WHERE c.cid <= 30",
+            "orders",
+        ),
+        // Out of shards into an unsharded table.
+        (
+            "INSERT INTO wf_totals (cid, n, amt) SELECT cid, COUNT(*), SUM(amount) FROM orders \
+             GROUP BY cid",
+            "wf_totals",
+        ),
+        // A column count that doesn't match.
+        (
+            "INSERT INTO customers (cid, name) SELECT cid + 20000 FROM customers WHERE cid < 3",
+            "customers",
+        ),
+        // Into a parent member (rows follow their parents).
+        (
+            "INSERT INTO invoice_lines (iid, line_no, sku, qty) SELECT iid, 90, memo, 1 \
+             FROM invoices WHERE iid >= 8000",
+            "invoice_lines",
+        ),
+    ];
+    for (q, t) in &cases {
+        let a = run(sut, q).await;
+        let b = run(reference, q).await;
+        stmts += 1;
+        if matches!(b, Outcome::Err(..)) {
+            errors += 1;
+        }
+        if matches!(a, Outcome::Err(39420, _)) {
+            tally
+                .mismatches
+                .push(format!("R3 WRITE FORM REFUSED {q}: {a:?}"));
+        }
+        tally.check(q, Cmp::Bag, &a, &b);
+        compare_full(sut, reference, tally, "after a write form", t).await;
+    }
+    // Inside transactions: rolled back, then committed.
+    for end in ["ROLLBACK", "COMMIT"] {
+        for c in [&mut *sut, &mut *reference] {
+            c.query_drop("BEGIN").await.unwrap();
+        }
+        let q = "INSERT INTO customers (cid, name) SELECT cid + 30000, name FROM customers \
+                 WHERE cid <= 60";
+        let a = run(sut, q).await;
+        let b = run(reference, q).await;
+        tally.check(q, Cmp::Bag, &a, &b);
+        let n = "SELECT COUNT(*) FROM customers WHERE cid > 30000";
+        let a = run(sut, n).await;
+        let b = run(reference, n).await;
+        tally.check(&format!("{n} (inside the transaction)"), Cmp::Bag, &a, &b);
+        // A failing one inside the transaction leaves the earlier one.
+        let bad = "INSERT INTO customers (cid, name) SELECT cid + 30000, name FROM customers \
+                   WHERE cid <= 61";
+        let a = run(sut, bad).await;
+        let b = run(reference, bad).await;
+        tally.check(bad, Cmp::Bag, &a, &b);
+        for c in [&mut *sut, &mut *reference] {
+            c.query_drop(end).await.unwrap();
+        }
+        stmts += 3;
+        compare_full(sut, reference, tally, &format!("after {end}"), "customers").await;
+    }
+    // LOAD DATA LOCAL INFILE.
+    let loads: Vec<(&str, &[u8], &str)> = vec![
+        (
+            "LOAD DATA LOCAL INFILE 'c1.csv' INTO TABLE customers FIELDS TERMINATED BY ',' \
+             OPTIONALLY ENCLOSED BY '\"' LINES TERMINATED BY '\\n' IGNORE 1 LINES \
+             (cid, name, region, score)",
+            b"cid,name,region,score\n40001,\"Smith, J\",north,1.50\n40002,\"say \"\"hi\"\"\",\\N,2\n\
+              1,dup,south,3\n40003,\"NULL\",NULL,4.25\n40004,back\\\\slash,east,\\N\n",
+            "customers",
+        ),
+        (
+            "LOAD DATA LOCAL INFILE 'c2.tsv' REPLACE INTO TABLE customers (cid, name)",
+            b"40001\treplaced\n40005\tnew\ttoo many\n2\tr2\n",
+            "customers",
+        ),
+        (
+            "LOAD DATA LOCAL INFILE 'o.csv' INTO TABLE orders FIELDS TERMINATED BY ';' \
+             (oid, cid, pid, amount, qty, note)",
+            b"40100;1;3;12.50;2;a\n40101;2;\\N;0.10;1;B\n40102;77;4;99999.99;3;n\n",
+            "orders",
+        ),
+        (
+            "LOAD DATA LOCAL INFILE 'p.txt' IGNORE INTO TABLE products FIELDS TERMINATED BY '|' \
+             LINES STARTING BY '>' TERMINATED BY '\\r\\n' (pid, pname, price, cat)",
+            b">40200|widget|1.00|tools\r\nnoise\r\n>40201|gadget|\\N|toys\r\n",
+            "products",
+        ),
+    ];
+    for (q, data, t) in &loads {
+        let a = load(sut, q, data).await;
+        let b = load(reference, q, data).await;
+        stmts += 1;
+        if matches!(a, Outcome::Err(39420, _)) {
+            tally
+                .mismatches
+                .push(format!("R3 LOAD DATA REFUSED {q}: {a:?}"));
+        }
+        tally.check(q, Cmp::Bag, &a, &b);
+        compare_full(sut, reference, tally, "after LOAD DATA", t).await;
+    }
+    // LOAD DATA inside a transaction that rolls back.
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("BEGIN").await.unwrap();
+    }
+    let q = "LOAD DATA LOCAL INFILE 'r.csv' INTO TABLE customers FIELDS TERMINATED BY ',' (cid, name)";
+    let a = load(sut, q, b"40300,a\n40301,b\n").await;
+    let b = load(reference, q, b"40300,a\n40301,b\n").await;
+    tally.check(q, Cmp::Bag, &a, &b);
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("ROLLBACK").await.unwrap();
+    }
+    stmts += 1;
+    compare_full(sut, reference, tally, "after LOAD DATA and ROLLBACK", "customers").await;
+    let full = full("wf_totals");
+    let a = run(sut, &full).await;
+    let b = run(reference, &full).await;
+    tally.check(&full, Cmp::Ordered, &a, &b);
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("DROP TABLE wf_totals").await.unwrap();
+    }
+    format!(
+        "write forms: {stmts} INSERT … SELECT and LOAD DATA statements ({errors} errors on the \
+         reference), {} comparisons, {} refused",
+        tally.compared - before,
+        tally.skipped - refused_before
+    )
+}
+
 #[derive(Debug, PartialEq)]
 enum Outcome {
     Rows(Vec<ColumnType>, Vec<Vec<Option<String>>>),
@@ -2208,6 +2426,7 @@ fn full(t: &str) -> String {
         "ship_items" => "SELECT * FROM ship_items ORDER BY cid, shid, item".to_owned(),
         "contacts" => "SELECT * FROM contacts ORDER BY cid, ctid".to_owned(),
         "tag_links" => "SELECT cid, lid, LOWER(tag) FROM tag_links ORDER BY cid, lid".to_owned(),
+        "wf_totals" => "SELECT * FROM wf_totals ORDER BY cid".to_owned(),
         _ => "SELECT * FROM orders ORDER BY cid, oid".to_owned(),
     }
 }
@@ -4204,6 +4423,8 @@ async fn differential_against_one_unsharded_mariadb() {
         }
         compare_full(&mut sut, &mut reference, &mut tally, "after a write", table).await;
     }
+    let wf_line = write_forms(&mut sut, &mut reference, &mut tally).await;
+    println!("{wf_line}");
     lookups(&e, &w, &mut sut, &mut reference, &mut tally).await;
     let fk_line = foreign_keys(&mut sut, &mut reference, &mut tally).await;
     let (race_n, race_ins, race_del) = fk_race(&e, &mut tally).await;

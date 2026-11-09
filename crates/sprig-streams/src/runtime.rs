@@ -411,6 +411,7 @@ pub async fn run_job(
         StreamKind::Changes => def.source_object.unwrap_or(ObjectId(id.0)),
     };
     tracing::info!(%tenant, stream = id.0, name = %def.name, "stream sequencer started");
+    let subs = Subscriptions::new(env.dc());
     let run = seq.run(&stop);
     tokio::pin!(run);
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -429,6 +430,14 @@ pub async fn run_job(
                 });
                 if !report.progress(p).await {
                     stop.cancel();
+                }
+                // DROP STREAM removes the subscription first: stop at once,
+                // so the job's slot is free within a second (r9triggers;
+                // the catalog check below runs only every minute).
+                if subscription_gone(&subs, tenant, id).await {
+                    tracing::info!(stream = id.0, "stream's subscription dropped; its sequencer stops");
+                    stop.cancel();
+                    gone = true;
                 }
                 if last_maint.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
                     last_maint = Some(Instant::now());
@@ -456,6 +465,15 @@ pub async fn run_job(
         RunEnd::Stopped => JobEnd::Stopped,
         RunEnd::Fenced => JobEnd::Fenced,
     })
+}
+
+/// Whether stream `id`'s subscription is gone or no longer active (a read
+/// error counts as present: the minute's catalog check still runs).
+async fn subscription_gone(subs: &Subscriptions, tenant: TenantId, id: StreamId) -> bool {
+    match subs.get(tenant, &subscription_name(id)).await {
+        Ok(s) => s.state != "active",
+        Err(e) => e.code() == Some(SprigCode::FeedSubscriptionNotFound),
+    }
 }
 
 /// One retention pass; `None` when the stream is gone.

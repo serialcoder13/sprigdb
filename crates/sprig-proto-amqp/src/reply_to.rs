@@ -10,9 +10,10 @@
 //! as the routing key goes straight to the requester's connection.
 //!
 //! Replies for a requester on another gateway go over the peer service
-//! (7403) in chapter 50's design; that relay is not built yet, so such a
-//! reply is dropped like one for a requester that is gone (both count as
-//! routed, as in RabbitMQ).
+//! (7403): gateways that share the key ([`DirectReplyTo::with_key`]) check
+//! each other's names, and a [`ReplyRelay`] carries the reply to the
+//! requester's gateway. Without a relay such a reply is dropped like one
+//! for a requester that is gone (both count as routed, as in RabbitMQ).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -40,11 +41,19 @@ struct Entry {
     nonce: u64,
 }
 
+/// Carries replies to requesters on other gateways (the peer service).
+pub trait ReplyRelay: Send + Sync + 'static {
+    /// Sends `message` to the requester named `name` on gateway `slot`;
+    /// fire and forget (a requester that is gone drops it).
+    fn relay(&self, slot: u32, name: &str, message: Message);
+}
+
 /// This gateway's direct reply-to requesters.
 pub struct DirectReplyTo {
     key: hmac::Key,
     gateway: u32,
     entries: Mutex<HashMap<(ConnKey, u16), Entry>>,
+    relay: std::sync::OnceLock<Arc<dyn ReplyRelay>>,
 }
 
 impl std::fmt::Debug for DirectReplyTo {
@@ -74,11 +83,24 @@ impl DirectReplyTo {
         let rng = SystemRandom::new();
         let mut k = [0u8; 32];
         let _ = rng.fill(&mut k);
+        Self::with_key(gateway, &k)
+    }
+
+    /// A registry for gateway number `gateway` with a key shared by the
+    /// gateways that relay replies to each other.
+    #[must_use]
+    pub fn with_key(gateway: u32, key: &[u8]) -> Arc<Self> {
         Arc::new(Self {
-            key: hmac::Key::new(hmac::HMAC_SHA256, &k),
+            key: hmac::Key::new(hmac::HMAC_SHA256, key),
             gateway,
             entries: Mutex::new(HashMap::new()),
+            relay: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Replies to other gateways' requesters go through `r` (set once).
+    pub fn set_relay(&self, r: Arc<dyn ReplyRelay>) {
+        let _ = self.relay.set(r);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(ConnKey, u16), Entry>> {
@@ -172,11 +194,14 @@ impl DirectReplyTo {
     #[must_use]
     pub fn alive(&self, name: &str) -> bool {
         self.decode(name).is_some_and(|a| {
-            a.gateway == self.gateway
-                && self
-                    .lock()
-                    .get(&(a.conn, a.channel))
-                    .is_some_and(|e| e.nonce == a.nonce)
+            // Another gateway's requester: its name is genuine (the shared
+            // key), and only its gateway knows whether it is still there.
+            (a.gateway != self.gateway && self.relay.get().is_some())
+                || a.gateway == self.gateway
+                    && self
+                        .lock()
+                        .get(&(a.conn, a.channel))
+                        .is_some_and(|e| e.nonce == a.nonce)
         })
     }
 
@@ -187,7 +212,13 @@ impl DirectReplyTo {
     pub fn deliver(&self, name: &str, message: Message) -> Option<bool> {
         let a = self.decode(name)?;
         if a.gateway != self.gateway {
-            return Some(false);
+            return Some(match self.relay.get() {
+                Some(r) => {
+                    r.relay(a.gateway, name, message);
+                    true
+                }
+                None => false,
+            });
         }
         let g = self.lock();
         let Some(e) = g.get(&(a.conn, a.channel)).filter(|e| e.nonce == a.nonce) else {
@@ -256,5 +287,30 @@ mod tests {
         r.unregister(ConnKey(42), 3);
         assert!(!r.alive(&name));
         assert_eq!(r.deliver(&name, msg()), Some(false));
+    }
+
+    #[test]
+    fn replies_cross_gateways_with_a_shared_key() {
+        struct Hop(Arc<DirectReplyTo>);
+        impl ReplyRelay for Hop {
+            fn relay(&self, slot: u32, name: &str, message: Message) {
+                assert_eq!(slot, 1);
+                let _ = self.0.deliver(name, message);
+            }
+        }
+        let a = DirectReplyTo::with_key(1, b"shared");
+        let b = DirectReplyTo::with_key(2, b"shared");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let c = ConsumerId::next();
+        let name = a.register(ConnKey(5), 1, c, tx);
+        // Without a relay, another gateway's requester is dropped.
+        assert_eq!(b.deliver(&name, msg()), Some(false));
+        b.set_relay(Arc::new(Hop(Arc::clone(&a))));
+        assert!(b.alive(&name));
+        assert_eq!(b.deliver(&name, msg()), Some(true));
+        assert!(matches!(rx.try_recv(), Ok(Event::Deliver { consumer, .. }) if consumer == c));
+        // Another key can't check the name: unroutable.
+        let other = DirectReplyTo::with_key(3, b"other");
+        assert_eq!(other.deliver(&name, msg()), None);
     }
 }

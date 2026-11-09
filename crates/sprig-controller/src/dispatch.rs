@@ -132,7 +132,16 @@ pub enum JobClass {
     Recovery,
     /// Everything else: no per-cluster limit.
     Other,
+    /// Long-running consumers that mostly wait: stream sequencers and
+    /// triggers on streams and queues (chapters 41 and 45, R9). One job per
+    /// stream or binding, so they get their own, larger pool
+    /// ([`CONSUMER_SLOTS`] per worker) and never starve `Other` jobs or each
+    /// other. No per-cluster limit.
+    Consumer,
 }
+
+/// Slots a worker offers for [`JobClass::Consumer`] jobs.
+pub const CONSUMER_SLOTS: u32 = 256;
 
 /// Who owns a job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,7 +743,7 @@ fn slot_limit(cx: &LoopCx, class: JobClass) -> Option<u32> {
         JobClass::Copy => Some(s.max_copies_per_cluster),
         JobClass::Build => Some(s.max_builds_per_cluster),
         JobClass::Recovery => Some(s.max_rebuilds_per_cluster),
-        JobClass::Other => None,
+        JobClass::Other | JobClass::Consumer => None,
     }
 }
 

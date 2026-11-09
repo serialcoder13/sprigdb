@@ -158,6 +158,44 @@ pub enum MqCode {
 }
 
 impl MqCode {
+    /// Every code, in number order.
+    pub const ALL: [MqCode; 28] = [
+        MqCode::NotFound,
+        MqCode::Precondition,
+        MqCode::ResourceLocked,
+        MqCode::AccessRefused,
+        MqCode::NotImplemented,
+        MqCode::Unroutable,
+        MqCode::QueueFull,
+        MqCode::MessageTooLarge,
+        MqCode::AlreadySettled,
+        MqCode::DeliveryTokenInvalid,
+        MqCode::OwnerMoved,
+        MqCode::ConfirmTimeout,
+        MqCode::ConsumerTimeout,
+        MqCode::TxnNeedsXa,
+        MqCode::DelayOutOfRange,
+        MqCode::Residency,
+        MqCode::Quota,
+        MqCode::VhostLimit,
+        MqCode::FrameError,
+        MqCode::SaslFailed,
+        MqCode::ProtocolHeader,
+        MqCode::ChannelLimit,
+        MqCode::LinkRefused,
+        MqCode::Amqp10Unsupported,
+        MqCode::StreamOffset,
+        MqCode::DirectReplyTo,
+        MqCode::MgmtUnsupported,
+        MqCode::DeadLetterCycle,
+    ];
+
+    /// The code of a SprigDB error number.
+    #[must_use]
+    pub fn from_number(n: u32) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.number() == n)
+    }
+
     /// The SprigDB error number.
     #[must_use]
     pub const fn number(self) -> u32 {

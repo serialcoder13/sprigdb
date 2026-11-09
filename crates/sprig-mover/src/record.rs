@@ -1047,7 +1047,12 @@ fn check_reshard(spec: &JobSpec) -> Result<()> {
         (JobKind::SplitShard, 1, n) if n >= 2 => {}
         (JobKind::MergeShards, n, 1) if n >= 2 => {}
         (JobKind::MoveShard, 1, 1) => {}
-        _ => return bad("a split is 1 to n, a merge n to 1, a shard move 1 to 1"),
+        (JobKind::Rekey, _, _) if matches!(spec.routing, Routing::Rekey { .. }) => {}
+        _ => {
+            return bad(
+                "a split is 1 to n, a merge n to 1, a shard move 1 to 1, a re-key n to m by a new key",
+            );
+        }
     }
     if !matches!(spec.cutover, CutoverMode::Auto | CutoverMode::Manual) {
         return bad("hash-range jobs cut over automatically or manually");

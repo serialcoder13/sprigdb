@@ -10,6 +10,8 @@
 //! - `Forward`: a transaction-handle call that landed on the wrong gateway
 //!   (chapter 37, "Transactions").
 //!
+//! - `QueuePeer` (a second service on the same listener): chapter 50's
+//!   queue relay, [`crate::amqp::peer`].
 //! - `HandoffLogin`: a login of a tenant whose residency (chapter 26)
 //!   doesn't allow the calling gateway's DC, decided here (chapter 14,
 //!   "Credential residency"); [`PeerHandoff`] is the calling side. A
@@ -149,6 +151,16 @@ pub trait PeerHost: Send + Sync + 'static {
     fn drain(&self, reason: &str) -> bool;
     /// Runs a forwarded transaction-handle call.
     async fn forwarded(&self, req: ForwardRequest) -> ForwardReply;
+    /// The queue relay's service (chapter 50, `QueuePeer`), when this
+    /// gateway runs the queue engine.
+    fn queue_peer(&self) -> Option<crate::amqp::peer::QueuePeerService> {
+        None
+    }
+    /// Workers' runs of triggers on streams and queues (chapter 41,
+    /// `LogicPeer`), when this gateway serves tenant catalogs.
+    fn logic_peer(&self) -> Option<crate::triggers::LogicPeerService> {
+        None
+    }
     /// Decides a handed-off login (chapter 14, "Credential residency").
     /// Hosts without logins refuse it with 39301.
     async fn handoff(&self, start: HandoffStart, password: Zeroizing<Vec<u8>>) -> HandoffResult {
@@ -302,7 +314,7 @@ pub async fn serve(
     stop: CancellationToken,
 ) -> Result<Option<(SocketAddr, tokio::task::JoinHandle<()>)>> {
     if tls.is_none() && !bind.ip().is_loopback() {
-        tracing::warn!(%bind, "no [tls]: the peer service needs mutual TLS off loopback; it stays off (cross-gateway KILL, drain and forwarding are unavailable)");
+        tracing::warn!(%bind, "no [tls]: the peer service needs mutual TLS off loopback; it stays off (cross-gateway KILL, drain, forwarding and the queue relay are unavailable)");
         return Ok(None);
     }
     let acceptor = tls
@@ -319,7 +331,16 @@ pub async fn serve(
     let local = listener
         .local_addr()
         .map_err(|e| SprigError::internal("peer listener address").with_source(e))?;
-    let routes = tonic::service::Routes::new(GatewayPeerServer::new(Service { host })).prepare();
+    let queue_peer = host.queue_peer();
+    let logic_peer = host.logic_peer();
+    let mut routes = tonic::service::Routes::new(GatewayPeerServer::new(Service { host }));
+    if let Some(q) = queue_peer {
+        routes = routes.add_service(q.server());
+    }
+    if let Some(l) = logic_peer {
+        routes = routes.add_service(l.server());
+    }
+    let routes = routes.prepare();
     tracing::info!(bind = %local, mtls = acceptor.is_some(), "peer service listening");
     let task = tokio::spawn(async move {
         let tracker = tokio_util::task::TaskTracker::new();

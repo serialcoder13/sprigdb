@@ -67,6 +67,8 @@ pub struct MysqlSource {
     /// Chapter 18's resolver, which finishes the tenant's prepared
     /// branches at cutover; `None` leaves them to block the fence.
     drain: Option<Arc<dyn PreparedDrain>>,
+    /// A re-key's source (chapter 16): digests leave `_sprig_rk` out.
+    rekey: bool,
 }
 
 impl std::fmt::Debug for MysqlSource {
@@ -184,6 +186,7 @@ impl MysqlSource {
             sys_ready: OnceCell::new(),
             known: Mutex::new(Vec::new()),
             drain: None,
+            rekey: false,
         }
     }
 
@@ -192,6 +195,14 @@ impl MysqlSource {
     #[must_use]
     pub fn with_drain(mut self, drain: Option<Arc<dyn PreparedDrain>>) -> Self {
         self.drain = drain;
+        self
+    }
+
+    /// The source of a re-key (chapter 16): verification digests leave
+    /// `_sprig_rk` out, since the re-key replaces it.
+    #[must_use]
+    pub fn with_rekey(mut self, on: bool) -> Self {
+        self.rekey = on;
         self
     }
 
@@ -603,6 +614,13 @@ impl SourceIo for MysqlSource {
         after: Option<&Row>,
         limit: usize,
     ) -> Result<Vec<RowDigest>> {
+        let bare;
+        let t = if self.rekey {
+            bare = crate::route::ShardRoute::without_rk(t);
+            &bare
+        } else {
+            t
+        };
         let (q, p) = sql::digests(t, after, limit);
         Ok(self
             .rows(&q, p)

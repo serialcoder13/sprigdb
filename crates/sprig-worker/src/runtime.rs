@@ -183,6 +183,7 @@ impl WorkerRuntime {
                 (JobClass::Build, 2),
                 (JobClass::Recovery, 1),
                 (JobClass::Other, 8),
+                (JobClass::Consumer, dispatch::CONSUMER_SLOTS),
             ]),
             running: Arc::default(),
         }

@@ -18,7 +18,8 @@
 //! - **Leases**: `/sprig/dc/<dc_id>/queue-owners/<tenant_id>/<object_id>`,
 //!   bound to one 10-second lease of this gateway kept alive every 3 s; a
 //!   lost lease stops every owner of this gateway (their writes would be
-//!   fenced anyway).
+//!   fenced anyway). Other gateways read the holder to relay to it
+//!   ([`super::peer`]).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -65,6 +66,8 @@ pub struct GatewayMq {
     migrated: Mutex<HashSet<u64>>,
     keys: Mutex<HashMap<u64, Arc<TokenKey>>>,
     stores: tokio::sync::Mutex<HashMap<(u64, u32), Arc<dyn MsgStore>>>,
+    /// The same stores as MariaDB stores (their confirm mode).
+    maria: Mutex<HashMap<(u64, u32), Arc<MariaStore>>>,
     grants: Mutex<HashMap<GrantKey, Arc<dyn SessionGrants>>>,
 }
 
@@ -84,6 +87,7 @@ impl GatewayMq {
             migrated: Mutex::new(HashSet::new()),
             keys: Mutex::new(HashMap::new()),
             stores: tokio::sync::Mutex::new(HashMap::new()),
+            maria: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashMap::new()),
         }
     }
@@ -301,8 +305,30 @@ impl MqCatalog for GatewayMq {
     }
 
     async fn store(&self, v: &VhostRef) -> Result<Arc<dyn MsgStore>, MqError> {
+        {
+            let mut stores = self.stores.lock().await;
+            match stores.get(&(v.tenant, v.db_id)) {
+                Some(s) if !s.stale() => {
+                    // The setting may have changed since the store opened.
+                    if let Some(m) = lock(&self.maria).get(&(v.tenant, v.db_id)) {
+                        m.set_confirm_replica(self.settings(v).confirm_replica);
+                    }
+                    return Ok(Arc::clone(s));
+                }
+                Some(_) => {
+                    // A shard move fenced the schema: open it again where
+                    // the tenant's map points once the move is done.
+                    tracing::info!(tenant = v.tenant, vhost = %v.name, "queue store moved; opening it again");
+                    stores.remove(&(v.tenant, v.db_id));
+                }
+                None => {}
+            }
+        }
+        self.wait_out_hold(TenantId(v.tenant)).await;
         let mut stores = self.stores.lock().await;
-        if let Some(s) = stores.get(&(v.tenant, v.db_id)) {
+        if let Some(s) = stores.get(&(v.tenant, v.db_id))
+            && !s.stale()
+        {
             return Ok(Arc::clone(s));
         }
         let tenant = TenantId(v.tenant);
@@ -327,9 +353,33 @@ impl MqCatalog for GatewayMq {
             .ctl_pool(&cluster)
             .await
             .map_err(unavailable)?;
-        let s = MariaStore::new(pool, schema);
+        // `queue.confirm_mode = replica`: pools on the cluster's replicas
+        // (none for one node or Galera, whose commit is the confirm).
+        let replicas = match self.svc.locator.ctl_replica_opts(&cluster).await {
+            Ok(opts) => opts
+                .into_iter()
+                .map(|o| {
+                    mysql_async::Pool::new(
+                        mysql_async::OptsBuilder::from_opts(o).pool_opts(
+                            mysql_async::PoolOpts::new()
+                                .with_constraints(
+                                    mysql_async::PoolConstraints::new(0, 4).unwrap_or_default(),
+                                )
+                                .with_inactive_connection_ttl(Duration::from_secs(60)),
+                        ),
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                tracing::debug!(%cluster, error = %e, "no replica pools for queue confirms");
+                Vec::new()
+            }
+        };
+        let s = Arc::new(MariaStore::new(pool, schema).with_replicas(replicas));
+        s.set_confirm_replica(self.settings(v).confirm_replica);
         s.ensure().await.map_err(unavailable)?;
-        let s: Arc<dyn MsgStore> = Arc::new(s);
+        lock(&self.maria).insert((v.tenant, v.db_id), Arc::clone(&s));
+        let s: Arc<dyn MsgStore> = s;
         stores.insert((v.tenant, v.db_id), Arc::clone(&s));
         Ok(s)
     }
@@ -380,11 +430,40 @@ impl MqCatalog for GatewayMq {
             publish_timeout_ms: n(&qs::PUBLISH_TIMEOUT_MS),
             quota_bytes_per_sec: n(&qs::QUOTA_PUBLISH_BYTES_PER_SEC),
             max_unacked: u32::try_from(n(&super::MAX_UNACKED_PER_CONSUMER)).unwrap_or(65_535),
+            takeover_grace_ms: n(&qs::TAKEOVER_GRACE_MS),
+            owner_move_after_ms: n(&qs::OWNER_MOVE_AFTER_SECONDS).saturating_mul(1000),
+            owner_move_cooldown_ms: n(&qs::OWNER_MOVE_COOLDOWN_SECONDS).saturating_mul(1000),
         }
     }
 }
 
 impl GatewayMq {
+    /// Waits while a mover's cutover holds the tenant's map (chapter 10),
+    /// at most 10 s: a store opened on the cluster about to be fenced
+    /// would write where the move no longer copies.
+    async fn wait_out_hold(&self, tenant: TenantId) {
+        let started = std::time::Instant::now();
+        let mut changes = self.svc.locator.placement_changes_for(tenant);
+        while started.elapsed() < Duration::from_secs(10) {
+            let held = self
+                .svc
+                .locator
+                .placement_followed(tenant)
+                .await
+                .and_then(|p| p.hold)
+                .is_some_and(|h| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                    now < h.until_ms
+                });
+            if !held {
+                return;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(200), changes.changed()).await;
+        }
+    }
+
     fn has_rule(p: &Principal, cat: &TenantCatalog, v: &VhostRef) -> bool {
         let Some(user) = p.user_id else { return false };
         Self::state(cat)
@@ -599,6 +678,19 @@ impl Leases for EtcdLeases {
             .unwrap_or(kv.create_revision);
         h.keys.insert((tenant, object), rev);
         Ok(Acquired::Mine(h.lost.clone()))
+    }
+
+    async fn holder(&self, tenant: u64, object: u64) -> Result<Option<String>, MqError> {
+        let key = self.key(tenant, object)?;
+        let kv = self
+            .store
+            .get(&key, sprig_meta::Consistency::Linearizable)
+            .await
+            .map_err(unavailable)?;
+        Ok(kv.map(|kv| {
+            serde_json::from_slice::<LeaseValue>(&kv.value)
+                .map_or_else(|_| "another gateway".to_owned(), |v| v.gateway_id)
+        }))
     }
 
     async fn release(&self, tenant: u64, object: u64) {

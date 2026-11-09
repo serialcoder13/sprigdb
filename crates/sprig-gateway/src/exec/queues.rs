@@ -5,7 +5,7 @@
 //!
 //! The arguments are evaluated by the session itself (`SELECT <args>`), so
 //! any expression works (`JSON_OBJECT(...)`, columns of a subquery) under
-//! the user's own rights. The vhost is `/` (`amqp.default_vhost_database`).
+//! the user's own rights.
 //!
 //! - **`mq_publish` in a transaction** inserts one `__sprig_qo` row (or a
 //!   `__sprig_qd` row for a delayed exchange) through this session, in its
@@ -15,8 +15,12 @@
 //! - **`mq_ack`** asks the owner to hold the delivery, then deletes the
 //!   message row through this session. Zero rows: 39258, and the
 //!   transaction is rolled back. Outside a transaction the owner is told
-//!   at once; inside one, the owner checks the row under a lock after
-//!   `hold_check_ms` (5 s) unless told sooner.
+//!   at once; inside one, the session's commit hook tells it when the
+//!   transaction ends ([`PassSession::mq_after_request`]), and the owner
+//!   checks the row under a lock after `hold_check_ms` (5 s) if nobody
+//!   does (a session that disconnected).
+//! - **The vhost** is an optional last argument of `mq_publish` and
+//!   `mq_get` (NULL or absent: `/`); a delivery token names its own.
 
 use std::sync::Arc;
 
@@ -180,6 +184,29 @@ impl PassSession {
         s.contains(StatusFlags::IN_TRANS) || !s.contains(StatusFlags::AUTOCOMMIT)
     }
 
+    /// The session's commit hook for acknowledgements inside a
+    /// transaction (chapter 50, "Acknowledging inside a database
+    /// transaction", step 5): after every request, if this session holds
+    /// deliveries for its transaction and the transaction has ended, the
+    /// owners learn it now: not committed for a `ROLLBACK`; for anything
+    /// else (`COMMIT`, an implicit commit) they read the row at once,
+    /// which no longer waits on a lock. A `COMMIT` is not taken at its
+    /// word because a failed one reaches the client as a relayed error
+    /// packet, not as an error here. `word`: what [`txn_word`] made of
+    /// the request.
+    pub(super) fn mq_after_request(&self, session: u64, word: Option<bool>, ok: bool) {
+        let Some(ts) = self.tenant.as_deref() else {
+            return;
+        };
+        let Some(engine) = ts.services().mq.get() else {
+            return;
+        };
+        if !engine.has_txn_holds(session) || self.mq_in_transaction() {
+            return;
+        }
+        engine.txn_ended(session, if ok { word } else { None });
+    }
+
     /// Chapter 50's step of [`PassSession::tenant_text`]: `None` when the
     /// statement isn't a `sprig.mq_*` call.
     pub(super) async fn tenant_queues(
@@ -259,8 +286,8 @@ impl PassSession {
         };
         let n = call.args.len();
         let (lo, hi, name) = match call.call {
-            MqCall::Publish => (4, 5, "sprig.mq_publish"),
-            MqCall::Get => (1, 3, "sprig.mq_get"),
+            MqCall::Publish => (4, 6, "sprig.mq_publish"),
+            MqCall::Get => (1, 4, "sprig.mq_get"),
             MqCall::Ack => (1, 1, "sprig.mq_ack"),
             MqCall::Nack => (1, 2, "sprig.mq_nack"),
         };
@@ -286,6 +313,13 @@ impl PassSession {
                 .unwrap_or(d)
         };
         let session = u64::from(cx.session.id.0);
+        // The optional vhost argument (last of mq_publish and mq_get);
+        // NULL or absent is `/`.
+        let vhost = |i: usize| {
+            text(i)
+                .filter(|v| !v.is_empty())
+                .unwrap_or(default_db.clone())
+        };
         match call.call {
             MqCall::Publish => {
                 let exchange = text(0).unwrap_or_default();
@@ -295,7 +329,7 @@ impl PassSession {
                 let m = mq::message(&exchange, &key, body, text(3).as_deref())
                     .map_err(|e| sql_error(&e))?;
                 let v = engine
-                    .sql_vhost(principal, &default_db, session)
+                    .sql_vhost(principal, &vhost(5), session)
                     .await
                     .map_err(|e| sql_error(&e))?;
                 if !self.mq_in_transaction() {
@@ -335,7 +369,7 @@ impl PassSession {
                 let max = u32::try_from(num(1, 1).clamp(1, 1000)).unwrap_or(1);
                 let lease = num(2, 30_000);
                 let v = engine
-                    .sql_vhost(principal, &default_db, session)
+                    .sql_vhost(principal, &vhost(3), session)
                     .await
                     .map_err(|e| sql_error(&e))?;
                 let ds = v.get(&queue, max, lease).await.map_err(|e| sql_error(&e))?;
@@ -426,11 +460,31 @@ impl PassSession {
                         "the message was already settled (acknowledged, or returned after its lease); the transaction is rolled back",
                     )));
                 }
-                if !in_txn {
+                if in_txn {
+                    // The session's commit hook tells the owner how the
+                    // transaction ended ([`PassSession::mq_after_request`]).
+                    engine.note_txn_hold(session, t);
+                } else {
                     v.release(&t, true);
                 }
                 Ok(Reply::Ok(1))
             }
         }
     }
+}
+
+/// `Some(false)` for a lone `ROLLBACK` (text protocol), else `None`: the
+/// commit hook's reading of a request.
+pub(super) fn txn_word(req: &crate::pipeline::Request) -> Option<bool> {
+    let crate::pipeline::Request::Query { sql, .. } = req else {
+        return None;
+    };
+    let s = std::str::from_utf8(sql)
+        .ok()?
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    let w = s.to_ascii_lowercase();
+    let w = w.strip_suffix(" work").unwrap_or(&w);
+    (w == "rollback").then_some(false)
 }

@@ -112,9 +112,97 @@ pub fn misrouted_count_sql(table: &str, lo: u64, hi: Option<u64>) -> String {
     }
 }
 
+/// The routing hash of key values read from MariaDB (text or binary
+/// protocol, or a binlog row image) under `spec`: what `_sprig_rk` holds
+/// for a row whose key columns hold `vals`. The advisor's back-fill and
+/// the mover's re-key (chapter 16) hash rows with it.
+///
+/// # Errors
+/// 39400 for a value the class can't take; 39405 for one that can't be
+/// normalized.
+pub fn hash_values(spec: &crate::KeySpec, vals: &[mysql_async::Value]) -> sprig_common::Result<u64> {
+    use mysql_async::Value;
+    use sprig_common::{SprigCode, SprigError};
+
+    use crate::key::{DateTimeParts, DecimalRef, KeyClass, KeyValue};
+    let texts: Vec<String> = vals
+        .iter()
+        .map(|v| match v {
+            Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+            _ => String::new(),
+        })
+        .collect();
+    let mut kv: Vec<KeyValue<'_>> = Vec::with_capacity(vals.len());
+    for (i, (class, v)) in spec.parts.iter().zip(vals).enumerate() {
+        let bad = || {
+            SprigError::new(
+                SprigCode::UnsupportedKeyType,
+                format!("key part {i}: {v:?} isn't a {class:?}"),
+            )
+        };
+        kv.push(match (class, v) {
+            (_, Value::NULL) => KeyValue::Null,
+            (KeyClass::Numeric, Value::Int(x)) => KeyValue::Int(i128::from(*x)),
+            (KeyClass::Numeric, Value::UInt(x)) => KeyValue::Int(i128::from(*x)),
+            (KeyClass::Numeric, Value::Double(x)) => KeyValue::Double(*x),
+            (KeyClass::Numeric, Value::Float(x)) => KeyValue::Double(f64::from(*x)),
+            (KeyClass::Numeric, Value::Bytes(_)) => KeyValue::Decimal(DecimalRef(&texts[i])),
+            (KeyClass::String { collation: c }, Value::Bytes(b)) => KeyValue::Str {
+                bytes: b,
+                charset: crate::collation::collation(*c)
+                    .map_or(crate::Charset::Utf8mb4, |x| x.charset),
+            },
+            (KeyClass::Binary, Value::Bytes(b)) => KeyValue::Bytes(b),
+            (KeyClass::Uuid, Value::Bytes(b)) => {
+                let u: [u8; 16] = match <[u8; 16]>::try_from(b.as_slice()) {
+                    Ok(u) => u,
+                    Err(_) => crate::key::parse_uuid(&texts[i]).ok_or_else(bad)?,
+                };
+                KeyValue::Uuid(u)
+            }
+            (KeyClass::DateTime, Value::Date(y, mo, d, h, mi, s, us)) => {
+                KeyValue::DateTime(DateTimeParts {
+                    year: *y,
+                    month: *mo,
+                    day: *d,
+                    hour: *h,
+                    minute: *mi,
+                    second: *s,
+                    micros: *us,
+                })
+            }
+            (KeyClass::Timestamp, Value::Int(secs)) => KeyValue::Timestamp {
+                secs: *secs,
+                micros: 0,
+            },
+            _ => return Err(bad()),
+        });
+    }
+    if kv.len() != spec.parts.len() {
+        return Err(SprigError::new(
+            SprigCode::UnsupportedKeyType,
+            format!("{} key values for a key of {} parts", kv.len(), spec.parts.len()),
+        ));
+    }
+    Ok(crate::hash_key(spec, &kv)?.0.0)
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
+
+    #[test]
+    fn row_values_hash_like_literals() {
+        let spec = crate::KeySpec::new(vec![crate::KeyClass::Numeric]).unwrap();
+        let lit = crate::hash_key(&spec, &[crate::KeyValue::Int(42)])
+            .map(|(h, _)| h.0)
+            .ok();
+        assert_eq!(hash_values(&spec, &[mysql_async::Value::Int(42)]).ok(), lit);
+        assert_eq!(hash_values(&spec, &[mysql_async::Value::UInt(42)]).ok(), lit);
+        assert!(hash_values(&spec, &[]).is_err());
+    }
 
     #[test]
     fn statements() {

@@ -33,6 +33,7 @@ mod binary;
 mod ids;
 pub(crate) mod layout;
 mod txn;
+mod write_forms;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -198,6 +199,9 @@ pub(crate) struct RouterState {
     /// For an `INSERT IGNORE` with ID-block values: the read of the first
     /// value it really inserted, and its row count.
     readback: Option<(Plan, u64)>,
+    /// An `INSERT … SELECT` or `LOAD DATA` runs its parts (R3): they never
+    /// start another.
+    write_form: bool,
 }
 
 impl std::fmt::Debug for RouterState {
@@ -675,6 +679,55 @@ impl PassSession {
         self.bs.as_ref().is_some_and(|b| b.pins().in_transaction())
     }
 
+    /// The cluster of the session's own connection.
+    pub(super) fn own_cluster(&self) -> ClusterId {
+        self.main_cluster()
+    }
+
+    /// Runs physical `sql` that the gateway made itself (names the client
+    /// can't write) on the session's own cluster, inside the session's
+    /// transaction: the coordinator's branch there in a coordinator
+    /// transaction, else the main connection. Chapter 45's
+    /// `sprig.commit_offset` (R9, r9triggers). Its rows or OK go to `out`.
+    ///
+    /// # Errors
+    /// The statement's error.
+    pub(super) async fn forward_raw_own(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        sql: &str,
+        out: &mut dyn ResultSink,
+    ) -> Result<Step> {
+        let map = self
+            .tenant
+            .as_deref()
+            .map(crate::tenant::session::TenantSession::map)
+            .ok_or_else(|| SprigError::internal("no tenant"))?;
+        let slot = if self.router.in_txn() {
+            Slot::Branch(self.main_cluster(), self.home_ref(), Intent::Write)
+        } else {
+            Slot::Main
+        };
+        let text = Bytes::copy_from_slice(sql.as_bytes());
+        let ran = Box::pin(self.forward_on(
+            cx,
+            slot,
+            false,
+            text,
+            sql.as_bytes(),
+            false,
+            RowFormat::Text,
+            ResultMapper::relay(),
+            &*map,
+            out,
+        ))
+        .await?;
+        match ran {
+            Ran::Done(step) => Ok(step),
+            Ran::Stale(e) | Ran::ColumnGone(e) | Ran::Collision(e) | Ran::Regather(e, _) => Err(e),
+        }
+    }
+
     /// Puts `slot`'s connection where the forward path looks
     /// (`self.bs`).
     async fn slot_in(&mut self, slot: &Slot) -> Result<()> {
@@ -1045,6 +1098,14 @@ impl PassSession {
         let mut collisions = 0u32;
         let mut regather: Option<sprig_router::Rejection> = None;
         let mut regathered = false;
+        // R3: `LOAD DATA LOCAL INFILE` into a sharded table becomes routed
+        // inserts (`write_forms`).
+        if !self.router.write_form
+            && let Some(ld) = write_forms::load_data_parse(&text)
+            && self.loads_sharded(&layout, &ld)
+        {
+            return Box::pin(self.load_data(cx, ld, more, mapper, map, out)).await;
+        }
         loop {
             if layout.hold_for(&text).is_some() {
                 self.wait_hold(&layout, &cache, &text).await;
@@ -1060,6 +1121,15 @@ impl PassSession {
                     Err(e) => return self.fail(out, &e).await,
                 }
             };
+            // R3: `INSERT … SELECT` into or out of shards runs as a read
+            // and routed inserts (`write_forms`).
+            if let Plan::Reject(r) = &plan
+                && r.reason == sprig_router::Reason::InsertSelect
+                && !self.router.write_form
+                && let Some(parts) = write_forms::insert_select_parts(&text)
+            {
+                return Box::pin(self.insert_select(cx, parts, more, mapper, map, out)).await;
+            }
             self.note_targets(&plan, &layout);
             let ran = self
                 .run_plan(
@@ -1371,6 +1441,28 @@ impl PassSession {
                 generated: false,
                 count: 0,
             },
+        })
+    }
+
+    /// Whether `ld` loads a table the router distributes.
+    fn loads_sharded(&self, layout: &TenantLayout, ld: &write_forms::LoadData) -> bool {
+        let schema = ld.schema.clone().or_else(|| {
+            self.bs
+                .as_ref()
+                .and_then(|bs| bs.vars().schema.clone())
+                .or_else(|| {
+                    self.tenant
+                        .as_deref()
+                        .and_then(|ts| ts.schema_of(ts.current.as_deref()))
+                })
+        });
+        schema.is_some_and(|s| {
+            sprig_router::Topology::table(
+                &layout.topo,
+                &s.to_ascii_lowercase(),
+                &ld.table.to_ascii_lowercase(),
+            )
+            .is_some()
         })
     }
 

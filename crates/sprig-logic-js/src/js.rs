@@ -57,6 +57,7 @@ use crate::bridge::Shape;
 use crate::budget::{Budget, Limits, RunState};
 use crate::engine::{self, ScriptSig, SyncHost};
 use crate::kirun::{Host, Outcome};
+use crate::messaging::MsgOp;
 
 /// JavaScript's reserved words: parameters with these names can't be
 /// bound by name in a body-form function.
@@ -145,6 +146,14 @@ const PRELUDE: &str = r#"(() => {
     sqlOne: (sql, a) => call("sqlOne", [String(sql), args(a)]),
     exec: (sql, a) => call("exec", [String(sql), args(a)]),
     call: (name, ...a) => call("call", [String(name), a]),
+    publish: (stream, key, value, headers) => call("publish", [stream, key ?? null, value ?? null, headers ?? null]),
+    commitOffset: (group, stream, partition, offset) => call("commitOffset", [group, stream, partition, offset]),
+    mq: Object.freeze({
+      publish: (exchange, routingKey, body, props) => call("mqPublish", [exchange ?? "", routingKey ?? "", body ?? null, props ?? null]),
+      get: (queue, opts) => call("mqGet", [queue, opts ?? null]),
+      ack: (token) => call("mqAck", [token]),
+      nack: (token, requeue) => call("mqNack", [token, requeue === undefined ? true : requeue]),
+    }),
   });
   globalThis.sprig = Object.freeze({
     reject: (message) => { call("reject", [String(message)]); },
@@ -489,6 +498,18 @@ fn host_inner(sync: &SyncHost, op: &str, payload: &str) -> Result<Value> {
             "sqlOne" => sync.sql(Shape::One, &text(0), &list(1), "db.sqlOne"),
             "exec" => sync.sql(Shape::Exec, &text(0), &list(1), "db.exec"),
             "call" => sync.call(&text(0), &list(1), "db.call"),
+            "publish" => sync.msg(MsgOp::Publish, v.as_array().map_or(&[][..], Vec::as_slice)),
+            "commitOffset" => sync.msg(
+                MsgOp::CommitOffset,
+                v.as_array().map_or(&[][..], Vec::as_slice),
+            ),
+            "mqPublish" => sync.msg(
+                MsgOp::MqPublish,
+                v.as_array().map_or(&[][..], Vec::as_slice),
+            ),
+            "mqGet" => sync.msg(MsgOp::MqGet, &crate::messaging::get_args(arg(0), &arg(1))),
+            "mqAck" => sync.msg(MsgOp::MqAck, v.as_array().map_or(&[][..], Vec::as_slice)),
+            "mqNack" => sync.msg(MsgOp::MqNack, v.as_array().map_or(&[][..], Vec::as_slice)),
             "fetch" => sync.fetch(engine::fetch_request(&text(0), &arg(1))),
             "log" => {
                 sync.log(text(0));

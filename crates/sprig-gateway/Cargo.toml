@@ -85,6 +85,9 @@ rcgen.workspace = true
 tracing-subscriber.workspace = true
 sprig-testkit.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }
+# The live test of triggers on queues declares its queue over AMQP 0-9-1
+# (lapin, MIT; already a test client of sprig-queues).
+lapin = { version = "=4.12.3", default-features = false, features = ["default-runtime"] }
 
 [lints]
 workspace = true

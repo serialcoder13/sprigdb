@@ -155,10 +155,10 @@ impl ConnVhost {
             .unwrap_or((0, 0))
     }
 
-    fn publish_temp(&self) {
+    async fn publish_temp(&self) {
         if let Ok(e) = self.engine() {
             let set = lock(&self.v.temp).clone();
-            e.deps.temps.publish(&self.v.r, &set);
+            e.deps.temps.publish(&self.v.r, &set).await;
         }
     }
 
@@ -447,7 +447,7 @@ impl Vhost for ConnVhost {
                 b.source != name && !(b.dest_kind == DestKind::Exchange && b.dest == name)
             });
         }
-        self.publish_temp();
+        self.publish_temp().await;
         self.engine()?
             .deps
             .catalog
@@ -606,7 +606,7 @@ impl Vhost for ConnVhost {
             lock(&self.v.temp)
                 .queues
                 .insert(def.name.clone(), Arc::new(def));
-            self.publish_temp();
+            self.publish_temp().await;
         } else {
             let t = e
                 .deps
@@ -709,7 +709,7 @@ impl Vhost for ConnVhost {
                     t.bindings.push(def);
                 }
             }
-            self.publish_temp();
+            self.publish_temp().await;
             return Ok(());
         }
         let e = self.engine()?;
@@ -757,7 +757,7 @@ impl Vhost for ConnVhost {
         };
         let e = self.engine()?;
         if had_temp {
-            self.publish_temp();
+            self.publish_temp().await;
         } else if e
             .deps
             .catalog
@@ -811,6 +811,7 @@ impl Vhost for ConnVhost {
             exclusive: spec.exclusive,
             priority: spec.priority,
             credit_out: AtomicU32::new(0),
+            held: std::sync::Mutex::default(),
         });
         let cs = ConsumerSpec {
             id: spec.consumer,
@@ -823,6 +824,8 @@ impl Vhost for ConnVhost {
             no_ack: spec.no_ack,
             exclusive: spec.exclusive,
             priority: spec.priority,
+            held: Vec::new(),
+            from: None,
         };
         lock(&self.v.consumers).insert(spec.consumer, rec);
         let (tx, rx) = oneshot::channel();
@@ -890,6 +893,18 @@ impl Vhost for ConnVhost {
                 continue; // direct reply-to: nothing to settle
             }
             by_q.entry(id.queue).or_default().push((id, how));
+        }
+        // The consumers no longer hold these (re-attachment reports).
+        for r in lock(&self.v.consumers).values() {
+            if r.conn != self.conn || r.no_ack {
+                continue;
+            }
+            if let Some(items) = by_q.get(&r.queue_id.load(Ordering::Relaxed)) {
+                let mut held = lock(&r.held);
+                for (id, _) in items {
+                    held.remove(id);
+                }
+            }
         }
         for (q, items) in by_q {
             // No owner: the delivery comes back with the next one.

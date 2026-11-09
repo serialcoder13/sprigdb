@@ -14,7 +14,9 @@
 //! Every proposal and advisor run is a decision in the tenant's log.
 
 mod ops;
+mod rekey;
 pub use ops::{GroupView, ManualJob, ShardRow, design_from_json};
+pub use rekey::RekeyRequest;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -422,6 +424,11 @@ impl ShardingLoop {
         {
             p.catalog_changed(tenant).await?;
             lock(&self.published).insert(tenant);
+        }
+        // Online re-keys (chapter 16): finish the catalog of a committed
+        // one, undo one that ended without a cutover.
+        if groups.iter().any(|g| g.1 == "rekeying") {
+            self.rekey_follow(tenant).await?;
         }
         // An apply that ended before releasing the advisor's lock (a crash
         // between the two) would keep every split out: release it.

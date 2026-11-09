@@ -1,0 +1,205 @@
+// sprig.internal.v1.QueuePeer: the queue relay between gateways on 7403
+// (chapter 50, "The queue owner"), with mutual TLS from the internal CA
+// like GatewayPeer (chapter 04). Never exposed to clients.
+syntax = "proto3";
+
+package sprig.internal.v1;
+
+service QueuePeer {
+  // One queue's relay: a gateway that doesn't own the queue opens one
+  // stream per queue to the owner's gateway. The first frame is `open`.
+  // The stream carries chapter 50's Enqueue flow (messages in, confirms
+  // out) and Attach flow (credit and settlements in, deliveries out), and
+  // gets and queue operations, in one order.
+  rpc Relay(stream QueueUp) returns (stream QueueDown);
+  // A direct reply-to reply for a requester on this gateway.
+  rpc Reply(QueueReplyRequest) returns (QueueReplyAck);
+}
+
+message QueueOpen {
+  uint64 tenant_id = 1;
+  uint32 db_id = 2;
+  string db = 3;
+  string vhost = 4;
+  uint64 queue_id = 5;
+  string queue = 6;
+  // The gateway opening the stream.
+  string from_gateway = 7;
+}
+
+// A message in its stored parts (chapter 50, "Message encoding").
+message QueueMessage {
+  // 0 = AMQP 0-9-1, 1 = AMQP 1.0.
+  uint32 fmt = 1;
+  string exchange = 2;
+  string routing_key = 3;
+  bytes props = 4;
+  bytes body = 5;
+  // The engine dropped the message's TTL (a dead letter).
+  bool no_ttl = 6;
+}
+
+message QueueDeliveryId {
+  uint64 queue = 1;
+  uint32 lane = 2;
+  uint32 pclass = 3;
+  uint64 seq = 4;
+}
+
+message QueueEnqueue {
+  uint64 req = 1;
+  QueueMessage message = 2;
+  bytes msg_id = 3;
+  bool dedup = 4;
+  // x-death as AMQP table entries; empty for none.
+  bytes deaths = 5;
+  bool confirm = 6;
+}
+
+message QueueAttach {
+  uint64 req = 1;
+  uint64 consumer = 2;
+  uint64 conn = 3;
+  bool no_ack = 4;
+  bool exclusive = 5;
+  int32 priority = 6;
+  // Deliveries the consumer still holds from an earlier owner.
+  repeated QueueDeliveryId held = 7;
+}
+
+message QueueCredit {
+  uint64 consumer = 1;
+  uint32 credit = 2;
+  bool drain = 3;
+}
+
+message QueueSettlement {
+  QueueDeliveryId id = 1;
+  // 0 ack; 1 requeue; 2 requeue counting a failure; 10 + reason:
+  // dead-letter (0 rejected, 1 expired, 2 maxlen, 3 delivery_limit).
+  uint32 how = 2;
+}
+
+message QueueSettle {
+  uint64 conn = 1;
+  // By delivery token: whoever holds the delivery.
+  bool any = 2;
+  repeated QueueSettlement items = 3;
+}
+
+message QueueGet {
+  uint64 req = 1;
+  uint64 conn = 2;
+  bool no_ack = 3;
+  bool has_lease = 4;
+  uint64 lease_ms = 5;
+}
+
+message QueueOp {
+  uint64 req = 1;
+  // 1 purge, 2 delete, 3 info.
+  uint32 op = 2;
+  bool if_unused = 3;
+  bool if_empty = 4;
+}
+
+message QueueHold {
+  uint64 req = 1;
+  QueueDeliveryId id = 2;
+  bytes msg_id = 3;
+}
+
+message QueueRelease {
+  QueueDeliveryId id = 1;
+  bool committed = 2;
+  // The transaction ended without telling how: check the row.
+  bool verify = 3;
+}
+
+message QueueUp {
+  oneof frame {
+    QueueOpen open = 1;
+    QueueEnqueue enqueue = 2;
+    QueueAttach attach = 3;
+    QueueCredit credit = 4;
+    uint64 cancel = 5;
+    QueueSettle settle = 6;
+    QueueGet get = 7;
+    QueueOp op = 8;
+    uint64 conn_lost = 9;
+    QueueHold hold = 10;
+    QueueRelease release = 11;
+  }
+}
+
+message QueueError {
+  // SprigDB's number (39250-39277).
+  uint32 code = 1;
+  // The AMQP 0-9-1 reply code.
+  uint32 reply = 2;
+  string text = 3;
+}
+
+message QueueDelivery {
+  QueueDeliveryId id = 1;
+  string queue = 2;
+  QueueMessage message = 3;
+  bool redelivered = 4;
+  uint32 delivery_count = 5;
+  // Delivery-time headers as AMQP table entries.
+  bytes annotations = 6;
+}
+
+message QueueReply {
+  uint64 req = 1;
+  // Set on failure.
+  QueueError error = 2;
+  // 0 done, 1 get, 2 count, 3 info.
+  uint32 kind = 3;
+  // A get's delivery (absent: the queue was empty).
+  QueueDelivery delivery = 4;
+  // A get's messages left, a purge's or delete's count, or info's ready
+  // messages.
+  uint32 count = 5;
+  // Info's consumers.
+  uint32 consumers = 6;
+}
+
+message QueueDeliver {
+  uint64 consumer = 1;
+  QueueDelivery delivery = 2;
+}
+
+message QueueCancelled {
+  uint64 consumer = 1;
+  QueueError reason = 2;
+}
+
+message QueueDrained {
+  uint64 consumer = 1;
+  uint32 credit = 2;
+}
+
+message QueueDown {
+  oneof frame {
+    QueueReply reply = 1;
+    QueueDeliver deliver = 2;
+    QueueCancelled cancelled = 3;
+    QueueDrained drained = 4;
+    // The owner left this gateway: the stream ends.
+    QueueError closed = 5;
+  }
+}
+
+message QueueReplyRequest {
+  // The requester's gateway slot (checked: it must be this one).
+  uint32 slot = 1;
+  // The reply-to name.
+  string name = 2;
+  QueueMessage message = 3;
+}
+
+message QueueReplyAck {
+  // A live requester got it.
+  bool delivered = 1;
+}

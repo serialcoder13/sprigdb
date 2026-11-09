@@ -369,6 +369,38 @@ impl GatewayLocator {
             .opts)
     }
 
+    /// Connection options of `sprig_ctl` on `cluster`'s replicas: its
+    /// nodes other than the writer, for a primary with replicas (chapter
+    /// 50's `queue.confirm_mode = replica`). Empty for one node, Galera
+    /// (a commit is on every node already) and external clusters.
+    ///
+    /// # Errors
+    /// As [`Self::ctl_pool`].
+    pub async fn ctl_replica_opts(&self, cluster: &ClusterId) -> Result<Vec<mysql_async::Opts>> {
+        let stored = self.registry.get(cluster).await?.ok_or_else(|| {
+            SprigError::new(
+                SprigCode::ClusterNotFound,
+                format!("no cluster {cluster} in dc {}", self.registry.dc()),
+            )
+        })?;
+        let rec = stored.body();
+        if rec.topology != sprig_cluster::record::TopologyKind::PrimaryReplica {
+            return Ok(Vec::new());
+        }
+        let writer = self
+            .backends
+            .writer(cluster, ShardId(0))
+            .await
+            .ok()
+            .map(|n| n.node);
+        let writer = writer.or_else(|| rec.nodes.first().map(|n| n.node.clone()));
+        let mut out = Vec::new();
+        for n in rec.nodes.iter().filter(|n| Some(&n.node) != writer.as_ref()) {
+            out.push(CredentialConnector::ctl(&rec.secrets).endpoint(n)?.opts);
+        }
+        Ok(out)
+    }
+
     /// A pool of `sprig_ctl` connections to `cluster`'s writer.
     ///
     /// # Errors

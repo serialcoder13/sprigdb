@@ -72,6 +72,8 @@ pub async fn server_with(settings: QueueSettings) -> Server {
         temps: Arc::new(NoTemps),
         clock: Arc::new(SystemClock),
         slot: 1,
+        peers: None,
+        placement: None,
     }));
     let svc = Services {
         identity: Arc::new(TestIdentity),

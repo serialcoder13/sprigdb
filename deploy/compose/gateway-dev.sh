@@ -14,7 +14,9 @@
 #   granted only on the tenant's own schemas; DDL creating
 #   databases and stored programs runs as the cluster's sprig_ctl account.
 #   down drops the two tenants' databases through the gateway (needs the
-#   mysql client) and deletes the tenants.
+#   mysql client), deletes the tenants and waits until each is gone from
+#   the tenant list (SPRIG_GATEWAY_DELETE_WAIT seconds at most, 300) before
+#   it stops the controller.
 # - accounts_file (M0.2): the logins app, app_repl and app_galera of
 #   gateway-accounts.dev.toml on the three raw clusters, names unchanged.
 #   The connector matrix runs against this mode.
@@ -96,6 +98,9 @@ case $login_mode in catalog | accounts_file) ;; *) echo "gateway-dev: SPRIG_GATE
 # The tenants catalog mode creates, each with the user app.
 tenants=(acme globex)
 tenant_password=sprig-dev-app
+# How long down waits for each tenant's deletion to finish, in seconds.
+delete_wait=${SPRIG_GATEWAY_DELETE_WAIT:-300}
+[[ $delete_wait =~ ^[1-9][0-9]*$ ]] || { echo "gateway-dev: SPRIG_GATEWAY_DELETE_WAIT must be a positive number of seconds" >&2; exit 1; }
 dc="dc-a"
 certs=deploy/compose/gateway-certs
 # status and down use the binaries up built, whatever CARGO_TARGET_DIR is then.
@@ -427,15 +432,23 @@ remove_tenants() {
             say "tenant $t not deleted (databases left?)"
             continue
         fi
-        # Cleanup (dropping the catalog) may finish in the controller's loop:
-        # wait for the entry to go before the controller stops.
-        local gone=false
-        for _ in $(seq 1 40); do
-            if ! ctl tenant show "$t" >/dev/null 2>&1; then
+        # Cleanup may finish in the controller's loop (a tenant moved in the
+        # last 24 hours first waits for its move job to drop the old copy):
+        # wait for the entry to go before the controller stops, or the
+        # cleanup of the clusters it hasn't reached yet (the new home's
+        # catalog, accounts and name rows) never runs. Gone means absent
+        # from a tenant list that answered: a failed call (a busy
+        # controller, a binary being rebuilt) proves nothing.
+        local gone=false waited=0 list
+        while ((waited < delete_wait * 2)); do
+            if list=$(ctl -o json tenant list 2>/dev/null) &&
+                ! jq -e --arg t "$t" '.tenants[]? | select(.name == $t)' <<<"$list" >/dev/null; then
                 gone=true
                 break
             fi
+            ((waited == 20)) && say "tenant $t is still deleting; waiting up to ${delete_wait}s (SPRIG_GATEWAY_DELETE_WAIT)"
             sleep 0.5
+            waited=$((waited + 1))
         done
         if $gone; then
             say "tenant $t deleted"

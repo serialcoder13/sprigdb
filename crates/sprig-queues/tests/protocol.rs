@@ -34,6 +34,8 @@ fn engine_under_test(map: VhostMap, authz: Authorizer) -> (EngineArc<dyn QueueBa
         temps: EngineArc::new(NoTemps),
         clock: EngineArc::new(SystemClock),
         slot: 1,
+        peers: None,
+        placement: None,
     }));
     let e = EngineArc::clone(&engine);
     (engine, EngineArc::new(move |b| e.set_blocked(b)))

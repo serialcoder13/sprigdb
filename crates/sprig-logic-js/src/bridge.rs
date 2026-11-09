@@ -39,6 +39,9 @@ pub enum Shape {
     /// `db.call`: one `CALL` of a logic function, built by [`call_op`];
     /// its row is `event`, then the event's fields.
     Call,
+    /// A `CALL sprig.*` the gateway answers itself (`sprig.mq_*`,
+    /// `sprig.commit_offset`), built by [`crate::messaging`]: rows or OK.
+    Sprig,
 }
 
 impl Shape {
@@ -50,6 +53,7 @@ impl Shape {
             Shape::Many => "Sprig.Db.Query",
             Shape::Exec => "Sprig.Db.Exec",
             Shape::Call => "db.call",
+            Shape::Sprig => "db.mq",
         }
     }
 }
@@ -354,7 +358,7 @@ pub fn bind(shape: Shape, sql: &str, args: &[Value], at: &str) -> Result<DbOp> {
                 match shape {
                     Shape::One | Shape::Many => "one SELECT statement",
                     Shape::Exec => "one INSERT, REPLACE, UPDATE or DELETE statement",
-                    Shape::Call => "one CALL statement",
+                    Shape::Call | Shape::Sprig => "one CALL statement",
                 }
             ),
         ));
@@ -381,6 +385,7 @@ fn first_word_fits(sql: &str, shape: Shape) -> bool {
         Shape::One | Shape::Many => matches!(w.as_str(), "SELECT" | "WITH" | "VALUES"),
         Shape::Exec => matches!(w.as_str(), "INSERT" | "REPLACE" | "UPDATE" | "DELETE"),
         Shape::Call => w == "CALL",
+        Shape::Sprig => crate::messaging::is_sprig_call(sql),
     }
 }
 
@@ -442,8 +447,10 @@ pub fn script_value(
     at: &str,
 ) -> Result<Value> {
     match (shape, reply) {
-        (Shape::Exec, Reply::Affected(n)) => Ok(serde_json::json!({ "affected": n })),
-        (Shape::Many | Shape::One | Shape::Call, Reply::Rows { columns, rows }) => {
+        (Shape::Exec | Shape::Sprig, Reply::Affected(n)) => {
+            Ok(serde_json::json!({ "affected": n }))
+        }
+        (Shape::Many | Shape::One | Shape::Call | Shape::Sprig, Reply::Rows { columns, rows }) => {
             st.read_rows(rows.len() as u64)?;
             match shape {
                 Shape::One => {

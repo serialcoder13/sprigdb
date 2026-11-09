@@ -43,6 +43,9 @@ pub struct GroupMapIo {
     sources: Vec<u32>,
     targets: Vec<(u32, HashRange)>,
     to: ClusterId,
+    /// A re-key's new `key_spec_digest`, written by the flip (chapter 16):
+    /// gateways route the new shards by the new key from then on.
+    new_digest: Option<u64>,
 }
 
 impl std::fmt::Debug for GroupMapIo {
@@ -94,6 +97,14 @@ impl GroupMapIo {
                     .ok_or_else(|| SprigError::internal("a hash-range target without a range"))
             })
             .collect::<Result<Vec<_>>>()?;
+        let new_digest = match &spec.routing {
+            crate::api::Routing::Rekey { key, .. } => Some(
+                sprig_shard::KeySpec::from_json(key)
+                    .map_err(|e| SprigError::internal(format!("the re-key's key: {e}")))?
+                    .digest,
+            ),
+            _ => None,
+        };
         Ok(Self {
             store: ShardMapStore::new(meta.clone()),
             meta,
@@ -102,6 +113,7 @@ impl GroupMapIo {
             sources: spec.sources.iter().map(|s| s.shard).collect(),
             targets,
             to,
+            new_digest,
         })
     }
 
@@ -211,6 +223,11 @@ impl GroupMapIo {
         m.ranges.splice(first..=last, new);
         let top = targets.iter().map(|(s, _)| *s).max().unwrap_or(0);
         m.next_shard_id = m.next_shard_id.max(top + 1);
+        if let Some(d) = self.new_digest {
+            // A re-key replaces every range: the map now hashes by the new
+            // key, in the same compare-and-put.
+            m.key_spec_digest = d;
+        }
         Ok(())
     }
 
@@ -558,6 +575,45 @@ mod tests {
             .unwrap();
         assert_eq!(m.ranges.len(), 1);
         assert_eq!((m.ranges[0].shard.0, m.ranges[0].epoch), (4, 3));
+    }
+
+    #[tokio::test]
+    async fn a_rekey_replaces_every_range_and_the_key_digest() {
+        let (s, c) = setup().await;
+        let key = sprig_shard::KeySpec::new(vec![sprig_shard::KeyClass::Binary]).unwrap();
+        let spec = JobSpec::rekey(
+            TenantId(3),
+            2,
+            &c,
+            vec![(1, vec!["t3_d1_g2_s1".into()], HashRange { lo: 0, hi: None })],
+            &c,
+            vec![
+                (
+                    2,
+                    HashRange {
+                        lo: 0,
+                        hi: Some(HALF),
+                    },
+                ),
+                (3, HashRange { lo: HALF, hi: None }),
+            ],
+            key.to_json(),
+            std::collections::BTreeMap::new(),
+        );
+        let io = GroupMapIo::new(s.clone(), &spec).unwrap();
+        let job = JobId::new_v7();
+        io.hold(job, 1, u64::MAX).await.unwrap();
+        assert_eq!(
+            io.commit(job, 1, &c).await.unwrap(),
+            CommitOutcome::Committed
+        );
+        let (m, _) = ShardMapStore::new(s)
+            .load(TenantId(3), GroupId(2))
+            .await
+            .unwrap();
+        assert_eq!(m.key_spec_digest, key.digest);
+        let shards: Vec<u32> = m.ranges.iter().map(|r| r.shard.0).collect();
+        assert_eq!(shards, vec![2, 3]);
     }
 
     #[tokio::test]

@@ -281,6 +281,58 @@ sprig_codes! {
     /// The automatic index's state doesn't allow the action (approve a
     /// non-recommendation, drop a pinned one, ...), or it changed meanwhile.
     AutoIndexStateInvalid = 39202, "ER_SPRIG_AUTO_INDEX_STATE_INVALID", "SprigAutoIndexStateInvalid", SQLSTATE_GENERAL, false;
+    /// Unknown sink or connection (chapter 51).
+    SinkNotFound = 39210, "ER_SPRIG_SINK_NOT_FOUND", "SprigSinkNotFound", SQLSTATE_GENERAL, false;
+    /// A sink or connection name in use (chapter 51).
+    SinkExists = 39211, "ER_SPRIG_SINK_EXISTS", "SprigSinkExists", SQLSTATE_GENERAL, false;
+    /// Creating or altering sinks or connections without `SPRIG_SINK_ADMIN`, naming a connection without `USAGE`, or a fan-in sink without `SPRIG_FAN_IN` (chapter 51).
+    SinkPrivilege = 39212, "ER_SPRIG_SINK_PRIVILEGE", "SprigSinkPrivilege", SQLSTATE_SYNTAX_ACCESS, false;
+    /// A destination not on `sink.destination_allowlist`, or an internal address not listed literally (chapter 51).
+    SinkDestinationNotAllowed = 39213, "ER_SPRIG_SINK_DESTINATION_NOT_ALLOWED", "SprigSinkDestinationNotAllowed", SQLSTATE_GENERAL, false;
+    /// The destination's tags don't satisfy the tenant's residency policy (chapter 51).
+    SinkResidency = 39214, "ER_SPRIG_SINK_RESIDENCY", "SprigSinkResidency", SQLSTATE_GENERAL, false;
+    /// Dropping a connection that sinks use (chapter 51).
+    SinkConnectionInUse = 39215, "ER_SPRIG_SINK_CONNECTION_IN_USE", "SprigSinkConnectionInUse", SQLSTATE_GENERAL, false;
+    /// A credential the connection type doesn't take, or one it needs is missing (chapter 51).
+    SinkCredentialsInvalid = 39216, "ER_SPRIG_SINK_CREDENTIALS_INVALID", "SprigSinkCredentialsInvalid", SQLSTATE_GENERAL, false;
+    /// `EXACTLY ONCE` for a source and target that can't give it (chapter 51).
+    SinkExactlyOnceUnsupported = 39217, "ER_SPRIG_SINK_EXACTLY_ONCE_UNSUPPORTED", "SprigSinkExactlyOnceUnsupported", SQLSTATE_GENERAL, false;
+    /// An unknown or invalid sink or connection option, template or column list (chapter 51).
+    SinkOptionInvalid = 39218, "ER_SPRIG_SINK_OPTION_INVALID", "SprigSinkOptionInvalid", SQLSTATE_GENERAL, false;
+    /// A transform that writes, calls out or isn't deterministic under `EXACTLY ONCE` (chapter 51).
+    SinkTransformInvalid = 39219, "ER_SPRIG_SINK_TRANSFORM_INVALID", "SprigSinkTransformInvalid", SQLSTATE_GENERAL, false;
+    /// A sink script raised an error or returned a malformed result (chapter 51).
+    SinkScriptFailed = 39220, "ER_SPRIG_SINK_SCRIPT_FAILED", "SprigSinkScriptFailed", SQLSTATE_GENERAL, false;
+    /// The destination refused or failed a delivery (chapter 51).
+    SinkDeliveryFailed = 39221, "ER_SPRIG_SINK_DELIVERY_FAILED", "SprigSinkDeliveryFailed", SQLSTATE_GENERAL, true;
+    /// The sink paused itself after `sink.pause_after_minutes` of failures (chapter 51).
+    SinkPaused = 39222, "ER_SPRIG_SINK_PAUSED", "SprigSinkPaused", SQLSTATE_GENERAL, false;
+    /// A sink's position fell behind its source's retention (chapter 51).
+    SinkSourceLost = 39223, "ER_SPRIG_SINK_SOURCE_LOST", "SprigSinkSourceLost", SQLSTATE_GENERAL, false;
+    /// The destination table or file schema doesn't fit the records (chapter 51).
+    SinkSchemaMismatch = 39224, "ER_SPRIG_SINK_SCHEMA_MISMATCH", "SprigSinkSchemaMismatch", SQLSTATE_GENERAL, false;
+    /// A record alone exceeds what the destination accepts (chapter 51).
+    SinkRecordTooLarge = 39225, "ER_SPRIG_SINK_RECORD_TOO_LARGE", "SprigSinkRecordTooLarge", SQLSTATE_GENERAL, false;
+    /// Over `sink.max_per_tenant` or a throughput quota (chapter 51).
+    SinkQuota = 39226, "ER_SPRIG_SINK_QUOTA", "SprigSinkQuota", SQLSTATE_GENERAL, false;
+    /// A sink task's epoch moved on; the old worker stops (chapter 51).
+    SinkFenced = 39227, "ER_SPRIG_SINK_FENCED", "SprigSinkFenced", SQLSTATE_GENERAL, true;
+    /// The worker's cloud identity without the operator's permission (chapter 51).
+    SinkPlatformIdentityDenied = 39228, "ER_SPRIG_SINK_PLATFORM_IDENTITY_DENIED", "SprigSinkPlatformIdentityDenied", SQLSTATE_GENERAL, false;
+    /// A sink's owner can no longer read its source (chapter 51).
+    SinkOwnerPrivilegeLost = 39229, "ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST", "SprigSinkOwnerPrivilegeLost", SQLSTATE_GENERAL, false;
+    /// `sink.enabled` is off, or the target kind isn't in `sink.allowed_kinds` (chapter 51).
+    SinkDisabled = 39230, "ER_SPRIG_SINK_DISABLED", "SprigSinkDisabled", SQLSTATE_GENERAL, false;
+    /// A format or compression the target or source can't produce (chapter 51).
+    SinkFormatUnsupported = 39231, "ER_SPRIG_SINK_FORMAT_UNSUPPORTED", "SprigSinkFormatUnsupported", SQLSTATE_GENERAL, false;
+    /// An operation the sink's state doesn't allow (chapter 51).
+    SinkState = 39232, "ER_SPRIG_SINK_STATE", "SprigSinkState", SQLSTATE_GENERAL, false;
+    /// A platform connection the tenant isn't granted (chapter 51).
+    SinkPlatformConnectionNotGranted = 39233, "ER_SPRIG_SINK_PLATFORM_CONNECTION_NOT_GRANTED", "SprigSinkPlatformConnectionNotGranted", SQLSTATE_GENERAL, false;
+    /// A worker can't read a platform connection's secret file (chapter 51).
+    SinkPlatformSecretUnavailable = 39234, "ER_SPRIG_SINK_PLATFORM_SECRET_UNAVAILABLE", "SprigSinkPlatformSecretUnavailable", SQLSTATE_GENERAL, true;
+    /// A sink script's `db` handle was given anything but a read (chapter 51).
+    SinkScriptReadOnly = 39235, "ER_SPRIG_SINK_SCRIPT_READ_ONLY", "SprigSinkScriptReadOnly", SQLSTATE_GENERAL, false;
     /// A distribution-key part has a type that can't be a key, or the
     /// values don't match the key's parts (chapter 15).
     UnsupportedKeyType = 39400, "ER_SPRIG_UNSUPPORTED_KEY_TYPE", "SprigUnsupportedKeyType", SQLSTATE_GENERAL, false;
@@ -610,6 +662,10 @@ sprig_codes! {
     /// The function was placed in the engine tier, whose runtime this
     /// build doesn't have yet (chapter 41, as built).
     LogicEngineUnavailable = 39876, "ER_SPRIG_LOGIC_ENGINE_UNAVAILABLE", "SprigLogicEngineUnavailable", SQLSTATE_GENERAL, false;
+    /// A trigger on a stream found its consumer group already past the
+    /// record: another run of the trigger committed it (chapter 41, R9;
+    /// the run is rolled back and skipped).
+    LogicTriggerPositionMoved = 39877, "ER_SPRIG_LOGIC_TRIGGER_POSITION_MOVED", "SprigLogicTriggerPositionMoved", SQLSTATE_GENERAL, true;
     /// Unknown stream or topic (chapter 45).
     StreamNotFound = 39940, "ER_SPRIG_STREAM_NOT_FOUND", "SprigStreamNotFound", SQLSTATE_GENERAL, false;
     /// `UPDATE` or `DELETE` on a stream; a produce to a change topic
@@ -632,6 +688,10 @@ sprig_codes! {
     StreamOffsetOutOfRange = 39947, "ER_SPRIG_STREAM_OFFSET_OUT_OF_RANGE", "SprigStreamOffsetOutOfRange", SQLSTATE_GENERAL, false;
     /// A record without a key on a compacted stream (chapter 45).
     StreamCompactNeedsKey = 39955, "ER_SPRIG_STREAM_COMPACT_NEEDS_KEY", "SprigStreamCompactNeedsKey", SQLSTATE_GENERAL, false;
+    /// `sprig.commit_offset` inside a transaction the gateway doesn't
+    /// coordinate, with the tenant catalog on another cluster than the
+    /// transaction's (chapter 45, R9).
+    StreamOffsetTxnUnsupported = 39958, "ER_SPRIG_STREAM_OFFSET_TXN_UNSUPPORTED", "SprigStreamOffsetTxnUnsupported", SQLSTATE_GENERAL, false;
     /// The audit spool is full (`audit.spool_max_mb`): admin API mutations
     /// and account statements fail closed (chapter 47).
     AuditUnavailable = 39970, "ER_SPRIG_AUDIT_UNAVAILABLE", "SprigAuditUnavailable", SQLSTATE_GENERAL, true;
@@ -753,7 +813,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ResidencyInvalid
         | SprigCode::StreamPartitionsDecrease
         | SprigCode::StreamKeyNotAttached
-        | SprigCode::StreamCompactNeedsKey => (Code::InvalidArgument, 400),
+        | SprigCode::StreamCompactNeedsKey
+        | SprigCode::SinkCredentialsInvalid
+        | SprigCode::SinkOptionInvalid
+        | SprigCode::SinkTransformInvalid
+        | SprigCode::SinkFormatUnsupported => (Code::InvalidArgument, 400),
         SprigCode::SettingLocked
         | SprigCode::BinlogUnsupported
         | SprigCode::FeedSourceUnsupported
@@ -807,7 +871,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::InheritCopyStale
         | SprigCode::InheritFederatedUnavailable
         | SprigCode::LogicEngineBusy
-        | SprigCode::StreamSequencingTimeout => (Code::Unavailable, 503),
+        | SprigCode::StreamSequencingTimeout
+        | SprigCode::SinkDeliveryFailed
+        | SprigCode::SinkPlatformSecretUnavailable => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
         | SprigCode::TxnHandleUnknown
@@ -824,7 +890,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::LogicVersionConflict
         | SprigCode::MoveCutoverAborted
         | SprigCode::ShardMapChanged
-        | SprigCode::DdlFailed => (Code::Aborted, 409),
+        | SprigCode::DdlFailed
+        | SprigCode::SinkScriptFailed
+        | SprigCode::SinkFenced => (Code::Aborted, 409),
         SprigCode::CrossClusterWriteRejected | SprigCode::TooManyBranches => {
             (Code::FailedPrecondition, 400)
         }
@@ -846,12 +914,14 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::TxnNotInDoubt
         | SprigCode::SpaceNotFound
         | SprigCode::ShareNotFound
-        | SprigCode::StreamNotFound => (Code::NotFound, 404),
+        | SprigCode::StreamNotFound
+        | SprigCode::SinkNotFound => (Code::NotFound, 404),
         SprigCode::ClusterExists
         | SprigCode::TenantExists
         | SprigCode::FeedSubscriptionExists
         | SprigCode::SpaceExists
-        | SprigCode::StreamExists => (Code::AlreadyExists, 409),
+        | SprigCode::StreamExists
+        | SprigCode::SinkExists => (Code::AlreadyExists, 409),
         SprigCode::ClusterStateInvalid
         | SprigCode::TypeHasDependents
         | SprigCode::HierarchyCycle
@@ -884,27 +954,44 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::InheritSchemaMismatch
         | SprigCode::InheritedObjectInUse
         | SprigCode::AuthorizerUnknownToGateways
-        | SprigCode::StreamAppendOnly => (Code::FailedPrecondition, 409),
+        | SprigCode::StreamAppendOnly
+        | SprigCode::LogicTriggerPositionMoved
+        | SprigCode::StreamOffsetTxnUnsupported
+        | SprigCode::SinkConnectionInUse
+        | SprigCode::SinkExactlyOnceUnsupported
+        | SprigCode::SinkPaused
+        | SprigCode::SinkSourceLost
+        | SprigCode::SinkSchemaMismatch
+        | SprigCode::SinkDisabled
+        | SprigCode::SinkState => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
         | SprigCode::DefinerRefused
         | SprigCode::LogicOutboundDenied
         | SprigCode::RlsUnsupported
         | SprigCode::TxnHandleForbidden
-        | SprigCode::SpaceAccessDenied => (Code::PermissionDenied, 403),
+        | SprigCode::SpaceAccessDenied
+        | SprigCode::SinkPrivilege
+        | SprigCode::SinkDestinationNotAllowed
+        | SprigCode::SinkResidency
+        | SprigCode::SinkPlatformIdentityDenied
+        | SprigCode::SinkOwnerPrivilegeLost
+        | SprigCode::SinkPlatformConnectionNotGranted
+        | SprigCode::SinkScriptReadOnly => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit
         | SprigCode::AdmissionTimeout
         | SprigCode::MemoryLimit
         | SprigCode::LogicBudgetExceeded
         | SprigCode::RouterMemoryLimit
-        | SprigCode::PlanLimitExceeded => (Code::ResourceExhausted, 429),
+        | SprigCode::PlanLimitExceeded
+        | SprigCode::SinkQuota => (Code::ResourceExhausted, 429),
         SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts => {
             (Code::ResourceExhausted, 503)
         }
-        SprigCode::RequestTooLarge | SprigCode::StreamRecordTooLarge => {
-            (Code::InvalidArgument, 413)
-        }
+        SprigCode::RequestTooLarge
+        | SprigCode::StreamRecordTooLarge
+        | SprigCode::SinkRecordTooLarge => (Code::InvalidArgument, 413),
         SprigCode::StreamOffsetOutOfRange => (Code::OutOfRange, 416),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
         SprigCode::AdminUnauthenticated

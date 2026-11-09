@@ -1,0 +1,74 @@
+[package]
+name = "sprig-sinks"
+description = "SprigDB: Sinks: continuous delivery from streams and queues to webhooks, Kafka, S3, databases and scripts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+# Gzip for JSON Lines and CSV objects (pure-Rust backend) and zstd.
+flate2.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+# The webhook and S3 clients: hyper 1.x over checked addresses, HTTP/1.1
+# and HTTP/2 (ALPN `h2`); h2 is already in the tree through tonic.
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio", "http2"] }
+# `Retry-After` as an HTTP date. MIT/Apache-2.0, already in the tree.
+httpdate = "1"
+metrics.workspace = true
+mysql_async.workspace = true
+# Parquet objects (chapter 51 open question 3, approved by Kiran on 9
+# November 2026): Apache Arrow's `parquet` crate (Apache-2.0) without its
+# Arrow feature, through the low-level serialized writer, zstd pages.
+parquet = { version = "=60.1.0", default-features = false, features = ["zstd"] }
+# AES-256-GCM sealing, HKDF, HMAC-SHA256 (webhook signatures, SigV4) and
+# SHA-256 (batch ids, payload hashes).
+ring.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-catalog.workspace = true
+sprig-common.workspace = true
+# sprig-logic-js.workspace = true
+sprig-meta.workspace = true
+sprig-proto-kafka = { path = "../sprig-proto-kafka" }
+sprig-settings.workspace = true
+# sprig-streams = { path = "../sprig-streams" }
+sprig-workload.workspace = true
+# The PostgreSQL database target (chapter 51 open question 10): sqlx's
+# PostgreSQL driver (MIT/Apache-2.0) on tokio with rustls and ring.
+sqlx = { version = "=0.8.6", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+# WHERE conditions of sinks are parsed with sqlparser and evaluated here.
+sqlparser.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "net", "io-util", "sync", "macros"] }
+tokio-rustls.workspace = true
+tracing.workspace = true
+# xxh3 for `{key_hash}` in S3 prefixes and lane choice.
+twox-hash.workspace = true
+uuid.workspace = true
+webpki-roots = "1"
+zeroize.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util", "test-util", "rt-multi-thread"] }
+# The webhook tests' in-process server: hyper's server side, HTTP/1.1 and
+# h2 on one port (hyper-util's auto builder), and a self-signed
+# certificate from rcgen. All MIT/Apache-2.0, already in the tree.
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["server", "server-auto", "tokio", "http1", "http2"] }
+rcgen.workspace = true
+
+[lints]
+workspace = true
+

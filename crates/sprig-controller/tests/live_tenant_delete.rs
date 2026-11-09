@@ -23,6 +23,17 @@
 //! `mysql.*`, routines, events, `__sprig_names` rows and the move's
 //! `__sprig_sys` rows, and the DC tier for the tenant's keys and job
 //! records.
+//!
+//! The second case (decision TD9, agent tenantdel2) is the one
+//! `gateway-dev.sh down` left half done: a tenant moved twice
+//! (`dc-a-c1` to `dc-a-c2`, whose retention the test then ends in the job
+//! record, then to `dc-a-c3`, the old copy kept; it needs `ETCD`) whose database also has shard schemas on the two clusters it
+//! left (made here directly, as a sharded group's shards would be). With
+//! its databases dropped, the deletion must finish within 20 seconds (it
+//! took 30 before: the cleanup waited as a blocked key while the move job
+//! dropped the old copy) and leave nothing on any of the three backends
+//! (`dc-a-c3` must be the third) or in etcd. `tenant show` failures seen
+//! meanwhile are reported: a failed call never means the tenant is gone.
 
 #![allow(
     clippy::too_many_lines,
@@ -38,9 +49,13 @@ use std::time::{Duration, Instant};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use serde_json::Value;
+use sprig_common::ids::JobId;
 use sprig_common::ids::TenantId;
 use sprig_common::names::{AccountName, SchemaName};
+use sprig_common::time::SystemClock;
 use sprig_meta::{EtcdConfig, EtcdStore, ListOpts, MetaStore, Tier};
+use sprig_mover::JobStore;
+use std::sync::Arc;
 
 const PREFIX: &str = "SPRIG_TEST_TENANTDEL_";
 const APP_PW: &str = "sprig-tenantdel-app";
@@ -406,4 +421,205 @@ async fn futures_join(backends: &[String], t: TenantId, jobs: &[String]) -> Vec<
         out.push(leftovers(b, t, jobs).await);
     }
     out
+}
+
+/// Polls `job list --tenant` until a job of `name` is in `want` (or
+/// fails the test after 5 minutes, or if one rolled back).
+async fn wait_job(ctl: &Ctl, name: &str, want: &str) -> Vec<String> {
+    let started = Instant::now();
+    loop {
+        if let Ok(jobs) = ctl.run(&["job", "list", "--tenant", name]) {
+            let list = jobs["jobs"].as_array().cloned().unwrap_or_default();
+            assert!(
+                !list.iter().any(|j| j["state"] == "rolled_back"),
+                "a move rolled back: {jobs}"
+            );
+            if list.iter().any(|j| j["state"] == want) {
+                eprintln!("jobs: {jobs}");
+                return list
+                    .iter()
+                    .filter_map(|j| j["id"].as_str().map(str::to_owned))
+                    .collect();
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(300),
+            "no {want} job after 5 minutes"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_tenant_moved_twice_and_spread_over_clusters_is_deleted_within_seconds() {
+    let (Some(bin), Some(admin), Some(gw), Some(backends)) = (
+        env("SPRIGCTL"),
+        env("ADMIN"),
+        env("GATEWAY"),
+        env("BACKENDS"),
+    ) else {
+        eprintln!("skipped: set {PREFIX}SPRIGCTL, ADMIN, GATEWAY and BACKENDS to run it");
+        return;
+    };
+    let backends: Vec<String> = backends.split(',').map(str::to_owned).collect();
+    assert!(backends.len() >= 3, "needs dc-a-c1, dc-a-c2 and dc-a-c3");
+    let ctl = Ctl { bin, admin };
+    let tag = format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            & 0xff_ffff
+    );
+    let name = format!("tenantdel2-{tag}");
+    let created = ctl
+        .run(&["tenant", "create", &name, "--cluster", "dc-a-c1"])
+        .unwrap();
+    let t = TenantId(created["tenant"]["tenant_id"].as_u64().expect("tenant id"));
+    eprintln!("tenant {name} is {t}");
+    if let Some(base) = env("ID_BASE").and_then(|b| b.parse::<u64>().ok())
+        && !(base..base + 100_000).contains(&t.0)
+    {
+        let _ = ctl.run(&["tenant", "delete", &name, "--yes"]);
+        panic!(
+            "tenant id {t} is outside {base}..{}: pick a higher base",
+            base + 100_000
+        );
+    }
+    ctl.run(&["tenant", "user", "add", &name, "app", "--password", APP_PW])
+        .unwrap();
+    let login = format!("{name}.app");
+    let mut c = gateway(&gw, &login).await;
+    for s in [
+        "CREATE USER u2 IDENTIFIED BY 'sprig-tenantdel-app'",
+        "CREATE USER u3 IDENTIFIED BY 'sprig-tenantdel-app'",
+        "CREATE DATABASE shop",
+        "CREATE TABLE shop.t (id INT PRIMARY KEY, v INT)",
+        "INSERT INTO shop.t VALUES (1, 1), (2, 2), (3, 3)",
+        "GRANT SELECT ON shop.t TO u2",
+    ] {
+        c.query_drop(s).await.unwrap_or_else(|e| panic!("{s}: {e}"));
+    }
+    let _ = c.disconnect().await;
+    // First move; its retention is then ended in the job record (as if
+    // 24 hours had passed), so the job drops the old copy and finishes.
+    // The tenant's accounts stay on dc-a-c1 (TD4).
+    let etcd = env("ETCD").expect("this case needs SPRIG_TEST_TENANTDEL_ETCD");
+    let cfg = EtcdConfig::new(vec![etcd]);
+    let dc: Arc<dyn MetaStore> = Arc::new(
+        EtcdStore::connect(Tier::Dc("dc-a".parse().unwrap()), &cfg)
+            .await
+            .unwrap(),
+    );
+    ctl.run(&["shard", "move", &name, "--to", "dc-a-c2"])
+        .unwrap();
+    let first = wait_job(&ctl, &name, "retaining").await;
+    let store = JobStore::new(Arc::clone(&dc), Arc::new(SystemClock));
+    let id: JobId = serde_json::from_value(Value::String(first[0].clone())).unwrap();
+    loop {
+        let (mut rec, rev) = store.get(&id).await.unwrap();
+        rec.retain_until_ms = Some(store.now_ms());
+        if store.put_if(&rec, rev).await.unwrap().is_some() {
+            break;
+        }
+    }
+    wait_job(&ctl, &name, "done").await;
+    // Used on dc-a-c2, then moved on to dc-a-c3, the old copy kept.
+    let mut c = gateway(&gw, &login).await;
+    let n: Option<u64> = c.query_first("SELECT COUNT(*) FROM shop.t").await.unwrap();
+    assert_eq!(n, Some(3));
+    let _ = c.disconnect().await;
+    ctl.run(&["shard", "move", &name, "--to", "dc-a-c3"])
+        .unwrap();
+    let jobs = wait_job(&ctl, &name, "retaining").await;
+    let mut c = gateway(&gw, &login).await;
+    let n: Option<u64> = c.query_first("SELECT COUNT(*) FROM shop.t").await.unwrap();
+    assert_eq!(n, Some(3));
+    let _ = c.disconnect().await;
+    // Shards of shop on the clusters it left, as a sharded group's.
+    let db: u32 = {
+        let mut r = Conn::new(Opts::from_url(&backends[2]).unwrap())
+            .await
+            .unwrap();
+        let id: Option<u32> = r
+            .query_first(format!(
+                "SELECT db_id FROM `t{t}_sprig`.`databases` WHERE name = 'shop'"
+            ))
+            .await
+            .unwrap();
+        let _ = r.disconnect().await;
+        id.expect("shop's id")
+    };
+    for (i, url) in backends[..2].iter().enumerate() {
+        let mut r = Conn::new(Opts::from_url(url).unwrap()).await.unwrap();
+        let schema = format!("t{t}_d{db}_g90{}_s{}", i + 1, i + 1);
+        r.query_drop(format!("CREATE DATABASE `{schema}`"))
+            .await
+            .unwrap();
+        r.query_drop(format!(
+            "CREATE TABLE `{schema}`.t (id INT PRIMARY KEY, v INT)"
+        ))
+        .await
+        .unwrap();
+        let _ = r.disconnect().await;
+    }
+    let mut c = gateway(&gw, &login).await;
+    c.query_drop("DROP DATABASE shop").await.unwrap();
+    let _ = c.disconnect().await;
+    let before = futures_join(&backends, t, &jobs).await;
+    for (b, l) in backends.iter().zip(&before) {
+        eprintln!(
+            "before, {}: {} accounts, schemas {:?}, {} name rows",
+            b.rsplit('@').next().unwrap_or(b),
+            l.accounts.len(),
+            l.schemas,
+            l.names.len()
+        );
+    }
+    assert!(!before[0].accounts.is_empty(), "first move's accounts");
+    assert!(
+        before[1].schemas.contains(&format!("t{t}_sprig")),
+        "the retained copy is on dc-a-c2: {:?}",
+        before[1].schemas
+    );
+    assert!(before[2].schemas.contains(&format!("t{t}_sprig")));
+    let started = Instant::now();
+    ctl.run(&["tenant", "delete", &name, "--yes"]).unwrap();
+    let mut show_failures = 0;
+    let took = loop {
+        if ctl.run(&["tenant", "show", &name]).is_err() {
+            show_failures += 1;
+        }
+        if let Ok(list) = ctl.run(&["tenant", "list"])
+            && !list["tenants"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x["name"] == name.as_str()))
+        {
+            break started.elapsed();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(300),
+            "tenant {name} still there after 5 minutes"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("deleted in {took:?} ({show_failures} tenant show calls failed meanwhile)");
+    let after = futures_join(&backends, t, &jobs).await;
+    for (b, l) in backends.iter().zip(&after) {
+        assert!(l.is_empty(), "left on {b}: {l:?}");
+    }
+    for tier in [Tier::Global, Tier::Dc("dc-a".parse().unwrap())] {
+        let store = EtcdStore::connect(tier.clone(), &cfg).await.unwrap();
+        let left = keys_left(&store, t, &name).await;
+        assert!(left.is_empty(), "keys left in {tier:?}: {left:?}");
+    }
+    assert!(
+        took < Duration::from_secs(20),
+        "the deletion took {took:?}: longer than gateway-dev.sh down used to wait"
+    );
+    eprintln!(
+        "nothing of {name} ({t}) is left on {} backends",
+        backends.len()
+    );
 }

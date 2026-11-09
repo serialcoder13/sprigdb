@@ -64,6 +64,40 @@ pub struct TableRef {
     pub name: String,
 }
 
+/// What a trigger `ON STREAM` or `ON QUEUE` reads (chapter 41, "Triggers
+/// on streams and queues"; R9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceKind {
+    /// An event stream (chapter 45): every record, in each partition's
+    /// order, with the trigger's own consumer group.
+    Stream,
+    /// A queue (chapter 50): the trigger is one more competing consumer.
+    Queue,
+}
+
+impl SourceKind {
+    /// The catalog's text.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SourceKind::Stream => "stream",
+            SourceKind::Queue => "queue",
+        }
+    }
+}
+
+/// `ON STREAM [db.]s` or `ON QUEUE [db.]q`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MessageSource {
+    /// Stream or queue.
+    pub kind: SourceKind,
+    /// The stream's database, or the queue's vhost database, if named.
+    pub db: Option<String>,
+    /// The stream or queue.
+    pub name: String,
+}
+
 /// `CREATE SCHEDULE`'s clauses.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ScheduleSpec {
@@ -128,6 +162,9 @@ pub struct Declaration {
     pub body: String,
     /// Validations and triggers: the table.
     pub table: Option<TableRef>,
+    /// Triggers on streams and queues (R9): what they read. `table` is then
+    /// `None`.
+    pub source: Option<MessageSource>,
     /// Validations and triggers: `insert`, `update`, `delete`.
     pub events: Vec<String>,
     /// Triggers: `FOR UPDATE OF (c, ...)`, fire only when these changed.
@@ -301,7 +338,9 @@ pub fn is_declaration(sql: &str) -> bool {
     };
     match kind {
         Some(&"validation" | &"schedule") => true,
-        Some(&"trigger") => words.windows(2).any(|w| w == ["after", "commit"]),
+        Some(&"trigger") => words
+            .windows(2)
+            .any(|w| w == ["after", "commit"] || w == ["on", "stream"] || w == ["on", "queue"]),
         Some(&"function" | &"procedure") => words
             .windows(2)
             .any(|w| w[0] == "language" && matches!(w[1], "kirun" | "javascript" | "js" | "lua")),
@@ -562,6 +601,7 @@ pub fn parse(sql: &str) -> Result<Declaration> {
         tier: TierPref::Auto,
         body: String::new(),
         table: None,
+        source: None,
         events: Vec::new(),
         when_fields: Vec::new(),
         schedule: None,
@@ -609,6 +649,26 @@ pub fn parse(sql: &str) -> Result<Declaration> {
             d.table = Some(p.qualified()?);
             let (ev, _) = p.events(false, false)?;
             d.events = ev;
+        }
+        Kind::Trigger if p.kw("on") => {
+            // `ON STREAM [db.]s` or `ON QUEUE [db.]q` (R9).
+            p.i += 1;
+            let kind = if p.eat("stream") {
+                SourceKind::Stream
+            } else if p.eat("queue") {
+                SourceKind::Queue
+            } else {
+                return Err(syntax("expected ON STREAM, ON QUEUE or AFTER COMMIT ON"));
+            };
+            let r = p.qualified()?;
+            if r.name.is_empty() {
+                return Err(syntax("a trigger reads a named stream or queue"));
+            }
+            d.source = Some(MessageSource {
+                kind,
+                db: r.db,
+                name: r.name,
+            });
         }
         Kind::Trigger => {
             p.expect("after")?;

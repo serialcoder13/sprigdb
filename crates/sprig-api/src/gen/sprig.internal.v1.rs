@@ -725,3 +725,693 @@ pub mod gateway_peer_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueOpen {
+    #[prost(uint64, tag = "1")]
+    pub tenant_id: u64,
+    #[prost(uint32, tag = "2")]
+    pub db_id: u32,
+    #[prost(string, tag = "3")]
+    pub db: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub vhost: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
+    pub queue_id: u64,
+    #[prost(string, tag = "6")]
+    pub queue: ::prost::alloc::string::String,
+    /// The gateway opening the stream.
+    #[prost(string, tag = "7")]
+    pub from_gateway: ::prost::alloc::string::String,
+}
+/// A message in its stored parts (chapter 50, "Message encoding").
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueMessage {
+    /// 0 = AMQP 0-9-1, 1 = AMQP 1.0.
+    #[prost(uint32, tag = "1")]
+    pub fmt: u32,
+    #[prost(string, tag = "2")]
+    pub exchange: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub routing_key: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "4")]
+    pub props: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub body: ::prost::alloc::vec::Vec<u8>,
+    /// The engine dropped the message's TTL (a dead letter).
+    #[prost(bool, tag = "6")]
+    pub no_ttl: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueDeliveryId {
+    #[prost(uint64, tag = "1")]
+    pub queue: u64,
+    #[prost(uint32, tag = "2")]
+    pub lane: u32,
+    #[prost(uint32, tag = "3")]
+    pub pclass: u32,
+    #[prost(uint64, tag = "4")]
+    pub seq: u64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueEnqueue {
+    #[prost(uint64, tag = "1")]
+    pub req: u64,
+    #[prost(message, optional, tag = "2")]
+    pub message: ::core::option::Option<QueueMessage>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub msg_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag = "4")]
+    pub dedup: bool,
+    /// x-death as AMQP table entries; empty for none.
+    #[prost(bytes = "vec", tag = "5")]
+    pub deaths: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag = "6")]
+    pub confirm: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueueAttach {
+    #[prost(uint64, tag = "1")]
+    pub req: u64,
+    #[prost(uint64, tag = "2")]
+    pub consumer: u64,
+    #[prost(uint64, tag = "3")]
+    pub conn: u64,
+    #[prost(bool, tag = "4")]
+    pub no_ack: bool,
+    #[prost(bool, tag = "5")]
+    pub exclusive: bool,
+    #[prost(int32, tag = "6")]
+    pub priority: i32,
+    /// Deliveries the consumer still holds from an earlier owner.
+    #[prost(message, repeated, tag = "7")]
+    pub held: ::prost::alloc::vec::Vec<QueueDeliveryId>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueCredit {
+    #[prost(uint64, tag = "1")]
+    pub consumer: u64,
+    #[prost(uint32, tag = "2")]
+    pub credit: u32,
+    #[prost(bool, tag = "3")]
+    pub drain: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueSettlement {
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<QueueDeliveryId>,
+    /// 0 ack; 1 requeue; 2 requeue counting a failure; 10 + reason:
+    /// dead-letter (0 rejected, 1 expired, 2 maxlen, 3 delivery_limit).
+    #[prost(uint32, tag = "2")]
+    pub how: u32,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueueSettle {
+    #[prost(uint64, tag = "1")]
+    pub conn: u64,
+    /// By delivery token: whoever holds the delivery.
+    #[prost(bool, tag = "2")]
+    pub any: bool,
+    #[prost(message, repeated, tag = "3")]
+    pub items: ::prost::alloc::vec::Vec<QueueSettlement>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueGet {
+    #[prost(uint64, tag = "1")]
+    pub req: u64,
+    #[prost(uint64, tag = "2")]
+    pub conn: u64,
+    #[prost(bool, tag = "3")]
+    pub no_ack: bool,
+    #[prost(bool, tag = "4")]
+    pub has_lease: bool,
+    #[prost(uint64, tag = "5")]
+    pub lease_ms: u64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueOp {
+    #[prost(uint64, tag = "1")]
+    pub req: u64,
+    /// 1 purge, 2 delete, 3 info.
+    #[prost(uint32, tag = "2")]
+    pub op: u32,
+    #[prost(bool, tag = "3")]
+    pub if_unused: bool,
+    #[prost(bool, tag = "4")]
+    pub if_empty: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueHold {
+    #[prost(uint64, tag = "1")]
+    pub req: u64,
+    #[prost(message, optional, tag = "2")]
+    pub id: ::core::option::Option<QueueDeliveryId>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub msg_id: ::prost::alloc::vec::Vec<u8>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueRelease {
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<QueueDeliveryId>,
+    #[prost(bool, tag = "2")]
+    pub committed: bool,
+    /// The transaction ended without telling how: check the row.
+    #[prost(bool, tag = "3")]
+    pub verify: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueueUp {
+    #[prost(oneof = "queue_up::Frame", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    pub frame: ::core::option::Option<queue_up::Frame>,
+}
+/// Nested message and enum types in `QueueUp`.
+pub mod queue_up {
+    #[allow(clippy::all)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Frame {
+        #[prost(message, tag = "1")]
+        Open(super::QueueOpen),
+        #[prost(message, tag = "2")]
+        Enqueue(super::QueueEnqueue),
+        #[prost(message, tag = "3")]
+        Attach(super::QueueAttach),
+        #[prost(message, tag = "4")]
+        Credit(super::QueueCredit),
+        #[prost(uint64, tag = "5")]
+        Cancel(u64),
+        #[prost(message, tag = "6")]
+        Settle(super::QueueSettle),
+        #[prost(message, tag = "7")]
+        Get(super::QueueGet),
+        #[prost(message, tag = "8")]
+        Op(super::QueueOp),
+        #[prost(uint64, tag = "9")]
+        ConnLost(u64),
+        #[prost(message, tag = "10")]
+        Hold(super::QueueHold),
+        #[prost(message, tag = "11")]
+        Release(super::QueueRelease),
+    }
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueError {
+    /// SprigDB's number (39250-39277).
+    #[prost(uint32, tag = "1")]
+    pub code: u32,
+    /// The AMQP 0-9-1 reply code.
+    #[prost(uint32, tag = "2")]
+    pub reply: u32,
+    #[prost(string, tag = "3")]
+    pub text: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueDelivery {
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<QueueDeliveryId>,
+    #[prost(string, tag = "2")]
+    pub queue: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub message: ::core::option::Option<QueueMessage>,
+    #[prost(bool, tag = "4")]
+    pub redelivered: bool,
+    #[prost(uint32, tag = "5")]
+    pub delivery_count: u32,
+    /// Delivery-time headers as AMQP table entries.
+    #[prost(bytes = "vec", tag = "6")]
+    pub annotations: ::prost::alloc::vec::Vec<u8>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueReply {
+    #[prost(uint64, tag = "1")]
+    pub req: u64,
+    /// Set on failure.
+    #[prost(message, optional, tag = "2")]
+    pub error: ::core::option::Option<QueueError>,
+    /// 0 done, 1 get, 2 count, 3 info.
+    #[prost(uint32, tag = "3")]
+    pub kind: u32,
+    /// A get's delivery (absent: the queue was empty).
+    #[prost(message, optional, tag = "4")]
+    pub delivery: ::core::option::Option<QueueDelivery>,
+    /// A get's messages left, a purge's or delete's count, or info's ready
+    /// messages.
+    #[prost(uint32, tag = "5")]
+    pub count: u32,
+    /// Info's consumers.
+    #[prost(uint32, tag = "6")]
+    pub consumers: u32,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueDeliver {
+    #[prost(uint64, tag = "1")]
+    pub consumer: u64,
+    #[prost(message, optional, tag = "2")]
+    pub delivery: ::core::option::Option<QueueDelivery>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueCancelled {
+    #[prost(uint64, tag = "1")]
+    pub consumer: u64,
+    #[prost(message, optional, tag = "2")]
+    pub reason: ::core::option::Option<QueueError>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueDrained {
+    #[prost(uint64, tag = "1")]
+    pub consumer: u64,
+    #[prost(uint32, tag = "2")]
+    pub credit: u32,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueDown {
+    #[prost(oneof = "queue_down::Frame", tags = "1, 2, 3, 4, 5")]
+    pub frame: ::core::option::Option<queue_down::Frame>,
+}
+/// Nested message and enum types in `QueueDown`.
+pub mod queue_down {
+    #[allow(clippy::all)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Frame {
+        #[prost(message, tag = "1")]
+        Reply(super::QueueReply),
+        #[prost(message, tag = "2")]
+        Deliver(super::QueueDeliver),
+        #[prost(message, tag = "3")]
+        Cancelled(super::QueueCancelled),
+        #[prost(message, tag = "4")]
+        Drained(super::QueueDrained),
+        /// The owner left this gateway: the stream ends.
+        #[prost(message, tag = "5")]
+        Closed(super::QueueError),
+    }
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueReplyRequest {
+    /// The requester's gateway slot (checked: it must be this one).
+    #[prost(uint32, tag = "1")]
+    pub slot: u32,
+    /// The reply-to name.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub message: ::core::option::Option<QueueMessage>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct QueueReplyAck {
+    /// A live requester got it.
+    #[prost(bool, tag = "1")]
+    pub delivered: bool,
+}
+/// Generated client implementations.
+pub mod queue_peer_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct QueuePeerClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> QueuePeerClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> QueuePeerClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            QueuePeerClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// One queue's relay: a gateway that doesn't own the queue opens one
+        /// stream per queue to the owner's gateway. The first frame is `open`.
+        /// The stream carries chapter 50's Enqueue flow (messages in, confirms
+        /// out) and Attach flow (credit and settlements in, deliveries out), and
+        /// gets and queue operations, in one order.
+        pub async fn relay(
+            &mut self,
+            request: impl tonic::IntoStreamingRequest<Message = super::QueueUp>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::QueueDown>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.internal.v1.QueuePeer/Relay",
+            );
+            let mut req = request.into_streaming_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.internal.v1.QueuePeer", "Relay"));
+            self.inner.streaming(req, path, codec).await
+        }
+        /// A direct reply-to reply for a requester on this gateway.
+        pub async fn reply(
+            &mut self,
+            request: impl tonic::IntoRequest<super::QueueReplyRequest>,
+        ) -> std::result::Result<tonic::Response<super::QueueReplyAck>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.internal.v1.QueuePeer/Reply",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.internal.v1.QueuePeer", "Reply"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod queue_peer_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with QueuePeerServer.
+    #[async_trait]
+    pub trait QueuePeer: std::marker::Send + std::marker::Sync + 'static {
+        /// Server streaming response type for the Relay method.
+        type RelayStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::QueueDown, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// One queue's relay: a gateway that doesn't own the queue opens one
+        /// stream per queue to the owner's gateway. The first frame is `open`.
+        /// The stream carries chapter 50's Enqueue flow (messages in, confirms
+        /// out) and Attach flow (credit and settlements in, deliveries out), and
+        /// gets and queue operations, in one order.
+        async fn relay(
+            &self,
+            request: tonic::Request<tonic::Streaming<super::QueueUp>>,
+        ) -> std::result::Result<tonic::Response<Self::RelayStream>, tonic::Status>;
+        /// A direct reply-to reply for a requester on this gateway.
+        async fn reply(
+            &self,
+            request: tonic::Request<super::QueueReplyRequest>,
+        ) -> std::result::Result<tonic::Response<super::QueueReplyAck>, tonic::Status>;
+    }
+    #[derive(Debug)]
+    pub struct QueuePeerServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> QueuePeerServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for QueuePeerServer<T>
+    where
+        T: QueuePeer,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.internal.v1.QueuePeer/Relay" => {
+                    #[allow(non_camel_case_types)]
+                    struct RelaySvc<T: QueuePeer>(pub Arc<T>);
+                    impl<T: QueuePeer> tonic::server::StreamingService<super::QueueUp>
+                    for RelaySvc<T> {
+                        type Response = super::QueueDown;
+                        type ResponseStream = T::RelayStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<tonic::Streaming<super::QueueUp>>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as QueuePeer>::relay(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RelaySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.internal.v1.QueuePeer/Reply" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReplySvc<T: QueuePeer>(pub Arc<T>);
+                    impl<
+                        T: QueuePeer,
+                    > tonic::server::UnaryService<super::QueueReplyRequest>
+                    for ReplySvc<T> {
+                        type Response = super::QueueReplyAck;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::QueueReplyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as QueuePeer>::reply(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReplySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for QueuePeerServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.internal.v1.QueuePeer";
+    impl<T> tonic::server::NamedService for QueuePeerServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}

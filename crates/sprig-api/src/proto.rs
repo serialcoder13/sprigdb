@@ -25,6 +25,12 @@ pub mod internal {
     include!("gen/sprig.internal.v1.rs");
 }
 
+/// `sprig.internal.logic.v1`: workers running triggers on streams and
+/// queues through a gateway (chapter 41, R9), on 7403.
+pub mod logic_peer {
+    include!("gen/sprig.internal.logic.v1.rs");
+}
+
 /// `grpc.health.v1`: the standard health service.
 pub mod health {
     include!("gen/grpc.health.v1.rs");

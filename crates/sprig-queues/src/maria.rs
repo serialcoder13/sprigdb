@@ -16,6 +16,8 @@
 //!   (messages are capped by `amqp.max_message_bytes`, 16 MiB); a batch
 //!   splits its inserts so one statement stays under 4 MiB.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use mysql_async::prelude::Queryable;
@@ -123,10 +125,6 @@ fn outbox_params(r: &OutboxRow) -> Vec<Value> {
     ]
 }
 
-fn fail(e: &mysql_async::Error) -> StoreError {
-    StoreError::Failed(e.to_string())
-}
-
 fn id16(v: &[u8]) -> MsgId {
     let mut a = [0u8; 16];
     let n = v.len().min(16);
@@ -138,8 +136,17 @@ fn id16(v: &[u8]) -> MsgId {
 #[derive(Clone)]
 pub struct MariaStore {
     pool: Pool,
+    /// `sprig_ctl` pools of the cluster's replicas (`queue.confirm_mode =
+    /// replica`).
+    replicas: Vec<Pool>,
+    /// Confirm only after a replica applied the commit.
+    confirm_replica: Arc<std::sync::atomic::AtomicBool>,
     schema: String,
     q: String,
+    /// The schema moved away (a mover renamed its tables, chapter 10's
+    /// fence) or is fenced: the gateway opens the store again where the
+    /// tenant's map points now.
+    stale: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for MariaStore {
@@ -160,7 +167,85 @@ impl MariaStore {
     pub fn new(pool: Pool, schema: impl Into<String>) -> Self {
         let schema = schema.into();
         let q = quote(&schema);
-        Self { pool, schema, q }
+        Self {
+            pool,
+            replicas: Vec::new(),
+            confirm_replica: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            schema,
+            q,
+            stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// The cluster's replicas, for `queue.confirm_mode = replica`.
+    #[must_use]
+    pub fn with_replicas(mut self, replicas: Vec<Pool>) -> Self {
+        self.replicas = replicas;
+        self
+    }
+
+    /// Turns `queue.confirm_mode = replica` on or off.
+    pub fn set_confirm_replica(&self, on: bool) {
+        self.confirm_replica
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether confirms wait for a replica (on, and the cluster has
+    /// replicas).
+    #[must_use]
+    pub fn confirms_on_replica(&self) -> bool {
+        !self.replicas.is_empty()
+            && self
+                .confirm_replica
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `queue.confirm_mode = replica` (chapter 50, "Confirms"): after a
+    /// commit on `c`, waits until one replica has applied it
+    /// (`MASTER_GTID_WAIT` on the session's `@@last_gtid`). A replica that
+    /// doesn't within 10 s fails the write: the owner stops and the
+    /// publishers get nacks (they republish), since the confirm's promise
+    /// can't be kept.
+    async fn wait_replica(&self, c: &mut mysql_async::Conn) -> Result<(), StoreError> {
+        if !self.confirms_on_replica() {
+            return Ok(());
+        }
+        let gtid: Option<String> = c
+            .query_first("SELECT @@last_gtid")
+            .await
+            .map_err(|e| self.fail(&e))?;
+        let Some(gtid) = gtid.filter(|g| !g.is_empty()) else {
+            return Ok(());
+        };
+        let started = std::time::Instant::now();
+        for p in &self.replicas {
+            let Ok(mut rc) = p.get_conn().await else {
+                continue;
+            };
+            let r: Result<Option<i64>, _> = rc
+                .exec_first("SELECT MASTER_GTID_WAIT(?, 10)", (gtid.as_str(),))
+                .await;
+            if matches!(r, Ok(Some(0))) {
+                metrics::histogram!("sprig_queue_replica_wait_seconds")
+                    .record(started.elapsed().as_secs_f64());
+                return Ok(());
+            }
+        }
+        Err(StoreError::Failed(format!(
+            "no replica applied {gtid} within 10 s (queue.confirm_mode = replica)"
+        )))
+    }
+
+    /// A backend error; one that says the tables are gone (renamed by a
+    /// mover's fence, or the schema dropped after a move) or not ours to
+    /// write marks the store stale.
+    fn fail(&self, e: &mysql_async::Error) -> StoreError {
+        if let mysql_async::Error::Server(se) = e
+            && matches!(se.code, 1049 | 1146 | 1142 | 1044)
+        {
+            self.stale.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        StoreError::Failed(e.to_string())
     }
 
     /// The schema.
@@ -174,9 +259,26 @@ impl MariaStore {
     /// # Errors
     /// A backend error.
     pub async fn ensure(&self) -> Result<(), StoreError> {
-        let mut c = self.pool.get_conn().await.map_err(|e| fail(&e))?;
+        let mut c = self.pool.get_conn().await.map_err(|e| self.fail(&e))?;
+        // A schema a mover has fenced (its tables renamed to
+        // `__sprig_f_*`) must not get fresh, empty queue tables: writes
+        // there would be lost when the move commits.
+        let fenced: Option<u64> = c
+            .exec_first(
+                "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?                  AND TABLE_NAME LIKE '\\_\\_sprig\\_f\\_%'",
+                (self.schema.as_str(),),
+            )
+            .await
+            .map_err(|e| self.fail(&e))?;
+        if fenced.unwrap_or(0) > 0 {
+            self.stale.store(true, std::sync::atomic::Ordering::Relaxed);
+            return Err(StoreError::Failed(format!(
+                "schema {} is fenced by a shard move",
+                self.schema
+            )));
+        }
         for s in ddl(&self.schema) {
-            c.query_drop(s).await.map_err(|e| fail(&e))?;
+            c.query_drop(s).await.map_err(|e| self.fail(&e))?;
         }
         Ok(())
     }
@@ -186,7 +288,7 @@ impl MariaStore {
     }
 
     async fn conn(&self) -> Result<mysql_async::Conn, StoreError> {
-        self.pool.get_conn().await.map_err(|e| fail(&e))
+        self.pool.get_conn().await.map_err(|e| self.fail(&e))
     }
 }
 
@@ -254,12 +356,16 @@ const OUT_COLS: &str =
 
 #[async_trait]
 impl MsgStore for MariaStore {
+    fn stale(&self) -> bool {
+        self.stale.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn claim(&self, queue: u64, lane: u16) -> Result<Claim, StoreError> {
         let mut c = self.conn().await?;
         let mut tx = c
             .start_transaction(TxOpts::default())
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         tx.exec_drop(
             format!(
                 "INSERT IGNORE INTO {} (queue_id, lane, owner_epoch, next_seq, delivered_hwm, \
@@ -269,7 +375,7 @@ impl MsgStore for MariaStore {
             (queue, lane),
         )
         .await
-        .map_err(|e| fail(&e))?;
+        .map_err(|e| self.fail(&e))?;
         let row: Option<(u64, u64, u64)> = tx
             .exec_first(
                 format!(
@@ -280,7 +386,7 @@ impl MsgStore for MariaStore {
                 (queue, lane),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         let (epoch, next_seq, hwm) = row.ok_or_else(|| StoreError::Failed("no lane row".into()))?;
         tx.exec_drop(
             format!(
@@ -291,7 +397,7 @@ impl MsgStore for MariaStore {
             (queue, lane),
         )
         .await
-        .map_err(|e| fail(&e))?;
+        .map_err(|e| self.fail(&e))?;
         let counts: Option<(u64, Option<u64>)> = tx
             .exec_first(
                 format!(
@@ -302,8 +408,8 @@ impl MsgStore for MariaStore {
                 (queue, lane),
             )
             .await
-            .map_err(|e| fail(&e))?;
-        tx.commit().await.map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
+        tx.commit().await.map_err(|e| self.fail(&e))?;
         let (count, bytes) = counts.unwrap_or((0, None));
         Ok(Claim {
             epoch: epoch + 1,
@@ -337,7 +443,7 @@ impl MsgStore for MariaStore {
                     (queue, lane, limit as u64),
                 )
                 .await
-                .map_err(|e| fail(&e))?,
+                .map_err(|e| self.fail(&e))?,
             Some((p, s)) => c
                 .exec(
                     format!(
@@ -348,7 +454,7 @@ impl MsgStore for MariaStore {
                     (queue, lane, p, p, s, limit as u64),
                 )
                 .await
-                .map_err(|e| fail(&e))?,
+                .map_err(|e| self.fail(&e))?,
         };
         Ok(rows.into_iter().filter_map(msg_of).collect())
     }
@@ -374,7 +480,7 @@ impl MsgStore for MariaStore {
                     Params::Positional(params),
                 )
                 .await
-                .map_err(|e| fail(&e))?;
+                .map_err(|e| self.fail(&e))?;
             out.extend(rows.iter().map(|r| id16(r)));
         }
         Ok(out)
@@ -385,7 +491,7 @@ impl MsgStore for MariaStore {
         let mut tx = c
             .start_transaction(TxOpts::default())
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         // The fence first: it locks the lane row for the batch.
         tx.exec_drop(
             format!(
@@ -404,7 +510,7 @@ impl MsgStore for MariaStore {
             ),
         )
         .await
-        .map_err(|e| fail(&e))?;
+        .map_err(|e| self.fail(&e))?;
         if tx.affected_rows() == 0 {
             let _ = tx.rollback().await;
             return Err(StoreError::Fenced);
@@ -453,7 +559,7 @@ impl MsgStore for MariaStore {
                 Params::Positional(params),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
             i += n;
         }
         for chunk in b.deletes.chunks(CHUNK) {
@@ -470,7 +576,7 @@ impl MsgStore for MariaStore {
                 Params::Positional(params),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         }
         for (r, n) in &b.counts {
             tx.exec_drop(
@@ -482,15 +588,19 @@ impl MsgStore for MariaStore {
                 (*n, b.queue, b.lane, r.pclass, r.seq, r.msg_id.to_vec()),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         }
         for o in &b.outbox {
             let (sql, params) = outbox_insert(&self.schema, o);
             tx.exec_drop(sql, Params::Positional(params))
                 .await
-                .map_err(|e| fail(&e))?;
+                .map_err(|e| self.fail(&e))?;
         }
-        tx.commit().await.map_err(|e| fail(&e))
+        tx.commit().await.map_err(|e| self.fail(&e))?;
+        if b.inserts.is_empty() {
+            return Ok(());
+        }
+        self.wait_replica(&mut c).await
     }
 
     async fn purge(
@@ -504,7 +614,7 @@ impl MsgStore for MariaStore {
         let mut tx = c
             .start_transaction(TxOpts::default())
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         tx.exec_drop(
             format!(
                 "UPDATE {} SET ready_count = 0, ready_bytes = 0, writes = writes + 1 \
@@ -514,7 +624,7 @@ impl MsgStore for MariaStore {
             (queue, lane, epoch),
         )
         .await
-        .map_err(|e| fail(&e))?;
+        .map_err(|e| self.fail(&e))?;
         if tx.affected_rows() == 0 {
             let _ = tx.rollback().await;
             return Err(StoreError::Fenced);
@@ -534,9 +644,9 @@ impl MsgStore for MariaStore {
             Params::Positional(params),
         )
         .await
-        .map_err(|e| fail(&e))?;
+        .map_err(|e| self.fail(&e))?;
         let n = tx.affected_rows();
-        tx.commit().await.map_err(|e| fail(&e))?;
+        tx.commit().await.map_err(|e| self.fail(&e))?;
         Ok(n)
     }
 
@@ -548,7 +658,7 @@ impl MsgStore for MariaStore {
                 (queue,),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         }
         Ok(())
     }
@@ -564,7 +674,7 @@ impl MsgStore for MariaStore {
                 (limit as u64,),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         Ok(rows.into_iter().filter_map(outbox_of).collect())
     }
 
@@ -576,7 +686,7 @@ impl MsgStore for MariaStore {
                 self.t("__sprig_qo")
             ))
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         Ok(id.and_then(|v| <[u8; 16]>::try_from(v.as_slice()).ok()))
     }
 
@@ -592,7 +702,7 @@ impl MsgStore for MariaStore {
                 Params::Positional(chunk.iter().map(|i| Value::from(i.to_vec())).collect()),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         }
         Ok(())
     }
@@ -617,7 +727,8 @@ impl MsgStore for MariaStore {
             ]),
         )
         .await
-        .map_err(|e| fail(&e))
+        .map_err(|e| self.fail(&e))?;
+        self.wait_replica(&mut c).await
     }
 
     async fn release_due(&self, now_ms: i64, limit: usize) -> Result<usize, StoreError> {
@@ -625,7 +736,7 @@ impl MsgStore for MariaStore {
         let mut tx = c
             .start_transaction(TxOpts::default())
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         let rows: Vec<(Vec<u8>, i64, Vec<u8>, Vec<u8>, u8, Vec<u8>, Vec<u8>)> = tx
             .exec(
                 format!(
@@ -636,7 +747,7 @@ impl MsgStore for MariaStore {
                 (now_ms, limit as u64),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         let n = rows.len();
         for (exchange, due, msg_id, rk, fmt, props, body) in rows {
             let exchange = String::from_utf8_lossy(&exchange).into_owned();
@@ -659,7 +770,7 @@ impl MsgStore for MariaStore {
             let (sql, params) = outbox_insert(&self.schema, &row);
             tx.exec_drop(sql, Params::Positional(params))
                 .await
-                .map_err(|e| fail(&e))?;
+                .map_err(|e| self.fail(&e))?;
             tx.exec_drop(
                 format!(
                     "DELETE FROM {} WHERE due_ms = ? AND msg_id = ?",
@@ -668,9 +779,9 @@ impl MsgStore for MariaStore {
                 (due, msg_id),
             )
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         }
-        tx.commit().await.map_err(|e| fail(&e))?;
+        tx.commit().await.map_err(|e| self.fail(&e))?;
         Ok(n)
     }
 
@@ -679,7 +790,7 @@ impl MsgStore for MariaStore {
         let v: Option<Option<i64>> = c
             .query_first(format!("SELECT MIN(due_ms) FROM {}", self.t("__sprig_qd")))
             .await
-            .map_err(|e| fail(&e))?;
+            .map_err(|e| self.fail(&e))?;
         Ok(v.flatten())
     }
 }

@@ -313,17 +313,6 @@ pub struct OwnerParams {
     pub no_move_before_ms: i64,
 }
 
-impl OwnerParams {
-    /// Parameters with the round-2 extras off (no grace, no moves): the
-    /// simulation and tests that drive an owner directly.
-    #[must_use]
-    pub fn without_extras(mut self) -> Self {
-        self.grace_ms = 0;
-        self.move_after_ms = 0;
-        self
-    }
-}
-
 impl std::fmt::Debug for OwnerParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OwnerParams")
@@ -379,6 +368,19 @@ struct Consumer {
     drain: bool,
 }
 
+/// What a slot is doing.
+#[derive(Debug, Clone)]
+pub enum SlotKind {
+    /// Finding the owner.
+    Resolving,
+    /// Running the owner here; cancelled when it stops.
+    Local(sprig_common::CancellationToken),
+    /// Relaying to the owner on that gateway.
+    Remote(String),
+    /// Ended.
+    Gone,
+}
+
 /// The handle the engine keeps.
 #[derive(Clone)]
 pub struct OwnerHandle {
@@ -388,6 +390,8 @@ pub struct OwnerHandle {
     pub tx: mpsc::UnboundedSender<Cmd>,
     /// The epoch.
     pub epoch: u64,
+    /// What the slot is doing.
+    pub kind: tokio::sync::watch::Receiver<SlotKind>,
 }
 
 impl std::fmt::Debug for OwnerHandle {
@@ -1798,8 +1802,7 @@ impl Core {
                 () = tokio::time::sleep(wait) => {}
             }
             let mut failed = None;
-            while self.batch_rows() < self.p.batch_rows && !self.deleted && self.handoff.is_none()
-            {
+            while self.batch_rows() < self.p.batch_rows && !self.deleted && self.handoff.is_none() {
                 match rx.try_recv() {
                     Ok(c) => {
                         if let Err(e) = self.apply(c).await {

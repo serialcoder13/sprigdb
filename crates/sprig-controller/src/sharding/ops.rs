@@ -53,6 +53,21 @@ pub enum ManualJob {
         /// The target cluster.
         to: String,
     },
+    /// Re-key the whole group online (chapter 16, R3): every member moves
+    /// to new shards routed by `column` (or its own column in `members`).
+    Rekey {
+        /// The new key's column, in every member not in `members`.
+        column: String,
+        /// Per member table name, its own column for the new key.
+        #[serde(default)]
+        members: std::collections::BTreeMap<String, String>,
+        /// How many new shards (default: as many as now, at least 2).
+        #[serde(default)]
+        shards: Option<u32>,
+        /// The cluster for the new shards (default: the group's).
+        #[serde(default)]
+        to: Option<String>,
+    },
 }
 
 /// One range of a group's map, as `sprigctl shard list` shows it.
@@ -174,6 +189,27 @@ impl ShardingLoop {
         job: ManualJob,
         actor: &str,
     ) -> Result<JobId> {
+        if let ManualJob::Rekey {
+            column,
+            members,
+            shards,
+            to,
+        } = job
+        {
+            return self
+                .rekey(
+                    tenant,
+                    group,
+                    super::RekeyRequest {
+                        column,
+                        members,
+                        shards,
+                        to,
+                    },
+                    actor,
+                )
+                .await;
+        }
         let mut ts = self.settings.settings(tenant);
         if !self.tenant_active(tenant).await? {
             return Err(busy(format!(
@@ -276,6 +312,9 @@ impl ShardingLoop {
                 // The target must be reachable before a job is created.
                 drop(self.conn(&to).await?);
                 ShardJob::Move { shard, to }
+            }
+            ManualJob::Rekey { .. } => {
+                return Err(not_allowed("a re-key isn't a shard job"));
             }
         };
         let p = Proposal {

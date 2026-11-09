@@ -57,6 +57,22 @@ pub(crate) struct MemberRow {
     pub rk_fill: bool,
     /// A parent member's `parent_fk` (the constraint to its parent).
     pub parent_fk: Option<String>,
+    /// During an online re-key (chapter 16): the new key, this member's
+    /// columns for it, and the re-key's first new shard id
+    /// (`next_routing`). The router uses them once every range of the
+    /// group's map is a new shard: the cutover replaced all of them in one
+    /// compare-and-put, before the catalog's key is rewritten.
+    pub next: Option<(KeySpec, Vec<String>, u32)>,
+}
+
+/// `group_members.next_routing` as a re-key writes it:
+/// `{"key_spec": <KeySpec>, "key_columns": [...], "shard_from": n, ...}`.
+fn next_routing(json: Option<&str>) -> Option<(KeySpec, Vec<String>, u32)> {
+    let v: serde_json::Value = serde_json::from_str(json?).ok()?;
+    let spec = KeySpec::from_json(v.get("key_spec")?).ok()?;
+    let cols: Vec<String> = serde_json::from_value(v.get("key_columns")?.clone()).ok()?;
+    let from = u32::try_from(v.get("shard_from")?.as_u64()?).ok()?;
+    (from > 0).then_some((spec, cols, from))
 }
 
 /// One `reference_tables` row.
@@ -207,10 +223,12 @@ impl CatalogExtension for ShardingExtension {
             Option<String>,
             String,
             Option<String>,
+            Option<String>,
         )> = conn
             .query(format!(
                 "SELECT m.object_id, m.group_id, m.db_id, m.routing, CAST(m.key_columns AS CHAR), \
-                        v.create_sql, CAST(m.rk_state AS CHAR), m.parent_fk \
+                        v.create_sql, CAST(m.rk_state AS CHAR), m.parent_fk, \
+                        CAST(m.next_routing AS CHAR) \
                  FROM `{schema}`.group_members m \
                  LEFT JOIN `{schema}`.objects o ON o.object_id = m.object_id \
                  LEFT JOIN `{schema}`.schema_versions v \
@@ -281,8 +299,9 @@ impl CatalogExtension for ShardingExtension {
                 .and_then(|v| KeySpec::from_json(&v).ok());
             state.groups.push(GroupRow { id, kind, spec });
         }
-        for (object, group, db, routing, cols, create_sql, rk, parent_fk) in members {
+        for (object, group, db, routing, cols, create_sql, rk, parent_fk, next) in members {
             state.members.push(MemberRow {
+                next: next_routing(next.as_deref()),
                 object,
                 group,
                 db,
@@ -462,14 +481,29 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
     let mut versions = HashMap::new();
     let mut missing = Vec::new();
     let mut held_groups: HashMap<u32, u64> = HashMap::new();
+    let mut rekeyed: HashSet<u32> = HashSet::new();
     let mut clusters = BTreeSet::new();
     for g in &state.groups {
         if g.kind != "sharded" {
             continue;
         }
-        let Some(spec) = g.spec.clone() else { continue };
+        let Some(mut spec) = g.spec.clone() else {
+            continue;
+        };
         match cache.get(tenant, GroupId(g.id)) {
             Ok(map) => {
+                // An online re-key's cutover committed (chapter 16): every
+                // range is a new shard, hashed by the new key, before the
+                // catalog's key is rewritten; the members' next routing
+                // has it.
+                if let Some((next, _, _)) = state.members.iter().find_map(|m| {
+                    m.next.as_ref().filter(|(_, _, from)| {
+                        m.group == g.id && map.ranges.iter().all(|r| r.shard.0 >= *from)
+                    })
+                }) {
+                    spec = next.clone();
+                    rekeyed.insert(g.id);
+                }
                 versions.insert(g.id, map.version);
                 for r in &map.ranges {
                     clusters.insert(r.cluster.to_string());
@@ -512,15 +546,27 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
         if !seen.insert(m.object) {
             continue;
         }
+        let next = m
+            .next
+            .as_ref()
+            .filter(|_| rekeyed.contains(&m.group))
+            .map(|(_, cols, _)| cols.clone());
         let member = match kinds.get(&m.group).copied() {
             Some("sharded") => Membership::Sharded {
                 group: m.group,
-                key_columns: (m.routing == "columns")
-                    .then(|| m.key_columns.clone())
-                    .flatten(),
+                key_columns: match &next {
+                    Some(cols) => Some(cols.clone()),
+                    None => (m.routing == "columns")
+                        .then(|| m.key_columns.clone())
+                        .flatten(),
+                },
                 create_sql: m.create_sql.clone(),
-                fill_rk: m.rk_fill,
-                parent_fk: m.parent_fk.clone(),
+                fill_rk: m.rk_fill || next.is_some(),
+                parent_fk: if next.is_some() {
+                    None
+                } else {
+                    m.parent_fk.clone()
+                },
                 lookups: state
                     .lookups
                     .iter()

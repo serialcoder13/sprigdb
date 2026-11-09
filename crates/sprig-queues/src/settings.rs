@@ -78,6 +78,18 @@ key!(
     HardBounds::range(0, 60_000), "Re-attachment window after an owner takeover, in ms"
 );
 
+key!(
+    /// `queue.owner_move_after_seconds`: consumers on another gateway this
+    /// long move the owner there (0: never).
+    OWNER_MOVE_AFTER_SECONDS: u64 = "queue.owner_move_after_seconds", 60, Scopes::PROCESS,
+    HardBounds::range(0, 86_400), "Consumers on another gateway this long move a queue's owner there"
+);
+key!(
+    /// `queue.owner_move_cooldown_seconds`: the damper on owner moves.
+    OWNER_MOVE_COOLDOWN_SECONDS: u64 = "queue.owner_move_cooldown_seconds", 300, Scopes::PROCESS,
+    HardBounds::range(0, 86_400), "Least time between two moves of one queue's owner"
+);
+
 /// What one vhost's queues run with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueSettings {
@@ -101,6 +113,12 @@ pub struct QueueSettings {
     pub quota_bytes_per_sec: u64,
     /// Prefetch 0 cap.
     pub max_unacked: u32,
+    /// `queue.takeover_grace_ms`.
+    pub takeover_grace_ms: u64,
+    /// `queue.owner_move_after_seconds`, in ms (0: never).
+    pub owner_move_after_ms: u64,
+    /// `queue.owner_move_cooldown_seconds`, in ms.
+    pub owner_move_cooldown_ms: u64,
 }
 
 impl Default for QueueSettings {
@@ -116,6 +134,9 @@ impl Default for QueueSettings {
             publish_timeout_ms: 10_000,
             quota_bytes_per_sec: 0,
             max_unacked: 65_535,
+            takeover_grace_ms: 2000,
+            owner_move_after_ms: 60_000,
+            owner_move_cooldown_ms: 300_000,
         }
     }
 }

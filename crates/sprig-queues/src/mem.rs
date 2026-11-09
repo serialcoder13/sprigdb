@@ -11,12 +11,12 @@ use sprig_proto_amqp::auth::Principal;
 use sprig_proto_amqp::error::MqError;
 use sprig_proto_amqp::mem::Perm;
 
-use crate::engine::{Acquired, Leases, MqCatalog, TopoChange, VhostRef, lock};
+use crate::engine::{Acquired, Leases, MqCatalog, TempRegistry, TopoChange, VhostRef, lock};
 use crate::memstore::MemStore;
 use crate::settings::QueueSettings;
 use crate::store::MsgStore;
 use crate::token::TokenKey;
-use crate::topology::Topology;
+use crate::topology::{TempSet, Topology};
 
 /// Maps a vhost name to a database name, or refuses it.
 pub type VhostMap = Arc<dyn Fn(&Principal, &str) -> Result<String, MqError> + Send + Sync>;
@@ -272,6 +272,13 @@ impl Leases for GatewayLeases {
         }
     }
 
+    async fn holder(&self, tenant: u64, object: u64) -> Result<Option<String>, MqError> {
+        Ok(lock(&self.table)
+            .holders
+            .get(&(tenant, object))
+            .map(|(g, _)| g.clone()))
+    }
+
     async fn release(&self, tenant: u64, object: u64) {
         let mut t = lock(&self.table);
         if t.holders
@@ -280,5 +287,74 @@ impl Leases for GatewayLeases {
         {
             t.holders.remove(&(tenant, object));
         }
+    }
+}
+
+/// Temporary-queue registries of simulated gateways (one process).
+#[derive(Clone, Default)]
+pub struct MemTemps {
+    sets: Arc<Mutex<HashMap<(u64, u32, String), TempSet>>>,
+}
+
+impl std::fmt::Debug for MemTemps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemTemps").finish_non_exhaustive()
+    }
+}
+
+impl MemTemps {
+    /// An empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One gateway's view.
+    #[must_use]
+    pub fn for_gateway(&self, me: &str) -> GatewayTemps {
+        GatewayTemps {
+            sets: Arc::clone(&self.sets),
+            me: me.to_owned(),
+        }
+    }
+
+    /// A gateway is gone: its entries go (its etcd lease expired).
+    pub fn drop_gateway(&self, gateway: &str) {
+        lock(&self.sets).retain(|(_, _, g), _| g != gateway);
+    }
+}
+
+/// [`MemTemps`] as one gateway sees it.
+#[derive(Clone)]
+pub struct GatewayTemps {
+    sets: Arc<Mutex<HashMap<(u64, u32, String), TempSet>>>,
+    me: String,
+}
+
+impl std::fmt::Debug for GatewayTemps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayTemps")
+            .field("me", &self.me)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl TempRegistry for GatewayTemps {
+    async fn publish(&self, v: &VhostRef, set: &TempSet) {
+        lock(&self.sets).insert((v.tenant, v.db_id, self.me.clone()), set.clone());
+    }
+
+    fn others(&self, v: &VhostRef) -> Option<Arc<TempSet>> {
+        let g = lock(&self.sets);
+        let mut out = TempSet::default();
+        for ((t, d, gw), s) in g.iter() {
+            if *t == v.tenant && *d == v.db_id && *gw != self.me {
+                out.queues
+                    .extend(s.queues.iter().map(|(k, q)| (k.clone(), Arc::clone(q))));
+                out.bindings.extend(s.bindings.iter().cloned());
+            }
+        }
+        Some(Arc::new(out))
     }
 }

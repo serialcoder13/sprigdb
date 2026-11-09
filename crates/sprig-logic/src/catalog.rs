@@ -154,6 +154,16 @@ pub static LOGIC_MIGRATIONS: &[Migration] = &[
         name: "logic_log",
         statements: &[DDL_LOG],
     },
+    // R9 (r9triggers): triggers on streams and queues.
+    Migration {
+        format: 3,
+        phase: Phase::Expand,
+        name: "logic_bindings.timing on_message, logic_message_sources",
+        statements: &[
+            crate::messages::DDL_TIMING_ON_MESSAGE,
+            crate::messages::DDL_MESSAGE_SOURCES,
+        ],
+    },
 ];
 
 /// The module, for [`Migrator::new`](sprig_catalog::Migrator::new) and

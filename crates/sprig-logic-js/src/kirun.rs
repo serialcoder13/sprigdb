@@ -56,6 +56,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::bridge::{self, DbBridge, Reply, Shape};
 use crate::budget::{Budget, Limits, RunState, copy, size_of};
+use crate::messaging::MsgOp;
 use crate::outbound::{self, Outbound};
 
 /// The functions engine code may call beyond KIRun's own.
@@ -64,6 +65,13 @@ pub const SPRIG_FUNCTIONS: &[&str] = &[
     "Sprig.Db.Query",
     "Sprig.Db.Exec",
     "Sprig.Http.Fetch",
+    // R9: publishing and consuming (`crate::messaging`).
+    "Sprig.Db.Publish",
+    "Sprig.Db.CommitOffset",
+    "Sprig.Mq.Publish",
+    "Sprig.Mq.Get",
+    "Sprig.Mq.Ack",
+    "Sprig.Mq.Nack",
 ];
 
 /// KIRun functions with no place in server code: `System.Wait` sleeps
@@ -548,7 +556,93 @@ fn sprig_functions(run: &Arc<Run>) -> HashMap<String, Arc<dyn Function>> {
         "Sprig.Http.Fetch".to_owned(),
         Arc::new(Fetch::new(Arc::clone(run))),
     );
+    for op in MsgOp::ALL {
+        m.insert(
+            op.kirun_name().to_owned(),
+            Arc::new(SprigMsg::new(op, Arc::clone(run))),
+        );
+    }
     m
+}
+
+/// `Sprig.Db.Publish(stream, key, value, headers)` → `output {affected}`,
+/// `Sprig.Db.CommitOffset(group, stream, partition, offset)`,
+/// `Sprig.Mq.Publish(exchange, routingKey, body, properties)` → `output
+/// {routed}`, `Sprig.Mq.Get(queue, max, leaseMs)` → `output {messages}`,
+/// `Sprig.Mq.Ack(token)`, `Sprig.Mq.Nack(token, requeue)` (R9).
+struct SprigMsg {
+    sig: FunctionSignature,
+    op: MsgOp,
+    run: Arc<Run>,
+}
+
+impl SprigMsg {
+    fn out_name(op: MsgOp) -> Option<&'static str> {
+        match op {
+            MsgOp::Publish => Some("affected"),
+            MsgOp::MqPublish => Some("routed"),
+            MsgOp::MqGet => Some("messages"),
+            _ => None,
+        }
+    }
+
+    fn new(op: MsgOp, run: Arc<Run>) -> Self {
+        let full = op.kirun_name();
+        let (ns, name) = full.rsplit_once('.').unwrap_or(("Sprig", full));
+        let params: Map<Parameter> = op
+            .params()
+            .iter()
+            .map(|p| Parameter::of_entry(p, Schema::of_any(p), false))
+            .collect();
+        let outputs: Map<Schema> = Self::out_name(op)
+            .map(|n| Map::from([(n.to_owned(), Schema::of_any(n))]))
+            .unwrap_or_default();
+        let sig = FunctionSignature::new(name)
+            .set_namespace(ns)
+            .set_parameters(params)
+            .set_events(Map::from([Event::output_event_map_entry(outputs)]));
+        Self { sig, op, run }
+    }
+}
+
+#[async_trait]
+impl AbstractFunction for SprigMsg {
+    fn get_signature(&self) -> &FunctionSignature {
+        &self.sig
+    }
+
+    async fn internal_execute(
+        &self,
+        cx: &mut FunctionExecutionParameters,
+    ) -> kirun::Result<FunctionOutput> {
+        let run = &self.run;
+        let a = cx.get_arguments().cloned().unwrap_or_default();
+        let args: Vec<Value> = self
+            .op
+            .params()
+            .iter()
+            .map(|p| a.get(*p).cloned().unwrap_or(Value::Null))
+            .collect();
+        run.st.data_op().map_err(|e| run.raise(e))?;
+        let v = crate::messaging::call(
+            &*run.host.db,
+            self.op,
+            &args,
+            run.host.default_db.as_deref(),
+        )
+        .await
+        .map_err(|e| run.raise(e))?;
+        run.st.check_time().map_err(|e| run.raise(e))?;
+        let fields: Map<Value> = match Self::out_name(self.op) {
+            Some("affected") => Map::from([(
+                "affected".to_owned(),
+                v.get("affected").cloned().unwrap_or(Value::Null),
+            )]),
+            Some(n) => Map::from([(n.to_owned(), v)]),
+            None => Map::new(),
+        };
+        Ok(FunctionOutput::new(vec![EventResult::output_of(fields)]))
+    }
 }
 
 /// `Sprig.Db.QueryOne | Query | Exec`.
@@ -567,7 +661,7 @@ impl SprigDb {
                 ("found".to_owned(), Schema::of_boolean("found")),
             ]),
             Shape::Many => Map::from([("rows".to_owned(), Schema::of_any("rows"))]),
-            Shape::Exec | Shape::Call => {
+            Shape::Exec | Shape::Call | Shape::Sprig => {
                 Map::from([("affected".to_owned(), Schema::of_long("affected"))])
             }
         };

@@ -260,7 +260,8 @@ pub fn group_env_with(
             server_id(server_id_base, rec.job_id),
             false,
         )
-        .with_drain(drain),
+        .with_drain(drain)
+        .with_rekey(route.rekey.is_some()),
     );
     let target = Arc::new(
         MysqlTarget::new(tgt, rec.job_id, None, source.clone()).with_route(Arc::new(route)),

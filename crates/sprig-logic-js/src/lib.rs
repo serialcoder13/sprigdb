@@ -40,9 +40,12 @@ pub mod engine;
 pub mod js;
 pub mod kirun;
 pub mod lua;
+pub mod messaging;
 pub mod outbound;
 pub mod program;
 
+#[cfg(test)]
+mod messaging_tests;
 #[cfg(test)]
 mod testutil;
 

@@ -1,0 +1,23 @@
+// sprig.internal.logic.v1.LogicPeer: a worker asking a gateway to run one
+// step of a trigger on a stream or a queue (chapter 41, "Triggers on streams
+// and queues"; R9). Served on the peer port 7403 with the peer service's
+// mutual TLS (chapter 04, "Interfaces"). Never exposed to clients.
+syntax = "proto3";
+
+package sprig.internal.logic.v1;
+
+service LogicPeer {
+  // One run: a record of a stream, or the next message of a queue, in one
+  // transaction of a session as the trigger's definer.
+  rpc RunTrigger(RunTriggerRequest) returns (RunTriggerReply);
+}
+
+message RunTriggerRequest {
+  // sprig_logic::messages::RunRequest as JSON.
+  string request_json = 1;
+}
+
+message RunTriggerReply {
+  // sprig_logic::messages::RunReply as JSON.
+  string reply_json = 1;
+}

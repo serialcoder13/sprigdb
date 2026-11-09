@@ -48,9 +48,9 @@ use crate::vhost::ConnVhost;
 /// Which call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MqCall {
-    /// `sprig.mq_publish(exchange, routing_key, body, properties [, mandatory])`.
+    /// `sprig.mq_publish(exchange, routing_key, body, properties [, mandatory [, vhost]])`.
     Publish,
-    /// `sprig.mq_get(queue, max, lease_ms)`.
+    /// `sprig.mq_get(queue [, max [, lease_ms [, vhost]]])`.
     Get,
     /// `sprig.mq_ack(token)`.
     Ack,
@@ -318,6 +318,51 @@ impl QueueEngine {
         })
     }
 
+    /// An acknowledgement inside session `session`'s open transaction:
+    /// its owner is told how the transaction ended
+    /// ([`QueueEngine::txn_ended`]), and checks the row itself after
+    /// `hold_check_ms` if nobody says.
+    pub fn note_txn_hold(&self, session: u64, t: TokenData) {
+        let now = self.inner.deps.clock.now_ms();
+        let mut g = crate::engine::lock(&self.inner.txn_holds);
+        // Sessions that ended without a word (their owners checked the
+        // rows themselves) go after ten minutes.
+        g.retain(|_, v| v.iter().any(|(at, _)| now - at < 600_000));
+        g.entry(session).or_default().push((now, t));
+    }
+
+    /// Whether session `session` has acknowledgements waiting for its
+    /// transaction to end (checked after each statement; cheap).
+    #[must_use]
+    pub fn has_txn_holds(&self, session: u64) -> bool {
+        crate::engine::lock(&self.inner.txn_holds).contains_key(&session)
+    }
+
+    /// The session's transaction ended (the session's commit hook):
+    /// `Some(true)` a `COMMIT` that succeeded, `Some(false)` a `ROLLBACK`,
+    /// `None` when the session can't tell (an implicit commit, a failed
+    /// `COMMIT`): the owner then reads the row now. Either way the owner
+    /// learns at once instead of after `hold_check_ms`.
+    pub fn txn_ended(&self, session: u64, committed: Option<bool>) {
+        let Some(holds) = crate::engine::lock(&self.inner.txn_holds).remove(&session) else {
+            return;
+        };
+        for (_, t) in holds {
+            let Some(v) = self.vhost_of(t.tenant, t.db) else {
+                continue;
+            };
+            if let Some(h) = v.slot_of(t.id.queue) {
+                let _ = h.send(match committed {
+                    Some(c) => Cmd::Release {
+                        id: t.id,
+                        committed: c,
+                    },
+                    None => Cmd::Verify { id: t.id },
+                });
+            }
+        }
+    }
+
     /// Checks a delivery token.
     ///
     /// # Errors
@@ -571,6 +616,23 @@ impl SqlVhost {
                     conn: self.cx.conn,
                 },
                 vec![(t.id, how)],
+            ));
+        }
+    }
+
+    /// Returns a delivery as a failed one (`Requeue { failed: true }`): it
+    /// goes back to its position and its `x-delivery-count` rises, so the
+    /// queue's delivery limit and a trigger's `logic.trigger_max_attempts`
+    /// (chapter 41, R9) see the failure. `mq_nack` with requeue doesn't
+    /// count, as RabbitMQ's `nack` doesn't.
+    pub fn fail(&self, t: &TokenData) {
+        if let Some(h) = self.v.slot_of(t.id.queue) {
+            let _ = h.send(Cmd::Settle(
+                Holder {
+                    origin: ANY_HOLDER,
+                    conn: self.cx.conn,
+                },
+                vec![(t.id, Settlement::Requeue { failed: true })],
             ));
         }
     }

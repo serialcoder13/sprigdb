@@ -32,12 +32,10 @@ use serde_json::json;
 use sprig_common::ids::{ClusterId, DbId, GroupId, ShardId, TenantId};
 use sprig_common::names::{SchemaName, quote};
 use sprig_common::{Result, SprigCode, SprigError};
-use sprig_shard::collation::collation;
 use sprig_shard::pins::PinKind;
 use sprig_shard::rk::{RK_COLUMN, add_rk_column, backfill_columns_sql, backfill_parent_sql};
 use sprig_shard::{
-    DateTimeParts, DecimalRef, KeyClass, KeySpec, KeyValue, ShardMap, ShardMapStore, TenantMaps,
-    hash_key, shard_schema,
+    KeySpec, ShardMap, ShardMapStore, TenantMaps, shard_schema,
 };
 
 use super::design::{Design, Input, Obj, Routing};
@@ -47,65 +45,14 @@ fn db_err(what: &str, e: &mysql_async::Error) -> SprigError {
     SprigError::new(SprigCode::BackendUnavailable, format!("{what}: {e}"))
 }
 
-/// The routing hash of key values read from MariaDB under `spec`.
+/// The routing hash of key values read from MariaDB under `spec`
+/// (`sprig_shard::rk::hash_values`, which the mover's re-key shares).
 ///
 /// # Errors
 /// 39400 for a value the class can't take; 39405 for one that can't be
 /// normalized.
 pub fn rk_of(spec: &KeySpec, vals: &[Value]) -> Result<u64> {
-    let mut texts: Vec<String> = Vec::new();
-    for v in vals {
-        texts.push(match v {
-            Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
-            _ => String::new(),
-        });
-    }
-    let mut kv: Vec<KeyValue<'_>> = Vec::with_capacity(vals.len());
-    for (i, (class, v)) in spec.parts.iter().zip(vals).enumerate() {
-        let bad = || {
-            SprigError::new(
-                SprigCode::UnsupportedKeyType,
-                format!("key part {i}: {v:?} isn't a {class:?}"),
-            )
-        };
-        kv.push(match (class, v) {
-            (_, Value::NULL) => KeyValue::Null,
-            (KeyClass::Numeric, Value::Int(x)) => KeyValue::Int(i128::from(*x)),
-            (KeyClass::Numeric, Value::UInt(x)) => KeyValue::Int(i128::from(*x)),
-            (KeyClass::Numeric, Value::Double(x)) => KeyValue::Double(*x),
-            (KeyClass::Numeric, Value::Float(x)) => KeyValue::Double(f64::from(*x)),
-            (KeyClass::Numeric, Value::Bytes(_)) => KeyValue::Decimal(DecimalRef(&texts[i])),
-            (KeyClass::String { collation: c }, Value::Bytes(b)) => KeyValue::Str {
-                bytes: b,
-                charset: collation(*c).map_or(sprig_shard::Charset::Utf8mb4, |x| x.charset),
-            },
-            (KeyClass::Binary, Value::Bytes(b)) => KeyValue::Bytes(b),
-            (KeyClass::Uuid, Value::Bytes(b)) => {
-                let u: [u8; 16] = match <[u8; 16]>::try_from(b.as_slice()) {
-                    Ok(u) => u,
-                    Err(_) => sprig_shard::key::parse_uuid(&texts[i]).ok_or_else(bad)?,
-                };
-                KeyValue::Uuid(u)
-            }
-            (KeyClass::DateTime, Value::Date(y, mo, d, h, mi, s, us)) => {
-                KeyValue::DateTime(DateTimeParts {
-                    year: *y,
-                    month: *mo,
-                    day: *d,
-                    hour: *h,
-                    minute: *mi,
-                    second: *s,
-                    micros: *us,
-                })
-            }
-            (KeyClass::Timestamp, Value::Int(secs)) => KeyValue::Timestamp {
-                secs: *secs,
-                micros: 0,
-            },
-            _ => return Err(bad()),
-        });
-    }
-    Ok(hash_key(spec, &kv)?.0.0)
+    sprig_shard::rk::hash_values(spec, vals)
 }
 
 /// Publishes a change the apply made to the tenant's catalog rows
@@ -846,6 +793,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use sprig_shard::KeyClass;
 
     #[test]
     fn binary_and_text_protocol_values_hash_alike() {

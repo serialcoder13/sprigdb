@@ -47,6 +47,10 @@ pub(crate) mod types;
 mod streams;
 // Chapter 50: `sprig.mq_*` calls (R9).
 mod queues;
+// Chapter 41 (R9, r9triggers): triggers on streams and queues, and
+// chapter 45's `sprig.commit_offset`.
+pub(crate) mod msg_trigger;
+mod offsets;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -956,6 +960,9 @@ impl SessionExec for PassSession {
             Err(e) => return Err(self.map_error(e)),
         };
         self.count_traffic(cx, &req);
+        // Chapter 50: acknowledgements held for this transaction learn how
+        // it ended (the commit hook, after the request).
+        let txn_word = queues::txn_word(&req);
         let r = match gate {
             Some(f) => {
                 let mut gated = crate::failover::GatedSink::new(out, f);
@@ -963,6 +970,7 @@ impl SessionExec for PassSession {
             }
             None => self.run_request(cx, req, out).await,
         };
+        self.mq_after_request(u64::from(cx.session.id.0), txn_word, r.is_ok());
         // Tenant sessions: no error the gateway returns carries a physical
         // name (the relay maps the ones it sends itself).
         r.map_err(|e| self.map_error(e))

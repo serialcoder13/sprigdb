@@ -252,6 +252,12 @@ impl WriteBatch {
 /// The durable side of queues in one shard schema (or one memory store).
 #[async_trait]
 pub trait MsgStore: Send + Sync + 'static {
+    /// The store no longer serves its queues here (a shard move fenced or
+    /// dropped its tables): open it again where the tenant's map points.
+    fn stale(&self) -> bool {
+        false
+    }
+
     /// Takes over a lane: `owner_epoch + 1` (the row is created when
     /// missing), the lane state, and the messages on disk counted.
     async fn claim(&self, queue: u64, lane: u16) -> Result<Claim, StoreError>;

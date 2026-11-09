@@ -216,6 +216,22 @@ where
     }
 }
 
+/// How a deleted tenant's cleanup ([`TenantService::cleanup`]) ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cleanup {
+    /// Finished: nothing of the tenant is left (or it was already gone).
+    Done,
+    /// Waiting for this many mover jobs of the tenant to end (cancelled,
+    /// or told to drop their retained copies now).
+    WaitingForJobs(usize),
+}
+
+/// How soon the tenant loop looks again at a deletion waiting for its
+/// mover jobs. Short: a worker finishes a job within seconds of its
+/// retention being ended, and a blocked key would wait 30 s (longer than
+/// `deploy/compose/gateway-dev.sh down` used to wait; decision TD9).
+pub const CLEANUP_JOBS_RECHECK: Duration = Duration::from_secs(2);
+
 fn placement_unavailable(message: String) -> SprigError {
     SprigError::new(SprigCode::PlacementUnavailable, message)
 }
@@ -750,38 +766,40 @@ where
         }
         let marked = self.directory.mark_deleting(id).await?;
         let view = Self::view(&marked, None, Vec::new(), None);
-        if let Err(err) = self.cleanup(id, guard).await {
-            tracing::warn!(tenant = %id, error = %err, "tenant cleanup will be retried by the loop");
+        match self.cleanup(id, guard).await {
+            Ok(Cleanup::Done) => {}
+            Ok(Cleanup::WaitingForJobs(n)) => {
+                tracing::info!(tenant = %id, jobs = n, "tenant cleanup waits for its mover jobs to end; the loop finishes it");
+            }
+            Err(err) => {
+                tracing::warn!(tenant = %id, error = %err, "tenant cleanup will be retried by the loop");
+            }
         }
         Ok(view)
     }
 
     /// Cleans up a `deleting` tenant; see the module docs and
-    /// [`cleanup`]'s steps.
+    /// [`cleanup`]'s steps. [`Cleanup::WaitingForJobs`] while the tenant's
+    /// mover jobs are still ending (a worker finishes them within seconds
+    /// once their retention is ended; the loop looks again after
+    /// [`CLEANUP_JOBS_RECHECK`], not the 30 s of a blocked key).
     ///
     /// # Errors
-    /// 39072 while the catalog lists live databases or the tenant's mover
-    /// jobs are still ending; 39504 when `guard` fails; the store's,
-    /// catalog's and clusters' errors.
-    pub async fn cleanup(&self, id: TenantId, guard: &[Cmp]) -> Result<()> {
+    /// 39072 while the catalog lists live databases; 39504 when `guard`
+    /// fails; the store's, catalog's and clusters' errors.
+    pub async fn cleanup(&self, id: TenantId, guard: &[Cmp]) -> Result<Cleanup> {
         let Some(e) = self.directory.get(id).await? else {
-            return Ok(());
+            return Ok(Cleanup::Done);
         };
         if e.body().state != TenantState::Deleting {
-            return Ok(());
+            return Ok(Cleanup::Done);
         }
         // 1. Mover jobs end first: their copies and retained sources are
         //    dropped by the jobs themselves.
         let jobs = sprig_mover::JobStore::new(Arc::clone(&self.dc_store), Arc::clone(&self.clock));
         let settled = cleanup::settle_jobs(&jobs, id).await?;
         if !settled.open.is_empty() {
-            return Err(SprigError::new(
-                SprigCode::TenantNotReady,
-                format!(
-                    "waiting for {} mover jobs of the deleted tenant to end",
-                    settled.open.len()
-                ),
-            ));
+            return Ok(Cleanup::WaitingForJobs(settled.open.len()));
         }
         // 2. The catalog: hooks, the live-database guard, its database ids.
         let mark = owner_mark(e.body());
@@ -869,7 +887,8 @@ where
         tracing::info!(event = "tenant.cleanup", tenant = %id, keys = n,
             jobs = settled.finished.len(), "deleted tenant's records removed");
         // 6. The entry and its name.
-        self.directory.remove(&e).await
+        self.directory.remove(&e).await?;
+        Ok(Cleanup::Done)
     }
 
     fn view(
@@ -1087,11 +1106,15 @@ where
                 }
             }
             TenantState::Deleting => match self.service.cleanup(*key, &guard).await {
-                Ok(()) => Ok(Outcome::Done),
+                Ok(Cleanup::Done) => Ok(Outcome::Done),
+                Ok(Cleanup::WaitingForJobs(n)) => {
+                    tracing::info!(tenant = %key, jobs = n, "tenant cleanup waits for its mover jobs to end");
+                    Ok(Outcome::RequeueAfter(CLEANUP_JOBS_RECHECK))
+                }
                 Err(err) if err.code() == Some(SprigCode::TenantNotReady) => {
                     tracing::warn!(tenant = %key, error = %err, "tenant cleanup waits");
                     Ok(Outcome::Blocked {
-                        reason: "the deleted tenant still has databases or open mover jobs",
+                        reason: "the deleted tenant still has databases",
                     })
                 }
                 Err(err) => Err(err),

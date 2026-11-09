@@ -49,6 +49,7 @@ use crate::bridge::Shape;
 use crate::budget::{Budget, Limits, RunState, copy};
 use crate::engine::{self, ScriptSig, SyncHost};
 use crate::kirun::{Host, Outcome};
+use crate::messaging::MsgOp;
 
 /// Lua's reserved words.
 const RESERVED: &[&str] = &[
@@ -566,6 +567,50 @@ fn install_logic(lua: &Lua, sync: &Arc<SyncHost>) -> mlua::Result<()> {
             lua.to_value(&v)
         })?,
     )?;
+    // R9: publishing and consuming (chapter 41, "The `db` interface").
+    for (name, op) in [
+        ("publish", MsgOp::Publish),
+        ("commitOffset", MsgOp::CommitOffset),
+    ] {
+        let h = Arc::clone(sync);
+        db.set(
+            name,
+            lua.create_function(move |lua, xs: Variadic<LuaValue>| {
+                let args = json_args(lua, xs)?;
+                let v = h.msg(op, &args).map_err(lua_err)?;
+                lua.to_value(&v)
+            })?,
+        )?;
+    }
+    let mq = lua.create_table()?;
+    for (name, op) in [
+        ("publish", MsgOp::MqPublish),
+        ("get", MsgOp::MqGet),
+        ("ack", MsgOp::MqAck),
+        ("nack", MsgOp::MqNack),
+    ] {
+        let h = Arc::clone(sync);
+        mq.set(
+            name,
+            lua.create_function(move |lua, xs: Variadic<LuaValue>| {
+                let mut args = json_args(lua, xs)?;
+                if op == MsgOp::MqGet {
+                    let opts = args.get(1).cloned().unwrap_or(Value::Null);
+                    args = crate::messaging::get_args(
+                        args.first().cloned().unwrap_or(Value::Null),
+                        &opts,
+                    );
+                }
+                if op == MsgOp::MqNack && args.len() < 2 {
+                    args.resize(1, Value::Null);
+                    args.push(Value::Bool(true));
+                }
+                let v = h.msg(op, &args).map_err(lua_err)?;
+                lua.to_value(&v)
+            })?,
+        )?;
+    }
+    db.set("mq", mq)?;
     g.set("db", db)?;
 
     let h = Arc::clone(sync);

@@ -248,6 +248,25 @@ impl SyncHost {
         })
     }
 
+    /// `db.publish`, `db.commitOffset` and `db.mq.*`
+    /// ([`crate::messaging`]): one statement through the caller's session.
+    ///
+    /// # Errors
+    /// As [`SyncHost::sql`].
+    pub fn msg(&self, op: crate::messaging::MsgOp, args: &[Value]) -> Result<Value> {
+        self.budgeted(|| {
+            self.st.data_op()?;
+            let v = self.handle.block_on(crate::messaging::call(
+                &*self.host.db,
+                op,
+                args,
+                self.host.default_db.as_deref(),
+            ))?;
+            self.st.check_time()?;
+            Ok(v)
+        })
+    }
+
     /// `fetch(url, init)`: `{status, headers, body}`.
     ///
     /// # Errors

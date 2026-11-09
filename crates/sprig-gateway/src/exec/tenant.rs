@@ -407,7 +407,7 @@ impl PassSession {
     }
 
     /// `sql.local_infile` for the session's tenant and current database.
-    fn tenant_local_infile(&self) -> bool {
+    pub(super) fn tenant_local_infile(&self) -> bool {
         let Some(ts) = self.tenant.as_deref() else {
             return self.settings.current().local_infile;
         };
@@ -877,6 +877,14 @@ impl PassSession {
             return Ok(step);
         }
         // Chapter 50: `CALL sprig.mq_publish | mq_get | mq_ack | mq_nack` (R9).
+        // Chapter 41 (R9): a run of a trigger on a stream or queue (from
+        // the peer service only), and chapter 45's `sprig.commit_offset`.
+        if let Some(step) = Box::pin(self.tenant_msg_trigger(cx, text, more, out)).await? {
+            return Ok(step);
+        }
+        if let Some(step) = Box::pin(self.tenant_offsets(cx, text, more, out)).await? {
+            return Ok(step);
+        }
         if let Some(step) = Box::pin(self.tenant_queues(cx, text, more, format, out)).await? {
             return Ok(step);
         }

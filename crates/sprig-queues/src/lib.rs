@@ -20,6 +20,9 @@
 //! - [`token`]: delivery tokens for acknowledging inside a database
 //!   transaction; [`sql`]: `sprig.mq_publish`, `mq_get`, `mq_ack` and
 //!   `mq_nack` for the gateway's SQL path;
+//! - [`relay`]: the queue relay between gateways (`QueuePeer`): remote
+//!   slots, the owner's side of a relay stream, owner placement by
+//!   rendezvous hashing, and in-memory peers for tests;
 //! - [`mem`]: an in-memory catalog and leases (tests, simulation).
 
 // AMQP names (basic.publish, x-dead-letter-exchange) fill the docs.
@@ -40,6 +43,7 @@ pub mod mem;
 pub mod memstore;
 pub mod msg;
 pub mod owner;
+pub mod relay;
 pub mod settings;
 pub mod sql;
 pub mod store;
