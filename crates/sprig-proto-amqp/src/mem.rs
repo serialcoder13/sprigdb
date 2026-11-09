@@ -186,7 +186,9 @@ impl Queue {
         self.arguments.get(k).and_then(FieldValue::as_i64)
     }
     fn arg_str(&self, k: &str) -> Option<String> {
-        self.arguments.get(k).and_then(|v| v.as_str().map(|s| s.into_owned()))
+        self.arguments
+            .get(k)
+            .and_then(|v| v.as_str().map(std::borrow::Cow::into_owned))
     }
     fn max_priority(&self) -> Option<u8> {
         if self.quorum {
@@ -302,16 +304,15 @@ impl State {
         let mut seen_q = HashSet::new();
         let mut visited = HashSet::new();
         self.route_into(exchange, key, headers, &mut visited, &mut seen_q, &mut out);
-        if out.is_empty() {
-            if let Some(alt) = self
+        if out.is_empty()
+            && let Some(alt) = self
                 .exchanges
                 .get(exchange)
                 .and_then(|e| e.arguments.get("alternate-exchange"))
-                .and_then(|v| v.as_str().map(|s| s.into_owned()))
-            {
-                let mut visited = HashSet::new();
-                self.route_into(&alt, key, headers, &mut visited, &mut seen_q, &mut out);
-            }
+                .and_then(|v| v.as_str().map(std::borrow::Cow::into_owned))
+        {
+            let mut visited = HashSet::new();
+            self.route_into(&alt, key, headers, &mut visited, &mut seen_q, &mut out);
         }
         out
     }
@@ -328,7 +329,9 @@ impl State {
         if !visited.insert(exchange.to_owned()) {
             return;
         }
-        let Some(x) = self.exchanges.get(exchange) else { return };
+        let Some(x) = self.exchanges.get(exchange) else {
+            return;
+        };
         if exchange.is_empty() {
             if self.queues.contains_key(key) && seen_q.insert(key.to_owned()) {
                 out.push(key.to_owned());
@@ -338,7 +341,7 @@ impl State {
         let kind = if x.kind == "x-delayed-message" {
             x.arguments
                 .get("x-delayed-type")
-                .and_then(|v| v.as_str().map(|s| s.into_owned()))
+                .and_then(|v| v.as_str().map(std::borrow::Cow::into_owned))
                 .unwrap_or_else(|| "direct".into())
         } else {
             x.kind.clone()
@@ -365,11 +368,24 @@ impl State {
     }
 
     /// Puts a message on a queue; `Err` for `reject-publish` overflow.
-    fn enqueue(&mut self, qname: &str, msg: Arc<Message>, deaths: Option<FieldValue>) -> Result<(), MqError> {
-        let Some(q) = self.queues.get_mut(qname) else { return Ok(()) };
-        let max_len = q.arg_i64("x-max-length").and_then(|n| usize::try_from(n).ok());
-        let max_bytes = q.arg_i64("x-max-length-bytes").and_then(|n| u64::try_from(n).ok());
-        let overflow = q.arg_str("x-overflow").unwrap_or_else(|| "drop-head".into());
+    fn enqueue(
+        &mut self,
+        qname: &str,
+        msg: Arc<Message>,
+        deaths: Option<FieldValue>,
+    ) -> Result<(), MqError> {
+        let Some(q) = self.queues.get_mut(qname) else {
+            return Ok(());
+        };
+        let max_len = q
+            .arg_i64("x-max-length")
+            .and_then(|n| usize::try_from(n).ok());
+        let max_bytes = q
+            .arg_i64("x-max-length-bytes")
+            .and_then(|n| u64::try_from(n).ok());
+        let overflow = q
+            .arg_str("x-overflow")
+            .unwrap_or_else(|| "drop-head".into());
         let bytes: u64 = q.ready.values().map(|e| e.msg.info.size).sum();
         let full = max_len.is_some_and(|n| q.ready.len() >= n)
             || max_bytes.is_some_and(|n| bytes + msg.info.size > n);
@@ -386,7 +402,9 @@ impl State {
                 let b: u64 = q.ready.values().map(|e| e.msg.info.size).sum();
                 max_bytes.is_some_and(|n| b + msg.info.size > n) && !q.ready.is_empty()
             } {
-                let Some((&k, _)) = q.ready.iter().next() else { break };
+                let Some((&k, _)) = q.ready.iter().next() else {
+                    break;
+                };
                 if let Some(e) = q.ready.remove(&k) {
                     dropped.push(e);
                 }
@@ -413,7 +431,8 @@ impl State {
         }
         let q = self.queues.get_mut(qname).unwrap_or_else(|| unreachable!());
         let ttl = [
-            q.arg_i64("x-message-ttl").and_then(|t| u64::try_from(t).ok()),
+            q.arg_i64("x-message-ttl")
+                .and_then(|t| u64::try_from(t).ok()),
             msg.info.ttl_ms,
         ]
         .into_iter()
@@ -442,8 +461,12 @@ impl State {
 
     /// Dead-letters an entry (chapter 50, "Dead-lettering").
     fn dead_letter(&mut self, qname: &str, e: Entry, reason: DeadLetterReason) {
-        let Some(q) = self.queues.get(qname) else { return };
-        let Some(dlx) = q.arg_str("x-dead-letter-exchange") else { return };
+        let Some(q) = self.queues.get(qname) else {
+            return;
+        };
+        let Some(dlx) = q.arg_str("x-dead-letter-exchange") else {
+            return;
+        };
         let key = q
             .arg_str("x-dead-letter-routing-key")
             .unwrap_or_else(|| e.msg.routing_key.clone());
@@ -455,8 +478,15 @@ impl State {
         let mut count = 1i64;
         deaths.retain(|d| {
             let FieldValue::Table(t) = d else { return true };
-            let same = t.get("queue").and_then(|v| v.as_str().map(|s| s.into_owned())).as_deref() == Some(qname)
-                && t.get("reason").and_then(|v| v.as_str().map(|s| s.into_owned())).as_deref() == Some(reason.as_str());
+            let same = t
+                .get("queue")
+                .and_then(|v| v.as_str().map(std::borrow::Cow::into_owned))
+                .as_deref()
+                == Some(qname)
+                && t.get("reason")
+                    .and_then(|v| v.as_str().map(std::borrow::Cow::into_owned))
+                    .as_deref()
+                    == Some(reason.as_str());
             if same {
                 count += t.get("count").and_then(FieldValue::as_i64).unwrap_or(0);
             }
@@ -465,10 +495,16 @@ impl State {
         // A cycle back to the same queue for a reason other than rejected
         // is dropped (RabbitMQ's rule, 39277).
         if reason != DeadLetterReason::Rejected && count > 1 {
-            tracing::debug!(queue = qname, code = MqCode::DeadLetterCycle.number(), "dead-letter cycle: message dropped");
+            tracing::debug!(
+                queue = qname,
+                code = MqCode::DeadLetterCycle.number(),
+                "dead-letter cycle: message dropped"
+            );
             return;
         }
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         deaths.insert(
             0,
             FieldValue::Table(FieldTable::from([
@@ -488,18 +524,25 @@ impl State {
         let headers = m.info.headers.clone();
         let msg = Arc::new(m);
         for target in self.route(&dlx, &key, &headers) {
-            let _ = self.enqueue(&target, Arc::clone(&msg), Some(FieldValue::Array(deaths.clone())));
+            let _ = self.enqueue(
+                &target,
+                Arc::clone(&msg),
+                Some(FieldValue::Array(deaths.clone())),
+            );
             self.dispatch(&target);
         }
     }
 
-    fn deliver_entry(&self, qname: &str, q: &Queue, e: &Entry) -> Delivery {
+    fn deliver_entry(qname: &str, q: &Queue, e: &Entry) -> Delivery {
         let mut annotations = FieldTable::new();
         if let Some(d) = &e.deaths {
             annotations.insert("x-death", d.clone());
         }
         if q.quorum && e.delivery_count > 0 {
-            annotations.insert("x-delivery-count", FieldValue::I64(i64::from(e.delivery_count)));
+            annotations.insert(
+                "x-delivery-count",
+                FieldValue::I64(i64::from(e.delivery_count)),
+            );
         }
         Delivery {
             id: DeliveryId {
@@ -534,7 +577,9 @@ impl State {
     /// "Dispatch, credit and consumers").
     fn dispatch(&mut self, qname: &str) {
         loop {
-            let Some(q) = self.queues.get(qname) else { return };
+            let Some(q) = self.queues.get(qname) else {
+                return;
+            };
             if q.ready.is_empty() {
                 break;
             }
@@ -546,7 +591,12 @@ impl State {
             };
             let best = candidates
                 .iter()
-                .filter_map(|c| self.consumers.get(c).filter(|c| c.credit > 0).map(|c| c.priority))
+                .filter_map(|c| {
+                    self.consumers
+                        .get(c)
+                        .filter(|c| c.credit > 0)
+                        .map(|c| c.priority)
+                })
                 .max();
             let Some(best) = best else { break };
             let n = candidates.len();
@@ -554,20 +604,29 @@ impl State {
             let mut chosen = None;
             for i in 0..n {
                 let c = candidates[(start + i) % n];
-                if self.consumers.get(&c).is_some_and(|x| x.credit > 0 && x.priority == best) {
+                if self
+                    .consumers
+                    .get(&c)
+                    .is_some_and(|x| x.credit > 0 && x.priority == best)
+                {
                     chosen = Some((c, (start + i + 1) % n.max(1)));
                     break;
                 }
             }
             let Some((cid, next_rr)) = chosen else { break };
-            let Some(e) = self.pop_ready(qname) else { break };
+            let Some(e) = self.pop_ready(qname) else {
+                break;
+            };
             let q = self.queues.get_mut(qname).unwrap_or_else(|| unreachable!());
             q.rr = next_rr;
-            let c = self.consumers.get_mut(&cid).unwrap_or_else(|| unreachable!());
+            let c = self
+                .consumers
+                .get_mut(&cid)
+                .unwrap_or_else(|| unreachable!());
             c.credit -= 1;
             let (conn, no_ack) = (c.conn, c.no_ack);
             let q = self.queues.get(qname).unwrap_or_else(|| unreachable!());
-            let d = self.deliver_entry(qname, q, &e);
+            let d = Self::deliver_entry(qname, q, &e);
             if !no_ack {
                 let q = self.queues.get_mut(qname).unwrap_or_else(|| unreachable!());
                 q.unacked.insert(e.seq, (e, Some(cid)));
@@ -595,11 +654,16 @@ impl State {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            let Some(c) = self.consumers.get_mut(&id) else { continue };
+            let Some(c) = self.consumers.get_mut(&id) else {
+                continue;
+            };
             let credit = std::mem::take(&mut c.credit);
             c.drain = false;
             if let Some(tx) = self.conns.get(&c.conn) {
-                let _ = tx.send(Event::Drained { consumer: id, credit });
+                let _ = tx.send(Event::Drained {
+                    consumer: id,
+                    credit,
+                });
             }
         }
     }
@@ -614,7 +678,9 @@ impl State {
                 if failed {
                     e.delivery_count += 1;
                 }
-                let limit = q.arg_i64("x-delivery-limit").or(if q.quorum { Some(20) } else { None });
+                let limit =
+                    q.arg_i64("x-delivery-limit")
+                        .or(if q.quorum { Some(20) } else { None });
                 if limit.is_some_and(|l| l >= 0 && i64::from(e.delivery_count) > l) {
                     self.dead_letter(&qname, e, DeadLetterReason::DeliveryLimit);
                 } else {
@@ -628,21 +694,23 @@ impl State {
     }
 
     fn delete_queue(&mut self, name: &str) -> u32 {
-        let Some(q) = self.queues.remove(name) else { return 0 };
+        let Some(q) = self.queues.remove(name) else {
+            return 0;
+        };
         self.queue_ids.remove(&q.id);
         self.bindings
             .retain(|b| !(b.kind == DestKind::Queue && b.dest == name));
         for cid in &q.consumers {
-            if let Some(c) = self.consumers.remove(cid) {
-                if let Some(tx) = self.conns.get(&c.conn) {
-                    let _ = tx.send(Event::Cancelled {
-                        consumer: *cid,
-                        reason: MqError::not_found(format!(
-                            "queue '{name}' in vhost '{}' was deleted",
-                            self.vhost
-                        )),
-                    });
-                }
+            if let Some(c) = self.consumers.remove(cid)
+                && let Some(tx) = self.conns.get(&c.conn)
+            {
+                let _ = tx.send(Event::Cancelled {
+                    consumer: *cid,
+                    reason: MqError::not_found(format!(
+                        "queue '{name}' in vhost '{}' was deleted",
+                        self.vhost
+                    )),
+                });
             }
         }
         u32::try_from(q.ready.len()).unwrap_or(u32::MAX)
@@ -650,8 +718,12 @@ impl State {
 
     /// Removes a consumer; an auto-delete queue goes with its last one.
     fn remove_consumer(&mut self, id: ConsumerId) {
-        let Some(c) = self.consumers.remove(&id) else { return };
-        let Some(q) = self.queues.get_mut(&c.queue) else { return };
+        let Some(c) = self.consumers.remove(&id) else {
+            return;
+        };
+        let Some(q) = self.queues.get_mut(&c.queue) else {
+            return;
+        };
         q.consumers.retain(|x| *x != id);
         if q.rr >= q.consumers.len() {
             q.rr = 0;
@@ -704,7 +776,11 @@ pub fn topic_match(pattern: &str, key: &str) -> bool {
         }
     }
     let p: Vec<&str> = pattern.split('.').collect();
-    let k: Vec<&str> = if key.is_empty() { Vec::new() } else { key.split('.').collect() };
+    let k: Vec<&str> = if key.is_empty() {
+        Vec::new()
+    } else {
+        key.split('.').collect()
+    };
     let p: Vec<&str> = if pattern.is_empty() { Vec::new() } else { p };
     m(&p, &k)
 }
@@ -714,7 +790,7 @@ pub fn topic_match(pattern: &str, key: &str) -> bool {
 pub fn headers_match(binding: &FieldTable, headers: &FieldTable) -> bool {
     let mode = binding
         .get("x-match")
-        .and_then(|v| v.as_str().map(|s| s.into_owned()))
+        .and_then(|v| v.as_str().map(std::borrow::Cow::into_owned))
         .unwrap_or_else(|| "all".into());
     let with_x = mode.ends_with("-with-x");
     let any = mode.starts_with("any");
@@ -801,7 +877,7 @@ fn arg_text(t: &FieldTable, k: &str) -> String {
         None => "none".into(),
         Some(v) => v
             .as_str()
-            .map(|s| s.into_owned())
+            .map(std::borrow::Cow::into_owned)
             .or_else(|| v.as_i64().map(|n| n.to_string()))
             .or_else(|| v.as_bool().map(|b| b.to_string()))
             .unwrap_or_else(|| format!("{v:?}")),
@@ -814,13 +890,20 @@ impl Vhost for MemVhost {
         &self.name
     }
 
-    async fn declare_exchange(&self, cx: &OpCtx, spec: ExchangeSpec, passive: bool) -> Result<(), MqError> {
+    async fn declare_exchange(
+        &self,
+        cx: &OpCtx,
+        spec: ExchangeSpec,
+        passive: bool,
+    ) -> Result<(), MqError> {
         let st = &mut *self.st();
         if spec.name.is_empty() {
             if passive {
                 return Ok(());
             }
-            return Err(MqError::access_refused("operation not permitted on the default exchange"));
+            return Err(MqError::access_refused(
+                "operation not permitted on the default exchange",
+            ));
         }
         if passive {
             return if st.exchanges.contains_key(&spec.name) {
@@ -839,20 +922,50 @@ impl Vhost for MemVhost {
             let v = st.vhost.clone();
             let name = &spec.name;
             if x.kind != spec.kind {
-                return Err(inequivalent("exchange", "type", name, &v, &spec.kind, &x.kind));
+                return Err(inequivalent(
+                    "exchange", "type", name, &v, &spec.kind, &x.kind,
+                ));
             }
             if x.durable != spec.durable {
-                return Err(inequivalent("exchange", "durable", name, &v, &spec.durable.to_string(), &x.durable.to_string()));
+                return Err(inequivalent(
+                    "exchange",
+                    "durable",
+                    name,
+                    &v,
+                    &spec.durable.to_string(),
+                    &x.durable.to_string(),
+                ));
             }
             if x.auto_delete != spec.auto_delete {
-                return Err(inequivalent("exchange", "auto_delete", name, &v, &spec.auto_delete.to_string(), &x.auto_delete.to_string()));
+                return Err(inequivalent(
+                    "exchange",
+                    "auto_delete",
+                    name,
+                    &v,
+                    &spec.auto_delete.to_string(),
+                    &x.auto_delete.to_string(),
+                ));
             }
             if x.internal != spec.internal {
-                return Err(inequivalent("exchange", "internal", name, &v, &spec.internal.to_string(), &x.internal.to_string()));
+                return Err(inequivalent(
+                    "exchange",
+                    "internal",
+                    name,
+                    &v,
+                    &spec.internal.to_string(),
+                    &x.internal.to_string(),
+                ));
             }
             for k in ["alternate-exchange", "x-delayed-type"] {
                 if !x.builtin && arg_text(&x.arguments, k) != arg_text(&spec.arguments, k) {
-                    return Err(inequivalent("exchange", k, name, &v, &arg_text(&spec.arguments, k), &arg_text(&x.arguments, k)));
+                    return Err(inequivalent(
+                        "exchange",
+                        k,
+                        name,
+                        &v,
+                        &arg_text(&spec.arguments, k),
+                        &arg_text(&x.arguments, k),
+                    ));
                 }
             }
             return Ok(());
@@ -878,9 +991,17 @@ impl Vhost for MemVhost {
         Ok(())
     }
 
-    async fn delete_exchange(&self, cx: &OpCtx, name: &str, if_unused: bool) -> Result<(), MqError> {
+    async fn delete_exchange(
+        &self,
+        cx: &OpCtx,
+        name: &str,
+        if_unused: bool,
+    ) -> Result<(), MqError> {
         let st = &mut *self.st();
-        if name.is_empty() || st.exchanges.get(name).is_some_and(|x| x.builtin) || name.starts_with("amq.") {
+        if name.is_empty()
+            || st.exchanges.get(name).is_some_and(|x| x.builtin)
+            || name.starts_with("amq.")
+        {
             return Err(MqError::access_refused(format!(
                 "operation not permitted on the default exchange or '{name}'"
             )));
@@ -896,11 +1017,17 @@ impl Vhost for MemVhost {
             )));
         }
         st.exchanges.remove(name);
-        st.bindings.retain(|b| b.source != name && !(b.kind == DestKind::Exchange && b.dest == name));
+        st.bindings
+            .retain(|b| b.source != name && !(b.kind == DestKind::Exchange && b.dest == name));
         Ok(())
     }
 
-    async fn declare_queue(&self, cx: &OpCtx, mut spec: QueueSpec, passive: bool) -> Result<QueueDeclared, MqError> {
+    async fn declare_queue(
+        &self,
+        cx: &OpCtx,
+        mut spec: QueueSpec,
+        passive: bool,
+    ) -> Result<QueueDeclared, MqError> {
         let st = &mut *self.st();
         let declared = |q: &Queue, name: &str| QueueDeclared {
             name: name.to_owned(),
@@ -922,7 +1049,7 @@ impl Vhost for MemVhost {
         let qtype = spec
             .arguments
             .get("x-queue-type")
-            .and_then(|v| v.as_str().map(|s| s.into_owned()))
+            .and_then(|v| v.as_str().map(std::borrow::Cow::into_owned))
             .unwrap_or_else(|| "classic".into());
         match qtype.as_str() {
             "classic" => {}
@@ -946,23 +1073,42 @@ impl Vhost for MemVhost {
                 ));
             }
             other => {
-                return Err(MqError::precondition(format!("unknown queue type '{other}'")));
+                return Err(MqError::precondition(format!(
+                    "unknown queue type '{other}'"
+                )));
             }
         }
         if let Some(q) = st.queues.get(&spec.name) {
-            if q.exclusive.is_some_and(|o| o != cx.conn) || q.exclusive.is_some() != spec.exclusive {
+            if q.exclusive.is_some_and(|o| o != cx.conn) || q.exclusive.is_some() != spec.exclusive
+            {
                 return Err(st.locked(&spec.name));
             }
             let v = st.vhost.clone();
             if q.durable != spec.durable {
-                return Err(inequivalent("queue", "durable", &spec.name, &v, &spec.durable.to_string(), &q.durable.to_string()));
+                return Err(inequivalent(
+                    "queue",
+                    "durable",
+                    &spec.name,
+                    &v,
+                    &spec.durable.to_string(),
+                    &q.durable.to_string(),
+                ));
             }
             if q.auto_delete != spec.auto_delete {
-                return Err(inequivalent("queue", "auto_delete", &spec.name, &v, &spec.auto_delete.to_string(), &q.auto_delete.to_string()));
+                return Err(inequivalent(
+                    "queue",
+                    "auto_delete",
+                    &spec.name,
+                    &v,
+                    &spec.auto_delete.to_string(),
+                    &q.auto_delete.to_string(),
+                ));
             }
             for k in QUEUE_ARGS {
                 let (a, b) = (arg_text(&spec.arguments, k), arg_text(&q.arguments, k));
-                let default_classic = k == "x-queue-type" && (a == "classic" || a == "none") && (b == "classic" || b == "none");
+                let default_classic = k == "x-queue-type"
+                    && (a == "classic" || a == "none")
+                    && (b == "classic" || b == "none");
                 if a != b && !default_classic {
                     return Err(inequivalent("queue", k, &spec.name, &v, &a, &b));
                 }
@@ -992,18 +1138,32 @@ impl Vhost for MemVhost {
         Ok(out)
     }
 
-    async fn delete_queue(&self, cx: &OpCtx, name: &str, if_unused: bool, if_empty: bool) -> Result<u32, MqError> {
+    async fn delete_queue(
+        &self,
+        cx: &OpCtx,
+        name: &str,
+        if_unused: bool,
+        if_empty: bool,
+    ) -> Result<u32, MqError> {
         let st = &mut *self.st();
-        let Some(q) = st.queues.get(name) else { return Ok(0) };
+        let Some(q) = st.queues.get(name) else {
+            return Ok(0);
+        };
         if q.exclusive.is_some_and(|o| o != cx.conn) {
             return Err(st.locked(name));
         }
         self.check(cx, Perm::Configure, "queue", name)?;
         if if_unused && !q.consumers.is_empty() {
-            return Err(MqError::precondition(format!("queue '{name}' in vhost '{}' in use", st.vhost)));
+            return Err(MqError::precondition(format!(
+                "queue '{name}' in vhost '{}' in use",
+                st.vhost
+            )));
         }
         if if_empty && !q.ready.is_empty() {
-            return Err(MqError::precondition(format!("queue '{name}' in vhost '{}' is not empty", st.vhost)));
+            return Err(MqError::precondition(format!(
+                "queue '{name}' in vhost '{}' is not empty",
+                st.vhost
+            )));
         }
         Ok(st.delete_queue(name))
     }
@@ -1021,7 +1181,9 @@ impl Vhost for MemVhost {
     async fn bind(&self, cx: &OpCtx, b: BindingSpec) -> Result<(), MqError> {
         let st = &mut *self.st();
         if b.source.is_empty() || (b.dest_kind == DestKind::Exchange && b.destination.is_empty()) {
-            return Err(MqError::access_refused("operation not permitted on the default exchange"));
+            return Err(MqError::access_refused(
+                "operation not permitted on the default exchange",
+            ));
         }
         if !st.exchanges.contains_key(&b.source) {
             return Err(st.no_exchange(&b.source));
@@ -1036,11 +1198,19 @@ impl Vhost for MemVhost {
                 }
             }
         }
-        let kind = if b.dest_kind == DestKind::Queue { "queue" } else { "exchange" };
+        let kind = if b.dest_kind == DestKind::Queue {
+            "queue"
+        } else {
+            "exchange"
+        };
         self.check(cx, Perm::Write, kind, &b.destination)?;
         self.check(cx, Perm::Read, "exchange", &b.source)?;
         let exists = st.bindings.iter().any(|x| {
-            x.source == b.source && x.dest == b.destination && x.kind == b.dest_kind && x.key == b.key && x.arguments == b.arguments
+            x.source == b.source
+                && x.dest == b.destination
+                && x.kind == b.dest_kind
+                && x.key == b.key
+                && x.arguments == b.arguments
         });
         if !exists {
             st.bindings.push(Binding {
@@ -1056,20 +1226,30 @@ impl Vhost for MemVhost {
 
     async fn unbind(&self, cx: &OpCtx, b: BindingSpec) -> Result<(), MqError> {
         let st = &mut *self.st();
-        if b.dest_kind == DestKind::Queue {
-            if let Some(q) = st.queues.get(&b.destination) {
-                if q.exclusive.is_some_and(|o| o != cx.conn) {
-                    return Err(st.locked(&b.destination));
-                }
-            }
+        if b.dest_kind == DestKind::Queue
+            && let Some(q) = st.queues.get(&b.destination)
+            && q.exclusive.is_some_and(|o| o != cx.conn)
+        {
+            return Err(st.locked(&b.destination));
         }
-        let kind = if b.dest_kind == DestKind::Queue { "queue" } else { "exchange" };
+        let kind = if b.dest_kind == DestKind::Queue {
+            "queue"
+        } else {
+            "exchange"
+        };
         self.check(cx, Perm::Write, kind, &b.destination)?;
         st.bindings.retain(|x| {
-            !(x.source == b.source && x.dest == b.destination && x.kind == b.dest_kind && x.key == b.key && x.arguments == b.arguments)
+            !(x.source == b.source
+                && x.dest == b.destination
+                && x.kind == b.dest_kind
+                && x.key == b.key
+                && x.arguments == b.arguments)
         });
         // An auto-delete exchange goes with its last binding.
-        let auto = st.exchanges.get(&b.source).is_some_and(|x| x.auto_delete && !x.builtin);
+        let auto = st
+            .exchanges
+            .get(&b.source)
+            .is_some_and(|x| x.auto_delete && !x.builtin);
         if auto && !st.bindings.iter().any(|x| x.source == b.source) {
             st.exchanges.remove(&b.source);
         }
@@ -1093,7 +1273,10 @@ impl Vhost for MemVhost {
         let st = &mut *self.st();
         let q = st.queue_for(&spec.queue, cx.conn)?;
         self.check(cx, Perm::Read, "queue", &spec.queue)?;
-        let exclusive_held = q.consumers.iter().any(|c| st.consumers.get(c).is_some_and(|c| c.exclusive));
+        let exclusive_held = q
+            .consumers
+            .iter()
+            .any(|c| st.consumers.get(c).is_some_and(|c| c.exclusive));
         if exclusive_held || (spec.exclusive && !q.consumers.is_empty()) {
             return Err(MqError::access_refused(format!(
                 "queue '{}' in vhost '{}' in exclusive use",
@@ -1112,7 +1295,10 @@ impl Vhost for MemVhost {
                 drain: false,
             },
         );
-        let q = st.queues.get_mut(&spec.queue).unwrap_or_else(|| unreachable!());
+        let q = st
+            .queues
+            .get_mut(&spec.queue)
+            .unwrap_or_else(|| unreachable!());
         q.consumers.push(spec.consumer);
         q.had_consumer = true;
         Ok(())
@@ -1124,20 +1310,29 @@ impl Vhost for MemVhost {
 
     fn credit(&self, consumer: ConsumerId, credit: u32, drain: bool) {
         let st = &mut *self.st();
-        let Some(c) = st.consumers.get_mut(&consumer) else { return };
+        let Some(c) = st.consumers.get_mut(&consumer) else {
+            return;
+        };
         c.credit = c.credit.saturating_add(credit);
         c.drain = drain;
         let q = c.queue.clone();
         st.dispatch(&q);
     }
 
-    async fn get(&self, cx: &OpCtx, queue: &str, no_ack: bool) -> Result<Option<(Delivery, u32)>, MqError> {
+    async fn get(
+        &self,
+        cx: &OpCtx,
+        queue: &str,
+        no_ack: bool,
+    ) -> Result<Option<(Delivery, u32)>, MqError> {
         let st = &mut *self.st();
         st.queue_for(queue, cx.conn)?;
         self.check(cx, Perm::Read, "queue", queue)?;
-        let Some(e) = st.pop_ready(queue) else { return Ok(None) };
+        let Some(e) = st.pop_ready(queue) else {
+            return Ok(None);
+        };
         let q = st.queues.get(queue).unwrap_or_else(|| unreachable!());
-        let d = st.deliver_entry(queue, q, &e);
+        let d = State::deliver_entry(queue, q, &e);
         let q = st.queues.get_mut(queue).unwrap_or_else(|| unreachable!());
         let remaining = u32::try_from(q.ready.len()).unwrap_or(u32::MAX);
         if !no_ack {
@@ -1195,6 +1390,26 @@ impl Vhost for MemVhost {
             .filter(|(_, c)| c.conn == conn)
             .map(|(id, _)| *id)
             .collect();
+        // A safety net: deliveries still out with this connection's
+        // consumers go back (the front ends normally settled them).
+        let set: HashSet<ConsumerId> = mine.iter().copied().collect();
+        let mut touched = Vec::new();
+        for (name, q) in &mut st.queues {
+            let lost: Vec<u64> = q
+                .unacked
+                .iter()
+                .filter(|(_, (_, c))| c.is_some_and(|c| set.contains(&c)))
+                .map(|(k, _)| *k)
+                .collect();
+            for k in lost {
+                if let Some((mut e, _)) = q.unacked.remove(&k) {
+                    e.redelivered = true;
+                    e.delivery_count += 1;
+                    q.ready.insert((e.pclass, e.seq), e);
+                }
+            }
+            touched.push(name.clone());
+        }
         for id in mine {
             st.remove_consumer(id);
         }
@@ -1206,6 +1421,9 @@ impl Vhost for MemVhost {
             .collect();
         for q in exclusive {
             st.delete_queue(&q);
+        }
+        for q in touched {
+            st.dispatch(&q);
         }
     }
 }
@@ -1233,17 +1451,40 @@ mod tests {
 
     #[test]
     fn headers() {
-        let h = FieldTable::from([("format", FieldValue::str("pdf")), ("type", FieldValue::str("report"))]);
-        let all = FieldTable::from([("x-match", FieldValue::str("all")), ("format", FieldValue::str("pdf")), ("type", FieldValue::str("report"))]);
+        let h = FieldTable::from([
+            ("format", FieldValue::str("pdf")),
+            ("type", FieldValue::str("report")),
+        ]);
+        let all = FieldTable::from([
+            ("x-match", FieldValue::str("all")),
+            ("format", FieldValue::str("pdf")),
+            ("type", FieldValue::str("report")),
+        ]);
         assert!(headers_match(&all, &h));
-        let any = FieldTable::from([("x-match", FieldValue::str("any")), ("format", FieldValue::str("zip")), ("type", FieldValue::str("report"))]);
+        let any = FieldTable::from([
+            ("x-match", FieldValue::str("any")),
+            ("format", FieldValue::str("zip")),
+            ("type", FieldValue::str("report")),
+        ]);
         assert!(headers_match(&any, &h));
-        let none = FieldTable::from([("x-match", FieldValue::str("any")), ("format", FieldValue::str("zip"))]);
+        let none = FieldTable::from([
+            ("x-match", FieldValue::str("any")),
+            ("format", FieldValue::str("zip")),
+        ]);
         assert!(!headers_match(&none, &h));
         let int = FieldTable::from([("n", FieldValue::I32(1))]);
-        assert!(headers_match(&int, &FieldTable::from([("n", FieldValue::I64(1))])));
-        let with_x = FieldTable::from([("x-match", FieldValue::str("all-with-x")), ("x-k", FieldValue::str("v"))]);
+        assert!(headers_match(
+            &int,
+            &FieldTable::from([("n", FieldValue::I64(1))])
+        ));
+        let with_x = FieldTable::from([
+            ("x-match", FieldValue::str("all-with-x")),
+            ("x-k", FieldValue::str("v")),
+        ]);
         assert!(!headers_match(&with_x, &h));
-        assert!(headers_match(&with_x, &FieldTable::from([("x-k", FieldValue::str("v"))])));
+        assert!(headers_match(
+            &with_x,
+            &FieldTable::from([("x-k", FieldValue::str("v"))])
+        ));
     }
 }

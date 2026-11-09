@@ -93,6 +93,10 @@ pub struct ScramCredential {
     pub stored_key: Vec<u8>,
     /// `HMAC(SaltedPassword, "Server Key")`.
     pub server_key: Vec<u8>,
+    /// `(StoredKey, ServerKey)` of a retained second password with the same
+    /// salt and iterations (chapter 14's dual passwords, `RETAIN CURRENT
+    /// PASSWORD`): the proof may match either.
+    pub secondary: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl std::fmt::Debug for ScramCredential {
@@ -132,6 +136,7 @@ impl ScramCredential {
             iterations,
             stored_key: stored_key.as_ref().to_vec(),
             server_key: server_key.as_ref().to_vec(),
+            secondary: None,
         }
     }
 
@@ -150,6 +155,7 @@ impl ScramCredential {
             iterations,
             stored_key,
             server_key: vec![0u8; mechanism.len()],
+            secondary: None,
         }
     }
 }
@@ -404,22 +410,27 @@ impl ScramServer {
             self.client_first_bare, self.server_first, without_proof
         );
         let alg = self.mechanism.hmac_alg();
-        let sig = hmac::sign(
-            &hmac::Key::new(alg, &cred.stored_key),
-            auth_message.as_bytes(),
-        );
-        let client_key: Vec<u8> = proof.iter().zip(sig.as_ref()).map(|(a, b)| a ^ b).collect();
-        let stored = digest::digest(self.mechanism.digest_alg(), &client_key);
-        if !bool::from(subtle::ConstantTimeEq::ct_eq(
-            stored.as_ref(),
-            cred.stored_key.as_slice(),
-        )) {
-            return Err(fail());
+        // The primary password's keys, then a retained secondary's (same
+        // salt and iterations); both are always computed.
+        let candidates = std::iter::once((&cred.stored_key, &cred.server_key))
+            .chain(cred.secondary.as_ref().map(|(st, sv)| (st, sv)));
+        let mut matched = None;
+        for (stored_key, server_key) in candidates {
+            let sig = hmac::sign(&hmac::Key::new(alg, stored_key), auth_message.as_bytes());
+            let client_key: Vec<u8> = proof.iter().zip(sig.as_ref()).map(|(a, b)| a ^ b).collect();
+            let stored = digest::digest(self.mechanism.digest_alg(), &client_key);
+            if bool::from(subtle::ConstantTimeEq::ct_eq(
+                stored.as_ref(),
+                stored_key.as_slice(),
+            )) && matched.is_none()
+            {
+                matched = Some(server_key);
+            }
         }
-        let server_sig = hmac::sign(
-            &hmac::Key::new(alg, &cred.server_key),
-            auth_message.as_bytes(),
-        );
+        let Some(server_key) = matched else {
+            return Err(fail());
+        };
+        let server_sig = hmac::sign(&hmac::Key::new(alg, server_key), auth_message.as_bytes());
         Ok(format!("v={}", B64.encode(server_sig.as_ref())).into_bytes())
     }
 }
@@ -569,6 +580,32 @@ mod tests {
                         assert!(c.verify(&fin));
                     }
                     Err(_) => assert!(!ok),
+                }
+            }
+        }
+    }
+
+    /// Chapter 14's dual passwords: the new password's verifier shares the
+    /// retained one's salt, so one exchange accepts either password.
+    #[test]
+    fn a_retained_password_with_the_same_salt_also_logs_in() {
+        for mech in [ScramMechanism::Sha256, ScramMechanism::Sha512] {
+            let old = ScramCredential::derive(mech, b"old-pw", b"shared-salt", 4096);
+            let mut cred = ScramCredential::derive(mech, b"new-pw", b"shared-salt", 4096);
+            cred.secondary = Some((old.stored_key.clone(), old.server_key.clone()));
+            for (pw, ok) in [
+                (&b"new-pw"[..], true),
+                (&b"old-pw"[..], true),
+                (&b"other"[..], false),
+            ] {
+                let mut c = ScramClient::new(mech, "acme.app", pw, "cn");
+                let mut s = ScramServer::new(mech);
+                s.client_first(&c.first()).unwrap();
+                let cf = c.last(&s.server_first(cred.clone())).unwrap();
+                match s.client_final(&cf) {
+                    // The server signs with the matching password's key.
+                    Ok(fin) => assert!(ok && c.verify(&fin), "{pw:?}"),
+                    Err(_) => assert!(!ok, "{pw:?}"),
                 }
             }
         }

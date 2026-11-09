@@ -42,6 +42,11 @@
 //!   catalog login it plans every statement with chapter 07's rewrite and
 //!   maps results, errors and session tracking back to logical names.
 //!
+//! - [`amqp`]: the AMQP listeners on 5672 and 5671 (chapter 50 steps 12,
+//!   14 and 23): `sprig-proto-amqp`'s server, both AMQP versions told apart
+//!   by the protocol header, over chapter 14's logins and, until
+//!   `sprig-queues` exists, the in-memory queue engine.
+//!
 //! - [`kafka`]: the Kafka listener on 9092 (chapter 45 steps 9, 12, 13):
 //!   `sprig-proto-kafka`'s broker over chapter 14's logins, the DC's
 //!   gateway records, etcd coordinator leases and the tenant's streams.
@@ -49,6 +54,7 @@
 //! Not yet: the other front ends (chapters 30, 37, 40), limits,
 //! registration and the other `MetaStore` caches (steps 4-10).
 
+pub mod amqp;
 pub mod backend;
 pub mod dc;
 pub mod exec;
@@ -311,10 +317,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             kafka::KafkaDeps {
                 live: live.clone(),
                 dc: dc.clone(),
-                identity: Arc::new(kafka::identity::KafkaIdentity::new(
-                    Arc::clone(&login),
-                    Some(Arc::clone(t)),
-                )),
+                identity: Arc::new(kafka::identity::KafkaIdentity::new(Arc::clone(&login))),
                 cluster,
                 topics: Arc::new(kafka::catalog::StreamTopics::new(
                     Arc::clone(t),
@@ -325,6 +328,23 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             stop.clone(),
         ))
     });
+    // AMQP on 5672 and 5671 (chapter 50, R9).
+    let amqp_fe = Arc::new(amqp::AmqpFrontend::new(
+        Arc::new(amqp::identity::AmqpIdentity::new(
+            Arc::clone(&login),
+            live.clone(),
+            dc.clone(),
+        )),
+        Arc::new(amqp::GatewayQueues::new(
+            tenants.clone(),
+            live.clone(),
+            dc.clone(),
+        )),
+        live.clone(),
+        dc.clone(),
+        gateway_id.to_string(),
+        u32::from(sessions.slot()),
+    ));
     let peer_host = Arc::new(PeerHost {
         login: Arc::clone(&login),
         core: Arc::clone(&core),
@@ -350,7 +370,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             {
                 let fes = mysql
                     .register(Frontends::new())
-                    .with(http_fe as Arc<dyn frontend::Frontend>);
+                    .with(http_fe as Arc<dyn frontend::Frontend>)
+                    .with(amqp_fe as Arc<dyn frontend::Frontend>);
                 match kafka_fe {
                     Some(k) => fes.with(k as Arc<dyn frontend::Frontend>),
                     None => fes,

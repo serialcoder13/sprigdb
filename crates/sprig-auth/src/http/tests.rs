@@ -104,11 +104,30 @@ async fn basic_logins_then_the_fast_path() {
     let p = h.authenticate(&req(&a)).await.unwrap();
     assert_eq!(p.user_id, Some(UserId(1)));
     let ev = w.audit.events();
-    let mech: Vec<_> = ev.iter().map(|e| (e.protocol, e.mechanism)).collect();
+    let mech: Vec<_> = ev
+        .iter()
+        .filter(|e| e.event == crate::audit::events::LOGIN_SUCCEEDED)
+        .map(|e| (e.protocol, e.mechanism))
+        .collect();
     assert_eq!(
         mech,
         vec![("http", Some("full")), ("http", Some("fast"))],
         "the second request takes the fast cache"
+    );
+    // Basic logins see the password: they store alice's missing SCRAM
+    // verifiers (here again each time: the test's snapshot never gains
+    // them).
+    let mut b = w.state.backfills();
+    for _ in 0..200 {
+        if !b.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        b = w.state.backfills();
+    }
+    assert!(
+        !b.is_empty() && b.iter().all(|x| *x == (ACME, UserId(1), 10)),
+        "{b:?}"
     );
     // The tenant from the Host header under a tenant suffix, or the header.
     let a = basic("alice", "pw");

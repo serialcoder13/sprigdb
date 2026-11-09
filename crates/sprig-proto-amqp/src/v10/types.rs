@@ -185,26 +185,24 @@ impl Value {
                 b.put_u8(0x61);
                 b.put_i16(*v);
             }
-            Value::Int(v) => match i8::try_from(*v) {
-                Ok(s) => {
+            Value::Int(v) => {
+                if let Ok(s) = i8::try_from(*v) {
                     b.put_u8(0x54);
                     b.put_i8(s);
-                }
-                Err(_) => {
+                } else {
                     b.put_u8(0x71);
                     b.put_i32(*v);
                 }
-            },
-            Value::Long(v) => match i8::try_from(*v) {
-                Ok(s) => {
+            }
+            Value::Long(v) => {
+                if let Ok(s) = i8::try_from(*v) {
                     b.put_u8(0x55);
                     b.put_i8(s);
-                }
-                Err(_) => {
+                } else {
                     b.put_u8(0x81);
                     b.put_i64(*v);
                 }
-            },
+            }
             Value::Float(v) => {
                 b.put_u8(0x72);
                 b.put_f32(*v);
@@ -557,7 +555,10 @@ impl<'a> Reader<'a> {
                     (self.u32()? as usize, self.u32()? as usize)
                 };
                 let width = if code & 0xf0 == 0xc0 { 1 } else { 4 };
-                let body = self.take(size.checked_sub(width).ok_or_else(|| DecodeError("bad compound size".into()))?)?;
+                let body = self.take(
+                    size.checked_sub(width)
+                        .ok_or_else(|| DecodeError("bad compound size".into()))?,
+                )?;
                 // Every element takes at least one byte.
                 if count > body.len() {
                     return err("compound count exceeds its size");
@@ -570,7 +571,7 @@ impl<'a> Reader<'a> {
                 if inner.pos != body.len() {
                     return err("compound size doesn't match its elements");
                 }
-                if code & 0x0f == 0 {
+                if code == 0xc0 || code == 0xd0 {
                     Value::List(items)
                 } else {
                     if count % 2 != 0 {
@@ -591,7 +592,10 @@ impl<'a> Reader<'a> {
                     (self.u32()? as usize, self.u32()? as usize)
                 };
                 let width = if code == 0xe0 { 1 } else { 4 };
-                let body = self.take(size.checked_sub(width).ok_or_else(|| DecodeError("bad array size".into()))?)?;
+                let body = self.take(
+                    size.checked_sub(width)
+                        .ok_or_else(|| DecodeError("bad array size".into()))?,
+                )?;
                 let mut inner = Reader { buf: body, pos: 0 };
                 // The constructor: a code, or a descriptor and a code.
                 let mut c = inner.u8()?;
@@ -605,7 +609,7 @@ impl<'a> Reader<'a> {
                 }
                 // Zero-width elements (null, true, false, uint0, ...) are
                 // the only ones that can outnumber the bytes.
-                let zero_width = matches!(c, 0x40 | 0x41 | 0x42 | 0x43 | 0x44 | 0x45);
+                let zero_width = matches!(c, 0x40..=0x45);
                 if !zero_width && count > body.len() {
                     return err("array count exceeds its size");
                 }
@@ -687,10 +691,16 @@ mod tests {
         assert_eq!(&rt(&Value::Uint(65536))[..], &[0x70, 0, 1, 0, 0]);
         assert_eq!(&rt(&Value::Ulong(0x10))[..], &[0x53, 0x10]);
         assert_eq!(&rt(&Value::Int(-1))[..], &[0x54, 0xff]);
-        assert_eq!(&rt(&Value::Long(1000))[..], &[0x81, 0, 0, 0, 0, 0, 0, 3, 0xe8]);
+        assert_eq!(
+            &rt(&Value::Long(1000))[..],
+            &[0x81, 0, 0, 0, 0, 0, 0, 3, 0xe8]
+        );
         assert_eq!(&rt(&Value::str("hi"))[..], &[0xa1, 2, b'h', b'i']);
         assert_eq!(&rt(&Value::sym("PLAIN"))[..], b"\xa3\x05PLAIN");
-        assert_eq!(&rt(&Value::Binary(Bytes::from_static(&[1, 2])))[..], &[0xa0, 2, 1, 2]);
+        assert_eq!(
+            &rt(&Value::Binary(Bytes::from_static(&[1, 2])))[..],
+            &[0xa0, 2, 1, 2]
+        );
         assert_eq!(&rt(&Value::List(vec![]))[..], &[0x45]);
         assert_eq!(
             &rt(&Value::List(vec![Value::Uint(1), Value::Null]))[..],
@@ -721,7 +731,7 @@ mod tests {
         want.extend_from_slice(b"EXTERNAL");
         assert_eq!(&b[..], &want[..]);
         // The compact element code a client may use decodes too.
-        let compact = [0xe0, 9, 2, 0xa3, 1, b'a', 2, b'b', b'c'];
+        let compact = [0xe0, 7, 2, 0xa3, 1, b'a', 2, b'b', b'c'];
         assert_eq!(
             Value::decode_all(&compact).unwrap(),
             Value::Array(vec![Value::sym("a"), Value::sym("bc")])
@@ -732,10 +742,7 @@ mod tests {
     fn golden_open_performative() {
         // open(container-id = "c") as described list 0x10.
         let v = Value::composite(0x10, vec![Value::str("c"), Value::Null]);
-        assert_eq!(
-            &rt(&v)[..],
-            &[0x00, 0x53, 0x10, 0xc0, 4, 1, 0xa1, 1, b'c']
-        );
+        assert_eq!(&rt(&v)[..], &[0x00, 0x53, 0x10, 0xc0, 4, 1, 0xa1, 1, b'c']);
         assert_eq!(v.descriptor(), Some(0x10));
         // A symbolic descriptor is understood.
         let s = Value::Described(
@@ -751,26 +758,30 @@ mod tests {
         let b = rt(&big);
         assert_eq!(b[0], 0xd0);
         rt(&Value::Array((0..300u64).map(Value::Ulong).collect()));
-        rt(&Value::Array(vec![Value::List(vec![Value::Uint(1)]), Value::List(vec![])]));
-        rt(&Value::Array(vec![Value::Array(vec![Value::Int(1)])]));
         rt(&Value::Array(vec![
-            Value::Described(Box::new(Value::Ulong(0x24)), Box::new(Value::List(vec![]))),
+            Value::List(vec![Value::Uint(1)]),
+            Value::List(vec![]),
         ]));
+        rt(&Value::Array(vec![Value::Array(vec![Value::Int(1)])]));
+        rt(&Value::Array(vec![Value::Described(
+            Box::new(Value::Ulong(0x24)),
+            Box::new(Value::List(vec![])),
+        )]));
         rt(&Value::str(&"x".repeat(1000)));
     }
 
     #[test]
     fn malformed() {
         for bad in [
-            &[0xa1, 5, b'a'][..],                // truncated string
-            &[0xc0, 3, 9, 0x40, 0x40][..],       // count beyond size
-            &[0xc1, 2, 1, 0x40][..],             // odd map
-            &[0x56, 2][..],                      // bad boolean
-            &[0xa1, 1, 0xff][..],                // bad UTF-8
-            &[0x0f][..],                         // unknown code
-            &[0xe0, 2, 1, 0x00][..],             // truncated descriptor
-            &[0xc0, 0, 0][..],                   // size smaller than count width
-            &[0xe0, 2, 0xff, 0x40][..],          // zero-width ok, 255 nulls
+            &[0xa1, 5, b'a'][..],          // truncated string
+            &[0xc0, 3, 9, 0x40, 0x40][..], // count beyond size
+            &[0xc1, 2, 1, 0x40][..],       // odd map
+            &[0x56, 2][..],                // bad boolean
+            &[0xa1, 1, 0xff][..],          // bad UTF-8
+            &[0x0f][..],                   // unknown code
+            &[0xe0, 2, 1, 0x00][..],       // truncated descriptor
+            &[0xc0, 0, 0][..],             // size smaller than count width
+            &[0xe0, 2, 0xff, 0x40][..],    // zero-width ok, 255 nulls
         ] {
             let r = Value::decode_all(bad);
             if bad == [0xe0, 2, 0xff, 0x40] {

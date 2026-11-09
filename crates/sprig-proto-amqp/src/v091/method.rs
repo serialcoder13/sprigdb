@@ -322,7 +322,10 @@ impl Method {
     pub fn has_content(&self) -> bool {
         matches!(
             self,
-            Method::BasicPublish(_) | Method::BasicReturn(_) | Method::BasicDeliver(_) | Method::BasicGetOk(_)
+            Method::BasicPublish(_)
+                | Method::BasicReturn(_)
+                | Method::BasicDeliver(_)
+                | Method::BasicGetOk(_)
         )
     }
 }

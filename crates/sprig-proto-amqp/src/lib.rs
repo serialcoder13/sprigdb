@@ -14,8 +14,15 @@
 //! - [`reply_to`]: direct reply-to names;
 //! - [`server`]: one connection, from the protocol header on.
 
-// AMQP names (basic.publish, x-dead-letter-exchange) fill the docs.
-#![allow(clippy::doc_markdown)]
+// AMQP names (basic.publish, x-dead-letter-exchange) fill the docs;
+// performatives and methods have many flags and long field lists, and
+// protocol handlers are long matches over them.
+#![allow(
+    clippy::doc_markdown,
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    clippy::struct_excessive_bools
+)]
 
 pub mod auth;
 pub mod backend;

@@ -216,10 +216,7 @@ mod tests {
             parse_plain(b"\0acme.app\0secret"),
             Some(("acme.app".into(), b"secret".to_vec()))
         );
-        assert_eq!(
-            parse_plain(b"u\0u\0p"),
-            Some(("u".into(), b"p".to_vec()))
-        );
+        assert_eq!(parse_plain(b"u\0u\0p"), Some(("u".into(), b"p".to_vec())));
         assert_eq!(parse_plain(b"other\0u\0p"), None);
         assert_eq!(parse_plain(b"\0u"), None);
         assert_eq!(parse_plain(b"\0\0p"), None);
@@ -238,10 +235,7 @@ mod tests {
         ]);
         let mut b = BytesMut::new();
         t.encode_entries(&mut b);
-        assert_eq!(
-            parse_amqplain(&b),
-            Some(("guest".into(), b"pw".to_vec()))
-        );
+        assert_eq!(parse_amqplain(&b), Some(("guest".into(), b"pw".to_vec())));
         assert_eq!(parse_amqplain(b"\x05LOGIN"), None);
     }
 

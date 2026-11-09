@@ -25,7 +25,9 @@ use crate::store::{
 };
 
 /// One verifier: the stored string of `caching_sha2_password` or
-/// `mysql_native_password`, hex-encoded.
+/// `mysql_native_password`, hex-encoded. SCRAM verifiers are never
+/// exported (chapter 14): an imported account gets them at its first login
+/// that sees the clear password.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortableVerifier {
     /// The mechanism (`caching_sha2_password`, `mysql_native_password`).
@@ -228,8 +230,19 @@ pub async fn import(
         RequireCurrent::parse(&a.require_current).map_err(|e| bad("require_current", &e))?;
     let mut verifiers = Vec::new();
     for v in &a.verifiers {
+        let kind = VerifierKind::parse(&v.mechanism).map_err(|e| bad("mechanism", &e))?;
+        // Only the stored strings travel; SCRAM verifiers are never exported
+        // and come back at the first login that sees the password.
+        if !matches!(kind, VerifierKind::CachingSha2 | VerifierKind::Native) {
+            return Err(SprigError::new(
+                SprigCode::AdminRequestInvalid,
+                format!(
+                    "mechanism {kind}: only caching_sha2_password and mysql_native_password verifiers import"
+                ),
+            ));
+        }
         verifiers.push((
-            VerifierKind::parse(&v.mechanism).map_err(|e| bad("mechanism", &e))?,
+            kind,
             Slot::parse(&v.slot).map_err(|e| bad("slot", &e))?,
             unhex(&v.auth_string_hex)?,
             v.generation,

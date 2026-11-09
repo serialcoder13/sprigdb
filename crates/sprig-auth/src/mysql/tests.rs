@@ -197,6 +197,15 @@ pub(crate) fn world_at(
     vs.push(sha2(12, 1, Slot::History, b"ancient"));
     vs.push(native(91, 9, b"npw"));
     vs.push(native(111, 11, b"pw"));
+    // dual@% also has both SCRAM verifiers of "pw".
+    for (vid, kind) in [(112, ScramKind::Sha256), (113, ScramKind::Sha512)] {
+        let mut r = ScramVerifier::create(kind, b"pw", None, 5000)
+            .unwrap()
+            .unwrap()
+            .to_row(UserId(11), Slot::Primary, 1, at());
+        r.verifier_id = vid;
+        vs.push(r);
+    }
     let lock = TempLock {
         user_id: UserId(7),
         locked_until: now + Duration::from_secs(3600),
@@ -947,4 +956,140 @@ async fn repeated_failures_are_delayed() {
     );
     let t = run(&w.svc, req("acme.alice"), b"wrong").await.took;
     assert!(t < first + Duration::from_millis(250), "{t:?}");
+}
+
+/// Waits for the background backfills to reach `n`.
+async fn backfills(w: &World, n: usize) -> Vec<(TenantId, UserId, u64)> {
+    for _ in 0..200 {
+        let b = w.state.backfills();
+        if b.len() >= n {
+            return b;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    w.state.backfills()
+}
+
+/// Chapter 14's upgrade on login: a successful login that saw the clear
+/// password of a generation without SCRAM verifiers stores them, once per
+/// verifier; the fast path (no clear password), a failed login, an account
+/// that has them, and `auth.backfill_verifiers = off` don't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::many_single_char_names)]
+async fn full_logins_backfill_scram_verifiers() {
+    let w = world(FixedPolicy::default());
+    // Full path, primary (verifier 10).
+    assert_eq!(
+        run(&w.svc, req("acme.alice"), b"pw").await.verdict,
+        AuthVerdict::Accept
+    );
+    assert_eq!(backfills(&w, 1).await, [(ACME, UserId(1), 10)]);
+    let added: Vec<_> = w
+        .audit
+        .events()
+        .into_iter()
+        .filter(|e| e.event == crate::audit::events::VERIFIERS_ADDED)
+        .collect();
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].protocol, "mysql");
+    assert_eq!(added[0].reason, Some("upgrade_on_login"));
+    assert_eq!(
+        added[0].detail.as_deref(),
+        Some("scram_sha_256,scram_sha_512")
+    );
+    // The fast path sees no password.
+    let r = run(&w.svc, req("acme.alice"), b"pw").await;
+    assert_eq!(
+        (r.verdict, r.seen),
+        (AuthVerdict::Accept, vec![FAST.to_vec()])
+    );
+    // The secondary password: its own generation (verifier 11).
+    assert_eq!(
+        run(&w.svc, req("acme.alice"), b"old-pw").await.verdict,
+        AuthVerdict::Accept
+    );
+    assert_eq!(backfills(&w, 2).await[1], (ACME, UserId(1), 11));
+    // Wrong passwords, refused accounts and accounts with SCRAM: nothing.
+    let _ = run(&w.svc, req("acme.alice"), b"nope").await;
+    let _ = run(&w.svc, req("acme.locked"), b"pw").await;
+    assert_eq!(
+        run(&w.svc, req("acme.dual"), b"pw").await.verdict,
+        AuthVerdict::Accept
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(w.state.backfills().len(), 2);
+    // HTTP Basic's clear-text fast path sees the password: it backfills,
+    // labelled http.
+    let w = world(FixedPolicy::default());
+    let mut l = w.svc.start_http(req("acme.tls")).await;
+    assert!(l.check_password(Zeroizing::new(b"pw".to_vec())).await);
+    assert_eq!(
+        l.decide(Outcome::Verified, AuthPath::Full).await,
+        AuthVerdict::Accept
+    );
+    let mut l = w.svc.start_kafka(req("acme.x509")).await;
+    assert!(!l.check_clear_fast(b"pw"));
+    assert!(l.check_password(Zeroizing::new(b"pw".to_vec())).await);
+    let _ = l.decide(Outcome::Verified, AuthPath::Full).await;
+    let _ = backfills(&w, 1).await;
+    let mut l = w.svc.start_http(req("acme.alice")).await;
+    assert!(l.check_password(Zeroizing::new(b"pw".to_vec())).await);
+    let _ = l.decide(Outcome::Verified, AuthPath::Full).await;
+    let _ = backfills(&w, 2).await;
+    // (The gateway backfills a user once at a time.)
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut l = w.svc.start_kafka(req("acme.alice")).await;
+    assert!(l.check_clear_fast(b"pw"));
+    assert_eq!(
+        l.decide(Outcome::Verified, AuthPath::Fast).await,
+        AuthVerdict::Accept
+    );
+    let b = backfills(&w, 3).await;
+    assert_eq!(b.len(), 3, "{b:?}");
+    let protocols: Vec<_> = w
+        .audit
+        .events()
+        .into_iter()
+        .filter(|e| e.event == crate::audit::events::LOGIN_SUCCEEDED)
+        .map(|e| e.protocol)
+        .collect();
+    assert_eq!(protocols, ["http", "http", "kafka"]);
+    // x509 was refused (no client certificate): no backfill, a kafka
+    // failure event.
+    assert!(
+        w.audit
+            .events()
+            .iter()
+            .any(|e| e.event == crate::audit::events::LOGIN_FAILED
+                && e.protocol == "kafka"
+                && e.reason == Some("tls_required"))
+    );
+    // Off.
+    let mut p = FixedPolicy::default();
+    p.0.insert(crate::settings::BACKFILL_VERIFIERS.key, Value::Bool(false));
+    let w = world(p);
+    assert_eq!(
+        run(&w.svc, req("acme.alice"), b"pw").await.verdict,
+        AuthVerdict::Accept
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(w.state.backfills().is_empty());
+}
+
+/// The SCRAM verifier a SCRAM exchange uses comes from the cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scram_credentials_from_the_cache() {
+    let w = world(FixedPolicy::default());
+    let l = w.svc.start_kafka(req("acme.dual")).await;
+    for kind in ScramKind::ALL {
+        let (v, secondary) = l.scram_credential(kind).unwrap();
+        assert_eq!(v.kind(), kind);
+        assert!(v.verify_password(b"pw"));
+        assert!(secondary.is_none());
+    }
+    // No verifiers, the decoy, an unknown tenant: none.
+    for name in ["acme.alice", "acme.nobody", "nowhere.alice"] {
+        let l = w.svc.start_kafka(req(name)).await;
+        assert!(l.scram_credential(ScramKind::Sha256).is_none(), "{name}");
+    }
 }

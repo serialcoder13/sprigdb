@@ -78,6 +78,30 @@ fn get<T: SettingValue>(p: &dyn PolicySettings, s: &'static Setting<T>, c: &Tena
         .unwrap_or_else(|| s.default.clone())
 }
 
+/// The tenant's [`Hashing`]: `auth.caching_sha2_rounds`,
+/// `auth.mysql_native_password`, `auth.scram_sha256_iterations` and
+/// `auth.scram_sha512_iterations`.
+#[must_use]
+pub fn hashing_of(p: &dyn PolicySettings, c: &TenantCatalog) -> Hashing {
+    use crate::scram::DEFAULT_SCRAM_ITERATIONS;
+    use crate::settings::{
+        CACHING_SHA2_ROUNDS, MYSQL_NATIVE_PASSWORD, SCRAM_SHA256_ITERATIONS,
+        SCRAM_SHA512_ITERATIONS,
+    };
+    Hashing {
+        caching_sha2_rounds: get(p, &CACHING_SHA2_ROUNDS, c)
+            .try_into()
+            .unwrap_or(crate::verifier::DEFAULT_CACHING_SHA2_ROUNDS),
+        native: get(p, &MYSQL_NATIVE_PASSWORD, c),
+        scram_sha256_iterations: get(p, &SCRAM_SHA256_ITERATIONS, c)
+            .try_into()
+            .unwrap_or(DEFAULT_SCRAM_ITERATIONS),
+        scram_sha512_iterations: get(p, &SCRAM_SHA512_ITERATIONS, c)
+            .try_into()
+            .unwrap_or(DEFAULT_SCRAM_ITERATIONS),
+    }
+}
+
 // ---- lockout ----
 
 /// How long a temporary lock lasts.
@@ -194,6 +218,25 @@ pub trait LoginStateStore: Send + Sync + 'static {
         until: SystemTime,
         now: SystemTime,
     ) -> Result<bool>;
+
+    /// Stores the SCRAM verifiers missing from the password generation of
+    /// `verifier_id`, which `password` just matched at a login (chapter 14,
+    /// "SCRAM verifiers": upgrade on login). Returns the mechanisms added,
+    /// comma-separated, or `None` if nothing was missing. The default
+    /// stores nothing (stores without a catalog writer).
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn backfill_scram(
+        &self,
+        _tenant: TenantId,
+        _user: UserId,
+        _verifier_id: u64,
+        _password: Zeroizing<Vec<u8>>,
+        _hashing: Hashing,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// `login_state` in the tenant's catalog, through its writer; lock
@@ -416,12 +459,32 @@ impl LoginStateStore for CatalogLoginState {
         .await?;
         Ok(cleared)
     }
+
+    async fn backfill_scram(
+        &self,
+        tenant: TenantId,
+        user: UserId,
+        verifier_id: u64,
+        password: Zeroizing<Vec<u8>>,
+        hashing: Hashing,
+    ) -> Result<Option<String>> {
+        let added =
+            admin::backfill_scram(&self.cat, tenant, user, verifier_id, &password, hashing).await?;
+        Ok(added.map(|(_, kinds)| {
+            kinds
+                .iter()
+                .map(|k| k.verifier_kind().as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        }))
+    }
 }
 
 /// Counters in memory: tests, and processes without a catalog writer.
 #[derive(Debug, Default)]
 pub struct MemLoginState {
     rows: Mutex<HashMap<(TenantId, UserId), LoginStateRow>>,
+    backfills: Mutex<Vec<(TenantId, UserId, u64)>>,
 }
 
 impl MemLoginState {
@@ -439,6 +502,15 @@ impl MemLoginState {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&(tenant, user))
             .cloned()
+    }
+
+    /// The SCRAM backfills asked for: tenant, user and matched verifier.
+    #[must_use]
+    pub fn backfills(&self) -> Vec<(TenantId, UserId, u64)> {
+        self.backfills
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -507,6 +579,21 @@ impl LoginStateStore for MemLoginState {
             }
             _ => Ok(false),
         }
+    }
+
+    async fn backfill_scram(
+        &self,
+        tenant: TenantId,
+        user: UserId,
+        verifier_id: u64,
+        _password: Zeroizing<Vec<u8>>,
+        _hashing: Hashing,
+    ) -> Result<Option<String>> {
+        self.backfills
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((tenant, user, verifier_id));
+        Ok(Some("scram_sha_256,scram_sha_512".into()))
     }
 }
 
@@ -816,20 +903,7 @@ pub async fn change_password(
         audit(events::PASSWORD_REJECTED, Some(p.reason()));
         return Err(p.error(change.persona, &row.name, &row.host));
     }
-    let hashing = Hashing {
-        caching_sha2_rounds: get(
-            ctx.policy,
-            &crate::settings::CACHING_SHA2_ROUNDS,
-            ctx.catalog,
-        )
-        .try_into()
-        .unwrap_or(crate::verifier::DEFAULT_CACHING_SHA2_ROUNDS),
-        native: get(
-            ctx.policy,
-            &crate::settings::MYSQL_NATIVE_PASSWORD,
-            ctx.catalog,
-        ),
-    };
+    let hashing = hashing_of(ctx.policy, ctx.catalog);
     let changed = admin::set_password(
         ctx.cat,
         tenant,

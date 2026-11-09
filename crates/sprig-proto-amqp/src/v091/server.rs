@@ -30,9 +30,9 @@ use super::frame::{
     put_content, put_heartbeat, put_method,
 };
 use super::method::{
-    BasicAck, BasicCancel, BasicCancelOk, BasicConsume, BasicConsumeOk, BasicDeliver, BasicGetEmpty,
-    BasicGetOk, BasicNack, BasicPublish, BasicQosOk, BasicRecoverOk, BasicReturn, ChannelClose,
-    ChannelCloseOk, ChannelFlowOk, ChannelOpenOk, ConfirmSelectOk, ConnectionBlocked,
+    BasicAck, BasicCancel, BasicCancelOk, BasicConsume, BasicConsumeOk, BasicDeliver,
+    BasicGetEmpty, BasicGetOk, BasicNack, BasicPublish, BasicQosOk, BasicRecoverOk, BasicReturn,
+    ChannelClose, ChannelCloseOk, ChannelFlowOk, ChannelOpenOk, ConfirmSelectOk, ConnectionBlocked,
     ConnectionClose, ConnectionCloseOk, ConnectionOpenOk, ConnectionStart, ConnectionTune,
     ConnectionUnblocked, ConnectionUpdateSecretOk, ExchangeBindOk, ExchangeDeclareOk,
     ExchangeDeleteOk, ExchangeUnbindOk, Method, MethodError, QueueBindOk, QueueDeclareOk,
@@ -40,8 +40,8 @@ use super::method::{
 };
 use crate::auth::{self, ConnInfo, Credentials, Principal};
 use crate::backend::{
-    BindingSpec, ConnKey, ConsumeSpec, ConsumerId, DeadLetterReason, DestKind, Event,
-    ExchangeSpec, OpCtx, QueueSpec, Settlement, TxBatch, Vhost,
+    BindingSpec, ConnKey, ConsumeSpec, ConsumerId, DeadLetterReason, DestKind, Event, ExchangeSpec,
+    OpCtx, QueueSpec, Settlement, TxBatch, Vhost,
 };
 use crate::convert;
 use crate::error::{MqCode, MqError, reply};
@@ -140,19 +140,27 @@ async fn expect<R: AsyncRead + Unpin>(
             continue;
         }
         match tokio::time::timeout_at(deadline, rd.read_buf(inb)).await {
-            Ok(Ok(0)) => return Err(MqError::frame(reply::CONNECTION_FORCED, "client closed during handshake")),
+            Ok(Ok(0)) => {
+                return Err(MqError::frame(
+                    reply::CONNECTION_FORCED,
+                    "client closed during handshake",
+                ));
+            }
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(io_err(&e)),
-            Err(_) => return Err(MqError::frame(reply::CONNECTION_FORCED, "handshake timeout")),
+            Err(_) => {
+                return Err(MqError::frame(
+                    reply::CONNECTION_FORCED,
+                    "handshake timeout",
+                ));
+            }
         }
     }
 }
 
 fn method_error(e: MethodError) -> MqError {
     match e {
-        MethodError::Unknown(c, m) => {
-            MqError::not_implemented(format!("unknown method {c}.{m}"))
-        }
+        MethodError::Unknown(c, m) => MqError::not_implemented(format!("unknown method {c}.{m}")),
         MethodError::Syntax(e) => e.into(),
     }
 }
@@ -211,8 +219,12 @@ where
     );
     flush(&mut wr, &mut out).await?;
     let hs_max = cfg.frame_max.max(FRAME_MIN_SIZE);
-    let Method::ConnectionStartOk(start_ok) = expect(&mut rd, &mut inb, hs_max, deadline).await? else {
-        return Err(MqError::frame(reply::COMMAND_INVALID, "expected connection.start-ok"));
+    let Method::ConnectionStartOk(start_ok) = expect(&mut rd, &mut inb, hs_max, deadline).await?
+    else {
+        return Err(MqError::frame(
+            reply::COMMAND_INVALID,
+            "expected connection.start-ok",
+        ));
     };
     let caps = ClientCaps::of(&start_ok.client_properties);
     let creds = auth::credentials(&start_ok.mechanism, &start_ok.response, &offered, &info);
@@ -223,7 +235,10 @@ where
     };
     let principal = match creds {
         Some(c) => svc.identity.login(&info, c).await.map_err(|e| e.0),
-        None => Err(format!("mechanism {} not offered or malformed response", start_ok.mechanism)),
+        None => Err(format!(
+            "mechanism {} not offered or malformed response",
+            start_ok.mechanism
+        )),
     };
     let principal = match principal {
         Ok(p) => Arc::new(p),
@@ -258,10 +273,21 @@ where
     );
     flush(&mut wr, &mut out).await?;
     let Method::ConnectionTuneOk(tune) = expect(&mut rd, &mut inb, hs_max, deadline).await? else {
-        return Err(MqError::frame(reply::COMMAND_INVALID, "expected connection.tune-ok"));
+        return Err(MqError::frame(
+            reply::COMMAND_INVALID,
+            "expected connection.tune-ok",
+        ));
     };
-    let frame_max = if tune.frame_max == 0 { cfg.frame_max } else { tune.frame_max };
-    let channel_max = if tune.channel_max == 0 { cfg.channel_max } else { tune.channel_max };
+    let frame_max = if tune.frame_max == 0 {
+        cfg.frame_max
+    } else {
+        tune.frame_max
+    };
+    let channel_max = if tune.channel_max == 0 {
+        cfg.channel_max
+    } else {
+        tune.channel_max
+    };
     let negotiation = if frame_max > cfg.frame_max && cfg.frame_max != 0 {
         Some(format!(
             "negotiated frame_max = {frame_max} is higher than the maximum allowed value ({})",
@@ -283,9 +309,16 @@ where
         return Err(e);
     }
     let Method::ConnectionOpen(open) = expect(&mut rd, &mut inb, frame_max, deadline).await? else {
-        return Err(MqError::frame(reply::COMMAND_INVALID, "expected connection.open"));
+        return Err(MqError::frame(
+            reply::COMMAND_INVALID,
+            "expected connection.open",
+        ));
     };
-    let vhost_name = if open.virtual_host.is_empty() { "/".to_owned() } else { open.virtual_host };
+    let vhost_name = if open.virtual_host.is_empty() {
+        "/".to_owned()
+    } else {
+        open.virtual_host
+    };
     let key = ConnKey::next();
     let (events_tx, events) = mpsc::unbounded_channel();
     let vhost = match svc
@@ -361,7 +394,7 @@ enum Content {
     #[default]
     None,
     Header(BasicPublish),
-    Body(BasicPublish, ContentHeader, BytesMut),
+    Body(BasicPublish, Box<ContentHeader>, BytesMut),
 }
 
 #[derive(Debug, Default)]
@@ -386,6 +419,8 @@ struct Channel {
     /// `basic.qos global = true`: the channel's limit.
     global: u32,
     last_queue: Option<String>,
+    /// Deliveries held back by the channel's global prefetch.
+    held: std::collections::VecDeque<(String, ConsumerId, Delivery)>,
 }
 
 struct Conn<'s> {
@@ -533,7 +568,10 @@ impl Conn<'_> {
         match f.kind {
             FRAME_HEARTBEAT if f.channel == 0 => Ok(()),
             FRAME_HEARTBEAT => Err((
-                MqError::frame(reply::FRAME_ERROR, format!("heartbeat frame on channel {}", f.channel)),
+                MqError::frame(
+                    reply::FRAME_ERROR,
+                    format!("heartbeat frame on channel {}", f.channel),
+                ),
                 (0, 0),
             )),
             FRAME_METHOD => {
@@ -553,7 +591,9 @@ impl Conn<'_> {
                 if f.channel == 0 {
                     self.on_connection_method(m).await.map_err(|e| (e, ids))
                 } else {
-                    self.on_channel_method(f.channel, m).await.map_err(|e| (e, ids))
+                    self.on_channel_method(f.channel, m)
+                        .await
+                        .map_err(|e| (e, ids))
                 }
             }
             FRAME_HEADER | FRAME_BODY => {
@@ -577,7 +617,9 @@ impl Conn<'_> {
                 self.finished = true;
                 Ok(())
             }
-            Method::ConnectionCloseOk(_) | Method::ConnectionBlocked(_) | Method::ConnectionUnblocked(_) => Ok(()),
+            Method::ConnectionCloseOk(_)
+            | Method::ConnectionBlocked(_)
+            | Method::ConnectionUnblocked(_) => Ok(()),
             Method::ConnectionUpdateSecret(u) => {
                 let creds = Credentials::Password {
                     mechanism: "PLAIN",
@@ -585,7 +627,10 @@ impl Conn<'_> {
                     password: u.new_secret.to_vec(),
                 };
                 match self.svc.identity.login(&self.info, creds).await {
-                    Ok(p) if p.user == self.principal.user && p.tenant_id == self.principal.tenant_id => {
+                    Ok(p)
+                        if p.user == self.principal.user
+                            && p.tenant_id == self.principal.tenant_id =>
+                    {
                         self.principal = Arc::new(p);
                         self.send(0, ConnectionUpdateSecretOk {});
                         Ok(())
@@ -605,7 +650,10 @@ impl Conn<'_> {
         if self.channel_max != 0 && ch > self.channel_max {
             return Err(MqError::new(
                 MqCode::ChannelLimit,
-                format!("channel {ch} is above the negotiated channel_max {}", self.channel_max),
+                format!(
+                    "channel {ch} is above the negotiated channel_max {}",
+                    self.channel_max
+                ),
             ));
         }
         if m.id().0 == 10 || !m.client_may_send() {
@@ -638,14 +686,20 @@ impl Conn<'_> {
         };
         if c.closing {
             match m {
-                Method::ChannelCloseOk(_) => self.remove_channel(ch),
+                Method::ChannelCloseOk(_) => self.remove_channel(ch).await,
                 Method::ChannelClose(_) => {
                     self.send(ch, ChannelCloseOk {});
-                    self.remove_channel(ch);
+                    self.remove_channel(ch).await;
                 }
                 _ => {}
             }
             return Ok(());
+        }
+        if matches!(m, Method::ChannelOpen(_)) {
+            return Err(MqError::frame(
+                reply::CHANNEL_ERROR,
+                format!("second 'channel.open' seen on channel {ch}"),
+            ));
         }
         if !matches!(c.content, Content::None) {
             return Err(MqError::frame(
@@ -661,14 +715,14 @@ impl Conn<'_> {
             Ok(()) => Ok(()),
             Err(e) if e.is_hard() => Err(e),
             Err(e) => {
-                self.close_channel(ch, &e, ids);
+                self.close_channel(ch, &e, ids).await;
                 Ok(())
             }
         }
     }
 
     /// Closes a channel from the server's side.
-    fn close_channel(&mut self, ch: u16, e: &MqError, (class_id, method_id): (u16, u16)) {
+    async fn close_channel(&mut self, ch: u16, e: &MqError, (class_id, method_id): (u16, u16)) {
         tracing::debug!(peer = %self.info.peer, channel = ch, error = %e, "AMQP channel error");
         self.send(
             ch,
@@ -679,7 +733,7 @@ impl Conn<'_> {
                 method_id,
             },
         );
-        self.release_channel(ch);
+        self.release_channel(ch).await;
         if let Some(c) = self.channels.get_mut(&ch) {
             c.closing = true;
             c.content = Content::None;
@@ -688,9 +742,11 @@ impl Conn<'_> {
 
     /// Ends a channel's consumers and requeues its unacknowledged
     /// deliveries; the channel itself stays until close-ok.
-    fn release_channel(&mut self, ch: u16) {
+    async fn release_channel(&mut self, ch: u16) {
         let cx = self.cx(ch);
-        let Some(c) = self.channels.get_mut(&ch) else { return };
+        let Some(c) = self.channels.get_mut(&ch) else {
+            return;
+        };
         let consumers: Vec<ConsumerState> = c.consumers.drain().map(|(_, s)| s).collect();
         let mut settle: Vec<(DeliveryId, Settlement)> = c
             .unacked
@@ -699,6 +755,11 @@ impl Conn<'_> {
             .map(|u| (u.id, Settlement::Requeue { failed: true }))
             .collect();
         c.unacked.clear();
+        settle.extend(
+            c.held
+                .drain(..)
+                .map(|(_, _, d)| (d.id, Settlement::Requeue { failed: false })),
+        );
         if let Some(tx) = c.tx.as_mut() {
             settle.extend(
                 tx.settlements
@@ -712,12 +773,9 @@ impl Conn<'_> {
             if s.reply {
                 self.svc.replies.unregister(self.key, ch);
             } else {
-                let vhost = Arc::clone(&self.vhost);
-                let cx = cx.clone();
-                // Cancels are quick and ordered before the requeue below
-                // by the engine's per-connection ordering; don't hold the
-                // connection for them.
-                tokio::spawn(async move { vhost.cancel(&cx, s.id).await });
+                // Cancel before requeueing, so the requeued messages
+                // don't go back to these consumers.
+                self.vhost.cancel(&cx, s.id).await;
             }
         }
         settle.retain(|(id, _)| *id != DeliveryId::default());
@@ -726,8 +784,8 @@ impl Conn<'_> {
         }
     }
 
-    fn remove_channel(&mut self, ch: u16) {
-        self.release_channel(ch);
+    async fn remove_channel(&mut self, ch: u16) {
+        self.release_channel(ch).await;
         if self.channels.remove(&ch).is_some() {
             metrics::gauge!("sprig_amqp_channels").decrement(1.0);
         }
@@ -755,7 +813,7 @@ impl Conn<'_> {
         match m {
             Method::ChannelClose(_) => {
                 self.send(ch, ChannelCloseOk {});
-                self.remove_channel(ch);
+                self.remove_channel(ch).await;
             }
             Method::ChannelFlow(f) => {
                 if !f.active {
@@ -785,7 +843,9 @@ impl Conn<'_> {
                 }
             }
             Method::ExchangeDelete(d) => {
-                self.vhost.delete_exchange(&cx, &d.exchange, d.if_unused).await?;
+                self.vhost
+                    .delete_exchange(&cx, &d.exchange, d.if_unused)
+                    .await?;
                 if !d.no_wait {
                     self.send(ch, ExchangeDeleteOk {});
                 }
@@ -919,7 +979,10 @@ impl Conn<'_> {
             }
             Method::QueueDelete(d) => {
                 let q = self.queue_name(ch, d.queue)?;
-                let n = self.vhost.delete_queue(&cx, &q, d.if_unused, d.if_empty).await?;
+                let n = self
+                    .vhost
+                    .delete_queue(&cx, &q, d.if_unused, d.if_empty)
+                    .await?;
                 if !d.no_wait {
                     self.send(ch, QueueDeleteOk { message_count: n });
                 }
@@ -976,7 +1039,13 @@ impl Conn<'_> {
                         c.next_tag += 1;
                         let tag = c.next_tag;
                         if !g.no_ack {
-                            c.unacked.insert(tag, Unacked { id: d.id, consumer: None });
+                            c.unacked.insert(
+                                tag,
+                                Unacked {
+                                    id: d.id,
+                                    consumer: None,
+                                },
+                            );
                         }
                         let m: Method = BasicGetOk {
                             delivery_tag: tag,
@@ -1030,7 +1099,9 @@ impl Conn<'_> {
             Method::ConfirmSelect(s) => {
                 let c = self.chan(ch);
                 if c.tx.is_some() {
-                    return Err(MqError::precondition("cannot switch from tx to confirm mode"));
+                    return Err(MqError::precondition(
+                        "cannot switch from tx to confirm mode",
+                    ));
                 }
                 c.confirm = true;
                 if !s.no_wait {
@@ -1040,7 +1111,9 @@ impl Conn<'_> {
             Method::TxSelect(_) => {
                 let c = self.chan(ch);
                 if c.confirm {
-                    return Err(MqError::precondition("cannot switch from confirm to tx mode"));
+                    return Err(MqError::precondition(
+                        "cannot switch from confirm to tx mode",
+                    ));
                 }
                 if c.tx.is_none() {
                     c.tx = Some(TxBuf::default());
@@ -1058,10 +1131,10 @@ impl Conn<'_> {
                 tx.publishes.clear();
                 for (t, u) in undo {
                     c.unacked.insert(t, u);
-                    if let Some(cid) = u.consumer {
-                        if let Some(s) = c.consumers.values_mut().find(|s| s.id == cid) {
-                            s.unacked += 1;
-                        }
+                    if let Some(cid) = u.consumer
+                        && let Some(s) = c.consumers.values_mut().find(|s| s.id == cid)
+                    {
+                        s.unacked += 1;
                     }
                 }
                 self.send(ch, TxRollbackOk {});
@@ -1169,22 +1242,30 @@ impl Conn<'_> {
                 if h.class_id != 60 {
                     return Err(MqError::frame(
                         reply::UNEXPECTED_FRAME,
-                        format!("content header for class {} after basic.publish", h.class_id),
+                        format!(
+                            "content header for class {} after basic.publish",
+                            h.class_id
+                        ),
                     ));
                 }
                 if h.body_size > max {
                     let e = MqError::new(
                         MqCode::MessageTooLarge,
-                        format!("message size {} is larger than configured max size {max}", h.body_size),
+                        format!(
+                            "message size {} is larger than configured max size {max}",
+                            h.body_size
+                        ),
                     );
-                    self.close_channel(ch, &e, (60, 40));
+                    self.close_channel(ch, &e, (60, 40)).await;
                     return Ok(());
                 }
                 if h.body_size == 0 {
                     Some((p, h, Bytes::new()))
                 } else {
-                    let cap = usize::try_from(h.body_size).unwrap_or(usize::MAX).min(1 << 20);
-                    c.content = Content::Body(p, h, BytesMut::with_capacity(cap));
+                    let cap = usize::try_from(h.body_size)
+                        .unwrap_or(usize::MAX)
+                        .min(1 << 20);
+                    c.content = Content::Body(p, Box::new(h), BytesMut::with_capacity(cap));
                     None
                 }
             }
@@ -1198,7 +1279,7 @@ impl Conn<'_> {
                     ));
                 }
                 if have == h.body_size {
-                    Some((p, h, body.freeze()))
+                    Some((p, *h, body.freeze()))
                 } else {
                     c.content = Content::Body(p, h, body);
                     None
@@ -1212,16 +1293,16 @@ impl Conn<'_> {
             }
         };
         if let Some((p, h, body)) = done {
-            match self.publish(ch, p, h, body) {
+            match self.publish(ch, &p, &h, body) {
                 Ok(()) => {}
                 Err(e) if e.is_hard() => return Err(e),
-                Err(e) => self.close_channel(ch, &e, (60, 40)),
+                Err(e) => self.close_channel(ch, &e, (60, 40)).await,
             }
         }
         Ok(())
     }
 
-    fn publish(&mut self, ch: u16, p: BasicPublish, h: ContentHeader, body: Bytes) -> HResult {
+    fn publish(&mut self, ch: u16, p: &BasicPublish, h: &ContentHeader, body: Bytes) -> HResult {
         let mut msg = convert::from_091(
             p.exchange.clone(),
             p.routing_key.clone(),
@@ -1247,8 +1328,8 @@ impl Conn<'_> {
         let published = if msg.exchange.is_empty() && msg.routing_key.starts_with(REPLY_PREFIX) {
             let rk = msg.routing_key.clone();
             match self.svc.replies.deliver(&rk, msg.clone()) {
-                Ok(_) => crate::backend::Published::done(1),
-                Err(()) => crate::backend::Published::done(0),
+                Some(_) => crate::backend::Published::done(1),
+                None => crate::backend::Published::done(0),
             }
         } else {
             self.vhost.publish(&cx, msg.clone(), p.mandatory)?
@@ -1295,7 +1376,12 @@ impl Conn<'_> {
     }
 
     /// Removes acknowledged tags from the channel.
-    fn take_tags(&mut self, ch: u16, tag: u64, multiple: bool) -> Result<Vec<(u64, Unacked)>, MqError> {
+    fn take_tags(
+        &mut self,
+        ch: u16,
+        tag: u64,
+        multiple: bool,
+    ) -> Result<Vec<(u64, Unacked)>, MqError> {
         let c = self.chan(ch);
         let taken: Vec<(u64, Unacked)> = if multiple {
             let keys: Vec<u64> = c
@@ -1308,16 +1394,19 @@ impl Conn<'_> {
                 .filter_map(|t| c.unacked.remove(&t).map(|u| (t, u)))
                 .collect()
         } else {
-            c.unacked.remove(&tag).map(|u| vec![(tag, u)]).unwrap_or_default()
+            c.unacked
+                .remove(&tag)
+                .map(|u| vec![(tag, u)])
+                .unwrap_or_default()
         };
         if taken.is_empty() && (tag != 0 || !multiple) {
             return Err(MqError::precondition(format!("unknown delivery tag {tag}")));
         }
         for (_, u) in &taken {
-            if let Some(cid) = u.consumer {
-                if let Some(s) = c.consumers.values_mut().find(|s| s.id == cid) {
-                    s.unacked = s.unacked.saturating_sub(1);
-                }
+            if let Some(cid) = u.consumer
+                && let Some(s) = c.consumers.values_mut().find(|s| s.id == cid)
+            {
+                s.unacked = s.unacked.saturating_sub(1);
             }
         }
         Ok(taken)
@@ -1327,14 +1416,33 @@ impl Conn<'_> {
         let cx = self.cx(ch);
         let c = self.chan(ch);
         if let Some(tx) = c.tx.as_mut() {
-            tx.settlements.extend(taken.into_iter().map(|(t, u)| (t, u, s)));
+            tx.settlements
+                .extend(taken.into_iter().map(|(t, u)| (t, u, s)));
             return;
         }
-        let batch: Vec<(DeliveryId, Settlement)> = taken.into_iter().map(|(_, u)| (u.id, s)).collect();
+        let batch: Vec<(DeliveryId, Settlement)> =
+            taken.into_iter().map(|(_, u)| (u.id, s)).collect();
         if !batch.is_empty() {
             self.vhost.settle(&cx, batch);
         }
+        self.release_held(ch);
         self.regrant(ch);
+    }
+
+    /// Delivers held messages while the channel's window has room.
+    fn release_held(&mut self, ch: u16) {
+        loop {
+            let Some(c) = self.channels.get_mut(&ch) else {
+                return;
+            };
+            if c.global > 0 && c.unacked.len() >= c.global as usize {
+                return;
+            }
+            let Some((tag, consumer, d)) = c.held.pop_front() else {
+                return;
+            };
+            self.write_delivery(ch, tag, consumer, &d);
+        }
     }
 
     /// Grants engine credit so each consumer's unacknowledged deliveries
@@ -1343,41 +1451,48 @@ impl Conn<'_> {
     fn regrant(&mut self, ch: u16) {
         let max = self.cfg.max_unacked_per_consumer.max(1);
         let vhost = Arc::clone(&self.vhost);
-        let Some(c) = self.channels.get_mut(&ch) else { return };
+        let Some(c) = self.channels.get_mut(&ch) else {
+            return;
+        };
         if c.closing {
             return;
         }
-        let unacked_total = u32::try_from(c.unacked.len()).unwrap_or(u32::MAX);
-        let mut used: u32 = unacked_total.saturating_add(
-            c.consumers
-                .values()
-                .filter(|s| !s.no_ack && !s.reply)
-                .map(|s| s.credit_out)
-                .sum(),
-        );
         let mut tags: Vec<&String> = c.consumers.keys().collect();
         tags.sort();
         let tags: Vec<String> = tags.into_iter().cloned().collect();
         for t in tags {
-            let Some(s) = c.consumers.get_mut(&t) else { continue };
+            let Some(s) = c.consumers.get_mut(&t) else {
+                continue;
+            };
             if s.reply {
                 continue;
             }
-            let cap = if s.no_ack || s.limit == 0 { max } else { s.limit.min(max) };
-            let have = if s.no_ack { s.credit_out } else { s.unacked + s.credit_out };
-            let mut want = cap.saturating_sub(have);
+            let mut cap = if s.no_ack || s.limit == 0 {
+                max
+            } else {
+                s.limit.min(max)
+            };
             if !s.no_ack && c.global > 0 {
-                want = want.min(c.global.saturating_sub(used));
+                // Each consumer may hold up to the channel's window; the
+                // window itself is enforced at delivery (held messages
+                // wait for acks), so idle credit on one queue can't
+                // starve another.
+                cap = cap.min(c.global);
             }
+            let held = u32::try_from(c.held.iter().filter(|(_, id, _)| *id == s.id).count())
+                .unwrap_or(u32::MAX);
+            let have = if s.no_ack {
+                s.credit_out
+            } else {
+                s.unacked + s.credit_out + held
+            };
+            let want = cap.saturating_sub(have);
             if want == 0 {
                 continue;
             }
             if want >= (cap / 4).max(1) || s.credit_out == 0 {
                 vhost.credit(s.id, want, false);
                 s.credit_out += want;
-                if !s.no_ack {
-                    used = used.saturating_add(want);
-                }
             }
         }
     }
@@ -1406,7 +1521,9 @@ impl Conn<'_> {
     }
 
     fn on_confirm(&mut self, c: ConfirmDone) {
-        let Some(chan) = self.channels.get(&c.ch) else { return };
+        let Some(chan) = self.channels.get(&c.ch) else {
+            return;
+        };
         if chan.epoch != c.epoch || chan.closing {
             return;
         }
@@ -1436,7 +1553,9 @@ impl Conn<'_> {
         match ev {
             Event::Deliver { consumer, delivery } => self.on_deliver(consumer, delivery),
             Event::Cancelled { consumer, reason } => {
-                let Some((ch, tag)) = self.consumers.remove(&consumer) else { return };
+                let Some((ch, tag)) = self.consumers.remove(&consumer) else {
+                    return;
+                };
                 if let Some(c) = self.channels.get_mut(&ch) {
                     c.consumers.remove(&tag);
                 }
@@ -1444,9 +1563,15 @@ impl Conn<'_> {
                     return;
                 }
                 if self.caps.cancel_notify {
-                    self.send(ch, BasicCancel { consumer_tag: tag, no_wait: true });
+                    self.send(
+                        ch,
+                        BasicCancel {
+                            consumer_tag: tag,
+                            no_wait: true,
+                        },
+                    );
                 } else {
-                    self.close_channel(ch, &reason, (60, 20));
+                    self.close_channel(ch, &reason, (60, 20)).await;
                 }
             }
             Event::Drained { .. } => {}
@@ -1466,7 +1591,10 @@ impl Conn<'_> {
     fn on_deliver(&mut self, consumer: ConsumerId, d: Delivery) {
         let requeue = |s: &Self, d: &Delivery| {
             if d.id != DeliveryId::default() {
-                s.vhost.settle(&s.cx(0), vec![(d.id, Settlement::Requeue { failed: false })]);
+                s.vhost.settle(
+                    &s.cx(0),
+                    vec![(d.id, Settlement::Requeue { failed: false })],
+                );
             }
         };
         let Some((ch, tag)) = self.consumers.get(&consumer).cloned() else {
@@ -1489,14 +1617,55 @@ impl Conn<'_> {
             }
         };
         let c = self.chan(ch);
-        c.next_tag += 1;
-        let delivery_tag = c.next_tag;
+        let mut manual = false;
         if let Some(s) = c.consumers.get_mut(&tag) {
             s.credit_out = s.credit_out.saturating_sub(1);
-            if !s.no_ack {
-                s.unacked += 1;
-                c.unacked.insert(delivery_tag, Unacked { id: d.id, consumer: Some(consumer) });
+            manual = !s.no_ack;
+        }
+        if manual && c.global > 0 && (c.unacked.len() >= c.global as usize || !c.held.is_empty()) {
+            c.held.push_back((tag, consumer, d));
+            return;
+        }
+        self.write_delivery_content(ch, tag, consumer, &d, &props, &body);
+        self.regrant(ch);
+    }
+
+    fn write_delivery(&mut self, ch: u16, tag: String, consumer: ConsumerId, d: &Delivery) {
+        match convert::to_091(d) {
+            Ok((props, body)) => self.write_delivery_content(ch, tag, consumer, d, &props, &body),
+            Err(e) => {
+                tracing::warn!(error = %e, queue = %d.queue, "undeliverable stored message dead-lettered");
+                self.vhost.settle(
+                    &self.cx(ch),
+                    vec![(d.id, Settlement::DeadLetter(DeadLetterReason::Rejected))],
+                );
             }
+        }
+    }
+
+    fn write_delivery_content(
+        &mut self,
+        ch: u16,
+        tag: String,
+        consumer: ConsumerId,
+        d: &Delivery,
+        props: &[u8],
+        body: &[u8],
+    ) {
+        let c = self.chan(ch);
+        c.next_tag += 1;
+        let delivery_tag = c.next_tag;
+        if let Some(s) = c.consumers.get_mut(&tag)
+            && !s.no_ack
+        {
+            s.unacked += 1;
+            c.unacked.insert(
+                delivery_tag,
+                Unacked {
+                    id: d.id,
+                    consumer: Some(consumer),
+                },
+            );
         }
         let m: Method = BasicDeliver {
             consumer_tag: tag,
@@ -1506,8 +1675,7 @@ impl Conn<'_> {
             routing_key: d.message.routing_key.clone(),
         }
         .into();
-        put_content(&mut self.out, ch, &m, &props, &body, self.frame_max);
-        self.regrant(ch);
+        put_content(&mut self.out, ch, &m, props, body, self.frame_max);
     }
 
     /// The connection ended: every channel's consumers end and their
@@ -1515,7 +1683,7 @@ impl Conn<'_> {
     async fn teardown(&mut self) {
         let chans: Vec<u16> = self.channels.keys().copied().collect();
         for ch in chans {
-            self.remove_channel(ch);
+            self.remove_channel(ch).await;
         }
         self.svc.replies.unregister_conn(self.key);
         self.vhost.connection_closed(self.key).await;

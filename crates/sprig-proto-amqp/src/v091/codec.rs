@@ -656,14 +656,11 @@ mod tests {
     #[test]
     fn table_golden_bytes() {
         // {"a": S "b", "n": I 1}: RabbitMQ's encoding.
-        let t = FieldTable::from([
-            ("a", FieldValue::str("b")),
-            ("n", FieldValue::I32(1)),
-        ]);
+        let t = FieldTable::from([("a", FieldValue::str("b")), ("n", FieldValue::I32(1))]);
         let mut b = BytesMut::new();
         t.encode(&mut b);
         let want: &[u8] = &[
-            0, 0, 0, 16, // length
+            0, 0, 0, 15, // length
             1, b'a', b'S', 0, 0, 0, 1, b'b', // a = "b"
             1, b'n', b'I', 0, 0, 0, 1, // n = 1
         ];

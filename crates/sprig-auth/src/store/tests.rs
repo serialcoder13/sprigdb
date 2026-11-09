@@ -46,8 +46,36 @@ fn times_round_trip_as_micros() {
 #[test]
 fn the_module_registers_with_the_migrator() {
     let m = Migrator::new(&[AUTH_MODULE]).unwrap();
-    assert_eq!(m.supports().get(MODULE), Some(&2));
-    assert_eq!(AUTH_MODULE.newest(), 2);
+    assert_eq!(m.supports().get(MODULE), Some(&3));
+    assert_eq!(AUTH_MODULE.newest(), 3);
+}
+
+#[test]
+fn format_3_enum_holds_every_mechanism() {
+    // Format 1's ENUM, then format 3's: every mechanism the code writes is
+    // a member, in the old order with scram_sha_512 last (a metadata-only
+    // change in MariaDB).
+    for k in VerifierKind::ALL {
+        assert!(
+            ALTER_VERIFIERS_SCRAM_SHA_512.contains(&format!("'{}'", k.as_str())),
+            "{k}"
+        );
+    }
+    assert!(!DDL_VERIFIERS.contains("scram_sha_512"));
+    let members = |sql: &str| -> Vec<String> {
+        let start = sql.find("ENUM(").unwrap() + 5;
+        let end = start + sql[start..].find(')').unwrap();
+        sql[start..end]
+            .split(',')
+            .map(|m| m.trim().trim_matches('\'').to_owned())
+            .collect()
+    };
+    let old = members(DDL_VERIFIERS);
+    let new = members(ALTER_VERIFIERS_SCRAM_SHA_512);
+    assert_eq!(&new[..old.len()], &old[..]);
+    assert_eq!(new.last().map(String::as_str), Some("scram_sha_512"));
+    let m = AUTH_MIGRATIONS.iter().find(|m| m.format == 3).unwrap();
+    assert_eq!(m.phase, Phase::Expand);
 }
 
 #[test]

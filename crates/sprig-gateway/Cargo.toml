@@ -59,6 +59,8 @@ sprig-types = { path = "../sprig-types" }
 sprig-streams = { path = "../sprig-streams" }
 # Chapter 45: the Kafka codec and broker on 9092 (R9).
 sprig-proto-kafka = { path = "../sprig-proto-kafka" }
+# Chapter 50: AMQP 0-9-1 and 1.0 on 5672 and 5671 (R9).
+sprig-proto-amqp = { path = "../sprig-proto-amqp" }
 uuid.workspace = true
 # Hierarchical data inheritance (chapter 42, R6).
 sprig-inherit = { path = "../sprig-inherit" }

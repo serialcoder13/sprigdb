@@ -10,9 +10,10 @@
 //!
 //! Format 1 creates `users`, `verifiers` and `login_state` exactly as
 //! Appendix C defines them, plus the user id counter
-//! `sprig.next_user_id`. The other chapter 14 tables (`user_factors`,
-//! `token_sessions`, `api_keys`, `oidc_issuers`, `claim_mappings`) arrive
-//! as later expand migrations with the steps that use them.
+//! `sprig.next_user_id`; format 2 adds `api_keys`, and format 3 adds
+//! `scram_sha_512` to `verifiers.mechanism`. The other chapter 14 tables
+//! (`user_factors`, `token_sessions`, `oidc_issuers`, `claim_mappings`)
+//! arrive as later expand migrations with the steps that use them.
 //!
 //! **Versioning.** `users` and `verifiers` are versioned by the tenant's
 //! auth version ([`VersionKind::Auth`](sprig_catalog::VersionKind)).
@@ -132,7 +133,20 @@ pub static AUTH_MIGRATIONS: &[Migration] = &[
         name: "api_keys",
         statements: &[crate::apikey::DDL_API_KEYS],
     },
+    Migration {
+        format: 3,
+        phase: Phase::Expand,
+        name: "verifiers.mechanism gains scram_sha_512",
+        statements: &[ALTER_VERIFIERS_SCRAM_SHA_512],
+    },
 ];
+
+/// Format 3: `scram_sha_512` joins `verifiers.mechanism` (chapter 14,
+/// "SCRAM verifiers"). A new last `ENUM` member: MariaDB changes only the
+/// table's metadata, and rerunning it changes nothing.
+pub const ALTER_VERIFIERS_SCRAM_SHA_512: &str = "ALTER TABLE verifiers MODIFY mechanism
+  ENUM('caching_sha2_password','mysql_native_password',
+       'scram_sha_256','scram_sha_1','scram_sha_512') NOT NULL";
 
 /// The auth module, for [`Migrator::new`](sprig_catalog::Migrator::new).
 pub const AUTH_MODULE: Module = Module {
@@ -258,6 +272,8 @@ sql_enum! {
         ScramSha256 = "scram_sha_256",
         /// SCRAM-SHA-1 (MongoDB's variant).
         ScramSha1 = "scram_sha_1",
+        /// SCRAM-SHA-512 (Kafka; format 3).
+        ScramSha512 = "scram_sha_512",
     }
 }
 

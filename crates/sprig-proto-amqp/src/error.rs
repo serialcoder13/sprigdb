@@ -235,17 +235,16 @@ impl MqCode {
         match self {
             MqCode::NotFound => reply::NOT_FOUND,
             MqCode::ResourceLocked => reply::RESOURCE_LOCKED,
-            MqCode::AccessRefused | MqCode::SaslFailed | MqCode::Residency => {
-                reply::ACCESS_REFUSED
+            MqCode::AccessRefused | MqCode::SaslFailed | MqCode::Residency => reply::ACCESS_REFUSED,
+            MqCode::NotImplemented | MqCode::Amqp10Unsupported | MqCode::MgmtUnsupported => {
+                reply::NOT_IMPLEMENTED
             }
-            MqCode::NotImplemented | MqCode::Amqp10Unsupported => reply::NOT_IMPLEMENTED,
             MqCode::Unroutable => reply::NO_ROUTE,
             MqCode::FrameError | MqCode::ProtocolHeader => reply::FRAME_ERROR,
             MqCode::ChannelLimit => reply::NOT_ALLOWED,
             MqCode::OwnerMoved | MqCode::TxnNeedsXa | MqCode::DeadLetterCycle => {
                 reply::INTERNAL_ERROR
             }
-            MqCode::MgmtUnsupported => reply::NOT_IMPLEMENTED,
             _ => reply::PRECONDITION_FAILED,
         }
     }

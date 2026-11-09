@@ -272,12 +272,43 @@ async fn live_users_and_passwords_through_auth_changes() {
                 .await
                 .unwrap();
             let vs = store.verifiers_of(&mut conn, &[UserId(1)]).await.unwrap();
-            let slots: Vec<(Slot, u64)> = vs.iter().map(|v| (v.slot, v.generation)).collect();
+            let slots: Vec<(Slot, u64)> = vs
+                .iter()
+                .filter(|v| v.kind == VerifierKind::CachingSha2)
+                .map(|v| (v.slot, v.generation))
+                .collect();
             assert_eq!(
                 slots,
                 [(Slot::Primary, 3), (Slot::Secondary, 2), (Slot::History, 1)]
             );
-            assert!(vs.iter().all(|v| v.kind == VerifierKind::CachingSha2));
+            // Every generation has both SCRAM verifiers, moved with it; a
+            // retained password shares the new one's SCRAM salt.
+            for (slot, generation) in slots {
+                let mut kinds: Vec<VerifierKind> = vs
+                    .iter()
+                    .filter(|v| v.slot == slot && v.generation == generation)
+                    .map(|v| v.kind)
+                    .collect();
+                kinds.sort();
+                assert_eq!(
+                    kinds,
+                    [
+                        VerifierKind::CachingSha2,
+                        VerifierKind::ScramSha256,
+                        VerifierKind::ScramSha512
+                    ]
+                );
+            }
+            let salt = |slot: Slot, kind: VerifierKind| {
+                vs.iter()
+                    .find(|v| v.slot == slot && v.kind == kind)
+                    .and_then(|v| v.salt.clone())
+                    .unwrap()
+            };
+            for kind in [VerifierKind::ScramSha256, VerifierKind::ScramSha512] {
+                assert_eq!(salt(Slot::Primary, kind), salt(Slot::Secondary, kind));
+                assert_eq!(salt(Slot::Secondary, kind), salt(Slot::History, kind));
+            }
             let row = store.user(&mut conn, UserId(1)).await.unwrap().unwrap();
             assert_eq!(row.changed_version, c.auth_version);
             // DISCARD OLD PASSWORD, keeping no history.
@@ -287,7 +318,8 @@ async fn live_users_and_passwords_through_auth_changes() {
             let vs = store.verifiers_of(&mut conn, &[UserId(1)]).await.unwrap();
             assert_eq!(
                 vs.iter().map(|v| v.slot).collect::<Vec<_>>(),
-                [Slot::Primary]
+                [Slot::Primary; 3],
+                "caching_sha2_password and both SCRAM verifiers"
             );
 
             // Native verifiers when the tenant enables them.
@@ -302,7 +334,15 @@ async fn live_users_and_passwords_through_auth_changes() {
                 .filter(|v| v.slot == Slot::Primary)
                 .map(|v| v.kind)
                 .collect();
-            assert_eq!(primary, [VerifierKind::CachingSha2, VerifierKind::Native]);
+            assert_eq!(
+                primary,
+                [
+                    VerifierKind::CachingSha2,
+                    VerifierKind::Native,
+                    VerifierKind::ScramSha256,
+                    VerifierKind::ScramSha512
+                ]
+            );
 
             // DROP USER: a tombstone; the name is free again, with a new id.
             admin::drop_user(&cat, t, UserId(1)).await.unwrap();
@@ -539,6 +579,269 @@ async fn live_logins_follow_auth_changes() {
             assert_eq!(
                 (r.seen.as_slice(), err(&r.verdict).code),
                 ([FULL.to_vec()].as_slice(), 1045)
+            );
+        })
+        .await;
+    })
+    .await;
+}
+
+/// Chapter 14's SCRAM verifiers in a real catalog: format 3's migration
+/// on a format-2 catalog, the backfill of a password without them (and of
+/// a retained one, with the primary's salt), and the upgrade on login
+/// through the login service with the catalog's writer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_scram_verifiers_migration_and_backfill() {
+    use crate::scram::{ScramKind, ScramVerifier};
+    use sprig_catalog::Migrator;
+    use sprig_catalog::migrate::MigrateOpts;
+
+    with_catalog("scram verifiers", |pool, schema, t| async move {
+        // Format 3 on a format-2 catalog: scram_sha_512 rows fail before
+        // and work after; rerunning changes nothing.
+        let old = format!("{schema}_f2");
+        let mut conn = pool.get_conn().await.unwrap();
+        let f2 = sprig_catalog::Module {
+            name: crate::store::MODULE,
+            migrations: &crate::store::AUTH_MIGRATIONS[..2],
+        };
+        let migrated = async {
+            Migrator::new(&[f2])
+                .unwrap()
+                .run(&mut conn, &old, &MigrateOpts::default())
+                .await
+                .unwrap();
+            let insert = format!(
+                "INSERT INTO {}.verifiers (user_id, mechanism, slot, generation, created_at) \
+                 VALUES (1, 'scram_sha_512', 'primary', 1, UTC_TIMESTAMP(6))",
+                quote(&old)
+            );
+            let before = conn.query_drop(insert.as_str()).await;
+            let t0 = Instant::now();
+            Migrator::new(&[crate::store::AUTH_MODULE])
+                .unwrap()
+                .run(&mut conn, &old, &MigrateOpts::default())
+                .await
+                .unwrap();
+            let took = t0.elapsed();
+            Migrator::new(&[crate::store::AUTH_MODULE])
+                .unwrap()
+                .run(&mut conn, &old, &MigrateOpts::default())
+                .await
+                .unwrap();
+            let after = conn.query_drop(insert.as_str()).await;
+            let column: Option<String> = conn
+                .exec_first(
+                    "SELECT CAST(COLUMN_TYPE AS CHAR) FROM information_schema.COLUMNS \
+                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'verifiers' \
+                     AND COLUMN_NAME = 'mechanism'",
+                    (old.as_str(),),
+                )
+                .await
+                .unwrap();
+            (before, after, column, took)
+        }
+        .await;
+        conn.query_drop(format!("DROP DATABASE IF EXISTS {}", quote(&old)))
+            .await
+            .unwrap();
+        drop(conn);
+        let (before, after, column, took) = migrated;
+        assert!(before.is_err(), "format 2 has no scram_sha_512");
+        after.unwrap();
+        assert!(column.unwrap().ends_with(",'scram_sha_512')"));
+        println!("format 2 to 3 on an empty verifiers table: {took:?}");
+
+        with_global(|g| async move {
+            let name = seed_directory(&*g, t).await;
+            let cat = catalog(&pool, &schema, t, &g);
+            let clock = SystemClock;
+            let store = AuthStore::new(&schema);
+            let mut conn = pool.get_conn().await.unwrap();
+            let id = admin::create_user(&cat, t, &NewUser::new("kafka", b"pw-1"), &clock)
+                .await
+                .unwrap()
+                .user_id;
+            let scram_rows = |vs: &[crate::store::VerifierRow]| {
+                vs.iter()
+                    .filter(|v| ScramKind::of(v.kind).is_some())
+                    .map(|v| (v.kind, v.slot, v.generation))
+                    .collect::<Vec<_>>()
+            };
+            let vs = store.verifiers_of(&mut conn, &[id]).await.unwrap();
+            assert_eq!(
+                scram_rows(&vs),
+                [
+                    (VerifierKind::ScramSha256, Slot::Primary, 1),
+                    (VerifierKind::ScramSha512, Slot::Primary, 1)
+                ]
+            );
+            for v in vs.iter().filter(|v| ScramKind::of(v.kind).is_some()) {
+                let s = ScramVerifier::from_row(v).unwrap();
+                assert_eq!(s.iterations(), 15_000);
+                assert_eq!(s.salt().len(), 28);
+                assert!(s.verify_password(b"pw-1"));
+                assert!(v.auth_string.is_none());
+            }
+            // A password set before SCRAM verifiers existed: none.
+            conn.query_drop(format!(
+                "DELETE FROM {}.verifiers WHERE mechanism IN ('scram_sha_256','scram_sha_512')",
+                quote(&schema)
+            ))
+            .await
+            .unwrap();
+            let sha2_id = |vs: &[crate::store::VerifierRow], slot: Slot| {
+                vs.iter()
+                    .find(|v| v.kind == VerifierKind::CachingSha2 && v.slot == slot)
+                    .unwrap()
+                    .verifier_id
+            };
+            let primary = sha2_id(&vs, Slot::Primary);
+            let (c, kinds) = admin::backfill_scram(
+                &cat,
+                t,
+                id,
+                primary,
+                b"pw-1",
+                admin::Hashing::default(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(kinds, ScramKind::ALL);
+            let vs = store.verifiers_of(&mut conn, &[id]).await.unwrap();
+            assert_eq!(scram_rows(&vs).len(), 2);
+            let row = store.user(&mut conn, id).await.unwrap().unwrap();
+            assert_eq!(row.changed_version, c.auth_version, "the cache reloads it");
+            // Nothing missing: no change.
+            assert!(
+                admin::backfill_scram(&cat, t, id, primary, b"pw-1", admin::Hashing::default())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            // A retained password without SCRAM verifiers gets the new
+            // primary's salt.
+            admin::set_password(
+                &cat,
+                t,
+                id,
+                b"pw-2",
+                SetPassword {
+                    retain_current: true,
+                    ..SetPassword::default()
+                },
+                &clock,
+            )
+            .await
+            .unwrap();
+            conn.query_drop(format!(
+                "DELETE FROM {}.verifiers WHERE slot = 'secondary' AND mechanism <> 'caching_sha2_password'",
+                quote(&schema)
+            ))
+            .await
+            .unwrap();
+            let vs = store.verifiers_of(&mut conn, &[id]).await.unwrap();
+            admin::backfill_scram(
+                &cat,
+                t,
+                id,
+                sha2_id(&vs, Slot::Secondary),
+                b"pw-1",
+                admin::Hashing::default(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let vs = store.verifiers_of(&mut conn, &[id]).await.unwrap();
+            for kind in ScramKind::ALL {
+                let get = |slot: Slot| {
+                    let r = vs
+                        .iter()
+                        .find(|v| v.kind == kind.verifier_kind() && v.slot == slot)
+                        .unwrap();
+                    ScramVerifier::from_row(r).unwrap()
+                };
+                let (p, s) = (get(Slot::Primary), get(Slot::Secondary));
+                assert_eq!(p.salt(), s.salt());
+                assert!(p.verify_password(b"pw-2") && s.verify_password(b"pw-1"));
+            }
+
+            // Upgrade on login: a full login through the login service with
+            // the catalog's writer stores them.
+            let id2 = admin::create_user(&cat, t, &NewUser::new("legacy", b"pw-l"), &clock)
+                .await
+                .unwrap()
+                .user_id;
+            conn.query_drop(format!(
+                "DELETE FROM {}.verifiers WHERE user_id = {} AND mechanism <> 'caching_sha2_password'",
+                quote(&schema),
+                id2.0
+            ))
+            .await
+            .unwrap();
+            let v = admin::set_require_tls(&cat, t, id2, crate::store::RequireTls::None)
+                .await
+                .unwrap()
+                .auth_version;
+            let cache = Arc::new(cache(&pool, &schema, t, &g).await);
+            reach(&cache, t, v).await;
+            let logins = CatalogLogins::new(
+                Arc::new(MetaTenants::new(Arc::clone(&g), Duration::ZERO)),
+                cache.clone(),
+                Arc::new(StaticBackends::new(None).with(
+                    t,
+                    BackendTarget {
+                        cluster: ClusterId::new("dc-a-c1").unwrap(),
+                        user: "root".into(),
+                        credentials: "env:SPRIG_TEST_BACKEND".parse().unwrap(),
+                    },
+                )),
+                Arc::new(DefaultPolicy),
+            );
+            let svc = Arc::new(
+                LoginService::new(
+                    LoginSource::Catalog(Arc::new(logins)),
+                    Arc::new(FastCache::new(
+                        Arc::new(SystemClock),
+                        crate::fast_cache::DEFAULT_TTL,
+                    )),
+                )
+                .with_login_state(Arc::new(crate::policy::CatalogLoginState::new(
+                    cat.clone(),
+                ))),
+            );
+            let login = format!("{name}.legacy");
+            let t0 = Instant::now();
+            assert_eq!(
+                run(&svc, req(&login), b"pw-l").await.verdict,
+                AuthVerdict::Accept
+            );
+            let stored = loop {
+                let vs = store.verifiers_of(&mut conn, &[id2]).await.unwrap();
+                if scram_rows(&vs).len() == 2 {
+                    break t0.elapsed();
+                }
+                assert!(t0.elapsed() < Duration::from_secs(5), "never backfilled");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            println!("login to SCRAM verifiers stored: {stored:?}");
+            // The cache follows; a later login finds them and adds nothing.
+            let row = store.user(&mut conn, id2).await.unwrap().unwrap();
+            reach(&cache, t, row.changed_version).await;
+            let cached = cache.cached(t).unwrap();
+            let u = TenantAuth::of(&cached).unwrap().user(id2).unwrap().clone();
+            assert!(u.has_scram(ScramKind::Sha256, Slot::Primary));
+            assert!(u.has_scram(ScramKind::Sha512, Slot::Primary));
+
+            // DROP USER deletes them with the others.
+            admin::drop_user(&cat, t, id).await.unwrap();
+            assert!(
+                store
+                    .verifiers_of(&mut conn, &[id])
+                    .await
+                    .unwrap()
+                    .is_empty()
             );
         })
         .await;

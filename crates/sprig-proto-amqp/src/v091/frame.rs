@@ -51,7 +51,10 @@ impl Frame {
         if frame_max != 0 && size + FRAME_OVERHEAD > frame_max as usize {
             return Err(MqError::frame(
                 reply::FRAME_ERROR,
-                format!("frame size {} exceeds frame_max {frame_max}", size + FRAME_OVERHEAD),
+                format!(
+                    "frame size {} exceeds frame_max {frame_max}",
+                    size + FRAME_OVERHEAD
+                ),
             ));
         }
         if buf.len() < size + FRAME_OVERHEAD {
@@ -159,7 +162,10 @@ impl ContentHeader {
     /// 502 for a malformed header.
     pub fn decode(payload: &Bytes) -> Result<Self, MqError> {
         if payload.len() < 14 {
-            return Err(MqError::frame(reply::SYNTAX_ERROR, "truncated content header"));
+            return Err(MqError::frame(
+                reply::SYNTAX_ERROR,
+                "truncated content header",
+            ));
         }
         let class_id = u16::from_be_bytes([payload[0], payload[1]]);
         let mut a = [0u8; 8];

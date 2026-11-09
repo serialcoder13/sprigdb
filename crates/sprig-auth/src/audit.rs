@@ -79,6 +79,9 @@ pub mod events {
     pub const HANDOFF: &str = "auth.handoff";
     /// An address was refused for too many failed logins.
     pub const RATE_LIMITED: &str = "auth.rate_limited";
+    /// Verifiers a password lacked were stored at a login (SCRAM backfill;
+    /// the detail lists the mechanisms, never a verifier).
+    pub const VERIFIERS_ADDED: &str = "auth.verifiers_added";
 }
 
 /// One audit event.

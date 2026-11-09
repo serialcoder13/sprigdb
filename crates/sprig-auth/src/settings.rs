@@ -3,7 +3,7 @@
 //! through the tenant's snapshot (chapter 08); "process": dc and global.
 //! All live.
 //!
-//! Keys of later steps (tokens, second factors, impersonation, SCRAM,
+//! Keys of later steps (tokens, second factors, impersonation, SCRAM-SHA-1,
 //! issuers) are registered with the code that reads them.
 
 use std::borrow::Cow;
@@ -80,6 +80,31 @@ pub static MYSQL_NATIVE_PASSWORD: Setting<bool> = Setting {
     doc: "Store and accept mysql_native_password verifiers",
 };
 sprig_settings::register!(MYSQL_NATIVE_PASSWORD);
+
+auth_key!(
+    /// `auth.scram_sha256_iterations`: PBKDF2 iterations of new
+    /// SCRAM-SHA-256 verifiers (chapter 14, "SCRAM verifiers").
+    SCRAM_SHA256_ITERATIONS: u64 = "auth.scram_sha256_iterations", 15_000, Scopes::TREE,
+    HardBounds::range(5_000, 1_000_000),
+    "PBKDF2 iterations of new SCRAM-SHA-256 verifiers"
+);
+
+auth_key!(
+    /// `auth.scram_sha512_iterations`: PBKDF2 iterations of new
+    /// SCRAM-SHA-512 verifiers.
+    SCRAM_SHA512_ITERATIONS: u64 = "auth.scram_sha512_iterations", 15_000, Scopes::TREE,
+    HardBounds::range(5_000, 1_000_000),
+    "PBKDF2 iterations of new SCRAM-SHA-512 verifiers"
+);
+
+auth_key!(
+    /// `auth.backfill_verifiers`: a successful login that saw the clear
+    /// password (MySQL full authentication, HTTP Basic, Kafka PLAIN) stores
+    /// the SCRAM verifiers its password lacks.
+    BACKFILL_VERIFIERS: bool = "auth.backfill_verifiers", true, Scopes::TREE,
+    HardBounds::NONE,
+    "Store missing SCRAM verifiers at a login that saw the clear password"
+);
 
 auth_key!(
     /// `auth.failed_login_attempts`: consecutive failures before a

@@ -152,7 +152,8 @@ impl DirectReplyTo {
         if !bool::from(full.as_ref()[..MAC_LEN].ct_eq(mac)) {
             return None;
         }
-        let u32_at = |i: usize| u32::from_be_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]);
+        let u32_at =
+            |i: usize| u32::from_be_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]);
         let u64_at = |i: usize| {
             let mut a = [0u8; 8];
             a.copy_from_slice(&body[i..i + 8]);
@@ -179,20 +180,18 @@ impl DirectReplyTo {
         })
     }
 
-    /// Delivers a reply. `Err` for a malformed or forged name (the caller
-    /// refuses the publish); `Ok(false)` when the requester is gone (the
-    /// reply is dropped, and still counts as routed).
-    ///
-    /// # Errors
-    /// The name isn't one this gateway's key signed.
-    pub fn deliver(&self, name: &str, message: Message) -> Result<bool, ()> {
-        let a = self.decode(name).ok_or(())?;
+    /// Delivers a reply. `None` for a malformed or forged name (the
+    /// caller treats it as unroutable); `Some(false)` when the requester is
+    /// gone (the reply is dropped, and still counts as routed).
+    #[must_use]
+    pub fn deliver(&self, name: &str, message: Message) -> Option<bool> {
+        let a = self.decode(name)?;
         if a.gateway != self.gateway {
-            return Ok(false);
+            return Some(false);
         }
         let g = self.lock();
         let Some(e) = g.get(&(a.conn, a.channel)).filter(|e| e.nonce == a.nonce) else {
-            return Ok(false);
+            return Some(false);
         };
         let d = Delivery {
             id: DeliveryId::default(),
@@ -202,13 +201,14 @@ impl DirectReplyTo {
             delivery_count: 0,
             annotations: FieldTable::new(),
         };
-        Ok(e
-            .events
-            .send(Event::Deliver {
-                consumer: e.consumer,
-                delivery: d,
-            })
-            .is_ok())
+        Some(
+            e.events
+                .send(Event::Deliver {
+                    consumer: e.consumer,
+                    delivery: d,
+                })
+                .is_ok(),
+        )
     }
 }
 
@@ -241,20 +241,20 @@ mod tests {
         assert!(r.alive(&name));
         let a = r.decode(&name).unwrap();
         assert_eq!((a.gateway, a.conn, a.channel), (7, ConnKey(42), 3));
-        assert_eq!(r.deliver(&name, msg()), Ok(true));
+        assert_eq!(r.deliver(&name, msg()), Some(true));
         assert!(matches!(rx.try_recv(), Ok(Event::Deliver { consumer, .. }) if consumer == c));
         // A flipped character fails the MAC.
         let mut forged = name.clone().into_bytes();
         let last = forged.len() - 3;
         forged[last] = if forged[last] == b'A' { b'B' } else { b'A' };
         let forged = String::from_utf8(forged).unwrap();
-        assert_eq!(r.deliver(&forged, msg()), Err(()));
+        assert_eq!(r.deliver(&forged, msg()), None);
         // Another gateway's key.
         let other = DirectReplyTo::new(7);
         assert!(other.decode(&name).is_none());
         // Gone requester: dropped, not an error.
         r.unregister(ConnKey(42), 3);
         assert!(!r.alive(&name));
-        assert_eq!(r.deliver(&name, msg()), Ok(false));
+        assert_eq!(r.deliver(&name, msg()), Some(false));
     }
 }

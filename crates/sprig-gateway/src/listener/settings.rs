@@ -180,10 +180,31 @@ listener!(
     KAFKA_CERT
 );
 
+listener!(
+    "amqp",
+    "0.0.0.0:5672",
+    false,
+    "off",
+    AMQP_BIND,
+    AMQP_ENABLED,
+    AMQP_TLS,
+    AMQP_CERT
+);
+listener!(
+    "amqps",
+    "0.0.0.0:5671",
+    false,
+    "required",
+    AMQPS_BIND,
+    AMQPS_ENABLED,
+    AMQPS_TLS,
+    AMQPS_CERT
+);
+
 /// Every client listener the manager runs. Telemetry (9180) is bound by the
 /// `sprigdb` binary before the role starts, and the peer listener (7403,
 /// fixed mutual TLS) is build step 10.
-pub static LISTENERS: [ListenerKeys; 8] = [
+pub static LISTENERS: [ListenerKeys; 10] = [
     ListenerKeys {
         name: "mysql",
         protocol: Protocol::MySql84,
@@ -247,6 +268,22 @@ pub static LISTENERS: [ListenerKeys; 8] = [
         enabled: &KAFKA_ENABLED,
         tls: &KAFKA_TLS,
         cert: &KAFKA_CERT,
+    },
+    ListenerKeys {
+        name: "amqp",
+        protocol: Protocol::Amqp,
+        bind: &AMQP_BIND,
+        enabled: &AMQP_ENABLED,
+        tls: &AMQP_TLS,
+        cert: &AMQP_CERT,
+    },
+    ListenerKeys {
+        name: "amqps",
+        protocol: Protocol::Amqp,
+        bind: &AMQPS_BIND,
+        enabled: &AMQPS_ENABLED,
+        tls: &AMQPS_TLS,
+        cert: &AMQPS_CERT,
     },
 ];
 

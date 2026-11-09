@@ -78,11 +78,12 @@ use crate::cache::{AuthUser, TenantAuth};
 use crate::fast_cache::{FastCache, FastKey};
 use crate::policy::{FailureOutcome, LockLength, LockoutPolicy, LoginStateStore};
 use crate::ratelimit::{DelayKey, DelayRule, FailureDelays, IpLimiter, rate_limited};
+use crate::scram::{ScramKind, ScramVerifier};
 use crate::settings::{
-    DEFAULT_PASSWORD_LIFETIME_DAYS, DELAY_AFTER_FAILURES, FAILURE_DELAY_MAX_MS, FAILURE_DELAY_MS,
-    IP_BLOCK_SECONDS, IP_FAILURES_PER_MINUTE, MYSQL_NATIVE_PASSWORD, REQUIRE_TLS,
+    BACKFILL_VERIFIERS, DEFAULT_PASSWORD_LIFETIME_DAYS, DELAY_AFTER_FAILURES, FAILURE_DELAY_MAX_MS,
+    FAILURE_DELAY_MS, IP_BLOCK_SECONDS, IP_FAILURES_PER_MINUTE, MYSQL_NATIVE_PASSWORD, REQUIRE_TLS,
 };
-use crate::store::{AccountLimits, AuthMethods, RequireTls, TempLock, UNBOUNDED_LOCK_MICROS};
+use crate::store::{AccountLimits, AuthMethods, RequireTls, Slot, TempLock, UNBOUNDED_LOCK_MICROS};
 use crate::verifier::{FastCacheValue, decoy_verify, verify_native_scramble, verify_scramble};
 
 /// How long a full-path hash waits for a CPU slot before 39301.
@@ -461,6 +462,14 @@ impl CatalogLogins {
         self.sni_suffixes.store(Arc::new(suffixes));
     }
 
+    /// The current `listener.tenant_sni_suffixes`: front ends that bind a
+    /// listener to a tenant (AMQP's `listener.amqp.tenant`, chapter 50)
+    /// check whether the server name already names one.
+    #[must_use]
+    pub fn sni_suffixes(&self) -> Arc<Vec<String>> {
+        self.sni_suffixes.load_full()
+    }
+
     /// Steps 1 and the account match: the target of a login whose user
     /// part may be `max_user` characters long.
     /// The residency of the tenant `req` names (chapter 26), read before
@@ -589,6 +598,8 @@ pub struct LoginService {
     delays: Arc<FailureDelays>,
     /// Chapter 26's login hand-off: this gateway's DC and its peers.
     handoff: Option<Arc<crate::handoff::HandoffConfig>>,
+    /// Users whose SCRAM verifiers are being backfilled here.
+    backfilling: Arc<std::sync::Mutex<std::collections::HashSet<(TenantId, UserId)>>>,
 }
 
 impl std::fmt::Debug for LoginService {
@@ -618,6 +629,7 @@ impl LoginService {
             state: None,
             audit: Arc::new(NoAudit),
             handoff: None,
+            backfilling: Arc::default(),
         }
     }
 
@@ -893,7 +905,7 @@ impl LoginService {
     /// be loaded, runs the same exchange and is refused in
     /// [`LoginFlow::decide`].
     pub async fn start(self: &Arc<Self>, req: LoginRequest) -> MysqlLogin {
-        self.start_as(req, false).await
+        self.start_as(req, Front::Mysql).await
     }
 
     /// Starts an HTTP login (chapter 14, "HTTP on 8080 and 8443"): the same
@@ -902,14 +914,24 @@ impl LoginService {
     /// `http` in metrics and events. `req.sni` carries the TLS SNI, or the
     /// `Host` header without its port. See [`crate::http`].
     pub async fn start_http(self: &Arc<Self>, req: LoginRequest) -> MysqlLogin {
-        self.start_as(req, true).await
+        self.start_as(req, Front::Http).await
     }
 
-    async fn start_as(self: &Arc<Self>, req: LoginRequest, http: bool) -> MysqlLogin {
-        let max_user = if http {
-            crate::admin::MAX_NAME
-        } else {
+    /// Starts a Kafka login (chapter 45, "Authentication"): as
+    /// [`Self::start_http`], with the protocol `kafka` in metrics and
+    /// events. PLAIN runs [`MysqlLogin::check_clear_fast`] and
+    /// [`LoginFlow::check_password`]; SCRAM reads
+    /// [`MysqlLogin::scram_credential`] and passes the proof's result to
+    /// [`LoginFlow::decide`].
+    pub async fn start_kafka(self: &Arc<Self>, req: LoginRequest) -> MysqlLogin {
+        self.start_as(req, Front::Kafka).await
+    }
+
+    async fn start_as(self: &Arc<Self>, req: LoginRequest, front: Front) -> MysqlLogin {
+        let max_user = if front == Front::Mysql {
             max_user_len(req.persona)
+        } else {
+            crate::admin::MAX_NAME
         };
         let target = match &self.source {
             LoginSource::Catalog(c) => c.find(&req, max_user).await,
@@ -929,9 +951,38 @@ impl LoginService {
             slot_timeout: false,
             principal: None,
             reason: None,
-            http,
+            front,
+            backfill: None,
         }
     }
+}
+
+/// Which front end a login came through: the `protocol` label of its
+/// metrics and audit events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Front {
+    /// MySQL or MariaDB (by persona).
+    Mysql,
+    /// HTTP Basic (chapter 14, "HTTP on 8080 and 8443").
+    Http,
+    /// Kafka SASL (chapter 45).
+    Kafka,
+}
+
+/// A verified clear-text password whose generation lacks SCRAM verifiers:
+/// stored after the login succeeds (chapter 14, "SCRAM verifiers").
+struct Backfill {
+    /// The `caching_sha2_password` or native verifier it matched.
+    verifier_id: u64,
+    password: Zeroizing<Vec<u8>>,
+}
+
+/// Whether the generation of `user`'s verifier in `slot` lacks a SCRAM
+/// verifier that `password` can have.
+fn lacks_scram(user: &AuthUser, slot: Slot, password: &[u8]) -> bool {
+    ScramKind::ALL
+        .into_iter()
+        .any(|k| !user.has_scram(k, slot) && k.prepare(password).is_some())
 }
 
 /// The longest user name a persona accepts (chapter 14).
@@ -991,8 +1042,10 @@ pub struct MysqlLogin {
     principal: Option<Principal>,
     /// Why the login was refused (the audit and metric reason).
     reason: Option<&'static str>,
-    /// An HTTP login ([`LoginService::start_http`]).
-    http: bool,
+    /// The front end.
+    front: Front,
+    /// SCRAM verifiers to store once the login is accepted.
+    backfill: Option<Backfill>,
 }
 
 impl std::fmt::Debug for MysqlLogin {
@@ -1040,11 +1093,64 @@ impl MysqlLogin {
     pub fn check_clear_fast(&mut self, password: &[u8]) -> bool {
         self.used_password |= !password.is_empty();
         let cache = &self.svc.fast_cache;
-        match &self.target {
-            Target::Catalog(c) if !password.is_empty() => {
-                Self::fast_keys(c).any(|k| cache.verify_password_key(&k, password))
+        let Target::Catalog(c) = &self.target else {
+            return false;
+        };
+        if password.is_empty() {
+            return false;
+        }
+        let Some(k) = Self::fast_keys(c).find(|k| cache.verify_password_key(k, password)) else {
+            return false;
+        };
+        self.note_backfill(k.verifier, password);
+        true
+    }
+
+    /// Remembers `password` for a SCRAM backfill when the generation of
+    /// the verifier it matched lacks SCRAM verifiers.
+    fn note_backfill(&mut self, verifier_id: u64, password: &[u8]) {
+        let Target::Catalog(c) = &self.target else {
+            return;
+        };
+        let u = &c.user;
+        let slot = u
+            .caching_sha2
+            .iter()
+            .map(|v| (v.id, v.slot))
+            .chain(u.native.iter().map(|v| (v.id, v.slot)))
+            .find(|(id, _)| *id == verifier_id)
+            .map(|(_, slot)| slot);
+        if slot.is_some_and(|slot| lacks_scram(u, slot, password)) {
+            self.backfill = Some(Backfill {
+                verifier_id,
+                password: Zeroizing::new(password.to_vec()),
+            });
+        }
+    }
+
+    /// The account's SCRAM verifier of `kind` for a SCRAM exchange
+    /// (chapter 45's Kafka SASL; chapter 30's MongoDB later): the primary
+    /// password's, and the secondary's when it shares the primary's salt
+    /// and iterations (set with `RETAIN CURRENT PASSWORD`), so the exchange
+    /// accepts either password. A password with a verifier only in the
+    /// secondary slot uses that. `None` for accounts without one, the
+    /// decoy, file accounts and unreadable catalogs.
+    #[must_use]
+    pub fn scram_credential(
+        &self,
+        kind: ScramKind,
+    ) -> Option<(ScramVerifier, Option<ScramVerifier>)> {
+        let Target::Catalog(c) = &self.target else {
+            return None;
+        };
+        let primary = c.user.scram(kind, Slot::Primary);
+        let secondary = c.user.scram(kind, Slot::Secondary);
+        match (primary, secondary) {
+            (Some(p), Some(s)) if p.salt() == s.salt() && p.iterations() == s.iterations() => {
+                Some((p.clone(), Some(s.clone())))
             }
-            _ => false,
+            (Some(v), _) | (None, Some(v)) => Some((v.clone(), None)),
+            (None, None) => None,
         }
     }
 
@@ -1325,39 +1431,48 @@ impl LoginFlow for MysqlLogin {
             return false;
         };
         let cache = Arc::clone(&self.svc.fast_cache);
-        tokio::task::spawn_blocking(move || match work {
+        let pw = password.clone();
+        let matched = tokio::task::spawn_blocking(move || match work {
             Work::Catalog(u, tenant, native) => {
                 for v in &u.caching_sha2 {
-                    if v.verifier.verify(&password) {
+                    if v.verifier.verify(&pw) {
                         let key = FastKey {
                             tenant,
                             user: u.row.user_id,
                             verifier: v.id,
                         };
-                        cache.fill_key(&key, &password);
-                        return true;
+                        cache.fill_key(&key, &pw);
+                        return Some(Some(v.id));
                     }
                 }
                 if u.caching_sha2.is_empty() {
                     if native {
-                        return u.native.iter().any(|v| v.verifier.verify(&password));
+                        return u
+                            .native
+                            .iter()
+                            .find(|v| v.verifier.verify(&pw))
+                            .map(|v| Some(v.id));
                     }
                     // No verifier this login can use: the same cost as one.
-                    return decoy_verify(&password);
+                    return decoy_verify(&pw).then_some(None);
                 }
-                false
+                None
             }
             Work::File(a) => {
-                let ok = a.verify_password(&password);
+                let ok = a.verify_password(&pw);
                 if ok && a.caching_sha2.is_some() {
-                    cache.fill(&a, &password);
+                    cache.fill(&a, &pw);
                 }
-                ok
+                ok.then_some(None)
             }
-            Work::Decoy => decoy_verify(&password),
+            Work::Decoy => decoy_verify(&pw).then_some(None),
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(None);
+        if let Some(Some(id)) = matched {
+            self.note_backfill(id, &password);
+        }
+        matched.is_some()
     }
 
     async fn decide(&mut self, outcome: Outcome, path: AuthPath) -> AuthVerdict {
@@ -1369,13 +1484,82 @@ impl LoginFlow for MysqlLogin {
 
 impl MysqlLogin {
     fn protocol(&self) -> &'static str {
-        if self.http {
-            return "http";
+        match (self.front, self.req.persona) {
+            (Front::Http, _) => "http",
+            (Front::Kafka, _) => "kafka",
+            (Front::Mysql, Persona::MySql84) => "mysql",
+            (Front::Mysql, Persona::MariaDb) => "mariadb",
         }
-        match self.req.persona {
-            Persona::MySql84 => "mysql",
-            Persona::MariaDb => "mariadb",
+    }
+
+    /// Stores the SCRAM verifiers the accepted login's password lacks, in
+    /// the background (chapter 14, "SCRAM verifiers": upgrade on login),
+    /// unless `auth.backfill_verifiers` is off, there is no catalog writer
+    /// (`LoginStateStore`), or this gateway is already at it for the user.
+    fn spawn_backfill(&mut self) {
+        let Some(b) = self.backfill.take() else {
+            return;
+        };
+        let (Target::Catalog(c), LoginSource::Catalog(cl), Some(state)) =
+            (&self.target, &self.svc.source, &self.svc.state)
+        else {
+            return;
+        };
+        if !self.policy_bool(c, &BACKFILL_VERIFIERS) {
+            return;
         }
+        let key = (c.tenant.id, c.user.row.user_id);
+        let fresh = self
+            .svc
+            .backfilling
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key);
+        if !fresh {
+            return;
+        }
+        let hashing = crate::policy::hashing_of(&*cl.policy, &c.catalog);
+        let state = Arc::clone(state);
+        let svc = Arc::clone(&self.svc);
+        let protocol = self.protocol();
+        let (tenant_name, user, host) = (
+            c.tenant.name.clone(),
+            c.user.row.name.clone(),
+            c.user.row.host.clone(),
+        );
+        let ip = self.req.client_ip;
+        tokio::spawn(async move {
+            let r = state
+                .backfill_scram(key.0, key.1, b.verifier_id, b.password, hashing)
+                .await;
+            svc.backfilling
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key);
+            match r {
+                Ok(Some(kinds)) => {
+                    metrics::counter!("sprig_auth_verifier_backfills_total", "outcome" => "ok")
+                        .increment(1);
+                    let mut e =
+                        AuditEvent::new(audit::events::VERIFIERS_ADDED, protocol, svc.clock.wall());
+                    e.tenant = Some(key.0);
+                    e.tenant_name = Some(tenant_name);
+                    e.user = Some(user);
+                    e.host = Some(host);
+                    e.user_id = Some(key.1);
+                    e.client_ip = Some(ip);
+                    e.reason = Some("upgrade_on_login");
+                    e.detail = Some(kinds);
+                    svc.audit.emit(&e);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    metrics::counter!("sprig_auth_verifier_backfills_total", "outcome" => "error")
+                        .increment(1);
+                    tracing::warn!(tenant = %key.0, user_id = %key.1, error = %err, "SCRAM verifiers not stored at login; the next login retries");
+                }
+            }
+        });
     }
 
     /// Who the login was for, as the delay table keys it.
@@ -1421,6 +1605,7 @@ impl MysqlLogin {
                 let lock = c.lock.filter(|l| l.locked_until <= now);
                 svc.after_success(&c.tenant, &c.user, lock, &c.catalog, protocol);
             }
+            self.spawn_backfill();
             svc.delays.on_success(&self.delay_key());
             if self
                 .principal

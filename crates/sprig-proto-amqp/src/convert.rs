@@ -32,19 +32,20 @@
 //! annotations, and the body becomes one `data` section — unless `type`
 //! is `amqp-1.0`, when the body is the 1.0 sections it came from.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use bytes::Bytes;
 
 use crate::error::MqError;
 use crate::message::{Delivery, Message, MessageInfo, MsgFormat};
-use crate::v091::codec::{FieldTable, FieldValue};
-use crate::v091::props::BasicProperties;
 use crate::v10::message::{
     Body, Header, Properties, Sections, annotations_section, application_properties_section,
     data_section, encode_sections, percent_decode, queue_address,
 };
 use crate::v10::types::Value;
+use crate::v091::codec::{FieldTable, FieldValue};
+use crate::v091::props::BasicProperties;
 
 /// The `type` RabbitMQ sets on a 0-9-1 message whose body is 1.0
 /// sections.
@@ -128,12 +129,26 @@ fn id_text(v: &Value) -> Option<String> {
 }
 
 fn uuid_text(u: &[u8; 16]) -> String {
-    let h: String = u.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+    let h = u.iter().fold(String::with_capacity(32), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }
 
 fn parse_urn_uuid(s: &str) -> Option<[u8; 16]> {
-    let hex: String = s.strip_prefix("urn:uuid:")?.chars().filter(|c| *c != '-').collect();
+    let hex: String = s
+        .strip_prefix("urn:uuid:")?
+        .chars()
+        .filter(|c| *c != '-')
+        .collect();
     if hex.len() != 32 {
         return None;
     }
@@ -166,7 +181,9 @@ pub fn to_field(v: &Value) -> Option<FieldValue> {
         Value::Uuid(u) => FieldValue::str(&format!("urn:uuid:{}", uuid_text(u))),
         Value::Binary(b) => FieldValue::Bytes(b.clone()),
         Value::String(s) | Value::Symbol(s) => FieldValue::str(s),
-        Value::List(l) | Value::Array(l) => FieldValue::Array(l.iter().filter_map(to_field).collect()),
+        Value::List(l) | Value::Array(l) => {
+            FieldValue::Array(l.iter().filter_map(to_field).collect())
+        }
         Value::Map(m) => FieldValue::Table(FieldTable(
             m.iter()
                 .filter_map(|(k, v)| Some((k.as_str()?.to_owned(), to_field(v)?)))
@@ -197,12 +214,18 @@ pub fn to_value(f: &FieldValue) -> Option<Value> {
             Err(_) => Value::Binary(b.clone()),
         },
         FieldValue::Bytes(b) => Value::Binary(b.clone()),
-        FieldValue::Timestamp(s) => Value::Timestamp(i64::try_from(s.saturating_mul(1000)).unwrap_or(i64::MAX)),
+        FieldValue::Timestamp(s) => {
+            Value::Timestamp(i64::try_from(s.saturating_mul(1000)).unwrap_or(i64::MAX))
+        }
         FieldValue::Array(a) => Value::List(a.iter().filter_map(to_value).collect()),
         FieldValue::Table(t) => Value::Map(
             t.0.iter()
                 .filter_map(|(k, v)| {
-                    let key = if k.starts_with("x-") { Value::sym(k) } else { Value::str(k) };
+                    let key = if k.starts_with("x-") {
+                        Value::sym(k)
+                    } else {
+                        Value::str(k)
+                    };
                     Some((key, to_value(v)?))
                 })
                 .collect(),
@@ -275,10 +298,12 @@ pub fn props_10_to_091(s: &Sections) -> (BasicProperties, Bytes) {
     };
     p.message_id = id(&pr.message_id, "x-message-id", &mut headers);
     p.correlation_id = id(&pr.correlation_id, "x-correlation-id", &mut headers);
-    p.user_id = pr
-        .user_id
-        .as_ref()
-        .and_then(|b| std::str::from_utf8(b).ok().filter(|s| s.len() <= 255).map(str::to_owned));
+    p.user_id = pr.user_id.as_ref().and_then(|b| {
+        std::str::from_utf8(b)
+            .ok()
+            .filter(|s| s.len() <= 255)
+            .map(str::to_owned)
+    });
     p.reply_to = pr.reply_to.as_ref().map(|r| {
         r.strip_prefix("/queues/")
             .and_then(percent_decode)
@@ -301,10 +326,12 @@ pub fn props_10_to_091(s: &Sections) -> (BasicProperties, Bytes) {
             if let Some(f) = to_field(v) {
                 headers.insert("CC", f);
             }
-        } else if k.starts_with("x-") && k != "x-exchange" && k != "x-routing-key" {
-            if let Some(f) = to_field(v) {
-                headers.insert(k, f);
-            }
+        } else if k.starts_with("x-")
+            && k != "x-exchange"
+            && k != "x-routing-key"
+            && let Some(f) = to_field(v)
+        {
+            headers.insert(k, f);
         }
     }
     if !headers.is_empty() {
@@ -334,10 +361,9 @@ pub fn to_10(d: &Delivery) -> Result<Bytes, MqError> {
             let s = if m.props.is_empty() {
                 None
             } else {
-                Some(
-                    Sections::parse(&m.props)
-                        .map_err(|e| MqError::new(crate::error::MqCode::FrameError, e.0).with_reply(541))?,
-                )
+                Some(Sections::parse(&m.props).map_err(|e| {
+                    MqError::new(crate::error::MqCode::FrameError, e.0).with_reply(541)
+                })?)
             };
             let header = s.as_ref().and_then(|s| s.header.clone());
             let ann = s.map(|s| s.message_annotations).unwrap_or_default();
@@ -401,10 +427,10 @@ pub fn props_091_to_10(
                     }
                 }
                 _ => {
-                    if !matches!(v, FieldValue::Table(_) | FieldValue::Array(_)) {
-                        if let Some(v) = to_value(v) {
-                            app.push((k.clone(), v));
-                        }
+                    if !matches!(v, FieldValue::Table(_) | FieldValue::Array(_))
+                        && let Some(v) = to_value(v)
+                    {
+                        app.push((k.clone(), v));
                     }
                 }
             }
@@ -416,7 +442,10 @@ pub fn props_091_to_10(
     }
     let props = Properties {
         message_id,
-        user_id: p.user_id.as_ref().map(|u| Bytes::copy_from_slice(u.as_bytes())),
+        user_id: p
+            .user_id
+            .as_ref()
+            .map(|u| Bytes::copy_from_slice(u.as_bytes())),
         reply_to: p.reply_to.as_ref().map(|r| {
             if r.starts_with('/') {
                 r.clone()
@@ -469,10 +498,10 @@ pub fn with_reply_to(m: &Message, reply_to: &str) -> Result<Message, MqError> {
             // Replace the properties section, keep the rest of the bare
             // message as it was.
             let mut rest = m.body.clone();
-            if let Ok((v, n)) = Value::decode(&m.body) {
-                if v.descriptor() == Some(crate::v10::message::section::PROPERTIES) {
-                    rest = m.body.slice(n..);
-                }
+            if let Ok((v, n)) = Value::decode(&m.body)
+                && v.descriptor() == Some(crate::v10::message::section::PROPERTIES)
+            {
+                rest = m.body.slice(n..);
             }
             let mut b = encode_sections(&[props.to_value()]).to_vec();
             b.extend_from_slice(&rest);
@@ -526,7 +555,14 @@ mod tests {
             ..Default::default()
         };
         let raw = p.to_bytes();
-        let m = from_091("ex".into(), "rk".into(), raw.clone(), &p, Bytes::from_static(b"{}")).unwrap();
+        let m = from_091(
+            "ex".into(),
+            "rk".into(),
+            raw.clone(),
+            &p,
+            Bytes::from_static(b"{}"),
+        )
+        .unwrap();
         assert_eq!(m.info.ttl_ms, Some(60_000));
         assert!(m.info.durable);
         let payload = to_10(&delivery(m.clone(), 1)).unwrap();
@@ -539,7 +575,10 @@ mod tests {
         assert!(matches!(s.properties.correlation_id, Some(Value::Uuid(_))));
         assert_eq!(s.properties.creation_time, Some(1_700_000_000_000));
         assert_eq!(s.properties.group_id.as_deref(), Some("shop"));
-        assert_eq!(s.application_properties, vec![("tenant".into(), Value::str("acme"))]);
+        assert_eq!(
+            s.application_properties,
+            vec![("tenant".into(), Value::str("acme"))]
+        );
         assert_eq!(s.annotation("x-retries"), Some(&Value::Int(2)));
         assert_eq!(s.annotation("x-basic-type"), Some(&Value::str("order")));
         assert_eq!(s.annotation("x-exchange"), Some(&Value::str("ex")));
@@ -597,7 +636,10 @@ mod tests {
         d.annotations.insert("x-delivery-count", FieldValue::I64(3));
         let (props, _) = to_091(&d).unwrap();
         let back = BasicProperties::decode(&props).unwrap();
-        assert_eq!(back.headers.unwrap().get("x-delivery-count"), Some(&FieldValue::I64(3)));
+        assert_eq!(
+            back.headers.unwrap().get("x-delivery-count"),
+            Some(&FieldValue::I64(3))
+        );
         assert_eq!(d.message.props, m.props);
     }
 
@@ -610,17 +652,27 @@ mod tests {
         let m = from_091(String::new(), "rpc".into(), p.to_bytes(), &p, Bytes::new()).unwrap();
         let r = with_reply_to(&m, "amq.rabbitmq.reply-to.abc").unwrap();
         assert_eq!(
-            BasicProperties::decode(&r.props).unwrap().reply_to.as_deref(),
+            BasicProperties::decode(&r.props)
+                .unwrap()
+                .reply_to
+                .as_deref(),
             Some("amq.rabbitmq.reply-to.abc")
         );
         let payload = encode_sections(&[
             Properties::default().to_value(),
             data_section(Bytes::from_static(b"x")),
         ]);
-        let m10 = from_10(String::new(), "rpc".into(), &Sections::parse(&payload).unwrap());
+        let m10 = from_10(
+            String::new(),
+            "rpc".into(),
+            &Sections::parse(&payload).unwrap(),
+        );
         let r = with_reply_to(&m10, "amq.rabbitmq.reply-to.abc").unwrap();
         let s = Sections::parse(&r.body).unwrap();
-        assert_eq!(s.properties.reply_to.as_deref(), Some("/queues/amq.rabbitmq.reply-to.abc"));
+        assert_eq!(
+            s.properties.reply_to.as_deref(),
+            Some("/queues/amq.rabbitmq.reply-to.abc")
+        );
         assert_eq!(s.body, Body::Data(vec![Bytes::from_static(b"x")]));
     }
 }

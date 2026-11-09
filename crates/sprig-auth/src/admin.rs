@@ -11,6 +11,9 @@
 //! ```text
 //! set_password(user, pw, opts):
 //!   new = [ caching_sha2(pw, fresh salt, rounds) ] (+ native(pw) when enabled)
+//!   new += scram_sha_256(SASLprep(pw)) (if SASLprep accepts pw), scram_sha_512(pw)
+//!          (with RETAIN CURRENT PASSWORD: the current primary's SCRAM salt and
+//!          iterations, so one SCRAM exchange can check both passwords)
 //!   change(tenant, Auth):
 //!      opts.retain_current ? primary → secondary : primary → history
 //!      discard_old deletes secondaries; trim history to the policy
@@ -20,9 +23,12 @@
 //!
 //! These calls don't check the password policy: [`crate::policy::change_password`]
 //! does, then calls [`set_password`]. [`AccountOps`] wraps them with audit
-//! events and the acting administrator (step 6). Not yet: SCRAM verifiers
-//! (they need `SASLprep`, step 2's other half); the caller's privileges are
-//! chapter 29's.
+//! events and the acting administrator (step 6). The caller's privileges
+//! are chapter 29's.
+//!
+//! [`backfill_scram`] adds the SCRAM verifiers a password set before they
+//! existed lacks, at a login that saw the clear password ("upgrade on
+//! login", chapter 14).
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -36,6 +42,7 @@ use zeroize::Zeroizing;
 use crate::audit::{Actor, AuditEvent, AuditSink, events};
 
 use crate::policy::AccountClauses;
+use crate::scram::{DEFAULT_SCRAM_ITERATIONS, ScramKind, ScramVerifier};
 use crate::store::{
     AuthStore, RequireTls, Slot, UserKind, UserRow, UserSource, UserState, VerifierKind,
     VerifierRow,
@@ -102,14 +109,20 @@ impl NewUser {
 }
 
 /// How passwords are hashed and which verifiers are stored: the
-/// `auth.caching_sha2_rounds` and `auth.mysql_native_password` values the
-/// caller resolved for the tenant.
+/// `auth.caching_sha2_rounds`, `auth.mysql_native_password`,
+/// `auth.scram_sha256_iterations` and `auth.scram_sha512_iterations`
+/// values the caller resolved for the tenant. SCRAM-SHA-256 and
+/// SCRAM-SHA-512 verifiers are always stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hashing {
     /// SHA-256 crypt rounds.
     pub caching_sha2_rounds: u32,
     /// Also store a `mysql_native_password` verifier.
     pub native: bool,
+    /// PBKDF2 iterations of SCRAM-SHA-256 verifiers.
+    pub scram_sha256_iterations: u32,
+    /// PBKDF2 iterations of SCRAM-SHA-512 verifiers.
+    pub scram_sha512_iterations: u32,
 }
 
 impl Default for Hashing {
@@ -117,6 +130,19 @@ impl Default for Hashing {
         Self {
             caching_sha2_rounds: DEFAULT_CACHING_SHA2_ROUNDS,
             native: false,
+            scram_sha256_iterations: DEFAULT_SCRAM_ITERATIONS,
+            scram_sha512_iterations: DEFAULT_SCRAM_ITERATIONS,
+        }
+    }
+}
+
+impl Hashing {
+    /// The iterations of `kind`'s new verifiers.
+    #[must_use]
+    pub const fn scram_iterations(&self, kind: ScramKind) -> u32 {
+        match kind {
+            ScramKind::Sha256 => self.scram_sha256_iterations,
+            ScramKind::Sha512 => self.scram_sha512_iterations,
         }
     }
 }
@@ -148,18 +174,70 @@ pub struct Changed {
 struct Hashed {
     sha2: CachingSha2Verifier,
     native: Option<NativeVerifier>,
+    scram: Vec<ScramVerifier>,
 }
 
-async fn hash(password: &Zeroizing<Vec<u8>>, h: Hashing) -> Result<Hashed> {
+/// A SCRAM salt and iteration count to reuse: a new password's verifier of
+/// that kind shares them with the retained one.
+type ScramSalt = (ScramKind, Vec<u8>, u32);
+
+/// The SCRAM verifiers of `pw`, for each kind with `reuse`'s salt and
+/// iterations when it has that kind, else a fresh salt and `h`'s
+/// iterations. A password `SASLprep` refuses gets no SCRAM-SHA-256 one.
+fn scram_of(pw: &[u8], h: Hashing, reuse: &[ScramSalt]) -> Result<Vec<ScramVerifier>> {
+    let mut out = Vec::with_capacity(2);
+    for kind in ScramKind::ALL {
+        let v = match reuse.iter().find(|(k, _, _)| *k == kind) {
+            Some((_, salt, iterations)) => ScramVerifier::create(kind, pw, Some(salt), *iterations)
+                .or_else(|_| ScramVerifier::create(kind, pw, None, h.scram_iterations(kind)))?,
+            None => ScramVerifier::create(kind, pw, None, h.scram_iterations(kind))?,
+        };
+        out.extend(v);
+    }
+    Ok(out)
+}
+
+async fn hash(password: &Zeroizing<Vec<u8>>, h: Hashing, reuse: Vec<ScramSalt>) -> Result<Hashed> {
     let pw = password.clone();
     tokio::task::spawn_blocking(move || {
         Ok(Hashed {
             sha2: CachingSha2Verifier::create(&pw, h.caching_sha2_rounds)?,
             native: h.native.then(|| NativeVerifier::create(&pw)),
+            scram: scram_of(&pw, h, &reuse)?,
         })
     })
     .await
     .map_err(|e| SprigError::internal(format!("hashing task failed: {e}")))?
+}
+
+/// The SCRAM salts of `user`'s live verifiers in `slot`, read from the
+/// writer outside any change. Empty when there are none or the read fails
+/// (the new password then gets fresh salts).
+async fn scram_salts(
+    cat: &MariaCatalog,
+    tenant: TenantId,
+    user: UserId,
+    slot: Slot,
+) -> Vec<ScramSalt> {
+    let read = async {
+        let ep = cat.backend().locator().writer(tenant).await?;
+        let mut conn = ep.pool.get_conn().await.map_err(crate::store::map_err)?;
+        AuthStore::of(&ep.store)
+            .verifiers_of(&mut conn, &[user])
+            .await
+    };
+    match read.await {
+        Ok(rows) => rows
+            .iter()
+            .filter(|r| r.slot == slot)
+            .filter_map(|r| ScramVerifier::from_row(r).ok())
+            .map(|v| (v.kind(), v.salt().to_vec(), v.iterations()))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(%tenant, user = %user, error = %e, "the current SCRAM salts can't be read; the new password gets fresh ones");
+            Vec::new()
+        }
+    }
 }
 
 fn check_account(name: &str, host: &str) -> Result<()> {
@@ -224,6 +302,11 @@ async fn insert_verifiers(
             )
             .await?;
     }
+    for v in &h.scram {
+        store
+            .insert_verifier(q, &v.to_row(user, Slot::Primary, generation, at))
+            .await?;
+    }
     Ok(())
 }
 
@@ -239,7 +322,7 @@ pub async fn create_user(
     clock: &dyn Clock,
 ) -> Result<Changed> {
     check_account(&new.name, &new.host)?;
-    let hashed = hash(&new.password, new.hashing).await?;
+    let hashed = hash(&new.password, new.hashing, Vec::new()).await?;
     let now = clock.wall();
     let mut c = cat
         .change_with(tenant, VersionKind::Auth, ChangeOpts::default())
@@ -346,7 +429,14 @@ pub async fn set_password(
     opts: SetPassword,
     clock: &dyn Clock,
 ) -> Result<Changed> {
-    let hashed = Arc::new(hash(&Zeroizing::new(password.to_vec()), opts.hashing).await?);
+    // RETAIN CURRENT PASSWORD: the new SCRAM verifiers take the current
+    // primary's salts, so a SCRAM exchange (one salt) can check both.
+    let reuse = if opts.retain_current {
+        scram_salts(cat, tenant, user, Slot::Primary).await
+    } else {
+        Vec::new()
+    };
+    let hashed = Arc::new(hash(&Zeroizing::new(password.to_vec()), opts.hashing, reuse).await?);
     let now = clock.wall();
     with_user(cat, tenant, user, "SET PASSWORD", move |store, q, row| {
         let hashed = Arc::clone(&hashed);
@@ -380,6 +470,99 @@ pub async fn set_password(
         })
     })
     .await
+}
+
+/// Adds the SCRAM verifiers missing from the password generation of
+/// `verifier_id` (the `caching_sha2_password` or `mysql_native_password`
+/// verifier `password` just matched at a login): chapter 14's "upgrade on
+/// login" for passwords set before SCRAM verifiers were stored, or
+/// imported as hashes. A new verifier takes the salt and iterations of the
+/// same kind in the user's other live slot, if there is one, so dual
+/// passwords keep sharing a salt. Returns the change and the mechanisms
+/// added; `Ok(None)` when nothing is missing, or the verifier is gone (the
+/// password changed meanwhile) or is history.
+///
+/// The caller has verified `password`; this doesn't check it again.
+///
+/// # Errors
+/// The catalog's errors; 39998 for iterations outside the settings' range.
+pub async fn backfill_scram(
+    cat: &MariaCatalog,
+    tenant: TenantId,
+    user: UserId,
+    verifier_id: u64,
+    password: &[u8],
+    hashing: Hashing,
+) -> Result<Option<(Changed, Vec<ScramKind>)>> {
+    let rows = {
+        let ep = cat.backend().locator().writer(tenant).await?;
+        let mut conn = ep.pool.get_conn().await.map_err(crate::store::map_err)?;
+        AuthStore::of(&ep.store)
+            .verifiers_of(&mut conn, &[user])
+            .await?
+    };
+    let Some((slot, generation)) = rows
+        .iter()
+        .find(|r| r.verifier_id == verifier_id && r.slot != Slot::History)
+        .map(|r| (r.slot, r.generation))
+    else {
+        return Ok(None);
+    };
+    let has = move |rows: &[VerifierRow], kind: ScramKind| {
+        rows.iter()
+            .any(|r| r.kind == kind.verifier_kind() && r.slot == slot && r.generation == generation)
+    };
+    let missing: Vec<ScramKind> = ScramKind::ALL
+        .into_iter()
+        .filter(|k| !has(&rows, *k) && k.prepare(password).is_some())
+        .collect();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let other = match slot {
+        Slot::Primary => Slot::Secondary,
+        _ => Slot::Primary,
+    };
+    let reuse: Vec<ScramSalt> = rows
+        .iter()
+        .filter(|r| r.slot == other)
+        .filter_map(|r| ScramVerifier::from_row(r).ok())
+        .map(|v| (v.kind(), v.salt().to_vec(), v.iterations()))
+        .collect();
+    let pw = Zeroizing::new(password.to_vec());
+    let new: Vec<ScramVerifier> =
+        tokio::task::spawn_blocking(move || scram_of(&pw, hashing, &reuse))
+            .await
+            .map_err(|e| SprigError::internal(format!("hashing task failed: {e}")))??
+            .into_iter()
+            .filter(|v| missing.contains(&v.kind()))
+            .collect();
+    if new.is_empty() {
+        return Ok(None);
+    }
+    let kinds: Vec<ScramKind> = new.iter().map(ScramVerifier::kind).collect();
+    let new = Arc::new(new);
+    let now = SystemTime::now();
+    let changed = with_user(cat, tenant, user, "ALTER USER", move |store, q, row| {
+        let new = Arc::clone(&new);
+        Box::pin(async move {
+            let rows = store.verifiers_of(q, &[row.user_id]).await?;
+            let still = rows.iter().any(|r| {
+                r.verifier_id == verifier_id && r.slot == slot && r.generation == generation
+            });
+            if !still {
+                return Ok(());
+            }
+            for v in new.iter().filter(|v| !has(&rows, v.kind())) {
+                store
+                    .insert_verifier(q, &v.to_row(row.user_id, slot, generation, now))
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await?;
+    Ok(Some((changed, kinds)))
 }
 
 /// `DISCARD OLD PASSWORD`: the secondary password stops working.

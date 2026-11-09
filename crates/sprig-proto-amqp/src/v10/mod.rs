@@ -2,7 +2,8 @@
 //! system ([`types`]), performatives and framing ([`performative`]),
 //! message sections and v2 addresses ([`message`]).
 
+pub mod client;
 pub mod message;
 pub mod performative;
-pub mod types;
 pub mod server;
+pub mod types;

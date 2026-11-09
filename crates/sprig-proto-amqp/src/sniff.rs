@@ -79,12 +79,18 @@ mod tests {
     fn table() {
         assert_eq!(Detected::of(b"AMQP\x00\x00\x09\x01"), Detected::Amqp091);
         assert_eq!(Detected::of(b"AMQP\x03\x01\x00\x00"), Detected::Amqp10Sasl);
-        assert_eq!(Detected::of(b"AMQP\x00\x01\x00\x00"), Detected::Amqp10NoSasl);
+        assert_eq!(
+            Detected::of(b"AMQP\x00\x01\x00\x00"),
+            Detected::Amqp10NoSasl
+        );
         assert_eq!(Detected::of(b"AMQP\x02\x01\x00\x00"), Detected::Amqp10Tls);
         // 0-9 and 0-8 headers, HTTP, TLS hellos: unknown.
         assert_eq!(Detected::of(b"AMQP\x01\x01\x00\x09"), Detected::Unknown);
         assert_eq!(Detected::of(b"GET / HT"), Detected::Unknown);
-        assert_eq!(Detected::of(&[0x16, 3, 1, 0, 0, 0, 0, 0]), Detected::Unknown);
+        assert_eq!(
+            Detected::of(&[0x16, 3, 1, 0, 0, 0, 0, 0]),
+            Detected::Unknown
+        );
         assert_eq!(Detected::Unknown.refusal(), Some(AMQP_091));
         assert_eq!(Detected::Amqp10NoSasl.refusal(), Some(AMQP_10_SASL));
         assert_eq!(Detected::Amqp10Tls.refusal(), Some(AMQP_10_SASL));

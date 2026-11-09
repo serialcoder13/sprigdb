@@ -427,6 +427,19 @@ pub async fn account_statement(
             &ctx,
             Some(&cat.settings),
         ),
+        // Chapter 14: every password also gets SCRAM verifiers.
+        scram_sha256_iterations: u32::try_from(svc.settings.get(
+            &sprig_auth::settings::SCRAM_SHA256_ITERATIONS,
+            &ctx,
+            Some(&cat.settings),
+        ))
+        .unwrap_or(sprig_auth::scram::DEFAULT_SCRAM_ITERATIONS),
+        scram_sha512_iterations: u32::try_from(svc.settings.get(
+            &sprig_auth::settings::SCRAM_SHA512_ITERATIONS,
+            &ctx,
+            Some(&cat.settings),
+        ))
+        .unwrap_or(sprig_auth::scram::DEFAULT_SCRAM_ITERATIONS),
     };
     let unsafe_error = svc
         .settings

@@ -784,7 +784,7 @@ fn specs_resolve_from_settings() {
     let names = |v: &[ListenerSpec]| v.iter().map(|s| s.name).collect::<Vec<_>>();
     assert_eq!(
         names(&res.specs),
-        ["http", "mongo", "redis", "bolt", "kafka"]
+        ["http", "mongo", "redis", "bolt", "kafka", "amqp", "amqps"]
     );
     let rejected: Vec<_> = res.rejected.iter().map(|r| r.name).collect();
     assert_eq!(rejected, ["mysql", "mariadb", "https"]);
@@ -818,7 +818,7 @@ fn specs_resolve_from_settings() {
     assert_eq!(
         names(&res.specs),
         [
-            "mysql", "mariadb", "http", "https", "redis", "bolt", "kafka"
+            "mysql", "mariadb", "http", "https", "redis", "bolt", "kafka", "amqp", "amqps"
         ]
     );
     assert_eq!(res.rejected.len(), 1);

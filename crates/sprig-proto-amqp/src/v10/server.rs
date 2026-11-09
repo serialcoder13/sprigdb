@@ -81,19 +81,25 @@ async fn next_frame<R: AsyncRead + Unpin>(
             Err(e) => return Err(MqError::new(MqCode::FrameError, e.0)),
         }
         match tokio::time::timeout_at(deadline, rd.read_buf(inb)).await {
-            Ok(Ok(0)) => return Err(MqError::new(MqCode::FrameError, "client closed").with_reply(320)),
+            Ok(Ok(0)) => {
+                return Err(MqError::new(MqCode::FrameError, "client closed").with_reply(320));
+            }
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(io_err(&e)),
-            Err(_) => return Err(MqError::new(MqCode::FrameError, "handshake timeout").with_reply(320)),
+            Err(_) => {
+                return Err(MqError::new(MqCode::FrameError, "handshake timeout").with_reply(320));
+            }
         }
     }
 }
 
 fn perf(f: &Frame) -> Result<Performative, MqError> {
-    let body = f
-        .body
-        .as_ref()
-        .ok_or_else(|| MqError::new(MqCode::FrameError, "empty frame where a performative was expected"))?;
+    let body = f.body.as_ref().ok_or_else(|| {
+        MqError::new(
+            MqCode::FrameError,
+            "empty frame where a performative was expected",
+        )
+    })?;
     Performative::from_value(body).map_err(|e| MqError::new(MqCode::FrameError, e.0))
 }
 
@@ -140,9 +146,15 @@ where
     let creds = auth::credentials(&mechanism, &response, &offered, &info);
     let principal = match creds {
         Some(c) => svc.identity.login(&info, c).await.map_err(|e| e.0),
-        None => Err(format!("mechanism {mechanism} not offered or malformed response")),
+        None => Err(format!(
+            "mechanism {mechanism} not offered or malformed response"
+        )),
     };
-    let code = if principal.is_ok() { sasl_code::OK } else { sasl_code::AUTH };
+    let code = if principal.is_ok() {
+        sasl_code::OK
+    } else {
+        sasl_code::AUTH
+    };
     put_frame(
         &mut out,
         FRAME_SASL,
@@ -170,18 +182,32 @@ where
         match tokio::time::timeout_at(deadline, rd.read_buf(&mut inb)).await {
             Ok(Ok(n)) if n > 0 => {}
             Ok(Err(e)) => return Err(io_err(&e)),
-            _ => return Err(MqError::new(MqCode::ProtocolHeader, "no AMQP header after SASL")),
+            _ => {
+                return Err(MqError::new(
+                    MqCode::ProtocolHeader,
+                    "no AMQP header after SASL",
+                ));
+            }
         }
     }
     let header = inb.split_to(8);
     if header[..] != AMQP_10 {
         out.extend_from_slice(&AMQP_10);
         let _ = write(&mut wr, &mut out).await;
-        return Err(MqError::new(MqCode::ProtocolHeader, "expected AMQP 0 1 0 0 after SASL"));
+        return Err(MqError::new(
+            MqCode::ProtocolHeader,
+            "expected AMQP 0 1 0 0 after SASL",
+        ));
     }
     out.extend_from_slice(&AMQP_10);
     write(&mut wr, &mut out).await?;
-    let f = next_frame(&mut rd, &mut inb, cfg.frame_max.max(MIN_MAX_FRAME_SIZE), deadline).await?;
+    let f = next_frame(
+        &mut rd,
+        &mut inb,
+        cfg.frame_max.max(MIN_MAX_FRAME_SIZE),
+        deadline,
+    )
+    .await?;
     let Performative::Open {
         hostname,
         max_frame_size,
@@ -254,7 +280,9 @@ where
         epochs: 0,
         reply_slots: 0,
     };
-    let peer_idle = idle_timeout.filter(|t| *t > 0).map(|t| Duration::from_millis(u64::from(t)));
+    let peer_idle = idle_timeout
+        .filter(|t| *t > 0)
+        .map(|t| Duration::from_millis(u64::from(t)));
     let r = conn
         .serve(&mut rd, &mut wr, inb, events, close, peer_idle, our_idle)
         .await;
@@ -338,8 +366,6 @@ struct Conn<'s> {
     reply_slots: u16,
 }
 
-type HResult = Result<(), MqError>;
-
 impl Conn<'_> {
     fn cx(&self, ch: u16) -> OpCtx {
         OpCtx {
@@ -369,7 +395,8 @@ impl Conn<'_> {
         W: AsyncWrite + Unpin,
     {
         let send_every = peer_idle.map(|d| d / 2);
-        let recv_limit = (our_idle_ms > 0).then(|| Duration::from_millis(u64::from(our_idle_ms)) * 2);
+        let recv_limit =
+            (our_idle_ms > 0).then(|| Duration::from_millis(u64::from(our_idle_ms)) * 2);
         let tick = send_every
             .into_iter()
             .chain(recv_limit.map(|d| d / 4))
@@ -421,22 +448,20 @@ impl Conn<'_> {
                         }
                     }
                 }
-                Some(ev) = events.recv() => self.on_event(ev),
+                Some(ev) = events.recv() => self.on_event(ev).await,
                 Some(c) = self.confirms.next(), if !self.confirms.is_empty() => self.on_confirm(c),
                 _ = ticker.tick() => {
-                    if let Some(limit) = recv_limit {
-                        if last_recv.elapsed() > limit && self.closing.is_none() {
+                    if let Some(limit) = recv_limit
+                        && last_recv.elapsed() > limit && self.closing.is_none() {
                             self.close_connection(AmqpError::new(
                                 condition::RESOURCE_LIMIT_EXCEEDED,
                                 "local-idle-timeout expired",
                             ));
                         }
-                    }
-                    if let Some(every) = send_every {
-                        if last_send.elapsed() >= every {
+                    if let Some(every) = send_every
+                        && last_send.elapsed() >= every {
                             put_heartbeat(&mut self.out);
                         }
-                    }
                 }
             }
         }
@@ -454,7 +479,10 @@ impl Conn<'_> {
     /// One frame; `Err` closes the connection.
     async fn on_frame(&mut self, f: Frame) -> Result<(), AmqpError> {
         if f.kind != FRAME_AMQP {
-            return Err(AmqpError::new(condition::FRAMING_ERROR, "SASL frame after SASL"));
+            return Err(AmqpError::new(
+                condition::FRAMING_ERROR,
+                "SASL frame after SASL",
+            ));
         }
         if f.body.is_none() {
             return Ok(()); // heartbeat
@@ -486,13 +514,22 @@ impl Conn<'_> {
                 ..
             } => {
                 if remote_channel.is_some() {
-                    return Err(AmqpError::new(condition::NOT_ALLOWED, "begin with remote-channel from a client"));
+                    return Err(AmqpError::new(
+                        condition::NOT_ALLOWED,
+                        "begin with remote-channel from a client",
+                    ));
                 }
                 if self.sessions.contains_key(&ch) {
-                    return Err(AmqpError::new(condition::NOT_ALLOWED, format!("channel {ch} already has a session")));
+                    return Err(AmqpError::new(
+                        condition::NOT_ALLOWED,
+                        format!("channel {ch} already has a session"),
+                    ));
                 }
                 if ch > self.cfg.channel_max {
-                    return Err(AmqpError::new(condition::RESOURCE_LIMIT_EXCEEDED, format!("channel {ch} above channel-max")));
+                    return Err(AmqpError::new(
+                        condition::RESOURCE_LIMIT_EXCEEDED,
+                        format!("channel {ch} above channel-max"),
+                    ));
                 }
                 self.epochs += 1;
                 self.sessions.insert(
@@ -528,7 +565,7 @@ impl Conn<'_> {
             }
             Performative::End { .. } => {
                 let ending = self.sessions.get(&ch).is_some_and(|s| s.ending);
-                self.end_session(ch);
+                self.end_session(ch).await;
                 if !ending {
                     self.send(ch, &Performative::End { error: None });
                 }
@@ -550,7 +587,12 @@ impl Conn<'_> {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn on_session(&mut self, ch: u16, p: Performative, payload: Bytes) -> Result<(), AmqpError> {
+    async fn on_session(
+        &mut self,
+        ch: u16,
+        p: Performative,
+        payload: Bytes,
+    ) -> Result<(), AmqpError> {
         match p {
             Performative::Attach {
                 name,
@@ -565,13 +607,27 @@ impl Conn<'_> {
                 ..
             } => {
                 if self.session(ch).links.contains_key(&handle) {
-                    return Err(AmqpError::new(condition::HANDLE_IN_USE, format!("handle {handle} in use")));
+                    return Err(AmqpError::new(
+                        condition::HANDLE_IN_USE,
+                        format!("handle {handle} in use"),
+                    ));
                 }
                 let echo = (source.clone(), target.clone());
                 let refused = if coordinator {
-                    Some(AmqpError::new(condition::NOT_IMPLEMENTED, MqError::new(MqCode::Amqp10Unsupported, "transactions are not supported").description()))
+                    Some(AmqpError::new(
+                        condition::NOT_IMPLEMENTED,
+                        MqError::new(MqCode::Amqp10Unsupported, "transactions are not supported")
+                            .description(),
+                    ))
                 } else if rcv_settle_mode == 1 {
-                    Some(AmqpError::new(condition::NOT_IMPLEMENTED, MqError::new(MqCode::Amqp10Unsupported, "rcv-settle-mode second is not supported").description()))
+                    Some(AmqpError::new(
+                        condition::NOT_IMPLEMENTED,
+                        MqError::new(
+                            MqCode::Amqp10Unsupported,
+                            "rcv-settle-mode second is not supported",
+                        )
+                        .description(),
+                    ))
                 } else {
                     None
                 };
@@ -580,9 +636,19 @@ impl Conn<'_> {
                     return Ok(());
                 }
                 if their_role == role::SENDER {
-                    self.attach_in(ch, name, handle, snd_settle_mode, source, target, initial_delivery_count).await;
+                    self.attach_in(
+                        ch,
+                        name,
+                        handle,
+                        snd_settle_mode,
+                        source,
+                        target,
+                        initial_delivery_count,
+                    )
+                    .await;
                 } else {
-                    self.attach_out(ch, name, handle, snd_settle_mode, source, target).await;
+                    self.attach_out(ch, name, handle, snd_settle_mode, source, target)
+                        .await;
                 }
                 Ok(())
             }
@@ -616,7 +682,7 @@ impl Conn<'_> {
                 more,
                 aborted,
                 ..
-            } => self.on_transfer(ch, handle, delivery_id, settled, more, aborted, payload),
+            } => self.on_transfer(ch, handle, delivery_id, settled, more, aborted, &payload),
             Performative::Disposition {
                 role: r,
                 first,
@@ -631,7 +697,7 @@ impl Conn<'_> {
                 Ok(())
             }
             Performative::Detach { handle, closed, .. } => {
-                self.drop_link(ch, handle);
+                self.drop_link(ch, handle).await;
                 self.send(
                     ch,
                     &Performative::Detach {
@@ -650,7 +716,9 @@ impl Conn<'_> {
     }
 
     fn session(&mut self, ch: u16) -> &mut Session {
-        self.sessions.get_mut(&ch).unwrap_or_else(|| unreachable!("checked by on_frame"))
+        self.sessions
+            .get_mut(&ch)
+            .unwrap_or_else(|| unreachable!("checked by on_frame"))
     }
 
     /// Answers an attach with a null terminus, then detaches with `e`.
@@ -724,17 +792,18 @@ impl Conn<'_> {
             Ok(None) => Ok(None),
             Ok(Some(a)) => {
                 let exists = match &a {
-                    Address::Exchange { exchange, .. } => self
-                        .vhost
-                        .declare_exchange(
-                            &cx,
-                            ExchangeSpec {
-                                name: exchange.clone(),
-                                ..ExchangeSpec::default()
-                            },
-                            true,
-                        )
-                        .await,
+                    Address::Exchange { exchange, .. } => {
+                        self.vhost
+                            .declare_exchange(
+                                &cx,
+                                ExchangeSpec {
+                                    name: exchange.clone(),
+                                    ..ExchangeSpec::default()
+                                },
+                                true,
+                            )
+                            .await
+                    }
                     Address::Queue(q) if q.starts_with(REPLY_PREFIX) => Ok(()),
                     Address::Queue(q) => self
                         .vhost
@@ -806,25 +875,37 @@ impl Conn<'_> {
     ) {
         let settled = snd_settle_mode == snd_settle::SETTLED;
         let mut src = source.clone().unwrap_or_default();
-        let volatile = src.address.is_none() && (src.dynamic || src.capabilities.iter().any(|c| c == VOLATILE));
+        let volatile = src.address.is_none()
+            && (src.dynamic || src.capabilities.iter().any(|c| c == VOLATILE));
         let consumer = ConsumerId::next();
         let mut reply_slot = None;
         let refusal = if volatile {
             if settled {
                 self.reply_slots = self.reply_slots.wrapping_add(1);
                 let slot = self.reply_slots;
-                let reply_name = self.svc.replies.register(self.key, slot, consumer, self.events_tx.clone());
+                let reply_name =
+                    self.svc
+                        .replies
+                        .register(self.key, slot, consumer, self.events_tx.clone());
                 src.address = Some(format!("/queues/{}", percent_encode(&reply_name)));
                 reply_slot = Some(slot);
                 None
             } else {
                 Some(AmqpError::new(
                     condition::NOT_ALLOWED,
-                    MqError::new(MqCode::DirectReplyTo, "a volatile reply link must be pre-settled").description(),
+                    MqError::new(
+                        MqCode::DirectReplyTo,
+                        "a volatile reply link must be pre-settled",
+                    )
+                    .description(),
                 ))
             }
         } else {
-            match src.address.as_deref().map(|a| Address::parse(a, self.cfg.legacy_addresses)) {
+            match src
+                .address
+                .as_deref()
+                .map(|a| Address::parse(a, self.cfg.legacy_addresses))
+            {
                 Some(Ok(Address::Queue(q))) => {
                     let mut arguments = crate::v091::codec::FieldTable::new();
                     if let Some(off) = stream_offset(src.filter.as_ref()) {
@@ -852,7 +933,8 @@ impl Conn<'_> {
                 }
                 Some(Ok(Address::Exchange { .. })) => Some(AmqpError::new(
                     condition::INVALID_FIELD,
-                    MqError::new(MqCode::LinkRefused, "a source must be /queues/:queue").description(),
+                    MqError::new(MqCode::LinkRefused, "a source must be /queues/:queue")
+                        .description(),
                 )),
                 Some(Err(why)) => Some(AmqpError::new(
                     condition::INVALID_FIELD,
@@ -886,7 +968,11 @@ impl Conn<'_> {
                 name,
                 handle,
                 role: role::SENDER,
-                snd_settle_mode: if settled { snd_settle::SETTLED } else { snd_settle::UNSETTLED },
+                snd_settle_mode: if settled {
+                    snd_settle::SETTLED
+                } else {
+                    snd_settle::UNSETTLED
+                },
                 rcv_settle_mode: 0,
                 source: Some(src),
                 target,
@@ -960,7 +1046,11 @@ impl Conn<'_> {
                     // credit = delivery-count(rcv) + link-credit(rcv) - delivery-count(snd)
                     let dc_rcv = delivery_count.unwrap_or(0);
                     let credit = dc_rcv.wrapping_add(lc).wrapping_sub(l.delivery_count);
-                    let credit = if credit > lc.saturating_add(1 << 20) { 0 } else { credit };
+                    let credit = if credit > lc.saturating_add(1 << 20) {
+                        0
+                    } else {
+                        credit
+                    };
                     l.credit = credit;
                     if credit > l.engine_credit {
                         vhost.credit(l.consumer, credit - l.engine_credit, drain);
@@ -991,7 +1081,7 @@ impl Conn<'_> {
         settled: Option<bool>,
         more: bool,
         aborted: bool,
-        payload: Bytes,
+        payload: &Bytes,
     ) -> Result<(), AmqpError> {
         let max = self.cfg.max_message_bytes;
         let s = self.session(ch);
@@ -1007,22 +1097,24 @@ impl Conn<'_> {
                 format!("transfer on handle {handle}, which is not a receiving link"),
             ));
         };
-        let (id, pre_settled, mut buf) = match l.partial.take() {
-            Some(p) => p,
-            None => {
-                let Some(id) = delivery_id else {
-                    return Err(AmqpError::new(condition::INVALID_FIELD, "first transfer without delivery-id"));
-                };
-                if l.credit == 0 {
-                    return Err(AmqpError::new(
-                        condition::TRANSFER_LIMIT_EXCEEDED,
-                        "transfer without link credit",
-                    ));
-                }
-                l.credit -= 1;
-                l.delivery_count = l.delivery_count.wrapping_add(1);
-                (id, settled.unwrap_or(false), BytesMut::new())
+        let (id, pre_settled, mut buf) = if let Some(p) = l.partial.take() {
+            p
+        } else {
+            let Some(id) = delivery_id else {
+                return Err(AmqpError::new(
+                    condition::INVALID_FIELD,
+                    "first transfer without delivery-id",
+                ));
+            };
+            if l.credit == 0 {
+                return Err(AmqpError::new(
+                    condition::TRANSFER_LIMIT_EXCEEDED,
+                    "transfer without link credit",
+                ));
             }
+            l.credit -= 1;
+            l.delivery_count = l.delivery_count.wrapping_add(1);
+            (id, settled.unwrap_or(false), BytesMut::new())
         };
         let pre_settled = pre_settled || settled.unwrap_or(false);
         if aborted {
@@ -1041,10 +1133,8 @@ impl Conn<'_> {
             l.returned += 1;
             self.disposition_in(ch, id, DeliveryState::Rejected(Some(amqp_error(&e))));
             // Swallow the rest of the delivery.
-            if more {
-                if let Some(Link::In(l)) = self.session(ch).links.get_mut(&handle) {
-                    l.partial = Some((id, true, BytesMut::new()));
-                }
+            if more && let Some(Link::In(l)) = self.session(ch).links.get_mut(&handle) {
+                l.partial = Some((id, true, BytesMut::new()));
             }
             return Ok(());
         }
@@ -1059,13 +1149,21 @@ impl Conn<'_> {
         if widen {
             self.session_flow(ch);
         }
-        self.publish(ch, handle, id, pre_settled, target, buf.freeze());
+        self.publish(ch, handle, id, pre_settled, target, &buf.freeze());
         Ok(())
     }
 
     /// A whole message from a publishing link.
-    fn publish(&mut self, ch: u16, handle: u32, id: u32, settled: bool, target: Option<Address>, payload: Bytes) {
-        let outcome = self.route_and_publish(ch, target, &payload);
+    fn publish(
+        &mut self,
+        ch: u16,
+        handle: u32,
+        id: u32,
+        settled: bool,
+        target: Option<Address>,
+        payload: &Bytes,
+    ) {
+        let outcome = self.route_and_publish(ch, target, payload);
         match outcome {
             Ok(Some(confirm)) => {
                 let epoch = self.session(ch).epoch;
@@ -1109,20 +1207,23 @@ impl Conn<'_> {
         target: Option<Address>,
         payload: &Bytes,
     ) -> Result<Option<BoxFuture<'static, Result<(), MqError>>>, AmqpError> {
-        let s = Sections::parse(payload).map_err(|e| AmqpError::new(condition::DECODE_ERROR, e.0))?;
-        let addr = match target {
-            Some(a) => a,
-            None => {
-                let to = s.properties.to.as_deref().ok_or_else(|| {
-                    AmqpError::new(
-                        condition::PRECONDITION_FAILED,
-                        "the anonymous terminus needs the 'to' property",
-                    )
-                })?;
-                Address::parse(to, self.cfg.legacy_addresses).map_err(|why| {
-                    AmqpError::new(condition::PRECONDITION_FAILED, MqError::new(MqCode::LinkRefused, why).description())
-                })?
-            }
+        let s =
+            Sections::parse(payload).map_err(|e| AmqpError::new(condition::DECODE_ERROR, e.0))?;
+        let addr = if let Some(a) = target {
+            a
+        } else {
+            let to = s.properties.to.as_deref().ok_or_else(|| {
+                AmqpError::new(
+                    condition::PRECONDITION_FAILED,
+                    "the anonymous terminus needs the 'to' property",
+                )
+            })?;
+            Address::parse(to, self.cfg.legacy_addresses).map_err(|why| {
+                AmqpError::new(
+                    condition::PRECONDITION_FAILED,
+                    MqError::new(MqCode::LinkRefused, why).description(),
+                )
+            })?
         };
         let (exchange, key) = addr.route();
         let msg = convert::from_10(exchange.to_owned(), key.to_owned(), &s);
@@ -1142,8 +1243,12 @@ impl Conn<'_> {
 
     fn return_credit(&mut self, ch: u16, handle: u32, n: u32) {
         let target = self.cfg.link_credit.max(1);
-        let Some(s) = self.sessions.get_mut(&ch) else { return };
-        let Some(Link::In(l)) = s.links.get_mut(&handle) else { return };
+        let Some(s) = self.sessions.get_mut(&ch) else {
+            return;
+        };
+        let Some(Link::In(l)) = s.links.get_mut(&handle) else {
+            return;
+        };
         l.returned += n;
         if l.returned >= (target / 2).max(1) {
             l.credit = l.credit.saturating_add(l.returned).min(target);
@@ -1167,7 +1272,11 @@ impl Conn<'_> {
     }
 
     fn on_confirm(&mut self, c: ConfirmDone) {
-        if self.sessions.get(&c.ch).is_none_or(|s| s.epoch != c.epoch || s.ending) {
+        if self
+            .sessions
+            .get(&c.ch)
+            .is_none_or(|s| s.epoch != c.epoch || s.ending)
+        {
             return;
         }
         let state = match c.result {
@@ -1185,10 +1294,19 @@ impl Conn<'_> {
     }
 
     /// The client settles our deliveries.
-    fn on_disposition(&mut self, ch: u16, first: u32, last: u32, settled: bool, state: Option<DeliveryState>) {
+    fn on_disposition(
+        &mut self,
+        ch: u16,
+        first: u32,
+        last: u32,
+        settled: bool,
+        state: Option<DeliveryState>,
+    ) {
         let settlement = match &state {
             Some(DeliveryState::Accepted) => Some(Settlement::Ack),
-            Some(DeliveryState::Rejected(_)) => Some(Settlement::DeadLetter(DeadLetterReason::Rejected)),
+            Some(DeliveryState::Rejected(_)) => {
+                Some(Settlement::DeadLetter(DeadLetterReason::Rejected))
+            }
             Some(DeliveryState::Released) => Some(Settlement::Requeue { failed: false }),
             Some(DeliveryState::Modified {
                 delivery_failed,
@@ -1240,7 +1358,7 @@ impl Conn<'_> {
         }
     }
 
-    fn on_event(&mut self, ev: Event) {
+    async fn on_event(&mut self, ev: Event) {
         match ev {
             Event::Deliver { consumer, delivery } => {
                 let Some(&(ch, handle)) = self.consumers.get(&consumer) else {
@@ -1250,8 +1368,10 @@ impl Conn<'_> {
                 self.deliver(ch, handle, delivery);
             }
             Event::Cancelled { consumer, reason } => {
-                let Some((ch, handle)) = self.consumers.remove(&consumer) else { return };
-                self.drop_link(ch, handle);
+                let Some((ch, handle)) = self.consumers.remove(&consumer) else {
+                    return;
+                };
+                self.drop_link(ch, handle).await;
                 let mut e = amqp_error(&reason);
                 if reason.code == MqCode::NotFound {
                     e.condition = condition::RESOURCE_DELETED.into();
@@ -1266,9 +1386,15 @@ impl Conn<'_> {
                 );
             }
             Event::Drained { consumer, credit } => {
-                let Some(&(ch, handle)) = self.consumers.get(&consumer) else { return };
-                let Some(Link::Out(l)) = self.session(ch).links.get_mut(&handle) else { return };
-                l.delivery_count = l.delivery_count.wrapping_add(l.credit.max(credit).min(l.credit));
+                let Some(&(ch, handle)) = self.consumers.get(&consumer) else {
+                    return;
+                };
+                let Some(Link::Out(l)) = self.session(ch).links.get_mut(&handle) else {
+                    return;
+                };
+                l.delivery_count = l
+                    .delivery_count
+                    .wrapping_add(l.credit.max(credit).min(l.credit));
                 l.credit = 0;
                 l.engine_credit = 0;
                 let dc = l.delivery_count;
@@ -1295,8 +1421,10 @@ impl Conn<'_> {
 
     fn requeue(&self, d: &Delivery) {
         if d.id != DeliveryId::default() {
-            self.vhost
-                .settle(&self.cx(0), vec![(d.id, Settlement::Requeue { failed: false })]);
+            self.vhost.settle(
+                &self.cx(0),
+                vec![(d.id, Settlement::Requeue { failed: false })],
+            );
         }
     }
 
@@ -1321,7 +1449,7 @@ impl Conn<'_> {
         l.engine_credit = l.engine_credit.saturating_sub(1);
         l.delivery_count = l.delivery_count.wrapping_add(1);
         if s.pending.is_empty() && self.window_open(ch) {
-            self.send_transfer(ch, handle, d);
+            self.send_transfer(ch, handle, &d);
         } else {
             self.session(ch).pending.push_back((handle, d));
         }
@@ -1329,20 +1457,24 @@ impl Conn<'_> {
 
     fn window_open(&mut self, ch: u16) -> bool {
         let s = self.session(ch);
-        let limit = s.remote_next_incoming_id.wrapping_add(s.remote_incoming_window);
+        let limit = s
+            .remote_next_incoming_id
+            .wrapping_add(s.remote_incoming_window);
         // Serial-number comparison: next_outgoing_id < limit.
-        limit.wrapping_sub(s.next_outgoing_id) as i32 > 0
+        limit.wrapping_sub(s.next_outgoing_id).cast_signed() > 0
     }
 
     fn send_pending(&mut self, ch: u16) {
         while self.window_open(ch) {
-            let Some((handle, d)) = self.session(ch).pending.pop_front() else { break };
-            self.send_transfer(ch, handle, d);
+            let Some((handle, d)) = self.session(ch).pending.pop_front() else {
+                break;
+            };
+            self.send_transfer(ch, handle, &d);
         }
     }
 
-    fn send_transfer(&mut self, ch: u16, handle: u32, d: Delivery) {
-        let payload = match convert::to_10(&d) {
+    fn send_transfer(&mut self, ch: u16, handle: u32, d: &Delivery) {
+        let payload = match convert::to_10(d) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, queue = %d.queue, "undeliverable stored message dead-lettered");
@@ -1393,10 +1525,14 @@ impl Conn<'_> {
 
     /// Ends a link: its consumer ends and its unsettled deliveries are
     /// requeued.
-    fn drop_link(&mut self, ch: u16, handle: u32) {
+    async fn drop_link(&mut self, ch: u16, handle: u32) {
         let cx = self.cx(ch);
-        let Some(s) = self.sessions.get_mut(&ch) else { return };
-        let Some(link) = s.links.remove(&handle) else { return };
+        let Some(s) = self.sessions.get_mut(&ch) else {
+            return;
+        };
+        let Some(link) = s.links.remove(&handle) else {
+            return;
+        };
         if let Link::Out(l) = link {
             let ids: Vec<u32> = s
                 .unsettled
@@ -1406,7 +1542,11 @@ impl Conn<'_> {
                 .collect();
             let mut batch: Vec<(DeliveryId, Settlement)> = ids
                 .iter()
-                .filter_map(|k| s.unsettled.remove(k).map(|(_, d)| (d, Settlement::Requeue { failed: false })))
+                .filter_map(|k| {
+                    s.unsettled
+                        .remove(k)
+                        .map(|(_, d)| (d, Settlement::Requeue { failed: false }))
+                })
                 .collect();
             let pending: VecDeque<(u32, Delivery)> = std::mem::take(&mut s.pending);
             for (h, d) in pending {
@@ -1420,9 +1560,7 @@ impl Conn<'_> {
             if let Some(slot) = l.reply_slot {
                 self.svc.replies.unregister(self.key, slot);
             } else {
-                let vhost = Arc::clone(&self.vhost);
-                let cx2 = cx.clone();
-                tokio::spawn(async move { vhost.cancel(&cx2, l.consumer).await });
+                self.vhost.cancel(&cx, l.consumer).await;
             }
             batch.retain(|(id, _)| *id != DeliveryId::default());
             if !batch.is_empty() {
@@ -1431,14 +1569,14 @@ impl Conn<'_> {
         }
     }
 
-    fn end_session(&mut self, ch: u16) {
+    async fn end_session(&mut self, ch: u16) {
         let handles: Vec<u32> = self
             .sessions
             .get(&ch)
             .map(|s| s.links.keys().copied().collect())
             .unwrap_or_default();
         for h in handles {
-            self.drop_link(ch, h);
+            self.drop_link(ch, h).await;
         }
         self.sessions.remove(&ch);
     }
@@ -1446,7 +1584,7 @@ impl Conn<'_> {
     async fn teardown(&mut self) {
         let chans: Vec<u16> = self.sessions.keys().copied().collect();
         for ch in chans {
-            self.end_session(ch);
+            self.end_session(ch).await;
         }
         self.svc.replies.unregister_conn(self.key);
         self.vhost.connection_closed(self.key).await;
@@ -1456,7 +1594,9 @@ impl Conn<'_> {
 /// `rabbitmq:stream-offset-spec` from a source filter, as the 0-9-1
 /// `x-stream-offset` argument.
 fn stream_offset(filter: Option<&Value>) -> Option<FieldValue> {
-    let Some(Value::Map(m)) = filter else { return None };
+    let Some(Value::Map(m)) = filter else {
+        return None;
+    };
     m.iter().find_map(|(k, v)| {
         if k.as_str() != Some("rabbitmq:stream-offset-spec") {
             return None;

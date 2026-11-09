@@ -8,6 +8,8 @@
 //! [`Sections::parse`] records where the bare message starts, so it can be
 //! stored and delivered byte for byte.
 
+use std::fmt::Write as _;
+
 use bytes::{Bytes, BytesMut};
 
 use super::types::{DResult, DecodeError, Value};
@@ -148,7 +150,9 @@ impl Properties {
             absolute_expiry_time: t(8),
             creation_time: t(9),
             group_id: s(10),
-            group_sequence: get(11).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()),
+            group_sequence: get(11)
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok()),
             reply_to_group_id: s(12),
         }
     }
@@ -239,7 +243,9 @@ impl Sections {
                             .and_then(Value::as_u64)
                             .and_then(|p| u8::try_from(p).ok())
                             .unwrap_or(4),
-                        ttl: get(2).and_then(Value::as_u64).and_then(|t| u32::try_from(t).ok()),
+                        ttl: get(2)
+                            .and_then(Value::as_u64)
+                            .and_then(|t| u32::try_from(t).ok()),
                         first_acquirer: get(3).and_then(Value::as_bool).unwrap_or(false),
                         delivery_count: get(4)
                             .and_then(Value::as_u64)
@@ -247,7 +253,6 @@ impl Sections {
                             .unwrap_or(0),
                     });
                 }
-                section::DELIVERY_ANNOTATIONS | section::FOOTER => {}
                 section::MESSAGE_ANNOTATIONS => message_annotations = map_entries(inner)?,
                 section::PROPERTIES => {
                     properties = Properties::from_fields(v.fields().unwrap_or(&[]));
@@ -264,6 +269,7 @@ impl Sections {
                 }
                 section::DATA | section::AMQP_SEQUENCE | section::AMQP_VALUE => {
                     if matches!(body, Body::Value(_))
+                        || (code == section::AMQP_VALUE && !matches!(body, Body::Empty))
                         || (code == section::DATA && matches!(body, Body::Sequence(_)))
                         || (code == section::AMQP_SEQUENCE && matches!(body, Body::Data(_)))
                     {
@@ -326,7 +332,10 @@ pub fn application_properties_section(entries: Vec<(String, Value)>) -> Value {
     Value::Described(
         Box::new(Value::Ulong(section::APPLICATION_PROPERTIES)),
         Box::new(Value::Map(
-            entries.into_iter().map(|(k, v)| (Value::String(k), v)).collect(),
+            entries
+                .into_iter()
+                .map(|(k, v)| (Value::String(k), v))
+                .collect(),
         )),
     )
 }
@@ -334,7 +343,10 @@ pub fn application_properties_section(entries: Vec<(String, Value)>) -> Value {
 /// Encodes a `data` section.
 #[must_use]
 pub fn data_section(b: Bytes) -> Value {
-    Value::Described(Box::new(Value::Ulong(section::DATA)), Box::new(Value::Binary(b)))
+    Value::Described(
+        Box::new(Value::Ulong(section::DATA)),
+        Box::new(Value::Binary(b)),
+    )
 }
 
 /// Encodes an `amqp-value` section.
@@ -376,7 +388,8 @@ impl Address {
     /// The reason it is refused (39272).
     pub fn parse(addr: &str, legacy: bool) -> Result<Address, String> {
         let segs: Vec<&str> = addr.split('/').collect();
-        let dec = |s: &str| percent_decode(s).ok_or_else(|| format!("bad percent-encoding in '{addr}'"));
+        let dec =
+            |s: &str| percent_decode(s).ok_or_else(|| format!("bad percent-encoding in '{addr}'"));
         match segs.as_slice() {
             ["", "exchanges", e] | ["", "exchanges", e, _] => {
                 let exchange = dec(e)?;
@@ -445,7 +458,7 @@ pub fn percent_encode(s: &str) -> String {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
             out.push(char::from(b));
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out
@@ -498,7 +511,10 @@ mod tests {
         assert!(p("/queues/").is_err());
         assert!(p("orders").is_err());
         assert!(p("/queues/%zz").is_err());
-        assert_eq!(Address::parse("orders", true), Ok(Address::Queue("orders".into())));
+        assert_eq!(
+            Address::parse("orders", true),
+            Ok(Address::Queue("orders".into()))
+        );
         assert_eq!(
             Address::parse("/amq/queue/orders", true),
             Ok(Address::Queue("orders".into()))
@@ -538,7 +554,10 @@ mod tests {
         let s = Sections::parse(&payload).unwrap();
         assert_eq!(s.header.as_ref().unwrap(), &header);
         assert_eq!(s.properties, props);
-        assert_eq!(s.application_properties, vec![("k".into(), Value::str("v"))]);
+        assert_eq!(
+            s.application_properties,
+            vec![("k".into(), Value::str("v"))]
+        );
         assert_eq!(
             s.body,
             Body::Data(vec![Bytes::from_static(b"one"), Bytes::from_static(b"two")])
@@ -550,10 +569,7 @@ mod tests {
         let bad = encode_sections(&[props.to_value(), header.to_value()]);
         assert!(Sections::parse(&bad).is_err());
         // Mixed body.
-        let bad = encode_sections(&[
-            data_section(Bytes::new()),
-            value_section(Value::Null),
-        ]);
+        let bad = encode_sections(&[data_section(Bytes::new()), value_section(Value::Null)]);
         assert!(Sections::parse(&bad).is_err());
         // Not a section.
         assert!(Sections::parse(&Bytes::from_static(&[0x40])).is_err());

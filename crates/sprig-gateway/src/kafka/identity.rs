@@ -7,25 +7,24 @@
 //!   verifiers; then the policy order, lockout counters, failure delays and
 //!   audit.
 //! - **SCRAM-SHA-256 and SCRAM-SHA-512** resolve the account the same way,
-//!   read its `scram_sha_256` (or `scram_sha_512`) verifier from the tenant
-//!   catalog's `verifiers` table, run the exchange, and then the same
-//!   policy order on the result. An account without such a verifier, or an
-//!   unknown one, gets a decoy salt (stable per name) and fails at the
-//!   proof, so probes can't tell them apart.
+//!   take its `scram_sha_256` (or `scram_sha_512`) verifier from the
+//!   tenant's auth cache (chapter 14 stores both with every password), run
+//!   the exchange, and then the same policy order on the result. With a
+//!   retained second password (`RETAIN CURRENT PASSWORD`) sharing the
+//!   primary's salt, the proof may match either. An account without such
+//!   a verifier, or an unknown one, gets a decoy salt (stable per name) and
+//!   fails at the proof, so probes can't tell them apart.
 //!
-//! Chapter 14 doesn't write SCRAM verifiers yet (its `verifiers.mechanism`
-//! has `scram_sha_256` but no `scram_sha_512`, and setting a password
-//! stores only `caching_sha2_password` and native verifiers), so until it
-//! does, SCRAM works for accounts whose verifier rows were written some
-//! other way, and PLAIN over TLS works for everyone.
+//! Accounts whose password was set before SCRAM verifiers were stored get
+//! them at their next successful PLAIN login (or MySQL full or HTTP Basic
+//! login): chapter 14's upgrade on login. Logins are labelled `kafka` in
+//! metrics and audit events.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mysql_async::prelude::Queryable;
 use sprig_auth::mysql::{LoginRequest, LoginService, MysqlLogin, Principal as AuthPrincipal};
-use sprig_catalog::CatalogLocator;
-use sprig_common::ids::TenantId;
+use sprig_auth::scram::{DEFAULT_SCRAM_ITERATIONS, ScramKind};
 use sprig_proto_kafka::broker::{AuthFailure, ConnInfo, Identity, ScramFinish, ScramLookup};
 use sprig_proto_kafka::sasl::{PlainCredentials, ScramCredential, ScramMechanism};
 use sprig_proto_kafka::topics::Principal;
@@ -33,18 +32,12 @@ use sprig_proto_mysql::Persona;
 use sprig_proto_mysql::auth::{AuthPath, AuthVerdict, LoginFlow, Outcome};
 use zeroize::Zeroizing;
 
-use crate::tenant::TenantServices;
-
-/// `salt, iterations, stored_key, server_key` of a `verifiers` row.
-type VerifierCols = (Vec<u8>, u32, Vec<u8>, Vec<u8>);
-
-/// SCRAM iterations of decoys (chapter 14's SCRAM-SHA-256 default).
-const DECOY_ITERATIONS: u32 = 15_000;
+/// SCRAM iterations of decoys (chapter 14's default).
+const DECOY_ITERATIONS: u32 = DEFAULT_SCRAM_ITERATIONS;
 
 /// Logins for the Kafka listener.
 pub struct KafkaIdentity {
     svc: Arc<LoginService>,
-    tenants: Option<Arc<TenantServices>>,
     decoy_secret: [u8; 32],
 }
 
@@ -55,21 +48,17 @@ impl std::fmt::Debug for KafkaIdentity {
 }
 
 impl KafkaIdentity {
-    /// Logins through `svc`; SCRAM verifiers from `tenants`' catalogs.
+    /// Logins through `svc`, with SCRAM verifiers from its tenant caches.
     #[must_use]
-    pub fn new(svc: Arc<LoginService>, tenants: Option<Arc<TenantServices>>) -> Self {
+    pub fn new(svc: Arc<LoginService>) -> Self {
         let mut decoy_secret = [0u8; 32];
         let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut decoy_secret);
-        Self {
-            svc,
-            tenants,
-            decoy_secret,
-        }
+        Self { svc, decoy_secret }
     }
 
     async fn start(&self, c: &ConnInfo, user: &str) -> MysqlLogin {
         self.svc
-            .start_http(LoginRequest {
+            .start_kafka(LoginRequest {
                 persona: Persona::MySql84,
                 login_name: user.as_bytes().to_vec(),
                 sni: c.sni.clone(),
@@ -79,46 +68,6 @@ impl KafkaIdentity {
                 can_handle_expired_password: false,
             })
             .await
-    }
-
-    /// The account's SCRAM verifier, read from its tenant catalog.
-    async fn verifier(
-        &self,
-        tenant: TenantId,
-        user_id: u32,
-        mech: ScramMechanism,
-    ) -> Option<ScramCredential> {
-        let svc = self.tenants.as_ref()?;
-        let ep = svc.locator.writer(tenant).await.ok()?;
-        let mut conn = ep.pool.get_conn().await.ok()?;
-        let mechanism = match mech {
-            ScramMechanism::Sha256 => "scram_sha_256",
-            ScramMechanism::Sha512 => "scram_sha_512",
-        };
-        let row: Option<VerifierCols> = conn
-            .exec_first(
-                format!(
-                    "SELECT salt, iterations, stored_key, server_key FROM `{}`.verifiers \
-                     WHERE user_id = ? AND CAST(mechanism AS CHAR) = ? AND slot = 'primary' \
-                     AND salt IS NOT NULL AND stored_key IS NOT NULL AND server_key IS NOT NULL \
-                     ORDER BY verifier_id DESC LIMIT 1",
-                    ep.store.schema()
-                ),
-                (user_id, mechanism),
-            )
-            .await
-            .ok()
-            .flatten();
-        let (salt, iterations, stored_key, server_key) = row?;
-        (stored_key.len() == mech.len() && server_key.len() == mech.len()).then_some(
-            ScramCredential {
-                mechanism: mech,
-                salt,
-                iterations,
-                stored_key,
-                server_key,
-            },
-        )
     }
 }
 
@@ -180,10 +129,21 @@ impl Identity for KafkaIdentity {
     async fn scram(&self, c: &ConnInfo, mech: ScramMechanism, user: &str) -> ScramLookup {
         let admitted = self.svc.admit(c.peer.ip()).is_ok();
         let login = self.start(c, user).await;
-        let real = match login.account() {
-            Some((t, u)) if admitted => self.verifier(t, u.0, mech).await,
-            _ => None,
+        let kind = match mech {
+            ScramMechanism::Sha256 => ScramKind::Sha256,
+            ScramMechanism::Sha512 => ScramKind::Sha512,
         };
+        let real = login
+            .scram_credential(kind)
+            .filter(|_| admitted)
+            .map(|(v, secondary)| ScramCredential {
+                mechanism: mech,
+                salt: v.salt().to_vec(),
+                iterations: v.iterations(),
+                stored_key: v.stored_key().to_vec(),
+                server_key: v.server_key().to_vec(),
+                secondary: secondary.map(|s| (s.stored_key().to_vec(), s.server_key().to_vec())),
+            });
         let seed = format!("{}/{user}", c.sni.as_deref().unwrap_or(""));
         let credential = real.clone().unwrap_or_else(|| {
             ScramCredential::decoy(mech, &self.decoy_secret, &seed, DECOY_ITERATIONS)

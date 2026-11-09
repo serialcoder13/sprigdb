@@ -103,7 +103,8 @@ pub enum TlsVersion {
 /// depends on.
 #[derive(Debug, Clone)]
 pub struct ListenerSpec {
-    /// `mysql`, `mariadb`, `http`, `https`, `mongo`, `redis`, `bolt`, `kafka`.
+    /// `mysql`, `mariadb`, `http`, `https`, `mongo`, `redis`, `bolt`, `kafka`,
+    /// `amqp`, `amqps`.
     pub name: &'static str,
     /// The protocol, which picks the front end.
     pub protocol: Protocol,

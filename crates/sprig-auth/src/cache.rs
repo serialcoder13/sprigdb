@@ -18,12 +18,12 @@
 //! are few. An incremental load equals a full load at the same version.
 //!
 //! **What is kept.** Live accounts in matching order per name, their
-//! primary and secondary `caching_sha2_password` and
-//! `mysql_native_password` verifiers (never history verifiers, which only
-//! password changes read, from the catalog) and temporary locks. SCRAM
-//! verifiers arrive with chapter 14 step 15. A verifier that doesn't parse
-//! is left out and logged; the account then fails its logins as with a
-//! wrong password.
+//! primary and secondary `caching_sha2_password`, `mysql_native_password`,
+//! SCRAM-SHA-256 and SCRAM-SHA-512 verifiers (never history verifiers,
+//! which only password changes read, from the catalog) and temporary
+//! locks. A verifier that doesn't parse is left out and logged; the
+//! account then fails its logins as with a wrong password. SCRAM-SHA-1
+//! verifiers arrive with chapter 14 step 15.
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -39,6 +39,7 @@ use sprig_common::ids::UserId;
 
 use crate::account::HostPattern;
 use crate::apikey::{ApiKey, ApiKeyRow};
+use crate::scram::{ScramKind, ScramVerifier};
 use crate::store::{
     AUTH_MIGRATIONS, AuthStore, MODULE, Slot, TempLock, UserRow, VerifierKind, VerifierRow,
 };
@@ -67,6 +68,9 @@ pub struct AuthUser {
     pub caching_sha2: Vec<SlotVerifier<CachingSha2Verifier>>,
     /// `mysql_native_password` verifiers: primary first, then secondary.
     pub native: Vec<SlotVerifier<NativeVerifier>>,
+    /// SCRAM-SHA-256 and SCRAM-SHA-512 verifiers: primary first, then
+    /// secondary.
+    pub scram: Vec<SlotVerifier<ScramVerifier>>,
 }
 
 impl AuthUser {
@@ -77,6 +81,7 @@ impl AuthUser {
     pub fn new(row: UserRow, verifiers: &[VerifierRow]) -> (Self, usize) {
         let mut sha2 = Vec::new();
         let mut native = Vec::new();
+        let mut scram = Vec::new();
         let mut bad = 0;
         for v in verifiers
             .iter()
@@ -100,11 +105,22 @@ impl AuthUser {
                     }),
                     _ => bad += 1,
                 },
-                VerifierKind::ScramSha256 | VerifierKind::ScramSha1 => {}
+                VerifierKind::ScramSha256 | VerifierKind::ScramSha512 => {
+                    match ScramVerifier::from_row(v) {
+                        Ok(verifier) => scram.push(SlotVerifier {
+                            id: v.verifier_id,
+                            slot: v.slot,
+                            verifier,
+                        }),
+                        Err(_) => bad += 1,
+                    }
+                }
+                VerifierKind::ScramSha1 => {}
             }
         }
         sha2.sort_by_key(|v| (v.slot, v.id));
         native.sort_by_key(|v| (v.slot, v.id));
+        scram.sort_by_key(|v| (v.slot, v.id));
         if bad > 0 {
             tracing::warn!(user_id = %row.user_id, bad, "auth cache: verifiers that don't parse are ignored");
         }
@@ -114,9 +130,27 @@ impl AuthUser {
                 row,
                 caching_sha2: sha2,
                 native,
+                scram,
             },
             bad,
         )
+    }
+
+    /// The SCRAM verifier of `kind` in `slot`, if any (the newest, should
+    /// there be several).
+    #[must_use]
+    pub fn scram(&self, kind: ScramKind, slot: Slot) -> Option<&ScramVerifier> {
+        self.scram
+            .iter()
+            .rev()
+            .find(|v| v.slot == slot && v.verifier.kind() == kind)
+            .map(|v| &v.verifier)
+    }
+
+    /// Whether `slot` has a SCRAM verifier of `kind`.
+    #[must_use]
+    pub fn has_scram(&self, kind: ScramKind, slot: Slot) -> bool {
+        self.scram(kind, slot).is_some()
     }
 
     fn bytes(&self) -> usize {
@@ -128,6 +162,7 @@ impl AuthUser {
             + self.caching_sha2.len()
                 * (std::mem::size_of::<SlotVerifier<CachingSha2Verifier>>() + 70)
             + self.native.len() * std::mem::size_of::<SlotVerifier<NativeVerifier>>()
+            + self.scram.len() * (std::mem::size_of::<SlotVerifier<ScramVerifier>>() + 160)
     }
 }
 

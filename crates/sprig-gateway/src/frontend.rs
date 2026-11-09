@@ -41,6 +41,8 @@ pub enum Protocol {
     Bolt,
     /// Kafka protocol, 9092 (R9).
     Kafka,
+    /// AMQP 0-9-1 and 1.0, 5672 and 5671 (R9).
+    Amqp,
 }
 
 impl Protocol {
@@ -74,6 +76,7 @@ impl Protocol {
             Protocol::Http => "http",
             Protocol::Bolt => "bolt",
             Protocol::Kafka => "kafka",
+            Protocol::Amqp => "amqp",
         }
     }
 }

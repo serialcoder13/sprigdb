@@ -159,7 +159,10 @@ impl Fields<'_> {
     fn symbols(&self, i: usize) -> Vec<String> {
         match self.get(i) {
             Value::Symbol(s) => vec![s.clone()],
-            Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
+            Value::Array(a) => a
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -223,7 +226,10 @@ impl AmqpError {
         if v.is_null() {
             return Ok(None);
         }
-        let f = Fields(v.fields().ok_or_else(|| DecodeError("error is not a list".into()))?);
+        let f = Fields(
+            v.fields()
+                .ok_or_else(|| DecodeError("error is not a list".into()))?,
+        );
         Ok(Some(Self {
             condition: f.str(0)?,
             description: f.opt_str(1)?,
@@ -368,7 +374,10 @@ impl Source {
         if v.is_null() {
             return Ok(None);
         }
-        let f = Fields(v.fields().ok_or_else(|| DecodeError("source is not a list".into()))?);
+        let f = Fields(
+            v.fields()
+                .ok_or_else(|| DecodeError("source is not a list".into()))?,
+        );
         Ok(Some(Self {
             address: f.opt_str(0)?,
             durable: f.opt_u32(1)?.unwrap_or(0),
@@ -424,7 +433,10 @@ impl Target {
         if v.descriptor() == Some(0x30) {
             return Err(DecodeError("coordinator".into()));
         }
-        let f = Fields(v.fields().ok_or_else(|| DecodeError("target is not a list".into()))?);
+        let f = Fields(
+            v.fields()
+                .ok_or_else(|| DecodeError("target is not a list".into()))?,
+        );
         Ok(Some(Self {
             address: f.opt_str(0)?,
             durable: f.opt_u32(1)?.unwrap_or(0),
@@ -456,6 +468,7 @@ pub mod snd_settle {
 }
 
 /// A transport or SASL performative.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 #[allow(missing_docs)]
 pub enum Performative {
@@ -763,12 +776,17 @@ impl Performative {
                 handle,
                 closed,
                 error,
-            } => Value::composite(0x16, vec![Value::Uint(*handle), Value::Bool(*closed), err(error)]),
+            } => Value::composite(
+                0x16,
+                vec![Value::Uint(*handle), Value::Bool(*closed), err(error)],
+            ),
             Performative::End { error } => Value::composite(0x17, vec![err(error)]),
             Performative::Close { error } => Value::composite(0x18, vec![err(error)]),
             Performative::SaslMechanisms { mechanisms } => Value::composite(
                 0x40,
-                vec![Value::Array(mechanisms.iter().map(|m| Value::sym(m)).collect())],
+                vec![Value::Array(
+                    mechanisms.iter().map(|m| Value::sym(m)).collect(),
+                )],
             ),
             Performative::SaslInit {
                 mechanism,
@@ -793,7 +811,10 @@ impl Performative {
                 additional_data,
             } => Value::composite(
                 0x44,
-                vec![Value::Ubyte(*code), opt(additional_data.clone(), Value::Binary)],
+                vec![
+                    Value::Ubyte(*code),
+                    opt(additional_data.clone(), Value::Binary),
+                ],
             ),
         }
     }
@@ -843,7 +864,9 @@ impl Performative {
                 Performative::Attach {
                     name: f.str(0)?,
                     handle: f.u32(1)?,
-                    role: f.opt_bool(2)?.ok_or_else(|| bad(2, "a mandatory boolean"))?,
+                    role: f
+                        .opt_bool(2)?
+                        .ok_or_else(|| bad(2, "a mandatory boolean"))?,
                     snd_settle_mode: f
                         .opt_u32(3)?
                         .map_or(snd_settle::MIXED, |m| u8::try_from(m).unwrap_or(u8::MAX)),
@@ -889,7 +912,9 @@ impl Performative {
                 batchable: f.bool(10, false)?,
             },
             0x15 => Performative::Disposition {
-                role: f.opt_bool(0)?.ok_or_else(|| bad(0, "a mandatory boolean"))?,
+                role: f
+                    .opt_bool(0)?
+                    .ok_or_else(|| bad(0, "a mandatory boolean"))?,
                 first: f.u32(1)?,
                 last: f.opt_u32(2)?,
                 settled: f.bool(3, false)?,
@@ -922,9 +947,9 @@ impl Performative {
                 response: f.opt_bin(0)?.unwrap_or_default(),
             },
             0x44 => Performative::SaslOutcome {
-                code: f
-                    .opt_u32(0)?
-                    .map_or(sasl_code::SYS, |c| u8::try_from(c).unwrap_or(sasl_code::SYS)),
+                code: f.opt_u32(0)?.map_or(sasl_code::SYS, |c| {
+                    u8::try_from(c).unwrap_or(sasl_code::SYS)
+                }),
                 additional_data: f.opt_bin(1)?,
             },
             other => return Err(DecodeError(format!("unknown performative {other:#x}"))),
@@ -953,7 +978,10 @@ mod tests {
             idle_timeout: Some(60_000),
             offered_capabilities: vec!["ANONYMOUS-RELAY".into()],
             desired_capabilities: vec![],
-            properties: Some(Value::Map(vec![(Value::sym("product"), Value::str("SprigDB"))])),
+            properties: Some(Value::Map(vec![(
+                Value::sym("product"),
+                Value::str("SprigDB"),
+            )])),
         });
         rt(&Performative::Begin {
             remote_channel: Some(0),
@@ -1064,7 +1092,13 @@ mod tests {
         assert!(f.body.is_none());
         // close() on channel 0: 00 00 00 0c 02 00 00 00 | 00 53 18 45.
         let mut b = BytesMut::new();
-        put_frame(&mut b, FRAME_AMQP, 0, &Performative::Close { error: None }.to_value(), &[]);
+        put_frame(
+            &mut b,
+            FRAME_AMQP,
+            0,
+            &Performative::Close { error: None }.to_value(),
+            &[],
+        );
         assert_eq!(&b[..], &[0, 0, 0, 12, 2, 0, 0, 0, 0x00, 0x53, 0x18, 0x45]);
         let f = Frame::parse(&mut b, 0).unwrap().unwrap();
         assert_eq!(
@@ -1072,7 +1106,11 @@ mod tests {
             Performative::Close { error: None }
         );
         // An extended header (doff 3) is skipped.
-        let mut b = BytesMut::from(&[0u8, 0, 0, 16, 3, 0, 0, 1, 9, 9, 9, 9, 0x00, 0x53, 0x18, 0x45][..]);
+        let mut b = BytesMut::from(
+            &[
+                0u8, 0, 0, 16, 3, 0, 0, 1, 9, 9, 9, 9, 0x00, 0x53, 0x18, 0x45,
+            ][..],
+        );
         let f = Frame::parse(&mut b, 0).unwrap().unwrap();
         assert_eq!(f.channel, 1);
         // Bad sizes.

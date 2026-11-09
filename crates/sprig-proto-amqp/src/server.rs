@@ -99,7 +99,12 @@ where
     match tokio::time::timeout(cfg.handshake_timeout, io.read_exact(&mut header)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => return Err(io_err(&e)),
-        Err(_) => return Err(MqError::new(MqCode::ProtocolHeader, "no protocol header in time")),
+        Err(_) => {
+            return Err(MqError::new(
+                MqCode::ProtocolHeader,
+                "no protocol header in time",
+            ));
+        }
     }
     let detected = Detected::of(&header);
     if let Some(reply) = detected.refusal() {
