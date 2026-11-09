@@ -24,6 +24,8 @@
 //!   the gateway side).
 //! - [`settings_stmt`]: settings in SQL (chapter 08 step 8): `SPRIG SET`,
 //!   `RESET`, `BOUNDS`, `SHOW SPRIG SETTINGS` and `ALTER TENANT <name>`.
+//! - [`pin_stmt`]: sharding pins and advice (chapter 16 steps 7 and 8):
+//!   `SPRIG PIN`, `SPRIG UNPIN`, `SPRIG SHOW ADVICE` and `SPRIG SHOW PINS`.
 //! - [`compat`]: the translator's R0 subset (chapter 28 build steps 1 to
 //!   5): executable comments, emulated variables, the collation map, the
 //!   persona-shaped `information_schema` providers and `SHOW` rewrites,
@@ -34,4 +36,5 @@ pub mod account_stmt;
 pub mod compat;
 pub mod lex;
 pub mod names;
+pub mod pin_stmt;
 pub mod settings_stmt;

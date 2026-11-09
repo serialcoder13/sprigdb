@@ -19,6 +19,11 @@
 //! 4. Every tenant's rows, read through the gateway and on the cluster
 //!    that holds it, equal what the writer wrote.
 //!
+//! With `SPRIG_TEST_BALANCER_PIN=<tenant>`, that tenant is pinned
+//! (`sprigctl tenant pin`) before `auto`: it must not move, a decision must
+//! say it was kept by its pin, and at the end `sprigctl shard move` moves
+//! it to the emptiest cluster (an operator decision).
+//!
 //! It prints the fleet before and after, every move with its decision, the
 //! rejected moves' reasons and `explain placement` / `explain decision`.
 

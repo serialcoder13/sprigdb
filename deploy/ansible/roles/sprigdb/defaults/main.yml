@@ -1,0 +1,19 @@
+---
+# SprigDB on VMs (chapter 27, "VM packaging"). Untested: Ansible and
+# Molecule aren't installed where this role was written.
+sprigdb_version: "0.0.1"
+# Where the packages come from: a local file pushed to the host, or a
+# repository the host already has.
+sprigdb_package_dir: "{{ playbook_dir }}/../../target/packages"
+sprigdb_dc: "{{ group_names | select('match', '^[a-z][a-z0-9-]*_(gateway|controller|worker|db|etcd)$') | map('regex_replace', '_(gateway|controller|worker|db|etcd)$', '') | first }}"
+# Roles this host runs, from its inventory groups (fra1_gateway, fra1_db, ...).
+sprigdb_roles: "{{ group_names | map('regex_replace', '^.*_', '') | list }}"
+sprigdb_deployment_id: ""
+sprigdb_dc_seeds: []
+sprigdb_global_seeds: []
+etcd_version: "3.6.5"
+etcd_archive_url: "https://github.com/etcd-io/etcd/releases/download/v{{ etcd_version }}/etcd-v{{ etcd_version }}-linux-{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}.tar.gz"
+# The deployment's CA and this host's certificate, PEM, from the operator.
+sprigdb_ca_pem: ""
+sprigdb_cert_pem: ""
+sprigdb_key_pem: ""

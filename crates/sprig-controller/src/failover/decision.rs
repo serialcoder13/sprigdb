@@ -102,8 +102,10 @@ pub struct TenantCandidate {
     /// Writers (`cluster/addr`) of the clusters holding the tenant in the
     /// lost DC.
     pub writers: Vec<String>,
-    /// Pinned to the lost DC (residency): never moved.
+    /// Pinned to the lost DC (`sprigctl tenant pin`): never moved.
     pub pinned: bool,
+    /// The tenant's allowed DCs (chapter 26); `None`: unrestricted.
+    pub allowed_dcs: Option<BTreeSet<DcId>>,
 }
 
 /// Step 7 for one tenant.
@@ -122,7 +124,8 @@ pub enum TenantPlan {
 
 /// Step 7: skip a manual or pinned tenant, one without a standby holding
 /// every unit, one whose standby's lag is unknown or over its RPO, or one
-/// on an unsafe writer; else promote the best standby that qualifies.
+/// on an unsafe writer; else promote the best standby that qualifies and
+/// that the tenant's residency allows.
 #[must_use]
 pub fn plan_tenant(
     t: &TenantCandidate,
@@ -143,6 +146,14 @@ pub fn plan_tenant(
     }
     let mut why = Vec::new();
     for dc in &t.standby_dcs {
+        // Residency (chapter 26): a standby outside the allowed DCs is
+        // never promoted, whatever its lag.
+        if let Some(a) = &t.allowed_dcs
+            && !a.contains(dc)
+        {
+            why.push(format!("{dc}: outside the tenant's residency"));
+            continue;
+        }
         match lags.get(&(dc.clone(), t.tenant_id)) {
             None => why.push(format!("{dc}: lag unknown")),
             Some(&lag) if u128::from(lag) > t.rpo.as_millis() => why.push(format!(
@@ -188,10 +199,19 @@ mod tests {
 
     #[test]
     fn two_down_verdicts_and_no_alive_fail_over() {
-        let d = [v("ams1", VerdictKind::Down, true), v("wit1", VerdictKind::Down, true)];
+        let d = [
+            v("ams1", VerdictKind::Down, true),
+            v("wit1", VerdictKind::Down, true),
+        ];
         assert_eq!(tally(&d, 3), Tally::FailOver);
-        let one = [v("ams1", VerdictKind::Down, true), v("wit1", VerdictKind::Down, false)];
-        assert!(matches!(tally(&one, 3), Tally::Retry(_)), "a fenced observer doesn't count");
+        let one = [
+            v("ams1", VerdictKind::Down, true),
+            v("wit1", VerdictKind::Down, false),
+        ];
+        assert!(
+            matches!(tally(&one, 3), Tally::Retry(_)),
+            "a fenced observer doesn't count"
+        );
         let split = [
             v("ams1", VerdictKind::Down, true),
             v("wit1", VerdictKind::Down, true),
@@ -209,7 +229,45 @@ mod tests {
             standby_dcs: vec![dc("ams1"), dc("iad1")],
             writers: vec!["fra1-c1/10.0.0.1:3306".into()],
             pinned: false,
+            allowed_dcs: None,
         }
+    }
+
+    #[test]
+    fn a_standby_outside_the_residency_is_never_promoted() {
+        let mut l = BTreeMap::new();
+        l.insert((dc("ams1"), 42), 9200);
+        l.insert((dc("iad1"), 42), 800);
+        // iad1 is the better standby but outside the EU.
+        let t = TenantCandidate {
+            allowed_dcs: Some([dc("fra1"), dc("ams1")].into()),
+            rpo: Duration::from_secs(10),
+            ..cand()
+        };
+        assert_eq!(
+            plan_tenant(&t, &l, &BTreeSet::new()),
+            TenantPlan::Promote {
+                to: dc("ams1"),
+                lag_ms: 9200
+            }
+        );
+        // Only iad1 within the RPO: skipped, never iad1.
+        let t = TenantCandidate {
+            allowed_dcs: Some([dc("fra1"), dc("ams1")].into()),
+            ..cand()
+        };
+        assert!(
+            matches!(plan_tenant(&t, &l, &BTreeSet::new()), TenantPlan::Skip(w) if w.contains("residency"))
+        );
+        // Fail closed: an empty set promotes nothing.
+        let t = TenantCandidate {
+            allowed_dcs: Some(BTreeSet::new()),
+            ..cand()
+        };
+        assert!(matches!(
+            plan_tenant(&t, &l, &BTreeSet::new()),
+            TenantPlan::Skip(_)
+        ));
     }
 
     #[test]
@@ -225,8 +283,12 @@ mod tests {
             }
         );
         l.insert((dc("iad1"), 42), 9000);
-        assert!(matches!(plan_tenant(&cand(), &l, &BTreeSet::new()), TenantPlan::Skip(w) if w.contains("rpo")));
-        assert!(matches!(plan_tenant(&cand(), &BTreeMap::new(), &BTreeSet::new()), TenantPlan::Skip(w) if w.contains("unknown")));
+        assert!(
+            matches!(plan_tenant(&cand(), &l, &BTreeSet::new()), TenantPlan::Skip(w) if w.contains("rpo"))
+        );
+        assert!(
+            matches!(plan_tenant(&cand(), &BTreeMap::new(), &BTreeSet::new()), TenantPlan::Skip(w) if w.contains("unknown"))
+        );
     }
 
     #[test]
@@ -234,12 +296,32 @@ mod tests {
         let mut l = BTreeMap::new();
         l.insert((dc("ams1"), 42), 100);
         let u: BTreeSet<String> = ["fra1-c1/10.0.0.1:3306".to_owned()].into();
-        assert!(matches!(plan_tenant(&cand(), &l, &u), TenantPlan::Skip(w) if w.contains("self-fence")));
-        let t = TenantCandidate { manual: true, ..cand() };
-        assert!(matches!(plan_tenant(&t, &l, &BTreeSet::new()), TenantPlan::Skip(_)));
-        let t = TenantCandidate { pinned: true, ..cand() };
-        assert!(matches!(plan_tenant(&t, &l, &BTreeSet::new()), TenantPlan::Skip(_)));
-        let t = TenantCandidate { standby_dcs: vec![], ..cand() };
-        assert!(matches!(plan_tenant(&t, &l, &BTreeSet::new()), TenantPlan::Skip(_)));
+        assert!(
+            matches!(plan_tenant(&cand(), &l, &u), TenantPlan::Skip(w) if w.contains("self-fence"))
+        );
+        let t = TenantCandidate {
+            manual: true,
+            ..cand()
+        };
+        assert!(matches!(
+            plan_tenant(&t, &l, &BTreeSet::new()),
+            TenantPlan::Skip(_)
+        ));
+        let t = TenantCandidate {
+            pinned: true,
+            ..cand()
+        };
+        assert!(matches!(
+            plan_tenant(&t, &l, &BTreeSet::new()),
+            TenantPlan::Skip(_)
+        ));
+        let t = TenantCandidate {
+            standby_dcs: vec![],
+            ..cand()
+        };
+        assert!(matches!(
+            plan_tenant(&t, &l, &BTreeSet::new()),
+            TenantPlan::Skip(_)
+        ));
     }
 }

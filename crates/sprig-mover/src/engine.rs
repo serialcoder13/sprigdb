@@ -40,6 +40,8 @@ const STREAM: u16 = 0;
 const CANCEL_CHECK: Duration = Duration::from_secs(1);
 /// How often progress is written to the job record.
 const SAVE_EVERY: Duration = Duration::from_secs(2);
+/// How often the applied position is committed when nothing else is.
+const POS_COMMIT_EVERY: Duration = Duration::from_secs(1);
 /// Items buffered between the stream reader and the apply lane.
 const STREAM_BUFFER: usize = 256;
 /// Consecutive failures before a job gives up and rolls back.
@@ -79,6 +81,10 @@ impl Drop for Reader {
 }
 
 /// What one state's step decided.
+/// A retaining job with longer than this to wait is given back to the
+/// job store rather than kept in a worker slot.
+const RETAIN_HAND_BACK_MS: u64 = 120_000;
+
 enum Step {
     /// Go on with the state machine.
     Next,
@@ -106,6 +112,10 @@ pub struct Engine {
     /// Per table: the index in `pending` of its latest op, and that op's
     /// keys.
     pending_keys: std::collections::HashMap<TableId, (usize, HashSet<KeyBytes>)>,
+    /// The last batch op touching each (table name, key): tables of one
+    /// name in different source schemas share a target table in a merge
+    /// (chapter 20), so their ops on one key keep the source's order.
+    pending_names: std::collections::HashMap<(String, KeyBytes), usize>,
     pending_rows: usize,
     pending_since: Option<Instant>,
     window: Option<Window>,
@@ -120,6 +130,8 @@ pub struct Engine {
     lag_ok_since: Option<Instant>,
     last_check: Instant,
     last_save: Instant,
+    /// The last commit of the applied position on the target.
+    last_commit: Instant,
     failures: u32,
     copied_since: (Instant, u64),
     /// Prepared XA groups waiting for their outcome, oldest first, with the
@@ -187,6 +199,7 @@ impl Engine {
             copy: CopyState::default(),
             pending: Vec::new(),
             pending_keys: std::collections::HashMap::new(),
+            pending_names: std::collections::HashMap::new(),
             pending_rows: 0,
             pending_since: None,
             window: None,
@@ -198,6 +211,7 @@ impl Engine {
             lag_ok_since: None,
             last_check: now,
             last_save: now,
+            last_commit: now,
             failures: 0,
             copied_since: (now, 0),
             xa_open: Vec::new(),
@@ -298,6 +312,7 @@ impl Engine {
         self.xa_open.clear();
         self.pending.clear();
         self.pending_keys.clear();
+        self.pending_names.clear();
         self.pending_rows = 0;
         self.pending_since = None;
         self.window = None;
@@ -422,17 +437,30 @@ impl Engine {
         let target = self.claim.rec.spec.targets[0].cluster.clone();
         let max = self.settings.max_copies_per_cluster;
         let lease = self.claim.lease();
+        let mut waited = false;
         loop {
             let store = self.claim.store().clone();
-            if store.take_slot(&source, &self.job, max, lease).await?
-                && store.take_slot(&target, &self.job, max, lease).await?
-            {
-                break;
+            if store.take_slot(&source, &self.job, max, lease).await? {
+                if store.take_slot(&target, &self.job, max, lease).await? {
+                    break;
+                }
+                // Both or neither: a job holding its source's slot while it
+                // waits for its target's could wait forever on one moving
+                // the other way.
+                if source != target {
+                    store.free_slots(&source, &self.job, max).await?;
+                }
+            }
+            if !waited {
+                waited = true;
+                tracing::info!(job = %self.job.0, %source, %target, "waiting for a copy slot");
             }
             self.pump(Until::For(Duration::from_secs(1)), None).await?;
             self.check_cancel(true).await?;
             if self.cancelled() {
-                return Ok(Step::Next);
+                // A cancel while waiting rolls back (it used to return
+                // here without changing state, so the job waited again).
+                return self.rolling_back(None).await;
             }
         }
         let ids: Vec<Arc<TableMeta>> = self.tables.clone();
@@ -497,7 +525,9 @@ impl Engine {
             .map(|k| k.iter().map(KeyPart::to_value).collect());
         let n = self.settings.copy_chunk_rows.max(1);
         let lo = self.watermark(WmKind::Low).await?;
-        self.pump(Until::Wm(WmKind::Low, lo), None).await?;
+        if !self.pump(Until::Wm(WmKind::Low, lo), None).await? {
+            return Ok(()); // cancelled
+        }
         let rows = self.env.source.read_chunk(t, after.as_ref(), n).await?;
         self.window = Some(Window {
             table: id.clone(),
@@ -505,7 +535,10 @@ impl Engine {
             ddl: false,
         });
         let hi = self.watermark(WmKind::High).await?;
-        self.pump(Until::Wm(WmKind::High, hi), None).await?;
+        if !self.pump(Until::Wm(WmKind::High, hi), None).await? {
+            self.window = None;
+            return Ok(()); // cancelled
+        }
         let Some(w) = self.window.take() else {
             return Ok(());
         };
@@ -668,7 +701,19 @@ impl Engine {
             }
             recoveries = 0;
             self.check_cancel(false).await?;
+            if self.stop_for_cancel() {
+                // Callers check `cancelled()` and roll back: a watermark
+                // that never comes (an idle source before the position-only
+                // commit, a stream that keeps failing) can't hold a cancel.
+                return Ok(false);
+            }
         }
+    }
+
+    /// A cancel stops a pump in every state before the cutover; the
+    /// cutover's own pumps have deadlines and abort by themselves.
+    fn stop_for_cancel(&self) -> bool {
+        self.cancelled() && self.claim.rec.state != JobState::CuttingOver
     }
 
     /// A stream or apply failure inside a pump: reopen from what the
@@ -696,6 +741,7 @@ impl Engine {
         self.xa_open.clear();
         self.pending.clear();
         self.pending_keys.clear();
+        self.pending_names.clear();
         self.pending_rows = 0;
         self.pending_since = None;
         tokio::time::sleep(Duration::from_millis(10 * u64::from(*count))).await;
@@ -815,13 +861,22 @@ impl Engine {
         // transaction (no constraint spans tables; foreign key checks are
         // off), so each table keeps its own latest op; within a table the
         // order is the source's, and a repeated key starts a new statement.
+        // A merge writes same-named tables of several source schemas into
+        // one target table: an op on a key never joins an earlier op once a
+        // same-named table's later op touched that key (found by the split
+        // simulation: a key deleted in one source and re-inserted in the
+        // other was lost).
         let id = t.id();
+        let named = (t.name.clone(), key.clone());
+        let later = self.pending_names.get(&named).copied();
         let reuse = self.pending_keys.get(&id).and_then(|(i, keys)| {
             let same = matches!(
                 (self.pending.get(*i), upsert),
                 (Some(ApplyOp::Upsert { .. }), true) | (Some(ApplyOp::Delete { .. }), false)
             );
-            (same && !keys.contains(&key)).then_some(*i)
+            // Not behind an op of a same-named table on this key.
+            let in_order = later.is_none_or(|l| l <= *i);
+            (same && in_order && !keys.contains(&key)).then_some(*i)
         });
         let i = if let Some(i) = reuse {
             i
@@ -844,6 +899,7 @@ impl Engine {
         if let Some((_, keys)) = self.pending_keys.get_mut(&id) {
             keys.insert(key);
         }
+        self.pending_names.insert(named, i);
         match self.pending.get_mut(i) {
             Some(ApplyOp::Upsert { rows, .. }) => rows.push(row),
             Some(ApplyOp::Delete { keys, .. }) => keys.push(row),
@@ -855,7 +911,17 @@ impl Engine {
     /// Commits the batch at the read position. With `force`, commits the
     /// position even without row changes.
     async fn flush(&mut self, force: bool) -> Result<()> {
-        if self.pending.is_empty() && !(force && self.read != self.applied) {
+        // With nothing pending the position is still committed now and then
+        // (POS_COMMIT_EVERY): otherwise an idle tenant's applied position
+        // stays where the job started, every reconnect re-reads all the
+        // ticks since, and a lossy stream never catches up (found by the
+        // idle-tenant simulation).
+        let stale = self.read != self.applied
+            && self.clock.now().saturating_duration_since(self.last_commit) >= POS_COMMIT_EVERY;
+        if self.pending.is_empty() && !((force || stale) && self.read != self.applied) {
+            // Nothing to commit: the batch timer stops too (left running,
+            // an idle tenant's pump polled every millisecond).
+            self.pending_since = None;
             self.note_ticks();
             return Ok(());
         }
@@ -871,6 +937,7 @@ impl Engine {
         let ops = std::mem::take(&mut self.pending);
         let rows = self.pending_rows;
         self.pending_keys.clear();
+        self.pending_names.clear();
         self.pending_rows = 0;
         self.pending_since = None;
         let persist = self.persist_pos(&pos);
@@ -880,6 +947,7 @@ impl Engine {
             .await?;
         metrics::counter!("sprig_mover_apply_rows_total").increment(rows as u64);
         self.applied = pos;
+        self.last_commit = self.clock.now();
         self.note_ticks();
         Ok(())
     }
@@ -1051,6 +1119,9 @@ impl Engine {
                 chunk += 1;
                 let check = sample.is_none_or(|pct| (chunk * 37) % 100 < pct);
                 let next = self.verify_chunk(&t, after.as_ref(), check).await?;
+                if self.cancelled() {
+                    return self.rolling_back(None).await;
+                }
                 let cursor = match &next {
                     Some(last) => {
                         VerifyCursor::After(last.iter().map(KeyPart::from_value).collect())
@@ -1087,7 +1158,9 @@ impl Engine {
         let mut repairs = 0u32;
         loop {
             let lo = self.watermark(WmKind::Low).await?;
-            self.pump(Until::Wm(WmKind::Low, lo), None).await?;
+            if !self.pump(Until::Wm(WmKind::Low, lo), None).await? {
+                return Ok(None); // cancelled: the caller rolls back
+            }
             let src = self.env.source.digests(t, after, n).await?;
             let Some(last) = src.last().map(|d| d.key_values.clone()) else {
                 // The source has nothing after `after`: rows the target has
@@ -1103,7 +1176,10 @@ impl Engine {
                 ddl: false,
             });
             let hi = self.watermark(WmKind::High).await?;
-            self.pump(Until::Wm(WmKind::High, hi), None).await?;
+            if !self.pump(Until::Wm(WmKind::High, hi), None).await? {
+                self.window = None;
+                return Ok(None); // cancelled: the caller rolls back
+            }
             let Some(w) = self.window.take() else {
                 return Ok(Some(last));
             };
@@ -1147,7 +1223,9 @@ impl Engine {
         last: &Row,
     ) -> Result<()> {
         let lo = self.watermark(WmKind::Low).await?;
-        self.pump(Until::Wm(WmKind::Low, lo), None).await?;
+        if !self.pump(Until::Wm(WmKind::Low, lo), None).await? {
+            return Ok(()); // cancelled
+        }
         let rows = self.env.source.read_range(t, after, last).await?;
         self.window = Some(Window {
             table: t.id(),
@@ -1155,7 +1233,10 @@ impl Engine {
             ddl: false,
         });
         let hi = self.watermark(WmKind::High).await?;
-        self.pump(Until::Wm(WmKind::High, hi), None).await?;
+        if !self.pump(Until::Wm(WmKind::High, hi), None).await? {
+            self.window = None;
+            return Ok(()); // cancelled
+        }
         let Some(w) = self.window.take() else {
             return Ok(());
         };
@@ -1550,6 +1631,13 @@ impl Engine {
             let until = self.claim.rec.retain_until_ms.unwrap_or(0);
             if now >= until {
                 break;
+            }
+            if until - now > RETAIN_HAND_BACK_MS {
+                // Nothing to do for a while (`sharding.retire_hours`, 24 by
+                // default): give the job back so it holds no worker slot;
+                // workers claim it again once the retention ends.
+                self.claim.release().await?;
+                return Ok(Step::End(JobState::Retaining));
             }
             tokio::time::sleep(Duration::from_millis((until - now).min(60_000))).await;
             // Keep proving ownership while waiting.

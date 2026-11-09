@@ -60,6 +60,7 @@ use crate::tenant::autoindex;
 use crate::tenant::ddl::GatewayDdl;
 use crate::tenant::names::{Accounts, TenantSessions};
 use crate::tenant::password;
+use crate::tenant::pins_sql;
 use crate::tenant::session::LocalWarning;
 use crate::tenant::settings_sql::{self, SettingsAnswer};
 
@@ -242,7 +243,11 @@ fn definer_as_current_user(sql: &[u8], lex: LexOptions) -> Vec<u8> {
 
 /// MySQL 8.4 session variables MariaDB lacks, which tools set and that
 /// change nothing SprigDB serves.
-const MYSQL_ONLY_VARS: &[&str] = &["information_schema_stats_expiry"];
+const MYSQL_ONLY_VARS: &[&str] = &[
+    "information_schema_stats_expiry",
+    // mysqldump 8.4 sets it around events (R4; reads answer `NONE`).
+    "terminology_use_previous",
+];
 
 /// Whether `text` is `SET [SESSION] v = literal [, ...]` of
 /// [`MYSQL_ONLY_VARS`] only.
@@ -325,6 +330,13 @@ impl PassSession {
     /// them.
     pub(super) fn lex_opts(&self) -> (LexOptions, bool) {
         let mut lex = LexOptions::for_persona(self.persona);
+        // Executable comments run by the version the greeting reports
+        // (`gateway.mysql_server_version`, chapter 28, R4).
+        if let Some(v) =
+            sprig_sql::compat::vars::version_number(&self.settings.persona_version(self.persona))
+        {
+            lex = lex.version(v);
+        }
         let mut ignore_space = false;
         if let Some(mode) = self.bs.as_ref().and_then(|b| b.vars().vars.get("sql_mode")) {
             let m = mode.to_ascii_uppercase();
@@ -395,14 +407,38 @@ impl PassSession {
         let mut summary = ExecSummary::default();
         self.wl_multi = n > 1;
         for (i, piece) in pieces.into_iter().enumerate() {
-            let step = self
-                .tenant_text(cx, &piece, attrs, i + 1 < n, RowFormat::Text, out)
-                .await;
+            // 3306: MySQL's `'table.key'` in 1062 (chapter 28, R4).
+            let dup_table = if self.persona == Persona::MySql84 {
+                sprig_sql::compat::errmap::dup_key_table(&piece, &self.lex_opts().0)
+            } else {
+                None
+            };
+            let step = match dup_table.as_deref() {
+                Some(table) => {
+                    let mut wrapped = super::compat_sink::DupKeySink {
+                        inner: &mut *out,
+                        table,
+                    };
+                    Box::pin(self.tenant_text(
+                        cx,
+                        &piece,
+                        attrs,
+                        i + 1 < n,
+                        RowFormat::Text,
+                        &mut wrapped,
+                    ))
+                    .await
+                }
+                None => {
+                    Box::pin(self.tenant_text(cx, &piece, attrs, i + 1 < n, RowFormat::Text, out))
+                        .await
+                }
+            };
             let step = match step {
                 Ok(s) => s,
                 Err(e) => {
                     summary.db = Some(self.current_logical());
-                    return Err(e);
+                    return Err(super::compat_sink::map(e, dup_table.as_deref()));
                 }
             };
             summary.status = step.status.or(summary.status);
@@ -433,6 +469,19 @@ impl PassSession {
                 s
             }
         };
+        if let Some(ts) = self.tenant.as_deref() {
+            super::logic_bound::warm_validations(ts);
+        }
+        // Chapter 41: `ALTER TABLE ... ADD c TYPE AS (f(...))` with a logic
+        // function `f` becomes a generated column (R7 order 3).
+        if sprig_logic::enforce::is_computed_candidate(&String::from_utf8_lossy(text)) {
+            let s = status(self.status());
+            if let Some(step) =
+                Box::pin(self.tenant_computed(cx, text, attrs, more, format, s, out)).await?
+            {
+                return Ok(step);
+            }
+        }
         let charset = cx.proto.collation;
         let previous_warnings = self.tenant.as_deref_mut().and_then(|ts| ts.warnings.take());
         let Some(ts) = self.tenant.as_deref_mut() else {
@@ -587,8 +636,60 @@ impl PassSession {
             };
         }
 
-        // Settings statements.
-        if let Some(parsed) = settings_stmt::parse(text, &lex) {
+        // Chapter 16's pins and advice (`SPRIG PIN`, `UNPIN`, `SHOW`).
+        if let Some(parsed) = sprig_sql::pin_stmt::parse(text, &lex) {
+            if sandbox {
+                return self.fail(out, &must_reset()).await;
+            }
+            let stmt = match parsed {
+                Ok(s) => s,
+                Err(e) => return self.fail(out, &e.into()).await,
+            };
+            let current = self.current_logical();
+            let Some(ts) = self.tenant.as_deref_mut() else {
+                return Err(SprigError::internal("no tenant"));
+            };
+            let cat = match ts.refresh().await {
+                Ok(c) => c,
+                Err(e) => return self.fail(out, &e).await,
+            };
+            // Boxed: the statement's catalog transaction would grow every
+            // statement's future.
+            let r = Box::pin(pins_sql::execute(
+                ts,
+                &cat,
+                current.as_deref(),
+                &stmt,
+                charset,
+            ))
+            .await;
+            let s = status(self.status());
+            return match r {
+                Ok(pins_sql::PinAnswer::Ok { affected }) => {
+                    let mut ok = OkPacket::new(s);
+                    ok.affected_rows = affected;
+                    out.ok(ok).await?;
+                    Ok(Step {
+                        errored: false,
+                        status: Some(s),
+                    })
+                }
+                Ok(pins_sql::PinAnswer::Rows(ans)) => {
+                    send_local(out, &ans, format, s).await?;
+                    Ok(Step {
+                        errored: false,
+                        status: Some(s),
+                    })
+                }
+                Err(e) => self.fail(out, &e).await,
+            };
+        }
+
+        // Settings statements (chapter 42's `ALTER TABLE ... SPRIG
+        // INHERITABLE` and `SPRIG RESET <table>` are not).
+        if let Some(parsed) = settings_stmt::parse(text, &lex)
+            .filter(|_| !sprig_inherit::grammar::is_extension(text, &lex))
+        {
             if sandbox {
                 return self.fail(out, &must_reset()).await;
             }
@@ -664,6 +765,60 @@ impl PassSession {
             }
             None => text,
         };
+        // 3306: `SET sql_mode` and `max_execution_time` as MySQL 8.4
+        // reads them (chapter 28, R4).
+        let set_rewritten;
+        // 3306: SRID 4326 as MySQL reads it (chapters 28 and 36, R4).
+        let geo_rewritten;
+        let text: &Bytes = if self.persona == Persona::MySql84 {
+            match sprig_sql::compat::geo::rewrite(text, &lex) {
+                None => text,
+                Some(Ok(t)) => {
+                    geo_rewritten = Bytes::from(t);
+                    &geo_rewritten
+                }
+                Some(Err(e)) => {
+                    let e = SprigError::standard(e.code, e.sqlstate, e.message);
+                    return self.fail(out, &e).await;
+                }
+            }
+        } else {
+            text
+        };
+        let text: &Bytes = if self.persona == Persona::MySql84 {
+            match sprig_sql::compat::setvar::rewrite_set(text, &lex) {
+                None => text,
+                Some(sprig_sql::compat::setvar::SetRewrite::Refused(e)) => {
+                    let e = SprigError::standard(e.code, e.sqlstate, e.message);
+                    return self.fail(out, &e).await;
+                }
+                Some(sprig_sql::compat::setvar::SetRewrite::Rewritten { sql, sql_mode }) => {
+                    self.tenant_bs(cx);
+                    if let (Some(m), Some(bs)) = (sql_mode, self.bs.as_mut()) {
+                        bs.vars_mut().expect_sql_mode(m.render(), m.backend());
+                    }
+                    set_rewritten = Bytes::from(sql);
+                    &set_rewritten
+                }
+            }
+        } else {
+            text
+        };
+        // Chapter 42: spaces, shares and merged views of inheritable
+        // objects (before chapter 32, which never sees them).
+        if let Some(step) = self
+            .tenant_inherit(cx, text, attrs, more, format, &cat, out)
+            .await?
+        {
+            return Ok(step);
+        }
+        // Chapter 32: typed tables and record hierarchies.
+        if let Some(step) = self
+            .tenant_types(cx, text, attrs, more, format, &cat, out)
+            .await?
+        {
+            return Ok(step);
+        }
         let attr_owned = attr_pairs(attrs);
         let mut retried = false;
         let planned = loop {
@@ -696,6 +851,9 @@ impl PassSession {
                     .backend_version(BACKEND_VERSION);
                 rw.ignore_space = ignore_space;
                 rw.lower_case_table_names = ts.lower_case_table_names();
+                // A chapter 32 plan's own statement names its `_sprig_`
+                // columns and indexes.
+                rw.internal = ts.types.internal;
                 let dbs = crate::tenant::authz::DbVisibility::of(ts);
                 let visible = |d: &sprig_sql::names::LogicalDb| dbs.allows(d);
                 let pctx = PlanCtx::new(rw, &ts.services().columns)
@@ -843,11 +1001,18 @@ impl PassSession {
         let original = text
             .get(sp.info.range.clone())
             .map_or_else(|| text.to_vec(), <[u8]>::to_vec);
+        let is_call = sp.info.kind == StmtKind::Call;
         let route = self
             .route(cx, sp, &original, more, format, charset, out)
             .await?;
         match route {
             Route::Done(step) => Ok(step),
+            // Chapter 41 (R7): a CALL may reach an engine-tier wrapper,
+            // which the gateway answers itself (`exec::logic`).
+            Route::Forward(sql, mapper) if is_call => {
+                self.tenant_call(cx, sql, &original, more, format, mapper, &*map, out)
+                    .await
+            }
             // Chapter 17: through the router when the tenant has shards.
             Route::Forward(sql, mapper) => {
                 self.routed(cx, sql, &original, more, format, mapper, &*map, out)
@@ -971,6 +1136,17 @@ impl PassSession {
             }
             Err(e) => return Ok(Route::Done(self.fail(out, &e.into()).await?)),
         };
+        // DDL inside a transaction chapter 18's coordinator holds commits
+        // it first, as MySQL does (chapter 17); a failed commit is the
+        // statement's error.
+        let status = if self.router.in_txn() {
+            if let Err(e) = self.implicit_commit(cx).await {
+                return Ok(Route::Done(self.fail(out, &e).await?));
+            }
+            (status & StatusFlags::MORE_RESULTS_EXISTS) | self.status()
+        } else {
+            status
+        };
         // The physical text.
         let physical = match &sp.action {
             Action::Forward { sql, .. } => {
@@ -1023,13 +1199,52 @@ impl PassSession {
             .as_deref()
             .map(|ts| crate::tenant::authz::dropped_objects(ts, &stmt, current.as_deref()))
             .unwrap_or_default();
+        // Chapter 21: a statement on a sharded table group runs on every
+        // shard (the layout comes from the router's topology in R1).
+        let layout = self.tenant.as_deref().and_then(super::router::ddl_layout);
+        // ...and waits for a split, merge or shard move of those shards
+        // (chapter 21, "DDL during moves").
+        let movers = self.tenant.as_deref().and_then(|ts| {
+            let cat = ts.catalog()?;
+            let mins = svc.settings.get(
+                &sprig_catalog::ddl::MOVER_WAIT_MINUTES,
+                &cat.setting_ctx(&svc.dc),
+                Some(&cat.settings),
+            );
+            let home = svc.locator.home_of(tenant);
+            let dc = svc.locator.dc_store();
+            let store = if home == svc.dc {
+                dc
+            } else {
+                sprig_meta::TierView::over(&dc, sprig_meta::Tier::Dc(home))
+            };
+            Some(crate::tenant::ddl::MoverLocks::new(
+                store,
+                std::time::Duration::from_secs(mins.saturating_mul(60)),
+            ))
+        });
         self.tenant_bs(cx);
         let Some(bs) = self.bs.as_mut() else {
             return Err(SprigError::internal("no backend session"));
         };
         let result = {
             let exec = GatewayDdl::new(bs, ctl).checked_by(ctl_pool);
-            svc.ddl.execute(&req, &exec).await
+            match layout {
+                Some(layout) => {
+                    let mut sharded = crate::tenant::ddl::ShardedDdl::new(
+                        exec,
+                        layout,
+                        Arc::clone(&svc.locator),
+                        tenant,
+                        user,
+                    );
+                    if let Some(m) = movers {
+                        sharded = sharded.with_mover_locks(m);
+                    }
+                    svc.ddl.execute(&req, &sharded).await
+                }
+                None => svc.ddl.execute(&req, &exec).await,
+            }
         };
         if result.as_ref().is_ok_and(|o| o.version.is_some())
             && !dropped.is_empty()
@@ -1240,6 +1455,14 @@ impl PassSession {
             return Err(SprigError::internal("no backend session"));
         };
         bs.query(&info, &piece).await?;
+        // Chapter 17: the router reads a stale-map ERR (or, on a
+        // coordinator branch, any ERR) before it reaches the client.
+        if self.router.probe_first(bs).await? {
+            return Ok(Step {
+                errored: true,
+                status: None,
+            });
+        }
         let r = Relay {
             more,
             format,
@@ -1368,6 +1591,17 @@ impl PassSession {
                 _ => Vec::new(),
             };
             keep = deferred(cols)?;
+        } else if let Some(parsed) = sprig_sql::pin_stmt::parse(&sql, &lex) {
+            // Chapter 16: run at execute time, as text.
+            if sandbox {
+                return Err(must_reset());
+            }
+            let cols = match parsed? {
+                sprig_sql::pin_stmt::PinStmt::ShowAdvice => pins_sql::advice_columns(charset),
+                sprig_sql::pin_stmt::PinStmt::ShowPins => pins_sql::pins_columns(charset),
+                _ => Vec::new(),
+            };
+            keep = deferred(cols)?;
         } else if let Some(parsed) = settings_stmt::parse(&sql, &lex) {
             if sandbox {
                 return Err(must_reset());
@@ -1382,10 +1616,28 @@ impl PassSession {
             return Ok(self.prepared_deferred(sql, columns));
         }
         ts.refresh().await?;
+        // Chapter 32: prepared statements on typed tables come later.
+        if let Some(e) = super::types::prepare_refusal(ts, &sql, lex) {
+            return Err(e);
+        }
+        // Chapter 42: and on inheritable objects.
+        if let Some(e) = super::inherit::prepare_refusal(ts, &sql, lex) {
+            return Err(e);
+        }
         // 3306: the same text rewrites as for COM_QUERY (chapter 28).
         let sql = match sprig_sql::compat::mysql_text_rewrites(&sql, &lex, BACKEND_VERSION) {
             Some(t) => Bytes::from(t),
             None => sql,
+        };
+        // 3306: SRID 4326 as MySQL reads it (chapters 28 and 36, R4).
+        let sql = if self.persona == Persona::MySql84 {
+            match sprig_sql::compat::geo::rewrite(&sql, &lex) {
+                None => sql,
+                Some(Ok(t)) => Bytes::from(t),
+                Some(Err(e)) => return Err(SprigError::standard(e.code, e.sqlstate, e.message)),
+            }
+        } else {
+            sql
         };
         let current = self.current_logical();
         let Some(ts) = self.tenant.as_deref() else {

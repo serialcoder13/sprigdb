@@ -20,9 +20,13 @@
 //! - **Reject**: `ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE` (39420) with a
 //!   reason code; never a different answer.
 //!
-//! [`exec::execute`] runs a plan through the gateway's [`exec::ShardBackend`].
-//! [`topology`] is the router's interface to chapter 15 until
-//! `sprig-shard` publishes table groups and shard maps.
+//! [`exec::execute`] runs a plan through the gateway's [`exec::ShardBackend`]
+//! ([`exec::execute_to`] streams a scatter's rows). [`topology`] is the
+//! router's interface to chapter 15: the gateway builds it from the
+//! catalog's table groups and `sprig-shard`'s shard maps
+//! ([`topology::catalog`]). Prepared statements are parsed once
+//! ([`planner::parse_template`]) and planned per execution with their
+//! parameters ([`planner::plan_prepared`]).
 
 // Short names (a, b, e, q, s, t) follow the SQL and the book's pseudocode.
 #![allow(clippy::many_single_char_names)]
@@ -34,18 +38,26 @@ pub mod exec;
 pub mod plan;
 pub mod planner;
 pub mod reject;
+pub mod settings;
 pub mod topology;
 pub mod value;
+pub mod write_notes;
 
-pub use exec::{Budget, Output, ShardBackend, ShardOk, ShardOutcome, ShardRows, execute};
-pub use plan::{Plan, Target};
-pub use planner::{PlanCtx, plan};
+pub use exec::{
+    Budget, Output, RowSink, ShardBackend, ShardOk, ShardOutcome, ShardRows, ShardStream, execute,
+    execute_to,
+};
+pub use plan::{Plan, ShardAt, Target};
+pub use planner::{ParamLit, PlanCtx, PreparedPlan, Template, parse_template, plan, plan_prepared};
 pub use reject::{Reason, Rejection};
+pub use settings::RouterConfig;
 pub use topology::{StaticTopology, Topology, TopologyFile};
 
-/// `router.max_route_values`' default.
+/// `router.max_route_values`' default (the setting:
+/// [`settings::MAX_ROUTE_VALUES`]).
 pub const MAX_ROUTE_VALUES: usize = 1024;
 /// `router.lookup_batch_size`'s default.
 pub const LOOKUP_BATCH: usize = 256;
-/// `router.max_statement_memory_mb`'s default.
-pub const MAX_STATEMENT_MEMORY_MB: u64 = 256;
+/// What a fenced or retired source shard returns (chapter 17,
+/// `STALE_MAP_CODES`): 1142, 1044, 1146.
+pub const STALE_MAP_CODES: [u16; 3] = [1142, 1044, 1146];

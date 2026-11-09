@@ -424,7 +424,7 @@ async fn login_phase(
     let mut login = shared
         .cfg
         .login
-        .start(login::request(
+        .begin(login::request(
             persona,
             &resp.user,
             conn.peer,

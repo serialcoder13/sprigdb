@@ -48,13 +48,18 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
             get(get_cluster).post(cluster_method),
         )
         .route("/admin/v1/dcs", get(list_dcs).post(register_dc))
-        .route("/admin/v1/dcs/{dc}", get(get_dc))
+        .route("/admin/v1/dcs/{dc}", get(get_dc).post(dc_method))
         .route("/admin/v1/tenants", get(list_tenants).post(create_tenant))
         .route(
             "/admin/v1/tenants/{name}",
             get(get_tenant).delete(delete_tenant).post(tenant_method),
         )
         .route("/admin/v1/tenants/{name}/move", get(tenant_move))
+        .route("/admin/v1/tenants/{name}/residency", get(tenant_residency))
+        .route("/admin/v1/tenants/{name}/failovers", get(tenant_failovers))
+        .route("/admin/v1/failovers", get(list_failovers))
+        .route("/admin/v1/dcs:latency", get(latency_matrix))
+        .route("/admin/v1/failovers:all", post(failover_all))
         .route("/admin/v1/tenants/{name}/traffic", get(tenant_traffic))
         .route("/admin/v1/traffic/reports", post(traffic_report))
         .route("/admin/v1/tenants/{name}/settings", get(tenant_settings))
@@ -81,6 +86,13 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
         .route("/admin/v1/jobs", get(list_jobs))
         .route("/admin/v1/jobs/{id}", get(get_job).post(job_method))
         .route("/admin/v1/tenants/{name}/placement", get(explain_placement))
+        .route(
+            "/admin/v1/tenants/{name}/shards",
+            get(list_shards).post(submit_shard_job),
+        )
+        .route("/admin/v1/tenants/{name}/advisor", get(advisor_show))
+        .route("/admin/v1/tenants/{name}/advisor:run", post(advisor_run))
+        .route("/admin/v1/tenants/{name}/advisor:apply", post(advisor_apply))
         .route(
             "/admin/v1/tenants/{name}/pin",
             post(pin_tenant_cluster).delete(unpin_tenant_cluster),
@@ -415,12 +427,101 @@ async fn tenant_method(
             };
             respond(r.await)
         }
+        Some((t, "failover")) => {
+            let r = async {
+                let req: crate::failover::manual::FailoverRequest = parse_required(&body)?;
+                app.svc.failover_tenant(t, req).await
+            };
+            respond(r.await)
+        }
+        Some((t, "standby")) => {
+            let r = async {
+                let req: crate::failover::manual::StandbyRequest = parse_required(&body)?;
+                app.svc.add_standby(t, req).await
+            };
+            respond(r.await)
+        }
+        Some((t, "residency")) => {
+            let r = async {
+                let req: crate::residency::ResidencyRequest = parse_required(&body)?;
+                app.svc.set_residency(t, req).await
+            };
+            respond(r.await)
+        }
         Some((t, "pin")) => respond(app.svc.pin_tenant_dc(t, true).await),
         Some((t, "unpin")) => respond(app.svc.pin_tenant_dc(t, false).await),
         _ => error_response(&invalid(format!(
-            "POST /admin/v1/tenants/{name}: expected {{name}}:move, :pin or :unpin"
+            "POST /admin/v1/tenants/{name}: expected {{name}}:move, :failover, :standby, :residency, :pin or :unpin"
         ))),
     }
+}
+
+async fn dc_method(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(dc): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        match dc.rsplit_once(':') {
+            Some((d, "drain")) => serde_json::to_value(app.svc.set_dc_draining(d, true).await?)
+                .map_err(|e| invalid(e.to_string())),
+            Some((d, "undrain")) => serde_json::to_value(app.svc.set_dc_draining(d, false).await?)
+                .map_err(|e| invalid(e.to_string())),
+            _ => Err(invalid(format!(
+                "POST /admin/v1/dcs/{dc}: expected {{dc}}:drain or :undrain"
+            ))),
+        }
+    };
+    respond(r.await)
+}
+
+async fn latency_matrix(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.latency_matrix().await
+    };
+    respond(r.await)
+}
+
+async fn tenant_residency(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.get_residency(&name).await
+    };
+    respond(r.await)
+}
+
+async fn tenant_failovers(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.tenant_failovers(&name).await
+    };
+    respond(r.await)
+}
+
+async fn list_failovers(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.failovers().await
+    };
+    respond(r.await)
+}
+
+async fn failover_all(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.failover_all(parse_required(&body)?).await
+    };
+    respond(r.await)
 }
 
 async fn tenant_move(
@@ -904,6 +1005,85 @@ async fn explain_decision(
             .parse()
             .map_err(|_| invalid(format!("decision id {id:?} is not a number")))?;
         app.svc.explain_decision(&name, id).await
+    };
+    respond(r.await)
+}
+
+async fn list_shards(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.list_shards(&name).await
+    };
+    respond(r.await)
+}
+
+async fn submit_shard_job(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let req: super::sharding_admin::ShardJobRequest = parse_required(&body)?;
+        app.svc.submit_shard_job(&name, req).await
+    };
+    respond(r.await)
+}
+
+/// `GET /admin/v1/tenants/{name}/advisor?run=`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct AdvisorQuery {
+    run: Option<String>,
+}
+
+async fn advisor_show(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    uri: Uri,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let q: AdvisorQuery = query(&uri)?;
+        let run = q
+            .run
+            .map(|r| {
+                r.parse::<u64>()
+                    .map_err(|_| invalid(format!("run {r:?} is not a number")))
+            })
+            .transpose()?;
+        app.svc.advisor_show(&name, run).await
+    };
+    respond(r.await)
+}
+
+async fn advisor_run(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.advisor_run(&name).await
+    };
+    respond(r.await)
+}
+
+async fn advisor_apply(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let req: super::sharding_admin::AdvisorApplyRequest = parse_required(&body)?;
+        app.svc.advisor_apply(&name, req).await
     };
     respond(r.await)
 }

@@ -44,12 +44,12 @@ use sprig_meta::bootstrap::{DcRecord, rfc3339};
 use sprig_meta::dclease::{PERMIT_STATES, dc_key, lease_key};
 use sprig_meta::{Cmp, Consistency, KeyValue, ListOpts, MetaStore, Op, Record, Tier};
 
+use sprig_shard::home::read_home;
+
 use super::decision::{self, Tally, TenantCandidate, TenantPlan};
 use super::observe::{ObserveTargets, targets_key};
 use super::promote::{Guard, Promoted, Promotion, promote};
-use super::record::{
-    FailoverRecord, FailoverState, TenantOutcome, Verdict, Vote, failover_key,
-};
+use super::record::{FailoverRecord, FailoverState, TenantOutcome, Verdict, Vote, failover_key};
 use super::settings::FailoverSettings;
 
 /// Asks a site to observe a DC (`Observer.ObserveDc`).
@@ -77,6 +77,9 @@ pub struct GlobalFailover {
     promotion: Promotion,
     seen: Mutex<HashMap<DcId, Seen>>,
     started: Instant,
+    /// Two tiers: positions the target DCs' `tenant_promote` loops
+    /// reported, by (failover, tenant), until the record takes them.
+    reported: Mutex<HashMap<(String, u64), BTreeMap<String, String>>>,
 }
 
 impl std::fmt::Debug for GlobalFailover {
@@ -125,7 +128,33 @@ impl GlobalFailover {
             promotion,
             seen: Mutex::new(HashMap::new()),
             started,
+            reported: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// `Global.PromotionDone` (two tiers): the target DC finished steps
+    /// 2-4 of `tenant`'s promotion at `epoch`; step 5 (the entry becomes
+    /// `active`, `auth_version + 1`) is written here, under the leader's
+    /// token, and the record takes `applied` at its next pass. Returns
+    /// `false` when the directory moved on.
+    ///
+    /// # Errors
+    /// 39504 when leadership was lost; the store's errors.
+    pub async fn promotion_done(
+        &self,
+        failover_id: &str,
+        tenant: TenantId,
+        to: &DcId,
+        epoch: u64,
+        applied: BTreeMap<String, String>,
+    ) -> Result<bool> {
+        let ok =
+            super::promote::activate(self.guard(), &*self.store, tenant, to, epoch, None).await?;
+        if ok {
+            lock(&self.reported).insert((failover_id.to_owned(), tenant.0), applied);
+            tracing::info!(%tenant, %to, epoch, failover = failover_id, "promotion finished in the target DC; tenant active");
+        }
+        Ok(ok)
     }
 
     fn guard(&self) -> &Guard {
@@ -178,7 +207,12 @@ impl GlobalFailover {
         let now = self.clock.now();
         let dcs = self.dcs().await?;
         let leases = self.leases().await?;
-        let open: BTreeSet<DcId> = self.open_records().await?.into_iter().map(|r| r.dc_id).collect();
+        let open: BTreeSet<DcId> = self
+            .open_records()
+            .await?
+            .into_iter()
+            .map(|r| r.dc_id)
+            .collect();
         let mut lost = Vec::new();
         for (rec, rev) in &dcs {
             let dc = &rec.body.dc_id;
@@ -215,7 +249,10 @@ impl GlobalFailover {
         }
         // Resume any record a previous leader left open.
         for rec in self.open_records().await? {
-            if !out.iter().any(|o| matches!(o, Outcome::Ended(f) if f.failover_id == rec.failover_id)) {
+            if !out
+                .iter()
+                .any(|o| matches!(o, Outcome::Ended(f) if f.failover_id == rec.failover_id))
+            {
                 out.push(self.resume(rec).await?);
             }
         }
@@ -282,7 +319,10 @@ impl GlobalFailover {
             .get(&dc_key(dc)?, Consistency::Linearizable)
             .await?
         {
-            Some(kv) => Ok(Some((Record::<DcRecord>::decode(&kv.value)?, kv.mod_revision))),
+            Some(kv) => Ok(Some((
+                Record::<DcRecord>::decode(&kv.value)?,
+                kv.mod_revision,
+            ))),
             None => Ok(None),
         }
     }
@@ -338,11 +378,13 @@ impl GlobalFailover {
             return Ok(Outcome::NotNeeded);
         }
         tracing::warn!(dc = %x, failover = %id, "DcLeaseLost: DC lease gone; DC suspect");
-        metrics::counter!("sprig_controller_dc_failovers_total", "result" => "started").increment(1);
+        metrics::counter!("sprig_controller_dc_failovers_total", "result" => "started")
+            .increment(1);
         self.resume(f).await
     }
 
     /// Continues an open record from its state.
+    #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // steps 2-8 in order
     ///
     /// # Errors
     /// As [`Self::dc_failover`].
@@ -353,11 +395,15 @@ impl GlobalFailover {
             // 2. The drift margin.
             tokio::time::sleep(s.clock_drift_margin).await;
             if self.has_lease(&x).await? {
-                return self.close(f, "the DC took its lease back within the drift margin").await;
+                return self
+                    .close(f, "the DC took its lease back within the drift margin")
+                    .await;
             }
             // 3. Sites.
             if !s.self_fence {
-                return self.manual_only(f, "failover.self_fence is false for the DC").await;
+                return self
+                    .manual_only(f, "failover.self_fence is false for the DC")
+                    .await;
             }
             let sites = self.sites(&x).await?;
             let voters = self.voter_sites().await?;
@@ -384,7 +430,9 @@ impl GlobalFailover {
                     .collect();
                 self.write_record(&f).await?;
                 if self.has_lease(&x).await? {
-                    return self.close(f, "the DC took its lease back while observed").await;
+                    return self
+                        .close(f, "the DC took its lease back while observed")
+                        .await;
                 }
                 match decision::tally(&verdicts, s.min_sites) {
                     Tally::FailOver => break verdicts,
@@ -396,7 +444,9 @@ impl GlobalFailover {
                     }
                 }
                 if self.clock.now() >= deadline {
-                    return self.manual_only(f, "no agreement before failover.decision_timeout_seconds").await;
+                    return self
+                        .manual_only(f, "no agreement before failover.decision_timeout_seconds")
+                        .await;
                 }
                 tokio::time::sleep(s.observer_probe_interval).await;
             };
@@ -414,6 +464,27 @@ impl GlobalFailover {
             tracing::warn!(dc = %x, failover = %f.failover_id, "DC failed; promoting its tenants");
         }
         if f.state == FailoverState::Promoting {
+            // Two tiers: committed promotions the target DC finished.
+            for t in f.tenants.iter_mut().filter(|t| t.outcome == "committed") {
+                let Some(to) = t.to.clone() else { continue };
+                let Some(e) = read_home(&*self.store, TenantId(t.tenant_id)).await? else {
+                    continue;
+                };
+                if e.home_dc != to || Some(e.epoch) != t.epoch {
+                    t.outcome = "skipped".into();
+                    t.reason = Some(format!(
+                        "the directory moved on: home {} epoch {}",
+                        e.home_dc, e.epoch
+                    ));
+                } else if e.state == "active" {
+                    t.outcome = "promoted".into();
+                    if let Some(a) =
+                        lock(&self.reported).remove(&(f.failover_id.clone(), t.tenant_id))
+                    {
+                        t.applied = a;
+                    }
+                }
+            }
             // 7. Promotions, bounded.
             let todo: Vec<usize> = f
                 .tenants
@@ -431,12 +502,15 @@ impl GlobalFailover {
                 let p = &self.promotion;
                 jobs.push(Box::pin(async move {
                     let to = t.to.clone().unwrap_or_else(|| x.clone());
-                    let r = promote(p, &id, TenantId(t.tenant_id), &x, &to, t.epoch.unwrap_or(0)).await;
+                    let r =
+                        promote(p, &id, TenantId(t.tenant_id), &x, &to, t.epoch.unwrap_or(0)).await;
                     (i, r)
                 }));
             }
-            let results: Vec<(usize, Result<Promoted>)> =
-                futures::stream::iter(jobs).buffer_unordered(par).collect().await;
+            let results: Vec<(usize, Result<Promoted>)> = futures::stream::iter(jobs)
+                .buffer_unordered(par)
+                .collect()
+                .await;
             for (i, r) in results {
                 let t = &mut f.tenants[i];
                 match r {
@@ -449,16 +523,28 @@ impl GlobalFailover {
                         t.outcome = "skipped".into();
                         t.reason = Some(why);
                     }
-                    Err(e) if e.code() == Some(sprig_common::SprigCode::NotLeader) => return Err(e),
+                    Ok(Promoted::Committed { epoch }) => {
+                        // Two tiers: the target DC's tenant_promote loop
+                        // finishes it (r2next).
+                        t.outcome = "committed".into();
+                        t.epoch = Some(epoch);
+                    }
+                    Err(e) if e.code() == Some(sprig_common::SprigCode::NotLeader) => {
+                        return Err(e);
+                    }
                     Err(e) => {
                         // Left planned: the next pass retries it.
                         tracing::warn!(tenant = t.tenant_id, error = %e, "promotion failed; retrying later");
                     }
                 }
             }
-            if f.tenants.iter().all(|t| t.outcome != "planned") {
+            if f.tenants
+                .iter()
+                .all(|t| t.outcome != "planned" && t.outcome != "committed")
+            {
                 f.state = FailoverState::Done;
-                metrics::counter!("sprig_controller_dc_failovers_total", "result" => "done").increment(1);
+                metrics::counter!("sprig_controller_dc_failovers_total", "result" => "done")
+                    .increment(1);
             }
             self.write_record(&f).await?;
         }
@@ -483,7 +569,8 @@ impl GlobalFailover {
         f.state = FailoverState::ManualOnly;
         f.reason = Some(why.to_owned());
         self.write_record(&f).await?;
-        metrics::counter!("sprig_controller_dc_failovers_total", "result" => "manual_only").increment(1);
+        metrics::counter!("sprig_controller_dc_failovers_total", "result" => "manual_only")
+            .increment(1);
         Ok(Outcome::Ended(f))
     }
 
@@ -628,12 +715,20 @@ impl GlobalFailover {
     }
 }
 
-fn candidate(kv: &KeyValue, x: &DcId, s: &FailoverSettings, writers: &[String]) -> Option<TenantCandidate> {
+fn candidate(
+    kv: &KeyValue,
+    x: &DcId,
+    s: &FailoverSettings,
+    writers: &[String],
+) -> Option<TenantCandidate> {
     let raw: serde_json::Map<String, Value> = serde_json::from_slice(&kv.value).ok()?;
     if raw.get("home_dc").and_then(Value::as_str) != Some(x.as_str()) {
         return None;
     }
-    if !matches!(raw.get("state").and_then(Value::as_str), Some("active" | "migrating")) {
+    if !matches!(
+        raw.get("state").and_then(Value::as_str),
+        Some("active" | "migrating")
+    ) {
         return None;
     }
     let tenant_id = kv.key.as_str().rsplit('/').next()?.parse().ok()?;
@@ -661,6 +756,7 @@ fn candidate(kv: &KeyValue, x: &DcId, s: &FailoverSettings, writers: &[String]) 
         standby_dcs,
         writers: writers.to_vec(),
         pinned: raw.get("pinned_dc").and_then(Value::as_str) == Some(x.as_str()),
+        allowed_dcs: sprig_shard::home::allowed_dcs(&raw),
     })
 }
 

@@ -1,0 +1,439 @@
+//! Input assembly (chapter 16, "Inputs and the window"; build step 1):
+//! tables, columns, keys, sizes and declared foreign keys from the
+//! tenant's schemas on its cluster; statements and transaction footprints
+//! from chapter 12's workload store in its catalog.
+//!
+//! Before a first split every table of a logical database lives in the
+//! database's default-group shard schema, `t<tenant>_d<db>_g<g>_s<s>`, on
+//! the tenant's cluster; the catalog's `objects` rows give each table its
+//! object id. The tenant's pins come from chapter 15's `group_pins`.
+
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime};
+
+use mysql_async::Conn;
+use mysql_async::prelude::Queryable;
+use sprig_common::ids::{DbId, TenantId};
+use sprig_common::names::SchemaName;
+use sprig_common::{Result, SprigCode, SprigError};
+use sprig_shard::KeyClass;
+use sprig_shard::pins::PinStore;
+use sprig_workload::fingerprint::FpKind;
+use sprig_workload::shape::{JoinOp, PredOp, Shape, WriteKind};
+use sprig_workload::store::WorkloadTables;
+
+use super::design::{Column, ForeignKey, Input, JoinEdge, Obj, Stmt, Table, Touch, Unit};
+
+fn db_err(what: &str, e: &mysql_async::Error) -> SprigError {
+    SprigError::new(SprigCode::CatalogUnavailable, format!("{what}: {e}"))
+}
+
+/// A table's place before the first design.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    /// The object.
+    pub object: Obj,
+    /// The database.
+    pub db: DbId,
+    /// Its schema now (the database's default-group shard schema).
+    pub schema: String,
+    /// The table.
+    pub name: String,
+}
+
+/// What the input was read from, with where each table is.
+#[derive(Debug, Clone, Default)]
+pub struct Assembled {
+    /// The advisor's input.
+    pub input: Input,
+    /// Each table's schema.
+    pub located: Vec<Located>,
+    /// The oldest statement in the window.
+    pub first_seen: Option<SystemTime>,
+    /// The catalog version the run read.
+    pub schema_version: u64,
+}
+
+/// The key class of a column type, or `None` (the rule `SPRIG PIN`
+/// checks with, `sprig_shard::pins::column_class`).
+#[must_use]
+pub fn class_of(data_type: &str, collation: Option<&str>) -> Option<KeyClass> {
+    sprig_shard::pins::column_class(data_type, collation)
+}
+
+fn quote_list(v: &[String]) -> String {
+    v.iter()
+        .map(|s| format!("'{}'", s.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Each database's default-group schema on the connection's server, from
+/// the catalog's `databases.default_group_id` and the server's schemas.
+async fn default_schemas(
+    c: &mut Conn,
+    tenant: TenantId,
+    catalog: &str,
+) -> Result<Vec<(DbId, String)>> {
+    let dbs: Vec<(u32, u32)> = c
+        .query(format!(
+            "SELECT db_id, default_group_id FROM `{catalog}`.`databases` WHERE state = 'active'"
+        ))
+        .await
+        .map_err(|e| db_err("databases", &e))?;
+    let names: Vec<String> = c
+        .exec(
+            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE ?",
+            (format!("t{tenant}\\_d%"),),
+        )
+        .await
+        .map_err(|e| db_err("schemata", &e))?;
+    // Groups a first design is still applying (a resumed run): their
+    // members may already sit in the group's first shard.
+    let preparing: Vec<u32> = c
+        .query(format!(
+            "SELECT group_id FROM `{catalog}`.table_groups WHERE state = 'preparing'"
+        ))
+        .await
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (db, g) in dbs {
+        let mut found: Vec<String> = names
+            .iter()
+            .filter(|n| {
+                matches!(n.parse::<SchemaName>(), Ok(SchemaName::Shard { tenant: t, db: d, group, .. })
+                    if t == tenant && d == DbId(db) && group.0 == g)
+            })
+            .cloned()
+            .collect();
+        found.sort();
+        if let Some(s) = found.into_iter().next() {
+            out.push((DbId(db), s));
+        }
+        for pg in &preparing {
+            let s = SchemaName::shard(
+                tenant,
+                DbId(db),
+                sprig_common::ids::GroupId(*pg),
+                sprig_common::ids::ShardId(1),
+            )
+            .to_string();
+            if names.contains(&s) {
+                out.push((DbId(db), s));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Reads the tables of the default-group schemas and their keys.
+///
+/// # Errors
+/// MariaDB's.
+#[allow(clippy::too_many_lines)]
+pub async fn tables(
+    c: &mut Conn,
+    tenant: TenantId,
+) -> Result<(Vec<Table>, Vec<ForeignKey>, Vec<Located>)> {
+    let catalog = SchemaName::catalog(tenant).to_string();
+    let schemas = default_schemas(c, tenant, &catalog).await?;
+    let objects: Vec<(u64, u32, String)> = c
+        .query(format!(
+            "SELECT object_id, db_id, name FROM `{catalog}`.objects \
+             WHERE namespace = 'relation' AND kind = 'table' AND state = 'active'"
+        ))
+        .await
+        .map_err(|e| db_err("objects", &e))?;
+    let obj = |db: DbId, name: &str| {
+        objects
+            .iter()
+            .find(|(_, d, n)| *d == db.0 && n.eq_ignore_ascii_case(name))
+            .map(|(o, _, _)| *o)
+    };
+    let mut tables = Vec::new();
+    let mut located = Vec::new();
+    let mut fks = Vec::new();
+    for (db, schema) in &schemas {
+        let s = quote_list(std::slice::from_ref(schema));
+        let tbls: Vec<(String, u64)> = c
+            .query(format!(
+                "SELECT TABLE_NAME, CAST(DATA_LENGTH + INDEX_LENGTH AS UNSIGNED) \
+                 FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ({s}) \
+                 AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
+            ))
+            .await
+            .map_err(|e| db_err("tables", &e))?;
+        let cols: Vec<(String, String, String, Option<String>)> = c
+            .query(format!(
+                "SELECT TABLE_NAME, LOWER(COLUMN_NAME), DATA_TYPE, COLLATION_NAME \
+                 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA IN ({s}) \
+                 ORDER BY TABLE_NAME, ORDINAL_POSITION"
+            ))
+            .await
+            .map_err(|e| db_err("columns", &e))?;
+        let stats: Vec<(String, String, u64, u32, String, Option<u64>)> = c
+            .query(format!(
+                "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, LOWER(COLUMN_NAME), \
+                 CARDINALITY FROM information_schema.STATISTICS WHERE TABLE_SCHEMA IN ({s}) \
+                 ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX"
+            ))
+            .await
+            .map_err(|e| db_err("statistics", &e))?;
+        let refs: Vec<(String, String, String, String, String, u32)> = c
+            .query(format!(
+                "SELECT CONSTRAINT_NAME, TABLE_NAME, LOWER(COLUMN_NAME), REFERENCED_TABLE_NAME, \
+                 LOWER(REFERENCED_COLUMN_NAME), ORDINAL_POSITION \
+                 FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA IN ({s}) \
+                 AND REFERENCED_TABLE_SCHEMA = TABLE_SCHEMA \
+                 ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION"
+            ))
+            .await
+            .map_err(|e| db_err("foreign keys", &e))?;
+        for (name, bytes) in tbls {
+            if sprig_common::names::is_internal_object(&name) {
+                continue;
+            }
+            let Some(object) = obj(*db, &name) else {
+                continue; // not in the catalog: not the tenant's table
+            };
+            // Indexes: name -> (unique, columns, cardinality of the first column).
+            let mut idx: BTreeMap<String, (bool, Vec<String>, Option<u64>)> = BTreeMap::new();
+            for (t, i, nu, seq, col, card) in &stats {
+                if t != &name {
+                    continue;
+                }
+                let e = idx.entry(i.clone()).or_insert((*nu == 0, Vec::new(), None));
+                e.1.push(col.clone());
+                if *seq == 1 {
+                    e.2 = *card;
+                }
+            }
+            let ndv = |col: &str| -> Option<f64> {
+                idx.values()
+                    .filter(|(_, cs, _)| cs.first().map(String::as_str) == Some(col))
+                    .filter_map(|(_, _, card)| *card)
+                    .max()
+                    .map(|n| {
+                        #[allow(clippy::cast_precision_loss)]
+                        let f = n as f64;
+                        f
+                    })
+            };
+            let columns: Vec<Column> = cols
+                .iter()
+                .filter(|(t, ..)| t == &name)
+                .map(|(_, c, ty, coll)| Column {
+                    name: c.clone(),
+                    class: class_of(ty, coll.as_deref()),
+                    ndv: ndv(c),
+                    top_share: None,
+                })
+                .collect();
+            let pk = idx.get("PRIMARY").map(|x| x.1.clone()).unwrap_or_default();
+            let uniques = idx
+                .iter()
+                .filter(|(n, (u, ..))| *u && n.as_str() != "PRIMARY")
+                .map(|(_, (_, cs, _))| cs.clone())
+                .collect();
+            #[allow(clippy::cast_precision_loss)]
+            tables.push(Table {
+                object,
+                db: db.0,
+                name: name.clone(),
+                columns,
+                pk,
+                uniques,
+                size_bytes: bytes as f64,
+            });
+            located.push(Located {
+                object,
+                db: *db,
+                schema: schema.clone(),
+                name: name.clone(),
+            });
+        }
+        let mut by_name: BTreeMap<(String, String), ForeignKey> = BTreeMap::new();
+        for (cn, t, col, rt, rc, _) in refs {
+            let (Some(child), Some(parent)) = (obj(*db, &t), obj(*db, &rt)) else {
+                continue;
+            };
+            let e = by_name
+                .entry((t.clone(), cn.clone()))
+                .or_insert(ForeignKey {
+                    name: cn.clone(),
+                    child,
+                    child_cols: Vec::new(),
+                    parent,
+                    parent_cols: Vec::new(),
+                });
+            e.child_cols.push(col);
+            e.parent_cols.push(rc);
+        }
+        fks.extend(by_name.into_values());
+    }
+    Ok((tables, fks, located))
+}
+
+fn alias_object(shape: &Shape, alias: Option<&str>) -> Option<Obj> {
+    shape
+        .tables
+        .iter()
+        .find(|t| Some(t.alias.as_str()) == alias)
+        .and_then(|t| t.object_id)
+        .map(|o| o.0)
+}
+
+/// One fingerprint's shape as a statement (or a transaction unit).
+#[must_use]
+pub fn statement(
+    shape: &Shape,
+    kind: FpKind,
+    fingerprint: u64,
+    weight: f64,
+    tables: &[Table],
+) -> (Option<Stmt>, Option<Unit>) {
+    let known = |o: Obj| tables.iter().any(|t| t.object == o);
+    if kind == FpKind::Txn {
+        let writes: Vec<Obj> = shape
+            .object_ids()
+            .iter()
+            .map(|o| o.0)
+            .filter(|o| known(*o))
+            .collect();
+        return (
+            None,
+            (!writes.is_empty()).then_some(Unit { weight, writes }),
+        );
+    }
+    if kind != FpKind::Sql {
+        return (None, None);
+    }
+    let mut touches: BTreeMap<Obj, Touch> = BTreeMap::new();
+    for t in &shape.tables {
+        if let Some(o) = t.object_id.map(|o| o.0)
+            && known(o)
+        {
+            touches.entry(o).or_insert(Touch {
+                object: o,
+                ..Touch::default()
+            });
+        }
+    }
+    for p in &shape.predicates {
+        if matches!(p.op, PredOp::Eq)
+            && let Some(o) = alias_object(shape, p.column.table.as_deref())
+            && let Some(t) = touches.get_mut(&o)
+        {
+            t.eq.push(p.column.col.clone());
+        }
+    }
+    if let Some(w) = &shape.writes {
+        for alias in &w.targets {
+            let Some(o) = alias_object(shape, Some(alias)) else {
+                continue;
+            };
+            let Some(t) = touches.get_mut(&o) else {
+                continue;
+            };
+            t.write = true;
+            if matches!(
+                w.kind,
+                WriteKind::Insert | WriteKind::Upsert | WriteKind::Replace
+            ) {
+                t.insert = if w.all_columns {
+                    tables
+                        .iter()
+                        .find(|x| x.object == o)
+                        .map(|x| x.columns.iter().map(|c| c.name.clone()).collect())
+                        .unwrap_or_default()
+                } else {
+                    w.set.iter().map(|c| c.col.clone()).collect()
+                };
+            }
+        }
+    }
+    let joins = shape
+        .joins
+        .iter()
+        .filter(|j| j.op == JoinOp::Eq)
+        .filter_map(|j| {
+            let a = alias_object(shape, j.l.table.as_deref())?;
+            let b = alias_object(shape, j.r.table.as_deref())?;
+            (known(a) && known(b) && a != b).then(|| JoinEdge {
+                a: (a, j.l.col.clone()),
+                b: (b, j.r.col.clone()),
+            })
+        })
+        .collect();
+    if touches.is_empty() {
+        return (None, None);
+    }
+    (
+        Some(Stmt {
+            weight,
+            fingerprint,
+            touches: touches.into_values().collect(),
+            joins,
+        }),
+        None,
+    )
+}
+
+/// The whole input of a run for `tenant` over `window` ending at `now`,
+/// read through `c` (a connection to the tenant's cluster).
+///
+/// # Errors
+/// MariaDB's and the workload store's.
+pub async fn assemble(
+    c: &mut Conn,
+    tenant: TenantId,
+    now: SystemTime,
+    window: Duration,
+    split_bytes: f64,
+) -> Result<Assembled> {
+    let (tables, fks, located) = tables(c, tenant).await?;
+    let store = WorkloadTables::for_tenant(tenant);
+    let from = now.checked_sub(window).unwrap_or(SystemTime::UNIX_EPOCH);
+    let fps = store
+        .window(c, tenant, from, now + Duration::from_secs(3600))
+        .await?;
+    let mut stmts = Vec::new();
+    let mut units = Vec::new();
+    let mut first_seen: Option<SystemTime> = None;
+    let ids: Vec<sprig_common::ids::Fingerprint> = fps.iter().map(|f| f.id).collect();
+    for f in store.fingerprints(c, &ids).await? {
+        first_seen = Some(first_seen.map_or(f.first_seen, |x| x.min(f.first_seen)));
+    }
+    for f in &fps {
+        #[allow(clippy::cast_precision_loss)]
+        let w = f.stats.exec_count as f64;
+        let (s, u) = statement(&f.shape, f.kind, f.id.0, w, &tables);
+        stmts.extend(s);
+        units.extend(u);
+    }
+    let catalog = SchemaName::catalog(tenant).to_string();
+    // Chapter 16's pins (empty before the `sharding` module's format 3).
+    let pins = PinStore.load(c, &catalog).await?;
+    let version: Option<String> = c
+        .query_first(format!(
+            "SELECT CAST(value AS CHAR) FROM `{catalog}`.settings WHERE scope_kind = 'tenant' \
+             AND scope_id = 0 AND setting_key = 'sprig.catalog_version'"
+        ))
+        .await
+        .map_err(|e| db_err("catalog version", &e))?;
+    Ok(Assembled {
+        input: Input {
+            tables,
+            fks,
+            stmts,
+            units,
+            split_bytes,
+            pins,
+        },
+        located,
+        first_seen,
+        schema_version: version
+            .and_then(|v| v.trim_matches('"').parse().ok())
+            .unwrap_or(0),
+    })
+}

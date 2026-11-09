@@ -530,3 +530,83 @@ fn galera_driver() {
     // Two synced nodes are too few for an RSU build.
     assert!(d.validation_node().is_none());
 }
+
+/// The dev clusters' bug: a deep probe found XA working, the publisher
+/// held the upgrade for its sustain period, and the light passes in
+/// between carried the published `xa = false` forward, so the upgrade
+/// never published. The driver now carries the last deep probe's results.
+#[test]
+fn deep_only_upgrades_sustain_across_light_passes() {
+    use crate::profile::CapabilityPublisher;
+    let kind = TopologyKind::SingleNode;
+    let d = for_topology(kind, connector(), ClusterSettings::default());
+    let mut rec = record(kind, &["n1"]);
+    // Published before: XA didn't work then.
+    let mut old = crate::profile::derive(DeriveInput {
+        topology: kind,
+        probes: &single(),
+        declared: None,
+        previous: None,
+    });
+    old.derived.xa = false;
+    old.version = 4;
+    rec.profile = Some(old.clone());
+    d.observe(&rec);
+    let sustain = Duration::from_secs(60);
+    let mut pubr = CapabilityPublisher::new(Some(old), sustain);
+    let t0 = Instant::now();
+    // A deep pass: XA works, the upgrade is held.
+    let deep = single();
+    let c = d.derive(&deep, None);
+    assert!(c.derived.xa);
+    assert!(pubr.observe(c, t0).is_none());
+    assert!(pubr.pending().contains(&"derived.xa"));
+    // Light passes (no active probes) keep proposing it.
+    let mut light = single();
+    light[0].active = None;
+    for s in [10, 30, 59] {
+        let c = d.derive(&light, None);
+        assert!(c.derived.xa, "carried from the deep pass");
+        assert!(pubr.observe(c, t0 + Duration::from_secs(s)).is_none());
+        assert!(pubr.pending().contains(&"derived.xa"));
+    }
+    let up = pubr
+        .observe(d.derive(&light, None), t0 + sustain)
+        .expect("published after the sustain period");
+    assert!(up.profile.derived.xa);
+    // A later deep pass that finds XA broken downgrades at once.
+    let mut broken = single();
+    if let Some(a) = broken[0].active.as_mut() {
+        a.xa = false;
+    }
+    let down = pubr
+        .observe(
+            d.derive(&broken, None),
+            t0 + sustain + Duration::from_secs(1),
+        )
+        .expect("downgrades publish at once");
+    assert!(!down.profile.derived.xa);
+    assert!(
+        !d.derive(&light, None).derived.xa,
+        "the new deep facts carry"
+    );
+}
+
+#[test]
+fn primary_replica_carries_xa_and_galera_never_has_it() {
+    let d = fed(TopologyKind::PrimaryReplica, &replication());
+    let mut light = replication();
+    for p in &mut light {
+        p.active = None;
+    }
+    assert!(d.derive(&light, None).derived.xa);
+    // Even an active probe that claims XA on Galera doesn't make it XA.
+    let mut g = galera();
+    if let Some(a) = g.iter_mut().find_map(|p| p.active.as_mut()) {
+        a.xa = true;
+    } else {
+        g[0].active = Some(crate::testutil::all_passed());
+    }
+    let d = fed(TopologyKind::Galera, &g);
+    assert!(!d.derive(&g, None).derived.xa);
+}

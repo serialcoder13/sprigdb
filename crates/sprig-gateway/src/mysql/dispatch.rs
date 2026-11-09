@@ -714,7 +714,7 @@ impl CommandLoop {
             .shared
             .cfg
             .login
-            .start(super::login::request(
+            .begin(super::login::request(
                 persona,
                 &cu.user,
                 self.session.peer,

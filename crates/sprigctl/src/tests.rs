@@ -564,12 +564,57 @@ fn tenant_commands_parse() {
         full.extend_from_slice(bad);
         assert!(cli().try_get_matches_from(full).is_err(), "{bad:?}");
     }
-    assert!(TENANT_LATER.contains(&"failover"));
-    // Chapter 24: `tenant move` is implemented.
+    // Chapter 24's `tenant move` and chapter 25's `tenant failover` are
+    // implemented.
     assert!(!TENANT_LATER.contains(&"move"));
+    assert!(!TENANT_LATER.contains(&"failover"));
+    for good in [
+        &["tenant", "failover", "acme", "--to", "ams1"][..],
+        &[
+            "tenant",
+            "failover",
+            "acme",
+            "--to",
+            "ams1",
+            "--accept-data-loss",
+            "--old-home-fenced",
+        ],
+        &["tenant", "failover", "--all-from", "fra1", "--to", "ams1"],
+        &["tenant", "failover", "acme", "--errant"],
+        &[
+            "tenant",
+            "standby",
+            "acme",
+            "--dc",
+            "ams1",
+            "--cluster",
+            "ams1-c1",
+        ],
+    ] {
+        let mut full = vec!["sprigctl"];
+        full.extend_from_slice(good);
+        assert!(cli().try_get_matches_from(full).is_ok(), "{good:?}");
+    }
+    for bad in [
+        &["tenant", "failover", "acme"][..],
+        &["tenant", "failover", "acme", "--to", "ams1", "--errant"],
+    ] {
+        let mut full = vec!["sprigctl"];
+        full.extend_from_slice(bad);
+        assert!(cli().try_get_matches_from(full).is_err(), "{bad:?}");
+    }
     for good in [
         &["tenant", "move", "acme", "--to", "fra1"][..],
-        &["tenant", "move", "acme", "--to", "fra1", "--max-pause-ms", "3000", "--wait"],
+        &[
+            "tenant",
+            "move",
+            "acme",
+            "--to",
+            "fra1",
+            "--max-pause-ms",
+            "3000",
+            "--wait",
+        ],
         &["tenant", "move", "acme", "--status"],
         &["tenant", "traffic", "acme"],
     ] {
@@ -579,7 +624,10 @@ fn tenant_commands_parse() {
     }
     let mut full = vec!["sprigctl"];
     full.extend_from_slice(&["tenant", "move", "acme"]);
-    assert!(cli().try_get_matches_from(full).is_err(), "move needs --to or --status");
+    assert!(
+        cli().try_get_matches_from(full).is_err(),
+        "move needs --to or --status"
+    );
 }
 
 fn tenant_view(id: u64, name: &str, parent: Option<&str>) -> TenantView {

@@ -1,0 +1,27 @@
+{{- /* cert-manager Certificates from the DC's intermediate CA (chapter 27,
+     "Security notes"). */}}
+{{- $roles := dict "controller" "720h" "worker" "720h" "operator" "720h" "etcd-dc" "2160h" "etcd-global" "2160h" "gateway" "24h" }}
+{{- range $role, $life := $roles }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sprigdb-{{ $role }}-tls
+  labels: {{- include "sprigdb.labels" $ | nindent 4 }}
+spec:
+  secretName: sprigdb-{{ $role }}-tls
+  duration: {{ $life }}
+  {{- if eq $role "gateway" }}
+  renewBefore: 8h
+  subject: {organizations: [sprigdb], organizationalUnits: [gateway]}
+  commonName: sprig-gateway
+  {{- else }}
+  commonName: {{ $role }}
+  {{- end }}
+  usages: [server auth, client auth]
+  dnsNames:
+    - sprigdb-{{ $role }}
+    - sprigdb-{{ $role }}.{{ $.Release.Namespace }}.svc
+    - "*.sprigdb-{{ $role }}.{{ $.Release.Namespace }}.svc"
+  issuerRef: {{- toYaml $.Values.tls.issuerRef | nindent 4 }}
+{{- end }}

@@ -1,13 +1,21 @@
 //! The differential suite (chapter 41, "Testing"; chapter 46): KIRun
 //! functions compiled to PL/SQL and run in MariaDB, against the reference
-//! interpreter running the same IR, on two copies of the same data.
-//! Each case compares the event, its fields (doubles to 1e-9 relative),
-//! the error class, and the rows of every table afterwards.
+//! interpreter running the same IR, and against the fallback tier running
+//! the same definition on the native `kirun` runtime
+//! (`sprig_logic_js::kirun`), on three copies of the same data. Each case
+//! compares the event, its fields (doubles to 1e-9 relative), the error
+//! class, and the rows of every table afterwards.
+//!
+//! The fallback tier's statements go through [`EngineDb`], which runs
+//! them as text on its own schema, bound exactly as the gateway binds
+//! them ([`sprig_logic_js::bridge::bind`]); its arguments are coerced to
+//! the definition's types as the gateway coerces a `CALL`'s.
 //!
 //! Runs on the Compose single node; skipped without
 //! `SPRIG_TEST_MARIADB_SINGLE` (for example
 //! `mysql://root:sprig-dev-root@127.0.0.1:13301`). Works in the schemas
-//! `r7_diff_compiled` and `r7_diff_interp`, dropped afterwards.
+//! `r7_diff_compiled`, `r7_diff_interp` and `r7_diff_engine`, dropped
+//! afterwards.
 
 #![allow(
     clippy::unwrap_used,
@@ -18,15 +26,22 @@
     missing_docs
 )]
 
+use std::sync::Arc;
+
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, Value as My};
 use serde_json::{Value as J, json};
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
 use sprig_logic_compile::interp::{self, Db, Limits, Value};
 use sprig_logic_compile::{Compiled, Options, Runtime, StaticColumns, compile, plsql, sql};
+use sprig_logic_js::bridge::{self as eb, ColKind, Column, DbBridge, DbOp, Reply, Shape};
+use sprig_logic_js::kirun::{self as engine, Host, Prepared};
+use sprig_logic_js::outbound::NoOutbound;
 
 const COMPILED: &str = "r7_diff_compiled";
 const INTERP: &str = "r7_diff_interp";
+const ENGINE: &str = "r7_diff_engine";
+const SCHEMAS: [&str; 3] = [COMPILED, INTERP, ENGINE];
 
 const SEED: &[&str] = &[
     "CREATE TABLE products (id BIGINT PRIMARY KEY, price DECIMAL(10,2) NOT NULL, stock INT NOT NULL)",
@@ -95,6 +110,58 @@ impl Db for MyDb<'_> {
     }
 }
 
+/// The fallback tier's `db`: each statement as text on [`ENGINE`].
+struct EngineDb {
+    pool: Pool,
+}
+
+#[async_trait::async_trait]
+impl DbBridge for EngineDb {
+    async fn exec(&self, op: DbOp) -> Result<Reply> {
+        let mut c = self.pool.get_conn().await.map_err(my_err)?;
+        c.query_drop(format!("USE `{ENGINE}`"))
+            .await
+            .map_err(my_err)?;
+        if op.shape == Shape::Exec {
+            c.query_drop(op.sql.as_str()).await.map_err(my_err)?;
+            return Ok(Reply::Affected(c.affected_rows()));
+        }
+        let mut r = c.query_iter(op.sql.as_str()).await.map_err(my_err)?;
+        let columns: Vec<Column> = r
+            .columns()
+            .map(|cs| {
+                cs.iter()
+                    .map(|col| Column {
+                        name: col.name_str().into_owned(),
+                        kind: kind_of(col),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let rows: Vec<mysql_async::Row> = r.collect().await.map_err(my_err)?;
+        Ok(Reply::Rows {
+            columns,
+            rows: rows
+                .into_iter()
+                .map(|row| row.unwrap().iter().map(text).collect())
+                .collect(),
+        })
+    }
+}
+
+fn kind_of(col: &mysql_async::Column) -> ColKind {
+    let unsigned = col
+        .flags()
+        .contains(mysql_async::consts::ColumnFlags::UNSIGNED_FLAG);
+    eb::kind_of_type(col.column_type() as u8, unsigned)
+}
+
+/// A definition deployed in both tiers.
+struct Def {
+    c: Compiled,
+    p: Prepared,
+}
+
 /// The error class compared across tiers: MariaDB's 1365 (division by
 /// zero) and 1690 (out of range) are 39866, as the gateway maps them.
 fn class(e: &SprigError) -> u16 {
@@ -146,7 +213,7 @@ impl Suite {
 
     fn reset(&self) {
         let mut c = self.conn(None);
-        for s in [COMPILED, INTERP] {
+        for s in SCHEMAS {
             self.rt
                 .block_on(async {
                     c.query_drop(format!("USE `{s}`")).await?;
@@ -181,7 +248,7 @@ impl Suite {
         cols
     }
 
-    fn deploy(&mut self, name: &str, src: &str, max_loops: u64) -> Compiled {
+    fn deploy(&mut self, name: &str, src: &str, max_loops: u64) -> Def {
         self.next_module += 1;
         let opts = Options {
             module_id: self.next_module,
@@ -204,7 +271,36 @@ impl Suite {
                 panic!("{name}: {e}\n{s}");
             }
         }
-        c
+        let p = Prepared::new(src).unwrap();
+        let missing = self.rt.block_on(p.missing_functions());
+        assert!(missing.is_empty(), "{name}: {missing:?}");
+        Def { c, p }
+    }
+
+    fn engine(&self, d: &Def, args: &[Value], max_loops: u64) -> Got {
+        let host = Host {
+            db: Arc::new(EngineDb {
+                pool: self.pool.clone(),
+            }),
+            outbound: Arc::new(NoOutbound),
+            // Every statement is qualified with the schema, as the gateway
+            // qualifies them with the code's database.
+            default_db: Some(ENGINE.to_owned()),
+        };
+        let limits = sprig_logic_js::Limits {
+            max_loop_iterations: max_loops,
+            ..sprig_logic_js::Limits::default()
+        };
+        let args =
+            d.p.coerce(args.iter().map(Value::to_json).collect())
+                .map_err(|e| class(&e))?;
+        self.rt
+            .block_on(engine::run(&d.p, args, host, limits))
+            .map(|o| (o.event, o.result))
+            .map_err(|e| {
+                println!("  fallback error: {e}");
+                class(&e)
+            })
     }
 
     fn compiled(&self, c: &Compiled, args: &[Value]) -> Got {
@@ -263,32 +359,34 @@ impl Suite {
         out
     }
 
-    fn case(
-        &mut self,
-        name: &str,
-        c: &Compiled,
-        args: Vec<Value>,
-        max_loops: u64,
-        expect: Option<Got>,
-    ) {
+    fn case(&mut self, name: &str, d: &Def, args: Vec<Value>, max_loops: u64, expect: Option<Got>) {
+        let c = &d.c;
         self.cases += 1;
         self.reset();
         let a = self.compiled(c, &args);
         let b = self.interpreted(c, &args, max_loops);
-        let same = match (&a, &b) {
-            (Ok((e1, r1)), Ok((e2, r2))) => e1 == e2 && close(r1, r2),
-            (Err(x), Err(y)) => x == y,
-            _ => false,
-        };
+        let e = self.engine(d, &args, max_loops);
         let label = format!("{name}{args:?}");
-        if !same {
+        if !same(&a, &b) {
             self.failures
                 .push(format!("{label}: compiled {a:?} vs interpreted {b:?}"));
         }
-        let (ta, tb) = (self.tables(COMPILED), self.tables(INTERP));
+        if !same(&a, &e) {
+            self.failures
+                .push(format!("{label}: compiled {a:?} vs fallback {e:?}"));
+        }
+        let (ta, tb, te) = (
+            self.tables(COMPILED),
+            self.tables(INTERP),
+            self.tables(ENGINE),
+        );
         if ta != tb {
             self.failures
                 .push(format!("{label}: tables differ: {ta:?} vs {tb:?}"));
+        }
+        if ta != te {
+            self.failures
+                .push(format!("{label}: fallback tables differ: {ta:?} vs {te:?}"));
         }
         if let Some(want) = expect {
             let ok = match (&want, &a) {
@@ -305,6 +403,14 @@ impl Suite {
     }
 }
 
+fn same(a: &Got, b: &Got) -> bool {
+    match (a, b) {
+        (Ok((e1, r1)), Ok((e2, r2))) => e1 == e2 && close(r1, r2),
+        (Err(x), Err(y)) => x == y,
+        _ => false,
+    }
+}
+
 fn fixture(name: &str) -> String {
     std::fs::read_to_string(format!(
         "{}/tests/kirun/{name}.json",
@@ -314,7 +420,7 @@ fn fixture(name: &str) -> String {
 }
 
 #[test]
-fn compiled_and_interpreted_runs_agree() {
+fn compiled_interpreted_and_fallback_runs_agree() {
     let Ok(url) = std::env::var("SPRIG_TEST_MARIADB_SINGLE") else {
         eprintln!("skipped: SPRIG_TEST_MARIADB_SINGLE is not set");
         return;
@@ -338,7 +444,7 @@ fn compiled_and_interpreted_runs_agree() {
     };
     {
         let mut c = s.conn(None);
-        for db in [COMPILED, INTERP] {
+        for db in SCHEMAS {
             s.rt.block_on(c.query_drop(format!("DROP DATABASE IF EXISTS `{db}`")))
                 .unwrap();
             s.rt.block_on(c.query_drop(format!("CREATE DATABASE `{db}` CHARACTER SET utf8mb4")))
@@ -351,7 +457,7 @@ fn compiled_and_interpreted_runs_agree() {
     let elapsed = start.elapsed();
     {
         let mut c = s.conn(None);
-        for db in [COMPILED, INTERP] {
+        for db in SCHEMAS {
             s.rt.block_on(c.query_drop(format!("DROP DATABASE IF EXISTS `{db}`")))
                 .unwrap();
         }
@@ -516,14 +622,80 @@ fn run_cases(s: &mut Suite) {
             json!({"stock": 10, "found": true, "row": {"stock": 10, "cost": 400.0}}),
         ))),
     );
-    s.case(
-        "many",
-        &many,
-        vec![I(1000)],
+    // No row: `Steps.q.output.row.stock` is a value that isn't there,
+    // which fails the run in KIRun ("t2"), so it does in compiled code.
+    s.case("many", &many, vec![I(1000)], big, Some(rt_err.clone()));
+
+    // KIRun's null arithmetic: `null + y` is `y`, a number plus null
+    // fails, and so do the other operators.
+    let nulls = s.deploy(
+        "nulls",
+        r#"{"name": "Nulls", "namespace": "T",
+          "parameters": {"x": {"parameterName": "x", "schema": {"type": ["DOUBLE", "NULL"]}},
+                         "y": {"parameterName": "y", "schema": {"type": ["INTEGER"]}}},
+          "events": {"output": {"name": "output", "parameters": {"a": {"type": ["DOUBLE"]}, "b": {"type": ["DOUBLE"]}}}},
+          "steps": {
+            "o": {"statementName": "o", "namespace": "System", "name": "GenerateEvent",
+                  "parameterMap": {"results": {
+                    "r1": {"type": "VALUE", "order": 1, "value": {"name": "a", "value": {"isExpression": true, "value": "Arguments.x + Arguments.y"}}},
+                    "r2": {"type": "VALUE", "order": 2, "value": {"name": "b", "value": {"isExpression": true, "value": "-(Arguments.x ?? 2)"}}}}}}}}"#,
         big,
-        Some(Ok((
-            "output".into(),
-            json!({"stock": null, "found": false, "row": null}),
-        ))),
     );
+    s.case(
+        "nulls",
+        &nulls,
+        vec![N, I(3)],
+        big,
+        Some(Ok(("output".into(), json!({"a": 3, "b": -2})))),
+    );
+    s.case(
+        "nulls",
+        &nulls,
+        vec![F(1.5), I(3)],
+        big,
+        Some(Ok(("output".into(), json!({"a": 4.5, "b": -1.5})))),
+    );
+    let plus_null = s.deploy(
+        "plus_null",
+        r#"{"name": "PlusNull", "namespace": "T",
+          "parameters": {"x": {"parameterName": "x", "schema": {"type": ["DOUBLE", "NULL"]}},
+                         "y": {"parameterName": "y", "schema": {"type": ["INTEGER"]}}},
+          "events": {"output": {"name": "output", "parameters": {"c": {"type": ["DOUBLE"]}}}},
+          "steps": {
+            "o": {"statementName": "o", "namespace": "System", "name": "GenerateEvent",
+                  "parameterMap": {"results": {
+                    "r1": {"type": "VALUE", "value": {"name": "c", "value": {"isExpression": true, "value": "Arguments.y + Arguments.x"}}}}}}}}"#,
+        big,
+    );
+    s.case(
+        "plus_null",
+        &plus_null,
+        vec![N, I(3)],
+        big,
+        Some(rt_err.clone()),
+    );
+    s.case(
+        "plus_null",
+        &plus_null,
+        vec![F(1.5), I(3)],
+        big,
+        Some(Ok(("output".into(), json!({"c": 4.5})))),
+    );
+    // Arguments KIRun's schema refuses: null for a STRING, an INTEGER past
+    // Java's int, a qty below its minimum.
+    s.case(
+        "strings",
+        &strings,
+        vec![N, I(8)],
+        big,
+        Some(rt_err.clone()),
+    );
+    s.case(
+        "arith",
+        &arith,
+        vec![I(3_000_000_000), I(1), N],
+        big,
+        Some(rt_err.clone()),
+    );
+    s.case("quote", &quote, vec![I(7), I(0)], big, Some(rt_err));
 }

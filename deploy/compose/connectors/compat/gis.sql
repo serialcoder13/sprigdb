@@ -1,0 +1,16 @@
+DROP TABLE IF EXISTS c_site;
+CREATE TABLE c_site (id INT PRIMARY KEY, name VARCHAR(20), loc POINT NOT NULL SRID 4326, SPATIAL INDEX (loc));
+INSERT INTO c_site VALUES (1, 'mumbai', ST_GeomFromText('POINT(18.9 72.8)', 4326)), (2, 'delhi', ST_GeomFromText('POINT(28.6 77.2)', 4326)), (3, 'pune', ST_PointFromText('POINT(18.52 73.85)', 4326));
+INSERT INTO c_site VALUES (4, 'kolkata', ST_GeomFromText('POINT(88.36 22.57)', 4326, 'axis-order=long-lat'));
+SELECT id, name, ST_X(loc), ST_Y(loc), ST_Latitude(loc), ST_Longitude(loc), ST_AsText(loc), HEX(loc), HEX(ST_AsBinary(loc)), ST_SRID(loc) FROM c_site ORDER BY id;
+SELECT a.name, b.name, ST_Distance(a.loc, b.loc) FROM c_site a JOIN c_site b ON a.id < b.id ORDER BY a.id, b.id;
+SELECT name FROM c_site WHERE ST_Distance(loc, ST_GeomFromText('POINT(18.9 72.8)', 4326)) < 150000 ORDER BY id;
+SELECT name, ST_Distance_Sphere(loc, ST_GeomFromText('POINT(28.6 77.2)', 4326)) FROM c_site ORDER BY id;
+SELECT name FROM c_site ORDER BY ST_Distance(loc, ST_GeomFromText('POINT(19 73)', 4326)) LIMIT 2;
+SELECT ST_AsText(ST_GeomFromWKB(ST_AsBinary(ST_GeomFromText('POINT(10 20)', 4326)), 4326));
+SELECT ST_AsText(ST_GeomFromText('LINESTRING(1 2, 3 4)', 4326)), ST_AsText(ST_GeomFromText('POINT(1 2)'));
+SET @p = ST_GeomFromText('POINT(18.9 72.8)', 4326);
+SELECT name, ST_Distance(loc, @p) FROM c_site ORDER BY id;
+SELECT ST_Distance(ST_GeomFromText('POINT(1 1)', 4326), ST_GeomFromText('POINT(2 2)', 4326)), ST_Distance(ST_GeomFromText('POINT(0 0)', 4326), ST_GeomFromText('POINT(0 180)', 4326));
+SELECT ST_X(POINT(1, 2)), ST_AsText(POINT(1, 2));
+DROP TABLE c_site;

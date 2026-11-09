@@ -66,7 +66,8 @@ pub const DDL_REFERENCE_TABLES: &str = "CREATE TABLE IF NOT EXISTS reference_tab
   KEY by_cluster (cluster_id)
 ) ENGINE=InnoDB";
 
-/// The module's migrations: chapter 15's tables, then chapter 19's.
+/// The module's migrations: chapter 15's tables, then chapter 19's, then
+/// the pins of chapter 16.
 pub static SHARDING_MIGRATIONS: &[Migration] = &[
     Migration {
         format: 1,
@@ -83,6 +84,12 @@ pub static SHARDING_MIGRATIONS: &[Migration] = &[
             crate::lookup::DDL_LOOKUP_INDEXES,
             crate::lookup::DDL_FOREIGN_KEYS,
         ],
+    },
+    Migration {
+        format: 3,
+        phase: Phase::Expand,
+        name: "group_pins (chapter 16's SPRIG PIN)",
+        statements: &[crate::pins::DDL_GROUP_PINS],
     },
 ];
 

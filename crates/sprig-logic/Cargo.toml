@@ -10,17 +10,28 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+# Schedules: cron times in IANA time zones (both already in the lock, through `kirun`).
+chrono = "0.4"
+chrono-tz = "0.10"
 mysql_async.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sprig-binlog.workspace = true
 sprig-catalog.workspace = true
 sprig-common.workspace = true
+# After-commit triggers read the change feed (chapter 38).
+sprig-feed.workspace = true
 sprig-logic-compile = { path = "../sprig-logic-compile" }
+# The fallback tier (R7 order 4): the native KIRun runtime.
+sprig-logic-js.workspace = true
+sprig-meta.workspace = true
+sprig-settings.workspace = true
+tokio = { workspace = true, features = ["time", "sync", "rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "test-util"] }
 
 [lints]
 workspace = true

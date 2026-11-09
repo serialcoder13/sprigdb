@@ -1,13 +1,19 @@
 function Test.Strings (name: str, n: i64) -> events {output{greeting: str, len: i64, upper: str, lower: str, hasA: bool, startsAb: bool, endsZ: bool, posB: i64, joined: str, same: bool, before: bool}}
-  1 cat_value: str := concat(concat(name, "-"), num_str(mul(n, 2)))
-  2 en_result: bool := ends_with(name, "z")
-  3 has_result: bool := contains(name, "a")
-  4 len_result: i64 := len(name)
-  5 low_result: str := lower(name)
-  6 pos_result: i64 := index_of(name, "b")
-  7 st_result: bool := starts_with(name, "Ab")
-  8 up_result: str := upper(name)
-  9 emit output {greeting: concat(concat(concat(concat(concat("Hi ", name), "! #"), num_str(n)), " "), num_str(div(n, 4))), len: len_result, upper: up_result, lower: low_result, hasA: has_result, startsAb: st_result, endsZ: en_result, posB: pos_result, joined: cat_value, same: seq(name, "abc"), before: lt(name, "b")}
+  1 if seq(name, null)
+  2   throw(39866, "Test.Strings: argument name is null, which its schema doesn't allow")
+  3 if seq(n, null)
+  4   throw(39866, "Test.Strings: argument n is null, which its schema doesn't allow")
+  5 if or(lt(n, -2147483648), gt(n, 2147483647))
+  6   throw(39866, "Test.Strings: argument n is out of the INTEGER range")
+  7 cat_value: str := concat(concat(name, "-"), concat("", num_str(mul(n, 2))))
+  8 en_result: bool := ends_with(name, "z")
+  9 has_result: bool := contains(name, "a")
+ 10 len_result: i64 := len(name)
+ 11 low_result: str := lower(name)
+ 12 pos_result: i64 := index_of(name, "b")
+ 13 st_result: bool := starts_with(name, "Ab")
+ 14 up_result: str := upper(name)
+ 15 emit output {greeting: concat(concat(concat(concat(concat("Hi ", name), "! #"), num_str(n)), " "), num_str(div(n, 4))), len: len_result, upper: up_result, lower: low_result, hasA: has_result, startsAb: st_result, endsZ: en_result, posB: pos_result, joined: cat_value, same: seq(name, "abc"), before: lt(name, "b")}
 
 -- cost 0 reads [] writes [] guarded 0
 
@@ -20,7 +26,7 @@ CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
   PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
     v VARCHAR(128) := LEFT(msg, 128);
   BEGIN
-    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+    SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
   END;
   FUNCTION num_str(x IN DOUBLE) RETURN VARCHAR AS
   BEGIN
@@ -47,7 +53,16 @@ AS
   v_st_result BOOLEAN;
   v_up_result LONGTEXT CHARACTER SET utf8mb4;
 BEGIN
-  v_cat_value := CONCAT(COALESCE(CONCAT(COALESCE(p_name, 'null'), COALESCE('-', 'null')), 'null'), COALESCE(COALESCE(CAST((p_n * 2) AS CHAR), 'null'), 'null'));
+  IF (COALESCE((p_name <=> NULL), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Strings: argument name is null, which its schema doesn''t allow');
+  END IF;
+  IF (COALESCE((p_n <=> NULL), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Strings: argument n is null, which its schema doesn''t allow');
+  END IF;
+  IF (COALESCE(((COALESCE((p_n < (-2147483648)), 0) <> 0) OR (COALESCE((p_n > 2147483647), 0) <> 0)), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Strings: argument n is out of the INTEGER range');
+  END IF;
+  v_cat_value := CONCAT(COALESCE(CONCAT(COALESCE(p_name, 'null'), COALESCE('-', 'null')), 'null'), COALESCE(CONCAT(COALESCE('', 'null'), COALESCE(COALESCE(CAST((p_n * 2) AS CHAR), 'null'), 'null')), 'null'));
   v_en_result := ((RIGHT(p_name, CHAR_LENGTH('z'))) COLLATE utf8mb4_bin = ('z') COLLATE utf8mb4_bin);
   v_has_result := (LOCATE(('a') COLLATE utf8mb4_bin, (p_name) COLLATE utf8mb4_bin) > 0);
   v_len_result := CHAR_LENGTH(p_name);

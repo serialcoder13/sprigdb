@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SprigDB chart values",
+  "type": "object",
+  "required": ["dc", "deploymentId", "image"],
+  "properties": {
+    "dc": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+        "tags": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "deploymentId": {"type": "string", "minLength": 1},
+    "global": {
+      "type": "object",
+      "properties": {
+        "endpoints": {"type": "array", "items": {"type": "string"}},
+        "voter": {
+          "type": "object",
+          "properties": {"enabled": {"type": "boolean"}, "advertise": {"type": "string"}}
+        }
+      }
+    },
+    "etcd": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "enum": [1, 3, 5]},
+        "storage": {"type": "string"},
+        "image": {"type": "string"}
+      }
+    },
+    "controller": {
+      "type": "object",
+      "properties": {"replicas": {"type": "integer", "minimum": 1}, "globalCandidate": {"type": "boolean"}}
+    },
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "autoscaling": {
+          "type": "object",
+          "properties": {
+            "minReplicas": {"type": "integer", "minimum": 1},
+            "maxReplicas": {"type": "integer", "minimum": 1},
+            "targetCPUUtilizationPercentage": {"type": "integer", "minimum": 1, "maximum": 100}
+          }
+        },
+        "service": {"type": "object", "properties": {"type": {"enum": ["LoadBalancer", "NodePort", "ClusterIP"]}}}
+      }
+    },
+    "worker": {"type": "object", "properties": {"replicas": {"type": "integer", "minimum": 0}}},
+    "operator": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1},
+        "agentSidecar": {"type": "boolean"},
+        "readyTimeoutSeconds": {"type": "integer", "minimum": 60}
+      }
+    },
+    "nodeServices": {"type": "object", "properties": {"type": {"enum": ["LoadBalancer", "ClusterIP", "NodePort"]}}},
+    "tls": {
+      "type": "object",
+      "required": ["issuerRef"],
+      "properties": {
+        "issuerRef": {"type": "object", "required": ["name"], "properties": {"kind": {"type": "string"}, "name": {"type": "string"}}},
+        "bundleConfigMap": {"type": "string"}
+      }
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {"repository": {"type": "string"}, "tag": {"type": "string"}, "pullPolicy": {"type": "string"}}
+    },
+    "settings": {"type": "object"},
+    "pools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "topology", "nodes", "storage", "maxClusters"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,40}$"},
+          "topology": {"enum": ["galera", "replication", "single"]},
+          "nodes": {"type": "integer", "minimum": 1, "maximum": 9},
+          "storage": {"type": "string"},
+          "storageClassName": {"type": "string"},
+          "minClusters": {"type": "integer", "minimum": 0},
+          "maxClusters": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "monitoring": {"type": "object"},
+    "networkPolicy": {"type": "object"}
+  }
+}

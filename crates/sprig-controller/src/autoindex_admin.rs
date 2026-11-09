@@ -573,9 +573,7 @@ impl AutoIndexService {
             names.insert(o.object_id, (db, o.name.clone()));
         }
         let ep = self.locator.writer(id).await?;
-        let mut conn = ep.pool.get_conn().await.map_err(|err| {
-            SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(err)
-        })?;
+        let mut conn = crate::catalogs::acquire(&ep.pool, "auto_index admin").await?;
         Migrator::new(&[AUTOINDEX_MODULE])?
             .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
             .await?;

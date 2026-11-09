@@ -1,22 +1,46 @@
 function Shop.Quote (productId: i64, qty: i64 [1..]) -> events {output{total: f64}, error{message: str}}
-  1 (item_found, item_price, item_stock) := db.sql_one("SELECT price, stock FROM products WHERE id = ?", [productId])
-  2 if truthy(ge(item_stock, qty))
-  3   sum_value: f64 := add(mul(item_price, qty), 40)
-  4   emit output {total: sum_value}
-  5 else
-  6   emit error {message: "not enough stock"}
+  1 if seq(productId, null)
+  2   throw(39866, "Shop.Quote: argument productId is null, which its schema doesn't allow")
+  3 if seq(qty, null)
+  4   throw(39866, "Shop.Quote: argument qty is null, which its schema doesn't allow")
+  5 if or(lt(qty, -2147483648), gt(qty, 2147483647))
+  6   throw(39866, "Shop.Quote: argument qty is out of the INTEGER range")
+  7 if lt(qty, 1.0)
+  8   throw(39866, "Shop.Quote: argument qty is below its minimum 1")
+  9 (item_found, item_price, item_stock) := db.sql_one("SELECT price, stock FROM products WHERE id = ?", [productId])
+ 10 if truthy(ge(item_stock, qty))
+ 11   sum_value: f64 := add(mul(not_null(item_price), qty), 40)
+ 12   emit output {total: sum_value}
+ 13 else
+ 14   emit error {message: "not enough stock"}
 
 -- cost 1 reads ["products"] writes [] guarded 0
 
 CREATE OR REPLACE PACKAGE __sprig_l44_v1_lib AS
   PROCEDURE fail(code IN INT, msg IN VARCHAR);
+  FUNCTION nn_i(x IN BIGINT) RETURN BIGINT;
+  FUNCTION nn_f(x IN DOUBLE) RETURN DOUBLE;
 END;
 
 CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
   PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
     v VARCHAR(128) := LEFT(msg, 128);
   BEGIN
-    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+    SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+  END;
+  FUNCTION nn_i(x IN BIGINT) RETURN BIGINT AS
+  BEGIN
+    IF x IS NULL THEN
+      SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = 39866, MESSAGE_TEXT = 'an arithmetic operator was applied to a null value';
+    END IF;
+    RETURN x;
+  END;
+  FUNCTION nn_f(x IN DOUBLE) RETURN DOUBLE AS
+  BEGIN
+    IF x IS NULL THEN
+      SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = 39866, MESSAGE_TEXT = 'an arithmetic operator was applied to a null value';
+    END IF;
+    RETURN x;
   END;
 END;
 
@@ -33,6 +57,18 @@ AS
   v_item_stock BIGINT;
   v_sum_value DOUBLE;
 BEGIN
+  IF (COALESCE((p_productid <=> NULL), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Shop.Quote: argument productId is null, which its schema doesn''t allow');
+  END IF;
+  IF (COALESCE((p_qty <=> NULL), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Shop.Quote: argument qty is null, which its schema doesn''t allow');
+  END IF;
+  IF (COALESCE(((COALESCE((p_qty < (-2147483648)), 0) <> 0) OR (COALESCE((p_qty > 2147483647), 0) <> 0)), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Shop.Quote: argument qty is out of the INTEGER range');
+  END IF;
+  IF (COALESCE((p_qty < 1e0), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Shop.Quote: argument qty is below its minimum 1');
+  END IF;
   BEGIN
     SELECT q.`price`, q.`stock` INTO v_item_price, v_item_stock FROM (SELECT price, stock FROM products WHERE id = (p_productid)) q;
     v_item_found := TRUE;
@@ -41,7 +77,7 @@ BEGIN
     WHEN TOO_MANY_ROWS THEN __sprig_l44_v1_lib.fail(39866, 'Sprig.Db.QueryOne at step item returned more than one row');
   END;
   IF (COALESCE((v_item_stock >= p_qty), 0) <> 0) THEN
-    v_sum_value := ((v_item_price * p_qty) + 40);
+    v_sum_value := ((__sprig_l44_v1_lib.nn_f(v_item_price) * p_qty) + 40);
     IF p__event IS NULL THEN
       p__event := 'output';
       p__result := JSON_OBJECT('total', (v_sum_value + 0e0));

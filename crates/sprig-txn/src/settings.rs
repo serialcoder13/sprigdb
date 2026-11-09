@@ -193,6 +193,31 @@ impl TxnConfig {
         }
     }
 
+    /// [`Self::resolve`] with the caller's resolvers (the gateway's live
+    /// settings with a tenant's rows): `num` for the numeric keys, `text`
+    /// for `txn.non_xa_policy`.
+    pub fn resolve_with(
+        ctx: &SettingCtx<'_>,
+        mut num: impl FnMut(&'static Setting<u64>, &SettingCtx<'_>) -> u64,
+        mut text: impl FnMut(&'static Setting<Cow<'static, str>>, &SettingCtx<'_>) -> String,
+        coordinator_id: &str,
+    ) -> Self {
+        Self {
+            policy: NonXaPolicy::parse(&text(&NON_XA_POLICY, ctx)),
+            prepare_timeout: Duration::from_millis(num(&PREPARE_TIMEOUT_MS, ctx)),
+            phase2_wait: Duration::from_millis(num(&PHASE2_WAIT_MS, ctx)),
+            commit_resolve_timeout: Duration::from_millis(num(&COMMIT_RESOLVE_TIMEOUT_MS, ctx)),
+            distributed_lock_wait_timeout_s: u32_of(num(
+                &DISTRIBUTED_LOCK_WAIT_TIMEOUT_SECONDS,
+                ctx,
+            )),
+            session_lock_wait_timeout_s: SESSION_LOCK_WAIT_DEFAULT,
+            max_branches: usize::try_from(num(&MAX_BRANCHES, ctx)).unwrap_or(32),
+            tenant_all_xa: false,
+            coordinator_id: coordinator_id.to_owned(),
+        }
+    }
+
     /// The lock-wait timeout every branch gets once a transaction has two.
     #[must_use]
     pub fn lock_wait_cap(&self) -> u32 {
@@ -267,6 +292,13 @@ mod tests {
         let dc = DcId::new("mum1").unwrap();
         let got = TxnConfig::resolve(&s, &SettingCtx::process(&dc), "gateway");
         assert_eq!(got, TxnConfig::default());
+        let with = TxnConfig::resolve_with(
+            &SettingCtx::process(&dc),
+            |k, cx| s.get(k, cx),
+            |k, cx| s.get(k, cx).into_owned(),
+            "gateway",
+        );
+        assert_eq!(with, got);
         assert_eq!(got.lock_wait_cap(), 10);
         let r = ResolverConfig::resolve(&s, &SettingCtx::process(&dc));
         assert_eq!(r, ResolverConfig::default());

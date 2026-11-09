@@ -30,7 +30,7 @@
     "parameterMap": {"value": {
       "a": {"type": "EXPRESSION", "order": 1, "expression": "Arguments.name"},
       "b": {"type": "VALUE", "order": 2, "value": "-"},
-      "c": {"type": "EXPRESSION", "order": 3, "expression": "Arguments.n * 2"}}}},
+      "c": {"type": "EXPRESSION", "order": 3, "expression": "'' + Arguments.n * 2"}}}},
   "out": {"statementName": "out", "namespace": "System", "name": "GenerateEvent",
     "parameterMap": {"results": {
       "r1": {"type": "VALUE", "order": 1, "value": {"name": "greeting", "value": {"isExpression": true, "value": "'Hi ' + Arguments.name + '! #' + Arguments.n + ' ' + (Arguments.n / 4)"}}},

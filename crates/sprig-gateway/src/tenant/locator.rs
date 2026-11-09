@@ -146,6 +146,14 @@ impl GatewayLocator {
         Record::<ShardMap>::decode(&kv.value).ok().map(|r| r.body)
     }
 
+    /// The role of the map this gateway follows for `tenant` (chapter 25:
+    /// a `quarantined` map is a fenced copy); `None` until it has loaded.
+    #[must_use]
+    pub fn followed_role(&self, tenant: TenantId) -> Option<MapRole> {
+        self.mirrored_map(&self.home_of(tenant), tenant)
+            .map(|m| m.role)
+    }
+
     /// The DC whose map this gateway follows for `tenant`: its home as last
     /// read, else this DC.
     #[must_use]
@@ -310,6 +318,55 @@ impl GatewayLocator {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&tenant)
             .cloned()
+    }
+
+    /// This DC's tier (shard maps, cluster records).
+    #[must_use]
+    pub fn dc_store(&self) -> Arc<dyn MetaStore> {
+        Arc::clone(&self.dc)
+    }
+
+    /// Whether `cluster`'s published capability profile says XA works
+    /// (chapter 09's `derived.xa`); `false` without a profile.
+    ///
+    /// # Errors
+    /// The registry's errors.
+    pub async fn cluster_xa(&self, cluster: &ClusterId) -> Result<bool> {
+        Ok(self
+            .registry
+            .get(cluster)
+            .await?
+            .and_then(|r| r.body().profile.as_ref().map(|p| p.derived.xa))
+            .unwrap_or(false))
+    }
+
+    /// Connection options of `sprig_ctl` on `cluster`'s writer (chapter
+    /// 18's resolver-side admin statements).
+    ///
+    /// # Errors
+    /// As [`Self::ctl_pool`].
+    pub async fn ctl_opts(&self, cluster: &ClusterId) -> Result<mysql_async::Opts> {
+        let stored = self.registry.get(cluster).await?.ok_or_else(|| {
+            SprigError::new(
+                SprigCode::ClusterNotFound,
+                format!("no cluster {cluster} in dc {}", self.registry.dc()),
+            )
+        })?;
+        let rec = stored.body();
+        let writer = match self.backends.writer(cluster, ShardId(0)).await {
+            Ok(n) => rec.nodes.iter().find(|s| s.node == n.node).cloned(),
+            Err(_) => None,
+        }
+        .or_else(|| rec.nodes.first().cloned())
+        .ok_or_else(|| {
+            SprigError::new(
+                SprigCode::ClusterUnavailable,
+                format!("cluster {cluster} has no writer"),
+            )
+        })?;
+        Ok(CredentialConnector::ctl(&rec.secrets)
+            .endpoint(&writer)?
+            .opts)
     }
 
     /// A pool of `sprig_ctl` connections to `cluster`'s writer.

@@ -50,7 +50,7 @@ shift 3
 DRIVERS=(mysql-connector-j mariadb-connector-j go-sql-driver mysql2 pymysql mysqlclient pdo_mysql mysqli
          mysql-cli mariadb-cli)
 ALL=("${DRIVERS[@]}" sqlalchemy-pymysql sqlalchemy-mysqlclient hibernate hibernate-mariadb prisma
-     mysqldump mariadb-dump sysbench sysbench-tpcc)
+     mysqldump mariadb-dump persona-sql sysbench sysbench-tpcc)
 QUICK_SET=("${DRIVERS[@]}" sqlalchemy-pymysql sqlalchemy-mysqlclient)
 if [[ $# -gt 0 ]]; then
   CONNECTORS=("$@")
@@ -71,7 +71,7 @@ service_of() {
     mysql2) echo conn-node ;;
     pymysql | mysqlclient | sqlalchemy-pymysql | sqlalchemy-mysqlclient) echo conn-python ;;
     pdo_mysql | mysqli) echo conn-php ;;
-    mysql-cli | mysqldump) echo conn-mysql-cli ;;
+    mysql-cli | mysqldump | persona-sql) echo conn-mysql-cli ;;
     mariadb-cli | mariadb-dump) echo conn-mariadb-cli ;;
     hibernate | hibernate-mariadb) echo conn-hibernate ;;
     prisma) echo conn-prisma ;;
@@ -121,7 +121,12 @@ run_one() { # service env... -- [command...]
   local envs=()
   while [[ $1 != -- ]]; do envs+=(-e "$1"); shift; done
   shift
-  "${DC[@]}" run --rm -T --no-deps "${envs[@]}" "$svc" "$@"
+  local extra=()
+  # persona-sql (compat/): the corpora and golden outputs mounted, run by
+  # the mysql 8.4 client of the conn-mysql-cli image.
+  [[ " ${envs[*]} " == *" SPRIG_CONNECTOR=persona-sql "* ]] &&
+    extra=(-v "$HERE/compat:/compat:ro" --entrypoint /compat/check.sh)
+  "${DC[@]}" run --rm -T --no-deps ${extra[@]+"${extra[@]}"} "${envs[@]}" "$svc" "$@"
 }
 
 mkdir -p "$RESULTS"

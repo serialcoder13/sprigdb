@@ -216,6 +216,46 @@ pub fn server_id(base: u32, job: JobId) -> u32 {
     base.saturating_add(u32::try_from(h).unwrap_or(0))
 }
 
+/// The environment of a hash-range job (split, merge, shard move): one
+/// source over every source shard's schemas, a target routing rows into
+/// the new shard schemas, and the group's map in `store`.
+///
+/// # Errors
+/// `Internal` for a spec that isn't a hash-range job.
+pub fn group_env(
+    src: ClusterAccess,
+    tgt: ClusterAccess,
+    rec: &JobRecord,
+    route: crate::route::ShardRoute,
+    store: Arc<dyn sprig_meta::MetaStore>,
+    server_id_base: u32,
+) -> Result<JobEnv> {
+    let schemas: Vec<String> = rec
+        .spec
+        .sources
+        .iter()
+        .flat_map(|s| s.schemas.iter().cloned())
+        .collect();
+    let source = Arc::new(MysqlSource::new(
+        src,
+        rec.job_id,
+        rec.tenant_id,
+        schemas,
+        None,
+        server_id(server_id_base, rec.job_id),
+        false,
+    ));
+    let target = Arc::new(
+        MysqlTarget::new(tgt, rec.job_id, None, source.clone()).with_route(Arc::new(route)),
+    );
+    let maps = Arc::new(crate::groupmaps::GroupMapIo::new(store, &rec.spec)?);
+    Ok(JobEnv {
+        source,
+        target,
+        maps,
+    })
+}
+
 /// Builds jobs' environments from the DC's cluster records.
 pub struct MysqlEnvFactory {
     registry: ClusterRegistry,
@@ -227,6 +267,9 @@ pub struct MysqlEnvFactory {
     /// The one etcd, for moves between DCs (chapter 24): set by
     /// [`Self::with_home_changes`].
     home_store: Option<Arc<dyn sprig_meta::MetaStore>>,
+    /// The DC tier holding group shard maps, for hash-range jobs (chapter
+    /// 20): set by [`Self::with_group_maps`].
+    group_store: Option<Arc<dyn sprig_meta::MetaStore>>,
 }
 
 impl std::fmt::Debug for MysqlEnvFactory {
@@ -246,7 +289,16 @@ impl MysqlEnvFactory {
             settings,
             addr_overrides: std::collections::HashMap::new(),
             home_store: None,
+            group_store: None,
         }
+    }
+
+    /// Runs hash-range jobs (split, merge, shard move, chapter 20) too:
+    /// they cut over on group shard maps in `store`, the DC tier.
+    #[must_use]
+    pub fn with_group_maps(mut self, store: Arc<dyn sprig_meta::MetaStore>) -> Self {
+        self.group_store = Some(store);
+        self
     }
 
     /// Runs moves between DCs too (chapter 24): a job whose source and
@@ -295,6 +347,12 @@ impl EnvFactory for MysqlEnvFactory {
         let swap = (rec.kind == JobKind::CopySwapDdl)
             .then(|| t.ddl.clone())
             .flatten();
+        if let Some(route) = crate::route::ShardRoute::from_spec(&rec.spec)? {
+            let store = self.group_store.clone().ok_or_else(|| {
+                SprigError::internal("this worker has no shard-map store for hash-range jobs")
+            })?;
+            return group_env(src, tgt, rec, route, store, self.settings.server_id_base);
+        }
         let source = Arc::new(MysqlSource::new(
             src,
             rec.job_id,
@@ -325,6 +383,9 @@ impl EnvFactory for MysqlEnvFactory {
         // A move between DCs brings its own budget (chapter 24).
         if let Some(ms) = rec.spec.max_hold_ms {
             s.cutover_max_hold = std::time::Duration::from_millis(ms);
+        }
+        if let Some(ms) = rec.spec.retain_ms {
+            s.source_retain = std::time::Duration::from_millis(ms);
         }
         s
     }

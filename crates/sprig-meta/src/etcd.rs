@@ -407,6 +407,10 @@ impl EtcdStore {
     }
 }
 
+/// The longest one keep-alive may take inside the store; callers bound it
+/// by their lease's deadline.
+pub const KEEP_ALIVE_BOUND: Duration = Duration::from_secs(10);
+
 fn timed_out(op: &str, after: Duration) -> SprigError {
     SprigError::new(
         SprigCode::MetaUnavailable,
@@ -733,23 +737,29 @@ impl MetaStore for EtcdStore {
     async fn keep_alive(&self, lease: LeaseId) -> Result<Option<Duration>> {
         let slot = self.keeper_slot(lease);
         let mut guard = slot.lock().await;
-        let r = tokio::time::timeout(self.timeout, self.keep_alive_once(lease, &mut guard)).await;
+        // The stream is taken out while a keep-alive is in flight: if the
+        // caller gives up (its own deadline, derived from the lease's TTL),
+        // the stream is dropped with the future, so a late answer is never
+        // read as the answer to a later keep-alive sent at a later time.
+        let mut keeper = guard.take();
+        // Keep-alives are bounded by their callers (sessions and DC leases
+        // retry until their lease's own deadline); the per-request deadline
+        // only stops a call that has lost its way (r2next: a slow etcd must
+        // not end a lease that is still alive).
+        let bound = self.timeout.max(KEEP_ALIVE_BOUND);
+        let r = tokio::time::timeout(bound, self.keep_alive_once(lease, &mut keeper)).await;
         match r {
-            Ok(Ok(ttl)) if ttl > 0 => Ok(Some(Duration::from_secs(to_u64(ttl)))),
+            Ok(Ok(ttl)) if ttl > 0 => {
+                *guard = keeper;
+                Ok(Some(Duration::from_secs(to_u64(ttl))))
+            }
             Ok(Ok(_)) => {
-                *guard = None;
                 drop(guard);
                 self.forget_lease(lease);
                 Ok(None)
             }
-            Ok(Err(e)) => {
-                *guard = None;
-                Err(map_err("keep_alive", e))
-            }
-            Err(_) => {
-                *guard = None;
-                Err(timed_out("keep_alive", self.timeout))
-            }
+            Ok(Err(e)) => Err(map_err("keep_alive", e)),
+            Err(_) => Err(timed_out("keep_alive", bound)),
         }
     }
 

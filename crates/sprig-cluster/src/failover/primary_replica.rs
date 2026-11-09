@@ -249,8 +249,10 @@ pub async fn promote(ep: &NodeEndpoint) -> Result<String, ProbeError> {
     let mut s = session(ep).await?;
     s.exec("STOP SLAVE").await?;
     s.exec("RESET SLAVE ALL").await?;
-    s.exec("SET GLOBAL rpl_semi_sync_slave_enabled = OFF").await?;
-    s.exec("SET GLOBAL rpl_semi_sync_master_enabled = ON").await?;
+    s.exec("SET GLOBAL rpl_semi_sync_slave_enabled = OFF")
+        .await?;
+    s.exec("SET GLOBAL rpl_semi_sync_master_enabled = ON")
+        .await?;
     s.exec("SET GLOBAL read_only = OFF").await?;
     let pos = s
         .scalar("SELECT @@gtid_slave_pos")
@@ -258,6 +260,120 @@ pub async fn promote(ep: &NodeEndpoint) -> Result<String, ProbeError> {
         .unwrap_or_default();
     s.close().await;
     Ok(pos)
+}
+
+/// Step 8 where agents fence the nodes (chapter 25, decision W8): makes
+/// `ep` a primary but leaves `read_only` to its agent, which clears it
+/// once it holds the writer lease and a DC permit and sees the node no
+/// longer replicates. `semisync`: switch the primary side of semi-sync on
+/// (only when replicas will follow it; without any, the first commit would
+/// wait out the whole timeout). Returns its applied position.
+///
+/// # Errors
+/// A statement failed; the steps are idempotent, so the caller retries.
+pub async fn promote_fenced(ep: &NodeEndpoint, semisync: bool) -> Result<String, ProbeError> {
+    let mut s = session(ep).await?;
+    s.exec("STOP SLAVE").await?;
+    let pos = s
+        .scalar("SELECT @@gtid_slave_pos")
+        .await?
+        .unwrap_or_default();
+    s.exec("RESET SLAVE ALL").await?;
+    let _ = s.exec("SET GLOBAL rpl_semi_sync_slave_enabled = OFF").await;
+    let _ = s
+        .exec(&format!(
+            "SET GLOBAL rpl_semi_sync_master_enabled = {}",
+            if semisync { "ON" } else { "OFF" }
+        ))
+        .await;
+    s.close().await;
+    Ok(pos)
+}
+
+/// Where replicas reach `ep`: its `report_host` and `report_port` when
+/// set (MariaDB's own "address for replicas"), else `None` and the caller
+/// uses the registered address.
+///
+/// # Errors
+/// The node couldn't be reached.
+pub async fn report_address(ep: &NodeEndpoint) -> Result<Option<(String, u16)>, ProbeError> {
+    let mut s = session(ep).await?;
+    let rows = s
+        .rows("SELECT @@report_host AS h, @@report_port AS p")
+        .await?;
+    s.close().await;
+    let Some(r) = rows.first() else {
+        return Ok(None);
+    };
+    let host = col(r, "h").unwrap_or_default().trim().to_owned();
+    if host.is_empty() {
+        return Ok(None);
+    }
+    let port = col(r, "p").and_then(|p| p.parse().ok()).unwrap_or(3306);
+    Ok(Some((host, port)))
+}
+
+/// Replicas reading this node's binlog now (its `Binlog Dump` threads).
+///
+/// # Errors
+/// A statement failed.
+pub async fn attached_replicas(s: &mut ProbeSession) -> Result<u32, ProbeError> {
+    Ok(s.scalar(
+        "SELECT COUNT(*) FROM information_schema.PROCESSLIST \
+             WHERE COMMAND LIKE 'Binlog Dump%'",
+    )
+    .await?
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0))
+}
+
+/// Whether the primary side of semi-sync is switched on (`false` where
+/// the variable doesn't exist).
+///
+/// # Errors
+/// The node couldn't be reached.
+pub async fn semisync_master_enabled(s: &mut ProbeSession) -> Result<bool, ProbeError> {
+    match s
+        .scalar("SELECT @@global.rpl_semi_sync_master_enabled")
+        .await
+    {
+        Ok(v) => Ok(v.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("on"))),
+        Err(e) if e.is_server_error() => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// The semi-sync guard of a node about to take writes (chapter 25; the
+/// leftover of R2's wiring): a primary with semi-sync on and no replica
+/// attached would make its first commit wait out
+/// `rpl_semi_sync_master_timeout` (a returning primary whose standby was
+/// promoted, a promoted replica whose peers haven't reattached). It is
+/// switched off; returns whether it was, so the caller switches it back on
+/// with [`semisync_resume`] once a replica attaches.
+///
+/// # Errors
+/// A statement failed.
+pub async fn semisync_guard(s: &mut ProbeSession) -> Result<bool, ProbeError> {
+    if !semisync_master_enabled(s).await? || attached_replicas(s).await? > 0 {
+        return Ok(false);
+    }
+    s.exec("SET GLOBAL rpl_semi_sync_master_enabled = OFF")
+        .await?;
+    Ok(true)
+}
+
+/// Switches the primary side of semi-sync back on once a replica is
+/// attached; returns whether it did.
+///
+/// # Errors
+/// A statement failed.
+pub async fn semisync_resume(s: &mut ProbeSession) -> Result<bool, ProbeError> {
+    if attached_replicas(s).await? == 0 {
+        return Ok(false);
+    }
+    s.exec("SET GLOBAL rpl_semi_sync_master_enabled = ON")
+        .await?;
+    Ok(true)
 }
 
 /// Step 9: points a replica at the new primary and starts it.
@@ -269,7 +385,11 @@ pub async fn repoint(ep: &NodeEndpoint, to: &ReplSource) -> Result<(), ProbeErro
     change_master(ep, to, "slave_pos").await
 }
 
-async fn change_master(ep: &NodeEndpoint, to: &ReplSource, use_gtid: &str) -> Result<(), ProbeError> {
+async fn change_master(
+    ep: &NodeEndpoint,
+    to: &ReplSource,
+    use_gtid: &str,
+) -> Result<(), ProbeError> {
     let mut s = session(ep).await?;
     s.exec("STOP SLAVE").await?;
     s.exec("SET GLOBAL read_only = ON").await?;
@@ -282,8 +402,10 @@ async fn change_master(ep: &NodeEndpoint, to: &ReplSource, use_gtid: &str) -> Re
         literal(&to.password)
     ))
     .await?;
-    s.exec("SET GLOBAL rpl_semi_sync_master_enabled = OFF").await?;
-    s.exec("SET GLOBAL rpl_semi_sync_slave_enabled = ON").await?;
+    s.exec("SET GLOBAL rpl_semi_sync_master_enabled = OFF")
+        .await?;
+    s.exec("SET GLOBAL rpl_semi_sync_slave_enabled = ON")
+        .await?;
     s.exec("START SLAVE").await?;
     s.close().await;
     Ok(())

@@ -26,7 +26,9 @@
 //! capabilities and collation are known (the pool key depends on them).
 
 mod capture;
+mod compat_sink;
 mod dc;
+mod fence;
 mod follow;
 pub mod relay;
 pub(crate) mod router;
@@ -35,7 +37,12 @@ pub mod split;
 pub mod stmt;
 // Chapter 41: logic declarations (R7).
 mod logic;
+// Chapter 41: validations, triggers, schedules, computed fields (R7 orders 3, 5).
+mod logic_bound;
 mod tenant;
+// Chapter 32: typed tables and record hierarchies.
+pub(crate) mod inherit;
+pub(crate) mod types;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,6 +129,7 @@ impl Executor for PassThrough {
             subst: Vec::new(),
             wl: None,
             wl_multi: false,
+            router: router::RouterState::default(),
         })
     }
 }
@@ -144,6 +152,9 @@ pub struct PassSession {
     wl: Option<crate::workload::SessionCapture>,
     /// The current `COM_QUERY` holds several statements: none is probed.
     wl_multi: bool,
+    /// Chapter 17's router: the session's connections to other clusters
+    /// and chapter 18's coordinator, for tenants with sharded tables.
+    router: router::RouterState,
 }
 
 impl std::fmt::Debug for PassSession {
@@ -153,6 +164,24 @@ impl std::fmt::Debug for PassSession {
             .field("persona", &self.persona)
             .finish_non_exhaustive()
     }
+}
+
+/// What an execute carries from its checks to the backend.
+#[allow(clippy::struct_excessive_bools)] // the statement's independent flags
+struct ExecTail {
+    mapper: Option<sprig_sql::names::ResultMapper>,
+    logical: Option<Bytes>,
+    values: Vec<sprig_proto_mysql::command::BoundParam>,
+    cursor: bool,
+    had_cursor: bool,
+    sql: Bytes,
+    info: StmtInfo,
+    renames: Vec<split::Renamed>,
+    nowait: bool,
+    conn_status: Option<relay::ConnStatus>,
+    flags: u8,
+    client_bound: bool,
+    backend_caps: Caps,
 }
 
 /// The MariaDB capabilities a backend connection takes from a 3307 client,
@@ -264,6 +293,11 @@ impl PassSession {
             }
         } else {
             s |= StatusFlags::AUTOCOMMIT;
+        }
+        // A transaction chapter 18's coordinator holds (its branches are
+        // other connections).
+        if self.router.in_txn() {
+            s |= StatusFlags::IN_TRANS;
         }
         s
     }
@@ -413,7 +447,7 @@ impl PassSession {
                 db: Some(self.current_logical()),
             });
         }
-        let mut mapper = s.mapper.clone();
+        let mapper = s.mapper.clone();
         let logical = s.logical.clone();
         let recheck = s.recheck.clone();
         let values = s.params_for_backend(params, persona)?;
@@ -440,6 +474,107 @@ impl PassSession {
             ts.refresh().await?;
             crate::tenant::authz::recheck(ts, persona, rc)?;
         }
+        // Chapter 17: a sharded tenant's statement is routed (see
+        // `router::PassSession::routed_execute`).
+        let mut sql = sql;
+        let mut slot = None;
+        if self.tenant.is_some() {
+            match self.routed_execute(cx, &sql, &values, cursor, out).await? {
+                router::ExecRoute::Answered => {
+                    return Ok(ExecSummary {
+                        status: None,
+                        prepared: None,
+                        db: None,
+                    });
+                }
+                router::ExecRoute::Done(status) => {
+                    return Ok(ExecSummary {
+                        status,
+                        prepared: None,
+                        db: None,
+                    });
+                }
+                router::ExecRoute::Normal(text, sl) => {
+                    if let Some(t) = text {
+                        sql = Bytes::from(t);
+                    }
+                    if !matches!(sl, router::ExecSlot::Main) {
+                        let _ = self.bs(cx);
+                        self.exec_slot_in(&sl).await?;
+                        self.router.probe = if matches!(sl, router::ExecSlot::Branch(..)) {
+                            router::Probe::Any
+                        } else {
+                            router::Probe::Off
+                        };
+                        slot = Some(sl);
+                    }
+                }
+            }
+        }
+        let tail = ExecTail {
+            mapper,
+            logical,
+            values,
+            cursor,
+            had_cursor,
+            sql,
+            info,
+            renames,
+            nowait,
+            conn_status,
+            flags,
+            client_bound,
+            backend_caps,
+        };
+        let r = self.exec_tail(cx, stmt, params, tail, out).await;
+        let Some(sl) = slot else {
+            return r;
+        };
+        self.router.probe = router::Probe::Off;
+        self.exec_slot_out(&sl);
+        let held = self.router.hit.take();
+        match (r, held) {
+            (Err(e), _) => Err(self.exec_failed(&sl, e).await),
+            (Ok(_), Some(e)) => {
+                let e = self.exec_failed(&sl, e).await;
+                let e = self.map_error(e);
+                out.error(&e).await?;
+                Ok(ExecSummary {
+                    status: None,
+                    prepared: None,
+                    db: None,
+                })
+            }
+            (ok, None) => ok,
+        }
+    }
+
+    /// The execute on `self.bs` (the session's connection, or the one a
+    /// routed statement swapped in).
+    #[allow(clippy::too_many_lines)]
+    async fn exec_tail(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: StmtRef,
+        params: &sprig_proto_mysql::command::ExecuteParams,
+        tail: ExecTail,
+        out: &mut dyn ResultSink,
+    ) -> Result<ExecSummary> {
+        let ExecTail {
+            mut mapper,
+            logical,
+            values,
+            cursor,
+            had_cursor,
+            sql,
+            info,
+            renames,
+            nowait,
+            conn_status,
+            flags,
+            client_bound,
+            backend_caps,
+        } = tail;
         let _ = self.bs(cx);
         // Workload capture (chapter 12): fingerprinted from the logical
         // text the client prepared; cursors are left out (their rows come
@@ -477,6 +612,15 @@ impl PassSession {
                 self.wl_finish(cx, pending, l, &ran);
             }
             return Err(e);
+        }
+        // A routed statement on a coordinator branch: an ERR goes to the
+        // coordinator before the client.
+        if self.router.probe_first(bs).await? {
+            return Ok(ExecSummary {
+                status: None,
+                prepared: None,
+                db: None,
+            });
         }
         let r = Relay {
             more: false,
@@ -781,8 +925,20 @@ impl SessionExec for PassSession {
         if let Err(e) = self.follow_tenant().await {
             return Err(self.map_error(e));
         }
+        // Chapter 25 (R2): writes of tenants homed here need the DC's
+        // permit, and so do their acknowledgements.
+        let gate = match self.dc_write_gate(&req).await {
+            Ok(g) => g,
+            Err(e) => return Err(self.map_error(e)),
+        };
         self.count_traffic(cx, &req);
-        let r = self.run_request(cx, req, out).await;
+        let r = match gate {
+            Some(f) => {
+                let mut gated = crate::failover::GatedSink::new(out, f);
+                self.run_request(cx, req, &mut gated).await
+            }
+            None => self.run_request(cx, req, out).await,
+        };
         // Tenant sessions: no error the gateway returns carries a physical
         // name (the relay maps the ones it sends itself).
         r.map_err(|e| self.map_error(e))
@@ -807,6 +963,7 @@ impl SessionExec for PassSession {
         if let Some(wl) = self.wl.as_mut() {
             wl.reset();
         }
+        self.router.reset().await;
         match self.bs.as_mut() {
             Some(bs) => bs.reset().await,
             None => Ok(()),
@@ -846,6 +1003,7 @@ impl SessionExec for PassSession {
         self.stmts.clear();
         metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str())
             .decrement(n);
+        self.router.close().await;
         if let Some(bs) = self.bs.as_mut() {
             bs.close().await;
         }
@@ -856,9 +1014,14 @@ impl PassSession {
     /// The variables the persona answers (chapter 28): its version
     /// string, `version_comment`, and on 3306 `gtid_mode`.
     fn persona_vars(&self) -> sprig_sql::compat::vars::PersonaVars {
+        let vars = self.bs.as_ref().map(BackendSession::vars);
         sprig_sql::compat::vars::PersonaVars::new(
             self.persona,
             self.settings.persona_version(self.persona),
+        )
+        .with_session(
+            vars.and_then(|v| v.client_sql_mode.as_deref()),
+            vars.and_then(|v| v.vars.get("max_statement_time").map(String::as_str)),
         )
     }
 
@@ -888,7 +1051,19 @@ impl PassSession {
     fn session_rewrites(&self, sql: Bytes, conn_id: u32) -> (Bytes, Vec<split::Renamed>) {
         let mut renames = Vec::new();
         let (lex, _) = self.lex_opts();
-        let sql = match sprig_sql::compat::vars::rewrite_reads(&sql, &lex, &self.persona_vars()) {
+        let mut vars = self.persona_vars();
+        // CURRENT_ROLE(): the gateway's active roles (chapter 29, R4).
+        if sql
+            .windows(12)
+            .any(|w| w.eq_ignore_ascii_case(b"current_role"))
+        {
+            vars = vars.with_current_role(
+                self.tenant
+                    .as_deref()
+                    .map(|ts| crate::tenant::authz::current_role(ts, self.persona)),
+            );
+        }
+        let sql = match sprig_sql::compat::vars::rewrite_reads(&sql, &lex, &vars) {
             Some((s, r)) => {
                 renames.extend(r.into_iter().map(|r| split::Renamed {
                     from: Bytes::from(r.column),
@@ -987,7 +1162,9 @@ impl PassSession {
         if let Some(m) = ts.aliases().apply(e.message.as_bytes()) {
             e.message = String::from_utf8_lossy(&m).into_owned();
         }
-        e
+        // Chapter 41: a validation's CHECK failure is 39863 with its
+        // message (R7 order 3).
+        logic_bound::map_validation(ts, e)
     }
 
     #[allow(clippy::cast_precision_loss)] // a gauge

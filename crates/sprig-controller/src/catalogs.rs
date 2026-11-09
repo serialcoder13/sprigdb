@@ -11,11 +11,33 @@
 //! Where this differs from the book, for now: catalog loads read the writer
 //! (chapter 08 lets them read a local replica); ancestors homed in other
 //! DCs are unreachable until the relay (R2) carries their shard maps.
+//!
+//! **Connection budgets** (chapter 13, "Settings scopes and budgets"; the
+//! R0 fix of the catalog-connection deadlock). Each [`RegistryPools`] is
+//! one budget: at most `max` connections per cluster. The controller's
+//! short catalog calls (settings, the reconciler, decisions, tenant
+//! deletion, snapshots) share one budget of [`POOL_MAX`]; the automatic
+//! indexing loop and its Admin API, which hold a catalog connection for a
+//! whole pass or request, have their own (`autoindex_loop::SESSIONS`).
+//! The rules that keep them from deadlocking:
+//!
+//! - a task holds at most one connection of a budget, and never waits for
+//!   a second one of the same budget while it holds the first;
+//! - a holder of a session connection may take a short one, never the
+//!   reverse, so waits between budgets can't form a cycle;
+//! - every wait for a connection ends after [`ACQUIRE_TIMEOUT`]
+//!   ([`acquire`], [`bounded`]) with 39070, so a starved caller fails and
+//!   retries instead of hanging.
+//!
+//! `sprig_controller_catalog_pool_connections{pool, cluster, state}`
+//! (`in_use`, `idle`, `waiting`) shows each budget.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use mysql_async::{OptsBuilder, Pool, PoolConstraints, PoolOpts};
+use std::time::Duration;
+
+use mysql_async::{Conn, OptsBuilder, Pool, PoolConstraints, PoolOpts};
 use sprig_catalog::placement::ShardMap;
 use sprig_catalog::{CatalogEndpoint, CatalogLocator, Store};
 use sprig_cluster::driver::NodeConnector;
@@ -29,8 +51,54 @@ use sprig_provision::credentials::CredentialConnector;
 
 use crate::monitor::ClusterMonitor;
 
-/// Connections a controller keeps per cluster for catalog work.
-const POOL_MAX: usize = 4;
+/// Connections a controller keeps per cluster for its short catalog calls.
+pub const POOL_MAX: usize = 4;
+
+/// The longest a controller task waits for a catalog connection.
+pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn starved(what: &str, after: Duration) -> SprigError {
+    metrics::counter!("sprig_controller_catalog_acquire_timeouts_total").increment(1);
+    SprigError::new(
+        SprigCode::CatalogUnavailable,
+        format!(
+            "{what}: no catalog connection within {} s (the cluster's connections are all in use)",
+            after.as_secs()
+        ),
+    )
+}
+
+/// A connection from `pool`, waiting at most [`ACQUIRE_TIMEOUT`].
+///
+/// # Errors
+/// 39070 when none frees up in time or the connection fails.
+pub async fn acquire(pool: &Pool, what: &str) -> Result<Conn> {
+    match tokio::time::timeout(ACQUIRE_TIMEOUT, pool.get_conn()).await {
+        Ok(Ok(c)) => Ok(c),
+        Ok(Err(e)) => Err(SprigError::new(
+            SprigCode::CatalogUnavailable,
+            format!("{what}: catalog unreachable"),
+        )
+        .with_source(e)),
+        Err(_) => Err(starved(what, ACQUIRE_TIMEOUT)),
+    }
+}
+
+/// `f` (one short catalog call that takes its own connection, such as a
+/// snapshot), cut off after [`ACQUIRE_TIMEOUT`] plus `work`.
+///
+/// # Errors
+/// `f`'s; 39070 when it runs out of time.
+pub async fn bounded<T>(
+    what: &str,
+    work: Duration,
+    f: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let limit = ACQUIRE_TIMEOUT + work;
+    tokio::time::timeout(limit, f)
+        .await
+        .unwrap_or_else(|_| Err(starved(what, limit)))
+}
 
 /// The catalog schema of a tenant: `t<tenant>_sprig`, or a test's own name.
 pub type CatalogNaming = Arc<dyn Fn(TenantId) -> String + Send + Sync>;
@@ -59,8 +127,8 @@ pub trait ClusterPools: Send + Sync + 'static {
     async fn writer(&self, cluster: &ClusterId) -> Result<Pool>;
 }
 
-fn pool_for(opts: mysql_async::Opts) -> Pool {
-    let constraints = PoolConstraints::new(0, POOL_MAX).unwrap_or_default();
+fn pool_for(opts: mysql_async::Opts, max: usize) -> Pool {
+    let constraints = PoolConstraints::new(0, max.max(1)).unwrap_or_default();
     // Keep idle connections for a minute: with mysql_async's default TTL of
     // 0, a pool with a minimum of 0 closes every connection returned to it.
     Pool::new(
@@ -81,6 +149,45 @@ pub struct RegistryPools {
     registry: ClusterRegistry,
     monitor: Option<Arc<ClusterMonitor>>,
     pools: Mutex<HashMap<ClusterId, (String, Pool)>>,
+    /// The budget's name in metrics.
+    name: &'static str,
+    /// Connections per cluster.
+    max: usize,
+}
+
+/// One budget's connections to one cluster, from the pool's own counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PoolStats {
+    /// Handed out to tasks.
+    pub in_use: usize,
+    /// Open and idle in the pool.
+    pub idle: usize,
+    /// Tasks waiting for one.
+    pub waiting: usize,
+}
+
+/// `pool`'s counters, also published as
+/// `sprig_controller_catalog_pool_connections`.
+#[must_use]
+pub fn pool_stats(budget: &str, cluster: &ClusterId, pool: &Pool) -> PoolStats {
+    use std::sync::atomic::Ordering::Relaxed;
+    let m = pool.metrics();
+    let s = PoolStats {
+        in_use: m.connections_in_use.load(Relaxed),
+        idle: m.connections_in_pool.load(Relaxed),
+        waiting: m.active_wait_requests.load(Relaxed),
+    };
+    #[allow(clippy::cast_precision_loss)] // a handful of connections
+    for (state, n) in [
+        ("in_use", s.in_use),
+        ("idle", s.idle),
+        ("waiting", s.waiting),
+    ] {
+        metrics::gauge!("sprig_controller_catalog_pool_connections",
+            "pool" => budget.to_owned(), "cluster" => cluster.to_string(), "state" => state)
+        .set(n as f64);
+    }
+    s
 }
 
 impl std::fmt::Debug for RegistryPools {
@@ -99,7 +206,37 @@ impl RegistryPools {
             registry,
             monitor,
             pools: Mutex::new(HashMap::new()),
+            name: "catalog",
+            max: POOL_MAX,
         }
+    }
+
+    /// The same pools as a budget of `max` connections per cluster, named
+    /// `name` in metrics.
+    #[must_use]
+    pub fn budget(mut self, name: &'static str, max: usize) -> Self {
+        self.name = name;
+        self.max = max.max(1);
+        self
+    }
+
+    /// Each cluster's connections now (and the metric updated).
+    #[must_use]
+    pub fn stats(&self) -> Vec<(ClusterId, PoolStats)> {
+        let pools: Vec<(ClusterId, Pool)> = self
+            .pools
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(c, (_, p))| (c.clone(), p.clone()))
+            .collect();
+        pools
+            .into_iter()
+            .map(|(c, p)| {
+                let s = pool_stats(self.name, &c, &p);
+                (c, s)
+            })
+            .collect()
     }
 
     async fn writer_spec(&self, rec: &ClusterRecord) -> Result<NodeSpec> {
@@ -153,17 +290,19 @@ impl ClusterPools for RegistryPools {
         let rec = stored.body();
         let spec = self.writer_spec(rec).await?;
         let fingerprint = format!("{}|{}|{}", spec.node, spec.addr, rec.secrets.ctl);
-        if let Some((f, p)) = self
+        let hit = self
             .pools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(cluster)
-            && *f == fingerprint
-        {
-            return Ok(p.clone());
+            .filter(|(f, _)| *f == fingerprint)
+            .map(|(_, p)| p.clone());
+        if let Some(p) = hit {
+            let _ = pool_stats(self.name, cluster, &p);
+            return Ok(p);
         }
         let ep = CredentialConnector::ctl(&rec.secrets).endpoint(&spec)?;
-        let pool = pool_for(ep.opts);
+        let pool = pool_for(ep.opts, self.max);
         let old = self
             .pools
             .lock()
@@ -198,7 +337,18 @@ impl StaticPools {
     pub fn with_url(mut self, cluster: ClusterId, url: &str) -> Result<Self> {
         let opts = mysql_async::Opts::from_url(url)
             .map_err(|e| SprigError::internal(format!("bad MariaDB URL: {e}")))?;
-        self.pools.push((cluster, pool_for(opts)));
+        self.pools.push((cluster, pool_for(opts, POOL_MAX)));
+        Ok(self)
+    }
+
+    /// Adds `cluster` with a budget of `max` connections.
+    ///
+    /// # Errors
+    /// `Internal` for a bad URL.
+    pub fn with_url_max(mut self, cluster: ClusterId, url: &str, max: usize) -> Result<Self> {
+        let opts = mysql_async::Opts::from_url(url)
+            .map_err(|e| SprigError::internal(format!("bad MariaDB URL: {e}")))?;
+        self.pools.push((cluster, pool_for(opts, max)));
         Ok(self)
     }
 }

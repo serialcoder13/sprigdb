@@ -9,12 +9,29 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+gethostname.workspace = true
+mysql_async.workspace = true
+serde_json.workspace = true
+sprig-binlog.workspace = true
+sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
+# Chapter 23's job runtime and the logic jobs (chapter 41, R7 order 5).
+sprig-controller = { path = "../sprig-controller" }
+sprig-feed.workspace = true
+# Chapter 42's copy worker (inherit_copy jobs).
+sprig-inherit = { path = "../sprig-inherit" }
+sprig-logic = { path = "../sprig-logic" }
 sprig-meta.workspace = true
 sprig-mover.workspace = true
+sprig-settings.workspace = true
 sprig-shard.workspace = true
+tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

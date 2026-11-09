@@ -42,6 +42,7 @@ pub mod key;
 pub mod mem;
 pub mod permit;
 pub mod record;
+pub mod relay;
 pub mod session;
 pub mod view;
 

@@ -69,7 +69,9 @@ pub mod store;
 pub mod testing;
 pub mod verifier;
 
-pub use account::{MetaTenants, StaticTenants, TenantDirectory, TenantInfo, parse_login};
+pub use account::{
+    MetaTenants, StaticTenants, TenantDirectory, TenantInfo, TenantResidency, parse_login,
+};
 pub use accounts::{Account, AccountStore, BackendTarget, FileAccounts, StaticAccounts};
 pub use cache::{AuthExtension, AuthUser, TenantAuth};
 pub use fast_cache::{FastCache, FastKey};

@@ -1,0 +1,22 @@
+{{- /* One SprigClusterPool per values.pools (chapter 27). */}}
+{{- range .Values.pools }}
+---
+apiVersion: sprigdb.io/v1alpha1
+kind: SprigClusterPool
+metadata:
+  name: {{ .name }}
+  labels: {{- include "sprigdb.labels" $ | nindent 4 }}
+spec:
+  minClusters: {{ .minClusters | default 0 }}
+  maxClusters: {{ .maxClusters }}
+  template:
+    topology: {{ .topology }}
+    nodes: {{ .nodes }}
+    mariadb: {image: {{ .image | default "mariadb:12.3" | quote }}}
+    storage:
+      size: {{ .storage }}
+      {{- with .storageClassName }}
+      storageClassName: {{ . }}
+      {{- end }}
+    failoverDriver: {{ .failoverDriver | default "operator" }}
+{{- end }}

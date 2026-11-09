@@ -126,12 +126,19 @@ fn arithmetic_in_the_interpreter() {
         json!({"sum": 9, "prod": 11, "quot": 3.5, "idiv": 3, "rem": 1, "mix": 5.0, "neg": -3,
                "pick": "a", "safe": 0.5, "big": false, "rounded": 2.0, "maxv": 7.0})
     );
-    let (_, r) = call(&c, vec![Value::Int(-7), Value::Int(2), Value::Null]);
+    let (_, r) = call(&c, vec![Value::Int(-7), Value::Int(2), Value::Float(-1.0)]);
     assert_eq!(r["idiv"], json!(-4));
     assert_eq!(r["rem"], json!(-1));
-    assert_eq!(r["mix"], json!(null));
-    assert_eq!(r["safe"], json!(0.25));
     assert_eq!(r["rounded"], json!(-2.0));
+    // `x` may be null, and `x * a` then fails as KIRun's `*` does.
+    let e = run(
+        c.ir.as_ref().unwrap(),
+        &[Value::Int(-7), Value::Int(2), Value::Null],
+        &mut NoDb,
+        &Limits::default(),
+    )
+    .unwrap_err();
+    assert!(e.message.contains("null value"), "{e}");
     // Division by zero and overflow are runtime errors.
     let e = run(
         c.ir.as_ref().unwrap(),
@@ -162,10 +169,35 @@ fn strings_in_the_interpreter() {
                "hasA": false, "startsAb": true, "endsZ": true, "posB": 1, "joined": "Abcz-6",
                "same": false, "before": true})
     );
-    let (_, r) = call(&c, vec![Value::Null, Value::Int(8)]);
-    assert_eq!(r["greeting"], json!("Hi null! #8 2"));
-    assert_eq!(r["len"], json!(null));
-    assert_eq!(r["same"], json!(false));
+    // `name` is `STRING`, not nullable: KIRun refuses the call, and so
+    // does compiled code.
+    let e = run(
+        c.ir.as_ref().unwrap(),
+        &[Value::Null, Value::Int(8)],
+        &mut NoDb,
+        &Limits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::LogicRuntimeError));
+    assert!(e.message.contains("argument name is null"), "{e}");
+    // KIRun's string functions take only text: a number sends the
+    // function to the engine tier.
+    let numeric = STRINGS.replace("'' + Arguments.n * 2", "Arguments.n * 2");
+    let c2 = compile(
+        Runtime::Kirun,
+        &numeric,
+        &StaticColumns::new(),
+        &Options::default(),
+    )
+    .unwrap();
+    assert!(
+        c2.analysis
+            .reasons
+            .iter()
+            .any(|r| r.code == "kirun.string_types"),
+        "{:?}",
+        c2.analysis.reasons
+    );
     assert!(
         c.plsql
             .as_ref()

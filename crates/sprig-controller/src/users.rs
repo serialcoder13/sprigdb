@@ -195,9 +195,7 @@ impl TenantUsers {
         // The auth module's tables, for tenants bootstrapped before the
         // hook existed. Idempotent.
         let ep = self.locator.writer(id).await?;
-        let mut conn = ep.pool.get_conn().await.map_err(|err| {
-            SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(err)
-        })?;
+        let mut conn = crate::catalogs::acquire(&ep.pool, "auth tables").await?;
         Migrator::new(&[AUTH_MODULE, sprig_auth::authz::AUTHZ_MODULE])?
             .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
             .await?;
@@ -270,9 +268,7 @@ impl TenantUsers {
         sprig_common::audit::check_available()?;
         let id = self.active(tenant).await?;
         let ep = self.locator.writer(id).await?;
-        let mut conn = ep.pool.get_conn().await.map_err(|err| {
-            SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(err)
-        })?;
+        let mut conn = crate::catalogs::acquire(&ep.pool, "auth tables").await?;
         Migrator::new(&[AUTH_MODULE, sprig_auth::authz::AUTHZ_MODULE])?
             .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
             .await?;

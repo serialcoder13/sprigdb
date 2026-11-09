@@ -119,6 +119,9 @@ where
         snap: &Snapshot,
         exec: &dyn DdlExecutor,
     ) -> Result<Resolution> {
+        if let Some(set) = &intent.shards {
+            return self.resolve_shards(tenant, intent, set, snap, exec).await;
+        }
         let rows = Rows::of(snap);
         match &intent.op {
             IntentOp::CreateDatabase { db } => {
@@ -132,6 +135,11 @@ where
                     all &= exec.schema(s).await?.is_some();
                 }
                 if all {
+                    // A crash between the two statements left the schema
+                    // without its decision table.
+                    for s in &schemas {
+                        exec.execute(&super::dtx_table_ddl(*s)).await?;
+                    }
                     let facts = gather(exec, Some(first), &[]).await?;
                     self.done(tenant, intent, &facts, false).await
                 } else {
@@ -271,7 +279,7 @@ where
         }
     }
 
-    async fn done(
+    pub(super) async fn done(
         &self,
         tenant: TenantId,
         intent: &DdlIntent,
@@ -285,7 +293,7 @@ where
         })
     }
 
-    async fn undo(&self, tenant: TenantId, intent: &DdlIntent) -> Result<Resolution> {
+    pub(super) async fn undo(&self, tenant: TenantId, intent: &DdlIntent) -> Result<Resolution> {
         Ok(if self.rollback(tenant, intent).await? {
             Resolution::RolledBack
         } else {
@@ -293,7 +301,7 @@ where
         })
     }
 
-    async fn latest_create_sql(
+    pub(super) async fn latest_create_sql(
         &self,
         tenant: TenantId,
         object: ObjectId,

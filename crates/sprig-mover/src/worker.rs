@@ -12,6 +12,7 @@ use sprig_common::{CancellationToken, ErrorKind, Result, SprigCode};
 use sprig_meta::{Session, SessionOpts};
 use tokio::task::JoinHandle;
 
+use crate::api::JobState;
 use crate::engine::Engine;
 use crate::io::JobEnv;
 use crate::record::{JobRecord, JobStore};
@@ -162,6 +163,15 @@ impl JobRuntime {
                 break;
             }
             if !rec.state.is_runnable() || running.contains_key(&rec.job_id) {
+                continue;
+            }
+            // A retaining job waits for its retention to end without a
+            // worker (the engine gives it back).
+            if rec.state == JobState::Retaining
+                && rec
+                    .retain_until_ms
+                    .is_some_and(|u| u > self.store.now_ms() + 60_000)
+            {
                 continue;
             }
             if self.store.owner(&rec.job_id).await?.is_some() {

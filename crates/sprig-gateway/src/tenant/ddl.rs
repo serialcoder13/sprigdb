@@ -26,11 +26,13 @@
 //! pool timeout) is 39030, also definite; anything after sending leaves the
 //! outcome unknown for the reconciler.
 
+use std::sync::Arc;
+
 use sprig_catalog::ddl::{
-    DdlExecutor, Effect, MariaExecutor, PhysicalDdl, PhysicalObject, SchemaInfo,
+    DdlExecutor, Effect, MariaExecutor, PhysicalDdl, PhysicalObject, SchemaInfo, ShardTarget,
 };
-use sprig_catalog::store::ObjectKind;
-use sprig_common::ids::TenantId;
+use sprig_catalog::store::{DatabaseRow, ObjectKind};
+use sprig_common::ids::{ClusterId, TenantId};
 use sprig_common::names::SchemaName;
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
 use sprig_proto_mysql::client::PacketKind;
@@ -184,64 +186,72 @@ impl GatewayDdl<'_> {
     /// `want` as the definer; otherwise the object is dropped and the
     /// statement fails with 39367.
     async fn verify_definer(&self, stmt: &PhysicalDdl, want: &str) -> Result<()> {
-        use mysql_async::prelude::Queryable;
-        let (kind, name) = match &stmt.effect {
-            Effect::Create { kind, name } => (*kind, name),
-            Effect::Alter {
-                kind: ObjectKind::Event,
-                name,
-            } => (ObjectKind::Event, name),
-            _ => return Ok(()),
-        };
-        let Some(pool) = &self.ctl_pool else {
-            return Ok(());
-        };
-        let (sql, keyword) = match kind {
-            ObjectKind::Procedure => (
-                "SELECT DEFINER FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? \
-                 AND ROUTINE_NAME = ? AND ROUTINE_TYPE = 'PROCEDURE'",
-                "PROCEDURE",
-            ),
-            ObjectKind::Function => (
-                "SELECT DEFINER FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? \
-                 AND ROUTINE_NAME = ? AND ROUTINE_TYPE = 'FUNCTION'",
-                "FUNCTION",
-            ),
-            ObjectKind::Trigger => (
-                "SELECT DEFINER FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? \
-                 AND TRIGGER_NAME = ?",
-                "TRIGGER",
-            ),
-            ObjectKind::Event => (
-                "SELECT DEFINER FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ? \
-                 AND EVENT_NAME = ?",
-                "EVENT",
-            ),
-            _ => return Ok(()),
-        };
-        let schema = stmt.schema.to_string();
-        let mut c = pool.get_conn().await.map_err(|e| {
-            SprigError::new(SprigCode::BackendUnavailable, "sprig_ctl unreachable").with_source(e)
-        })?;
-        let got: Option<String> = c
-            .exec_first(sql, (&schema, name))
-            .await
-            .map_err(|e| SprigError::internal(format!("reading a definer: {e}")))?;
-        match got {
-            Some(d) if d != want => {
-                let drop = format!(
-                    "DROP {keyword} IF EXISTS {}.{}",
-                    sprig_common::names::quote(&schema),
-                    sprig_common::names::quote(name)
-                );
-                if let Err(e) = c.query_drop(drop).await {
-                    tracing::error!(error = %e, schema, name, "dropping a stored program with a wrong definer failed");
-                }
-                tracing::warn!(schema, name, definer = %d, "stored program refused: wrong definer");
-                Err(sprig_auth::authz::definers::mismatch(keyword, name, &d))
-            }
-            _ => Ok(()),
+        match &self.ctl_pool {
+            Some(pool) => verify_definer_on(pool, stmt, want).await,
+            None => Ok(()),
         }
+    }
+}
+
+/// After `CREATE` (and `ALTER EVENT`) through `pool` (`sprig_ctl` on the
+/// object's cluster): MariaDB must have recorded `want` as the definer;
+/// otherwise the object is dropped and the statement fails with 39367.
+async fn verify_definer_on(pool: &mysql_async::Pool, stmt: &PhysicalDdl, want: &str) -> Result<()> {
+    use mysql_async::prelude::Queryable;
+    let (kind, name) = match &stmt.effect {
+        Effect::Create { kind, name } => (*kind, name),
+        Effect::Alter {
+            kind: ObjectKind::Event,
+            name,
+        } => (ObjectKind::Event, name),
+        _ => return Ok(()),
+    };
+
+    let (sql, keyword) = match kind {
+        ObjectKind::Procedure => (
+            "SELECT DEFINER FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? \
+                 AND ROUTINE_NAME = ? AND ROUTINE_TYPE = 'PROCEDURE'",
+            "PROCEDURE",
+        ),
+        ObjectKind::Function => (
+            "SELECT DEFINER FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? \
+                 AND ROUTINE_NAME = ? AND ROUTINE_TYPE = 'FUNCTION'",
+            "FUNCTION",
+        ),
+        ObjectKind::Trigger => (
+            "SELECT DEFINER FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? \
+                 AND TRIGGER_NAME = ?",
+            "TRIGGER",
+        ),
+        ObjectKind::Event => (
+            "SELECT DEFINER FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ? \
+                 AND EVENT_NAME = ?",
+            "EVENT",
+        ),
+        _ => return Ok(()),
+    };
+    let schema = stmt.schema.to_string();
+    let mut c = pool.get_conn().await.map_err(|e| {
+        SprigError::new(SprigCode::BackendUnavailable, "sprig_ctl unreachable").with_source(e)
+    })?;
+    let got: Option<String> = c
+        .exec_first(sql, (&schema, name))
+        .await
+        .map_err(|e| SprigError::internal(format!("reading a definer: {e}")))?;
+    match got {
+        Some(d) if d != want => {
+            let drop = format!(
+                "DROP {keyword} IF EXISTS {}.{}",
+                sprig_common::names::quote(&schema),
+                sprig_common::names::quote(name)
+            );
+            if let Err(e) = c.query_drop(drop).await {
+                tracing::error!(error = %e, schema, name, "dropping a stored program with a wrong definer failed");
+            }
+            tracing::warn!(schema, name, definer = %d, "stored program refused: wrong definer");
+            Err(sprig_auth::authz::definers::mismatch(keyword, name, &d))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -476,6 +486,324 @@ impl DdlExecutor for GatewayDdl<'_> {
     }
 }
 
+/// Chapter 21's wait for chapter 20's shard jobs (open question 10): a
+/// split, merge or shard move holds `mover/shard-locks/<tenant>/g<g>s<s>`
+/// in the tenant's home DC tier for each source shard, from admission
+/// until the job ends. A schema change on such a shard polls until the
+/// lock is gone, up to `wait` (`ddl.mover_wait_minutes`), then fails with
+/// 39470. A locked shard that is no longer in its group's map belongs to
+/// a job that already committed: the statement's layout is stale, so it
+/// fails with 39110 and the client retries on the new map.
+#[derive(Clone)]
+pub struct MoverLocks {
+    store: Arc<dyn sprig_meta::MetaStore>,
+    wait: std::time::Duration,
+    poll: std::time::Duration,
+}
+
+impl std::fmt::Debug for MoverLocks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MoverLocks")
+            .field("wait", &self.wait)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MoverLocks {
+    /// Locks in `store` (the tenant's home DC tier), waited for at most
+    /// `wait`.
+    #[must_use]
+    pub fn new(store: Arc<dyn sprig_meta::MetaStore>, wait: std::time::Duration) -> Self {
+        Self {
+            store,
+            wait,
+            poll: std::time::Duration::from_millis(500),
+        }
+    }
+
+    /// The same with another polling interval (tests).
+    #[must_use]
+    pub fn with_poll(mut self, poll: std::time::Duration) -> Self {
+        self.poll = poll;
+        self
+    }
+
+    /// The job holding one of `shards`, if any.
+    async fn holder(&self, tenant: TenantId, shards: &[SchemaName]) -> Result<Option<String>> {
+        for s in shards {
+            let SchemaName::Shard { group, shard, .. } = s else {
+                continue;
+            };
+            let key = self
+                .store
+                .tier()
+                .key(&format!("mover/shard-locks/{tenant}/g{group}s{shard}"))?;
+            let Some(kv) = self
+                .store
+                .get(&key, sprig_meta::Consistency::Linearizable)
+                .await?
+            else {
+                continue;
+            };
+            let job = String::from_utf8_lossy(&kv.value).into_owned();
+            let (map, _) = sprig_shard::ShardMapStore::new(Arc::clone(&self.store))
+                .load(tenant, *group)
+                .await?;
+            if map.shard(*shard).is_none() {
+                return Err(SprigError::new(
+                    SprigCode::ShardMoved,
+                    format!(
+                        "shard {shard} of table group {group} was replaced by job {job} \
+                         while the statement was planned; retry it"
+                    ),
+                ));
+            }
+            return Ok(Some(format!("job {job} (group {group}, shard {shard})")));
+        }
+        Ok(None)
+    }
+
+    /// Waits until no split, merge or shard move holds one of `shards`.
+    ///
+    /// # Errors
+    /// 39470 when `wait` runs out; 39110 for a stale layout; etcd errors.
+    pub async fn wait(&self, tenant: TenantId, shards: &[SchemaName]) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + self.wait;
+        let mut logged = false;
+        loop {
+            let h = match self.holder(tenant, shards).await {
+                Ok(None) => return Ok(()),
+                Ok(Some(h)) => h,
+                // etcd slow or briefly unreachable: look again until the
+                // deadline rather than fail the change.
+                Err(e) if e.retryable && tokio::time::Instant::now() < deadline => {
+                    tracing::debug!(%tenant, error = %e, "shard locks unreadable; retrying");
+                    tokio::time::sleep(self.poll).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            if tokio::time::Instant::now() >= deadline {
+                metrics::counter!("sprig_ddl_mover_waits_total", "outcome" => "timeout")
+                    .increment(1);
+                return Err(SprigError::new(
+                    SprigCode::ShardBusy,
+                    format!(
+                        "a split, merge or shard move holds a shard of this table: {h}; \
+                         waited {} s (ddl.mover_wait_minutes); retry when it finishes",
+                        self.wait.as_secs()
+                    ),
+                ));
+            }
+            if !logged {
+                logged = true;
+                metrics::counter!("sprig_ddl_mover_waits_total", "outcome" => "waited")
+                    .increment(1);
+                tracing::info!(%tenant, holder = %h, "schema change waits for a shard job");
+            }
+            tokio::time::sleep(self.poll).await;
+        }
+    }
+}
+
+/// Where a database's shards are: for its template schema and a table
+/// (`None`: routines, events and views), the shard schemas and their
+/// clusters, or `None` when the statement stays on the template (R0).
+pub type ShardLayout =
+    Arc<dyn Fn(&str, Option<&str>) -> Option<Vec<(String, ClusterId)>> + Send + Sync>;
+
+/// Chapter 21 in the gateway: DDL on a table group's shards.
+///
+/// The catalog's [`DdlEngine`](sprig_catalog::ddl::DdlEngine) asks
+/// [`DdlExecutor::shards`] where a statement goes; this executor answers
+/// from `layout` (in R1 the router's topology) and runs each shard's
+/// statement as `sprig_ctl` on that shard's cluster, after the gateway's
+/// own privilege check. Stored programs keep chapter 29's rule on every
+/// shard: their definer is the creating user's backend account
+/// (`t<tenant>_u<user>`@`%`), written into the statement and checked after
+/// creation. Statements on schemas outside the layout (unsharded tables,
+/// the template) go to the session's [`GatewayDdl`] as before.
+pub struct ShardedDdl<'a> {
+    inner: GatewayDdl<'a>,
+    layout: ShardLayout,
+    movers: Option<MoverLocks>,
+    locator: Arc<super::locator::GatewayLocator>,
+    definer: Option<(String, String)>,
+    routes:
+        std::sync::Mutex<std::collections::BTreeMap<SchemaName, (ClusterId, mysql_async::Pool)>>,
+}
+
+impl std::fmt::Debug for ShardedDdl<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardedDdl").finish_non_exhaustive()
+    }
+}
+
+impl<'a> ShardedDdl<'a> {
+    /// `inner` for the session's schemas; shards from `layout`, reached
+    /// through `locator`'s `sprig_ctl` pools; stored programs defined by
+    /// `user`'s backend account.
+    #[must_use]
+    pub fn new(
+        inner: GatewayDdl<'a>,
+        layout: ShardLayout,
+        locator: Arc<super::locator::GatewayLocator>,
+        tenant: TenantId,
+        user: Option<sprig_common::ids::UserId>,
+    ) -> Self {
+        Self {
+            inner,
+            layout,
+            movers: None,
+            locator,
+            definer: user.map(|u| {
+                (
+                    sprig_auth::authz::backend::account(tenant, u),
+                    "%".to_owned(),
+                )
+            }),
+            routes: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+
+    /// The same executor waiting for chapter 20's shard jobs (see
+    /// [`MoverLocks`]).
+    #[must_use]
+    pub fn with_mover_locks(mut self, movers: MoverLocks) -> Self {
+        self.movers = Some(movers);
+        self
+    }
+
+    fn route(&self, schema: &SchemaName) -> Option<(ClusterId, mysql_async::Pool)> {
+        self.routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(schema)
+            .cloned()
+    }
+
+    fn ctl(&self, schema: &SchemaName) -> Option<MariaExecutor> {
+        self.route(schema).map(|(_, p)| MariaExecutor::new(p))
+    }
+
+    async fn stored_program_on(&self, pool: &mysql_async::Pool, stmt: &PhysicalDdl) -> Result<()> {
+        let Some((user, host)) = self.definer.clone() else {
+            return Err(SprigError::internal(
+                "a stored program on several shards needs the creating user",
+            ));
+        };
+        let definer = format!("DEFINER={}@{}", bq(&user), bq(&host));
+        let st = PhysicalDdl {
+            sql: with_definer(&stmt.sql, &definer, &stmt.effect),
+            ..stmt.clone()
+        };
+        MariaExecutor::new(pool.clone()).execute(&st).await?;
+        verify_definer_on(pool, stmt, &format!("{user}@{host}")).await
+    }
+}
+
+#[async_trait::async_trait]
+impl DdlExecutor for ShardedDdl<'_> {
+    async fn execute(&self, stmt: &PhysicalDdl) -> Result<()> {
+        let Some((_, pool)) = self.route(&stmt.schema) else {
+            return self.inner.execute(stmt).await;
+        };
+        if stored_program(&stmt.effect) && !matches!(stmt.effect, Effect::Drop { .. }) {
+            return self.stored_program_on(&pool, stmt).await;
+        }
+        // Undo re-creations (`Effect::Restore`) keep the definer they had.
+        MariaExecutor::new(pool).execute(stmt).await
+    }
+
+    async fn schema(&self, schema: &SchemaName) -> Result<Option<SchemaInfo>> {
+        match self.ctl(schema) {
+            Some(e) => e.schema(schema).await,
+            None => self.inner.schema(schema).await,
+        }
+    }
+
+    async fn show_create(
+        &self,
+        schema: &SchemaName,
+        kind: ObjectKind,
+        name: &str,
+    ) -> Result<Option<String>> {
+        match self.ctl(schema) {
+            Some(e) => e.show_create(schema, kind, name).await,
+            None => self.inner.show_create(schema, kind, name).await,
+        }
+    }
+
+    async fn objects(&self, schema: &SchemaName) -> Result<Vec<PhysicalObject>> {
+        match self.ctl(schema) {
+            Some(e) => e.objects(schema).await,
+            None => self.inner.objects(schema).await,
+        }
+    }
+
+    async fn tenant_schemas(&self, tenant: TenantId) -> Result<Vec<SchemaName>> {
+        self.inner.tenant_schemas(tenant).await
+    }
+
+    async fn busy(&self, schema: &SchemaName) -> Result<bool> {
+        match self.ctl(schema) {
+            Some(e) => e.busy(schema).await,
+            None => self.inner.busy(schema).await,
+        }
+    }
+
+    async fn wait_for_shard_jobs(&self, tenant: TenantId, shards: &[SchemaName]) -> Result<()> {
+        match &self.movers {
+            Some(m) => m.wait(tenant, shards).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn shards(
+        &self,
+        tenant: TenantId,
+        db: &DatabaseRow,
+        target: ShardTarget<'_>,
+    ) -> Result<Vec<SchemaName>> {
+        let default = sprig_catalog::ddl::shard_schemas(tenant, db);
+        let Some(template) = default.first() else {
+            return Ok(default);
+        };
+        let table = match target {
+            ShardTarget::Table(t) => Some(t),
+            ShardTarget::Database => None,
+        };
+        let Some(found) = (self.layout)(&template.to_string(), table) else {
+            return Ok(default);
+        };
+        if found.is_empty() {
+            return Ok(default);
+        }
+        let mut out = Vec::new();
+        for (schema, cluster) in found {
+            let s: SchemaName = schema
+                .parse()
+                .map_err(|e| SprigError::internal(format!("a shard schema in the layout: {e}")))?;
+            if s.db() != Some(db.db_id) {
+                return Ok(default);
+            }
+            if self.route(&s).is_none() {
+                let pool = self.locator.ctl_pool(&cluster).await?;
+                self.routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(s, (cluster, pool));
+            }
+            out.push(s);
+        }
+        Ok(out)
+    }
+
+    fn cluster_of(&self, schema: &SchemaName) -> Option<ClusterId> {
+        self.route(schema).map(|(c, _)| c)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,5 +888,97 @@ mod tests {
             with_definer("ALTER PROCEDURE p COMMENT 'x'", D, &alter_p),
             "ALTER PROCEDURE p COMMENT 'x'"
         );
+    }
+}
+
+#[cfg(test)]
+mod mover_lock_tests {
+    #![allow(clippy::unwrap_used)]
+    use std::time::Duration;
+
+    use sprig_common::ids::{DbId, DcId, GroupId, ShardId};
+    use sprig_meta::{MemStore, MetaStore, Op, Tier, Txn};
+
+    use super::*;
+
+    const T: TenantId = TenantId(3_930_600_001);
+
+    async fn put(s: &Arc<dyn MetaStore>, rel: &str, v: &[u8]) {
+        let key = s.tier().key(rel).unwrap();
+        s.txn(Txn {
+            when: vec![],
+            then: vec![Op::Put {
+                key,
+                value: v.to_vec(),
+                lease: None,
+            }],
+            otherwise: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn del(s: &Arc<dyn MetaStore>, rel: &str) {
+        let key = s.tier().key(rel).unwrap();
+        s.txn(Txn {
+            when: vec![],
+            then: vec![Op::Delete(key)],
+            otherwise: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    fn shard(s: u32) -> SchemaName {
+        SchemaName::shard(T, DbId(1), GroupId(3), ShardId(s))
+    }
+
+    /// Chapter 21 open question 10: a schema change waits for a split of
+    /// its shards, gives up with 39470, and calls a replaced shard stale.
+    #[tokio::test]
+    async fn schema_changes_wait_for_shard_jobs() {
+        let s: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Dc(DcId::new("dc-a").unwrap())));
+        let map = sprig_shard::ShardMap::presplit(
+            T,
+            GroupId(3),
+            0,
+            2,
+            &[ClusterId::new("dc-a-c1").unwrap()],
+        )
+        .unwrap();
+        sprig_shard::ShardMapStore::new(Arc::clone(&s))
+            .create(&map)
+            .await
+            .unwrap();
+        let locks = MoverLocks::new(Arc::clone(&s), Duration::from_millis(60))
+            .with_poll(Duration::from_millis(5));
+        // Nothing holds the shards.
+        locks.wait(T, &[shard(1), shard(2)]).await.unwrap();
+        // A split of shard 2 runs: refused when the wait runs out.
+        let lock = format!("mover/shard-locks/{T}/g3s2");
+        put(&s, &lock, b"job-a").await;
+        let e = locks.wait(T, &[shard(1), shard(2)]).await.unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::ShardBusy));
+        assert!(e.message.contains("job-a"), "{}", e.message);
+        // Other shards don't wait.
+        locks.wait(T, &[shard(1)]).await.unwrap();
+        // The split ends while a change waits: the change goes ahead.
+        let waiting = {
+            let l = locks.clone().with_poll(Duration::from_millis(5));
+            let l = MoverLocks {
+                wait: Duration::from_secs(5),
+                ..l
+            };
+            tokio::spawn(async move { l.wait(T, &[shard(2)]).await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished());
+        del(&s, &lock).await;
+        waiting.await.unwrap().unwrap();
+        // A lock on a shard no longer in the map: the job committed and
+        // the statement's layout is stale.
+        put(&s, &format!("mover/shard-locks/{T}/g3s7"), b"job-b").await;
+        let e = locks.wait(T, &[shard(7)]).await.unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::ShardMoved));
     }
 }

@@ -406,3 +406,330 @@ async fn one_tenant_from_candidate_to_drop() {
         std::panic::resume_unwind(p);
     }
 }
+
+/// The R0 catalog-connection deadlock: an `auto_index` pass held a pooled
+/// catalog connection while its hooks (the catalog snapshot, evaluation,
+/// workload reads) took another from the same pool; with the loop's four
+/// workers on a pool of four, every pass waited for a fifth connection
+/// forever, and every other catalog call of the cluster timed out.
+///
+/// Hooks here take a short connection from the shared budget, as the real
+/// ones do. Wired the old way (the pass's connection from the shared
+/// budget) the workers deadlock; wired the new way (the loop's own budget,
+/// `SESSIONS`) many passes and short callers run beside each other, no
+/// short caller waits long, and both budgets end empty.
+mod budgets {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use mysql_async::Pool;
+    use sprig_advisor::autoindex::observe::{FpLatency, UsageSample, WorkloadSource};
+
+    use super::*;
+    use crate::catalogs::{PoolStats, StaticPools, acquire, pool_stats};
+
+    /// A short catalog call: one connection of `pool`, a few milliseconds.
+    async fn leaf(pool: &Pool, what: &str) -> Result<()> {
+        let mut c = acquire(pool, what).await?;
+        c.query_drop("SELECT SLEEP(0.005)")
+            .await
+            .map_err(|e| SprigError::internal("leaf").with_source(e))?;
+        Ok(())
+    }
+
+    struct PoolEnv {
+        sessions: Pool,
+        shared: Pool,
+        schema: String,
+    }
+
+    #[async_trait::async_trait]
+    impl AutoIndexEnv for PoolEnv {
+        async fn catalog(&self, _t: TenantId) -> Result<(Conn, AutoIndexStore)> {
+            let c = acquire(&self.sessions, "pass").await?;
+            Ok((c, AutoIndexStore::new(&self.schema)))
+        }
+        async fn objects(
+            &self,
+            _t: TenantId,
+            _o: &BTreeSet<ObjectId>,
+        ) -> Result<BTreeMap<ObjectId, ObjectEnv>> {
+            leaf(&self.shared, "snapshot").await?;
+            Ok(BTreeMap::new())
+        }
+        async fn external_builds(&self, _c: &ClusterId) -> Result<u32> {
+            Ok(0)
+        }
+    }
+
+    struct Shared(Pool);
+
+    #[async_trait::async_trait]
+    impl CandidateSource for Shared {
+        async fn evaluate(&self, _t: TenantId, _now: SystemTime) -> Result<Evaluated> {
+            leaf(&self.0, "evaluate").await?;
+            Ok(Evaluated::default())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkloadSource for Shared {
+        async fn latency(
+            &self,
+            _t: TenantId,
+            _o: ObjectId,
+            _s: SystemTime,
+            _u: SystemTime,
+        ) -> Result<Option<BTreeMap<Fingerprint, FpLatency>>> {
+            Ok(None)
+        }
+        async fn samples(
+            &self,
+            _t: TenantId,
+            _o: ObjectId,
+            _n: usize,
+            _since: SystemTime,
+        ) -> Result<Option<Vec<UsageSample>>> {
+            Ok(None)
+        }
+        async fn objects_read(
+            &self,
+            _t: TenantId,
+            _s: SystemTime,
+            _u: SystemTime,
+        ) -> Result<Option<BTreeSet<ObjectId>>> {
+            leaf(&self.0, "workload").await?;
+            Ok(Some(BTreeSet::new()))
+        }
+    }
+
+    fn hooks(shared: &Pool) -> AutoIndexHooks {
+        AutoIndexHooks {
+            candidates: Arc::new(Shared(shared.clone())),
+            validation: Arc::new(AcceptAll),
+            workload: Arc::new(Shared(shared.clone())),
+            locks: Arc::new(NoMover),
+            mover: None,
+            marker: Arc::new(NoMarker),
+            decisions: Arc::new(LogDecisions),
+        }
+    }
+
+    /// `n` passes, `WORKERS` at a time as the runtime runs them, each a
+    /// fresh tenant memory (so evaluation and the user pass run every time).
+    async fn passes(env: Arc<PoolEnv>, hooks: AutoIndexHooks, n: usize) -> usize {
+        let slots = Arc::new(LocalSlots::new());
+        let mut set = tokio::task::JoinSet::new();
+        let mut ok = 0;
+        for i in 0..n {
+            while set.len() >= WORKERS {
+                if let Some(Ok(true)) = set.join_next().await {
+                    ok += 1;
+                }
+            }
+            let (env, hooks, slots) = (Arc::clone(&env), hooks.clone(), Arc::clone(&slots));
+            set.spawn(async move {
+                let mut mem = Memory::default();
+                let t = TenantId(1 + (i as u64 % 12));
+                tenant_pass(
+                    &*env,
+                    &hooks,
+                    &slots,
+                    t,
+                    SystemTime::now(),
+                    &mut mem,
+                    &Cadence::default(),
+                )
+                .await
+                .is_ok_and(|r| r.errors.is_empty())
+            });
+        }
+        while let Some(r) = set.join_next().await {
+            if matches!(r, Ok(true)) {
+                ok += 1;
+            }
+        }
+        ok
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn passes_never_starve_the_shared_catalog_budget() {
+        let Some(url) = std::env::var("SPRIG_TEST_MARIADB_SINGLE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        else {
+            eprintln!("skipped: set SPRIG_TEST_MARIADB_SINGLE to run it");
+            return;
+        };
+        let schema = format!("__sprig_test_pool_budget_{}", std::process::id());
+        let mut c = Conn::new(Opts::from_url(&url).unwrap()).await.unwrap();
+        c.query_drop(format!("DROP DATABASE IF EXISTS {}", quote(&schema)))
+            .await
+            .unwrap();
+        c.query_drop(format!("CREATE DATABASE {}", quote(&schema)))
+            .await
+            .unwrap();
+        c.query_drop(format!("USE {}", quote(&schema)))
+            .await
+            .unwrap();
+        for ddl in [
+            DDL_AUTO_INDEXES,
+            DDL_CANDIDATES,
+            DDL_VALIDATIONS,
+            DDL_INDEX_ORIGINS,
+            sprig_advisor::autoindex::store::DDL_INDEX_USAGE,
+        ] {
+            c.query_drop(ddl).await.unwrap();
+        }
+        let cluster = ClusterId::new("dev-single").unwrap();
+        let pool = |max: usize| {
+            let p = StaticPools::new()
+                .with_url_max(cluster.clone(), &url, max)
+                .unwrap();
+            futures::executor::block_on(crate::catalogs::ClusterPools::writer(&p, &cluster))
+                .unwrap()
+        };
+
+        // The old wiring: the pass's connection from the shared budget of
+        // four. Within seconds all four are held by passes waiting for a
+        // fifth.
+        let shared = pool(crate::catalogs::POOL_MAX);
+        let env = Arc::new(PoolEnv {
+            sessions: shared.clone(),
+            shared: shared.clone(),
+            schema: schema.clone(),
+        });
+        let old = tokio::spawn(passes(env, hooks(&shared), 40));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let stuck = pool_stats("old", &cluster, &shared);
+        eprintln!(
+            "old wiring after 3 s: {stuck:?}, finished: {}",
+            old.is_finished()
+        );
+        assert!(!old.is_finished(), "the old wiring didn't deadlock");
+        assert_eq!(stuck.in_use, crate::catalogs::POOL_MAX);
+        assert!(stuck.waiting >= WORKERS, "{stuck:?}");
+        old.abort();
+        let _ = old.await;
+        let _ = shared.disconnect().await;
+
+        // The new wiring: the loop's own budget.
+        let shared = pool(crate::catalogs::POOL_MAX);
+        let sessions = pool(SESSIONS);
+        let env = Arc::new(PoolEnv {
+            sessions: sessions.clone(),
+            shared: shared.clone(),
+            schema: schema.clone(),
+        });
+        let stop = sprig_common::CancellationToken::new();
+        let worst = Arc::new(AtomicU64::new(0));
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut short = Vec::new();
+        for _ in 0..8 {
+            let (shared, stop, worst, calls) = (
+                shared.clone(),
+                stop.clone(),
+                Arc::clone(&worst),
+                Arc::clone(&calls),
+            );
+            short.push(tokio::spawn(async move {
+                while !stop.is_cancelled() {
+                    let t0 = std::time::Instant::now();
+                    leaf(&shared, "settings").await.unwrap();
+                    let ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    worst.fetch_max(ms, Ordering::Relaxed);
+                    calls.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+        let t0 = std::time::Instant::now();
+        let n = 400;
+        let ok = tokio::time::timeout(Duration::from_secs(60), passes(env, hooks(&shared), n))
+            .await
+            .expect("passes stalled with their own budget");
+        stop.cancel();
+        for s in short {
+            s.await.unwrap();
+        }
+        let took = t0.elapsed();
+        let (a, b): (PoolStats, PoolStats) = (
+            pool_stats("catalog", &cluster, &shared),
+            pool_stats("autoindex", &cluster, &sessions),
+        );
+        eprintln!(
+            "new wiring: {ok}/{n} passes in {:.1} s beside {} short calls, the slowest {} ms; \
+             shared {a:?}, sessions {b:?}",
+            took.as_secs_f64(),
+            calls.load(Ordering::Relaxed),
+            worst.load(Ordering::Relaxed)
+        );
+        assert_eq!(ok, n);
+        assert!(worst.load(Ordering::Relaxed) < 2_000);
+        assert_eq!((a.in_use, a.waiting, b.in_use, b.waiting), (0, 0, 0, 0));
+        let _ = shared.disconnect().await;
+        let _ = sessions.disconnect().await;
+        c.query_drop(format!("DROP DATABASE IF EXISTS {}", quote(&schema)))
+            .await
+            .unwrap();
+        let _ = c.disconnect().await;
+    }
+}
+
+/// A pass that hangs (here waiting for its catalog connection) gives up at
+/// `Cadence::pass_limit`; a build's time doesn't count against it.
+#[tokio::test(start_paused = true)]
+async fn a_stuck_pass_gives_up_at_its_limit() {
+    struct Stuck;
+
+    #[async_trait::async_trait]
+    impl AutoIndexEnv for Stuck {
+        async fn catalog(&self, _t: TenantId) -> Result<(Conn, AutoIndexStore)> {
+            std::future::pending().await
+        }
+        async fn objects(
+            &self,
+            _t: TenantId,
+            _o: &BTreeSet<ObjectId>,
+        ) -> Result<BTreeMap<ObjectId, ObjectEnv>> {
+            Ok(BTreeMap::new())
+        }
+        async fn external_builds(&self, _c: &ClusterId) -> Result<u32> {
+            Ok(0)
+        }
+    }
+    let hooks = AutoIndexHooks {
+        candidates: Arc::new(NoCandidates),
+        validation: Arc::new(AcceptAll),
+        workload: Arc::new(sprig_advisor::autoindex::observe::NoWorkload),
+        locks: Arc::new(NoMover),
+        mover: None,
+        marker: Arc::new(NoMarker),
+        decisions: Arc::new(LogDecisions),
+    };
+    let cadence = Cadence {
+        pass_limit: Duration::from_secs(600),
+        ..Cadence::default()
+    };
+    let t0 = tokio::time::Instant::now();
+    let e = tenant_pass(
+        &Stuck,
+        &hooks,
+        &LocalSlots::new(),
+        TENANT,
+        SystemTime::now(),
+        &mut Memory::default(),
+        &cadence,
+    )
+    .await
+    .unwrap_err();
+    assert!(e.to_string().contains("ran over its 600 s limit"), "{e}");
+    assert_eq!(t0.elapsed(), Duration::from_secs(600));
+
+    // The budget: a build extends it while it runs, and only by its time.
+    let b = PassBudget::new(Duration::from_secs(10));
+    b.extend(Duration::from_secs(3600));
+    tokio::time::advance(Duration::from_secs(100)).await;
+    b.retract(Duration::from_secs(3600 - 100));
+    let t1 = tokio::time::Instant::now();
+    b.expired().await;
+    assert_eq!(t1.elapsed(), Duration::from_secs(10));
+}

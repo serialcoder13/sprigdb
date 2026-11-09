@@ -10,7 +10,11 @@
 //!
 //! A pin names the cluster the tenant is on, or the target of a mover job
 //! already moving it there (`sprigctl shard move --to <c> --pin` submits
-//! the move, then pins).
+//! the move, then pins). An operator's move of a pinned tenant takes the
+//! pin with it: the pin is re-pointed at the target when the job is
+//! submitted, and the balancer's run puts it back where the tenant is if
+//! the move rolls back (`sprig_balancer::pins` module docs). Operator
+//! decisions of a move carry its job id.
 
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -20,7 +24,7 @@ use serde_json::json;
 use sprig_balancer::decisions::{CatalogDecisionLog, DecisionLog, Mode, NewDecision, Outcome};
 use sprig_balancer::pins::{PinStore, TenantPin};
 use sprig_common::Result;
-use sprig_common::ids::{ClusterId, TenantId};
+use sprig_common::ids::{ClusterId, JobId, TenantId};
 use sprig_mover::{JobFilter, JobStatus, JobStore, MetaMover, Mover};
 use sprig_shard::{Placement, TenantMaps};
 
@@ -63,20 +67,26 @@ impl AdminService {
         PinStore::new(self.stores.dc.clone())
     }
 
-    fn decision_log(&self) -> CatalogDecisionLog {
+    /// The balancer's decision log (its pools); a log of its own only for
+    /// a service without the balancer (tests), whose pools last one call.
+    fn decision_log(&self) -> Arc<dyn DecisionLog> {
+        if let Some(p) = &self.placement {
+            return p.decisions();
+        }
         let pools: Arc<dyn ClusterPools> = Arc::new(RegistryPools::new(
             self.monitor.registry().clone(),
             Some(Arc::clone(&self.monitor)),
         ));
-        CatalogDecisionLog::new(Arc::new(ShardMapLocator::new(
+        Arc::new(CatalogDecisionLog::new(Arc::new(ShardMapLocator::new(
             self.stores.dc.clone(),
             pools,
             default_naming(),
-        )))
+        ))))
     }
 
     /// Writes an operator decision; a failure is logged, never returned:
     /// the operator's action already happened.
+    #[allow(clippy::too_many_arguments)]
     async fn operator_decision(
         &self,
         tenant: TenantId,
@@ -85,6 +95,7 @@ impl AdminService {
         summary: String,
         evidence: serde_json::Value,
         actor: &str,
+        job: Option<JobId>,
     ) {
         let d = NewDecision {
             decided_at_us: i64::try_from(now_s(self)).unwrap_or(0) * 1_000_000,
@@ -98,7 +109,7 @@ impl AdminService {
             summary,
             evidence,
             alternatives: None,
-            job_id: None,
+            job_id: job.map(JobId::to_bytes),
             parent_id: None,
             actor: actor.to_owned(),
             dc_id: self.dc().to_string(),
@@ -125,6 +136,42 @@ impl AdminService {
             ),
             json!({"from": from.to_string(), "to": to.to_string(), "job": st.id.to_string()}),
             "operator",
+            Some(st.id),
+        )
+        .await;
+        self.pin_follows_move(st, to).await;
+    }
+
+    /// A pinned tenant's operator move re-points its pin at the target
+    /// (module docs). Best effort, like the decision: the move runs.
+    async fn pin_follows_move(&self, st: &JobStatus, to: &ClusterId) {
+        let Some(old) = self.pin_of(st.tenant).await else {
+            return;
+        };
+        if old.cluster == *to {
+            return;
+        }
+        let pin = TenantPin {
+            cluster: to.clone(),
+            ..old.clone()
+        };
+        if let Err(e) = self.pins().pin(&pin).await {
+            tracing::warn!(tenant = %st.tenant, error = %e, "the pin didn't follow the move");
+            return;
+        }
+        self.operator_decision(
+            st.tenant,
+            "shard.pin",
+            "pin_follows_move",
+            format!(
+                "the pin of t{} moved from {} to {} with the operator's move (job {}); it \
+                 returns to {} if the move rolls back",
+                st.tenant, old.cluster, to, st.id, old.cluster
+            ),
+            json!({"from": old.cluster.to_string(), "to": to.to_string(),
+                "job": st.id.to_string(), "pinned_by": old.pinned_by}),
+            "operator",
+            Some(st.id),
         )
         .await;
     }
@@ -172,6 +219,7 @@ impl AdminService {
             format!("tenant {name} {}", pin.describe()),
             json!({"cluster": cluster.to_string(), "reason": pin.reason}),
             &by,
+            None,
         )
         .await;
         Ok(pin)
@@ -195,6 +243,7 @@ impl AdminService {
                 ),
                 json!({"cluster": p.cluster.to_string()}),
                 "operator",
+                None,
             )
             .await;
         }

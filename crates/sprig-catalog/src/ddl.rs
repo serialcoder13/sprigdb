@@ -68,10 +68,16 @@
 pub mod backend;
 pub mod exec;
 pub mod mem;
+mod multi;
 mod repair;
+pub mod shards;
 
 #[cfg(test)]
 mod live_tests;
+#[cfg(test)]
+mod shard_live_tests;
+#[cfg(test)]
+mod shard_sim;
 #[cfg(test)]
 mod tests;
 
@@ -90,9 +96,10 @@ use sprig_settings::{Apply, HardBounds, Scopes, Setting};
 
 pub use backend::{DdlBackend, DdlTx};
 pub use exec::{
-    DdlExecutor, Effect, MariaExecutor, PhysicalDdl, PhysicalObject, SchemaInfo, drop_sql,
-    kind_keyword, outcome_unknown,
+    DdlExecutor, Effect, MariaExecutor, PhysicalDdl, PhysicalObject, RoutedExecutor, SchemaInfo,
+    ShardTarget, drop_sql, kind_keyword, outcome_unknown,
 };
+pub use multi::{ShardRef, ShardSet, jobs_on_shards};
 pub use repair::{Resolution, drop_schema};
 
 use crate::store::{
@@ -116,6 +123,21 @@ pub static DDL_WAIT_MS: Setting<u64> = Setting {
     doc: "Wait for a pending DDL job",
 };
 sprig_settings::register!(DDL_WAIT_MS);
+
+/// `ddl.mover_wait_minutes`: how long a schema change on a table group's
+/// shards waits for a split, merge or shard move holding one of them
+/// before failing with 39470 (chapter 21, "DDL during moves").
+pub static MOVER_WAIT_MINUTES: Setting<u64> = Setting {
+    key: "ddl.mover_wait_minutes",
+    default: 120,
+    scopes: Scopes(0b11_0100),
+    hard: HardBounds::range(0, 1440),
+    apply: Apply::Live,
+    operator_only: true,
+    owner: 21,
+    doc: "How long DDL waits for mover jobs",
+};
+sprig_settings::register!(MOVER_WAIT_MINUTES);
 
 /// `catalog.reconcile_interval_seconds`.
 pub static RECONCILE_INTERVAL_SECONDS: Setting<u64> = Setting {
@@ -209,6 +231,42 @@ pub fn object_key(kind: ObjectKind, name: &str, lower_case_table_names: bool) ->
     }
 }
 
+/// Chapter 18's decision table, in every schema a distributed
+/// transaction's decision can be anchored in (each shard schema, the
+/// database's own schema).
+pub const DTX_TABLE: &str = "__sprig_dtx";
+
+/// `CREATE TABLE IF NOT EXISTS` of [`DTX_TABLE`] in `schema` (chapter 18,
+/// "Decision table"; `sprig_txn::decision::create_table_sql` is this).
+#[must_use]
+pub fn dtx_table_sql(schema: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS `{}`.`{DTX_TABLE}` (\
+         dtid BINARY(16) NOT NULL, \
+         outcome ENUM('commit','abort','pending') NOT NULL, \
+         decider BINARY(16) NULL, \
+         coordinator VARCHAR(64) NOT NULL, \
+         participants VARBINARY(4096) NULL, \
+         created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), \
+         PRIMARY KEY (dtid), KEY (created_at)) ENGINE=InnoDB",
+        schema.replace('`', "``")
+    )
+}
+
+/// The statement creating [`DTX_TABLE`] in `schema`, run with the schema
+/// itself (`CREATE DATABASE`, its repair).
+#[must_use]
+pub fn dtx_table_ddl(schema: SchemaName) -> PhysicalDdl {
+    PhysicalDdl {
+        schema,
+        sql: dtx_table_sql(&schema.to_string()),
+        effect: Effect::Create {
+            kind: ObjectKind::Table,
+            name: DTX_TABLE.to_owned(),
+        },
+    }
+}
+
 /// The `databases.options` key listing a database's shard ids in its
 /// default group (R0: one).
 pub const SHARDS_OPTION: &str = "shards";
@@ -231,19 +289,13 @@ pub fn shard_schemas(tenant: TenantId, db: &DatabaseRow) -> Vec<SchemaName> {
         .unwrap_or_default()
 }
 
-/// The one shard schema of a database (R0), or `Internal`.
+/// The template schema of a database: the first shard of its default
+/// group, the schema chapter 07's rewrite names. A statement that changes
+/// several shards is written for it and rewritten per shard (chapter 21).
 fn single_schema(tenant: TenantId, db: &DatabaseRow) -> Result<SchemaName> {
-    match shard_schemas(tenant, db).as_slice() {
-        [one] => Ok(*one),
-        [] => Err(SprigError::internal(format!(
-            "database {} has no physical placement",
-            db.name
-        ))),
-        _ => Err(SprigError::internal(format!(
-            "database {} has several shards; multi-shard DDL is chapter 21's (R1)",
-            db.name
-        ))),
-    }
+    shard_schemas(tenant, db).first().copied().ok_or_else(|| {
+        SprigError::internal(format!("database {} has no physical placement", db.name))
+    })
 }
 
 /// Replaces backquoted physical schema names of `tenant` in `text` with
@@ -550,6 +602,10 @@ pub struct DdlIntent {
     /// The user who ran it.
     #[serde(default)]
     pub user: Option<UserId>,
+    /// The shards a multi-shard job changes (chapter 21); `None` for R0's
+    /// one schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shards: Option<ShardSet>,
     /// What it does.
     #[serde(flatten)]
     pub op: IntentOp,
@@ -610,7 +666,7 @@ impl DdlIntent {
         }
     }
 
-    fn row(&self, version: u64, at: SystemTime) -> Result<SettingRow> {
+    pub(crate) fn row(&self, version: u64, at: SystemTime) -> Result<SettingRow> {
         Ok(SettingRow {
             scope: SettingScope::Tenant,
             key: intent_key(self.job),
@@ -638,6 +694,11 @@ pub enum DdlStep {
     Prepared,
     /// The physical statement ran; phase 3 hasn't started.
     Applied,
+    /// A multi-shard job is about to run its statement on shard `i` (in
+    /// the job's order).
+    Shard(usize),
+    /// A multi-shard job is about to undo shard `i`.
+    Undo(usize),
 }
 
 /// A test hook called at every [`DdlStep`].
@@ -689,6 +750,7 @@ pub(crate) struct Facts {
 
 /// A prepared job.
 struct Plan {
+    fanout: Option<multi::Fanout>,
     intent: DdlIntent,
     physical: Vec<PhysicalDdl>,
     targets: Vec<FactTarget>,
@@ -704,7 +766,7 @@ enum Planned {
     /// Nothing to do (`IF [NOT] EXISTS`).
     Done(DdlOutcome),
     /// `TRUNCATE`: run it, no catalog change.
-    Run(PhysicalDdl, Vec<(DbId, String)>),
+    Run(PhysicalDdl, Vec<(DbId, String)>, Option<multi::Fanout>),
     /// `ALTER DATABASE`: run it, then one versioned change.
     AlterDb(DatabaseRow, Vec<PhysicalDdl>),
     /// A job: marks written in the transaction.
@@ -720,6 +782,20 @@ where
     clock: Arc<dyn Clock>,
     opts: DdlOpts,
     failpoint: Option<DdlFailpoint>,
+    checks: Vec<Arc<dyn PrepareCheck>>,
+}
+
+/// A check another module runs in the prepare phase, under the catalog
+/// lock, before anything reaches MariaDB (chapter 21; chapter 42's
+/// "Schema changes while an object is shared" is one). An error refuses
+/// the statement.
+#[async_trait::async_trait]
+pub trait PrepareCheck: Send + Sync {
+    /// Checks `req` against the catalog as `tx` reads it.
+    ///
+    /// # Errors
+    /// The refusal; the catalog's errors.
+    async fn check(&self, req: &DdlRequest<'_>, tx: &mut dyn DdlTx) -> Result<()>;
 }
 
 impl<B: DdlBackend> Clone for DdlEngine<B>
@@ -732,6 +808,7 @@ where
             clock: Arc::clone(&self.clock),
             opts: self.opts,
             failpoint: self.failpoint.clone(),
+            checks: self.checks.clone(),
         }
     }
 }
@@ -781,6 +858,22 @@ fn missing(kind: ObjectKind, db: &str, name: &str, dropping: bool) -> (u16, [u8;
             format!("Table '{db}.{name}' doesn't exist"),
         ),
     }
+}
+
+/// A missing object's note as the error a statement without `IF EXISTS`
+/// gets: `DROP EVENT` notes 1305 (`Event e does not exist`) but fails with
+/// 1539 (`Unknown event 'e'`), in MySQL 8.4 and MariaDB 11.8 alike
+/// (measured, chapter 28 R4).
+fn missing_as_error(e: SprigError) -> SprigError {
+    if errno(&e) == Some(1305)
+        && let Some(name) = e
+            .message
+            .strip_prefix("Event ")
+            .and_then(|r| r.strip_suffix(" does not exist"))
+    {
+        return std_err(1539, *b"HY000", format!("Unknown event '{name}'"));
+    }
+    e
 }
 
 fn missing_err(kind: ObjectKind, db: &str, name: &str, dropping: bool) -> SprigError {
@@ -865,7 +958,15 @@ where
             clock,
             opts: DdlOpts::default(),
             failpoint: None,
+            checks: Vec::new(),
         }
+    }
+
+    /// The same engine with another module's prepare-phase check.
+    #[must_use]
+    pub fn with_check(mut self, check: Arc<dyn PrepareCheck>) -> Self {
+        self.checks.push(check);
+        self
     }
 
     /// The same engine with other timing.
@@ -926,13 +1027,15 @@ where
     ) -> Result<DdlOutcome> {
         let tenant = req.tenant;
         let job = self.new_job();
-        let plan = match self.prepare(req, job).await? {
+        let plan = match self.prepare(req, job, exec).await? {
             Planned::Busy(what) => return Err(conflict(&what)),
             Planned::Done(o) => return Ok(o),
-            Planned::Run(stmt, names) => {
-                exec.execute(&stmt)
-                    .await
-                    .map_err(|e| map_names(e, tenant, &names))?;
+            Planned::Run(stmt, names, fan) => {
+                for s in multi::fan_out(tenant, &stmt, fan.as_ref(), exec).await? {
+                    exec.execute(&s)
+                        .await
+                        .map_err(|e| map_names(e, tenant, &names))?;
+                }
                 return Ok(DdlOutcome::default());
             }
             Planned::AlterDb(db, stmts) => {
@@ -941,7 +1044,14 @@ where
             Planned::Go(p) => *p,
         };
         self.fail(tenant, DdlStep::Prepared)?;
-        for stmt in &plan.physical {
+        if let Some(set) = plan.intent.shards.clone() {
+            self.apply_shards(tenant, &plan, &set, exec).await?;
+        }
+        for stmt in plan
+            .physical
+            .iter()
+            .filter(|_| plan.intent.shards.is_none())
+        {
             if let Err(e) = exec.execute(stmt).await {
                 if outcome_unknown(&e) {
                     tracing::warn!(%tenant, job = %job, error = %e,
@@ -957,6 +1067,9 @@ where
         }
         self.fail(tenant, DdlStep::Applied)?;
         let facts = self.gather_retrying(tenant, job, exec, &plan).await?;
+        if let Some(set) = &plan.intent.shards {
+            multi::check_skew(tenant, job, set, &plan.targets, exec).await;
+        }
         let version = self.finish(tenant, &plan.intent, &facts).await?;
         if version.is_none() {
             tracing::warn!(%tenant, job = %job, "the reconciler resolved this DDL before it finished");
@@ -1004,12 +1117,20 @@ where
     }
 
     /// Phase 1, waiting while a target is held.
-    async fn prepare(&self, req: &DdlRequest<'_>, job: JobId) -> Result<Planned> {
+    async fn prepare(
+        &self,
+        req: &DdlRequest<'_>,
+        job: JobId,
+        exec: &dyn DdlExecutor,
+    ) -> Result<Planned> {
         let tenant = req.tenant;
         let deadline = self.clock.now() + self.opts.ddl_wait;
         loop {
             let mut locked = self.versioner.lock(tenant, VersionKind::Catalog).await?;
-            let planned = self.plan(&mut locked, req, job).await;
+            let planned = match self.plan(&mut locked, req, job).await {
+                Ok(Planned::Go(p)) => self.place(&mut locked, req.tenant, *p, exec).await,
+                other => other,
+            };
             match planned {
                 Ok(Planned::Go(p)) => {
                     if let Err(e) = self.fail(tenant, DdlStep::Planned) {
@@ -1046,6 +1167,9 @@ where
         req: &DdlRequest<'_>,
         job: JobId,
     ) -> Result<Planned> {
+        for c in &self.checks {
+            c.check(req, locked.tx()).await?;
+        }
         let tenant = req.tenant;
         let lctn = req.lower_case_table_names;
         let previous = locked.previous();
@@ -1057,6 +1181,7 @@ where
             started_ms: millis(now),
             ddl: req.logical_sql.to_owned(),
             user: req.user,
+            shards: None,
             op,
         };
         let tx = locked.tx();
@@ -1128,15 +1253,22 @@ where
                 let it = intent(IntentOp::CreateDatabase { db });
                 tx.put_internal(&it.row(previous, now)?).await?;
                 Ok(Planned::Go(Box::new(Plan {
+                    fanout: None,
                     intent: it,
-                    physical: vec![PhysicalDdl {
-                        schema,
-                        sql: format!(
-                            "CREATE DATABASE IF NOT EXISTS {}{clause}",
-                            quote(&schema.to_string())
-                        ),
-                        effect: Effect::CreateSchema,
-                    }],
+                    physical: vec![
+                        PhysicalDdl {
+                            schema,
+                            sql: format!(
+                                "CREATE DATABASE IF NOT EXISTS {}{clause}",
+                                quote(&schema.to_string())
+                            ),
+                            effect: Effect::CreateSchema,
+                        },
+                        // Chapter 18: the database's schema anchors the
+                        // decisions of transactions that start on its
+                        // unsharded tables.
+                        dtx_table_ddl(schema),
+                    ],
                     targets: Vec::new(),
                     schema: Some(schema),
                     names: vec![(db, name.clone())],
@@ -1204,6 +1336,7 @@ where
                     })
                     .collect();
                 Ok(Planned::Go(Box::new(Plan {
+                    fanout: None,
                     intent: it,
                     physical,
                     targets: Vec::new(),
@@ -1235,6 +1368,12 @@ where
                     return Ok(Planned::Busy(format!("database '{}'", db.name)));
                 }
                 let schema = single_schema(tenant, &db)?;
+                let fan = multi::Fanout::of_create(
+                    &db,
+                    *kind,
+                    &name.name,
+                    parent.as_ref().map(|p| p.name.as_str()),
+                );
                 let key = object_key(*kind, &name.name, lctn);
                 let names = vec![(db.db_id, db.name.clone())];
                 let physical = vec![PhysicalDdl {
@@ -1267,6 +1406,7 @@ where
                     });
                     tx.put_internal(&it.row(previous, now)?).await?;
                     return Ok(Planned::Go(Box::new(Plan {
+                        fanout: Some(fan.clone()),
                         intent: it,
                         physical,
                         targets: vec![FactTarget {
@@ -1327,6 +1467,7 @@ where
                 });
                 tx.put_internal(&it.row(previous, now)?).await?;
                 Ok(Planned::Go(Box::new(Plan {
+                    fanout: Some(fan),
                     intent: it,
                     physical,
                     targets: vec![FactTarget {
@@ -1360,7 +1501,7 @@ where
                             ..DdlOutcome::default()
                         }));
                     }
-                    Found::Missing(e) => return Err(e),
+                    Found::Missing(e) => return Err(missing_as_error(e)),
                 };
                 if held_db(db.db_id) {
                     return Ok(Planned::Busy(format!("database '{}'", db.name)));
@@ -1378,6 +1519,7 @@ where
                 });
                 tx.put_internal(&it.row(previous, now)?).await?;
                 Ok(Planned::Go(Box::new(Plan {
+                    fanout: Some(multi::Fanout::of(&db, o.kind, &o.name)),
                     intent: it,
                     physical: vec![PhysicalDdl {
                         schema,
@@ -1426,7 +1568,7 @@ where
                                     message: e.message,
                                 });
                             } else {
-                                return Err(e);
+                                return Err(missing_as_error(e));
                             }
                         }
                     }
@@ -1439,6 +1581,7 @@ where
                 };
                 let schema = single_schema(tenant, first_db)?;
                 let first_id = first_db.db_id;
+                let fan = multi::Fanout::of_drop(first_db, *kind, &found);
                 let mut db_names: Vec<(DbId, String)> = Vec::new();
                 let mut in_schema = Vec::new();
                 for (d, o) in &mut found {
@@ -1456,6 +1599,7 @@ where
                 });
                 tx.put_internal(&it.row(previous, now)?).await?;
                 Ok(Planned::Go(Box::new(Plan {
+                    fanout: Some(fan),
                     intent: it,
                     physical: vec![PhysicalDdl {
                         schema,
@@ -1481,12 +1625,13 @@ where
                     match find(tx, ObjectKind::Table, name, req.current_db, lctn, false).await? {
                         Found::Object(b) => *b,
                         Found::Busy(w) => return Ok(Planned::Busy(w)),
-                        Found::Missing(e) => return Err(e),
+                        Found::Missing(e) => return Err(missing_as_error(e)),
                     };
                 if held_db(db.db_id) {
                     return Ok(Planned::Busy(format!("database '{}'", db.name)));
                 }
                 let schema = single_schema(tenant, &db)?;
+                let fan = multi::Fanout::of(&db, ObjectKind::Table, &name.name);
                 Ok(Planned::Run(
                     PhysicalDdl {
                         schema,
@@ -1496,6 +1641,7 @@ where
                         },
                     },
                     vec![(db.db_id, db.name.clone())],
+                    Some(fan),
                 ))
             }
         }
@@ -1633,6 +1779,7 @@ where
             started_ms: millis(now),
             ddl: req.logical_sql.to_owned(),
             user: req.user,
+            shards: None,
             op: IntentOp::Rename { moves },
         };
         tx.put_internal(&it.row(previous, now)?).await?;
@@ -1640,7 +1787,12 @@ where
             .first()
             .map(|m| m.0)
             .ok_or_else(|| SprigError::internal("RENAME without moves"))?;
+        let fan = dbs
+            .values()
+            .find(|d| single_schema(tenant, d).ok() == Some(schema))
+            .map(|d| multi::Fanout::of_rename(d, &physical_moves));
         Ok(Planned::Go(Box::new(Plan {
+            fanout: fan,
             intent: it,
             physical: vec![PhysicalDdl {
                 schema,
@@ -1708,6 +1860,7 @@ where
             started_ms: millis(now),
             ddl: req.logical_sql.to_owned(),
             user: req.user,
+            shards: None,
             op: IntentOp::Rename {
                 moves: vec![Move {
                     object: o.object_id,
@@ -1723,6 +1876,7 @@ where
             names.push((tdb.db_id, tdb.name.clone()));
         }
         Ok(Planned::Go(Box::new(Plan {
+            fanout: Some(multi::Fanout::of(&db, o.kind, &o.name)),
             intent: it,
             physical: vec![PhysicalDdl {
                 schema: from_schema,

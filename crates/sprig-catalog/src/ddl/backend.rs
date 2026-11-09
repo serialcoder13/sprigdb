@@ -20,6 +20,17 @@ use crate::version::{MariaBackend, MariaTx, VersionBackend, VersionKind};
 /// version row). Reads see the transaction's own writes.
 #[async_trait::async_trait]
 pub trait DdlTx: Send {
+    /// The rows of a read-only query on the catalog schema, in which
+    /// `{catalog}` stands for the schema's quoted name: other modules'
+    /// tables, for [`PrepareCheck`](super::PrepareCheck)s. A missing table
+    /// reads as no rows; `None` where the backend runs no SQL.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    async fn query_rows(&mut self, _sql: &str) -> Result<Option<Vec<Vec<Option<String>>>>> {
+        Ok(None)
+    }
+
     /// One database by id, tombstones included.
     ///
     /// # Errors
@@ -171,6 +182,32 @@ where
 
 #[async_trait::async_trait]
 impl DdlTx for MariaTx {
+    async fn query_rows(&mut self, sql: &str) -> Result<Option<Vec<Vec<Option<String>>>>> {
+        use mysql_async::prelude::Queryable;
+        let (st, q) = self.parts();
+        let sql = sql.replace("{catalog}", &sprig_common::names::quote(st.schema()));
+        match q.query::<mysql_async::Row, _>(sql).await {
+            Ok(rows) => Ok(Some(
+                rows.into_iter()
+                    .map(|r| {
+                        r.unwrap()
+                            .into_iter()
+                            .map(|v| match v {
+                                mysql_async::Value::NULL => None,
+                                mysql_async::Value::Bytes(b) => {
+                                    Some(String::from_utf8_lossy(&b).into_owned())
+                                }
+                                other => Some(other.as_sql(true)),
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            )),
+            Err(mysql_async::Error::Server(e)) if e.code == 1146 => Ok(Some(Vec::new())),
+            Err(e) => Err(map_err(e)),
+        }
+    }
+
     async fn database(&mut self, db: DbId) -> Result<Option<DatabaseRow>> {
         let (s, q) = self.parts();
         s.database(q, db).await

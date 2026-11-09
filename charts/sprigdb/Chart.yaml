@@ -1,0 +1,13 @@
+apiVersion: v2
+name: sprigdb
+description: SprigDB for one data center (chapter 27); install once per DC's Kubernetes cluster.
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+license: Apache-2.0
+home: https://github.com/serialcoder13/sprigdb
+kubeVersion: ">=1.27.0-0"
+annotations:
+  # Needs mariadb-operator (k8s.mariadb.com/v1alpha1) and cert-manager in the
+  # cluster; this chart installs neither.
+  sprigdb.io/requires: "mariadb-operator, cert-manager, trust-manager"

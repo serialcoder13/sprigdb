@@ -127,9 +127,17 @@ impl Subscriptions {
 
     /// Registers a subscription.
     ///
+    /// Residency (chapter 26): the consumers of a DC tier's subscriptions
+    /// decode the tenant's feed in that DC, so a tier whose DC the tenant's
+    /// residency doesn't allow refuses the subscription (39507). The
+    /// directory is read through this store's etcd (single-etcd mode); a
+    /// tier that can't see the directory doesn't check.
+    ///
     /// # Errors
-    /// 39804 if the name is taken; the store's errors.
+    /// 39804 if the name is taken; 39507 outside the tenant's allowed DCs;
+    /// the store's errors.
     pub async fn register(&self, sub: &Subscription) -> Result<()> {
+        self.check_residency(sub.tenant).await?;
         let key = self.sub_key(sub.tenant, &sub.name)?;
         let r = self
             .store
@@ -258,6 +266,66 @@ impl Subscriptions {
         Err(SprigError::new(
             SprigCode::CatalogConflict,
             format!("subscription {name}'s checkpoint kept changing"),
+        ))
+    }
+
+    /// 39507 when this tier's DC is outside `tenant`'s allowed DCs.
+    async fn check_residency(&self, tenant: TenantId) -> Result<()> {
+        let sprig_meta::Tier::Dc(dc) = self.store.tier().clone() else {
+            return Ok(());
+        };
+        let global = sprig_meta::TierView::over(&self.store, sprig_meta::Tier::Global);
+        let Some(e) = sprig_shard::home::read_home(&*global, tenant).await? else {
+            return Ok(());
+        };
+        if e.residency_allows(&dc) {
+            Ok(())
+        } else {
+            Err(SprigError::new(
+                SprigCode::ResidencyUnsatisfiable,
+                format!(
+                    "tenant {tenant}'s residency doesn't allow its change feed to be read in {dc}"
+                ),
+            ))
+        }
+    }
+
+    /// Sets a subscription's state (`active` or `paused`); `false` when
+    /// there is none. Chapter 26's residency loop pauses subscriptions in
+    /// DCs the tenant may no longer be read in.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn set_state(&self, tenant: TenantId, name: &str, state: &str) -> Result<bool> {
+        let key = self.sub_key(tenant, name)?;
+        for _ in 0..8 {
+            let Some(kv) = self.store.get(&key, Consistency::Linearizable).await? else {
+                return Ok(false);
+            };
+            let mut rec = Record::<Subscription>::decode(&kv.value)?;
+            if rec.body.state == state {
+                return Ok(true);
+            }
+            rec.body.state = state.to_owned();
+            let r = self
+                .store
+                .txn(Txn {
+                    when: vec![Cmp::ModRev(key.clone(), kv.mod_revision)],
+                    then: vec![Op::Put {
+                        key: key.clone(),
+                        value: rec.encode()?,
+                        lease: None,
+                    }],
+                    otherwise: Vec::new(),
+                })
+                .await?;
+            if r.succeeded {
+                return Ok(true);
+            }
+        }
+        Err(SprigError::new(
+            SprigCode::CatalogConflict,
+            format!("subscription {name} kept changing"),
         ))
     }
 

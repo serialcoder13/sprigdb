@@ -1,0 +1,9 @@
+`r4c_r1`@`%`
+`r4c_r1`@`%`
+ERROR 1142 (42000): INSERT command denied to user 'r4c_u1'@'HOST' for table 'c_g1'
+`r4c_r1`@`%`,`r4c_r2`@`%`
+NONE
+`r4c_r1`@`%`,`r4c_r2`@`%`
+`r4c_r1`@`%`
+`r4c_r1`@`%`
+ERROR 3530 (HY000): `r4c_r3`@`%` is not granted to `r4c_u1`@`%`

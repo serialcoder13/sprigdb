@@ -120,3 +120,212 @@ async fn claims_raise_the_token_and_guard_writes() {
     let e = m.cancel(&rec.job_id, "late").await;
     assert!(e.is_err() || m.status(&rec.job_id).await.unwrap().state == JobState::Done);
 }
+
+#[tokio::test]
+async fn hash_range_jobs_lock_their_shards_and_the_tenant() {
+    use crate::api::HashRange;
+    const HALF: u64 = 1 << 63;
+    let m = MetaMover::new(store());
+    let c = ClusterId::new("dc-a-c1").unwrap();
+    let split = |shard: u32, lo: u64, hi: Option<u64>, a: u32, b: u32| {
+        let mid = lo / 2 + hi.map_or(HALF, |h| h / 2);
+        JobSpec::reshard(
+            TenantId(5),
+            3,
+            &c,
+            vec![(
+                shard,
+                vec![format!("t5_d1_g3_s{shard}")],
+                HashRange { lo, hi },
+            )],
+            &c,
+            vec![
+                (a, HashRange { lo, hi: Some(mid) }),
+                (b, HashRange { lo: mid, hi }),
+            ],
+        )
+    };
+    let a = m.submit(split(1, 0, Some(HALF), 3, 4)).await.unwrap();
+    assert_eq!(m.status(&a).await.unwrap().kind, JobKind::SplitShard);
+    // Another shard of the group splits beside it; the same shard can't.
+    m.submit(split(2, HALF, None, 5, 6)).await.unwrap();
+    let e = m.submit(split(1, 0, Some(HALF), 7, 8)).await.unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::ShardLocked));
+    // A whole-tenant move blocks new hash-range jobs.
+    m.submit(spec(9)).await.unwrap();
+    let mut s9 = split(1, 0, Some(HALF), 3, 4);
+    s9.tenant = TenantId(9);
+    s9.sources[0].schemas = vec!["t9_d1_g3_s1".into()];
+    let e = m.submit(s9).await.unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::ShardLocked));
+    // Cancelling frees every lock it held.
+    m.cancel(&a, "test").await.unwrap();
+    m.submit(split(1, 0, Some(HALF), 7, 8)).await.unwrap();
+    // Targets must cover the sources exactly.
+    let mut bad = split(1, 0, Some(HALF), 9, 10);
+    bad.targets[1].range = Some(HashRange {
+        lo: 7,
+        hi: Some(HALF),
+    });
+    assert!(m.submit(bad).await.is_err());
+}
+
+/// No worker runs a paused job, so a cancel there used to be recorded and
+/// never acted on: it now sends the job to `rolling_back` (the R0 fixes),
+/// which a worker claims.
+#[tokio::test]
+async fn a_cancelled_paused_job_rolls_back() {
+    let m = MetaMover::new(store());
+    let id = m.submit(spec(21)).await.unwrap();
+    m.edit(&id, |r| {
+        r.state = JobState::Paused;
+        r.paused_from = Some(JobState::Ready);
+        Ok(true)
+    })
+    .await
+    .unwrap();
+    assert!(!m.status(&id).await.unwrap().state.is_runnable());
+    m.cancel(&id, "operator").await.unwrap();
+    let (rec, _) = m.store().get(&id).await.unwrap();
+    assert_eq!(rec.state, JobState::RollingBack);
+    assert!(rec.state.is_runnable());
+    assert_eq!(rec.cancel.as_deref(), Some("operator"));
+    assert_eq!(rec.paused_from, None);
+}
+
+/// Copy slots are freed whatever `mover.max_copies_per_cluster` is now: a
+/// slot taken under a larger value isn't left behind (the R0 fixes).
+#[tokio::test]
+async fn slots_are_freed_beyond_the_current_maximum() {
+    let s = store();
+    let c = ClusterId::new("dc-a-c2").unwrap();
+    let (a, b, job) = (JobId::new_v7(), JobId::new_v7(), JobId::new_v7());
+    let lease = s.dc.grant_lease(Duration::from_secs(60)).await.unwrap();
+    // Slot 0 to a, 1 to b, 2 to job (taken while the maximum was 3).
+    assert!(s.take_slot(&c, &a, 1, lease).await.unwrap());
+    assert!(s.take_slot(&c, &b, 2, lease).await.unwrap());
+    assert!(s.take_slot(&c, &job, 3, lease).await.unwrap());
+    // Freed with the maximum lowered to 1.
+    s.free_slots(&c, &job, 1).await.unwrap();
+    assert!(
+        s.take_slot(&c, &JobId::new_v7(), 3, lease).await.unwrap(),
+        "slot 2 is free"
+    );
+    assert!(
+        !s.take_slot(&c, &JobId::new_v7(), 3, lease).await.unwrap(),
+        "all three taken"
+    );
+    // a's and b's slots stay theirs.
+    s.free_slots(&c, &job, 3).await.unwrap();
+    assert!(s.take_slot(&c, &a, 1, lease).await.unwrap());
+    assert!(s.take_slot(&c, &b, 2, lease).await.unwrap());
+}
+
+/// Chapter 20's exclusion in the other direction (R1 integration): a
+/// whole-tenant move never starts beside a split, merge or shard move of
+/// the tenant, and a tenant with table groups doesn't move whole.
+#[tokio::test]
+async fn whole_tenant_moves_wait_for_shard_jobs_and_refuse_sharded_tenants() {
+    use crate::api::HashRange;
+    const HALF: u64 = 1 << 63;
+    let js = store();
+    let m = MetaMover::new(js.clone());
+    let c = ClusterId::new("dc-a-c1").unwrap();
+    let split = JobSpec::reshard(
+        TenantId(11),
+        3,
+        &c,
+        vec![(
+            1,
+            vec!["t11_d1_g3_s1".into()],
+            HashRange { lo: 0, hi: None },
+        )],
+        &c,
+        vec![
+            (
+                2,
+                HashRange {
+                    lo: 0,
+                    hi: Some(HALF),
+                },
+            ),
+            (3, HashRange { lo: HALF, hi: None }),
+        ],
+    );
+    let s = m.submit(split).await.unwrap();
+    // A running split: the move is refused (retryable) and leaves nothing.
+    let e = m.submit(spec(11)).await.unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::ShardBusy));
+    assert!(e.retryable);
+    assert_eq!(m.list(&JobFilter::default()).await.unwrap().len(), 1);
+    // A copy-and-swap is a whole-tenant job too.
+    let cs = JobSpec::copy_swap(
+        TenantId(11),
+        c.clone(),
+        "t11_d1_g0_s1",
+        "t",
+        "ADD COLUMN x INT",
+    );
+    assert_eq!(
+        m.submit(cs).await.unwrap_err().code(),
+        Some(SprigCode::ShardBusy)
+    );
+    m.cancel(&s, "test").await.unwrap();
+    // The tenant has a group map: refused for good (not retryable).
+    let key = js.meta().tier().key("shardmaps/11/3").unwrap();
+    js.meta()
+        .txn(Txn {
+            when: vec![],
+            then: vec![Op::Put {
+                key,
+                value: b"{}".to_vec(),
+                lease: None,
+            }],
+            otherwise: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(js.sharded_groups(TenantId(11)).await.unwrap(), vec![3]);
+    let e = m.submit(spec(11)).await.unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::ShardedTenantMove));
+    assert!(!e.retryable);
+    // Group 0 is the catalog's own map: an unsharded tenant still moves.
+    let key0 = js.meta().tier().key("shardmaps/12/0").unwrap();
+    js.meta()
+        .txn(Txn {
+            when: vec![],
+            then: vec![Op::Put {
+                key: key0,
+                value: b"{}".to_vec(),
+                lease: None,
+            }],
+            otherwise: vec![],
+        })
+        .await
+        .unwrap();
+    m.submit(spec(12)).await.unwrap();
+}
+
+/// The advisor's first design holds the tenant lock while it creates the
+/// groups' maps (chapter 16): no move and no split starts meanwhile.
+#[tokio::test]
+async fn the_tenant_lock_keeps_moves_out_while_held() {
+    let js = store();
+    let m = MetaMover::new(js.clone());
+    assert_eq!(js.lock_tenant(TenantId(13), "advisor").await.unwrap(), None);
+    // Taking it again as the same holder succeeds (a resumed apply).
+    assert_eq!(js.lock_tenant(TenantId(13), "advisor").await.unwrap(), None);
+    let e = m.submit(spec(13)).await.unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::ShardLocked));
+    // Someone else's job holds it: the advisor can't take it.
+    let other = m.submit(spec(14)).await.unwrap();
+    assert_eq!(
+        js.lock_tenant(TenantId(14), "advisor").await.unwrap(),
+        Some(other.0.to_string())
+    );
+    // Releasing as another holder does nothing; as the holder frees it.
+    js.unlock_tenant(TenantId(13), "someone").await.unwrap();
+    assert!(m.submit(spec(13)).await.is_err());
+    js.unlock_tenant(TenantId(13), "advisor").await.unwrap();
+    m.submit(spec(13)).await.unwrap();
+}

@@ -65,7 +65,9 @@ pub fn single_node_plan(l: &SingleNodeLoss) -> SingleNodePlan {
             lag.as_secs(),
             l.rpo.as_secs()
         )),
-        (None, _) => SingleNodePlan::Blocked("no standby and no binlog archive fits the RPO".into()),
+        (None, _) => {
+            SingleNodePlan::Blocked("no standby and no binlog archive fits the RPO".into())
+        }
     }
 }
 
@@ -153,7 +155,10 @@ mod tests {
 
     #[test]
     fn external_writers_are_followed() {
-        assert_eq!(follow_external("a:3306", Some("a:3306")), ExternalWriter::Same);
+        assert_eq!(
+            follow_external("a:3306", Some("a:3306")),
+            ExternalWriter::Same
+        );
         assert_eq!(follow_external("a:3306", None), ExternalWriter::None);
         assert_eq!(
             follow_external("a:3306", Some("b:3306")),

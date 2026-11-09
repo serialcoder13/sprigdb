@@ -10,6 +10,9 @@
 //! | `version_comment` | `SprigDB <release>` | the same |
 //! | `gtid_mode` | `OFF` | (MariaDB's own: no such variable) |
 //! | `enforce_gtid_consistency` | `OFF` | (none) |
+//! | `sql_mode` (R4) | the client's view ([`super::sqlmode`]); `GLOBAL`: MySQL 8.4's default | (the backend's) |
+//! | `max_execution_time` (R4) | the session's `max_statement_time` in ms | (none) |
+//! | `terminology_use_previous` (R4) | `NONE` | (none) |
 //!
 //! Reads in a `SELECT` become literals ([`rewrite_reads`]), with the
 //! column named as the client wrote it; `SHOW VARIABLES` rows for them are
@@ -63,6 +66,15 @@ pub struct PersonaVars {
     pub persona: Persona,
     /// The persona's version string (the greeting's).
     pub version: String,
+    /// 3306: the client's view of the session's `sql_mode` (R4,
+    /// [`super::sqlmode`]); `None` leaves reads to the backend.
+    pub sql_mode: Option<String>,
+    /// 3306: `max_execution_time` in milliseconds, from the session's
+    /// `max_statement_time` (R4).
+    pub max_execution_time: Option<u64>,
+    /// `CURRENT_ROLE()` (chapter 29, R4): `Some(None)` is `NULL`; `None`
+    /// leaves it to the backend.
+    pub current_role: Option<Option<String>>,
 }
 
 impl PersonaVars {
@@ -72,17 +84,69 @@ impl PersonaVars {
         Self {
             persona,
             version: version.into(),
+            sql_mode: None,
+            max_execution_time: None,
+            current_role: None,
         }
+    }
+
+    /// With the session's `CURRENT_ROLE()` answer (a tenant session's).
+    #[must_use]
+    pub fn with_current_role(mut self, role: Option<Option<String>>) -> Self {
+        self.current_role = role;
+        self
+    }
+
+    /// With the session's `sql_mode` view and `max_statement_time` (the
+    /// backend's seconds), on the MySQL persona.
+    #[must_use]
+    pub fn with_session(
+        mut self,
+        sql_mode: Option<&str>,
+        max_statement_time: Option<&str>,
+    ) -> Self {
+        if self.persona == Persona::MySql84 {
+            self.sql_mode = sql_mode.map(str::to_owned);
+            self.max_execution_time = Some(
+                max_statement_time
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+                    .map_or(0, |s| {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let ms = (s * 1000.0).round().max(0.0) as u64;
+                        ms
+                    }),
+            );
+        }
+        self
     }
 
     /// The value the persona gives `name` (lower case, without `@@` or a
     /// scope), or `None` when the backend answers.
     #[must_use]
-    pub fn value(&self, name: &str) -> Option<&str> {
+    pub fn value(&self, name: &str) -> Option<std::borrow::Cow<'_, str>> {
+        self.value_at(name, false)
+    }
+
+    /// [`Self::value`] at session or global scope.
+    #[must_use]
+    pub fn value_at(&self, name: &str, global: bool) -> Option<std::borrow::Cow<'_, str>> {
+        use std::borrow::Cow;
         match (self.persona, name) {
-            (_, "version") => Some(&self.version),
-            (p, "version_comment") => Some(version_comment(p)),
-            (Persona::MySql84, "gtid_mode" | "enforce_gtid_consistency") => Some("OFF"),
+            (_, "version") => Some(Cow::Borrowed(&self.version)),
+            (p, "version_comment") => Some(Cow::Borrowed(version_comment(p))),
+            (Persona::MySql84, "gtid_mode" | "enforce_gtid_consistency") => {
+                Some(Cow::Borrowed("OFF"))
+            }
+            // mysqldump 8.4 sets it; MySQL's default.
+            (Persona::MySql84, "terminology_use_previous") => Some(Cow::Borrowed("NONE")),
+            (Persona::MySql84, "sql_mode") if global => {
+                Some(Cow::Owned(super::sqlmode::MYSQL84_DEFAULT.render()))
+            }
+            (Persona::MySql84, "sql_mode") => self.sql_mode.as_deref().map(Cow::Borrowed),
+            (Persona::MySql84, "max_execution_time") if global => Some(Cow::Borrowed("0")),
+            (Persona::MySql84, "max_execution_time") => {
+                self.max_execution_time.map(|v| Cow::Owned(v.to_string()))
+            }
             _ => None,
         }
     }
@@ -91,10 +155,14 @@ impl PersonaVars {
     /// Value)`. Rows MariaDB doesn't have (`gtid_mode`) are not added.
     #[must_use]
     pub fn show_rows(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut rows = vec![
             ("version", self.version.clone()),
             ("version_comment", version_comment(self.persona).to_owned()),
-        ]
+        ];
+        if let Some(m) = &self.sql_mode {
+            rows.push(("sql_mode", m.clone()));
+        }
+        rows
     }
 }
 
@@ -117,6 +185,7 @@ fn sql_literal(v: &str, nbe: bool) -> String {
 /// persona's values are server-wide. `None` when nothing changes or the
 /// statement is not a `SELECT`.
 #[must_use]
+#[allow(clippy::too_many_lines)] // one pass over the tokens
 pub fn rewrite_reads(
     sql: &[u8],
     lex_opts: &LexOptions,
@@ -127,7 +196,8 @@ pub fn rewrite_reads(
         sql.windows(needle.len())
             .any(|w| w.eq_ignore_ascii_case(needle))
     };
-    if !has(b"@@") && !has(b"version") {
+    let role = vars.current_role.is_some() && has(b"current_role");
+    if !has(b"@@") && !has(b"version") && !role {
         return None;
     }
     let tokens = lex::lex(sql, lex_opts).ok()?;
@@ -144,7 +214,10 @@ pub fn rewrite_reads(
         .iter()
         .find(|&&i| tokens[i].kind == TokenKind::Word)
         .map(|&i| tokens[i].bytes(sql))?;
-    if !first_word.eq_ignore_ascii_case(b"SELECT") {
+    // R4: `SET @old = @@sql_mode` (mysqldump's) reads the client's view
+    // too; the assignment targets themselves stay.
+    let is_set = first_word.eq_ignore_ascii_case(b"SET");
+    if !first_word.eq_ignore_ascii_case(b"SELECT") && !is_set {
         return None;
     }
     let nbe = lex_opts.no_backslash_escapes;
@@ -157,22 +230,48 @@ pub fn rewrite_reads(
     for (k, &i) in sig.iter().enumerate() {
         let t = tokens[i];
         match t.kind {
-            TokenKind::SysVar => {
+            TokenKind::SysVar
+                if !(is_set
+                    && sig.get(k + 1).is_some_and(|&n| {
+                        tokens[n].kind == TokenKind::Op
+                            && matches!(tokens[n].bytes(sql), b"=" | b":=")
+                    })) =>
+            {
                 let text = String::from_utf8_lossy(t.bytes(sql)).to_ascii_lowercase();
                 let name = text.trim_start_matches('@');
+                let global = name.starts_with("global.");
                 let name = name
                     .strip_prefix("session.")
                     .or_else(|| name.strip_prefix("local."))
                     .or_else(|| name.strip_prefix("global."))
                     .unwrap_or(name)
                     .trim_matches('`');
-                if let Some(v) = vars.value(name) {
+                if let Some(v) = vars.value_at(name, global) {
                     edits.push((
                         t.range(),
-                        sql_literal(v, nbe),
+                        sql_literal(&v, nbe),
                         String::from_utf8_lossy(t.bytes(sql)).into_owned(),
                     ));
                 }
+            }
+            TokenKind::Word
+                if t.bytes(sql).eq_ignore_ascii_case(b"CURRENT_ROLE")
+                    && punct(k + 1, b'(')
+                    && punct(k + 2, b')')
+                    && !(k > 0 && punct(k - 1, b'.'))
+                    && vars.current_role.is_some() =>
+            {
+                let close = tokens[sig[k + 2]];
+                let lit = match vars.current_role.as_ref().and_then(Option::as_deref) {
+                    Some(r) => sql_literal(r, nbe),
+                    None => "NULL".to_owned(),
+                };
+                edits.push((
+                    t.start as usize..close.end as usize,
+                    lit,
+                    String::from_utf8_lossy(&sql[t.start as usize..close.end as usize])
+                        .into_owned(),
+                ));
             }
             TokenKind::Word
                 if t.bytes(sql).eq_ignore_ascii_case(b"VERSION")
@@ -267,7 +366,25 @@ mod tests {
 
     #[test]
     fn only_selects_change() {
-        assert!(rw("SET @v = @@version", &my()).is_none());
+        assert_eq!(
+            rw("SET @v = @@version, @@session.sql_mode = 'x'", &my())
+                .unwrap()
+                .0,
+            "SET @v = '8.4.8-SprigDB', @@session.sql_mode = 'x'"
+        );
+        let m = my().with_session(Some("ANSI"), Some("1.5"));
+        assert_eq!(
+            rw("SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='X'", &m)
+                .unwrap()
+                .0,
+            "SET @OLD_SQL_MODE='ANSI', SQL_MODE='X'"
+        );
+        assert_eq!(
+            rw("SELECT @@max_execution_time, @@global.sql_mode", &m)
+                .unwrap()
+                .0,
+            "SELECT '1500', 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'"
+        );
         assert!(rw("SELECT 1", &my()).is_none());
         assert!(rw("SHOW VARIABLES LIKE 'version'", &my()).is_none());
         assert!(rw("/* c */ SELECT @@version", &my()).is_some());

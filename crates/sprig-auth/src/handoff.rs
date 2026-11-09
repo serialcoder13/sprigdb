@@ -25,13 +25,22 @@
 //! ```
 //!
 //! **Transport.** Chapter 14 runs this over `GatewayPeer.HandoffLogin` on
-//! port 7403 with mutual TLS (chapter 04). The peer service doesn't exist
-//! yet, and neither do chapter 26's pins, so [`HandoffTarget`] is the seam:
-//! [`LocalPeers`] (tests: DCs as in-process services) implements it now,
-//! the gRPC client later. The messages ([`HandoffStart`],
-//! [`HandoffResult`]) are serde types, ready for either. A handoff costs
-//! one WAN round trip: the whole exchange happens at the source, and only
-//! the decision crosses.
+//! port 7403 with mutual TLS (chapter 04): the gateway's `PeerHandoff`
+//! implements [`HandoffTarget`] over it, and [`LocalPeers`] (tests: DCs as
+//! in-process services) in process. The messages ([`HandoffStart`],
+//! [`PrincipalWire`]) are serde types carried as JSON in the gRPC
+//! messages. A handoff costs one WAN round trip: the whole exchange
+//! happens at the source, and only the decision crosses.
+//!
+//! **Wiring (R2, chapter 26).** [`LoginService::begin`] (and
+//! [`LoginService::begin_http`]) read the tenant's residency from the
+//! directory *before* anything of its credentials is loaded, and pick the
+//! flow: the local [`crate::MysqlLogin`], [`RelayLogin`], or [`DenyLogin`]
+//! (39302 after the exchange). A residency block whose allowed set is
+//! empty or unreadable allows no DC: such logins are refused with 39302
+//! (fail closed). The target re-checks that it is an allowed DC before
+//! deciding ([`serve_handoff`]), so a misrouted handoff never loads
+//! verifiers outside the allowed DCs.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -46,8 +55,10 @@ use sprig_proto_mysql::handshake::NONCE_LEN;
 use sprig_proto_mysql::{ErrPacket, Persona};
 use zeroize::Zeroizing;
 
+use crate::accounts::BackendTarget;
 use crate::audit::{self, AuditEvent};
-use crate::mysql::{LoginRequest, LoginService, Principal};
+use crate::mysql::{LoginRequest, LoginService, MysqlLogin, Principal, max_user_len};
+use crate::store::AccountLimits;
 
 /// Where a login is decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,13 +174,25 @@ pub trait HandoffTarget: Send + Sync + 'static {
 
 /// The target side: decides a handed-off login with `svc`. The target
 /// audits it (`auth.handoff`, plus the login's own event) and counts
-/// failures.
+/// failures. A target outside the tenant's allowed DCs refuses with 39301
+/// without loading anything of its credentials.
 pub async fn serve_handoff(
     svc: &Arc<LoginService>,
     start: HandoffStart,
     password: &[u8],
 ) -> HandoffResult {
-    let mut login = svc.start(start.request()).await;
+    let req = start.request();
+    if !matches!(svc.route_of(&req, false).await, Route::Local) {
+        metrics::counter!("sprig_auth_handoffs_total", "outcome" => "misrouted").increment(1);
+        return HandoffResult::Refused(ErrPacket::from_error(
+            req.persona,
+            &SprigError::new(
+                SprigCode::AuthUnavailable,
+                "this data center isn't allowed to decide the tenant's logins",
+            ),
+        ));
+    }
+    let mut login = svc.start(req).await;
     let (outcome, path) = if login.check_clear_fast(password) {
         (Outcome::Verified, AuthPath::Fast)
     } else if login
@@ -369,6 +392,291 @@ impl LoginFlow for RelayLogin {
     }
 }
 
+/// This gateway's side of the hand-off: its DC and how it reaches the
+/// gateways of other DCs.
+pub struct HandoffConfig {
+    /// This gateway's DC (`[meta] dc_id`), never the client's hint.
+    pub here: DcId,
+    /// The other DCs' gateways.
+    pub peers: Arc<dyn HandoffTarget>,
+}
+
+impl std::fmt::Debug for HandoffConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandoffConfig")
+            .field("here", &self.here)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LoginService {
+    /// Where the login `req` is decided (see the module docs): `Local`
+    /// without a hand-off configuration, for the accounts file, for a
+    /// login that names no tenant, or when the directory can't be read
+    /// (the local login then refuses with 39301 itself).
+    pub async fn route_of(&self, req: &LoginRequest, http: bool) -> Route {
+        let (Some(h), crate::mysql::LoginSource::Catalog(c)) = (self.handoff(), self.source())
+        else {
+            return Route::Local;
+        };
+        let max_user = if http {
+            crate::admin::MAX_NAME
+        } else {
+            max_user_len(req.persona)
+        };
+        match c.residency_of(req, max_user).await {
+            Ok(Some(r)) => {
+                if r.allowed_dcs.is_empty() {
+                    // A block without a readable set allows nowhere.
+                    Route::Deny
+                } else {
+                    route(Some(&r.allowed_dcs), &h.here, r.deny_remote_access)
+                }
+            }
+            Ok(None) => Route::Local,
+            Err(e) => {
+                tracing::warn!(error = %e, "residency unreadable; the login decides locally (39301 if its catalog can't load either)");
+                Route::Local
+            }
+        }
+    }
+
+    /// Starts one MySQL login, routed by the tenant's residency (chapter
+    /// 26): decided here, relayed to an allowed DC, or refused.
+    pub async fn begin(self: &Arc<Self>, req: LoginRequest) -> ResidentLogin {
+        self.begin_as(req, false).await
+    }
+
+    /// [`Self::begin`] for an HTTP login.
+    pub async fn begin_http(self: &Arc<Self>, req: LoginRequest) -> ResidentLogin {
+        self.begin_as(req, true).await
+    }
+
+    async fn begin_as(self: &Arc<Self>, req: LoginRequest, http: bool) -> ResidentLogin {
+        match self.route_of(&req, http).await {
+            Route::Local => ResidentLogin::Local(if http {
+                self.start_http(req).await
+            } else {
+                self.start(req).await
+            }),
+            Route::Deny => {
+                metrics::counter!("sprig_auth_handoffs_total", "outcome" => "denied").increment(1);
+                ResidentLogin::Deny(DenyLogin {
+                    persona: req.persona,
+                })
+            }
+            Route::HandOff(dcs) => {
+                let (here, peers) = match self.handoff() {
+                    Some(h) => (h.here.clone(), Arc::clone(&h.peers)),
+                    None => return ResidentLogin::Local(self.start(req).await),
+                };
+                ResidentLogin::Relay(RelayLogin::new(req, here, dcs, peers))
+            }
+        }
+    }
+}
+
+/// A login refused because the tenant's residency denies remote access
+/// (39302), after the same exchange as any login.
+#[derive(Debug)]
+pub struct DenyLogin {
+    persona: Persona,
+}
+
+#[async_trait]
+impl LoginFlow for DenyLogin {
+    fn method(&self, client_plugin: Option<&str>) -> Method {
+        if client_plugin == Some(Method::ClearText.plugin_name()) {
+            Method::ClearText
+        } else {
+            Method::CachingSha2
+        }
+    }
+    fn check_fast(&mut self, _nonce: &[u8; NONCE_LEN], _scramble: &[u8]) -> bool {
+        false
+    }
+    fn check_native(&mut self, _nonce: &[u8; NONCE_LEN], _scramble: &[u8]) -> bool {
+        false
+    }
+    async fn check_password(&mut self, _password: Zeroizing<Vec<u8>>) -> bool {
+        false
+    }
+    async fn decide(&mut self, _outcome: Outcome, _path: AuthPath) -> AuthVerdict {
+        AuthVerdict::Refuse(remote_access_denied(self.persona))
+    }
+}
+
+/// A login as residency routed it ([`LoginService::begin`]).
+#[derive(Debug)]
+pub enum ResidentLogin {
+    /// Decided here.
+    Local(MysqlLogin),
+    /// Relayed to an allowed DC.
+    Relay(RelayLogin),
+    /// Refused: 39302.
+    Deny(DenyLogin),
+}
+
+impl ResidentLogin {
+    /// Who logged in, once accepted.
+    #[must_use]
+    pub fn principal(&self) -> Option<&Principal> {
+        match self {
+            Self::Local(l) => l.principal(),
+            Self::Relay(r) => r.principal(),
+            Self::Deny(_) => None,
+        }
+    }
+
+    /// The local login, if decided here (its file account, its refusal
+    /// reason).
+    #[must_use]
+    pub fn local(&self) -> Option<&MysqlLogin> {
+        match self {
+            Self::Local(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// The fast path for a clear-text password (HTTP Basic); never for a
+    /// relayed or denied login.
+    pub fn check_clear_fast(&mut self, password: &[u8]) -> bool {
+        match self {
+            Self::Local(l) => l.check_clear_fast(password),
+            _ => false,
+        }
+    }
+}
+
+#[async_trait]
+impl LoginFlow for ResidentLogin {
+    fn method(&self, client_plugin: Option<&str>) -> Method {
+        match self {
+            Self::Local(l) => l.method(client_plugin),
+            Self::Relay(r) => r.method(client_plugin),
+            Self::Deny(d) => d.method(client_plugin),
+        }
+    }
+    fn check_fast(&mut self, nonce: &[u8; NONCE_LEN], scramble: &[u8]) -> bool {
+        match self {
+            Self::Local(l) => l.check_fast(nonce, scramble),
+            Self::Relay(r) => r.check_fast(nonce, scramble),
+            Self::Deny(d) => d.check_fast(nonce, scramble),
+        }
+    }
+    fn check_native(&mut self, nonce: &[u8; NONCE_LEN], scramble: &[u8]) -> bool {
+        match self {
+            Self::Local(l) => l.check_native(nonce, scramble),
+            Self::Relay(r) => r.check_native(nonce, scramble),
+            Self::Deny(d) => d.check_native(nonce, scramble),
+        }
+    }
+    async fn check_password(&mut self, password: Zeroizing<Vec<u8>>) -> bool {
+        match self {
+            Self::Local(l) => l.check_password(password).await,
+            Self::Relay(r) => r.check_password(password).await,
+            Self::Deny(d) => d.check_password(password).await,
+        }
+    }
+    async fn decide(&mut self, outcome: Outcome, path: AuthPath) -> AuthVerdict {
+        match self {
+            Self::Local(l) => l.decide(outcome, path).await,
+            Self::Relay(r) => r.decide(outcome, path).await,
+            Self::Deny(d) => d.decide(outcome, path).await,
+        }
+    }
+}
+
+/// A [`Principal`] on the wire (`GatewayPeer.HandoffLogin`'s reply): the
+/// principal's fields only. The backend credential crosses as its
+/// reference, never the secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrincipalWire {
+    /// The tenant.
+    pub tenant: Option<u64>,
+    /// Its name.
+    pub tenant_name: Option<String>,
+    /// The user's id.
+    pub user_id: Option<u32>,
+    /// The user.
+    pub user: String,
+    /// The account's host pattern.
+    pub host: String,
+    /// The client address.
+    pub client_ip: IpAddr,
+    /// Sandbox mode.
+    pub must_change_password: bool,
+    /// `MAX_QUERIES_PER_HOUR`, `MAX_UPDATES_PER_HOUR`,
+    /// `MAX_CONNECTIONS_PER_HOUR`, `MAX_USER_CONNECTIONS`.
+    pub limits: [u32; 4],
+    /// The auth version.
+    pub auth_version: u64,
+    /// The backend cluster.
+    pub backend_cluster: String,
+    /// The backend account.
+    pub backend_user: String,
+    /// The backend credential's reference.
+    pub backend_credentials: String,
+}
+
+impl PrincipalWire {
+    /// The wire form of `p`.
+    #[must_use]
+    pub fn of(p: &Principal) -> Self {
+        Self {
+            tenant: p.tenant.map(|t| t.0),
+            tenant_name: p.tenant_name.clone(),
+            user_id: p.user_id.map(|u| u.0),
+            user: p.user.clone(),
+            host: p.host.clone(),
+            client_ip: p.client_ip,
+            must_change_password: p.must_change_password,
+            limits: [
+                p.limits.max_queries_per_hour,
+                p.limits.max_updates_per_hour,
+                p.limits.max_connections_per_hour,
+                p.limits.max_user_connections,
+            ],
+            auth_version: p.auth_version,
+            backend_cluster: p.backend.cluster.to_string(),
+            backend_user: p.backend.user.clone(),
+            backend_credentials: p.backend.credentials.to_string(),
+        }
+    }
+
+    /// The principal.
+    ///
+    /// # Errors
+    /// Internal for a malformed cluster id or credential reference.
+    pub fn principal(&self) -> Result<Principal> {
+        Ok(Principal {
+            tenant: self.tenant.map(sprig_common::ids::TenantId),
+            tenant_name: self.tenant_name.clone(),
+            user_id: self.user_id.map(sprig_common::ids::UserId),
+            user: self.user.clone(),
+            host: self.host.clone(),
+            client_ip: self.client_ip,
+            must_change_password: self.must_change_password,
+            limits: AccountLimits {
+                max_queries_per_hour: self.limits[0],
+                max_updates_per_hour: self.limits[1],
+                max_connections_per_hour: self.limits[2],
+                max_user_connections: self.limits[3],
+            },
+            auth_version: self.auth_version,
+            backend: BackendTarget {
+                cluster: sprig_common::ids::ClusterId::new(&self.backend_cluster)
+                    .map_err(|e| SprigError::internal(format!("handoff principal: {e}")))?,
+                user: self.backend_user.clone(),
+                credentials: self
+                    .backend_credentials
+                    .parse()
+                    .map_err(|e: SprigError| SprigError::internal(format!("handoff principal: {}", e.message)))?,
+            },
+        })
+    }
+}
+
 /// 39302: the tenant's credentials stay in its allowed DCs and remote
 /// access is denied.
 #[must_use]
@@ -448,5 +756,93 @@ mod tests {
         assert!(!lost.check_password(Zeroizing::new(b"pw".to_vec())).await);
         let v = lost.decide(Outcome::WrongCredentials, AuthPath::Full).await;
         assert!(matches!(v, AuthVerdict::Refuse(ref p) if p.code == 39301));
+    }
+
+    fn pinned(dcs: &[&str], deny: bool) -> Option<crate::account::TenantResidency> {
+        Some(crate::account::TenantResidency {
+            allowed_dcs: dcs.iter().map(|d| dc(d)).collect(),
+            deny_remote_access: deny,
+        })
+    }
+
+    /// Chapter 26's wiring: `begin` reads the residency first and picks the
+    /// flow; the source never loads the tenant's catalog; the target
+    /// refuses a handoff it isn't allowed to decide.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn begin_routes_by_residency_and_the_target_checks_it() {
+        // fra1: an allowed DC, deciding with its own catalog.
+        let fra = crate::mysql::tests::world_at(
+            FixedPolicy::default(),
+            Some(Arc::new(HandoffConfig {
+                here: dc("fra1"),
+                peers: Arc::new(LocalPeers::default()),
+            })),
+        );
+        fra.tenants.set_residency("acme", pinned(&["fra1"], false));
+        let peers: Arc<dyn HandoffTarget> =
+            Arc::new(LocalPeers::default().with(dc("fra1"), Arc::clone(&fra.svc)));
+        // nyc1: outside; its catalog cache must never be asked for acme.
+        let nyc = crate::mysql::tests::world_at(
+            FixedPolicy::default(),
+            Some(Arc::new(HandoffConfig {
+                here: dc("nyc1"),
+                peers: Arc::clone(&peers),
+            })),
+        );
+        nyc.tenants.set_residency("acme", pinned(&["fra1"], false));
+        nyc.catalogs.map.lock().unwrap().clear();
+        let req = crate::mysql::tests::req;
+        // Relayed and accepted, with the principal from fra1.
+        let mut l = nyc.svc.begin(req("acme.alice")).await;
+        assert!(matches!(l, ResidentLogin::Relay(_)), "{l:?}");
+        assert!(!l.check_clear_fast(b"pw"), "no fast path at the source");
+        assert!(l.check_password(Zeroizing::new(b"pw".to_vec())).await);
+        assert_eq!(
+            l.decide(Outcome::Verified, AuthPath::Full).await,
+            AuthVerdict::Accept
+        );
+        let p = l.principal().unwrap();
+        assert_eq!((p.user.as_str(), p.tenant), ("alice", Some(crate::mysql::tests::ACME)));
+        // The wire form round-trips.
+        assert_eq!(&PrincipalWire::of(p).principal().unwrap(), p);
+        // Wrong password: fra1's 1045.
+        let mut l = nyc.svc.begin(req("acme.alice")).await;
+        assert!(!l.check_password(Zeroizing::new(b"no".to_vec())).await);
+        let v = l.decide(Outcome::WrongCredentials, AuthPath::Full).await;
+        assert!(matches!(v, AuthVerdict::Refuse(ref p) if p.code == 1045), "{v:?}");
+        // deny_remote_access: 39302 after the exchange.
+        nyc.tenants.set_residency("acme", pinned(&["fra1"], true));
+        let mut l = nyc.svc.begin(req("acme.alice")).await;
+        assert!(matches!(l, ResidentLogin::Deny(_)));
+        assert!(!l.check_password(Zeroizing::new(b"pw".to_vec())).await);
+        let v = l.decide(Outcome::WrongCredentials, AuthPath::Full).await;
+        assert!(matches!(v, AuthVerdict::Refuse(ref p) if p.code == 39302), "{v:?}");
+        // A block without a readable set allows nowhere: 39302.
+        nyc.tenants.set_residency("acme", pinned(&[], false));
+        assert!(matches!(
+            nyc.svc.begin(req("acme.alice")).await,
+            ResidentLogin::Deny(_)
+        ));
+        // Unpinned tenants and logins naming no tenant decide locally.
+        nyc.tenants.set_residency("acme", None);
+        assert!(matches!(
+            nyc.svc.begin(req("acme.alice")).await,
+            ResidentLogin::Local(_)
+        ));
+        assert!(matches!(
+            nyc.svc.begin(req("nodots")).await,
+            ResidentLogin::Local(_)
+        ));
+        // In an allowed DC: local.
+        assert!(matches!(
+            fra.svc.begin(req("acme.alice")).await,
+            ResidentLogin::Local(_)
+        ));
+        // A handoff reaching a DC that isn't allowed is refused there
+        // (39301), without deciding.
+        fra.tenants.set_residency("acme", pinned(&["ams1"], false));
+        let start = HandoffStart::of(&req("acme.alice"), dc("nyc1"));
+        let r = serve_handoff(&fra.svc, start, b"pw").await;
+        assert!(matches!(r, HandoffResult::Refused(ref p) if p.code == 39301), "{r:?}");
     }
 }

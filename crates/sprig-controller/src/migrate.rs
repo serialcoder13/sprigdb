@@ -224,6 +224,7 @@ impl DcMoves {
         to: &DcId,
         asked: Option<&str>,
         retained: &HashSet<ClusterId>,
+        allowed: Option<&std::collections::BTreeSet<DcId>>,
     ) -> Result<ClusterId> {
         let reg = ClusterRegistry::new(
             TierView::over(&self.store, Tier::Global),
@@ -234,6 +235,8 @@ impl DcMoves {
             .await?
             .into_iter()
             .filter(|c| c.body().admin_state == AdminState::Active)
+            // Chapter 26's cluster rule: every copy inside the residency.
+            .filter(|c| crate::residency::eligible(c.body(), allowed))
             .map(|c| c.body().cluster_id.clone())
             .collect();
         active.sort();
@@ -268,12 +271,27 @@ impl DcMoves {
     /// # Errors
     /// 39550 when the move can't start; 39503 for an unregistered DC; the
     /// stores' errors.
-    #[allow(clippy::too_many_lines)] // the checks, then the three steps
     pub async fn start(
         &self,
         tenant: TenantId,
         name: &str,
         req: &MoveTenantRequest,
+    ) -> Result<MoveView> {
+        self.start_caused(tenant, name, req, "operator").await
+    }
+
+    /// [`Self::start`], recording `cause` in the migration record
+    /// (`operator`, or `residency` for chapter 26's compliance moves).
+    ///
+    /// # Errors
+    /// As [`Self::start`].
+    #[allow(clippy::too_many_lines)] // the checks, then the three steps
+    pub async fn start_caused(
+        &self,
+        tenant: TenantId,
+        name: &str,
+        req: &MoveTenantRequest,
+        cause: &str,
     ) -> Result<MoveView> {
         let to = DcId::new(req.to.as_str())
             .map_err(|e| SprigError::new(SprigCode::UnknownDc, format!("--to {}: {e}", req.to)))?;
@@ -303,6 +321,24 @@ impl DcMoves {
                 "tenant {name} is pinned to {p}: unpin it first"
             )));
         }
+        // Chapter 26: never to a DC outside the tenant's residency (the
+        // commit checks again, against the entry it commits).
+        if !e.residency_allows(&to) {
+            let allowed: Vec<String> = e
+                .allowed_dcs()
+                .unwrap_or_default()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            return Err(refused(format!(
+                "tenant {name}'s residency allows {}, not {to}",
+                if allowed.is_empty() {
+                    "no data center".to_owned()
+                } else {
+                    allowed.join(", ")
+                }
+            )));
+        }
         // `sprigctl tenant pin` (chapter 11's pin record in this DC).
         if let Some(p) = sprig_balancer::pins::PinStore::new(Arc::clone(&self.store))
             .get(tenant)
@@ -330,6 +366,9 @@ impl DcMoves {
                 j.id.0
             )));
         }
+        // Chapter 20 (R1): no move beside the tenant's shard work, and no
+        // whole move of a tenant with table groups.
+        self.check_shard_work(tenant, name).await?;
         let (map, _) = TenantMaps::new(Arc::clone(&self.store))
             .load(tenant)
             .await?;
@@ -340,7 +379,7 @@ impl DcMoves {
             .filter_map(|j| j.source.clone())
             .collect();
         let to_cluster = self
-            .target_cluster(&to, req.cluster.as_deref(), &retained)
+            .target_cluster(&to, req.cluster.as_deref(), &retained, e.allowed_dcs().as_ref())
             .await?;
         let budget = req
             .max_pause_ms
@@ -350,7 +389,7 @@ impl DcMoves {
         let migration = json!({
             "id": id, "from": self.dc.as_str(), "to": to.as_str(),
             "source_cluster": from_cluster.as_str(), "target_cluster": to_cluster.as_str(),
-            "max_pause_ms": budget, "started_ms": self.now_ms(), "cause": "operator",
+            "max_pause_ms": budget, "started_ms": self.now_ms(), "cause": cause,
             "job": Value::Null,
         });
         if req.dry_run {
@@ -374,6 +413,14 @@ impl DcMoves {
         })
         .await?;
         self.watch(tenant);
+        // The sharding loop admits shard work only for `active` tenants and
+        // re-reads the directory after it starts some: checking again after
+        // the directory says `migrating` closes the race between the two.
+        if let Err(err) = self.check_shard_work(tenant, name).await {
+            self.revert(tenant, &id, &format!("the move couldn't start: {err}"))
+                .await?;
+            return Err(err);
+        }
         // 4. The job in Y's tier.
         let mut spec =
             JobSpec::move_tenant(tenant, from_cluster, to_cluster).with_max_hold_ms(budget);
@@ -404,6 +451,38 @@ impl DcMoves {
         metrics::counter!("sprig_controller_migrations_total", "cause" => "operator", "result" => "started")
             .increment(1);
         Ok(self.view(name, &dir, None).await)
+    }
+
+    /// Refuses the move while a split, merge or shard move of `tenant`
+    /// runs here, or the advisor applies its first design (39470), and for
+    /// a tenant with table groups (39472): the move would carry the
+    /// catalog's map, not the groups' shard maps (chapters 10 and 20).
+    async fn check_shard_work(&self, tenant: TenantId, name: &str) -> Result<()> {
+        let js = JobStore::new(
+            TierView::over(&self.store, Tier::Dc(self.dc.clone())),
+            Arc::clone(&self.clock),
+        );
+        let groups = js.sharded_groups(tenant).await?;
+        if !groups.is_empty() {
+            return Err(sprig_mover::record::sharded_tenant(tenant, &groups));
+        }
+        let busy = match js.group_locks(tenant).await?.into_iter().next() {
+            Some((_, job)) => Some(job),
+            None => js.tenant_lock_holder(tenant).await?.filter(|h| {
+                // A job of this tenant's own (checked above as open) is not
+                // shard work; anything else holding the lock is.
+                h.parse::<JobId>().is_err()
+            }),
+        };
+        if let Some(h) = busy {
+            return Err(SprigError::new(
+                SprigCode::ShardBusy,
+                format!(
+                    "tenant {name} can't move now: {h} holds its shards; retry when it finishes"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn watch(&self, tenant: TenantId) {

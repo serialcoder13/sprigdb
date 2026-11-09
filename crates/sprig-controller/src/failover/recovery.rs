@@ -70,7 +70,9 @@ pub struct ReturningDc {
 
 impl std::fmt::Debug for ReturningDc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReturningDc").field("dc", &self.dc).finish_non_exhaustive()
+        f.debug_struct("ReturningDc")
+            .field("dc", &self.dc)
+            .finish_non_exhaustive()
     }
 }
 
@@ -113,33 +115,50 @@ impl ReturningDc {
         Ok(ReturnStep::Unfenced { fenced })
     }
 
-    /// Fences and quarantines every tenant this DC holds a home map for
-    /// that the directory shows elsewhere (or at a higher epoch).
+    /// Fences and quarantines every tenant this DC holds a map for that
+    /// the directory shows homed elsewhere: `home` maps (the DC was cut
+    /// off before anyone could change them), and `quarantined` ones (a
+    /// promotion quarantines the old home's maps when it can reach them;
+    /// the copy is fenced all the same). A fence that fails for a tenant
+    /// whose maps were all quarantined already is logged, not fatal: no
+    /// gateway routes there.
     async fn fence_moved(&self) -> Result<Vec<TenantId>> {
         let prefix = self.tier.tier().key("shardmaps/")?;
         let page = self.tier.list(&prefix, ListOpts::default()).await?;
-        let mut tenants: Vec<(TenantId, u64)> = Vec::new();
+        // Tenant -> whether any of its maps here is still `home`.
+        let mut tenants: Vec<(TenantId, bool)> = Vec::new();
         for kv in page.kvs {
             let Ok(m) = Record::<ShardMap>::decode(&kv.value) else {
                 continue;
             };
-            if m.body.role != MapRole::Home {
+            if m.body.role == MapRole::Standby {
                 continue;
             }
+            let home = m.body.role == MapRole::Home;
             let t = m.body.tenant_id;
-            if !tenants.iter().any(|(x, _)| *x == t) {
-                tenants.push((t, m.body.tenant_epoch));
+            match tenants.iter_mut().find(|(x, _)| *x == t) {
+                Some(e) => e.1 |= home,
+                None => tenants.push((t, home)),
             }
         }
         let mut fenced = Vec::new();
-        for (t, map_epoch) in tenants {
+        for (t, had_home) in tenants {
             let Some(e) = read_home(&*self.global, t).await? else {
                 continue;
             };
-            if e.home_dc == self.dc && e.epoch <= map_epoch {
+            // Homed here: nothing moved away (a quarantined map here is
+            // then an old forwarding map of a move that came back).
+            if e.home_dc == self.dc {
                 continue;
             }
-            self.fence.fence(t).await?;
+            match self.fence.fence(t).await {
+                Ok(()) => {}
+                Err(e) if !had_home => {
+                    tracing::warn!(dc = %self.dc, tenant = %t, error = %e, "fencing a quarantined copy failed; it serves no traffic");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
             quarantine_maps(&*self.tier, t).await?;
             tracing::warn!(dc = %self.dc, tenant = %t, home = %e.home_dc, "moved tenant fenced and quarantined");
             fenced.push(t);
@@ -153,7 +172,11 @@ impl ReturningDc {
 /// `schemas` (the moved tenant's; empty keeps all): a cluster shared by
 /// several tenants logs the others' writes in the same GTID domain.
 #[must_use]
-pub fn errant_report(range: &DivergedRange, txns: &[DivergedTxn], schemas: &[&str]) -> ErrantReport {
+pub fn errant_report(
+    range: &DivergedRange,
+    txns: &[DivergedTxn],
+    schemas: &[&str],
+) -> ErrantReport {
     let ours = |t: &&DivergedTxn| {
         schemas.is_empty()
             || t.tables.iter().any(|tb| {
@@ -185,7 +208,10 @@ pub fn errant_report(range: &DivergedRange, txns: &[DivergedTxn], schemas: &[&st
         },
         tables,
         path: None,
-        statements: kept.iter().flat_map(|t| t.statements.iter().cloned()).collect(),
+        statements: kept
+            .iter()
+            .flat_map(|t| t.statements.iter().cloned())
+            .collect(),
     }
 }
 
@@ -265,61 +291,10 @@ impl TrafficSteps {
     }
 }
 
-/// A gateway's admission of new connections while its DC returns: a token
-/// bucket refilled at the permit's `admit_per_second` (0: no limit).
-#[derive(Debug, Clone)]
-pub struct Admission {
-    tokens: f64,
-    last: Instant,
-    seed: u64,
-}
-
-impl Admission {
-    /// An empty bucket at `now` (a returning gateway starts with none).
-    #[must_use]
-    pub fn new(now: Instant, seed: u64) -> Self {
-        Self {
-            tokens: 0.0,
-            last: now,
-            seed: seed | 1,
-        }
-    }
-
-    fn jitter(&mut self) -> Duration {
-        // xorshift64: full jitter between 1 and 5 s, no shared RNG needed.
-        self.seed ^= self.seed << 13;
-        self.seed ^= self.seed >> 7;
-        self.seed ^= self.seed << 17;
-        Duration::from_millis(1000 + self.seed % 4001)
-    }
-
-    /// Admits one connection or returns 39531 with a retry delay.
-    ///
-    /// # Errors
-    /// 39531 `ER_SPRIG_ADMISSION_BACKOFF` (SQLSTATE 08S01).
-    pub fn admit(&mut self, now: Instant, rate: u32) -> Result<()> {
-        if rate == 0 {
-            return Ok(());
-        }
-        let dt = now.saturating_duration_since(self.last).as_secs_f64();
-        self.last = now;
-        let cap = f64::from(rate);
-        self.tokens = (self.tokens + dt * cap).min(cap);
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            return Ok(());
-        }
-        let wait = self.jitter();
-        Err(SprigError::new(
-            SprigCode::AdmissionBackoff,
-            format!(
-                "this data center is returning from an outage and admits connections in steps; \
-                 retry in {} ms",
-                wait.as_millis()
-            ),
-        ))
-    }
-}
+// A gateway's admission of new connections while its DC returns lives
+// with the permit that carries its rate, in `sprig-meta`, so gateways use
+// it without depending on the controller.
+pub use sprig_meta::permit::Admission;
 
 #[cfg(test)]
 mod tests {
@@ -327,14 +302,30 @@ mod tests {
 
     #[test]
     fn the_report_keeps_the_moved_tenants_schemas() {
-        let range = DivergedRange { domain: 1, server: 101, after_seq: 10, through_seq: 13 };
-        let t = |g: &str, tb: &str| DivergedTxn { gtid: g.into(), tables: vec![tb.into()], statements: vec![format!("INSERT {tb}")] };
-        let txns = [t("1-101-11", "t1.la"), t("1-101-12", "t2.la"), t("1-101-13", "t1.other")];
+        let range = DivergedRange {
+            domain: 1,
+            server: 101,
+            after_seq: 10,
+            through_seq: 13,
+        };
+        let t = |g: &str, tb: &str| DivergedTxn {
+            gtid: g.into(),
+            tables: vec![tb.into()],
+            statements: vec![format!("INSERT {tb}")],
+        };
+        let txns = [
+            t("1-101-11", "t1.la"),
+            t("1-101-12", "t2.la"),
+            t("1-101-13", "t1.other"),
+        ];
         let all = errant_report(&range, &txns, &[]);
         assert_eq!(all.count, 3);
         let mine = errant_report(&range, &txns, &["t1"]);
         assert_eq!(mine.count, 2);
-        assert_eq!(mine.gtids, vec!["1-101-11".to_owned(), "1-101-13".to_owned()]);
+        assert_eq!(
+            mine.gtids,
+            vec!["1-101-11".to_owned(), "1-101-13".to_owned()]
+        );
         assert_eq!(mine.tables, vec!["t1.la".to_owned(), "t1.other".to_owned()]);
     }
 
@@ -347,8 +338,16 @@ mod tests {
         assert_eq!(s.tick(t0 + Duration::from_secs(100), true), 10);
         assert_eq!(s.tick(t0 + m, true), 25);
         assert_eq!(s.tick(t0 + m * 2, true), 50);
-        assert_eq!(s.tick(t0 + m * 2 + Duration::from_secs(10), false), 25, "a breach steps back");
-        assert_eq!(s.tick(t0 + m * 2 + Duration::from_secs(20), false), 25, "only once");
+        assert_eq!(
+            s.tick(t0 + m * 2 + Duration::from_secs(10), false),
+            25,
+            "a breach steps back"
+        );
+        assert_eq!(
+            s.tick(t0 + m * 2 + Duration::from_secs(20), false),
+            25,
+            "only once"
+        );
         assert_eq!(s.tick(t0 + m * 3 + Duration::from_secs(20), true), 50);
         assert_eq!(s.tick(t0 + m * 4 + Duration::from_secs(20), true), 100);
         assert!(s.done());
@@ -386,7 +385,13 @@ mod tests {
         assert!((190..=200).contains(&admitted), "admitted {admitted}");
         let ms: Vec<u64> = hints
             .iter()
-            .filter_map(|m| m.rsplit("retry in ").next()?.trim_end_matches(" ms").parse().ok())
+            .filter_map(|m| {
+                m.rsplit("retry in ")
+                    .next()?
+                    .trim_end_matches(" ms")
+                    .parse()
+                    .ok()
+            })
             .collect();
         assert_eq!(ms.len(), hints.len());
         assert!(ms.iter().all(|m| (1000..=5000).contains(m)));

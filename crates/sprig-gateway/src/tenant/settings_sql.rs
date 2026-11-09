@@ -110,7 +110,11 @@ impl Versioned for NameEntry {
 }
 
 /// The id of tenant `name` when it is a descendant of `me`.
-async fn descendant(svc: &TenantServices, me: TenantId, name: &str) -> Result<Option<TenantId>> {
+pub(crate) async fn descendant(
+    svc: &TenantServices,
+    me: TenantId,
+    name: &str,
+) -> Result<Option<TenantId>> {
     let denied = || Ok(None);
     let key = svc.global.tier().key(&format!("tenant-names/{name}"))?;
     let Some(kv) = svc.global.get(&key, Consistency::Serializable).await? else {

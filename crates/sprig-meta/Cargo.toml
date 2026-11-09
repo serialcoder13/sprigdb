@@ -17,6 +17,11 @@ conformance = ["tokio/test-util"]
 async-trait.workspace = true
 etcd-client = { workspace = true, features = ["tls"] }
 futures.workspace = true
+# Permits.Renew over JSON/HTTP until chapter 23's gRPC port exists
+# (`permit::http`); MIT.
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 metrics.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -19,6 +19,7 @@ use super::{ClusterAccess, db_err, errno};
 use crate::api::DdlTransform;
 use crate::io::{Counter, Load, SourceIo, TargetIo};
 use crate::model::{ApplyOp, CopyState, PosRow, Row, RowDigest, TableMeta, Value};
+use crate::route::ShardRoute;
 
 /// Errors a re-run DDL statement raises when it already took effect:
 /// exists (1007, 1050, 1060, 1061, 1304, 1359), doesn't exist (1008, 1051,
@@ -34,6 +35,9 @@ pub struct MysqlTarget {
     job: JobId,
     swap: Option<DdlTransform>,
     source: Arc<MysqlSource>,
+    /// A hash-range job's routing (chapter 20): target schemas are new
+    /// shard schemas, rows go by `_sprig_rk`.
+    route: Option<Arc<ShardRoute>>,
 }
 
 impl std::fmt::Debug for MysqlTarget {
@@ -76,7 +80,16 @@ impl MysqlTarget {
             job,
             swap,
             source,
+            route: None,
         }
+    }
+
+    /// Routes rows of a hash-range job (split, merge, shard move) into
+    /// its new shard schemas.
+    #[must_use]
+    pub fn with_route(mut self, route: Arc<ShardRoute>) -> Self {
+        self.route = Some(route);
+        self
     }
 
     /// The target's name for `t`: its shadow in a copy-and-swap.
@@ -142,6 +155,14 @@ impl MysqlTarget {
     }
 
     async fn run_ops(&self, tx: &mut mysql_async::Transaction<'_>, ops: &[ApplyOp]) -> Result<()> {
+        let routed;
+        let ops = match &self.route {
+            Some(r) => {
+                routed = r.route_ops(ops)?;
+                routed.as_slice()
+            }
+            None => ops,
+        };
         for op in ops {
             let stmts = match op {
                 ApplyOp::Upsert { table, rows } => sql::upserts(table, &self.name_of(table), rows),
@@ -154,8 +175,13 @@ impl MysqlTarget {
         Ok(())
     }
 
+    /// The schemas this job writes on the target: the source's names for a
+    /// move, the new shard schemas for a hash-range job.
     async fn job_schemas(&self) -> Result<Vec<String>> {
-        self.source.schemas().await
+        match &self.route {
+            Some(r) => Ok(r.target_schemas()),
+            None => self.source.schemas().await,
+        }
     }
 
     async fn exists(&self, c: &mut Conn, schema: &str, table: &str) -> Result<bool> {
@@ -209,21 +235,38 @@ impl TargetIo for MysqlTarget {
             }
             return Ok(());
         }
+        let rewritten;
+        let objects = match &self.route {
+            Some(r) => {
+                rewritten = r.rewrite_statements(objects);
+                rewritten.as_slice()
+            }
+            None => objects,
+        };
         for q in objects.iter().filter(|q| q.starts_with("CREATE DATABASE")) {
             c.query_drop(q.as_str())
                 .await
                 .map_err(|e| db_err("create a schema", &e))?;
         }
         for t in tables {
-            c.query_drop(format!("USE {}", quote(&t.schema)))
-                .await
-                .map_err(|e| db_err("use a schema", &e))?;
-            let create = t
-                .create_sql
-                .replacen("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1);
-            c.query_drop(create)
-                .await
-                .map_err(|e| db_err("create a table", &e))?;
+            let schemas = match &self.route {
+                Some(r) => r.targets_of(&t.schema),
+                None => vec![t.schema.clone()],
+            };
+            for schema in schemas {
+                c.query_drop(format!("CREATE DATABASE IF NOT EXISTS {}", quote(&schema)))
+                    .await
+                    .map_err(|e| db_err("create a schema", &e))?;
+                c.query_drop(format!("USE {}", quote(&schema)))
+                    .await
+                    .map_err(|e| db_err("use a schema", &e))?;
+                let create = t
+                    .create_sql
+                    .replacen("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1);
+                c.query_drop(create)
+                    .await
+                    .map_err(|e| db_err("create a table", &e))?;
+            }
         }
         // Views may need other views first: retry until nothing changes.
         let mut pending: Vec<&String> = objects
@@ -234,7 +277,7 @@ impl TargetIo for MysqlTarget {
             let mut failed = Vec::new();
             let mut last_use = None;
             for q in pending {
-                if q.starts_with("USE ") || q.starts_with("SET SESSION") {
+                if q.starts_with("USE ") || q.starts_with("SET SESSION") || q.starts_with("SET NAMES") {
                     let _ = c.query_drop(q.as_str()).await;
                     if q.starts_with("USE ") {
                         last_use = Some(q);
@@ -426,16 +469,37 @@ impl TargetIo for MysqlTarget {
         }
         if self.swap.is_none() {
             let mut c = self.conn().await?;
-            if !db.is_empty() {
-                // The database may be the one the statement creates.
-                let _ = c.query_drop(format!("USE {}", quote(db))).await;
-            }
-            if let Err(e) = c.query_drop(stmt).await {
-                match errno(&e) {
-                    Some(n) if ALREADY_APPLIED.contains(&n) => {
-                        tracing::info!(errno = n, "DDL already applied");
+            let runs: Vec<(String, String)> = match &self.route {
+                // DDL on a split or merged shard runs on each target, its
+                // schema name rewritten (DDL of the group is chapter 21's
+                // job and waits for movers; this covers what slips by).
+                Some(r) => {
+                    let stmts = vec![format!("USE {}", quote(db)), stmt.to_owned()];
+                    r.rewrite_statements(&stmts)
+                        .chunks(2)
+                        .filter_map(|p| match p {
+                            [u, q] => Some((
+                                u.trim_start_matches("USE ").trim_matches('`').to_owned(),
+                                q.clone(),
+                            )),
+                            _ => None,
+                        })
+                        .collect()
+                }
+                None => vec![(db.to_owned(), stmt.to_owned())],
+            };
+            for (db, stmt) in runs {
+                if !db.is_empty() {
+                    // The database may be the one the statement creates.
+                    let _ = c.query_drop(format!("USE {}", quote(&db))).await;
+                }
+                if let Err(e) = c.query_drop(stmt).await {
+                    match errno(&e) {
+                        Some(n) if ALREADY_APPLIED.contains(&n) => {
+                            tracing::info!(errno = n, "DDL already applied");
+                        }
+                        _ => return Err(db_err("apply DDL", &e)),
                     }
-                    _ => return Err(db_err("apply DDL", &e)),
                 }
             }
         }
@@ -448,6 +512,42 @@ impl TargetIo for MysqlTarget {
         after: Option<&Row>,
         last: &Row,
     ) -> Result<Vec<RowDigest>> {
+        if let Some(r) = &self.route {
+            let r = r.clone();
+            let mut all = Vec::new();
+            let rk = ShardRoute::rk_column(t).map(|i| quote(&t.columns[i].name));
+            for schema in r.targets_of(&t.schema) {
+                let tt = ShardRoute::retarget(t, &schema);
+                let exprs = match &rk {
+                    Some(k) => format!("{}, {k}", sql::digest_list(&tt)),
+                    None => sql::digest_list(&tt),
+                };
+                let (q, p) = sql::range(&tt, &tt.name, &exprs, after, last);
+                let mut c = self.conn().await?;
+                let rows: Vec<MyRow> = c
+                    .exec(q, Params::Positional(p))
+                    .await
+                    .map_err(|e| db_err("target digests", &e))?;
+                let n = t.pk.len();
+                for row in rows {
+                    let vals: Vec<Value> = row.unwrap();
+                    let key_values: Vec<Value> = vals.iter().take(n).cloned().collect();
+                    let num = |v: Option<&Value>| match v {
+                        Some(Value::UInt(u)) => Some(*u),
+                        Some(Value::Int(i)) => Some(u64::from_ne_bytes(i.to_ne_bytes())),
+                        Some(Value::Bytes(b)) => String::from_utf8_lossy(b).parse().ok(),
+                        _ => None,
+                    };
+                    let d = RowDigest {
+                        key: TableMeta::key_of_values(&key_values),
+                        key_values,
+                        hash: num(vals.get(n)).unwrap_or(0),
+                    };
+                    all.push((schema.clone(), d, num(vals.get(n + 1))));
+                }
+            }
+            return Ok(r.merge_digests(t, all));
+        }
         let name = self.name_of(t);
         let (q, p) = sql::range(t, &name, &sql::digest_list(t), after, last);
         let mut c = self.conn().await?;
@@ -490,7 +590,20 @@ impl TargetIo for MysqlTarget {
 
     async fn raise_counters(&self, counters: &[Counter]) -> Result<()> {
         let mut c = self.conn().await?;
-        for k in counters {
+        let routed: Vec<Counter> = match &self.route {
+            Some(r) => counters
+                .iter()
+                .flat_map(|k| {
+                    r.targets_of(&k.schema).into_iter().map(|s| Counter {
+                        schema: s,
+                        table: k.table.clone(),
+                        next: k.next,
+                    })
+                })
+                .collect(),
+            None => counters.to_vec(),
+        };
+        for k in &routed {
             let name = match &self.swap {
                 Some(d) if d.schema == k.schema && d.table == k.table => shadow_name(&k.table),
                 Some(_) => continue,
@@ -534,6 +647,14 @@ impl TargetIo for MysqlTarget {
                     .map_err(|e| db_err("swap the shadow in", &e))?;
             }
         } else {
+            let rewritten;
+            let triggers = match &self.route {
+                Some(r) => {
+                    rewritten = r.rewrite_statements(triggers);
+                    rewritten.as_slice()
+                }
+                None => triggers,
+            };
             for q in triggers {
                 if let Err(e) = c.query_drop(q.as_str()).await {
                     match errno(&e) {

@@ -77,10 +77,56 @@ fn named_key(cat: &TenantCatalog, db_key: &str, name_key: &str) -> ObjKey {
         .unwrap_or_else(|| (db_key.to_owned(), name_key.to_owned(), ObjectType::Table))
 }
 
-/// The lines of `SHOW GRANTS FOR acc [USING extra]`.
+/// The lines of `SHOW GRANTS FOR acc [USING extra]`. On the MariaDB
+/// persona a role's lines are followed by those of every role granted to
+/// it, depth first, as MariaDB 11.8 prints them (measured).
 #[must_use]
-#[allow(clippy::too_many_lines)] // the levels in rendering order
 pub fn render(
+    state: &AuthzState,
+    cat: &TenantCatalog,
+    grantee: Grantee,
+    acc: &AccountRef,
+    extra: &[RoleId],
+    persona: Persona,
+) -> Vec<String> {
+    let mut out = render_one(state, cat, grantee, acc, extra, persona);
+    if persona == Persona::MariaDb
+        && let Grantee::Role(top) = grantee
+    {
+        let mut seen = vec![top];
+        let mut stack: Vec<RoleId> = state
+            .edges_of(grantee)
+            .iter()
+            .rev()
+            .map(|e| e.role)
+            .collect();
+        while let Some(r) = stack.pop() {
+            if seen.contains(&r) {
+                continue;
+            }
+            seen.push(r);
+            if let Some(row) = state.role(r) {
+                let a = AccountRef {
+                    name: row.name.clone(),
+                    host: row.host.clone(),
+                };
+                out.extend(render_one(state, cat, Grantee::Role(r), &a, &[], persona));
+            }
+            stack.extend(
+                state
+                    .edges_of(Grantee::Role(r))
+                    .iter()
+                    .rev()
+                    .map(|e| e.role),
+            );
+        }
+    }
+    out
+}
+
+/// One grantee's lines.
+#[allow(clippy::too_many_lines)] // the levels in rendering order
+fn render_one(
     state: &AuthzState,
     cat: &TenantCatalog,
     grantee: Grantee,
@@ -92,6 +138,7 @@ pub fn render(
     let to = account(acc, is_role, persona);
     let mut tenant = ActionSet::EMPTY;
     let mut dbs: BTreeMap<String, ActionSet> = BTreeMap::new();
+    let mut restricted: BTreeMap<String, ActionSet> = BTreeMap::new();
     // Objects by (database, name, type) as shown, so a grant held by name
     // and one on the live table merge into one line.
     let mut objects: BTreeMap<ObjKey, ActionSet> = BTreeMap::new();
@@ -110,6 +157,14 @@ pub fn render(
                     *e = e.union(p.actions);
                     continue;
                 }
+                // Partial revokes are the account's own: a role's apply
+                // only through the role.
+                PrivTarget::Restriction(n) if g == grantee => {
+                    let e = restricted.entry(n.clone()).or_default();
+                    *e = e.union(p.actions);
+                    continue;
+                }
+                PrivTarget::Restriction(_) => continue,
                 PrivTarget::Object { object, .. } => (live_key(cat, *object), None),
                 PrivTarget::Column { object, column, .. } => (live_key(cat, *object), Some(column)),
                 PrivTarget::Named {
@@ -192,6 +247,17 @@ pub fn render(
             with_option(*set)
         ));
     }
+    // Partial revokes, after the database grants (MySQL 8.4's order).
+    for (db, set) in &restricted {
+        let names = render_static(*set, Level::Database, ObjectType::Table);
+        if !names.is_empty() {
+            out.push(format!(
+                "REVOKE {} ON {}.* FROM {to}",
+                names.join(", "),
+                q(db)
+            ));
+        }
+    }
     // db.obj
     let mut objs: Vec<ObjKey> = objects.keys().chain(columns.keys()).cloned().collect();
     objs.sort();
@@ -222,11 +288,12 @@ pub fn render(
             Action::AlterRoutine,
             Action::Trigger,
         ] {
-            if set.has(a) {
-                if !all_table {
-                    parts.push(a.command().to_owned());
-                }
-            } else if let Some(cols) = cols {
+            if set.has(a) && !all_table {
+                parts.push(a.command().to_owned());
+            }
+            // MySQL lists a column grant next to the same privilege at the
+            // table level (`UPDATE, UPDATE (`b`)`).
+            if let Some(cols) = cols {
                 let named: Vec<String> = cols
                     .iter()
                     .filter(|(_, s)| s.has(a))
@@ -287,6 +354,8 @@ pub fn render(
         }
     } else {
         {
+            // MariaDB prints role grants before the privileges.
+            let mut roles = Vec::new();
             for e in edges {
                 if let Some(a) = role_acc(e.role) {
                     let opt = if e.admin_option {
@@ -294,9 +363,10 @@ pub fn render(
                     } else {
                         ""
                     };
-                    out.push(format!("GRANT {} TO {to}{opt}", q(&a.name)));
+                    roles.push(format!("GRANT {} TO {to}{opt}", q(&a.name)));
                 }
             }
+            out.splice(0..0, roles);
             if let Some(d) = edges.iter().find(|e| e.is_default)
                 && let Some(a) = role_acc(d.role)
             {

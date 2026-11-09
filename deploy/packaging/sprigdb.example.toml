@@ -1,0 +1,12 @@
+# /etc/sprigdb/sprigdb.toml: the small process file (chapter 23). The
+# Ansible role writes the real one.
+[node]
+dc = "fra1"
+
+[meta]
+dc_seeds = ["https://127.0.0.1:2379"]
+global_seeds = []
+deployment_id = ""
+
+[telemetry]
+bootstrap_addr = "0.0.0.0:9180"

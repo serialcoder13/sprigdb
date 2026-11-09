@@ -7,6 +7,13 @@
 //! moving it until the operator unpins it. Only an operator's own move
 //! (`sprigctl shard move`) moves a pinned tenant.
 //!
+//! **A pin follows its tenant's operator move.** `sprigctl shard move`
+//! of a pinned tenant re-pins it to the target when the job is submitted
+//! (as `--pin` does). If the move rolls back, or a pin otherwise names a
+//! cluster the tenant isn't on, the balancer's next run moves the pin back
+//! to where the tenant is ([`follow_moves`]), once no move of the tenant is
+//! in flight before its commit; both are `shard.pin` decisions.
+//!
 //! Pins live in the tenant's home DC tier next to its placement, at
 //! `/sprig/dc/<dc_id>/pins/<tenant_id>` (the shard maps are at
 //! `shardmaps/<tenant_id>/<group>`), as JSON: the cluster, who pinned it,
@@ -150,6 +157,29 @@ impl PinStore {
     }
 }
 
+/// Pins that name a cluster their tenant isn't on, re-pointed at the
+/// tenant's cluster (module docs): `placements` is each tenant's cluster
+/// now; tenants in `moving` have a move in flight that hasn't committed,
+/// and keep their pin as it is (it may name the move's target). The
+/// operator, time and reason stay; `pinned_at` doesn't change.
+#[must_use]
+pub fn follow_moves(
+    pins: &BTreeMap<TenantId, TenantPin>,
+    placements: &BTreeMap<TenantId, ClusterId>,
+    moving: &std::collections::BTreeSet<TenantId>,
+) -> Vec<TenantPin> {
+    pins.values()
+        .filter(|p| !moving.contains(&p.tenant_id))
+        .filter_map(|p| {
+            let at = placements.get(&p.tenant_id)?;
+            (*at != p.cluster).then(|| TenantPin {
+                cluster: at.clone(),
+                ..p.clone()
+            })
+        })
+        .collect()
+}
+
 /// Marks pinned tenants in the view (the controller calls this after
 /// building it).
 pub fn apply_pins(view: &mut FleetView, pins: &BTreeMap<TenantId, TenantPin>) {
@@ -169,6 +199,41 @@ mod tests {
     use super::*;
     use crate::model::{ShardKey, ShardView};
     use crate::testutil::{cid, fleet, load};
+
+    #[test]
+    fn a_pin_follows_its_tenant_once_no_move_is_in_flight() {
+        let pin = |t: u64, c: u32| TenantPin {
+            tenant_id: TenantId(t),
+            cluster: cid(c),
+            pinned_by: "alice".to_owned(),
+            pinned_at: 100,
+            reason: "keep".to_owned(),
+        };
+        let pins: BTreeMap<TenantId, TenantPin> = [pin(1, 1), pin(2, 1), pin(3, 2), pin(4, 1)]
+            .into_iter()
+            .map(|p| (p.tenant_id, p))
+            .collect();
+        // 1 moved to cluster 2 (committed); 2 is where its pin says; 3's
+        // move to 2 rolled back (it stayed on 1); 4 is moving.
+        let at: BTreeMap<TenantId, ClusterId> = [(1, 2), (2, 1), (3, 1), (4, 1)]
+            .into_iter()
+            .map(|(t, c)| (TenantId(t), cid(c)))
+            .collect();
+        let moving = [TenantId(4)].into_iter().collect();
+        let fixed = follow_moves(&pins, &at, &moving);
+        assert_eq!(fixed, vec![pin(1, 2), pin(3, 1)]);
+        assert_eq!(fixed[0].pinned_by, "alice");
+        assert_eq!(fixed[0].pinned_at, 100);
+        // Nothing left to fix once they're written.
+        let mut pins = pins;
+        for p in fixed {
+            pins.insert(p.tenant_id, p);
+        }
+        assert!(follow_moves(&pins, &at, &moving).is_empty());
+        // A tenant without a placement here keeps its pin.
+        let none = BTreeMap::new();
+        assert!(follow_moves(&pins, &none, &std::collections::BTreeSet::default()).is_empty());
+    }
 
     #[tokio::test]
     async fn pins_round_trip_and_mark_the_view() {

@@ -10,7 +10,11 @@
 //! - `Forward`: a transaction-handle call that landed on the wrong gateway
 //!   (chapter 37, "Transactions").
 //!
-//! `HandoffLogin` (chapter 14, residency) is not served yet.
+//! - `HandoffLogin`: a login of a tenant whose residency (chapter 26)
+//!   doesn't allow the calling gateway's DC, decided here (chapter 14,
+//!   "Credential residency"); [`PeerHandoff`] is the calling side. A
+//!   gateway of another DC is found in that DC's tier of the one etcd
+//!   (single-etcd mode, like the locator's remote maps).
 //!
 //! **Transport.** With `[tls]` in `sprigdb.toml` (the process identity from
 //! the internal CA) the listener requires client certificates signed by
@@ -30,10 +34,15 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sprig_api::proto::internal::gateway_peer_client::GatewayPeerClient;
 use sprig_api::proto::internal::gateway_peer_server::{GatewayPeer, GatewayPeerServer};
 use sprig_api::proto::internal::{
-    DrainReply, DrainRequest, ForwardReply, ForwardRequest, KillReply, KillRequest,
-    ListSessionsReply, ListSessionsRequest, SessionRow,
+    DrainReply, DrainRequest, ForwardReply, ForwardRequest, HandoffLoginReply,
+    HandoffLoginRequest, KillReply, KillRequest, ListSessionsReply, ListSessionsRequest,
+    SessionRow,
 };
-use sprig_common::ids::{ConnId, TenantId};
+use sprig_auth::handoff::{HandoffResult, HandoffStart, HandoffTarget, PrincipalWire};
+use sprig_common::ids::{ConnId, DcId, TenantId};
+use sprig_meta::{Tier, TierView};
+use sprig_proto_mysql::{ErrPacket, Persona};
+use zeroize::Zeroizing;
 use sprig_common::{CancellationToken, Result, SprigCode, SprigError};
 use sprig_meta::MetaStore;
 use sprig_settings::{Apply, HardBounds, Scopes, Setting};
@@ -141,6 +150,54 @@ pub trait PeerHost: Send + Sync + 'static {
     fn drain(&self, reason: &str) -> bool;
     /// Runs a forwarded transaction-handle call.
     async fn forwarded(&self, req: ForwardRequest) -> ForwardReply;
+    /// Decides a handed-off login (chapter 14, "Credential residency").
+    /// Hosts without logins refuse it with 39301.
+    async fn handoff(&self, start: HandoffStart, password: Zeroizing<Vec<u8>>) -> HandoffResult {
+        let _ = (start, password);
+        HandoffResult::Refused(ErrPacket::from_error(
+            Persona::MySql84,
+            &SprigError::new(SprigCode::AuthUnavailable, "this gateway decides no logins"),
+        ))
+    }
+}
+
+/// A handoff's result as the reply carries it.
+fn reply_of(r: &HandoffResult) -> HandoffLoginReply {
+    match r {
+        HandoffResult::Accepted(p) => HandoffLoginReply {
+            accepted: true,
+            principal_json: serde_json::to_string(&PrincipalWire::of(p)).unwrap_or_default(),
+            ..HandoffLoginReply::default()
+        },
+        HandoffResult::Refused(e) => HandoffLoginReply {
+            accepted: false,
+            principal_json: String::new(),
+            error_code: u32::from(e.code),
+            sql_state: String::from_utf8_lossy(&e.sqlstate).into_owned(),
+            error_message: e.message.clone(),
+        },
+    }
+}
+
+/// The result a reply carries.
+///
+/// # Errors
+/// Internal for a malformed reply.
+fn result_of(r: &HandoffLoginReply) -> Result<HandoffResult> {
+    if r.accepted {
+        let w: PrincipalWire = serde_json::from_str(&r.principal_json)
+            .map_err(|e| SprigError::internal(format!("handoff reply: {e}")))?;
+        return Ok(HandoffResult::Accepted(Box::new(w.principal()?)));
+    }
+    let mut sqlstate = *b"HY000";
+    if r.sql_state.len() == 5 {
+        sqlstate.copy_from_slice(r.sql_state.as_bytes());
+    }
+    Ok(HandoffResult::Refused(ErrPacket {
+        code: u16::try_from(r.error_code).unwrap_or(1045),
+        sqlstate,
+        message: r.error_message.clone(),
+    }))
 }
 
 struct Service {
@@ -220,6 +277,17 @@ impl GatewayPeer for Service {
         Ok(tonic::Response::new(
             self.host.forwarded(req.into_inner()).await,
         ))
+    }
+
+    async fn handoff_login(
+        &self,
+        req: tonic::Request<HandoffLoginRequest>,
+    ) -> std::result::Result<tonic::Response<HandoffLoginReply>, tonic::Status> {
+        let r = req.into_inner();
+        let start: HandoffStart = serde_json::from_str(&r.start_json)
+            .map_err(|e| tonic::Status::invalid_argument(format!("start_json: {e}")))?;
+        let result = self.host.handoff(start, Zeroizing::new(r.password)).await;
+        Ok(tonic::Response::new(reply_of(&result)))
     }
 }
 
@@ -454,6 +522,45 @@ impl Peers {
             .into_inner())
     }
 
+    /// The ready gateways of DC `dc` that serve the peer service, from that
+    /// DC's tier (single-etcd mode).
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn gateways_in(&self, dc: &DcId) -> Result<Vec<GatewayRecord>> {
+        let tier = TierView::over(&self.store, Tier::Dc(dc.clone()));
+        Ok(registry::list(&*tier)
+            .await?
+            .into_iter()
+            .filter(|r| {
+                r.state == registry::GatewayState::Ready && r.listeners.contains_key("peer")
+            })
+            .collect())
+    }
+
+    /// `HandoffLogin` on gateway `rec`.
+    ///
+    /// # Errors
+    /// 39788 when it can't be reached; internal for a malformed reply.
+    pub async fn handoff(
+        &self,
+        rec: &GatewayRecord,
+        start: &HandoffStart,
+        password: &[u8],
+    ) -> Result<HandoffResult> {
+        let mut c = self.client(rec)?;
+        let reply = c
+            .handoff_login(HandoffLoginRequest {
+                start_json: serde_json::to_string(start)
+                    .map_err(|e| SprigError::internal(e.to_string()))?,
+                password: password.to_vec(),
+            })
+            .await
+            .map_err(|e| unavailable("handoff", e))?
+            .into_inner();
+        result_of(&reply)
+    }
+
     /// Every gateway's sessions (for operators).
     ///
     /// # Errors
@@ -472,5 +579,208 @@ impl Peers {
             }
         }
         Ok(out)
+    }
+}
+
+/// [`HandoffTarget`] over the peer service: a login handed to DC `dc` goes
+/// to one of its ready gateways, trying each until one answers.
+#[derive(Debug)]
+pub struct PeerHandoff {
+    peers: Arc<Peers>,
+}
+
+impl PeerHandoff {
+    /// Hand-offs through `peers`.
+    #[must_use]
+    pub fn new(peers: Arc<Peers>) -> Self {
+        Self { peers }
+    }
+}
+
+#[async_trait]
+impl HandoffTarget for PeerHandoff {
+    async fn login(
+        &self,
+        dc: &DcId,
+        start: HandoffStart,
+        password: Zeroizing<Vec<u8>>,
+    ) -> Result<HandoffResult> {
+        let gateways = self.peers.gateways_in(dc).await?;
+        let mut last = None;
+        for rec in &gateways {
+            match self.peers.handoff(rec, &start, &password).await {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    tracing::warn!(%dc, gateway = %rec.gateway_id, error = %e, "handoff target unreachable");
+                    last = Some(e);
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| unavailable("handoff", format!("no ready gateway in {dc}"))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::net::IpAddr;
+
+    use sprig_auth::Principal;
+    use sprig_auth::accounts::BackendTarget;
+    use sprig_common::time::SystemClock;
+    use sprig_meta::{MemStore, Op, Record, Txn};
+
+    use super::*;
+
+    fn dc(s: &str) -> DcId {
+        DcId::new(s).unwrap()
+    }
+
+    /// A gateway of fra1 that accepts `pw` for anyone.
+    struct Fra1 {
+        sessions: Arc<SessionTable>,
+        seen: Mutex<Vec<DcId>>,
+    }
+
+    #[async_trait]
+    impl PeerHost for Fra1 {
+        fn sessions(&self) -> &Arc<SessionTable> {
+            &self.sessions
+        }
+        fn gateway_id(&self) -> String {
+            "fra1-gw".into()
+        }
+        fn drain(&self, _reason: &str) -> bool {
+            false
+        }
+        async fn forwarded(&self, _req: ForwardRequest) -> ForwardReply {
+            ForwardReply::default()
+        }
+        async fn handoff(
+            &self,
+            start: HandoffStart,
+            password: Zeroizing<Vec<u8>>,
+        ) -> HandoffResult {
+            self.seen.lock().unwrap().push(start.source_dc.clone());
+            if password.as_slice() != b"pw" {
+                return HandoffResult::Refused(ErrPacket::access_denied(
+                    Persona::MySql84,
+                    "acme.alice",
+                    "192.0.2.10",
+                    true,
+                ));
+            }
+            HandoffResult::Accepted(Box::new(Principal {
+                tenant: Some(TenantId(42)),
+                tenant_name: Some("acme".into()),
+                user_id: Some(sprig_common::ids::UserId(1)),
+                user: "alice".into(),
+                host: "%".into(),
+                client_ip: start.client_ip,
+                must_change_password: false,
+                limits: sprig_auth::store::AccountLimits::default(),
+                auth_version: 7,
+                backend: BackendTarget {
+                    cluster: sprig_common::ids::ClusterId::new("fra1-c1").unwrap(),
+                    user: "t42_u1".into(),
+                    credentials: "file:/etc/sprigdb/creds/fra1.toml".parse().unwrap(),
+                },
+            }))
+        }
+    }
+
+    fn start(ip: IpAddr) -> HandoffStart {
+        serde_json::from_value(serde_json::json!({
+            "persona": "mysql", "login_name": b"acme.alice".to_vec(), "sni": null,
+            "client_ip": ip, "tls": true, "client_cert": false,
+            "can_handle_expired_password": false, "source_dc": "nyc1"
+        }))
+        .unwrap()
+    }
+
+    /// `HandoffLogin` over real gRPC on loopback: nyc1's `PeerHandoff`
+    /// finds fra1's ready gateway in fra1's tier, and only the decision
+    /// and the principal's fields come back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_login_is_handed_to_a_gateway_of_the_allowed_dc() {
+        let mem: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Dc(dc("nyc1"))));
+        let host = Arc::new(Fra1 {
+            sessions: Arc::new(SessionTable::new(Arc::new(SystemClock))),
+            seen: Mutex::new(Vec::new()),
+        });
+        let stop = CancellationToken::new();
+        let (addr, task) = serve(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            Arc::clone(&host) as Arc<dyn PeerHost>,
+            stop.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let fra1 = TierView::over(&mem, Tier::Dc(dc("fra1")));
+        let mut rec = GatewayRecord {
+            gateway_id: "fra1-gw".into(),
+            slot: 1,
+            version: "test".into(),
+            addr: "127.0.0.1".into(),
+            listeners: [("peer".to_owned(), addr.port())].into(),
+            state: registry::GatewayState::Ready,
+            catalog_formats: Vec::new(),
+            load: registry::Load::default(),
+        };
+        let put = |r: &GatewayRecord| {
+            let fra1 = Arc::clone(&fra1);
+            let value = Record::new(r.clone()).encode().unwrap();
+            async move {
+                fra1.txn(Txn {
+                    when: Vec::new(),
+                    then: vec![Op::Put {
+                        key: fra1.tier().key("gateways/fra1-gw").unwrap(),
+                        value,
+                        lease: None,
+                    }],
+                    otherwise: Vec::new(),
+                })
+                .await
+                .unwrap();
+            }
+        };
+        put(&rec).await;
+        let target = PeerHandoff::new(Arc::new(Peers::new(Arc::clone(&mem), None)));
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let r = target
+            .login(&dc("fra1"), start(ip), Zeroizing::new(b"pw".to_vec()))
+            .await
+            .unwrap();
+        let HandoffResult::Accepted(p) = r else {
+            panic!("refused: {r:?}");
+        };
+        assert_eq!((p.user.as_str(), p.tenant, p.client_ip), ("alice", Some(TenantId(42)), ip));
+        assert_eq!(p.backend.credentials.to_string(), "file:/etc/sprigdb/creds/fra1.toml");
+        let r = target
+            .login(&dc("fra1"), start(ip), Zeroizing::new(b"no".to_vec()))
+            .await
+            .unwrap();
+        assert!(matches!(r, HandoffResult::Refused(ref e) if e.code == 1045 && &e.sqlstate == b"28000"), "{r:?}");
+        assert_eq!(host.seen.lock().unwrap().as_slice(), [dc("nyc1"), dc("nyc1")]);
+        // No ready gateway in the DC: an error, so the source tries the
+        // next allowed DC (and 39301 when none answers).
+        rec.state = registry::GatewayState::Draining;
+        put(&rec).await;
+        let e = target
+            .login(&dc("fra1"), start(ip), Zeroizing::new(b"pw".to_vec()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::ForwardFailed));
+        assert!(
+            target
+                .login(&dc("ams1"), start(ip), Zeroizing::new(b"pw".to_vec()))
+                .await
+                .is_err()
+        );
+        stop.cancel();
+        let _ = task.await;
     }
 }

@@ -211,6 +211,58 @@ async fn recommend_and_dry_run_write_once_and_run_nothing() {
     assert!(log.all().is_empty());
 }
 
+/// The live balancing run wrote the same recommendation after every
+/// shard cooldown (the R0 fix): with a short cooldown and a plan that
+/// doesn't change, it is written once a day; a new target, a new reason or
+/// a net value 25% off writes it again at once.
+#[tokio::test]
+async fn a_recommendation_is_written_again_only_when_it_changes() {
+    let mut v = hot();
+    for t in v.tenants.values_mut() {
+        t.knobs.shard_cooldown_secs = 60;
+    }
+    let p = Planner::new(BalancerSettings::default());
+    let exec = Fake::default();
+    let log = MemDecisionLog::new();
+    let mut s = Scheduler::new("mum1", "ctl-1");
+    p.rebalance(&v, 0);
+    s.annotate(&mut v, 3600);
+    let r = p.rebalance(&v, 3600);
+    let t = r.moves[0].tenant;
+    let rec = |_: TenantId| BalancerMode::Recommend;
+    s.schedule(&r, &v, &rec, 4, &exec, &log, 3600).await;
+    assert_eq!(log.of(t).len(), 1);
+    // A run a minute for six hours, the cooldown passing every time.
+    for i in 1..=360 {
+        let now = 3600 + 60 * i;
+        let out = s.schedule(&r, &v, &rec, 4, &exec, &log, now).await;
+        assert_eq!(out[0].blocked.as_deref(), Some("already_recommended"));
+    }
+    assert_eq!(log.of(t).len(), 1, "written once, not every cooldown");
+    // A small change in value is the same advice.
+    let mut small = r.clone();
+    small.moves[0].value *= 1.1;
+    s.schedule(&small, &v, &rec, 4, &exec, &log, 30_000).await;
+    assert_eq!(log.of(t).len(), 1);
+    // The value moved by more than a quarter: written again.
+    let mut big = r.clone();
+    big.moves[0].value *= 1.5;
+    s.schedule(&big, &v, &rec, 4, &exec, &log, 30_060).await;
+    assert_eq!(log.of(t).len(), 2);
+    // Another target: written again.
+    let mut other = big.clone();
+    other.moves[0].to = cid(9);
+    s.schedule(&other, &v, &rec, 4, &exec, &log, 30_120).await;
+    assert_eq!(log.of(t).len(), 3);
+    // Unchanged for a day: written again once.
+    s.schedule(&other, &v, &rec, 4, &exec, &log, 30_120 + 86_399)
+        .await;
+    assert_eq!(log.of(t).len(), 3);
+    s.schedule(&other, &v, &rec, 4, &exec, &log, 30_120 + 86_400)
+        .await;
+    assert_eq!(log.of(t).len(), 4);
+}
+
 #[tokio::test]
 async fn no_mover_fails_the_decision() {
     let mut v = hot();

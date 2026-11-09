@@ -14,11 +14,18 @@
 //!   feed's binlog settings included), accounts, a binlog read as
 //!   `sprig_repl` (chapter 09's dump probe) and capability profile.
 //!
-//! Not yet: the object-store check (step 3) and the Kubernetes and VM
-//! provisioners (R2).
+//! - [`mycnf`]: the baseline server settings of managed clusters, for VMs
+//!   and for Kubernetes' `spec.myCnf` (R2);
+//! - [`vm`]: the VM provisioner's free-host pool, cluster plans, systemd
+//!   units and install steps (R2, chapter 27 steps 8 and 9).
+//!
+//! Not yet: the object-store check (step 3). The Kubernetes provisioner
+//! lives in `sprig-operator`, next to its client.
 
 pub mod credentials;
 pub mod external;
+pub mod mycnf;
+pub mod vm;
 
 use std::fmt;
 

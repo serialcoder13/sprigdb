@@ -616,6 +616,19 @@ async fn accept_loop(
                 let Some(fe) = shared.frontends.0.get(&a.spec.protocol).cloned() else {
                     continue;
                 };
+                // Chapter 25: a returning DC admits connections in steps.
+                if let Some(f) = crate::failover::get()
+                    && let Err(wait) = f.admit(a.spec.protocol.as_str())
+                {
+                    metrics::counter!("sprig_gateway_connections_rejected_total", "listener" => a.spec.name, "reason" => "admission").increment(1);
+                    tokio::spawn(conn::refuse_admission(
+                        sock,
+                        a.spec.protocol,
+                        a.spec.tls,
+                        wait,
+                    ));
+                    continue;
+                }
                 // gateway.max_connections (chapter 04 step 7).
                 let mut permit = None;
                 if let Some(l) = &shared.ctx.limits {

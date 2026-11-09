@@ -3,8 +3,10 @@
 
 use std::sync::Arc;
 
+use sprig_shard::KeyValueOwned;
+
 use crate::reject::Rejection;
-use crate::topology::Group;
+use crate::topology::{Group, LookupRef};
 
 /// One statement for one shard (or one cluster).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +17,22 @@ pub struct Target {
     pub shard: u32,
     /// The SQL, with physical names for that shard.
     pub sql: String,
+    /// Where the shard is (chapter 18's `ShardRef`: a transaction branch's
+    /// anchor); default for reference-only statements.
+    pub at: ShardAt,
+}
+
+/// A shard's place in its group, for transaction branches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShardAt {
+    /// Table group (0: none).
+    pub group: u32,
+    /// Logical database.
+    pub db: u32,
+    /// Start of the shard's hash range.
+    pub lo: u64,
+    /// The shard schema.
+    pub schema: String,
 }
 
 /// A column of a shard result: one of the statement's own (visible)
@@ -275,6 +293,101 @@ pub struct WritePlan {
     pub targets: Vec<Target>,
     /// Rows the client's statement listed (multi-row `INSERT` info).
     pub rows: u64,
+    /// Unique lookup values the inserted rows claim, in `lookup_id`
+    /// order, before the rows are written (chapter 19, `claim`).
+    pub claims: Vec<Claim>,
+    /// Lookups whose values the deleted rows release (chapter 19,
+    /// `release`), read before the delete.
+    pub releases: Vec<Release>,
+}
+
+/// One value an inserted row claims in a unique lookup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Claim {
+    /// The lookup.
+    pub lookup: Arc<LookupRef>,
+    /// The value (one part per value column).
+    pub value: Vec<KeyValueOwned>,
+    /// The row's primary key.
+    pub owner_pk: Vec<KeyValueOwned>,
+    /// The row's routing hash.
+    pub owner_rk: u64,
+}
+
+// Key values hold no NaN: literals only.
+impl Eq for Claim {}
+
+/// A lookup whose values a `DELETE` releases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    /// The lookup.
+    pub lookup: Arc<LookupRef>,
+    /// Per target shard, `SELECT <value>, <primary key> ... FOR UPDATE`
+    /// of the rows the delete removes; strings and binary values come
+    /// hex-encoded (`HEX(CONVERT(c USING utf8mb4))`), so the session's
+    /// character set doesn't matter.
+    pub reads: Vec<Target>,
+}
+
+/// The values a statement's equality on a lookup column names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LookupProbe {
+    /// The lookup.
+    pub lookup: Arc<LookupRef>,
+    /// The values (`c = v`, `c IN (v, ...)`), one part each.
+    pub values: Vec<Vec<KeyValueOwned>>,
+}
+
+impl Eq for LookupProbe {}
+
+/// A plan over every shard that a lookup narrows (chapter 19, "Routing
+/// through lookups"): the executor reads the owners' routing hashes and
+/// keeps the targets on their shards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViaLookup {
+    /// What to look up.
+    pub probe: LookupProbe,
+    /// The table's group, to route the hashes.
+    pub group: Arc<Group>,
+    /// The plan over every shard: a read or a write.
+    pub plan: Plan,
+}
+
+impl ViaLookup {
+    /// The plan narrowed to the shards owning `rks`. With no owner (no row
+    /// has the value) one shard still runs, so the answer has its
+    /// columns and counts.
+    #[must_use]
+    pub fn narrow(&self, rks: &[u64]) -> Plan {
+        let shards: std::collections::BTreeSet<u32> = rks
+            .iter()
+            .filter_map(|h| self.group.shards.get(self.group.route(*h)))
+            .map(|s| s.shard)
+            .collect();
+        let keep = |ts: &[Target]| -> Vec<Target> {
+            let mut out: Vec<Target> = ts
+                .iter()
+                .filter(|t| shards.contains(&t.shard))
+                .cloned()
+                .collect();
+            if out.is_empty() {
+                out.extend(ts.first().cloned());
+            }
+            out
+        };
+        let mut p = self.plan.clone();
+        match &mut p {
+            Plan::Read(r) => r.targets = keep(&r.targets),
+            Plan::Write(w) => {
+                w.targets = keep(&w.targets);
+                for r in &mut w.releases {
+                    r.reads = keep(&r.reads);
+                }
+            }
+            _ => {}
+        }
+        p
+    }
 }
 
 /// A plan.
@@ -291,6 +404,8 @@ pub enum Plan {
     LookupJoin(Box<LookupJoinPlan>),
     /// A write over several shards.
     Write(WritePlan),
+    /// A read or write narrowed by a unique lookup.
+    ViaLookup(Box<ViaLookup>),
     /// `EXPLAIN FORMAT=SPRIG`: the plan of the statement.
     Explain(Box<Plan>),
     /// No exact plan.
@@ -307,6 +422,7 @@ impl Plan {
             Self::Read(r) => r.kind.as_str(),
             Self::LookupJoin(_) => "lookup_join",
             Self::Write(_) => "write",
+            Self::ViaLookup(_) => "via_lookup",
             Self::Explain(_) => "explain",
             Self::Reject(_) => "reject",
         }

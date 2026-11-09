@@ -294,27 +294,45 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
             let mut t_bits = ActionSet::EMPTY;
             let mut db_bits: BTreeMap<String, ActionSet> = BTreeMap::new();
             let mut rest = Vec::new();
+            let mut per_grantee = Vec::new();
             for g in &grantees {
+                let mut own = (ActionSet::EMPTY, BTreeMap::new());
                 for p in state.privileges_of(*g) {
                     match &p.target {
-                        PrivTarget::Tenant => t_bits = t_bits.union(p.actions),
+                        PrivTarget::Tenant => {
+                            t_bits = t_bits.union(p.actions);
+                            own.0 = own.0.union(p.actions);
+                        }
                         PrivTarget::Database(n) => {
                             let e = db_bits.entry(n.clone()).or_default();
+                            *e = e.union(p.actions);
+                        }
+                        PrivTarget::Restriction(n) => {
+                            let e: &mut ActionSet = own.1.entry(n.clone()).or_default();
                             *e = e.union(p.actions);
                         }
                         _ => rest.push(p.clone()),
                     }
                 }
+                per_grantee.push(own);
             }
             compiled_tenant = t_bits;
+            // Partial revokes (R4): a restricted database gets its own
+            // rows without the cut actions, which win over the tenant
+            // pattern row as the more specific match.
+            let cut = super::compile::restrictions(&per_grantee);
+            for name in cut.keys() {
+                db_bits.entry(name.clone()).or_default();
+            }
             for (name, bits) in db_bits {
                 let Some(d) = cat.database(&name).filter(|d| d.state == DbState::Active) else {
                     continue;
                 };
+                let tenant_part = t_bits.minus(cut.get(&name).copied().unwrap_or_default());
                 for s in shard_schemas(tenant, d) {
                     add(
                         BackendTarget::Db(escape_db(&s.to_string())),
-                        bits.union(t_bits),
+                        bits.union(tenant_part),
                     );
                 }
             }

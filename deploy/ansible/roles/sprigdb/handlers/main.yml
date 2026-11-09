@@ -1,0 +1,8 @@
+---
+# Binary upgrades only: one host at a time (the play sets serial: 1).
+- name: Restart sprigdb
+  ansible.builtin.systemd_service:
+    name: "sprigdb-{{ item }}.service"
+    state: restarted
+  loop: "{{ sprigdb_roles | map('replace', 'db', 'agent') | map('replace', 'etcd', 'etcd-dc') | list }}"
+  throttle: 1

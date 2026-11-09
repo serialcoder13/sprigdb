@@ -331,17 +331,25 @@ impl Registrar {
         let store = session.store();
         let rec = self.record();
         let key = store.tier().key(&format!("gateways/{}", rec.gateway_id))?;
+        // Chapter 20's write sketches, when a minute completed.
+        let load = crate::write_load::report_op(store.as_ref(), &rec.gateway_id, session.lease())?;
+        let id = rec.gateway_id.clone();
+        let mut then = vec![Op::Put {
+            key,
+            value: Record::new(rec).encode()?,
+            lease: Some(session.lease()),
+        }];
+        then.extend(load.as_ref().map(|(op, _)| op.clone()));
         store
             .txn(Txn {
                 when: vec![],
-                then: vec![Op::Put {
-                    key,
-                    value: Record::new(rec).encode()?,
-                    lease: Some(session.lease()),
-                }],
+                then,
                 otherwise: vec![],
             })
             .await?;
+        if let Some((_, mark)) = load {
+            crate::write_load::written(&id, mark);
+        }
         Ok(())
     }
 }

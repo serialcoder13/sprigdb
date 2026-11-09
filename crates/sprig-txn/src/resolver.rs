@@ -17,7 +17,7 @@
 //! so a restarted resolver waits a full `min_age` again: safe, only slower.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use sprig_common::ids::{ClusterId, TenantId};
@@ -74,14 +74,14 @@ pub struct SweepReport {
 pub struct Resolver {
     admin: Arc<dyn ClusterAdmin>,
     locator: Arc<dyn AnchorLocator>,
-    cfg: ResolverConfig,
+    cfg: RwLock<ResolverConfig>,
     first_seen: Mutex<HashMap<(ClusterId, Xid), Instant>>,
 }
 
 impl std::fmt::Debug for Resolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Resolver")
-            .field("cfg", &self.cfg)
+            .field("cfg", &self.config())
             .finish_non_exhaustive()
     }
 }
@@ -104,15 +104,24 @@ impl Resolver {
         Self {
             admin,
             locator,
-            cfg,
+            cfg: RwLock::new(cfg),
             first_seen: Mutex::new(HashMap::new()),
         }
     }
 
-    /// The configuration.
+    /// The configuration now.
     #[must_use]
-    pub fn config(&self) -> &ResolverConfig {
-        &self.cfg
+    pub fn config(&self) -> ResolverConfig {
+        self.cfg
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces the configuration (live settings changed). Branches keep
+    /// their first-seen times.
+    pub fn set_config(&self, cfg: ResolverConfig) {
+        *self.cfg.write().unwrap_or_else(PoisonError::into_inner) = cfg;
     }
 
     fn seen(&self) -> std::sync::MutexGuard<'_, HashMap<(ClusterId, Xid), Instant>> {
@@ -128,6 +137,7 @@ impl Resolver {
     /// 39100 when the decision can't be recorded or read now.
     pub async fn decide(&self, g: &Gtrid) -> Result<Decision> {
         let (cluster, schema) = self.locator.locate(g.tenant, g.home).await?;
+        let me = self.config().id;
         match decide_by_race(
             &*self.admin,
             Some(&*self.locator),
@@ -137,7 +147,7 @@ impl Resolver {
                 schema: &schema,
             },
             g.dtid,
-            &self.cfg.id,
+            &me,
             true,
         )
         .await
@@ -197,13 +207,14 @@ impl Resolver {
                 })
                 .collect()
         };
+        let min_age = self.config().min_age;
         let mut r = ScanReport {
             listed: xids.len(),
             ..ScanReport::default()
         };
         for (x, age) in ages {
             r.oldest = r.oldest.max(age);
-            if age < self.cfg.min_age {
+            if age < min_age {
                 r.young += 1;
                 continue;
             }
@@ -289,7 +300,8 @@ impl Resolver {
                 format!("decision rows on {cluster}: {e}"),
             )
         })?;
-        let min_age = self.cfg.min_age.as_secs();
+        let cfg = self.config();
+        let min_age = cfg.min_age.as_secs();
         let mut recovered: BTreeMap<ClusterId, Option<Vec<Xid>>> = BTreeMap::new();
         let mut rep = SweepReport::default();
         for (schema, row) in rows {
@@ -330,7 +342,7 @@ impl Resolver {
                         }
                     }
                 }
-                Decision::Abort if age >= self.cfg.abort_retention.as_secs() => {
+                Decision::Abort if age >= cfg.abort_retention.as_secs() => {
                     if self
                         .admin
                         .delete_decision(cluster, &schema, row.dtid)
@@ -360,7 +372,7 @@ impl Resolver {
             }
             tokio::select! {
                 () = cancel.cancelled() => return,
-                () = tokio::time::sleep(self.cfg.interval) => {}
+                () = tokio::time::sleep(self.config().interval) => {}
             }
         }
     }

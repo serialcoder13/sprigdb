@@ -1,0 +1,30 @@
+{{- /* Initial global and dc settings, applied once (chapter 27). */}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sprigdb-settings-{{ .Release.Revision }}
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      containers:
+        - name: settings
+          image: {{ include "sprigdb.image" . }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              E=http://sprigdb-controller.{{ .Release.Namespace }}.svc:7480
+              sprigctl --endpoint "$E" dc register {{ .Values.dc.id }} --tags '{{ range $k, $v := .Values.dc.tags }}{{ $k }}={{ $v }},{{ end }}' || true
+              {{- range $k, $v := .Values.settings.global }}
+              sprigctl --endpoint "$E" config set --scope global {{ $k }} {{ $v | quote }}
+              {{- end }}
+              {{- range $k, $v := .Values.settings.dc }}
+              sprigctl --endpoint "$E" config set --scope dc:{{ $.Values.dc.id }} {{ $k }} {{ $v | quote }}
+              {{- end }}

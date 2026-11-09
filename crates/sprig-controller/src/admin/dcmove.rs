@@ -7,6 +7,9 @@
 //! GET  /admin/v1/tenants/{name}/move     the move in progress, or the last one
 //! POST /admin/v1/tenants/{name}:pin      pinned_dc = the home DC (and :unpin);
 //!                                        `sprigctl tenant pin` calls it
+//! POST /admin/v1/tenants/{name}:residency {"policy": "...", "deny_remote_access": true,
+//!                                        "apply": false}: chapter 26's plan, or apply
+//! GET  /admin/v1/tenants/{name}/residency the policy, allowed DCs and state
 //! GET  /admin/v1/tenants/{name}/traffic  the window and the R0 decision
 //! POST /admin/v1/traffic/reports         gateways' counts (no bearer token:
 //!                                        counts only, on the private Admin port)
@@ -64,6 +67,40 @@ impl AdminService {
         self.moves()?.status(t.tenant_id, name).await
     }
 
+    /// The same service with chapter 26's calls.
+    #[must_use]
+    pub fn with_residency(mut self, r: Arc<crate::residency::Residency>) -> Self {
+        self.residency = Some(r);
+        self
+    }
+
+    fn residency(&self) -> Result<&Arc<crate::residency::Residency>> {
+        self.residency
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't serve residency"))
+    }
+
+    /// `Tenants.SetResidency` (`:residency`): the plan, and with `apply`
+    /// the policy (chapter 26, "Validation and convergence").
+    ///
+    /// # Errors
+    /// As [`crate::residency::Residency::set`].
+    pub async fn set_residency(
+        &self,
+        name: &str,
+        req: crate::residency::ResidencyRequest,
+    ) -> Result<crate::residency::ResidencyView> {
+        self.residency()?.set(name, &req).await
+    }
+
+    /// `Tenants.GetResidency`.
+    ///
+    /// # Errors
+    /// As [`crate::residency::Residency::show`].
+    pub async fn get_residency(&self, name: &str) -> Result<crate::residency::ResidencyView> {
+        self.residency()?.show(name).await
+    }
+
     /// Pins `name` to its home DC, or unpins it (`:pin`, `:unpin`).
     ///
     /// # Errors
@@ -91,7 +128,12 @@ impl AdminService {
     pub async fn tenant_traffic(&self, name: &str) -> Result<TrafficView> {
         let m = self.moves()?;
         let t = self.get_tenant(name).await?;
-        Ok(m.traffic.view(
+        // R2: weigh by the measured latency matrix when it has rows.
+        let matrix = crate::latency::Matrix::read(&*self.stores.global)
+            .await
+            .unwrap_or_default();
+        let rtt = |a: &str, b: &str| matrix.rtt(a, b);
+        Ok(m.traffic.view_with_rtt(
             t.tenant_id,
             name,
             &t.home_dc,
@@ -100,6 +142,7 @@ impl AdminService {
             m.setting(&WRITE_WEIGHT),
             m.setting(&MIN_SIGNAL_REQUESTS),
             m.setting(&MIN_IMPROVEMENT_PCT),
+            (!matrix.is_empty()).then_some(&rtt as &crate::traffic::RttFn<'_>),
         ))
     }
 }

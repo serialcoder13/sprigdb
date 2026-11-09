@@ -37,6 +37,45 @@ pub trait PromoteHooks: Send + Sync {
     /// standby that replicates, the replication stops and `read_only`
     /// clears).
     async fn make_writable(&self, tenant: TenantId, to: &DcId) -> Result<()>;
+    /// Two tiers: `to`'s tier and nodes are out of this controller's reach,
+    /// so the promotion stops at the commit point and `to`'s own
+    /// `tenant_promote` loop does steps 2-4 and asks the global leader for
+    /// step 5 ([`TwoTierHooks`]).
+    fn finished_in(&self, _to: &DcId) -> bool {
+        false
+    }
+}
+
+/// Hooks for a controller in a two-tier deployment: promotions into its
+/// own DC run here; into any other DC they stop at the commit point and
+/// that DC's `tenant_promote` loop finishes them (chapter 25, "Promotion
+/// and epochs": "a `tenant_promote` job in Y's tier").
+pub struct TwoTierHooks {
+    /// The hooks for this DC.
+    pub inner: Arc<dyn PromoteHooks>,
+    /// This DC.
+    pub me: DcId,
+}
+
+impl std::fmt::Debug for TwoTierHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwoTierHooks")
+            .field("me", &self.me)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl PromoteHooks for TwoTierHooks {
+    async fn stop_standby(&self, tenant: TenantId, to: &DcId) -> Result<BTreeMap<String, String>> {
+        self.inner.stop_standby(tenant, to).await
+    }
+    async fn make_writable(&self, tenant: TenantId, to: &DcId) -> Result<()> {
+        self.inner.make_writable(tenant, to).await
+    }
+    fn finished_in(&self, to: &DcId) -> bool {
+        *to != self.me
+    }
 }
 
 /// Hooks that do nothing (tests, and tenants whose standbys are only maps).
@@ -104,7 +143,16 @@ pub enum Promoted {
     },
     /// The directory changed under the decision; nothing was done.
     Skipped(String),
+    /// Two tiers: committed (step 1); the target DC's `tenant_promote`
+    /// loop does the rest.
+    Committed {
+        /// The new epoch.
+        epoch: u64,
+    },
 }
+
+/// Maps a DC to its tier's store.
+pub type DcTiers = Arc<dyn Fn(&DcId) -> Arc<dyn MetaStore> + Send + Sync>;
 
 /// Everything a promotion needs.
 #[derive(Clone)]
@@ -114,7 +162,7 @@ pub struct Promotion {
     /// Global writes.
     pub guard: Guard,
     /// A DC's tier (`TierView` over one etcd in single-etcd mode).
-    pub dc_tier: Arc<dyn Fn(&DcId) -> Arc<dyn MetaStore> + Send + Sync>,
+    pub dc_tier: DcTiers,
     /// The data-path hooks.
     pub hooks: Arc<dyn PromoteHooks>,
 }
@@ -130,10 +178,14 @@ impl std::fmt::Debug for Promotion {
 impl Promotion {
     /// Promotions in one etcd: every tier is a view of `store`.
     #[must_use]
-    pub fn single_etcd(store: Arc<dyn MetaStore>, guard: Guard, hooks: Arc<dyn PromoteHooks>) -> Self {
-        let s = Arc::clone(&store);
+    pub fn single_etcd(
+        store: &Arc<dyn MetaStore>,
+        guard: Guard,
+        hooks: Arc<dyn PromoteHooks>,
+    ) -> Self {
+        let s = Arc::clone(store);
         Self {
-            global: TierView::over(&store, Tier::Global),
+            global: TierView::over(store, Tier::Global),
             guard,
             dc_tier: Arc::new(move |dc: &DcId| TierView::over(&s, Tier::Dc(dc.clone()))),
             hooks,
@@ -170,10 +222,10 @@ pub async fn promote(
 ) -> Result<Promoted> {
     // 1. The commit point (or a resume after it).
     let new_epoch = epoch + 1;
-    let mut e = loop {
-        let e = read_home(&*p.global, tenant)
-            .await?
-            .ok_or_else(|| SprigError::internal(format!("tenant {tenant} has no directory entry")))?;
+    let e = loop {
+        let e = read_home(&*p.global, tenant).await?.ok_or_else(|| {
+            SprigError::internal(format!("tenant {tenant} has no directory entry"))
+        })?;
         if &e.home_dc == to && e.epoch == new_epoch {
             break e;
         }
@@ -181,6 +233,13 @@ pub async fn promote(
             return Ok(Promoted::Skipped(format!(
                 "the directory changed: home {} epoch {}",
                 e.home_dc, e.epoch
+            )));
+        }
+        // Chapter 26: the commit compares this entry's revision, so the
+        // residency read here is the one in force at the commit point.
+        if !e.residency_allows(to) {
+            return Ok(Promoted::Skipped(format!(
+                "residency doesn't allow {to} for the tenant"
             )));
         }
         let mut next = e.clone();
@@ -196,38 +255,89 @@ pub async fn promote(
         );
         if put_entry(&p.guard, &next, tenant).await? {
             tracing::info!(%tenant, %from, %to, epoch = new_epoch, "tenant failover committed");
-            continue;
         }
     };
-    // 2. Standby jobs stop; their positions go to the record.
-    let applied = p.hooks.stop_standby(tenant, to).await?;
-    // 3. The standby maps become home maps.
-    promote_maps(&*(p.dc_tier)(to), tenant, new_epoch).await?;
-    // 4. Write access.
-    p.hooks.make_writable(tenant, to).await?;
-    // 5. Active, auth_version + 1.
-    loop {
-        if e.state == "active" {
-            break;
-        }
-        let mut next = e.clone();
-        let auth = e.raw.get("auth_version").and_then(Value::as_u64).unwrap_or(0);
-        next.raw.insert("auth_version".into(), json!(auth + 1));
-        next.raw.insert("state".into(), json!("active"));
-        if put_entry(&p.guard, &next, tenant).await? {
-            break;
-        }
-        e = read_home(&*p.global, tenant)
-            .await?
-            .ok_or_else(|| SprigError::internal("directory entry vanished"))?;
-        if &e.home_dc != to || e.epoch != new_epoch {
-            return Ok(Promoted::Skipped("the directory changed after the commit".into()));
-        }
+    if p.hooks.finished_in(to) {
+        return Ok(Promoted::Committed { epoch: new_epoch });
+    }
+    // 2-4.
+    let applied = promote_here(&*p.hooks, &*(p.dc_tier)(to), tenant, to, new_epoch).await?;
+    // 5.
+    if !activate(&p.guard, &*p.global, tenant, to, new_epoch, Some(e)).await? {
+        return Ok(Promoted::Skipped(
+            "the directory changed after the commit".into(),
+        ));
     }
     Ok(Promoted::Done {
         epoch: new_epoch,
         applied,
     })
+}
+
+/// Steps 2-4 in the target DC: the standby stops (its positions are
+/// returned for the record), its maps in `tier` become `home` at `epoch`,
+/// the copies become writable. Idempotent.
+///
+/// # Errors
+/// The store's errors and the hooks'.
+pub async fn promote_here(
+    hooks: &dyn PromoteHooks,
+    tier: &dyn MetaStore,
+    tenant: TenantId,
+    to: &DcId,
+    epoch: u64,
+) -> Result<BTreeMap<String, String>> {
+    // 2. Standby jobs stop; their positions go to the record.
+    let applied = hooks.stop_standby(tenant, to).await?;
+    // 3. The standby maps become home maps.
+    promote_maps(tier, tenant, epoch).await?;
+    // 4. Write access.
+    hooks.make_writable(tenant, to).await?;
+    Ok(applied)
+}
+
+/// Step 5: the entry becomes `active` with `auth_version + 1`, while it
+/// still names `to` at `epoch`. Returns `false` when the directory moved
+/// on. `seen` is an entry already read.
+///
+/// # Errors
+/// The store's errors; 39504 when leadership was lost.
+pub async fn activate(
+    guard: &Guard,
+    global: &dyn MetaStore,
+    tenant: TenantId,
+    to: &DcId,
+    epoch: u64,
+    seen: Option<HomeEntry>,
+) -> Result<bool> {
+    let mut e = match seen {
+        Some(e) => e,
+        None => read_home(global, tenant)
+            .await?
+            .ok_or_else(|| SprigError::internal("directory entry vanished"))?,
+    };
+    loop {
+        if &e.home_dc != to || e.epoch != epoch {
+            return Ok(false);
+        }
+        if e.state == "active" {
+            return Ok(true);
+        }
+        let mut next = e.clone();
+        let auth = e
+            .raw
+            .get("auth_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        next.raw.insert("auth_version".into(), json!(auth + 1));
+        next.raw.insert("state".into(), json!("active"));
+        if put_entry(guard, &next, tenant).await? {
+            return Ok(true);
+        }
+        e = read_home(global, tenant)
+            .await?
+            .ok_or_else(|| SprigError::internal("directory entry vanished"))?;
+    }
 }
 
 fn merge(old: Option<&Value>, add: Value) -> Value {

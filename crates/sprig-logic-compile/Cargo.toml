@@ -20,6 +20,9 @@ sprig-common.workspace = true
 # The differential test runs compiled routines on the Compose single node.
 mysql_async.workspace = true
 tokio = { workspace = true, features = ["rt"] }
+# ... and the same definitions on the fallback tier's native KIRun runtime.
+async-trait.workspace = true
+sprig-logic-js.workspace = true
 
 [lints]
 workspace = true

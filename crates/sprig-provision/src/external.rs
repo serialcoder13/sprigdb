@@ -83,6 +83,7 @@ pub struct ExternalProvisioner {
     settings: ClusterSettings,
     retention_hours: u64,
     clock: Arc<dyn Clock>,
+    recorded_as: ProvisionerKind,
 }
 
 impl std::fmt::Debug for ExternalProvisioner {
@@ -104,7 +105,18 @@ impl ExternalProvisioner {
             settings,
             retention_hours: feed::DEFAULT_RETENTION_HOURS,
             clock: Arc::new(SystemClock),
+            recorded_as: ProvisionerKind::External,
         }
+    }
+
+    /// Records registered clusters with `provisioner = kind`: the
+    /// Kubernetes operator registers the clusters it built through the same
+    /// prechecks (chapter 27, "The Kubernetes operator", step 5), and the
+    /// record says who manages them.
+    #[must_use]
+    pub fn recorded_as(mut self, kind: ProvisionerKind) -> Self {
+        self.recorded_as = kind;
+        self
     }
 
     /// Uses `feed.retention_hours` = `hours` for the binlog checks.
@@ -305,7 +317,7 @@ impl ExternalProvisioner {
             .register(Registration {
                 name: req.name,
                 topology: req.topology,
-                provisioner: ProvisionerKind::External,
+                provisioner: self.recorded_as,
                 nodes: req.nodes,
                 secrets: req.secrets,
                 capacity: req.capacity,

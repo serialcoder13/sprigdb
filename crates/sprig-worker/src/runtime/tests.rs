@@ -167,3 +167,36 @@ async fn a_job_changed_under_the_worker_stops_at_once() {
     stop.cancel();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn a_restarted_worker_resumes_its_running_jobs() {
+    let store = store();
+    let id = assign(&*store, "w1", "noop", json!({"sleep_ms": 100})).await;
+    // As if w1 had claimed it, then restarted under the same id.
+    let key = dispatch::job_key(&*store, id).unwrap();
+    let mut j = dispatch::get_job(&*store, id).await.unwrap().unwrap();
+    j.record.body.state = JobState::Running;
+    store
+        .txn(Txn {
+            when: vec![],
+            then: vec![Op::Put {
+                key,
+                value: j.record.encode().unwrap(),
+                lease: None,
+            }],
+            otherwise: vec![],
+        })
+        .await
+        .unwrap();
+    let rt = runtime(&store);
+    let stop = CancellationToken::new();
+    let h = {
+        let rt = Arc::clone(&rt);
+        let stop = stop.clone();
+        tokio::spawn(async move { rt.run(stop).await })
+    };
+    let done = wait_state(&*store, id, JobState::Succeeded).await;
+    assert_eq!(done.progress, json!({"slept_ms": 100}));
+    stop.cancel();
+    h.await.unwrap().unwrap();
+}

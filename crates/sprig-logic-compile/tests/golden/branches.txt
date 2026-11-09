@@ -1,20 +1,24 @@
 function Test.Branches (score: i64, vip: bool) -> events {output{grade: str, bonus: i64}, error{message: str}}
-  1 if truthy(sne(score, null))
-  2   if present(vip)
-  3     extra_value: i64 := add(score, 5)
-  4     ran_extra: bool := true
-  5   else
-  6     ran_extra: bool := false
-  7   if truthy(ge(score, 90))
-  8     if ran_extra
-  9       emit output {grade: "A", bonus: extra_value}
- 10       ran_a: bool := true
- 11     else
- 12       ran_a: bool := false
- 13   else
- 14     emit output {grade: cond(truthy(ge(score, 50)), "pass", "fail"), bonus: 0}
- 15 else
- 16   emit error {message: "no score"}
+  1 if or(lt(score, -2147483648), gt(score, 2147483647))
+  2   throw(39866, "Test.Branches: argument score is out of the INTEGER range")
+  3 if seq(vip, null)
+  4   throw(39866, "Test.Branches: argument vip is null, which its schema doesn't allow")
+  5 if truthy(sne(score, null))
+  6   if present(vip)
+  7     extra_value: i64 := add(score, 5)
+  8     ran_extra: bool := true
+  9   else
+ 10     ran_extra: bool := false
+ 11   if truthy(ge(score, 90))
+ 12     if ran_extra
+ 13       emit output {grade: "A", bonus: extra_value}
+ 14       ran_a: bool := true
+ 15     else
+ 16       ran_a: bool := false
+ 17   else
+ 18     emit output {grade: cond(truthy(ge(score, 50)), "pass", "fail"), bonus: 0}
+ 19 else
+ 20   emit error {message: "no score"}
 
 -- cost 0 reads [] writes [] guarded 0
 
@@ -26,7 +30,7 @@ CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
   PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
     v VARCHAR(128) := LEFT(msg, 128);
   BEGIN
-    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+    SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
   END;
 END;
 
@@ -42,6 +46,12 @@ AS
   v_ran_extra BOOLEAN;
   v_ran_a BOOLEAN;
 BEGIN
+  IF (COALESCE(((COALESCE((p_score < (-2147483648)), 0) <> 0) OR (COALESCE((p_score > 2147483647), 0) <> 0)), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Branches: argument score is out of the INTEGER range');
+  END IF;
+  IF (COALESCE((p_vip <=> NULL), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Branches: argument vip is null, which its schema doesn''t allow');
+  END IF;
   IF (COALESCE((NOT (p_score <=> NULL)), 0) <> 0) THEN
     IF (COALESCE((COALESCE(p_vip, 0) <> 0), 0) <> 0) THEN
       v_extra_value := (p_score + 5);

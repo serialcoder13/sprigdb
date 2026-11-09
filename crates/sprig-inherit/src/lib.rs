@@ -1,6 +1,278 @@
-//! `sprig-inherit`: spaces, shares, layers, merged views and materialization.
+//! `sprig-inherit`: spaces, shares, layers and merged views.
 //!
 //! Layer: 2 data layer. Design: [chapter 42](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/42-data-inheritance.md) (Data inheritance) of the SprigDB low-level design.
 //!
-//! **Stub.** Nothing is implemented yet; the crate exists so the workspace
-//! layout matches chapter 03. Planned for R6.
+//! What exists (R6 order 2, SQL on single-shard tenants, read-through):
+//!
+//! - [`model`] and [`store`]: spaces, inheritable objects, shares and home
+//!   spaces in the tenant catalog, loaded into every snapshot by
+//!   [`InheritExtension`] (build step 1);
+//! - [`grammar`]: the extension statements;
+//! - [`ddl`]: spaces, shares, home spaces and `SPRIG INHERITABLE` (steps 1-3);
+//! - [`view`] and [`rewrite`]: the merged view and statements reading it,
+//!   with `SPRIG_ORIGIN()` (step 4);
+//! - [`write`](mod@write): layer writes, resets, parent deletes and
+//!   synchronous orphaning (steps 5 and 6);
+//! - [`upstream`]: cross-tenant read-through edges, through share views
+//!   in the child's schema defined by the parent's account (step 9, the
+//!   read-through half);
+//! - [`copy`]: materialized copies and asynchronous orphaning across
+//!   tenants, kept by one worker per tenant tree from the change feed
+//!   (step 8 and step 9's other half; the job is `sprig-worker::inherit`);
+//! - [`moves`]: the tenant-move check for shares (39361);
+//! - [`guard`]: "Schema changes while an object is shared" (39895);
+//! - [`show`]: what schema tools see;
+//! - [`reference`]: the merged view as a Rust model, for tests.
+//!
+//! [`handle`] is the entry point: the gateway calls it for each statement
+//! of a tenant session before chapter 32's type layer and chapter 07's name
+//! plan, with a [`Runner`] that sends the plan's statements back through
+//! the session (logical names, chapter 29's checks, chapter 17's router).
+//!
+//! Not built: federated edges (Spider), collections and key-value
+//! namespaces, `ViewMapper` for the feed.
+
+// The plans read best as the chapter's steps in order, over SQL text built
+// with format!; short names (o, s, r, k) follow the chapter's pseudocode.
+#![allow(
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    clippy::format_push_string,
+    clippy::struct_excessive_bools
+)]
+
+pub mod copy;
+pub mod ddl;
+pub mod grammar;
+pub mod guard;
+pub mod model;
+pub mod moves;
+pub mod plan;
+pub mod reference;
+pub mod rewrite;
+pub mod settings;
+pub mod show;
+pub mod store;
+pub mod subs;
+pub mod upstream;
+pub mod view;
+pub mod write;
+
+use sprig_common::Result;
+use sprig_common::ids::TenantId;
+use sprig_types::{Done, Rows};
+
+pub use model::{InheritState, InheritableObject, LayerState, ROOT_SPACE, Share, Space, SpaceId};
+pub use plan::{Ctx, Limits, Privileges};
+pub use store::{INHERIT_MODULE, InheritChange, InheritExtension, InheritStore, MODULE};
+
+use crate::grammar::Stmt;
+
+/// What the inheritance layer needs from the executor, beyond chapter
+/// 32's [`sprig_types::Runner`].
+#[async_trait::async_trait]
+pub trait Runner: sprig_types::Runner {
+    /// Commits `change` to the tenant's `inherit` module in one versioned
+    /// catalog change (migrating the module first if needed).
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn commit(&mut self, change: &InheritChange) -> Result<()>;
+
+    /// Runs `sql` as the provisioning account on the session's cluster:
+    /// the share views of cross-tenant edges.
+    ///
+    /// # Errors
+    /// The backend's.
+    async fn ctl(&mut self, sql: &str) -> Result<()>;
+
+    /// The id of tenant `name` when it is a direct child of this one.
+    ///
+    /// # Errors
+    /// The directory's.
+    async fn child_tenant(&mut self, name: &str) -> Result<Option<TenantId>>;
+
+    /// A user of this tenant by name.
+    fn user_id(&self, name: &str) -> Option<u32>;
+
+    /// Asks for the copy worker of this tenant's tree (chapter 42,
+    /// "Materialized copies"): registers its feed subscription on this
+    /// tenant and its ancestors, from their current positions, unless it
+    /// exists. Called when a share needs the worker (a materialized share,
+    /// or one that reaches child tenants, which are orphaned
+    /// asynchronously).
+    ///
+    /// # Errors
+    /// The directory's and the feed's.
+    async fn subscribe(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// What the gateway does with a statement.
+#[derive(Debug)]
+pub enum Handled {
+    /// Not the inheritance layer's: the statement goes on unchanged.
+    NotInherit,
+    /// Send this statement (logical names, internal mode) instead; its
+    /// result is the client's.
+    Forward(String),
+    /// The plan ran: answer OK.
+    Ok(Done),
+    /// The plan's answer: a result set.
+    Rows(Rows),
+    /// `USE SPACE`: the session's new space.
+    Space(SpaceId),
+}
+
+/// A quick test on the raw text: could the statement concern the
+/// inheritance layer? False for every statement when the tenant has no
+/// inheritable objects and the text has none of the extension keywords.
+#[must_use]
+pub fn maybe_inherit(sql: &[u8], state: Option<&InheritState>) -> bool {
+    if state.is_some_and(|s| !s.is_empty()) {
+        return true;
+    }
+    let upper = sql.to_ascii_uppercase();
+    let has = |w: &[u8]| upper.windows(w.len()).any(|x| x == w);
+    has(b"SPACE") || has(b"SHARE") || has(b"SPRIG") || has(b"INHERITABLE")
+}
+
+/// Handles one statement of a tenant session (see the crate docs).
+///
+/// # Errors
+/// The chapter's errors (39880-39895), 1062, 1142 and the steps' errors
+/// with logical names.
+pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Handled> {
+    if !maybe_inherit(sql.as_bytes(), Some(ctx.state))
+        || grammar::names_reserved(sql.as_bytes(), &ctx.lex)
+    {
+        return Ok(Handled::NotInherit);
+    }
+    let stmt = grammar::classify(sql.as_bytes(), &ctx.lex)?;
+    // Extension statements first; then statements on objects.
+    match stmt {
+        Stmt::UseSpace(name) => return ddl::use_space(ctx, name.as_deref()).map(Handled::Space),
+        Stmt::ShowSpaces => return Ok(Handled::Rows(show::spaces(ctx))),
+        Stmt::ShowShares => return Ok(Handled::Rows(show::shares(ctx))),
+        Stmt::CreateSpace { name, parent } => {
+            return ddl::create_space(ctx, r, &name, parent.as_deref())
+                .await
+                .map(Handled::Ok);
+        }
+        Stmt::DropSpace {
+            name,
+            if_exists,
+            cascade,
+        } => {
+            return ddl::drop_space(ctx, r, &name, if_exists, cascade)
+                .await
+                .map(Handled::Ok);
+        }
+        Stmt::SpaceHome { space, users } => {
+            return ddl::space_home(ctx, r, &space, &users)
+                .await
+                .map(Handled::Ok);
+        }
+        Stmt::Inheritable { table, key, tag } => {
+            return ddl::inheritable(ctx, r, &table, &key, tag.as_deref())
+                .await
+                .map(Handled::Ok);
+        }
+        Stmt::DropInheritable(table) => {
+            return ddl::drop_inheritable(ctx, r, &table).await.map(Handled::Ok);
+        }
+        Stmt::CreateShare {
+            name,
+            table,
+            to,
+            filter,
+            columns,
+            reshare,
+        } => {
+            return ddl::create_share(
+                ctx,
+                r,
+                &ddl::NewShare {
+                    name: &name,
+                    table: &table,
+                    to: &to,
+                    filter: filter.as_deref(),
+                    columns: columns.as_deref(),
+                    reshare,
+                },
+            )
+            .await
+            .map(Handled::Ok);
+        }
+        Stmt::AlterShare { name, change } => {
+            return ddl::alter_share(ctx, r, &name, &change)
+                .await
+                .map(Handled::Ok);
+        }
+        Stmt::DropShare { name, if_exists } => {
+            return ddl::drop_share(ctx, r, &name, if_exists)
+                .await
+                .map(Handled::Ok);
+        }
+        Stmt::Reset {
+            table,
+            columns,
+            filter,
+        } => {
+            return write::reset(ctx, r, &table, columns.as_deref(), filter.as_deref())
+                .await
+                .map(Handled::Ok);
+        }
+        // It names no object: checked before the reference test below.
+        Stmt::DropDatabase(db) => {
+            return guard::drop_database(&db, ctx).map(|()| Handled::NotInherit);
+        }
+        _ => {}
+    }
+    if ctx.state.objects().next().is_none() {
+        return Ok(Handled::NotInherit);
+    }
+    let touches = plan::touches(sql, ctx);
+    if !touches {
+        return Ok(Handled::NotInherit);
+    }
+    if plan::touches_typed(sql, ctx) {
+        return Err(grammar::unsupported(
+            "a statement naming both an inheritable object and a typed or hierarchical table \
+             is not supported yet",
+        ));
+    }
+    match stmt {
+        Stmt::Query => Box::pin(rewrite::query(sql, ctx, r)).await,
+        Stmt::Insert | Stmt::Replace => Box::pin(write::insert(sql, ctx, r)).await,
+        Stmt::Update => Box::pin(write::update(sql, ctx, r)).await,
+        Stmt::Delete => Box::pin(write::delete(sql, ctx, r)).await,
+        Stmt::AlterTable(n) => Box::pin(guard::alter(sql, &n, ctx, r)).await,
+        Stmt::DropTable(names) => guard::drop_tables(&names, ctx).map(|()| Handled::NotInherit),
+        Stmt::Rename(names) => guard::rename(&names, ctx).map(|()| Handled::NotInherit),
+        Stmt::Truncate(n) => Box::pin(write::truncate(&n, ctx, r)).await,
+        Stmt::ShowCreate(n) => Box::pin(show::create(&n, ctx, r)).await,
+        Stmt::LoadData(n) => {
+            if ctx.resolve(&n)?.is_some() {
+                Err(grammar::unsupported(
+                    "LOAD DATA into an inheritable object is not supported yet: use INSERT",
+                ))
+            } else {
+                Ok(Handled::NotInherit)
+            }
+        }
+        Stmt::CreateOther
+            if !grammar::names(sql.as_bytes(), &ctx.lex)
+                .iter()
+                .any(|n| ctx.resolve(n).ok().flatten().is_some()) =>
+        {
+            Ok(Handled::NotInherit)
+        }
+        Stmt::CreateOther => Err(grammar::unsupported(
+            "a view, routine, trigger or CREATE TABLE ... LIKE | SELECT naming an inheritable \
+             object is not supported yet",
+        )),
+        _ => Ok(Handled::NotInherit),
+    }
+}

@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use mysql_async::prelude::Queryable;
 use mysql_async::{Pool, Row};
-use sprig_common::ids::TenantId;
+use sprig_common::ids::{ClusterId, TenantId};
 use sprig_common::names::{SchemaName, quote};
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
 
-use crate::store::ObjectKind;
+use crate::store::{DatabaseRow, ObjectKind};
 
 /// What a physical statement does, so in-memory executors can model it and
 /// logs can say it without parsing SQL.
@@ -64,6 +64,16 @@ pub enum Effect {
     /// Empties a table.
     Truncate {
         /// The table.
+        name: String,
+    },
+    /// Re-creates an object from its own `SHOW CREATE` text, read on
+    /// another shard (chapter 21's undo of a replaced routine, view or
+    /// event): `CREATE OR REPLACE` with the definer as written, which
+    /// executors must not change.
+    Restore {
+        /// Its kind.
+        kind: ObjectKind,
+        /// Its name.
         name: String,
     },
 }
@@ -160,6 +170,162 @@ pub trait DdlExecutor: Send + Sync {
     /// 39030 if the cluster is unreachable.
     async fn busy(&self, _schema: &SchemaName) -> Result<bool> {
         Ok(false)
+    }
+
+    /// The shard schemas a statement on `target` in database `db` changes
+    /// (chapter 21). The default is R0's placement: the database's default
+    /// group, from `databases.options.shards`, all on this executor's
+    /// cluster. Executors that know table groups (the gateway, from the
+    /// shard maps) return a table's group shards, and every shard schema
+    /// of the database for routines, events and views.
+    ///
+    /// # Errors
+    /// The shard maps are unreadable.
+    async fn shards(
+        &self,
+        tenant: TenantId,
+        db: &DatabaseRow,
+        _target: ShardTarget<'_>,
+    ) -> Result<Vec<SchemaName>> {
+        Ok(super::shard_schemas(tenant, db))
+    }
+
+    /// The cluster a shard schema lives on, when this executor routes by
+    /// schema; recorded in multi-shard jobs so the reconciler reaches every
+    /// shard.
+    fn cluster_of(&self, _schema: &SchemaName) -> Option<ClusterId> {
+        None
+    }
+
+    /// Waits while a split, merge or shard move (chapter 20) holds one of
+    /// `shards`, the shards a multi-shard job is about to change (chapter
+    /// 21, "DDL during moves"). The engine calls it after the job's intent
+    /// row is written, so a split admitted later sees the job and waits;
+    /// one admitted earlier is seen here. The default has no mover jobs to
+    /// wait for.
+    ///
+    /// # Errors
+    /// 39470 when the wait runs out; 39110 when a job already replaced one
+    /// of `shards` (the caller's layout is stale: retry); store errors.
+    async fn wait_for_shard_jobs(&self, _tenant: TenantId, _shards: &[SchemaName]) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// What a statement acts on, for [`DdlExecutor::shards`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShardTarget<'a> {
+    /// A table (also a trigger's table, an index's table): its group's
+    /// shards.
+    Table(&'a str),
+    /// Routines, events, views and sequences: every shard schema of the
+    /// database.
+    Database,
+}
+
+/// A [`DdlExecutor`] that sends each statement to the cluster of its
+/// schema: a [`MariaExecutor`] per shard schema, and a default one (the
+/// catalog's cluster) for every other schema. The controller's reconciler
+/// and the live tests use it for multi-shard jobs; the gateway has its own
+/// (it adds stored programs' definers).
+#[derive(Debug, Clone)]
+pub struct RoutedExecutor {
+    default: MariaExecutor,
+    routes: std::collections::BTreeMap<SchemaName, (ClusterId, MariaExecutor)>,
+    /// What [`DdlExecutor::shards`] answers, per table (lowercase); `None`
+    /// key for routines and other database-wide objects.
+    layout: std::collections::BTreeMap<Option<String>, Vec<SchemaName>>,
+}
+
+impl RoutedExecutor {
+    /// Every schema on `default`.
+    #[must_use]
+    pub fn new(default: MariaExecutor) -> Self {
+        Self {
+            default,
+            routes: std::collections::BTreeMap::new(),
+            layout: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// `schema` lives on `cluster`, reached through `exec`.
+    #[must_use]
+    pub fn route(mut self, schema: SchemaName, cluster: ClusterId, exec: MariaExecutor) -> Self {
+        self.routes.insert(schema, (cluster, exec));
+        self
+    }
+
+    /// Statements on `table` (`None`: database-wide objects) go to these
+    /// shard schemas.
+    #[must_use]
+    pub fn layout(mut self, table: Option<&str>, shards: Vec<SchemaName>) -> Self {
+        self.layout
+            .insert(table.map(str::to_ascii_lowercase), shards);
+        self
+    }
+
+    fn on(&self, schema: &SchemaName) -> &MariaExecutor {
+        self.routes.get(schema).map_or(&self.default, |(_, e)| e)
+    }
+}
+
+#[async_trait::async_trait]
+impl DdlExecutor for RoutedExecutor {
+    async fn execute(&self, stmt: &PhysicalDdl) -> Result<()> {
+        self.on(&stmt.schema).execute(stmt).await
+    }
+
+    async fn schema(&self, schema: &SchemaName) -> Result<Option<SchemaInfo>> {
+        self.on(schema).schema(schema).await
+    }
+
+    async fn show_create(
+        &self,
+        schema: &SchemaName,
+        kind: ObjectKind,
+        name: &str,
+    ) -> Result<Option<String>> {
+        self.on(schema).show_create(schema, kind, name).await
+    }
+
+    async fn objects(&self, schema: &SchemaName) -> Result<Vec<PhysicalObject>> {
+        self.on(schema).objects(schema).await
+    }
+
+    async fn tenant_schemas(&self, tenant: TenantId) -> Result<Vec<SchemaName>> {
+        let mut all = self.default.tenant_schemas(tenant).await?;
+        for s in self.routes.keys() {
+            if s.tenant() == tenant && !all.contains(s) {
+                all.push(*s);
+            }
+        }
+        all.sort();
+        Ok(all)
+    }
+
+    async fn busy(&self, schema: &SchemaName) -> Result<bool> {
+        self.on(schema).busy(schema).await
+    }
+
+    async fn shards(
+        &self,
+        tenant: TenantId,
+        db: &DatabaseRow,
+        target: ShardTarget<'_>,
+    ) -> Result<Vec<SchemaName>> {
+        let key = match target {
+            ShardTarget::Table(t) => Some(t.to_ascii_lowercase()),
+            ShardTarget::Database => None,
+        };
+        let mine = |v: &Vec<SchemaName>| v.iter().all(|s| s.db() == Some(db.db_id));
+        match self.layout.get(&key).filter(|v| mine(v)) {
+            Some(v) => Ok(v.clone()),
+            None => Ok(super::shard_schemas(tenant, db)),
+        }
+    }
+
+    fn cluster_of(&self, schema: &SchemaName) -> Option<ClusterId> {
+        self.routes.get(schema).map(|(c, _)| c.clone())
     }
 }
 

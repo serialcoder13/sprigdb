@@ -114,7 +114,10 @@ async fn followers_adopt_and_renew_the_same_lease() {
         b.tick(false).await.expect("tick");
     }
     assert!(!b.permit().fenced, "b's keep-alives keep the shared lease");
-    assert!(a.permit().fenced, "a stopped renewing: its own deadline passed");
+    assert!(
+        a.permit().fenced,
+        "a stopped renewing: its own deadline passed"
+    );
 }
 
 #[tokio::test(start_paused = true)]

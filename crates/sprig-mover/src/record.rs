@@ -153,13 +153,30 @@ impl JobRecord {
         }
     }
 
-    /// The shard lock this job holds.
+    /// The shard lock this job holds (its first, for a job holding
+    /// several).
     #[must_use]
     pub fn lock_rel(&self) -> String {
-        lock_rel(
-            self.tenant_id,
-            self.spec.sources.first().map_or(0, |s| s.shard),
-        )
+        self.lock_rels().swap_remove(0)
+    }
+
+    /// Every shard lock this job holds: the tenant's (shard 0) for an R0
+    /// job; one per source shard, `g<group>s<shard>`, for a hash-range job
+    /// (chapter 20), whose shard ids are per group.
+    #[must_use]
+    pub fn lock_rels(&self) -> Vec<String> {
+        match self.spec.group() {
+            Some(g) => self
+                .spec
+                .sources
+                .iter()
+                .map(|s| group_lock_rel(self.tenant_id, g, s.shard))
+                .collect(),
+            None => vec![lock_rel(
+                self.tenant_id,
+                self.spec.sources.first().map_or(0, |s| s.shard),
+            )],
+        }
     }
 }
 
@@ -182,12 +199,29 @@ fn lock_rel(tenant: TenantId, shard: u32) -> String {
     format!("mover/shard-locks/{tenant}/{shard}")
 }
 
+fn group_lock_rel(tenant: TenantId, group: u32, shard: u32) -> String {
+    format!("mover/shard-locks/{tenant}/g{group}s{shard}")
+}
+
 fn slot_rel(cluster: &ClusterId, n: u32) -> String {
     format!("mover/slots/copy/{cluster}/{n}")
 }
 
 fn not_found(id: &JobId) -> SprigError {
     SprigError::new(SprigCode::JobNotFound, format!("no job {}", id.0))
+}
+
+/// 39472 for a whole-tenant move of a tenant with table groups.
+#[must_use]
+pub fn sharded_tenant(tenant: TenantId, groups: &[u32]) -> SprigError {
+    SprigError::new(
+        SprigCode::ShardedTenantMove,
+        format!(
+            "tenant {tenant} has table groups {groups:?}: R1 doesn't move a sharded tenant \
+             whole (its groups' shard maps wouldn't follow); move its shards with \
+             `sprigctl shard move`"
+        ),
+    )
 }
 
 fn lease_lost(id: &JobId) -> SprigError {
@@ -300,6 +334,12 @@ impl JobStore {
     /// 39131 if the shard is locked; `Internal` for a spec R0 can't run.
     pub async fn create(&self, spec: JobSpec) -> Result<JobRecord> {
         check_spec(&spec)?;
+        if spec.group().is_none() {
+            // A whole-tenant job (chapter 20, "Mutual exclusion"): never
+            // beside a split, merge or shard move of the tenant, and no
+            // move of a tenant whose tables are in table groups (R1).
+            self.check_whole_tenant(&spec).await?;
+        }
         let now = self.now_ms();
         let rec = JobRecord {
             job_id: JobId::new_v7(),
@@ -325,40 +365,227 @@ impl JobStore {
             created_ms: now,
             updated_ms: now,
         };
-        let lock = self.key(&rec.lock_rel())?;
+        let locks = rec
+            .lock_rels()
+            .iter()
+            .map(|l| self.key(l))
+            .collect::<Result<Vec<_>>>()?;
+        let mut when: Vec<Cmp> = locks.iter().map(|k| Cmp::Missing(k.clone())).collect();
+        if rec.spec.group().is_some() {
+            // A hash-range job never runs beside a whole-tenant move.
+            when.push(Cmp::Missing(self.key(&lock_rel(rec.tenant_id, 0))?));
+        }
+        let mut then: Vec<Op> = locks
+            .iter()
+            .map(|k| Op::Put {
+                key: k.clone(),
+                value: rec.job_id.0.to_string().into_bytes(),
+                lease: None,
+            })
+            .collect();
+        then.push(Op::Put {
+            key: self.key(&job_rel(&rec.job_id))?,
+            value: Record::new(rec.clone()).encode()?,
+            lease: None,
+        });
+        let mut otherwise: Vec<Op> = locks.iter().map(|k| Op::Get(k.clone())).collect();
+        if rec.spec.group().is_some() {
+            otherwise.push(Op::Get(self.key(&lock_rel(rec.tenant_id, 0))?));
+        }
         let r = self
             .dc
             .txn(Txn {
-                when: vec![Cmp::Missing(lock.clone())],
-                then: vec![
-                    Op::Put {
-                        key: lock.clone(),
-                        value: rec.job_id.0.to_string().into_bytes(),
-                        lease: None,
-                    },
-                    Op::Put {
-                        key: self.key(&job_rel(&rec.job_id))?,
-                        value: Record::new(rec.clone()).encode()?,
-                        lease: None,
-                    },
-                ],
-                otherwise: vec![Op::Get(lock)],
+                when,
+                then,
+                otherwise,
             })
             .await?;
         if r.succeeded {
             tracing::info!(job = %rec.job_id.0, kind = rec.kind.as_str(), tenant = %rec.tenant_id, "job created");
+            if rec.spec.group().is_none()
+                && let Some((_, holder)) = self.group_locks(rec.tenant_id).await?.into_iter().next()
+            {
+                // A hash-range job was admitted between the check above and
+                // this job's lock (its own admission compares the tenant
+                // lock as missing, so none can follow). Withdraw this one.
+                let why = format!("a split, merge or shard move of the tenant runs (job {holder})");
+                crate::MetaMover::new(self.clone())
+                    .cancel(&rec.job_id, &why)
+                    .await?;
+                return Err(SprigError::new(
+                    SprigCode::ShardBusy,
+                    format!("tenant {} can't move now: {why}", rec.tenant_id),
+                ));
+            }
             return Ok(rec);
         }
-        let holder = match r.results.first() {
-            Some(sprig_meta::OpResult::Get(Some(kv))) => {
-                String::from_utf8_lossy(&kv.value).into_owned()
-            }
-            _ => "?".to_owned(),
-        };
+        let holder = r
+            .results
+            .iter()
+            .find_map(|x| match x {
+                sprig_meta::OpResult::Get(Some(kv)) => {
+                    Some(String::from_utf8_lossy(&kv.value).into_owned())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "?".to_owned());
         Err(SprigError::new(
             SprigCode::ShardLocked,
             format!("tenant {} is locked by job {holder}", rec.tenant_id),
         ))
+    }
+
+    /// The hash-range jobs' shard locks of `tenant` (`g<group>s<shard>`):
+    /// `(lock, holding job)`.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn group_locks(&self, tenant: TenantId) -> Result<Vec<(String, String)>> {
+        let prefix = self.key(&format!("mover/shard-locks/{tenant}/g"))?;
+        let page = self
+            .dc
+            .list(
+                &prefix,
+                ListOpts {
+                    limit: 64,
+                    ..ListOpts::default()
+                },
+            )
+            .await?;
+        Ok(page
+            .kvs
+            .iter()
+            .map(|kv| {
+                (
+                    kv.key.as_str().to_owned(),
+                    String::from_utf8_lossy(&kv.value).into_owned(),
+                )
+            })
+            .collect())
+    }
+
+    /// The table groups of `tenant` that have a shard map in this tier
+    /// (`shardmaps/<tenant>/<group>`, group 0, the catalog's map, left out).
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn sharded_groups(&self, tenant: TenantId) -> Result<Vec<u32>> {
+        let prefix = self.key(&format!("shardmaps/{tenant}/"))?;
+        let mut out = Vec::new();
+        let mut opts = ListOpts::default();
+        loop {
+            let page = self.dc.list(&prefix, opts.clone()).await?;
+            for kv in &page.kvs {
+                let k = kv.key.as_str();
+                if let Some(g) = k.rsplit('/').next().and_then(|g| g.parse::<u32>().ok())
+                    && g != 0
+                {
+                    out.push(g);
+                }
+            }
+            if !page.more {
+                break;
+            }
+            opts.at = Some(page.revision);
+            opts.after = page.kvs.last().map(|kv| kv.key.clone());
+        }
+        Ok(out)
+    }
+
+    /// Refuses a whole-tenant job while a hash-range job of the tenant
+    /// holds a shard (39470), and a move of a tenant with table groups
+    /// (39472): R1 moves only the catalog's map, not the groups' maps.
+    async fn check_whole_tenant(&self, spec: &JobSpec) -> Result<()> {
+        // The permanent refusal first: it says what to do instead.
+        if matches!(spec.kind, JobKind::MoveShard | JobKind::TenantMigration) {
+            let groups = self.sharded_groups(spec.tenant).await?;
+            if !groups.is_empty() {
+                return Err(sharded_tenant(spec.tenant, &groups));
+            }
+        }
+        if let Some((_, holder)) = self.group_locks(spec.tenant).await?.into_iter().next() {
+            return Err(SprigError::new(
+                SprigCode::ShardBusy,
+                format!(
+                    "tenant {} can't move now: a split, merge or shard move of the tenant \
+                     runs (job {holder}); retry when it finishes",
+                    spec.tenant
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Takes the tenant's whole-tenant lock (`mover/shard-locks/<tenant>/0`)
+    /// for `holder`, a non-job owner such as the advisor applying a first
+    /// design (chapter 16): no whole-tenant move and no hash-range job
+    /// starts while it is held. Taking a lock `holder` already holds
+    /// succeeds. Returns the other holder when the lock is taken.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn lock_tenant(&self, tenant: TenantId, holder: &str) -> Result<Option<String>> {
+        let key = self.key(&lock_rel(tenant, 0))?;
+        let r = self
+            .dc
+            .txn(Txn {
+                when: vec![Cmp::Missing(key.clone())],
+                then: vec![Op::Put {
+                    key: key.clone(),
+                    value: holder.as_bytes().to_vec(),
+                    lease: None,
+                }],
+                otherwise: vec![Op::Get(key)],
+            })
+            .await?;
+        if r.succeeded {
+            return Ok(None);
+        }
+        let cur = r
+            .results
+            .iter()
+            .find_map(|x| match x {
+                sprig_meta::OpResult::Get(Some(kv)) => {
+                    Some(String::from_utf8_lossy(&kv.value).into_owned())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        Ok((cur != holder).then_some(cur))
+    }
+
+    /// Who holds the tenant's whole-tenant lock: a job id, or a holder
+    /// such as the advisor's (see [`JobStore::lock_tenant`]).
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn tenant_lock_holder(&self, tenant: TenantId) -> Result<Option<String>> {
+        Ok(self
+            .dc
+            .get(&self.key(&lock_rel(tenant, 0))?, Consistency::Linearizable)
+            .await?
+            .map(|kv| String::from_utf8_lossy(&kv.value).into_owned()))
+    }
+
+    /// Releases a lock [`JobStore::lock_tenant`] took, if `holder` still
+    /// holds it.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn unlock_tenant(&self, tenant: TenantId, holder: &str) -> Result<()> {
+        let key = self.key(&lock_rel(tenant, 0))?;
+        if let Some(kv) = self.dc.get(&key, Consistency::Linearizable).await?
+            && kv.value == holder.as_bytes()
+        {
+            self.dc
+                .txn(Txn {
+                    when: vec![Cmp::ModRev(key.clone(), kv.mod_revision)],
+                    then: vec![Op::Delete(key)],
+                    otherwise: Vec::new(),
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     /// Writes `rec` if its record is still at `rev` (writers without an
@@ -442,10 +669,13 @@ impl JobStore {
 
     /// Deletes the shard lock and the owner key of a finished job.
     fn unlock_ops(&self, rec: &JobRecord) -> Result<Vec<Op>> {
-        Ok(vec![
-            Op::Delete(self.key(&rec.lock_rel())?),
-            Op::Delete(self.key(&owner_rel(&rec.job_id))?),
-        ])
+        let mut ops = rec
+            .lock_rels()
+            .iter()
+            .map(|l| Ok(Op::Delete(self.key(l)?)))
+            .collect::<Result<Vec<_>>>()?;
+        ops.push(Op::Delete(self.key(&owner_rel(&rec.job_id))?));
+        Ok(ops)
     }
 
     /// Takes a free copy slot on `cluster` for `job` under `lease`. Returns
@@ -493,19 +723,19 @@ impl JobStore {
     /// The store's errors.
     pub async fn free_slots(&self, cluster: &ClusterId, job: &JobId, max: u32) -> Result<()> {
         let me = job.0.to_string();
-        for n in 0..max.max(1) {
-            let key = self.key(&slot_rel(cluster, n))?;
-            if let Some(kv) = self.dc.get(&key, Consistency::Linearizable).await?
-                && kv.value == me.as_bytes()
-            {
-                self.dc
-                    .txn(Txn {
-                        when: vec![Cmp::ModRev(key.clone(), kv.mod_revision)],
-                        then: vec![Op::Delete(key)],
-                        otherwise: Vec::new(),
-                    })
-                    .await?;
-            }
+        // Every slot of the cluster, not just `0..max`: a slot taken under
+        // a larger `mover.max_copies_per_cluster` is freed too.
+        let _ = max;
+        let prefix = self.key(&format!("mover/slots/copy/{cluster}/"))?;
+        let page = self.dc.list(&prefix, ListOpts::default()).await?;
+        for kv in page.kvs.into_iter().filter(|kv| kv.value == me.as_bytes()) {
+            self.dc
+                .txn(Txn {
+                    when: vec![Cmp::ModRev(kv.key.clone(), kv.mod_revision)],
+                    then: vec![Op::Delete(kv.key)],
+                    otherwise: Vec::new(),
+                })
+                .await?;
         }
         Ok(())
     }
@@ -693,6 +923,9 @@ impl Claim {
 /// Checks a spec against what this release runs.
 fn check_spec(spec: &JobSpec) -> Result<()> {
     let bad = |m: &str| Err(SprigError::internal(format!("unsupported job: {m}")));
+    if spec.group().is_some() {
+        return check_reshard(spec);
+    }
     match spec.kind {
         JobKind::MoveShard | JobKind::CopySwapDdl => {}
         k => return bad(&format!("{} arrives in a later release", k.as_str())),
@@ -721,6 +954,73 @@ fn check_spec(spec: &JobSpec) -> Result<()> {
         }
         _ => Ok(()),
     }
+}
+
+/// Checks a hash-range job (chapter 20): sources on one cluster, targets
+/// on one cluster, adjacent source ranges covered exactly by the targets.
+fn check_reshard(spec: &JobSpec) -> Result<()> {
+    let bad = |m: &str| Err(SprigError::internal(format!("unsupported job: {m}")));
+    if spec.sources.is_empty() || spec.targets.is_empty() {
+        return bad("a hash-range job needs sources and targets");
+    }
+    match (spec.kind, spec.sources.len(), spec.targets.len()) {
+        (JobKind::SplitShard, 1, n) if n >= 2 => {}
+        (JobKind::MergeShards, n, 1) if n >= 2 => {}
+        (JobKind::MoveShard, 1, 1) => {}
+        _ => return bad("a split is 1 to n, a merge n to 1, a shard move 1 to 1"),
+    }
+    if !matches!(spec.cutover, CutoverMode::Auto | CutoverMode::Manual) {
+        return bad("hash-range jobs cut over automatically or manually");
+    }
+    let from = &spec.sources[0].cluster;
+    let to = &spec.targets[0].cluster;
+    if spec.sources.iter().any(|s| &s.cluster != from) {
+        return bad("R1 merges shards of one cluster (move one first)");
+    }
+    if spec.targets.iter().any(|t| &t.cluster != to) {
+        return bad("R1 places a job's new shards on one cluster");
+    }
+    if spec.kind == JobKind::MoveShard && from == to {
+        return bad("a shard move needs another cluster");
+    }
+    let range = |r: Option<crate::api::HashRange>| r.map(|r| (r.lo, r.hi));
+    let mut src: Vec<(u64, Option<u64>)> = Vec::new();
+    for s in &spec.sources {
+        let Some(r) = range(s.range) else {
+            return bad("every source names its range");
+        };
+        if s.schemas.is_empty() {
+            return bad("every source names its schemas");
+        }
+        src.push(r);
+    }
+    let mut tgt: Vec<(u64, Option<u64>)> = Vec::new();
+    for t in &spec.targets {
+        let Some(r) = range(t.range) else {
+            return bad("every target names its range");
+        };
+        if spec.sources.iter().any(|s| s.shard == t.shard) {
+            return bad("targets are new shards");
+        }
+        tgt.push(r);
+    }
+    let contiguous = |v: &mut Vec<(u64, Option<u64>)>| -> Option<(u64, Option<u64>)> {
+        v.sort_by_key(|r| r.0);
+        for w in v.windows(2) {
+            if w[0].1 != Some(w[1].0) {
+                return None;
+            }
+        }
+        Some((v[0].0, v[v.len() - 1].1))
+    };
+    match (contiguous(&mut src), contiguous(&mut tgt)) {
+        (Some(a), Some(b)) if a == b => {}
+        _ => return bad("the targets must cover exactly the adjacent sources' range"),
+    }
+    if crate::route::ShardRoute::from_spec(spec).is_err() {
+        return bad("the sources' schemas must be shard schemas of the group");
+    }
+    Ok(())
 }
 
 /// [`Mover`] on the DC tier's job records: what the balancer and the Admin
@@ -826,7 +1126,17 @@ impl Mover for MetaMover {
                     format!("job {} committed its cutover", r.job_id.0),
                 ));
             }
-            if r.cancel.is_some() || r.state.is_terminal() {
+            if r.state.is_terminal() {
+                return Ok(false);
+            }
+            // No worker runs a paused job: a cancelled one rolls back.
+            if r.state == JobState::Paused {
+                r.state = JobState::RollingBack;
+                r.paused_from = None;
+                r.cancel = Some(reason.clone());
+                return Ok(true);
+            }
+            if r.cancel.is_some() {
                 return Ok(false);
             }
             r.cancel = Some(reason.clone());

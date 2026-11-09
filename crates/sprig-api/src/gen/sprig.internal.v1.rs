@@ -103,6 +103,34 @@ pub struct ForwardReply {
     #[prost(string, tag = "2")]
     pub body_json: ::prost::alloc::string::String,
 }
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HandoffLoginRequest {
+    /// sprig-auth's HandoffStart as JSON: the login's request fields and the
+    /// source DC.
+    #[prost(string, tag = "1")]
+    pub start_json: ::prost::alloc::string::String,
+    /// The password the client sent in clear text over TLS to the source.
+    #[prost(bytes = "vec", tag = "2")]
+    pub password: ::prost::alloc::vec::Vec<u8>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HandoffLoginReply {
+    /// The login was accepted.
+    #[prost(bool, tag = "1")]
+    pub accepted: bool,
+    /// When accepted: sprig-auth's PrincipalWire as JSON.
+    #[prost(string, tag = "2")]
+    pub principal_json: ::prost::alloc::string::String,
+    /// When refused: the MySQL error packet's number, SQLSTATE and message.
+    #[prost(uint32, tag = "3")]
+    pub error_code: u32,
+    #[prost(string, tag = "4")]
+    pub sql_state: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub error_message: ::prost::alloc::string::String,
+}
 /// Generated client implementations.
 pub mod gateway_peer_client {
     #![allow(
@@ -279,6 +307,35 @@ pub mod gateway_peer_client {
                 .insert(GrpcMethod::new("sprig.internal.v1.GatewayPeer", "Forward"));
             self.inner.unary(req, path, codec).await
         }
+        /// A login of a tenant whose residency (chapter 26) doesn't allow the
+        /// calling gateway's DC: this gateway, in an allowed DC, decides it
+        /// (chapter 14, "Credential residency") and returns the principal only.
+        pub async fn handoff_login(
+            &mut self,
+            request: impl tonic::IntoRequest<super::HandoffLoginRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::HandoffLoginReply>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.internal.v1.GatewayPeer/HandoffLogin",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("sprig.internal.v1.GatewayPeer", "HandoffLogin"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -320,6 +377,16 @@ pub mod gateway_peer_server {
             &self,
             request: tonic::Request<super::ForwardRequest>,
         ) -> std::result::Result<tonic::Response<super::ForwardReply>, tonic::Status>;
+        /// A login of a tenant whose residency (chapter 26) doesn't allow the
+        /// calling gateway's DC: this gateway, in an allowed DC, decides it
+        /// (chapter 14, "Credential residency") and returns the principal only.
+        async fn handoff_login(
+            &self,
+            request: tonic::Request<super::HandoffLoginRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::HandoffLoginReply>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct GatewayPeerServer<T> {
@@ -558,6 +625,51 @@ pub mod gateway_peer_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ForwardSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.internal.v1.GatewayPeer/HandoffLogin" => {
+                    #[allow(non_camel_case_types)]
+                    struct HandoffLoginSvc<T: GatewayPeer>(pub Arc<T>);
+                    impl<
+                        T: GatewayPeer,
+                    > tonic::server::UnaryService<super::HandoffLoginRequest>
+                    for HandoffLoginSvc<T> {
+                        type Response = super::HandoffLoginReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::HandoffLoginRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GatewayPeer>::handoff_login(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = HandoffLoginSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

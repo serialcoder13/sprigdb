@@ -1,54 +1,84 @@
 function Test.Loops (n: i64 [0..50], stopAt: i64, items: json) -> events {output{total: i64, evens: i64, stoppedAt: i64, spend: f64, count: i64, down: f64}}
-  1 ctx_down: f64 := to_f64(0)
-  2 downloop_value: f64 := 2.5
-  3 downloop_to: f64 := to_f64(0)
-  4 downloop_break: bool := false
-  5 while and(gt(downloop_value, downloop_to), not(downloop_break)) (bound 5)
-  6   downloop_index: f64 := downloop_value
-  7   downloop_value: f64 := add(downloop_value, -0.5)
-  8   ctx_down: f64 := add(ctx_down, downloop_index)
-  9 ctx_evens: i64 := 0
- 10 ctx_spend: f64 := to_f64(0)
- 11 each_source: json := items
- 12 each_length: i64 := coalesce(json_len(each_source), 0)
- 13 each_value: i64 := 0
- 14 each_break: bool := false
- 15 while and(lt(each_value, each_length), not(each_break)) (guarded)
- 16   each_index: i64 := each_value
- 17   each_each: json := each_source[each_value]
- 18   each_value: i64 := add(each_value, 1)
- 19   ctx_spend: f64 := add(ctx_spend, mul(json_num(each_each.price), json_num(each_each.qty)))
- 20 ctx_total: i64 := 0
- 21 range_value: i64 := 1
- 22 range_to: i64 := add(n, 1)
- 23 range_break: bool := false
- 24 while and(lt(range_value, range_to), not(range_break)) (bound 50)
- 25   range_index: i64 := range_value
- 26   range_value: i64 := add(range_value, 1)
- 27   ctx_total: i64 := add(ctx_total, range_index)
- 28   if truthy(seq(mod(range_index, 2), 0))
- 29     ctx_evens: i64 := add(ctx_evens, 1)
- 30 count_value: i64 := 0
- 31 count_count: i64 := 1000
- 32 count_break: bool := false
- 33 while and(lt(count_value, count_count), not(count_break)) (bound 1000)
- 34   count_index: i64 := count_value
- 35   count_value: i64 := add(count_value, 1)
- 36   if truthy(ge(count_index, stopAt))
- 37     count_break: bool := true
- 38 emit output {total: ctx_total, evens: ctx_evens, stoppedAt: count_value, spend: ctx_spend, count: json_len(items), down: ctx_down}
+  1 if seq(n, null)
+  2   throw(39866, "Test.Loops: argument n is null, which its schema doesn't allow")
+  3 if or(lt(n, -2147483648), gt(n, 2147483647))
+  4   throw(39866, "Test.Loops: argument n is out of the INTEGER range")
+  5 if lt(n, 0.0)
+  6   throw(39866, "Test.Loops: argument n is below its minimum 0")
+  7 if gt(n, 50.0)
+  8   throw(39866, "Test.Loops: argument n is above its maximum 50")
+  9 if seq(stopAt, null)
+ 10   throw(39866, "Test.Loops: argument stopAt is null, which its schema doesn't allow")
+ 11 if or(lt(stopAt, -2147483648), gt(stopAt, 2147483647))
+ 12   throw(39866, "Test.Loops: argument stopAt is out of the INTEGER range")
+ 13 if seq(items, null)
+ 14   throw(39866, "Test.Loops: argument items is null, which its schema doesn't allow")
+ 15 ctx_down: f64 := to_f64(0)
+ 16 downloop_value: f64 := 2.5
+ 17 downloop_to: f64 := to_f64(0)
+ 18 downloop_break: bool := false
+ 19 while and(gt(downloop_value, downloop_to), not(downloop_break)) (bound 5)
+ 20   downloop_index: f64 := downloop_value
+ 21   downloop_value: f64 := add(downloop_value, -0.5)
+ 22   ctx_down: f64 := cond(seq(ctx_down, null), downloop_index, add(ctx_down, not_null(downloop_index)))
+ 23 ctx_evens: i64 := 0
+ 24 ctx_spend: f64 := to_f64(0)
+ 25 each_source: json := items
+ 26 each_length: i64 := coalesce(json_len(each_source), 0)
+ 27 each_value: i64 := 0
+ 28 each_break: bool := false
+ 29 while and(lt(each_value, each_length), not(each_break)) (guarded)
+ 30   each_index: i64 := each_value
+ 31   each_each: json := each_source[each_value]
+ 32   each_value: i64 := add(each_value, 1)
+ 33   ctx_spend: f64 := cond(seq(ctx_spend, null), mul(sub(not_null(json_num(each_each.price)), 0), sub(not_null(json_num(each_each.qty)), 0)), add(ctx_spend, mul(sub(not_null(json_num(each_each.price)), 0), sub(not_null(json_num(each_each.qty)), 0))))
+ 34 ctx_total: i64 := 0
+ 35 range_value: i64 := 1
+ 36 range_to: i64 := add(n, 1)
+ 37 range_break: bool := false
+ 38 while and(lt(range_value, range_to), not(range_break)) (bound 50)
+ 39   range_index: i64 := range_value
+ 40   range_value: i64 := add(range_value, 1)
+ 41   ctx_total: i64 := cond(seq(ctx_total, null), range_index, add(ctx_total, not_null(range_index)))
+ 42   if truthy(seq(mod(not_null(range_index), 2), 0))
+ 43     ctx_evens: i64 := cond(seq(ctx_evens, null), 1, add(ctx_evens, 1))
+ 44 count_value: i64 := 0
+ 45 count_count: i64 := 1000
+ 46 count_break: bool := false
+ 47 while and(lt(count_value, count_count), not(count_break)) (bound 1000)
+ 48   count_index: i64 := count_value
+ 49   count_value: i64 := add(count_value, 1)
+ 50   if truthy(ge(count_index, stopAt))
+ 51     count_break: bool := true
+ 52 emit output {total: ctx_total, evens: ctx_evens, stoppedAt: count_value, spend: ctx_spend, count: json_len(items), down: ctx_down}
 
 -- cost 0 reads [] writes [] guarded 1
 
 CREATE OR REPLACE PACKAGE __sprig_l44_v1_lib AS
   PROCEDURE fail(code IN INT, msg IN VARCHAR);
+  FUNCTION nn_i(x IN BIGINT) RETURN BIGINT;
+  FUNCTION nn_f(x IN DOUBLE) RETURN DOUBLE;
 END;
 
 CREATE OR REPLACE PACKAGE BODY __sprig_l44_v1_lib AS
   PROCEDURE fail(code IN INT, msg IN VARCHAR) AS
     v VARCHAR(128) := LEFT(msg, 128);
   BEGIN
-    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+    SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;
+  END;
+  FUNCTION nn_i(x IN BIGINT) RETURN BIGINT AS
+  BEGIN
+    IF x IS NULL THEN
+      SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = 39866, MESSAGE_TEXT = 'an arithmetic operator was applied to a null value';
+    END IF;
+    RETURN x;
+  END;
+  FUNCTION nn_f(x IN DOUBLE) RETURN DOUBLE AS
+  BEGIN
+    IF x IS NULL THEN
+      SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = 39866, MESSAGE_TEXT = 'an arithmetic operator was applied to a null value';
+    END IF;
+    RETURN x;
   END;
 END;
 
@@ -85,6 +115,27 @@ AS
   v_count_index BIGINT;
   v__guard0 BIGINT := 0;
 BEGIN
+  IF (COALESCE((p_n <=> NULL), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Loops: argument n is null, which its schema doesn''t allow');
+  END IF;
+  IF (COALESCE(((COALESCE((p_n < (-2147483648)), 0) <> 0) OR (COALESCE((p_n > 2147483647), 0) <> 0)), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Loops: argument n is out of the INTEGER range');
+  END IF;
+  IF (COALESCE((p_n < 0e0), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Loops: argument n is below its minimum 0');
+  END IF;
+  IF (COALESCE((p_n > 5e1), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Loops: argument n is above its maximum 50');
+  END IF;
+  IF (COALESCE((p_stopat <=> NULL), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Loops: argument stopAt is null, which its schema doesn''t allow');
+  END IF;
+  IF (COALESCE(((COALESCE((p_stopat < (-2147483648)), 0) <> 0) OR (COALESCE((p_stopat > 2147483647), 0) <> 0)), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Loops: argument stopAt is out of the INTEGER range');
+  END IF;
+  IF (COALESCE((p_items <=> NULL), 0) <> 0) THEN
+    __sprig_l44_v1_lib.fail(39866, 'Test.Loops: argument items is null, which its schema doesn''t allow');
+  END IF;
   v_ctx_down := (0 + 0e0);
   v_downloop_value := 2.5e0;
   v_downloop_to := (0 + 0e0);
@@ -92,7 +143,7 @@ BEGIN
   WHILE (COALESCE(((COALESCE((v_downloop_value > v_downloop_to), 0) <> 0) AND (COALESCE((NOT (COALESCE(v_downloop_break, 0) <> 0)), 0) <> 0)), 0) <> 0) LOOP
     v_downloop_index := v_downloop_value;
     v_downloop_value := (v_downloop_value + (-5e-1));
-    v_ctx_down := (v_ctx_down + v_downloop_index);
+    v_ctx_down := (CASE WHEN (COALESCE((v_ctx_down <=> NULL), 0) <> 0) THEN v_downloop_index ELSE (v_ctx_down + __sprig_l44_v1_lib.nn_f(v_downloop_index)) END);
   END LOOP;
   v_ctx_evens := 0;
   v_ctx_spend := (0 + 0e0);
@@ -106,7 +157,7 @@ BEGIN
     v_each_index := v_each_value;
     v_each_each := (CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_source, CONCAT('$[', v_each_value, ']'))) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_source, CONCAT('$[', v_each_value, ']')) END);
     v_each_value := (v_each_value + 1);
-    v_ctx_spend := (v_ctx_spend + (CAST(JSON_VALUE((CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_each, '$."price"')) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_each, '$."price"') END), '$') AS DOUBLE) * CAST(JSON_VALUE((CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_each, '$."qty"')) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_each, '$."qty"') END), '$') AS DOUBLE)));
+    v_ctx_spend := (CASE WHEN (COALESCE((v_ctx_spend <=> NULL), 0) <> 0) THEN ((__sprig_l44_v1_lib.nn_f(CAST(JSON_VALUE((CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_each, '$."price"')) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_each, '$."price"') END), '$') AS DOUBLE)) - 0) * (__sprig_l44_v1_lib.nn_f(CAST(JSON_VALUE((CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_each, '$."qty"')) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_each, '$."qty"') END), '$') AS DOUBLE)) - 0)) ELSE (v_ctx_spend + ((__sprig_l44_v1_lib.nn_f(CAST(JSON_VALUE((CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_each, '$."price"')) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_each, '$."price"') END), '$') AS DOUBLE)) - 0) * (__sprig_l44_v1_lib.nn_f(CAST(JSON_VALUE((CASE WHEN JSON_TYPE(JSON_EXTRACT(v_each_each, '$."qty"')) = 'NULL' THEN NULL ELSE JSON_EXTRACT(v_each_each, '$."qty"') END), '$') AS DOUBLE)) - 0))) END);
   END LOOP;
   v_ctx_total := 0;
   v_range_value := 1;
@@ -115,9 +166,9 @@ BEGIN
   WHILE (COALESCE(((COALESCE((v_range_value < v_range_to), 0) <> 0) AND (COALESCE((NOT (COALESCE(v_range_break, 0) <> 0)), 0) <> 0)), 0) <> 0) LOOP
     v_range_index := v_range_value;
     v_range_value := (v_range_value + 1);
-    v_ctx_total := (v_ctx_total + v_range_index);
-    IF (COALESCE((MOD(v_range_index, 2) <=> 0), 0) <> 0) THEN
-      v_ctx_evens := (v_ctx_evens + 1);
+    v_ctx_total := (CASE WHEN (COALESCE((v_ctx_total <=> NULL), 0) <> 0) THEN v_range_index ELSE (v_ctx_total + __sprig_l44_v1_lib.nn_i(v_range_index)) END);
+    IF (COALESCE((MOD(__sprig_l44_v1_lib.nn_i(v_range_index), 2) <=> 0), 0) <> 0) THEN
+      v_ctx_evens := (CASE WHEN (COALESCE((v_ctx_evens <=> NULL), 0) <> 0) THEN 1 ELSE (v_ctx_evens + 1) END);
     END IF;
   END LOOP;
   v_count_value := 0;

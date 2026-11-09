@@ -1,11 +1,23 @@
-//! `sprig-agent`: the agent role, the node agent for VMs: MariaDB install, settings, health, backups.
+//! `sprig-agent`: the agent role, the node agent for VMs: MariaDB install,
+//! settings, health, backups.
 //!
-//! Layer 3 (roles). Design: [chapter 27](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/27-provisioning.md) (Provisioning) of the SprigDB low-level design.
+//! Layer 3 (roles). Design: [chapter 27](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/27-provisioning.md) (Provisioning) and
+//! [chapter 25](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/25-failover.md) (Failover) of the SprigDB low-level design.
 //!
-//! **Skeleton.** [`run`] starts, reports ready, waits for shutdown and
-//! drains; it does no agent work: no plan engine or MariaDB supervision yet (chapter 27 steps 4-6).
+//! What exists: [`fence`], chapter 25's self-fence of the agent's MariaDB
+//! node (R2): the DC permit, the writer lease, `read_only` and session
+//! kills, and the watchdog. It runs when `[agent] cluster` names the
+//! node's cluster. Not yet: chapter 27's plan engine and MariaDB
+//! supervision (steps 4-6).
+
+pub mod fence;
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use sprig_common::{Result, Role, RoleContext};
+use sprig_meta::MetaStore;
+use sprig_meta::etcd::{DEFAULT_REQUEST_TIMEOUT, EtcdTls, connect_tiers};
 
 /// Runs the agent role until `ctx.shutdown` is cancelled.
 ///
@@ -14,16 +26,47 @@ use sprig_common::{Result, Role, RoleContext};
 /// process ready.
 ///
 /// # Errors
-/// None yet; later, failures that stop the role.
+/// 39998 for unreadable TLS files or an `[agent]` that names no node of
+/// its cluster; 39500 if no etcd seed answers at start-up.
 pub async fn run(ctx: RoleContext) -> Result<()> {
     let role = Role::Agent;
-    tracing::warn!(%role, "skeleton only: no plan engine or MariaDB supervision yet (chapter 27 steps 4-6)");
+    let cfg = &ctx.config;
+    if cfg.agent.cluster.is_none() {
+        tracing::warn!(%role, "no [agent] cluster: no node to fence; no plan engine yet (chapter 27 steps 4-6)");
+        ctx.health.set_ready();
+        ctx.shutdown.cancelled().await;
+        ctx.health.set_draining();
+        return Ok(());
+    }
+    let tls = cfg.tls.as_ref().map(EtcdTls::from_files).transpose()?;
+    let tiers = connect_tiers(
+        cfg.node.dc.clone(),
+        &cfg.meta,
+        tls,
+        DEFAULT_REQUEST_TIMEOUT,
+        false,
+    )
+    .await?;
+    let store: Arc<dyn MetaStore> = Arc::new(tiers.dc);
+    // The cluster may be registered after the agent starts.
+    let target = loop {
+        match fence::target(&*store, &cfg.agent).await {
+            Ok(t) => break t,
+            Err(e) => {
+                tracing::warn!(error = %e, "can't find the node to fence yet; retrying");
+                tokio::select! {
+                    () = ctx.shutdown.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+            }
+        }
+    };
+    let agent = fence::AgentFence::new(cfg.node.id(), cfg.node.dc.clone(), store, target);
     ctx.health.set_ready();
     tracing::info!(%role, "ready");
-
-    ctx.shutdown.cancelled().await;
-
+    let r = agent
+        .run(Duration::from_millis(1000), ctx.shutdown.clone())
+        .await;
     ctx.health.set_draining();
-    tracing::info!(%role, "draining: nothing to drain yet");
-    Ok(())
+    r
 }

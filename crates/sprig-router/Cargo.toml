@@ -17,10 +17,14 @@ serde_json.workspace = true
 sprig-common.workspace = true
 # Column definitions of shard results (chapter 05's codec).
 sprig-proto-mysql.workspace = true
+# Chapter 17's `router.*` keys (chapter 03, "Declaring a key").
+sprig-settings.workspace = true
 # Chapter 15: key normalization, routing_hash, collations.
 sprig-shard.workspace = true
 # Statement ASTs (chapter 17, "Pipeline": sqlparser-rs).
 sqlparser.workspace = true
+# Parallel shard streams (chapter 17, "Streaming, backpressure and packets").
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
@@ -28,6 +32,10 @@ tracing.workspace = true
 # reference MariaDB.
 mysql_async.workspace = true
 proptest.workspace = true
+# The suite writes table groups and shard maps as chapters 15 and 20 do.
+sprig-catalog.workspace = true
+sprig-meta.workspace = true
+sprig-txn.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

@@ -14,8 +14,12 @@
 //!
 //! Modes: `auto` writes `applied`/`scheduled` and submits; `recommend`
 //! writes `recommended`/`proposed`; `dry_run` writes `dry_run`/`proposed`;
-//! `off` writes nothing. A recommendation or dry-run decision for the same
-//! shard and target is written once per shard cooldown, not every run.
+//! `off` writes nothing. A recommendation or dry-run decision is written
+//! once, and again only when it changes materially (another target or
+//! reason, or its net value moved by more than [`RECOMMEND_MATERIAL`]) or
+//! [`RECOMMEND_REPEAT_SECS`] later (at least the shard cooldown). It used
+//! to be written again after every shard cooldown, which in a busy fleet
+//! repeated the same advice every few minutes.
 
 use std::collections::BTreeMap;
 
@@ -164,6 +168,31 @@ pub struct Scheduled {
     pub blocked: Option<String>,
 }
 
+/// A recommendation is written again after this long even when nothing
+/// changed (a day; the shard cooldown when longer).
+pub const RECOMMEND_REPEAT_SECS: Timestamp = 86_400;
+
+/// A recommendation whose net value moved by more than this fraction is
+/// written again at once.
+pub const RECOMMEND_MATERIAL: f64 = 0.25;
+
+/// The last recommendation (or dry-run decision) written for a shard.
+#[derive(Debug, Clone, PartialEq)]
+struct Recommended {
+    to: ClusterId,
+    reason: MoveReason,
+    value: f64,
+    at: Timestamp,
+}
+
+impl Recommended {
+    /// Whether `m`, at `now`, says the same thing as this one did.
+    fn same(&self, m: &PlannedMove, now: Timestamp, repeat: Timestamp) -> bool {
+        let close = (m.value - self.value).abs() <= RECOMMEND_MATERIAL * self.value.abs().max(1e-9);
+        self.to == m.to && self.reason == m.reason && close && self.at + repeat > now
+    }
+}
+
 /// The scheduler and its memory.
 #[derive(Debug, Clone, Default)]
 pub struct Scheduler {
@@ -174,7 +203,7 @@ pub struct Scheduler {
     memory: BTreeMap<ShardKey, ShardMemory>,
     last_move_off: BTreeMap<ClusterId, Timestamp>,
     tenant_moves: BTreeMap<TenantId, Vec<Timestamp>>,
-    recommended: BTreeMap<ShardKey, (ClusterId, Timestamp)>,
+    recommended: BTreeMap<ShardKey, Recommended>,
     rejected_seen: BTreeMap<(ShardKey, ClusterId), Timestamp>,
     in_flight: Vec<InFlight>,
     /// The thrash counters.
@@ -300,15 +329,25 @@ impl Scheduler {
                     .tenants
                     .get(&m.tenant)
                     .map_or(86_400, |t| t.knobs.shard_cooldown_secs);
-                if let Some((to, at)) = self.recommended.get(&m.shards[0])
-                    && to == &m.to
-                    && *at + cooldown > now
+                let repeat = RECOMMEND_REPEAT_SECS.max(cooldown);
+                if self
+                    .recommended
+                    .get(&m.shards[0])
+                    .is_some_and(|r| r.same(m, now, repeat))
                 {
                     sch.blocked = Some("already_recommended".to_owned());
                     out.push(sch);
                     continue;
                 }
-                self.recommended.insert(m.shards[0], (m.to.clone(), now));
+                self.recommended.insert(
+                    m.shards[0],
+                    Recommended {
+                        to: m.to.clone(),
+                        reason: m.reason,
+                        value: m.value,
+                        at: now,
+                    },
+                );
             }
             let (dmode, outcome) = match mode {
                 BalancerMode::Auto => (Mode::Applied, Outcome::Scheduled),

@@ -186,6 +186,40 @@ pub(super) async fn refuse_too_many(mut sock: TcpStream, protocol: Protocol, tls
     let _ = sock.shutdown().await;
 }
 
+/// Refuses a connection while the DC returns from an outage (chapter 25):
+/// MySQL gets 39531 in place of the greeting, HTTP a 503 with
+/// `Retry-After`.
+pub(super) async fn refuse_admission(
+    mut sock: TcpStream,
+    protocol: Protocol,
+    tls: TlsMode,
+    wait: std::time::Duration,
+) {
+    match protocol {
+        Protocol::MySql84 | Protocol::MariaDb => {
+            let p = crate::failover::admission_err_packet(wait);
+            let mut frame = Vec::with_capacity(p.len() + 4);
+            let len = u32::try_from(p.len()).unwrap_or(0).to_le_bytes();
+            frame.extend_from_slice(&len[..3]);
+            frame.push(0);
+            frame.extend_from_slice(&p);
+            let _ = sock.write_all(&frame).await;
+        }
+        Protocol::Http if tls != TlsMode::Required => {
+            let secs = wait.as_secs().max(1);
+            let body = "Admission backoff: the data center is returning from an outage\n";
+            let head = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain\r\n\
+                 retry-after: {secs}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+        }
+        _ => {}
+    }
+    let _ = sock.shutdown().await;
+}
+
 /// Answers a plaintext HTTP request on a `required` listener with 400.
 async fn refuse_http(mut sock: TcpStream) {
     if sock.write_all(HTTP_TLS_REQUIRED).await.is_err() || sock.shutdown().await.is_err() {

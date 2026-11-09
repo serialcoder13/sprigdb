@@ -39,7 +39,10 @@ fn loss_comes_from_semi_sync_or_the_lag() {
     assert!(check_rpo(Some(Duration::from_secs(1)), rpo, false).is_ok());
     assert!(check_rpo(Some(Duration::from_secs(9)), rpo, false).is_err());
     assert!(check_rpo(None, rpo, false).is_err(), "unknown loss stops");
-    assert!(check_rpo(Some(Duration::ZERO), rpo, true).is_err(), "manual stops");
+    assert!(
+        check_rpo(Some(Duration::ZERO), rpo, true).is_err(),
+        "manual stops"
+    );
 }
 
 #[test]
@@ -51,7 +54,10 @@ fn diverged_transactions_are_past_the_applied_position() {
     assert!(!d.contains(&"1-101-117".parse().expect("gtid")));
     assert!(!d.contains(&"1-102-118".parse().expect("gtid")));
     assert!(diverged("1-101-117", "1-101-117", 1).is_none());
-    assert!(diverged("1-101-110", "1-101-117", 1).is_none(), "behind, not diverged");
+    assert!(
+        diverged("1-101-110", "1-101-117", 1).is_none(),
+        "behind, not diverged"
+    );
     assert!(diverged("", "1-101-117", 1).is_none());
 }
 
@@ -63,6 +69,9 @@ fn binlog_event_infos_parse() {
     );
     assert_eq!(gtid_of("GTID 1-101-8").map(|g| g.seq), Some(8));
     assert_eq!(gtid_of("COMMIT"), None);
-    assert_eq!(table_of("table_id: 33 (r2_db.items)"), Some("r2_db.items".into()));
+    assert_eq!(
+        table_of("table_id: 33 (r2_db.items)"),
+        Some("r2_db.items".into())
+    );
     assert_eq!(table_of("nothing"), None);
 }

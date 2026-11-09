@@ -214,24 +214,57 @@ impl Session {
     }
 }
 
+/// After a failed or timed-out keep-alive, the next one goes this soon.
+pub const RETRY_AFTER: Duration = Duration::from_millis(250);
+
 /// The keep-alive loop.
+///
+/// One keep-alive every `period`. Each may take as long as the session is
+/// still certainly alive (its deadline minus the margin): a slow etcd that
+/// answers within the TTL keeps the session (r2next). A keep-alive that
+/// fails or runs out of that time is retried after [`RETRY_AFTER`], until
+/// the deadline passes; only then is the session lost. The deadline only
+/// moves on an answer, from the time read before sending, so a lease that
+/// can't be renewed is still given up on time.
 async fn keep(store: Arc<dyn MetaStore>, s: Arc<State>, period: Duration) {
+    let mut wait = period;
     loop {
-        tokio::time::sleep(period).await;
+        tokio::time::sleep(wait).await;
         if *s.lost.borrow() {
             return;
         }
+        wait = period;
         if !s.halted.load(Ordering::SeqCst) {
             let ts = s.clock.now();
-            match tokio::time::timeout(period, store.keep_alive(s.lease)).await {
-                Ok(Ok(Some(granted))) => s.extend(ts + granted),
-                Ok(Ok(None)) => {
-                    tracing::warn!(lease = s.lease.0, "session lease ended");
-                    s.mark_lost();
-                    return;
+            let budget = s
+                .deadline()
+                .checked_sub(s.margin)
+                .map_or(Duration::ZERO, |v| v.saturating_duration_since(ts));
+            if !budget.is_zero() {
+                let sent = tokio::time::Instant::now();
+                match tokio::time::timeout(budget, store.keep_alive(s.lease)).await {
+                    Ok(Ok(Some(granted))) => {
+                        s.extend(ts + granted);
+                        // Keep the cadence from the send.
+                        wait = period.saturating_sub(sent.elapsed());
+                    }
+                    Ok(Ok(None)) => {
+                        tracing::warn!(lease = s.lease.0, "session lease ended");
+                        s.mark_lost();
+                        return;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(lease = s.lease.0, error = %e, "keep-alive failed; retrying");
+                        wait = RETRY_AFTER;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            lease = s.lease.0,
+                            "keep-alive got no answer while the session was valid; retrying"
+                        );
+                        wait = RETRY_AFTER;
+                    }
                 }
-                Ok(Err(e)) => tracing::warn!(lease = s.lease.0, error = %e, "keep-alive failed"),
-                Err(_) => tracing::warn!(lease = s.lease.0, "keep-alive timed out"),
             }
         }
         if s.expired() {

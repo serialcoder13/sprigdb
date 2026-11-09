@@ -182,7 +182,11 @@ mod tests {
     impl DcProbe for Scripted {
         async fn probe(&self, _dc: &DcId) -> ProbeRound {
             let mut v = self.0.lock().expect("lock");
-            if v.len() > 1 { v.remove(0) } else { v[0].clone() }
+            if v.len() > 1 {
+                v.remove(0)
+            } else {
+                v[0].clone()
+            }
         }
     }
 
@@ -210,14 +214,26 @@ mod tests {
 
     async fn run(rounds: Vec<ProbeRound>) -> Verdict {
         let p = Scripted(Mutex::new(rounds));
-        observe(&dc("ams1"), true, &dc("fra1"), &p, 3, Duration::ZERO, vec![]).await
+        observe(
+            &dc("ams1"),
+            true,
+            &dc("fra1"),
+            &p,
+            3,
+            Duration::ZERO,
+            vec![],
+        )
+        .await
     }
 
     #[tokio::test]
     async fn a_valid_permit_anywhere_means_alive() {
         let v = run(vec![
             ProbeRound::default(),
-            ProbeRound { pings: vec![ping(true)], writers: vec![] },
+            ProbeRound {
+                pings: vec![ping(true)],
+                writers: vec![],
+            },
         ])
         .await;
         assert_eq!(v.verdict, VerdictKind::Alive);

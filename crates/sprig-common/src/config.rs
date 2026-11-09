@@ -45,9 +45,9 @@ pub struct ProcessConfig {
     /// Worker runtime sizing.
     #[serde(default)]
     pub worker: RuntimeConfig,
-    /// Node agent runtime sizing.
+    /// Node agent runtime sizing and the node it fences (chapter 25).
     #[serde(default)]
-    pub agent: RuntimeConfig,
+    pub agent: AgentConfig,
     /// Kubernetes operator runtime sizing.
     #[serde(default)]
     pub operator: RuntimeConfig,
@@ -184,14 +184,6 @@ pub struct GatewayConfig {
     /// "Registration records"). Unset: the hostname.
     #[serde(default)]
     pub advertise_addr: Option<String>,
-    /// Development and test hook (chapter 17, R1): the JSON file describing
-    /// tenants' sharded and reference tables, their groups and shards
-    /// (format in `sprig_router::TopologyFile`), until chapter 15's table
-    /// groups reach the catalog. Re-read within a second of a change.
-    /// Unset: the router routes nothing and every statement is relayed as
-    /// before.
-    #[serde(default)]
-    pub router_topology_file: Option<PathBuf>,
 }
 
 /// `[gateway] login_mode`.
@@ -254,6 +246,18 @@ pub struct ControllerConfig {
     /// production.
     #[serde(default)]
     pub autoindex_test_clock_file: Option<PathBuf>,
+    /// Where the controller serves chapter 25's internal services
+    /// (`Permits.Renew`, `Peer.Ping`, `Observer.ObserveDc`, and chapter
+    /// 23's relay reads) as JSON over HTTP until the mTLS gRPC port 7400
+    /// exists. Published in the controller's registration, so gateways,
+    /// agents and other DCs' observers find it. Port 0 picks a free port.
+    #[serde(default = "default_internal_addr")]
+    pub internal_addr: SocketAddr,
+    /// The address other processes reach `internal_addr` at, when it
+    /// differs from the bound one (a published port, a proxy). Unset: the
+    /// bound address (an unspecified IP becomes the hostname).
+    #[serde(default)]
+    pub internal_advertise: Option<String>,
 }
 
 impl Default for ControllerConfig {
@@ -266,8 +270,43 @@ impl Default for ControllerConfig {
             admin_token_file: None,
             workload_key_file: None,
             autoindex_test_clock_file: None,
+            internal_addr: default_internal_addr(),
+            internal_advertise: None,
         }
     }
+}
+
+/// The internal services' default address: loopback, any free port.
+fn default_internal_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 0))
+}
+
+/// `[agent]`: runtime sizing and the MariaDB node the agent fences
+/// (chapter 25, "DC leases, sub-leases and self-fencing" steps 6 and 9;
+/// chapter 27's plan engine comes later).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// Tokio worker threads; 0 means one per CPU.
+    #[serde(default)]
+    pub worker_threads: usize,
+    /// The cluster the node belongs to, such as `fra1-c1`. Unset: the
+    /// agent fences nothing (the chapter 27 skeleton).
+    #[serde(default)]
+    pub cluster: Option<String>,
+    /// The node's id in the cluster record. Unset: the cluster's node
+    /// whose address is [`AgentConfig::mysql_addr`].
+    #[serde(default)]
+    pub node: Option<String>,
+    /// `host:port` of the local MariaDB. Unset: the node's address in the
+    /// cluster record.
+    #[serde(default)]
+    pub mysql_addr: Option<String>,
+    /// The secret reference of the account the agent fences with (needs
+    /// `READ_ONLY ADMIN` and `CONNECTION ADMIN`), `file:<path>#<table>`.
+    /// Unset: the cluster's `sprig_ctl` reference.
+    #[serde(default)]
+    pub credentials: Option<String>,
 }
 
 /// The Admin API's default address on a controller: loopback, port 7480.
@@ -402,7 +441,9 @@ impl ProcessConfig {
                 worker_threads: self.controller.worker_threads,
             },
             crate::Role::Worker => self.worker.clone(),
-            crate::Role::Agent => self.agent.clone(),
+            crate::Role::Agent => RuntimeConfig {
+                worker_threads: self.agent.worker_threads,
+            },
             crate::Role::Operator => self.operator.clone(),
         }
     }

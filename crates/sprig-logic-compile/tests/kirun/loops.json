@@ -49,7 +49,7 @@
   "addSpend": {"statementName": "addSpend", "namespace": "System.Context", "name": "Set",
     "dependentStatements": {"Steps.each.iteration": true},
     "parameterMap": {"name": {"x": {"type": "VALUE", "value": "Context.spend"}},
-                     "value": {"x": {"type": "EXPRESSION", "expression": "Context.spend + Steps.each.iteration.each.price * Steps.each.iteration.each.qty"}}}},
+                     "value": {"x": {"type": "EXPRESSION", "expression": "Context.spend + (Steps.each.iteration.each.price - 0) * (Steps.each.iteration.each.qty - 0)"}}}},
   "downLoop": {"statementName": "downLoop", "namespace": "System.Loop", "name": "RangeLoop",
     "dependentStatements": {"Steps.mkDown.output": true},
     "parameterMap": {"from": {"x": {"type": "VALUE", "value": 2.5}}, "to": {"x": {"type": "VALUE", "value": 0}},

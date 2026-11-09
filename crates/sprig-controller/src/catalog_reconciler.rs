@@ -42,11 +42,11 @@ use std::time::{Duration, SystemTime};
 use sprig_catalog::cache::{Loaded, TenantCatalog};
 use sprig_catalog::ddl::{
     DdlBackend, DdlEngine, DdlExecutor, DdlIntent, DdlTx, IntentOp, LOWER_CASE_TABLE_NAMES,
-    MariaExecutor, ORPHAN_RETENTION_DAYS, RECONCILE_INTERVAL_SECONDS, Resolution,
+    MariaExecutor, ORPHAN_RETENTION_DAYS, RECONCILE_INTERVAL_SECONDS, Resolution, RoutedExecutor,
     STUCK_STATE_MINUTES, TOMBSTONE_RETENTION_HOURS, drop_schema, object_key, shard_schemas,
 };
 use sprig_catalog::store::{DbState, ObjectKind, ObjectState, PurgeReport, Snapshot};
-use sprig_common::ids::{DbId, DcId, TenantId};
+use sprig_common::ids::{ClusterId, DbId, DcId, GroupId, TenantId};
 use sprig_common::names::{SchemaName, is_internal_object};
 use sprig_common::time::Clock;
 use sprig_common::{Result, SprigError};
@@ -64,6 +64,20 @@ pub trait ExecutorSource: Send + Sync + 'static {
     /// # Errors
     /// 39072 if the tenant has no catalog here; the cluster's errors.
     async fn executor(&self, tenant: TenantId) -> Result<Arc<dyn DdlExecutor>>;
+
+    /// An executor that also reaches every shard of a multi-shard DDL job
+    /// (chapter 21), each on its recorded cluster. The default is
+    /// [`executor`](Self::executor) (every shard on the catalog's cluster).
+    ///
+    /// # Errors
+    /// As [`executor`](Self::executor); a shard's cluster unreachable.
+    async fn shard_executor(
+        &self,
+        tenant: TenantId,
+        _shards: &[(SchemaName, Option<ClusterId>)],
+    ) -> Result<Arc<dyn DdlExecutor>> {
+        self.executor(tenant).await
+    }
 }
 
 /// [`ExecutorSource`] through the catalog's shard map and the cluster
@@ -92,6 +106,27 @@ impl ExecutorSource for PoolExecutors {
         })?;
         let pool = self.locator.pools().writer(&cluster).await?;
         Ok(Arc::new(MariaExecutor::new(pool)))
+    }
+
+    async fn shard_executor(
+        &self,
+        tenant: TenantId,
+        shards: &[(SchemaName, Option<ClusterId>)],
+    ) -> Result<Arc<dyn DdlExecutor>> {
+        let cluster = self.locator.cluster_of(tenant).await?.ok_or_else(|| {
+            SprigError::new(
+                sprig_common::SprigCode::TenantNotReady,
+                format!("tenant {tenant} has no catalog in this data center"),
+            )
+        })?;
+        let pools = self.locator.pools();
+        let mut routed = RoutedExecutor::new(MariaExecutor::new(pools.writer(&cluster).await?));
+        for (schema, c) in shards {
+            let c = c.clone().unwrap_or_else(|| cluster.clone());
+            let pool = pools.writer(&c).await?;
+            routed = routed.route(*schema, c, MariaExecutor::new(pool));
+        }
+        Ok(Arc::new(routed))
     }
 }
 
@@ -131,6 +166,9 @@ pub enum Finding {
     TombstonesPurged,
     /// The tenant's count of clamped or ignored setting values changed.
     ClampedValues,
+    /// A database of a tenant being deleted, dropped so the deletion can
+    /// finish.
+    DeletedTenantDatabase,
 }
 
 impl Finding {
@@ -146,6 +184,7 @@ impl Finding {
             Finding::OutsideObject => "outside_object",
             Finding::TombstonesPurged => "tombstones_purged",
             Finding::ClampedValues => "clamped_values",
+            Finding::DeletedTenantDatabase => "deleted_tenant_database",
         }
     }
 }
@@ -262,6 +301,8 @@ pub struct PassReport {
     pub clamped: BTreeMap<&'static str, usize>,
     /// Steps that failed (the pass carried on).
     pub errors: Vec<String>,
+    /// Databases of a tenant being deleted, dropped.
+    pub deleted_databases: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -289,6 +330,35 @@ where
     fixed: Option<ReconcileConfig>,
     clock: Arc<dyn Clock>,
     memory: Mutex<HashMap<TenantId, TenantMemory>>,
+    /// The groups with shard maps (chapter 20): their shard schemas are
+    /// never orphans. `None`: no shard schema of a non-default group is.
+    group_maps: Option<Arc<dyn GroupMaps>>,
+}
+
+/// The table groups of a tenant that have shard maps (chapters 15 and
+/// 20). A split's new shards, a merge's target and a retired source all
+/// belong to such a group: their schemas are the mover's and the sharding
+/// loop's to create and drop, never the reconciler's.
+#[async_trait::async_trait]
+pub trait GroupMaps: Send + Sync {
+    /// Group ids with a shard map (group 0, the catalog's, excluded).
+    ///
+    /// # Errors
+    /// The store's.
+    async fn groups(&self, tenant: TenantId) -> Result<BTreeSet<GroupId>>;
+}
+
+#[async_trait::async_trait]
+impl GroupMaps for sprig_shard::ShardMapStore {
+    async fn groups(&self, tenant: TenantId) -> Result<BTreeSet<GroupId>> {
+        Ok(self
+            .list(tenant)
+            .await?
+            .into_iter()
+            .map(|m| m.group)
+            .filter(|g| g.0 != 0)
+            .collect())
+    }
 }
 
 impl<B: DdlBackend> std::fmt::Debug for CatalogReconciler<B>
@@ -345,7 +415,17 @@ where
             fixed: None,
             clock,
             memory: Mutex::new(HashMap::new()),
+            group_maps: None,
         }
+    }
+
+    /// Recognises the shard schemas of groups with shard maps in
+    /// `maps` (chapter 20); without it, no shard schema of a group other
+    /// than a database's default group is ever an orphan.
+    #[must_use]
+    pub fn with_group_maps(mut self, maps: Arc<dyn GroupMaps>) -> Self {
+        self.group_maps = Some(maps);
+        self
     }
 
     /// The same loop with fixed timing (tests).
@@ -407,7 +487,20 @@ where
         let mut resolved_any = false;
         for intent in DdlIntent::all(&snap.settings) {
             let age = now.duration_since(intent.started()).unwrap_or_default();
-            let schemas = intent_schemas(tenant, &intent, &snap);
+            // Chapter 21: a multi-shard job reaches every shard's cluster.
+            let (exec, schemas) = match &intent.shards {
+                Some(set) => {
+                    let routes = set.routes();
+                    match self.executors.shard_executor(tenant, &routes).await {
+                        Ok(e) => (e, routes.into_iter().map(|(s, _)| s).collect()),
+                        Err(e) => {
+                            report.errors.push(format!("job {}: {e}", intent.job));
+                            continue;
+                        }
+                    }
+                }
+                None => (Arc::clone(&exec), intent_schemas(tenant, &intent, &snap)),
+            };
             let mut busy = false;
             for s in &schemas {
                 busy |= exec.busy(s).await.unwrap_or(true);
@@ -441,6 +534,56 @@ where
             snap = backend.full_snapshot(tenant).await?;
         }
         let lctn = self.lower_case_table_names(tenant, &snap);
+
+        // A tenant being deleted: nobody can log in to drop its databases
+        // any more, and cleanup waits for them (chapter 08, "Deleting a
+        // tenant"), so they go here, through the DDL path, once no job
+        // holds them; the rest of the pass doesn't apply.
+        if self
+            .directory
+            .get(tenant)
+            .await?
+            .is_some_and(|e| e.body().state == TenantState::Deleting)
+        {
+            let held = held_databases(&snap);
+            for db in snap
+                .databases
+                .iter()
+                .filter(|d| d.state != DbState::Dropped && !held.contains(&d.db_id))
+            {
+                let sql = format!(
+                    "DROP DATABASE IF EXISTS {}",
+                    sprig_common::names::quote(&db.name)
+                );
+                let req = sprig_catalog::ddl::DdlRequest {
+                    tenant,
+                    statement: sprig_catalog::ddl::DdlStatement::DropDatabase {
+                        name: db.name.clone(),
+                        if_exists: true,
+                    },
+                    sql: &sql,
+                    logical_sql: &sql,
+                    current_db: None,
+                    user: None,
+                    lower_case_table_names: lctn,
+                };
+                match self.engine.execute(&req, &*exec).await {
+                    Ok(_) => {
+                        self.decide(
+                            tenant,
+                            Finding::DeletedTenantDatabase,
+                            db.name.clone(),
+                            "dropped",
+                            format!("database {} of a tenant being deleted", db.name),
+                        )
+                        .await;
+                        report.deleted_databases.push(db.name.clone());
+                    }
+                    Err(e) => report.errors.push(format!("database {}: {e}", db.name)),
+                }
+            }
+            return Ok(report);
+        }
 
         // 2. Databases against their schemas.
         let held: BTreeSet<DbId> = held_databases(&snap);
@@ -575,11 +718,31 @@ where
             .iter()
             .flat_map(|d| shard_schemas(tenant, d))
             .collect();
+        // Shard schemas of table groups (splits, merges, the advisor's
+        // regroup) are known when their group has a shard map; when the
+        // maps can't be read, every one of them is known.
+        let default_groups: BTreeSet<GroupId> = expected
+            .iter()
+            .filter_map(|s| match s {
+                SchemaName::Shard { group, .. } => Some(*group),
+                _ => None,
+            })
+            .collect();
+        let mapped: Option<BTreeSet<GroupId>> = match &self.group_maps {
+            Some(m) => m.groups(tenant).await.ok(),
+            None => None,
+        };
+        let known_group = |s: &SchemaName| match s {
+            SchemaName::Shard { group, .. } if !default_groups.contains(group) => {
+                mapped.as_ref().is_none_or(|m| m.contains(group))
+            }
+            _ => false,
+        };
         match exec.tenant_schemas(tenant).await {
             Ok(present) => {
                 let orphans: Vec<SchemaName> = present
                     .into_iter()
-                    .filter(|s| !expected.contains(s))
+                    .filter(|s| !expected.contains(s) && !known_group(s))
                     .collect();
                 let mut fresh = Vec::new();
                 let mut due = Vec::new();
@@ -832,7 +995,9 @@ fn intent_schemas(tenant: TenantId, intent: &DdlIntent, snap: &Snapshot) -> Vec<
 
 /// Whether the loop reconciles a tenant in `state`.
 const fn reconcilable(state: TenantState) -> bool {
-    matches!(state, TenantState::Active)
+    // A tenant being deleted too: a stuck job or a database left behind
+    // would otherwise keep it `deleting` for ever.
+    matches!(state, TenantState::Active | TenantState::Deleting)
 }
 
 #[async_trait::async_trait]

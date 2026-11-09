@@ -36,6 +36,22 @@ pub static UNSAFE_PRIVILEGE_ACTION: Setting<Cow<'static, str>> = Setting {
 };
 sprig_settings::register!(UNSAFE_PRIVILEGE_ACTION);
 
+/// `auth.partial_revokes`: MySQL's `partial_revokes` (R4). On, a
+/// database-level `REVOKE` of a privilege the grantee holds at `*.*`
+/// stores a restriction (shown as `REVOKE ... ON db.*`); off, it fails
+/// with 1141, as MySQL 8.4 does by default.
+pub static PARTIAL_REVOKES: Setting<bool> = Setting {
+    key: "auth.partial_revokes",
+    default: false,
+    scopes: Scopes::TREE,
+    hard: HardBounds::NONE,
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 29,
+    doc: "MySQL's partial_revokes: REVOKE on db.* of what *.* gives becomes a restriction",
+};
+sprig_settings::register!(PARTIAL_REVOKES);
+
 /// `auth.authorizer`: the authorization engine of the tenant's sessions
 /// ([`super::authorizer`]). Only `mysql_grants` (MySQL 8.4's grant model)
 /// exists; the bound grows as engines are added. Read when a session

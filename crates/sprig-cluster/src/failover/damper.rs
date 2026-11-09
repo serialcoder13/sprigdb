@@ -90,7 +90,10 @@ impl FlapDamper {
             let why = if s.probes_timed_out && n == 0 {
                 "probes time out: the writer is slow, not down".to_owned()
             } else {
-                format!("{n} of {} sources say the writer is down", self.need_sources)
+                format!(
+                    "{n} of {} sources say the writer is down",
+                    self.need_sources
+                )
             };
             return Damp::Wait(why);
         }
@@ -140,7 +143,11 @@ mod tests {
         let t1 = t0 + Duration::from_secs(600);
         assert!(matches!(d.may_fail_over(&s, t1), Damp::Suppress(_)));
         let hard = DownSources { hard: true, ..s };
-        assert_eq!(d.may_fail_over(&hard, t1), Damp::Proceed, "a hard failure proceeds");
+        assert_eq!(
+            d.may_fail_over(&hard, t1),
+            Damp::Proceed,
+            "a hard failure proceeds"
+        );
         let t2 = t0 + Duration::from_secs(31 * 60);
         assert_eq!(d.may_fail_over(&s, t2), Damp::Proceed);
     }

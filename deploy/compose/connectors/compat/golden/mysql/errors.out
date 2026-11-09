@@ -1,0 +1,29 @@
+ERROR 1062 (23000): Duplicate entry '1' for key 'c_err_p.PRIMARY'
+ERROR 1062 (23000): Duplicate entry 'a' for key 'c_err_p.uk_u'
+ERROR 1062 (23000): Duplicate entry 'a' for key 'c_err_p.uk_u'
+ERROR 1364 (HY000): Field 'v' doesn't have a default value
+ERROR 1048 (23000): Column 'v' cannot be null
+ERROR 1452 (23000): Cannot add or update a child row: a foreign key constraint fails (`@DB@`.`c_err_c`, CONSTRAINT `fk_c_err` FOREIGN KEY (`pid`) REFERENCES `c_err_p` (`id`))
+ERROR 1451 (23000): Cannot delete or update a parent row: a foreign key constraint fails (`@DB@`.`c_err_c`, CONSTRAINT `fk_c_err` FOREIGN KEY (`pid`) REFERENCES `c_err_p` (`id`))
+ERROR 1054 (42S22): Unknown column 'nocol' in 'field list'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'field list'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'where clause'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'group statement'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'having clause'
+ERROR 1054 (42S22): Unknown column 'c_err_p.nocol' in 'on clause'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'order clause'
+ERROR 1052 (23000): Column 'id' in where clause is ambiguous
+ERROR 1146 (42S02): Table '@DB@.c_err_nosuch' doesn't exist
+ERROR 1366 (HY000): Incorrect integer value: 'x' for column 'id' at row 1
+ERROR 1406 (22001): Data too long for column 'u' at row 1
+ERROR 1292 (22007): Incorrect date value: '2020-13-45' for column 'd' at row 1
+ERROR 1060 (42S21): Duplicate column name 'v'
+ERROR 1091 (42000): Can't DROP 'nocol'; check that column/key exists
+ERROR 1091 (42000): Can't DROP 'nokey'; check that column/key exists
+ERROR 1061 (42000): Duplicate key name 'k_v'
+ERROR 1051 (42S02): Unknown table '@DB@.c_err_nosuchview'
+ERROR 1539 (HY000): Unknown event 'c_err_nosuchevent'
+ERROR 1241 (21000): Operand should contain 1 column(s)
+ERROR 3819 (HY000): Check constraint 'c_err_j_chk_2' is violated.
+ERROR 3819 (HY000): Check constraint 'c_err_j_chk_1' is violated.
+ERROR 1347 (HY000): '@DB@.c_err_p' is not VIEW

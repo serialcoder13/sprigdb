@@ -1,0 +1,36 @@
+{{- /* Only SprigDB talks to etcd and the controllers' internal ports;
+     clients reach the gateways (chapter 27, "One Kubernetes cluster per DC"). */}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sprigdb-etcd-dc
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: etcd-dc}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: sprigdb}}
+      ports:
+        - {port: 2379}
+        - {port: 2380}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sprigdb-controller
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/component: controller}}
+  policyTypes: [Ingress]
+  ingress:
+    # Other DCs' controllers (7400) come through the load balancer.
+    - ports:
+        - {port: 7400}
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: sprigdb}}
+      ports:
+        - {port: 7480}
+        - {port: 9180}
+{{- end }}

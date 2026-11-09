@@ -13,6 +13,8 @@ bytes.workspace = true
 # Chapter 29's account statement AST and actions (sprig-auth is the data
 # layer below; it never depends on sprig-sql).
 sprig-auth.workspace = true
+# MySQL's geodesic numbers for SRID 4326 (chapter 36, R4).
+sprig-geo = { path = "../sprig-geo" }
 sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-proto-mysql.workspace = true

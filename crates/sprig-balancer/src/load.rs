@@ -24,6 +24,7 @@ use sprig_common::ids::ClusterId;
 use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::model::{LoadVector, ShardKey};
+use crate::shards::sketch::{ClusterWrites, WriteSketch, WriteSketches};
 
 /// One gateway's cumulative counters for one shard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,12 +54,37 @@ pub struct LoadReport {
     pub at_ms: u64,
     /// Every shard it served since it started.
     pub shards: Vec<ShardLoad>,
+    /// Chapter 20's write sketches: the completed minutes of the last few,
+    /// the most written shards of each ([`crate::shards::sketch`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sketches: Vec<WriteSketch>,
+    /// Every cluster's writes in the same minutes (the denominators of
+    /// write shares).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cluster_writes: Vec<ClusterWrites>,
 }
+
+impl sprig_meta::Versioned for LoadReport {
+    const V: u32 = 1;
+}
+
+/// Where a gateway's report lives in its DC tier, under its registration
+/// lease: `gateway-load/<gateway_id>` (R1: written with the registration
+/// record when a minute completes, not sent over port 7400).
+#[must_use]
+pub fn report_key(gateway: &str) -> String {
+    format!("{REPORT_PREFIX}{gateway}")
+}
+
+/// The prefix of [`report_key`].
+pub const REPORT_PREFIX: &str = "gateway-load/";
 
 /// The gateway side: counters per shard, read every report period.
 #[derive(Debug, Default)]
 pub struct LoadAccumulator {
     inner: Mutex<BTreeMap<ShardKey, ShardLoad>>,
+    /// Chapter 20's write sketches.
+    sketches: WriteSketches,
 }
 
 impl LoadAccumulator {
@@ -105,14 +131,23 @@ impl LoadAccumulator {
         }
     }
 
+    /// The write sketches (chapter 20): the router counts its writes here.
+    #[must_use]
+    pub fn sketches(&self) -> &WriteSketches {
+        &self.sketches
+    }
+
     /// The report to send now.
     #[must_use]
     pub fn report(&self, gateway: &str, at_ms: u64) -> LoadReport {
+        let (sketches, cluster_writes) = self.sketches.report(at_ms);
         let g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         LoadReport {
             gateway: gateway.to_owned(),
             at_ms,
             shards: g.values().cloned().collect(),
+            sketches,
+            cluster_writes,
         }
     }
 }

@@ -256,6 +256,10 @@ pub(crate) struct State {
     pub(crate) profile: Option<CapabilityProfile>,
     /// The chosen writer (primary + replicas, external, single node).
     pub(crate) writer: Option<NodeId>,
+    /// The last deep probe's active results (chapter 09: XA, features,
+    /// privileges only a deep probe tests), carried into the passes in
+    /// between so a held upgrade can sustain.
+    pub(crate) deep: Option<crate::probe::ActiveProbes>,
 }
 
 /// The state and code every driver shares.
@@ -274,6 +278,21 @@ impl fmt::Debug for Core {
             .field("connector", &self.connector)
             .finish_non_exhaustive()
     }
+}
+
+/// `probes` with the last deep probe's active results attached to the
+/// node active probes run on, when this pass ran none; `None` when the
+/// pass ran them (they are remembered) or nothing was seen yet.
+fn carry_deep(core: &Core, probes: &[NodeProbe]) -> Option<Vec<NodeProbe>> {
+    if let Some(a) = probes.iter().find_map(|p| p.active.clone()) {
+        core.write(|s| s.deep = Some(a));
+        return None;
+    }
+    let a = core.read(|s| s.deep.clone())?;
+    let i = crate::probe::active_target(core.kind, probes)?;
+    let mut v = probes.to_vec();
+    v[i].active = Some(a);
+    Some(v)
 }
 
 /// 39100.
@@ -330,9 +349,14 @@ impl Core {
         declared: Option<&Declared>,
     ) -> CapabilityProfile {
         let previous = self.read(|s| s.profile.clone());
+        // Deep-only facts come from the last deep probe, not from the
+        // published profile: an upgrade the publisher holds (a sustain
+        // period) would otherwise be undone by the next light pass and
+        // never publish (the dev clusters' XA stayed `false` that way).
+        let carried = carry_deep(self, probes);
         let p = derive(DeriveInput {
             topology: self.kind,
-            probes,
+            probes: carried.as_deref().unwrap_or(probes),
             declared,
             previous: previous.as_ref(),
         });

@@ -9,8 +9,32 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+getrandom.workspace = true
+# The Kubernetes REST client (chapter 27 step 10): no kube-rs, just HTTP/1.1
+# over hyper with rustls, against the in-cluster service-account config.
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+metrics.workspace = true
+mysql_async.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-cluster.workspace = true
 sprig-common.workspace = true
+sprig-provision.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+toml.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# The in-process fake Kubernetes API server of the reconcile tests.
+axum.workspace = true
 
 [lints]
 workspace = true

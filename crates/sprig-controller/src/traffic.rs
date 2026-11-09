@@ -15,8 +15,13 @@
 //! L(c) = sum over d of w[d] * rtt(d, c) / W
 //! ```
 //!
-//! **Where the book differs (R0).** There is no latency matrix before R2
-//! (chapter 23 step 12), so `rtt(d, c)` is 0 inside a DC and 1 between DCs:
+//! **R2.** With chapter 23's latency matrix ([`crate::latency`]) covering
+//! every pair, `L(c)` is in milliseconds ([`TrafficView::weighted_rtt_ms`])
+//! and the decision follows it.
+//!
+//! **Where the book differs (R0).** Without a latency matrix (before R2,
+//! chapter 23 step 12, or while a pair is unmeasured), `rtt(d, c)` is 0
+//! inside a DC and 1 between DCs:
 //! `L(c)` is the share of weighted traffic that would cross DCs if `c`
 //! were home. The candidate is the DC with the lowest `L`, ties to the
 //! home; it qualifies when it beats the home by
@@ -99,6 +104,9 @@ type Counts = (u64, u64);
 /// One tenant's ring: (minute, counts per client DC), oldest first.
 type Ring = VecDeque<(i64, HashMap<String, Counts>)>;
 
+/// `rtt(client_dc, candidate)` in ms, `None` when unmeasured.
+pub type RttFn<'a> = dyn Fn(&str, &str) -> Option<f64> + 'a;
+
 /// Every tenant's window on this leader.
 #[derive(Debug, Default)]
 pub struct TrafficWindows {
@@ -138,6 +146,11 @@ pub struct TrafficView {
     /// `L(c)` per candidate DC (R0: the share of weighted traffic that
     /// would cross DCs), in percent.
     pub cross_dc_pct: BTreeMap<String, f64>,
+    /// `L(c)` per candidate DC in milliseconds, from the measured latency
+    /// matrix (R2, chapter 23 step 12), when it covers every pair; the
+    /// decision then uses it instead of [`TrafficView::cross_dc_pct`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub weighted_rtt_ms: BTreeMap<String, f64>,
     /// The best DC, if it qualifies as a move.
     pub candidate: Option<DcId>,
     /// `stay`, `candidate` or `no_signal`.
@@ -177,9 +190,10 @@ impl TrafficWindows {
         metrics::gauge!("sprig_controller_traffic_tenants").set(rings.len() as f64);
     }
 
-    /// The window of `tenant` ending at `now_minute`, and the decision.
+    /// The window of `tenant` ending at `now_minute`, and the decision,
+    /// with R0's 0/1 stand-in for `rtt` (see the module docs).
     #[must_use]
-    #[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+    #[allow(clippy::too_many_arguments)]
     pub fn view(
         &self,
         tenant: TenantId,
@@ -190,6 +204,40 @@ impl TrafficWindows {
         write_weight: u64,
         min_signal: u64,
         min_improvement_pct: u64,
+    ) -> TrafficView {
+        self.view_with_rtt(
+            tenant,
+            name,
+            home,
+            now_minute,
+            window_minutes,
+            write_weight,
+            min_signal,
+            min_improvement_pct,
+            None,
+        )
+    }
+
+    /// As [`Self::view`], weighing traffic by `rtt(client_dc, candidate)`
+    /// in ms when given and it knows every pair needed (R2's measured
+    /// matrix, `crate::latency::Matrix::rtt`); otherwise the 0/1 stand-in.
+    #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::cast_precision_loss,
+        clippy::too_many_lines
+    )]
+    pub fn view_with_rtt(
+        &self,
+        tenant: TenantId,
+        name: &str,
+        home: &DcId,
+        now_minute: i64,
+        window_minutes: u64,
+        write_weight: u64,
+        min_signal: u64,
+        min_improvement_pct: u64,
+        rtt: Option<&RttFn<'_>>,
     ) -> TrafficView {
         let oldest = now_minute - i64::try_from(window_minutes).unwrap_or(i64::MAX);
         let mut sums: HashMap<String, Counts> = HashMap::new();
@@ -245,6 +293,63 @@ impl TrafficWindows {
                 best = Some((k.client_dc.clone(), v));
             }
         }
+        // R2: L(c) = sum w[d] * rtt(d, c) / W in ms, when the matrix knows
+        // every pair; the candidate and the decision then follow it.
+        let mut measured = BTreeMap::new();
+        if let Some(rtt) = rtt
+            && total > 0
+        {
+            let cands: Vec<String> = std::iter::once(home.to_string())
+                .chain(known.iter().map(|k| k.client_dc.clone()))
+                .collect();
+            let mut all = true;
+            for c in &cands {
+                let mut sum = 0.0;
+                for k in &known {
+                    match rtt(&k.client_dc, c) {
+                        Some(ms) => sum += k.weighted as f64 * ms,
+                        None => all = false,
+                    }
+                }
+                measured.insert(c.clone(), sum / total as f64);
+            }
+            if all {
+                let home_l = measured.get(home.as_str()).copied().unwrap_or(0.0);
+                best = measured
+                    .iter()
+                    .filter(|(c, _)| c.as_str() != home.as_str())
+                    .min_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(c, v)| (c.clone(), *v));
+                let signal = total >= min_signal && total > 0;
+                let candidate = best.and_then(|(dc, v)| {
+                    let gain = home_l - v;
+                    (signal && gain > 0.0 && gain >= home_l * min_improvement_pct as f64 / 100.0)
+                        .then(|| DcId::new(dc).ok())
+                        .flatten()
+                });
+                let decision = if !signal {
+                    "no_signal"
+                } else if candidate.is_some() {
+                    "candidate"
+                } else {
+                    "stay"
+                };
+                return TrafficView {
+                    tenant: name.to_owned(),
+                    home_dc: home.clone(),
+                    window_minutes,
+                    minutes_reported: minutes,
+                    clients,
+                    weighted_total: total,
+                    signal,
+                    cross_dc_pct: cross,
+                    weighted_rtt_ms: measured,
+                    candidate,
+                    decision: decision.to_owned(),
+                };
+            }
+            measured.clear();
+        }
         let signal = total >= min_signal && total > 0;
         let candidate = best.and_then(|(dc, v)| {
             let gain = home_l - v;
@@ -268,6 +373,7 @@ impl TrafficWindows {
             weighted_total: total,
             signal,
             cross_dc_pct: cross,
+            weighted_rtt_ms: measured,
             candidate,
             decision: decision.to_owned(),
         }
@@ -339,5 +445,55 @@ mod tests {
         let v = w.view(TenantId(1), "a", &fra1, 140, 30, 3, 1000, 30);
         assert_eq!(v.decision, "stay");
         assert_eq!(v.minutes_reported, 1);
+    }
+
+    #[test]
+    fn measured_latency_weighs_the_traffic() {
+        // Clients in ams1 and mum1; home fra1. By share alone mum1 wins
+        // (most traffic); measured RTTs say ams1 is close to everyone.
+        let w = TrafficWindows::default();
+        let fra1 = DcId::new("fra1").unwrap();
+        w.add(
+            &TrafficBatch {
+                minute: 100,
+                rows: vec![row(1, "mum1", 6000, 0), row(1, "ams1", 4000, 0)],
+            },
+            30,
+        );
+        let share = w.view(TenantId(1), "a", &fra1, 100, 30, 3, 1000, 10);
+        assert_eq!(share.candidate.as_ref().unwrap().as_str(), "mum1");
+        assert!(share.weighted_rtt_ms.is_empty());
+        let rtt = |a: &str, b: &str| -> Option<f64> {
+            let mut p = [a, b];
+            p.sort_unstable();
+            match p {
+                [x, y] if x == y => Some(0.2),
+                ["ams1", "fra1"] => Some(10.0),
+                ["ams1", "mum1"] => Some(110.0),
+                ["fra1", "mum1"] => Some(120.0),
+                _ => None,
+            }
+        };
+        let v = w.view_with_rtt(TenantId(1), "a", &fra1, 100, 30, 3, 1000, 10, Some(&rtt));
+        // L(fra1) = 0.6*120 + 0.4*10 = 76; L(ams1) = 0.6*110 + 0.4*0.2 = 66.08;
+        // L(mum1) = 0.6*0.2 + 0.4*110 = 44.12.
+        assert!((v.weighted_rtt_ms["fra1"] - 76.0).abs() < 1e-6);
+        assert!((v.weighted_rtt_ms["mum1"] - 44.12).abs() < 1e-6);
+        assert_eq!(v.candidate.unwrap().as_str(), "mum1");
+        // An unmeasured pair: back to the share.
+        let partial = |a: &str, b: &str| (a == b).then_some(0.2);
+        let v = w.view_with_rtt(
+            TenantId(1),
+            "a",
+            &fra1,
+            100,
+            30,
+            3,
+            1000,
+            10,
+            Some(&partial),
+        );
+        assert!(v.weighted_rtt_ms.is_empty());
+        assert_eq!(v.candidate, share.candidate);
     }
 }

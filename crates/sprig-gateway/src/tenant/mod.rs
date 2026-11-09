@@ -29,6 +29,7 @@ pub mod ddl;
 pub mod locator;
 pub mod names;
 pub mod password;
+pub mod pins_sql;
 pub mod session;
 pub mod settings_sql;
 
@@ -143,6 +144,12 @@ impl TenantServices {
         let extensions: Vec<Arc<dyn CatalogExtension>> = vec![
             Arc::new(AuthExtension),
             Arc::new(sprig_auth::authz::AuthzExtension),
+            // Chapter 32: types and record hierarchies.
+            Arc::new(sprig_types::TypesExtension),
+            // Chapter 42: spaces, inheritable objects and shares.
+            Arc::new(sprig_inherit::InheritExtension),
+            // Chapter 15's table groups, for the router (chapter 17).
+            Arc::new(crate::exec::router::ShardingExtension),
         ];
         let source = MariaSource::new(Arc::clone(&dyn_locator), extensions)?;
         let feed = DirectoryWatch::start(Arc::clone(&global))?;
@@ -166,7 +173,10 @@ impl TenantServices {
             MariaBackend::new(Arc::clone(&dyn_locator)).with_clock(Arc::clone(&clock)),
             Arc::new(DirectoryAllocator::new(Arc::clone(&global))),
         );
-        let ddl = DdlEngine::new(catalog.clone(), Arc::clone(&clock));
+        // Chapter 42: no destructive change of a shared object, checked
+        // under the catalog lock (decision I7).
+        let ddl = DdlEngine::new(catalog.clone(), Arc::clone(&clock))
+            .with_check(sprig_inherit::guard::SharedCheck::shared());
         let writer = TenantSettingsWriter::new(
             catalog.clone(),
             registry,

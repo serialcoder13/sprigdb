@@ -36,6 +36,8 @@
 //! - [`lookup`]: unique and automatic lookup indexes, the consistent-lookup
 //!   claim and release, routing through lookups, build and orphan scan
 //!   (chapter 19).
+//! - [`pins`]: chapter 16's sharding pins (`SPRIG PIN`): the `group_pins`
+//!   table, the conflict rules (39410) and the split-group rule (39411).
 
 pub mod collation;
 pub mod groups;
@@ -47,6 +49,7 @@ pub mod lookup;
 pub mod map;
 pub mod names;
 pub mod normalize;
+pub mod pins;
 pub mod reference;
 pub mod rk;
 pub mod shardmap;

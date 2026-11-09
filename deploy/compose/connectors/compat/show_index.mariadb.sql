@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS c_idx;
+CREATE TABLE c_idx (id INT PRIMARY KEY, name VARCHAR(10), cat INT, UNIQUE KEY uk_name (name), KEY k_cat (cat) IGNORED);
+CREATE INDEX k_name_cat ON c_idx (name, cat);
+SHOW INDEX FROM c_idx;
+SHOW KEYS FROM c_idx WHERE Key_name = 'k_cat';
+ALTER TABLE c_idx ALTER INDEX k_cat NOT IGNORED;
+SELECT INDEX_NAME, IGNORED FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'c_idx' ORDER BY INDEX_NAME, SEQ_IN_INDEX;
+SHOW INDEX FROM c_idx_nosuch;
+DROP TABLE c_idx;

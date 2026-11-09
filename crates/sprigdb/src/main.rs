@@ -15,6 +15,8 @@
 //! 6. on SIGTERM or SIGINT, cancel the role's shutdown token, wait for it to
 //!    drain, stop the telemetry server and exit 0.
 
+mod sdnotify;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -151,6 +153,11 @@ fn start_audit(
 fn build_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
     let mut b = tokio::runtime::Builder::new_multi_thread();
     b.enable_all();
+    // 8 MiB worker stacks (tokio's default is 2 MiB): sqlparser recurses
+    // per nesting level, and a debug build overflowed 2 MiB (aborting the
+    // process) on a 2.8 KB statement nested 14 deep, the MySQL persona's
+    // SRID 4326 distance (chapter 36). Only touched pages are committed.
+    b.thread_stack_size(8 << 20);
     if worker_threads > 0 {
         b.worker_threads(worker_threads);
     }
@@ -173,6 +180,8 @@ async fn run(role: Role, config: ProcessConfig, source: Option<(PathBuf, String)
     );
 
     let health = Health::default();
+    // VMs: systemd's Type=notify units (chapter 27).
+    sdnotify::spawn(health.clone());
     if let Some((path, text)) = source {
         health.watch_config(path, text);
     }

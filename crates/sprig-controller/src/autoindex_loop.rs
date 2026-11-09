@@ -69,9 +69,9 @@ use sprig_advisor::autoindex::store::{
     IndexState, ShardBuild, StateChange,
 };
 use sprig_advisor::autoindex::validate::{NodeMarker, ValidationSettings};
-use sprig_common::Result;
 use sprig_common::ids::{ClusterId, DcId, ObjectId, TenantId};
 use sprig_common::time::Clock;
+use sprig_common::{Result, SprigCode, SprigError};
 use sprig_meta::MetaStore;
 
 use crate::dispatch::{JobClass, list_jobs};
@@ -257,6 +257,11 @@ pub struct Cadence {
     /// User and migrated indexes' usage pass (decision O1); each index is
     /// counted at most every `usage_every` of its table.
     pub user_every: Duration,
+    /// The longest a pass may hold its catalog connection, apart from its
+    /// builds: each build adds its object's `max_build` while it runs.
+    /// A pass over its limit is dropped, its connection with it, and the
+    /// tenant comes back after the loop's backoff.
+    pub pass_limit: Duration,
 }
 
 impl Default for Cadence {
@@ -267,6 +272,50 @@ impl Default for Cadence {
             min_requeue: Duration::from_secs(5),
             max_requeue: Duration::from_secs(600),
             user_every: Duration::from_secs(60),
+            pass_limit: Duration::from_secs(600),
+        }
+    }
+}
+
+/// Tenants one `auto_index` loop passes over at once. Each holds one
+/// connection of the loop's own budget ([`SESSIONS`]) for its pass.
+pub const WORKERS: usize = 4;
+
+/// The loop's own catalog connections per cluster: one per worker, and
+/// two for the automatic-indexing Admin API (`sprigctl index ...`), which
+/// holds one for a request (`catalogs` module docs).
+pub const SESSIONS: usize = WORKERS + 2;
+
+/// A pass's time limit ([`Cadence::pass_limit`]), extended while a build
+/// runs.
+struct PassBudget {
+    until: Mutex<tokio::time::Instant>,
+}
+
+impl PassBudget {
+    fn new(limit: Duration) -> Self {
+        Self {
+            until: Mutex::new(tokio::time::Instant::now() + limit),
+        }
+    }
+
+    fn extend(&self, d: Duration) {
+        let mut u = self.until.lock().unwrap_or_else(PoisonError::into_inner);
+        *u += d;
+    }
+
+    fn retract(&self, d: Duration) {
+        let mut u = self.until.lock().unwrap_or_else(PoisonError::into_inner);
+        *u = u.checked_sub(d).unwrap_or(*u);
+    }
+
+    async fn expired(&self) {
+        loop {
+            let u = *self.until.lock().unwrap_or_else(PoisonError::into_inner);
+            if tokio::time::Instant::now() >= u {
+                return;
+            }
+            tokio::time::sleep_until(u).await;
         }
     }
 }
@@ -314,12 +363,12 @@ const SERVING: [IndexState; 5] = [
     IndexState::Failed,
 ];
 
-/// One pass over one tenant.
+/// One pass over one tenant, within [`Cadence::pass_limit`] (plus its
+/// builds' time).
 ///
 /// # Errors
-/// The catalog is unreachable; every other failure is in
-/// [`PassReport::errors`].
-#[allow(clippy::too_many_lines)] // the five steps of chapter 13's flow
+/// The catalog is unreachable, or the pass ran over its limit; every other
+/// failure is in [`PassReport::errors`].
 pub async fn tenant_pass(
     env: &dyn AutoIndexEnv,
     hooks: &AutoIndexHooks,
@@ -328,6 +377,34 @@ pub async fn tenant_pass(
     now: SystemTime,
     memory: &mut Memory,
     cadence: &Cadence,
+) -> Result<PassReport> {
+    let budget = PassBudget::new(cadence.pass_limit);
+    tokio::select! {
+        r = pass(env, hooks, slots, tenant, now, memory, cadence, &budget) => r,
+        () = budget.expired() => {
+            metrics::counter!("sprig_advisor_autoindex_pass_timeouts_total").increment(1);
+            Err(SprigError::new(
+                SprigCode::CatalogUnavailable,
+                format!(
+                    "auto_index pass over tenant {tenant} ran over its {} s limit; \
+                     its catalog connection was released",
+                    cadence.pass_limit.as_secs()
+                ),
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // chapter 13's five steps
+async fn pass(
+    env: &dyn AutoIndexEnv,
+    hooks: &AutoIndexHooks,
+    slots: &LocalSlots,
+    tenant: TenantId,
+    now: SystemTime,
+    memory: &mut Memory,
+    cadence: &Cadence,
+    budget: &PassBudget,
 ) -> Result<PassReport> {
     let mut rep = PassReport {
         next_in: cadence.max_requeue,
@@ -372,7 +449,6 @@ pub async fn tenant_pass(
         Ok(e) => e,
         Err(e) => {
             rep.errors.push(format!("objects: {e}"));
-            let _ = q.disconnect().await;
             return Ok(rep);
         }
     };
@@ -424,7 +500,13 @@ pub async fn tenant_pass(
             decisions: &*hooks.decisions,
             now,
         };
-        match advance(&store, &mut q, &cx, r).await {
+        // A build may take its object's `max_build`; the pass's own clock
+        // stops meanwhile.
+        let started = tokio::time::Instant::now();
+        budget.extend(o.rollout.max_build);
+        let advanced = advance(&store, &mut q, &cx, r).await;
+        budget.retract(o.rollout.max_build.saturating_sub(started.elapsed()));
+        match advanced {
             Ok(step) => {
                 match &step {
                     Step::Wait { retry_after, .. } | Step::Retry { retry_after, .. } => {
@@ -539,7 +621,9 @@ pub async fn tenant_pass(
         }
     }
     soon(&mut rep, cadence.drift_every);
-    let _ = q.disconnect().await;
+    // Back to the pool (a disconnect closed it, and the next pass opened
+    // another).
+    drop(q);
     Ok(rep)
 }
 
@@ -883,8 +967,9 @@ impl Reconciler for AutoIndexLoop {
     }
 
     fn workers(&self) -> usize {
-        // Tenants in parallel; builds are still limited per cluster.
-        4
+        // Tenants in parallel; builds are still limited per cluster. No
+        // more than the loop's own connection budget holds.
+        WORKERS.min(SESSIONS)
     }
 }
 

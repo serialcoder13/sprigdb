@@ -13,19 +13,25 @@
 //! - [`backend`]: the seams to MariaDB; [`mysql`] implements them on
 //!   `mysql_async`, the gateway on its own connections, and the
 //!   simulation (`tests/sim_txn.rs`) on the MariaDB model.
+//! - [`locate`]: [`MapLocator`], where an anchor's decision rows live now,
+//!   from the tenant's shard maps.
 //! - [`lookup`]: `DistTxn`, chapter 19's lookup sessions (Pre, Main,
 //!   Post) on the coordinator.
 //! - [`xid`], [`decision`], [`settings`]: ids and xids, decision rows,
 //!   `txn.*` keys.
 //!
+//! The controller runs the resolver on the DC leader
+//! (`sprig-controller::txn_resolver`) with [`MapLocator`].
+//!
 //! Not yet (later build steps): Sprig 2PC (R3), client XA rewriting,
 //! eager consistent-snapshot branches, SERIALIZABLE autocommit reads,
-//! waiting for mover holds before prepare, and the gateway wiring (with
-//! chapter 17's router).
+//! waiting for mover holds before prepare, the mover draining prepared
+//! branches before a fence, and `sprigctl txn`.
 
 pub mod backend;
 pub mod coordinator;
 pub mod decision;
+pub mod locate;
 pub mod lookup;
 pub mod mysql;
 pub mod race;
@@ -44,6 +50,7 @@ pub use coordinator::{
     TxnCoordinator, TxnHooks, TxnMode,
 };
 pub use decision::{Decision, DecisionRow};
+pub use locate::{GroupSchemas, MapLocator};
 pub use resolver::{DrainReport, Resolver, ScanReport, SweepReport};
 pub use settings::{NonXaPolicy, ResolverConfig, TxnConfig};
 pub use xid::{AnchorRef, Dtid, DtidGen, Gtrid, Xid};
@@ -51,8 +58,8 @@ pub use xid::{AnchorRef, Dtid, DtidGen, Gtrid, Xid};
 use sprig_common::ids::{ClusterId, TenantId};
 use sprig_common::{SprigCode, SprigError};
 
-/// An [`AnchorLocator`] over a fixed table, for tests and tools until
-/// chapter 15's group maps place anchors.
+/// An [`AnchorLocator`] over a fixed table, for tests and tools
+/// ([`MapLocator`] reads the shard maps).
 #[derive(Debug, Default)]
 pub struct StaticLocator {
     map: Mutex<BTreeMap<(TenantId, AnchorRef), (ClusterId, String)>>,

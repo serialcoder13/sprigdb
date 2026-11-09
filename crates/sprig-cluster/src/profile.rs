@@ -335,9 +335,12 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
     // With 12.3's InnoDB-stored binlog nothing is logged at XA PREPARE, so a
     // prepared branch never reaches a replica and can't survive a failover
     // (binlog spike; chapters 09 and 18). A single node keeps XA.
+    //       AND NOT Galera (MariaDB refuses XA START with wsrep on: error
+    //       1235; chapter 18 gives Galera the last-resource slot instead)
     let xa_probe = active.map_or(prev.derived.xa, |a| a.xa);
     let prepared_survives_failover = probes.len() <= 1 || b.in_files();
     let xa = xa_probe
+        && !galera_on
         && writer.server.legacy_xa_rollback_at_disconnect != Some(true)
         && prepared_survives_failover;
 

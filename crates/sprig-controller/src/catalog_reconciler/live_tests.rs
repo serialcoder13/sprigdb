@@ -292,3 +292,66 @@ async fn live_reconciler_repairs_crashes_and_outside_changes() {
         std::panic::resume_unwind(p);
     }
 }
+
+/// One pass of this build's reconciler over one tenant of a running
+/// deployment (`SPRIG_TEST_RECONCILE_TENANT`, etcd at `SPRIG_TEST_ETCD`,
+/// DC `SPRIG_TEST_DC`): how a tenant that an older build left `deleting`
+/// (it skipped deleting tenants, so a stuck job and the databases behind
+/// it stayed for ever) is released before the deployment's controller runs
+/// this build. The controller's `tenant_bootstrap` loop then finishes the
+/// deletion itself.
+#[tokio::test]
+#[ignore = "acts on a running deployment"]
+async fn pass_one_live_tenant() {
+    let Some(tenant) = std::env::var("SPRIG_TEST_RECONCILE_TENANT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(TenantId)
+    else {
+        eprintln!("set SPRIG_TEST_RECONCILE_TENANT");
+        return;
+    };
+    let meta = sprig_common::config::MetaConfig {
+        dc_seeds: vec![
+            std::env::var("SPRIG_TEST_ETCD").unwrap_or_else(|_| "http://127.0.0.1:2379".into()),
+        ],
+        global_seeds: Vec::new(),
+        deployment_id: "sprigdb-dev".into(),
+    };
+    let dc = DcId::new(std::env::var("SPRIG_TEST_DC").unwrap_or_else(|_| "dc-a".into())).unwrap();
+    let tiers =
+        sprig_meta::etcd::connect_tiers(dc.clone(), &meta, None, Duration::from_secs(5), true)
+            .await
+            .unwrap();
+    let dcs: Arc<dyn MetaStore> = Arc::new(tiers.dc);
+    let global: Arc<dyn MetaStore> = Arc::new(tiers.global.unwrap());
+    let registry =
+        sprig_cluster::registry::ClusterRegistry::new(Arc::clone(&global), Arc::clone(&dcs))
+            .unwrap();
+    let pools: Arc<dyn crate::catalogs::ClusterPools> =
+        Arc::new(crate::catalogs::RegistryPools::new(registry, None).budget("reconcile_test", 4));
+    let locator = crate::catalogs::ShardMapLocator::new(
+        Arc::clone(&dcs),
+        pools,
+        crate::catalogs::default_naming(),
+    );
+    let v = Versioner::new(
+        MariaBackend::new(Arc::new(locator.clone())),
+        Arc::new(DirectoryAllocator::new(Arc::clone(&global))),
+    );
+    let rec = CatalogReconciler::new(
+        DdlEngine::new(v, Arc::new(SystemClock)),
+        Directory::new(global),
+        Arc::new(PoolExecutors::new(locator)),
+        Arc::new(LogDecisions),
+        dc,
+        None,
+        Arc::new(SystemClock),
+    );
+    let r = rec.pass(tenant).await.unwrap();
+    eprintln!(
+        "tenant {tenant}: resolved {:?}, databases dropped {:?}, errors {:?}",
+        r.resolved, r.deleted_databases, r.errors
+    );
+    assert!(r.errors.is_empty());
+}

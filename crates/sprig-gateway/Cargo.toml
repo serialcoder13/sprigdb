@@ -27,12 +27,16 @@ sprig-api.workspace = true
 tonic = { workspace = true, features = ["codegen", "router", "channel", "tls-ring"] }
 metrics.workspace = true
 mysql_async.workspace = true
+# Rows for chapter 19's lookup sessions on the router's connections.
+mysql_common.workspace = true
 # Sealed workload samples (chapter 12): randomness for nonces.
 ring.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sprig-auth.workspace = true
+# Chapter 11's load report and chapter 20's write sketches.
+sprig-balancer.workspace = true
 # Logic declarations (chapter 41, R7).
 sprig-logic = { path = "../sprig-logic" }
 sprig-catalog.workspace = true
@@ -46,7 +50,13 @@ sprig-settings.workspace = true
 sprig-shard.workspace = true
 # The router (chapter 17, R1).
 sprig-router.workspace = true
+# Chapter 18: the session's backend connection as a transaction branch.
+sprig-txn.workspace = true
 sprig-sql.workspace = true
+# Typed tables and record hierarchies (chapter 32, R6).
+sprig-types = { path = "../sprig-types" }
+# Hierarchical data inheritance (chapter 42, R6).
+sprig-inherit = { path = "../sprig-inherit" }
 # Chapter 12: fingerprints, the recorder, the flusher and samples.
 sprig-workload.workspace = true
 tokio = { workspace = true, features = ["io-util"] }

@@ -27,6 +27,9 @@
 //! - [`maps`]: the cutover's hold and commit on chapter 15's tenant map;
 //! - [`home`]: the same for a move between data centers, whose commit is
 //!   the home change of chapter 24;
+//! - [`route`] and [`groupmaps`] (R1, chapter 20): hash-range jobs (split,
+//!   merge, shard move) route rows by `_sprig_rk` into new shard schemas,
+//!   and cut over on the table group's shard map;
 //! - [`worker`]: the job runtime a worker role runs;
 //! - [`settings`]: the `mover.*` keys.
 //!
@@ -37,12 +40,14 @@
 
 pub mod api;
 pub mod engine;
+pub mod groupmaps;
 pub mod home;
 pub mod io;
 pub mod maps;
 pub mod model;
 pub mod mysql;
 pub mod record;
+pub mod route;
 pub mod settings;
 pub mod worker;
 
@@ -51,6 +56,8 @@ pub use api::{
     Progress, Routing, SourceSpec, TargetSpec, VerifyMode,
 };
 pub use io::{ChangeStream, CommitOutcome, HandoffPos, JobEnv, MapIo, SourceIo, TargetIo};
+pub use groupmaps::GroupMapIo;
 pub use record::{Claim, JobRecord, JobStore, MetaMover};
+pub use route::ShardRoute;
 pub use settings::MoverSettings;
 pub use worker::{EnvFactory, JobRuntime, WorkerOpts};

@@ -106,7 +106,19 @@ settings=(
     tls.bundles.default.cert_path tls.bundles.default.key_path
     listener.http.enabled listener.https.enabled
     workload.flush_seconds
+    failover.self_fence
 )
+
+# DC self-fencing (chapter 25) is off for this shared development stack: a
+# gateway armed by its controller fences writes with 39501 when that
+# controller goes away, and `restart` stops the controller, which would break
+# every agent's live tests on 13306/13307. Production stacks (and the 72-hour
+# soak's own stack, deploy/compose/m07) keep the default, true.
+# SPRIG_GATEWAY_SELF_FENCE=keep leaves the setting as it is.
+dev_self_fence() {
+    [[ ${SPRIG_GATEWAY_SELF_FENCE:-off} == keep ]] && return
+    set_setting failover.self_fence false
+}
 
 say() { echo "gateway-dev: $*"; }
 die() {
@@ -467,6 +479,7 @@ up() {
     # Workload statistics reach the tenants' catalogs within seconds, not
     # 15 minutes (chapter 12, workload.flush_seconds).
     set_setting workload.flush_seconds 10
+    dev_self_fence
 
     start gateway deploy/compose/sprigdb.gateway.dev.toml gateway
     wait_ready gateway "$gw_ready"
@@ -591,6 +604,7 @@ status() {
 # environment, so SPRIGDB_CONTROLLER_* overrides apply.
 restart() {
     [[ -d $state ]] || die "not up (no $state/)"
+    dev_self_fence
     stop gateway
     stop worker
     stop controller

@@ -284,6 +284,40 @@ impl SessionAuthz {
     }
 }
 
+/// `CURRENT_ROLE()` for the session (chapter 29, R4): the active roles,
+/// as MySQL 8.4 prints them (`` `r1`@`%`,`r2`@`%` ``, or `NONE`) or as
+/// MariaDB does (the role's name, or `NULL`: `None`). The backend's own
+/// answer would be the per-user account's, which never has a role.
+#[must_use]
+pub fn current_role(ts: &TenantSession, persona: Persona) -> Option<String> {
+    let cat = ts.catalog()?;
+    let _ = privileges(ts, cat); // the login's default roles, once
+    let state = AuthzState::of(cat)?;
+    let mut names: Vec<(String, String)> = ts
+        .authz
+        .active()
+        .into_iter()
+        .filter_map(|r| {
+            state
+                .role(r)
+                .map(|row| (row.name.clone(), row.host.clone()))
+        })
+        .collect();
+    names.sort();
+    let q = |s: &str| format!("`{}`", s.replace('`', "``"));
+    match persona {
+        Persona::MySql84 if names.is_empty() => Some("NONE".to_owned()),
+        Persona::MySql84 => Some(
+            names
+                .iter()
+                .map(|(n, h)| format!("{}@{}", q(n), q(h)))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        Persona::MariaDb => names.first().map(|(n, _)| n.clone()),
+    }
+}
+
 /// The session's engine (read from `auth.authorizer` once).
 fn session_engine(ts: &TenantSession, cat: &TenantCatalog) -> Option<Arc<dyn Authorizer>> {
     ts.authz
@@ -356,6 +390,7 @@ pub enum AccountAnswer {
 ///
 /// # Errors
 /// The statement's MySQL error, or the catalog's.
+#[allow(clippy::too_many_lines)] // the context, the statement, the wait
 pub async fn account_statement(
     ts: &mut TenantSession,
     cat: &Arc<TenantCatalog>,
@@ -389,6 +424,11 @@ pub async fn account_statement(
         .settings
         .get(&UNSAFE_PRIVILEGE_ACTION, &ctx, Some(&cat.settings))
         == "error";
+    let partial_revokes = svc.settings.get(
+        &sprig_auth::authz::settings::PARTIAL_REVOKES,
+        &ctx,
+        Some(&cat.settings),
+    );
     let client_host = ts.principal.client_ip.to_string();
     let lctn = ts.lower_case_table_names();
     let active = ts.authz.active();
@@ -414,6 +454,7 @@ pub async fn account_statement(
             active_roles: &active,
             hashing,
             unsafe_error,
+            partial_revokes,
             clock: &*svc.clock,
         };
         engine.account_statement(&actx, stmt).await?

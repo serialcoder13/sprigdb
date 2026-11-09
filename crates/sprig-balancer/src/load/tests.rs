@@ -19,6 +19,8 @@ fn report(gw: &str, at_ms: u64, busy_us: u64, rows: u64) -> LoadReport {
             rows_read: 0,
             connections: 3,
         }],
+        sketches: Vec::new(),
+        cluster_writes: Vec::new(),
     }
 }
 

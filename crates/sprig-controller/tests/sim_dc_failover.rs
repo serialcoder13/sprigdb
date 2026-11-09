@@ -33,6 +33,32 @@
 //!    only it holds (acknowledged or not) are exactly the diverged range
 //!    the report computes, and every acknowledged write missing from the
 //!    new home is in it.
+//! 4. **Residency** (chapter 26, R2's "a pinned tenant never leaves its
+//!    jurisdiction under any failure scenario"): tenant 3's residency
+//!    allows only `fra1`, yet it has a standby in `ams1` (one recorded
+//!    before its policy tightened, which the residency loop would drop);
+//!    it is never moved. Tenant 4 starts unrestricted, and in the random
+//!    scenario an operator restricts it to `fra1` at a seed-chosen moment,
+//!    possibly while its failover is under way: no home change of tenant 4
+//!    to `ams1` commits after that write.
+
+// Test code: long scenario functions, short names for record fields, and
+// locks held across awaits on purpose (a one-at-a-time guard; the
+// single-threaded simulation's shared state).
+#![allow(
+    clippy::many_single_char_names,
+    clippy::similar_names,
+    clippy::too_many_lines,
+    clippy::doc_markdown,
+    clippy::needless_pass_by_value,
+    clippy::collapsible_if,
+    clippy::single_match_else,
+    clippy::cast_possible_truncation,
+    clippy::nonminimal_bool,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::semicolon_if_nothing_returned
+)]
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -61,9 +87,15 @@ use sprig_meta::{
     Tier, TierView, Txn, WatchEvent,
 };
 use sprig_testkit::faults::Node;
-use sprig_testkit::sim::{FaultKind, FaultPlan, NodeCtx, PlannedFault, Sim, SimRng, SimResult, World};
+use sprig_testkit::sim::{
+    FaultKind, FaultPlan, NodeCtx, PlannedFault, Sim, SimResult, SimRng, World,
+};
 
-const TENANTS: [u64; 2] = [1, 2];
+const TENANTS: [u64; 4] = [1, 2, 3, 4];
+/// Residency allows only fra1 from the start.
+const PINNED: u64 = 3;
+/// Restricted to fra1 during the random scenario.
+const LATE_PIN: u64 = 4;
 const FRA1_SERVER: u32 = 101;
 const AMS1_SERVER: u32 = 201;
 const PULL: Duration = Duration::from_millis(200);
@@ -122,6 +154,8 @@ struct Shared {
     lease_gone: Vec<(Duration, String)>,
     /// Records written, last version per id.
     records: BTreeMap<String, FailoverRecord>,
+    /// True time the directory first showed tenant 4's residency.
+    late_pin_at: Option<Duration>,
     next_value: u64,
 }
 
@@ -157,7 +191,11 @@ async fn put(store: &dyn MetaStore, key: sprig_meta::Key, value: Vec<u8>) {
     store
         .txn(Txn {
             when: vec![],
-            then: vec![Op::Put { key, value, lease: None }],
+            then: vec![Op::Put {
+                key,
+                value,
+                lease: None,
+            }],
             otherwise: vec![],
         })
         .await
@@ -178,21 +216,50 @@ async fn seed(world: &World, s: &S) {
         put(&*g, dc_key(&dc(name)).expect("k"), rec.encode().expect("e")).await;
     }
     for t in TENANTS {
-        let e = json!({"v": 1, "name": format!("t{t}"), "state": "active", "home_dc": "fra1",
+        let mut e = json!({"v": 1, "name": format!("t{t}"), "state": "active", "home_dc": "fra1",
                        "epoch": 1, "standby_dcs": ["ams1"]});
-        put(&*g, Tier::Global.key(&format!("tenants/{t}")).expect("k"), serde_json::to_vec(&e).expect("j")).await;
+        if t == PINNED {
+            e["residency"] = json!({"policy": "dc = \"fra1\"", "allowed_dcs": ["fra1"],
+                                    "state": "converging"});
+        }
+        put(
+            &*g,
+            Tier::Global.key(&format!("tenants/{t}")).expect("k"),
+            serde_json::to_vec(&e).expect("j"),
+        )
+        .await;
         for (d, role) in [("fra1", MapRole::Home), ("ams1", MapRole::Standby)] {
             let tier = TierView::over(&g, Tier::Dc(dc(d)));
-            let mut m = ShardMap::catalog(TenantId(t), ClusterId::new(format!("{d}-c1")).expect("c"), 1);
+            let mut m = ShardMap::catalog(
+                TenantId(t),
+                ClusterId::new(format!("{d}-c1")).expect("c"),
+                1,
+            );
             m.role = role;
-            put(&*tier, ShardMap::catalog_key(tier.tier(), TenantId(t)).expect("k"), Record::new(m).encode().expect("e")).await;
+            put(
+                &*tier,
+                ShardMap::catalog_key(tier.tier(), TenantId(t)).expect("k"),
+                Record::new(m).encode().expect("e"),
+            )
+            .await;
         }
     }
     let mut sh = lock(s);
     for (d, server) in [("fra1", FRA1_SERVER), ("ams1", AMS1_SERVER)] {
-        let mut db = Db { server, read_only: true, copies: BTreeMap::new() };
+        let mut db = Db {
+            server,
+            read_only: true,
+            copies: BTreeMap::new(),
+        };
         for t in TENANTS {
-            db.copies.insert(t, Copy { writable: d == "fra1", replicating: d == "ams1", ..Copy::default() });
+            db.copies.insert(
+                t,
+                Copy {
+                    writable: d == "fra1",
+                    replicating: d == "ams1",
+                    ..Copy::default()
+                },
+            );
         }
         sh.dbs.insert(format!("{d}-db"), db);
     }
@@ -211,12 +278,22 @@ fn watch_truth(world: &World, s: &S) {
                 WatchEvent::Put(kv) => {
                     let k = kv.key.as_str().to_owned();
                     if let Some(t) = k.strip_prefix("/sprig/g/tenants/") {
-                        let v: serde_json::Value = serde_json::from_slice(&kv.value).unwrap_or_default();
+                        let v: serde_json::Value =
+                            serde_json::from_slice(&kv.value).unwrap_or_default();
                         let home = v["home_dc"].as_str().unwrap_or_default().to_owned();
                         let epoch = v["epoch"].as_u64().unwrap_or(0);
                         let t: u64 = t.parse().unwrap_or(0);
                         let mut sh = lock(&s);
-                        let last = sh.moves.iter().rev().find(|m| m.1 == t).map(|m| m.2.clone());
+                        if t == LATE_PIN && !v["residency"].is_null() && sh.late_pin_at.is_none() {
+                            w.record(format!("TRUTH tenant {t} restricted to fra1 (home {home})"));
+                            sh.late_pin_at = Some(at);
+                        }
+                        let last = sh
+                            .moves
+                            .iter()
+                            .rev()
+                            .find(|m| m.1 == t)
+                            .map(|m| m.2.clone());
                         if last.as_deref().unwrap_or("fra1") != home {
                             w.record(format!("TRUTH tenant {t} home {home} epoch {epoch}"));
                             sh.moves.push((at, t, home, epoch));
@@ -264,14 +341,22 @@ fn replicator(world: &World, s: &S) {
     world.spawn("ams1-repl", async move {
         loop {
             tokio::time::sleep(PULL).await;
-            let wanted: Vec<u64> = lock(&s).dbs["ams1-db"].copies.iter().filter(|(_, c)| c.replicating).map(|(t, _)| *t).collect();
+            let wanted: Vec<u64> = lock(&s).dbs["ams1-db"]
+                .copies
+                .iter()
+                .filter(|(_, c)| c.replicating)
+                .map(|(t, _)| *t)
+                .collect();
             if wanted.is_empty() {
                 continue;
             }
             let s2 = Arc::clone(&s);
             let Ok(lists) = rpc(&w, &me, &src, move || {
                 let sh = lock(&s2);
-                wanted.iter().map(|t| (*t, sh.dbs["fra1-db"].copies[t].list.clone())).collect::<Vec<_>>()
+                wanted
+                    .iter()
+                    .map(|t| (*t, sh.dbs["fra1-db"].copies[t].list.clone()))
+                    .collect::<Vec<_>>()
             })
             .await
             else {
@@ -303,7 +388,8 @@ fn standby_lags(s: &S) -> Vec<StandbyLag> {
         .filter(|(_, c)| c.replicating)
         .map(|(t, c)| StandbyLag {
             tenant_id: *t,
-            lag_ms: u32::try_from((c.source_seen_at.saturating_sub(c.applied_through)).as_millis()).unwrap_or(u32::MAX),
+            lag_ms: u32::try_from((c.source_seen_at.saturating_sub(c.applied_through)).as_millis())
+                .unwrap_or(u32::MAX),
         })
         .collect()
 }
@@ -323,7 +409,10 @@ impl PermitSource for SimPermits {
         let s = Arc::clone(&self.s);
         let to = self.to.to_string();
         rpc(&self.world, &self.from, &self.to, move || {
-            lock(&s).leases.get(&to).map_or(Permit::fenced(0), |l| l.permit())
+            lock(&s)
+                .leases
+                .get(&to)
+                .map_or(Permit::fenced(0), |l| l.permit())
         })
         .await
     }
@@ -333,7 +422,12 @@ fn permit_sources(world: &World, from: &Node, d: &str, s: &S) -> Vec<Arc<dyn Per
     controllers(d)
         .into_iter()
         .map(|c| {
-            Arc::new(SimPermits { world: world.clone(), from: from.clone(), to: c, s: Arc::clone(s) }) as Arc<dyn PermitSource>
+            Arc::new(SimPermits {
+                world: world.clone(),
+                from: from.clone(),
+                to: c,
+                s: Arc::clone(s),
+            }) as Arc<dyn PermitSource>
         })
         .collect()
 }
@@ -355,7 +449,13 @@ impl DcProbe for SimProbe {
             if let Ok(Some(p)) = rpc(&self.world, &self.from, &c, move || {
                 lock(&s).leases.get(&name).map(|l| {
                     let p = l.permit();
-                    PeerPing { dc_id: x2, dc_state: l.dc_state(), dc_epoch: p.dc_epoch, permits_valid: !p.fenced, fenced_writers: vec![] }
+                    PeerPing {
+                        dc_id: x2,
+                        dc_state: l.dc_state(),
+                        dc_epoch: p.dc_epoch,
+                        permits_valid: !p.fenced,
+                        fenced_writers: vec![],
+                    }
                 })
             })
             .await
@@ -366,7 +466,14 @@ impl DcProbe for SimProbe {
         if x.as_str() != "wit1" {
             let db = n(&format!("{x}-db"));
             let up = rpc(&self.world, &self.from, &db, || ()).await.is_ok();
-            r.writers.push((WriterTarget { cluster: format!("{x}-c1"), addr: format!("{db}:3306"), self_fences: true }, up));
+            r.writers.push((
+                WriterTarget {
+                    cluster: format!("{x}-c1"),
+                    addr: format!("{db}:3306"),
+                    self_fences: true,
+                },
+                up,
+            ));
         }
         r
     }
@@ -389,10 +496,27 @@ impl ObserverClient for SimObservers {
             self.world.net().wait_running(&c).await;
             let lease = lock(&self.s).leases.get(c.as_str()).cloned();
             let Some(lease) = lease else { continue };
-            let probe = SimProbe { world: self.world.clone(), from: c.clone(), s: Arc::clone(&self.s) };
-            let lags = if site.as_str() == "ams1" { standby_lags(&self.s) } else { vec![] };
+            let probe = SimProbe {
+                world: self.world.clone(),
+                from: c.clone(),
+                s: Arc::clone(&self.s),
+            };
+            let lags = if site.as_str() == "ams1" {
+                standby_lags(&self.s)
+            } else {
+                vec![]
+            };
             let st = settings();
-            let v = observe(site, lease.lease_valid(), x, &probe, st.observer_probes, st.observer_probe_interval, lags).await;
+            let v = observe(
+                site,
+                lease.lease_valid(),
+                x,
+                &probe,
+                st.observer_probes,
+                st.observer_probe_interval,
+                lags,
+            )
+            .await;
             match hop(&self.world, &c, &self.from).await {
                 Ok(()) => return Ok(v),
                 Err(e) => last = e,
@@ -415,7 +539,13 @@ impl PromoteHooks for SimHooks {
         let s = Arc::clone(&self.s);
         rpc(&self.world, &self.from, &n(&db), move || {
             let mut sh = lock(&s);
-            let c = sh.dbs.get_mut(&db).expect("db").copies.get_mut(&t.0).expect("copy");
+            let c = sh
+                .dbs
+                .get_mut(&db)
+                .expect("db")
+                .copies
+                .get_mut(&t.0)
+                .expect("copy");
             c.replicating = false;
             let applied = format!("{}-{FRA1_SERVER}-{}", t.0, c.list.len());
             BTreeMap::from([("fra1-c1".to_owned(), applied)])
@@ -448,7 +578,13 @@ impl CopyFence for SimFence {
         let s = Arc::clone(&self.s);
         rpc(&self.world, &self.from, &n("fra1-db"), move || {
             let mut sh = lock(&s);
-            let c = sh.dbs.get_mut("fra1-db").expect("db").copies.get_mut(&t.0).expect("copy");
+            let c = sh
+                .dbs
+                .get_mut("fra1-db")
+                .expect("db")
+                .copies
+                .get_mut(&t.0)
+                .expect("copy");
             c.fenced = true;
             c.writable = false;
         })
@@ -465,8 +601,16 @@ fn controller(world: &World, node: Node, d: &'static str, s: &S) {
         async move {
             let store = ctx.meta(Tier::Global);
             let clock: Arc<dyn Clock> = ctx.clock();
-            let lease = Arc::new(DcLease::new(dc(d), ctx.node.to_string(), Arc::clone(&store), clock, settings().lease_opts()));
-            lock(&s).leases.insert(ctx.node.to_string(), Arc::clone(&lease));
+            let lease = Arc::new(DcLease::new(
+                dc(d),
+                ctx.node.to_string(),
+                Arc::clone(&store),
+                clock,
+                settings().lease_opts(),
+            ));
+            lock(&s)
+                .leases
+                .insert(ctx.node.to_string(), Arc::clone(&lease));
             let keep = lease.run(|| true);
             // The returning DC's leader side (fra1's first controller).
             let ret = async {
@@ -477,11 +621,18 @@ fn controller(world: &World, node: Node, d: &'static str, s: &S) {
                     dc: dc(d),
                     global: Arc::clone(&store),
                     tier: ctx.meta(Tier::Dc(dc(d))),
-                    fence: Arc::new(SimFence { world: ctx.world.clone(), from: ctx.node.clone(), s: Arc::clone(&s) }),
+                    fence: Arc::new(SimFence {
+                        world: ctx.world.clone(),
+                        from: ctx.node.clone(),
+                        s: Arc::clone(&s),
+                    }),
                 };
                 loop {
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    if let Ok(step @ sprig_controller::failover::recovery::ReturnStep::Unfenced { .. }) = r.step().await {
+                    if let Ok(
+                        step @ sprig_controller::failover::recovery::ReturnStep::Unfenced { .. },
+                    ) = r.step().await
+                    {
                         ctx.world.record(format!("fra1 return step {step:?}"));
                     }
                 }
@@ -513,8 +664,12 @@ fn gateway(world: &World, d: &'static str, s: &S) {
                         for t in TENANTS {
                             let k = Tier::Global.key(&format!("tenants/{t}")).expect("k");
                             if let Ok(Some(kv)) = store.get(&k, Consistency::Serializable).await {
-                                let v: serde_json::Value = serde_json::from_slice(&kv.value).unwrap_or_default();
-                                homes.insert(t, v["home_dc"].as_str().unwrap_or_default().to_owned());
+                                let v: serde_json::Value =
+                                    serde_json::from_slice(&kv.value).unwrap_or_default();
+                                homes.insert(
+                                    t,
+                                    v["home_dc"].as_str().unwrap_or_default().to_owned(),
+                                );
                             }
                         }
                     }
@@ -545,7 +700,12 @@ fn gateway(world: &World, d: &'static str, s: &S) {
                         // Acknowledge only while the permit still holds.
                         if matches!(r, Ok(true)) && holder.writable() {
                             let at = ctx.world.elapsed();
-                            lock(&s).acks.push(Ack { at, dc: d.to_owned(), tenant: t, value });
+                            lock(&s).acks.push(Ack {
+                                at,
+                                dc: d.to_owned(),
+                                tenant: t,
+                                value,
+                            });
                         }
                     }
                 }
@@ -590,9 +750,17 @@ fn global_leader(world: &World, node: Node, s: &S) {
         async move {
             let store = ctx.meta(Tier::Global);
             let clock: Arc<dyn Clock> = ctx.clock();
-            let election = Election::new(Arc::clone(&store), Arc::clone(&clock), SessionOpts::new(Duration::from_secs(15)));
+            let election = Election::new(
+                Arc::clone(&store),
+                Arc::clone(&clock),
+                SessionOpts::new(Duration::from_secs(15)),
+            );
             let key = Tier::Global.key("leader").expect("k");
-            let me = LeaderRecord { holder: ctx.node.to_string(), dc: None, build: "sim".into() };
+            let me = LeaderRecord {
+                holder: ctx.node.to_string(),
+                dc: None,
+                build: "sim".into(),
+            };
             loop {
                 let Ok(l) = election.campaign(&key, &me).await else {
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -606,13 +774,21 @@ fn global_leader(world: &World, node: Node, s: &S) {
                         let st = Arc::clone(&store);
                         Arc::new(move |d: &DcId| TierView::over(&st, Tier::Dc(d.clone())))
                     },
-                    hooks: Arc::new(SimHooks { world: ctx.world.clone(), from: ctx.node.clone(), s: Arc::clone(&s) }),
+                    hooks: Arc::new(SimHooks {
+                        world: ctx.world.clone(),
+                        from: ctx.node.clone(),
+                        s: Arc::clone(&s),
+                    }),
                 };
                 let g = GlobalFailover::new(
                     Arc::clone(&store),
                     Arc::clone(&clock),
                     Arc::new(|_: &DcId| settings()),
-                    Arc::new(SimObservers { world: ctx.world.clone(), from: ctx.node.clone(), s: Arc::clone(&s) }),
+                    Arc::new(SimObservers {
+                        world: ctx.world.clone(),
+                        from: ctx.node.clone(),
+                        s: Arc::clone(&s),
+                    }),
                     promotion,
                 );
                 while l.is_leading() {
@@ -620,7 +796,10 @@ fn global_leader(world: &World, node: Node, s: &S) {
                         Ok(out) => {
                             for o in out {
                                 if let Outcome::Ended(f) = o {
-                                    ctx.world.record(format!("failover {} {:?}", f.failover_id, f.state));
+                                    ctx.world.record(format!(
+                                        "failover {} {:?}",
+                                        f.failover_id, f.state
+                                    ));
                                 }
                             }
                         }
@@ -653,32 +832,67 @@ fn plan(rng: &SimRng) -> FaultPlan {
     let fra1 = group("fra1");
     let mut fra1_db = fra1.clone();
     fra1_db.push(n("fra1-db"));
-    let others: Vec<Node> = all_nodes().into_iter().filter(|x| !fra1_db.contains(x)).collect();
+    let others: Vec<Node> = all_nodes()
+        .into_iter()
+        .filter(|x| !fra1_db.contains(x))
+        .collect();
     for _ in 0..rng.range(2..6) {
         let at_ms = rng.below(horizon);
         let for_ms = rng.range(3_000..40_000);
         let pick = |v: &[&str]| n(v[rng.index(v.len())]);
         let fault = match rng.below(10) {
-            0 | 1 => FaultKind::Partition { a: fra1.clone(), b: vec![n("etcd")], for_ms },
-            2 => FaultKind::Partition { a: fra1_db.clone(), b: others.clone(), for_ms },
+            0 | 1 => FaultKind::Partition {
+                a: fra1.clone(),
+                b: vec![n("etcd")],
+                for_ms,
+            },
+            2 => FaultKind::Partition {
+                a: fra1_db.clone(),
+                b: others.clone(),
+                for_ms,
+            },
             3 => {
                 // The whole DC frozen: one pause per process.
                 for p in &fra1 {
-                    faults.push(PlannedFault { at_ms, fault: FaultKind::Pause { node: p.clone(), for_ms } });
+                    faults.push(PlannedFault {
+                        at_ms,
+                        fault: FaultKind::Pause {
+                            node: p.clone(),
+                            for_ms,
+                        },
+                    });
                 }
                 continue;
             }
-            4 => FaultKind::Pause { node: pick(&["fra1-gw", "fra1-agent", "fra1-c1", "fra1-c2"]), for_ms },
-            5 => FaultKind::Kill { node: pick(&["fra1-c1", "fra1-c2", "fra1-gw", "g1", "g2", "ams1-c1", "wit1-c1"]) },
-            6 => FaultKind::Pause { node: pick(&["g1", "g2", "ams1-c1", "ams1-c2", "wit1-c1"]), for_ms },
-            7 => FaultKind::Partition { a: vec![pick(&["ams1-c1", "wit1-c1", "g1", "g2"])], b: vec![n("etcd")], for_ms },
+            4 => FaultKind::Pause {
+                node: pick(&["fra1-gw", "fra1-agent", "fra1-c1", "fra1-c2"]),
+                for_ms,
+            },
+            5 => FaultKind::Kill {
+                node: pick(&[
+                    "fra1-c1", "fra1-c2", "fra1-gw", "g1", "g2", "ams1-c1", "wit1-c1",
+                ]),
+            },
+            6 => FaultKind::Pause {
+                node: pick(&["g1", "g2", "ams1-c1", "ams1-c2", "wit1-c1"]),
+                for_ms,
+            },
+            7 => FaultKind::Partition {
+                a: vec![pick(&["ams1-c1", "wit1-c1", "g1", "g2"])],
+                b: vec![n("etcd")],
+                for_ms,
+            },
             8 => FaultKind::Skew {
                 node: pick(&["fra1-c1", "fra1-c2", "fra1-gw", "fra1-agent", "g1", "g2"]),
                 offset_ms: i64::try_from(rng.below(5000)).unwrap_or(0) - 2500,
                 rate_ppm: i64::try_from(rng.below(4000)).unwrap_or(0) - 2000,
                 for_ms,
             },
-            _ => FaultKind::Partition { a: vec![n("fra1-gw")], b: controllers("fra1"), for_ms },
+            _ => FaultKind::Partition {
+                a: vec![n("fra1-gw")],
+                b: controllers("fra1"),
+                for_ms,
+            },
         };
         faults.push(PlannedFault { at_ms, fault });
     }
@@ -710,6 +924,24 @@ async fn scenario(world: World, plan: FaultPlan) -> SimResult {
     start(&world, &s);
     // Let leases and permits settle before the faults.
     world.sleep(Duration::from_secs(15)).await;
+    // An operator restricts tenant 4 to fra1 at a seed-chosen moment of
+    // the faults (the write itself isn't faulted: it is the operator's).
+    let pin_after = Duration::from_millis(2_000 + world.seed().wrapping_mul(7919) % 150_000);
+    let store: Arc<dyn MetaStore> = Arc::new(world.etcd().store().clone());
+    let w2 = world.clone();
+    world.spawn("late-pin", async move {
+        w2.sleep(pin_after).await;
+        let g = TierView::over(&store, Tier::Global);
+        let r = sprig_shard::home::update_home(&*g, TenantId(LATE_PIN), |e| {
+            e.raw.insert(
+                "residency".into(),
+                json!({"policy": "dc = \"fra1\"", "allowed_dcs": ["fra1"], "state": "converging"}),
+            );
+            Ok(true)
+        })
+        .await;
+        w2.record(format!("late pin of tenant {LATE_PIN} written: {}", r.is_ok()));
+    });
     world.run_plan(&plan).await;
     world.heal_all().await;
     // Recovery: the DC returns, fences, steps up again.
@@ -724,10 +956,15 @@ async fn check(world: &World, s: &S) -> SimResult {
     let st = settings();
     // 1. No split-brain.
     for t in TENANTS {
-        let moves: Vec<&(Duration, u64, String, u64)> = sh.moves.iter().filter(|m| m.1 == t).collect();
+        let moves: Vec<&(Duration, u64, String, u64)> =
+            sh.moves.iter().filter(|m| m.1 == t).collect();
         for a in sh.acks.iter().filter(|a| a.tenant == t) {
             // The home at the ack's time, from the directory's history.
-            let home = moves.iter().rev().find(|m| m.0 <= a.at).map_or("fra1", |m| m.2.as_str());
+            let home = moves
+                .iter()
+                .rev()
+                .find(|m| m.0 <= a.at)
+                .map_or("fra1", |m| m.2.as_str());
             if home != a.dc {
                 return Err(format!(
                     "split brain: tenant {t} value {} acknowledged by {} at {:?}, home was {home} (moves {moves:?})",
@@ -740,32 +977,88 @@ async fn check(world: &World, s: &S) -> SimResult {
     // 2. Conditions of every promotion.
     for m in &sh.moves {
         let (at, t, to, _) = m;
-        let gone = sh.lease_gone.iter().rev().find(|(g, d)| d == "fra1" && g <= at);
+        let gone = sh
+            .lease_gone
+            .iter()
+            .rev()
+            .find(|(g, d)| d == "fra1" && g <= at);
         let Some((gone_at, _)) = gone else {
-            return Err(format!("tenant {t} moved to {to} at {at:?} while fra1's lease never vanished").into());
+            return Err(format!(
+                "tenant {t} moved to {to} at {at:?} while fra1's lease never vanished"
+            )
+            .into());
         };
         if *at < *gone_at + st.clock_drift_margin {
             return Err(format!("tenant {t} moved at {at:?}, under the drift margin after the lease vanished at {gone_at:?}").into());
         }
         let rec = sh.records.values().find(|r| {
-            r.tenants.iter().any(|x| x.tenant_id == *t && x.to.as_ref().map(DcId::as_str) == Some(to.as_str()))
+            r.tenants
+                .iter()
+                .any(|x| x.tenant_id == *t && x.to.as_ref().map(DcId::as_str) == Some(to.as_str()))
         });
         let Some(rec) = rec else {
             return Err(format!("tenant {t} moved without a failover record").into());
         };
-        let downs = rec.votes.iter().filter(|v| matches!(v.verdict, VerdictKind::Down | VerdictKind::Unsafe)).count();
-        if downs + 1 < st.min_sites as usize || rec.votes.iter().any(|v| v.verdict == VerdictKind::Alive) {
+        let downs = rec
+            .votes
+            .iter()
+            .filter(|v| matches!(v.verdict, VerdictKind::Down | VerdictKind::Unsafe))
+            .count();
+        if downs + 1 < st.min_sites as usize
+            || rec.votes.iter().any(|v| v.verdict == VerdictKind::Alive)
+        {
             return Err(format!("tenant {t} promoted without agreement: {:?}", rec.votes).into());
         }
-        let line = rec.tenants.iter().find(|x| x.tenant_id == *t).expect("line");
+        let line = rec
+            .tenants
+            .iter()
+            .find(|x| x.tenant_id == *t)
+            .expect("line");
         if u128::from(line.lag_ms.unwrap_or(u32::MAX)) > st.rpo.as_millis() {
-            return Err(format!("tenant {t} promoted with lag {:?} over the RPO", line.lag_ms).into());
+            return Err(format!(
+                "tenant {t} promoted with lag {:?} over the RPO",
+                line.lag_ms
+            )
+            .into());
+        }
+    }
+    // 4. Residency.
+    for (at, t, to, _) in &sh.moves {
+        if *t == PINNED {
+            return Err(format!(
+                "tenant {PINNED}, allowed only fra1, moved to {to} at {at:?}"
+            )
+            .into());
+        }
+        if *t == LATE_PIN
+            && to != "fra1"
+            && let Some(p) = sh.late_pin_at
+            && *at > p
+        {
+            return Err(format!(
+                "tenant {LATE_PIN} moved to {to} at {at:?}, after it was restricted to fra1 at {p:?}"
+            )
+            .into());
+        }
+    }
+    for r in sh.records.values() {
+        if let Some(x) = r.tenants.iter().find(|x| x.tenant_id == PINNED)
+            && x.to.is_some()
+        {
+            return Err(format!("the failover record promotes tenant {PINNED}: {x:?}").into());
         }
     }
     // 3. The return.
-    let moved: Vec<u64> = TENANTS.iter().copied().filter(|t| sh.moves.iter().any(|m| m.1 == *t)).collect();
+    let moved: Vec<u64> = TENANTS
+        .iter()
+        .copied()
+        .filter(|t| sh.moves.iter().any(|m| m.1 == *t))
+        .collect();
     if !moved.is_empty() {
-        let kv = store.get(&dc_key(&dc("fra1")).expect("k"), Consistency::Linearizable).await?.expect("dc");
+        let kv = store
+            .get(&dc_key(&dc("fra1")).expect("k"), Consistency::Linearizable)
+            .await?
+            .expect("dc");
         let state = Record::<DcRecord>::decode(&kv.value)?.body.state;
         if state != "active" {
             return Err(format!("fra1 is {state} 60 s after healing, not active again").into());
@@ -776,30 +1069,60 @@ async fn check(world: &World, s: &S) -> SimResult {
             if !c.fenced {
                 return Err(format!("tenant {t} moved but fra1's copy isn't fenced").into());
             }
-            let page = fra1.list(&fra1.tier().key(&format!("shardmaps/{t}/"))?, ListOpts::default()).await?;
+            let page = fra1
+                .list(
+                    &fra1.tier().key(&format!("shardmaps/{t}/"))?,
+                    ListOpts::default(),
+                )
+                .await?;
             for kv in page.kvs {
                 if Record::<ShardMap>::decode(&kv.value)?.body.role != MapRole::Quarantined {
                     return Err(format!("tenant {t}'s map in fra1 isn't quarantined").into());
                 }
             }
             // Diverged transactions: what fra1 holds past what ams1 applied.
-            let rec = sh.records.values().find(|r| r.tenants.iter().any(|x| x.tenant_id == *t && x.outcome == "promoted"));
+            let rec = sh.records.values().find(|r| {
+                r.tenants
+                    .iter()
+                    .any(|x| x.tenant_id == *t && x.outcome == "promoted")
+            });
             let Some(rec) = rec else { continue };
-            let line = rec.tenants.iter().find(|x| x.tenant_id == *t).expect("line");
+            let line = rec
+                .tenants
+                .iter()
+                .find(|x| x.tenant_id == *t)
+                .expect("line");
             let applied = line.applied.get("fra1-c1").cloned().unwrap_or_default();
             let pos = format!("{t}-{FRA1_SERVER}-{}", c.list.len());
             let d = diverged(&pos, &applied, u32::try_from(*t).unwrap_or(0));
-            let applied_len: usize = applied.rsplit('-').next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let applied_len: usize = applied
+                .rsplit('-')
+                .next()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(0);
             let extra = c.list.len().saturating_sub(applied_len);
             let count = d.as_ref().map_or(0, |d| d.count());
             if count != extra as u64 {
-                return Err(format!("tenant {t}: report counts {count}, fra1 holds {extra} extra").into());
+                return Err(
+                    format!("tenant {t}: report counts {count}, fra1 holds {extra} extra").into(),
+                );
             }
-            let ams_vals: Vec<u64> = sh.dbs["ams1-db"].copies[t].list.iter().map(|(_, v)| *v).collect();
-            let diverged_vals: Vec<u64> = c.list[applied_len.min(c.list.len())..].iter().map(|(_, v)| *v).collect();
+            let ams_vals: Vec<u64> = sh.dbs["ams1-db"].copies[t]
+                .list
+                .iter()
+                .map(|(_, v)| *v)
+                .collect();
+            let diverged_vals: Vec<u64> = c.list[applied_len.min(c.list.len())..]
+                .iter()
+                .map(|(_, v)| *v)
+                .collect();
             for a in sh.acks.iter().filter(|a| a.tenant == *t && a.dc == "fra1") {
                 if !ams_vals.contains(&a.value) && !diverged_vals.contains(&a.value) {
-                    return Err(format!("tenant {t}: acknowledged value {} is lost and not reported", a.value).into());
+                    return Err(format!(
+                        "tenant {t}: acknowledged value {} is lost and not reported",
+                        a.value
+                    )
+                    .into());
                 }
             }
             world.record(format!("tenant {t}: {extra} diverged, reported"));
@@ -831,60 +1154,100 @@ fn no_split_brain_under_partitions_pauses_and_skew() {
 /// only fra1 holds.
 #[test]
 fn a_dc_cut_from_the_global_tier_fails_over_and_returns_fenced() {
-    Sim::new("dc_failover_plain").seeds(5).max_time(Duration::from_secs(600)).run(|world| async move {
-        let s: S = Arc::new(Mutex::new(Shared::default()));
-        seed(&world, &s).await;
-        start(&world, &s);
-        world.sleep(Duration::from_secs(15)).await;
-        let cut = FaultPlan {
-            faults: vec![PlannedFault {
-                at_ms: 0,
-                fault: FaultKind::Partition { a: group("fra1"), b: vec![n("etcd")], for_ms: 40_000 },
-            }],
-        };
-        world.run_plan(&cut).await;
-        world.heal_all().await;
-        world.sleep(Duration::from_secs(60)).await;
-        check(&world, &s).await?;
-        let sh = lock(&s);
-        if sh.moves.iter().filter(|m| m.2 == "ams1").count() != TENANTS.len() {
-            return Err(format!("expected both tenants to fail over: {:?}", sh.moves).into());
-        }
-        let done = sh.records.values().any(|r| r.state == FailoverState::Done);
-        if !done {
-            return Err(format!("no finished failover: {:?}", sh.records).into());
-        }
-        // ams1 took writes after the move.
-        if !sh.acks.iter().any(|a| a.dc == "ams1") {
-            return Err("the new home never acknowledged a write".into());
-        }
-        Ok(())
-    });
+    Sim::new("dc_failover_plain")
+        .seeds(5)
+        .max_time(Duration::from_secs(600))
+        .run(|world| async move {
+            let s: S = Arc::new(Mutex::new(Shared::default()));
+            seed(&world, &s).await;
+            start(&world, &s);
+            world.sleep(Duration::from_secs(15)).await;
+            let cut = FaultPlan {
+                faults: vec![PlannedFault {
+                    at_ms: 0,
+                    fault: FaultKind::Partition {
+                        a: group("fra1"),
+                        b: vec![n("etcd")],
+                        for_ms: 40_000,
+                    },
+                }],
+            };
+            world.run_plan(&cut).await;
+            world.heal_all().await;
+            world.sleep(Duration::from_secs(60)).await;
+            check(&world, &s).await?;
+            let sh = lock(&s);
+            // Every tenant but the pinned one fails over (tenant 4 isn't
+            // restricted in this test).
+            if sh.moves.iter().filter(|m| m.2 == "ams1").count() != TENANTS.len() - 1
+                || sh.moves.iter().any(|m| m.1 == PINNED)
+            {
+                return Err(format!(
+                    "expected every tenant but {PINNED} to fail over: {:?}",
+                    sh.moves
+                )
+                .into());
+            }
+            let skipped = sh.records.values().any(|r| {
+                r.tenants.iter().any(|x| {
+                    x.tenant_id == PINNED
+                        && x.to.is_none()
+                        && x.reason.as_deref().is_some_and(|w| w.contains("residency"))
+                })
+            });
+            if !skipped {
+                return Err(format!(
+                    "tenant {PINNED} isn't skipped for residency in the record: {:?}",
+                    sh.records
+                )
+                .into());
+            }
+            let done = sh.records.values().any(|r| r.state == FailoverState::Done);
+            if !done {
+                return Err(format!("no finished failover: {:?}", sh.records).into());
+            }
+            // ams1 took writes after the move.
+            if !sh.acks.iter().any(|a| a.dc == "ams1") {
+                return Err("the new home never acknowledged a write".into());
+            }
+            Ok(())
+        });
 }
 
 /// Two sites only (the witness gone): never automatic.
 #[test]
 fn with_two_sites_there_is_no_automatic_failover() {
-    Sim::new("dc_failover_two_sites").seeds(3).max_time(Duration::from_secs(600)).run(|world| async move {
-        let s: S = Arc::new(Mutex::new(Shared::default()));
-        seed(&world, &s).await;
-        start(&world, &s);
-        world.faults().crash(&n("wit1-c1"));
-        world.sleep(Duration::from_secs(15)).await;
-        let cut = FaultPlan {
-            faults: vec![PlannedFault {
-                at_ms: 0,
-                fault: FaultKind::Partition { a: group("fra1"), b: vec![n("etcd")], for_ms: 40_000 },
-            }],
-        };
-        world.run_plan(&cut).await;
-        let sh = lock(&s);
-        if !sh.moves.is_empty() {
-            return Err(format!("moved with two sites: {:?}", sh.moves).into());
-        }
-        if !sh.records.values().any(|r| r.state == FailoverState::ManualOnly) {
-            return Err(format!("expected manual_only: {:?}", sh.records).into());
-        }
-        Ok(())
-    });
+    Sim::new("dc_failover_two_sites")
+        .seeds(3)
+        .max_time(Duration::from_secs(600))
+        .run(|world| async move {
+            let s: S = Arc::new(Mutex::new(Shared::default()));
+            seed(&world, &s).await;
+            start(&world, &s);
+            world.faults().crash(&n("wit1-c1"));
+            world.sleep(Duration::from_secs(15)).await;
+            let cut = FaultPlan {
+                faults: vec![PlannedFault {
+                    at_ms: 0,
+                    fault: FaultKind::Partition {
+                        a: group("fra1"),
+                        b: vec![n("etcd")],
+                        for_ms: 40_000,
+                    },
+                }],
+            };
+            world.run_plan(&cut).await;
+            let sh = lock(&s);
+            if !sh.moves.is_empty() {
+                return Err(format!("moved with two sites: {:?}", sh.moves).into());
+            }
+            if !sh
+                .records
+                .values()
+                .any(|r| r.state == FailoverState::ManualOnly)
+            {
+                return Err(format!("expected manual_only: {:?}", sh.records).into());
+            }
+            Ok(())
+        });
 }

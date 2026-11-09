@@ -4,7 +4,9 @@
 //! updates, the changed columns. Internal columns (`_sprig_*`, `_v`, and
 //! `my_row_id` unless it is the only key) are removed first; an update
 //! whose remaining images are equal is dropped, so back-fills of internal
-//! columns produce no events.
+//! columns produce no events, unless it changed chapter 42's layer
+//! columns (`_sprig_state`, `_sprig_ovr`), which change what descendant
+//! spaces see.
 
 use sprig_binlog::RowImage;
 use sprig_common::names::is_internal_column;
@@ -60,8 +62,24 @@ fn key(shape: &TableShape, img: &RowImage) -> Image {
     )
 }
 
+/// Whether an update changed an inheritable object's layer columns
+/// (`_sprig_state`, `_sprig_ovr`; chapter 42): a hide marker or an orphan
+/// can change what descendants see without changing a visible value, so
+/// such an update is kept (with an empty delta) for the copy worker.
+fn layer_changed(row: &RawRow) -> bool {
+    let (Some(b), Some(a)) = (row.before.as_ref(), row.after.as_ref()) else {
+        return false;
+    };
+    row.table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.as_str() == "_sprig_state" || n.as_str() == "_sprig_ovr")
+        .any(|(i, _)| b.get(i) != a.get(i))
+}
+
 /// Decodes one row change; `None` for an update that changed only
-/// internal columns.
+/// internal columns (other than an inheritable object's layer columns).
 #[must_use]
 pub fn decode_row(row: &RawRow) -> Option<Decoded> {
     let shape = &row.table;
@@ -75,7 +93,7 @@ pub fn decode_row(row: &RawRow) -> Option<Decoded> {
     };
     let delta = if op == Op::Update {
         let (b, a) = (before.as_ref()?, after.as_ref()?);
-        if b == a {
+        if b == a && !layer_changed(row) {
             return None;
         }
         Some(
@@ -202,6 +220,37 @@ mod tests {
             after: Some(img(1, "y", 9)),
         };
         assert_eq!(decode_row(&upd).unwrap().delta, Some(vec!["v".to_owned()]));
+        // Chapter 42: a hide marker over an override with the same values.
+        let layer = Arc::new(TableShape {
+            schema: "t1_d1_g1_s1".into(),
+            table: "p".into(),
+            columns: vec![
+                "id".into(),
+                "v".into(),
+                "_sprig_space".into(),
+                "_sprig_state".into(),
+                "_sprig_ovr".into(),
+            ],
+            key: vec![0, 2],
+        });
+        let row = |state: &str, ovr: u64| {
+            RowImage(vec![
+                Some(Value::Int(5)),
+                Some(Value::String(b"x".to_vec())),
+                Some(Value::UInt(7)),
+                Some(Value::String(state.as_bytes().to_vec())),
+                Some(Value::UInt(ovr)),
+            ])
+        };
+        let hide = RawRow {
+            table: Arc::clone(&layer),
+            kind: RowKind::Update,
+            before: Some(row("ovr", 2)),
+            after: Some(row("hide", 0)),
+        };
+        let d = decode_row(&hide).unwrap();
+        assert_eq!(d.delta, Some(Vec::new()));
+        assert_eq!(d.key.0.len(), 2, "the key keeps the space");
     }
 
     #[test]

@@ -24,7 +24,7 @@
 //! next statement on every gateway once its cache has loaded the version
 //! (the directory watch, typically well under a second).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use sprig_common::ids::{DbId, ObjectId, RoleId, UserId};
 
@@ -87,6 +87,34 @@ pub struct CompiledPrivileges {
     pub named: HashMap<(String, String), ActionSet>,
     /// The roles the set was compiled for (active, then closed).
     pub roles: Vec<RoleId>,
+    /// Partial revokes (R4): the tenant-level actions that don't reach a
+    /// database, by name key. An action is cut only when every grantee
+    /// that holds it at `*.*` restricts it there (MySQL: a role without
+    /// the restriction gives it back).
+    pub restricted: HashMap<String, ActionSet>,
+}
+
+/// The tenant-level actions cut from each database by partial revokes,
+/// given each grantee's `*.*` actions and its restrictions.
+#[must_use]
+pub fn restrictions(
+    per_grantee: &[(ActionSet, BTreeMap<String, ActionSet>)],
+) -> HashMap<String, ActionSet> {
+    let all = per_grantee
+        .iter()
+        .fold(ActionSet::EMPTY, |a, (t, _)| a.union(*t));
+    let dbs: BTreeSet<&String> = per_grantee.iter().flat_map(|(_, r)| r.keys()).collect();
+    let mut out = HashMap::new();
+    for d in dbs {
+        let reach = per_grantee.iter().fold(ActionSet::EMPTY, |a, (t, r)| {
+            a.union(t.minus(r.get(d).copied().unwrap_or_default()))
+        });
+        let cut = all.minus(reach);
+        if !cut.is_empty() {
+            out.insert(d.clone(), cut);
+        }
+    }
+    out
 }
 
 impl CompiledPrivileges {
@@ -126,8 +154,18 @@ impl CompiledPrivileges {
         };
         let grantees =
             std::iter::once(Grantee::User(user)).chain(roles.iter().map(|r| Grantee::Role(*r)));
+        let mut per_grantee = Vec::new();
         for g in grantees {
+            let mut own = (ActionSet::EMPTY, BTreeMap::new());
             for p in state.privileges_of(g) {
+                match &p.target {
+                    PrivTarget::Tenant => own.0 = own.0.union(p.actions),
+                    PrivTarget::Restriction(d) => {
+                        let e: &mut ActionSet = own.1.entry(d.clone()).or_default();
+                        *e = e.union(p.actions);
+                    }
+                    _ => {}
+                }
                 match &p.target {
                     PrivTarget::Named {
                         db_key,
@@ -156,7 +194,9 @@ impl CompiledPrivileges {
                     t => c.add(t, p.actions),
                 }
             }
+            per_grantee.push(own);
         }
+        c.restricted = restrictions(&per_grantee);
         c
     }
 
@@ -183,7 +223,7 @@ impl CompiledPrivileges {
                 self.dbs_with_objects.insert(*db);
             }
             // Resolved by compile_at.
-            PrivTarget::Named { .. } => {}
+            PrivTarget::Named { .. } | PrivTarget::Restriction(_) => {}
         }
     }
 
@@ -194,6 +234,7 @@ impl CompiledPrivileges {
             Target::Tenant => self.tenant,
             Target::Database { db_key } => self
                 .tenant
+                .minus(self.restricted.get(db_key).copied().unwrap_or_default())
                 .union(self.dbs.get(db_key).copied().unwrap_or_default()),
             Target::Named { db_key, name_key } => self
                 .actions_on(Target::Database { db_key })

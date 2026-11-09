@@ -49,13 +49,17 @@ mod client;
 mod cluster;
 mod dcmove;
 mod export;
+mod failover;
 mod gateway;
 mod index;
 mod logic;
 mod mover;
 mod placement;
 mod render;
+mod residency;
 mod settings;
+mod sharding;
+mod space;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
@@ -79,11 +83,6 @@ const GROUPS: &[(&str, &str, &[&str])] = &[
     ("feed", "Change feeds", &["list", "show", "lag"]),
     ("search", "Search indexes", &["list", "show", "rebuild"]),
     (
-        "space",
-        "Spaces and shares",
-        &["create", "list", "show", "share", "unshare"],
-    ),
-    (
         "import",
         "Copy data and index definitions from a live source",
         &["mongodb", "mysql"],
@@ -91,7 +90,7 @@ const GROUPS: &[(&str, &str, &[&str])] = &[
 ];
 
 /// `sprigctl tenant` subcommands not implemented yet.
-const TENANT_LATER: &[&str] = &["failover"];
+const TENANT_LATER: &[&str] = &[];
 
 /// `sprigctl tenant`.
 #[allow(clippy::too_many_lines)]
@@ -187,7 +186,12 @@ fn tenant_group() -> Command {
     // Chapter 24's moves between DCs and traffic (crate::dcmove).
     g = g
         .subcommand(dcmove::move_command())
-        .subcommand(dcmove::traffic_command());
+        .subcommand(dcmove::traffic_command())
+        // Chapter 25's manual failover and standbys (crate::failover).
+        .subcommand(failover::failover_command())
+        .subcommand(failover::standby_command())
+        // Chapter 26's residency (crate::residency).
+        .subcommand(residency::residency_command());
     for &sub in TENANT_LATER {
         g = g.subcommand(
             Command::new(sub).arg(
@@ -243,6 +247,20 @@ fn dc_group() -> Command {
             Command::new("show")
                 .about("Show a DC and its current leader")
                 .arg(dc_arg()),
+        )
+        // Chapter 23 step 13: the DC lifecycle.
+        .subcommand(
+            Command::new("drain")
+                .about("Take no new tenants; the DC is retired once migration empties it")
+                .arg(dc_arg()),
+        )
+        .subcommand(
+            Command::new("undrain")
+                .about("Make a draining DC active again")
+                .arg(dc_arg()),
+        )
+        .subcommand(
+            Command::new("latency").about("The measured latency matrix between DCs (p50, p90, p99)"),
         )
 }
 
@@ -381,9 +399,11 @@ fn cli() -> Command {
         .subcommand(index::explain_group())
         .subcommand(mover::shard_group())
         .subcommand(mover::job_group())
+        .subcommand(sharding::advisor_group())
         .subcommand(gateway::group())
         .subcommand(check::group())
-        .subcommand(logic::group());
+        .subcommand(logic::group())
+        .subcommand(space::group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -428,10 +448,10 @@ fn main() -> ExitCode {
     };
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
-        "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" => true,
+        "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
+        | "shard" | "space" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
-        "shard" => name == "move",
         "logic" => logic::implemented(&name),
         _ => false,
     };
@@ -476,6 +496,15 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "logic" => logic::run(sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "space" => space::run(sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "shard" if sharding::run_shard(&client, sub, output(&matches)).await? => {
+                Ok(ExitCode::SUCCESS)
+            }
+            "advisor" => sharding::run_advisor(&client, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "shard" | "job" => mover::run(&client, group, sub, output(&matches))
@@ -587,6 +616,46 @@ async fn run_dc(c: &AdminClient, m: &ArgMatches, group: &ArgMatches) -> Result<E
         "show" => {
             let r: GetDcResponse = c.get(&format!("/admin/v1/dcs/{}", id())).await?;
             print(out, &r, render::dc_show);
+            Ok(ExitCode::SUCCESS)
+        }
+        "drain" | "undrain" => {
+            if m.get_flag("dry-run") {
+                println!("would {cmd} dc {}", id());
+                return Ok(ExitCode::SUCCESS);
+            }
+            let r: sprig_meta::bootstrap::DcRecord = c
+                .post(
+                    &format!("/admin/v1/dcs/{}:{cmd}", id()),
+                    &serde_json::json!({}),
+                )
+                .await?;
+            print(out, &[r], |r| render::dc_list(r));
+            Ok(ExitCode::SUCCESS)
+        }
+        "latency" => {
+            let r: serde_json::Value = c.get("/admin/v1/dcs:latency").await?;
+            print(out, &r, |v| {
+                let rows: Vec<[String; 6]> = v["rows"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|x| {
+                        let f = |k: &str| {
+                            x[k].as_f64()
+                                .map_or_else(|| "-".to_owned(), |n| format!("{n:.2} ms"))
+                        };
+                        [
+                            x["from"].as_str().unwrap_or_default().to_owned(),
+                            x["to"].as_str().unwrap_or_default().to_owned(),
+                            f("p50_ms"),
+                            f("p90_ms"),
+                            f("p99_ms"),
+                            x["reachable"].to_string(),
+                        ]
+                    })
+                    .collect();
+                render::table(["FROM", "TO", "P50", "P90", "P99", "REACHABLE"], &rows)
+            });
             Ok(ExitCode::SUCCESS)
         }
         _ => Ok(ExitCode::FAILURE),
@@ -731,8 +800,16 @@ async fn run_tenant(
             placement::run_pin(c, cmd, sub, out).await?;
             Ok(ExitCode::SUCCESS)
         }
+        "failover" | "standby" => {
+            failover::run(c, cmd, sub, m.get_flag("dry-run"), out).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         "move" | "traffic" => {
             dcmove::run(c, cmd, sub, m.get_flag("dry-run"), out).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "residency" => {
+            residency::run(c, sub, out).await?;
             Ok(ExitCode::SUCCESS)
         }
         "create" => {

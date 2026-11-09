@@ -246,9 +246,11 @@ impl HttpAuth {
             Some(t) if host.is_none() && !t.is_empty() => format!("{t}.{user}"),
             _ => user.to_owned(),
         };
+        // Residency (chapter 26): a tenant pinned elsewhere is decided in
+        // an allowed DC, or refused (39302).
         let mut login = self
             .svc
-            .start_http(LoginRequest {
+            .begin_http(LoginRequest {
                 persona: Persona::MySql84,
                 login_name: login_name.into_bytes(),
                 sni: host,

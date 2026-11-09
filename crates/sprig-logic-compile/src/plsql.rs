@@ -74,6 +74,7 @@ pub fn generate(f: &Function, opts: &Options) -> Plsql {
         pkg: package.clone(),
         uses_fail: false,
         uses_num_str: false,
+        uses_nn: false,
         guards: 0,
         params: param_names(f),
     };
@@ -202,6 +203,7 @@ struct Gen<'a> {
     pkg: String,
     uses_fail: bool,
     uses_num_str: bool,
+    uses_nn: bool,
     guards: usize,
     params: Vec<String>,
 }
@@ -213,7 +215,7 @@ impl Gen<'_> {
     }
 
     fn package(&self) -> (Option<String>, Option<String>) {
-        if !self.uses_fail && !self.uses_num_str {
+        if !self.uses_fail && !self.uses_num_str && !self.uses_nn {
             return (None, None);
         }
         let mut spec = format!("CREATE OR REPLACE PACKAGE {} AS\n", self.pkg);
@@ -223,7 +225,7 @@ impl Gen<'_> {
             body.push_str(
                 "  PROCEDURE fail(code IN INT, msg IN VARCHAR) AS\n    \
                  v VARCHAR(128) := LEFT(msg, 128);\n  \
-                 BEGIN\n    SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;\n  \
+                 BEGIN\n    SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = code, MESSAGE_TEXT = v;\n  \
                  END;\n",
             );
         }
@@ -236,6 +238,17 @@ impl Gen<'_> {
                  THEN CAST(CAST(x AS SIGNED) AS CHAR) ELSE CAST(x AS CHAR) END;\n  \
                  END;\n",
             );
+        }
+        if self.uses_nn {
+            for (f, t) in [("nn_i", "BIGINT"), ("nn_f", "DOUBLE")] {
+                spec.push_str(&format!("  FUNCTION {f}(x IN {t}) RETURN {t};\n"));
+                body.push_str(&format!(
+                    "  FUNCTION {f}(x IN {t}) RETURN {t} AS\n  BEGIN\n    \
+                     IF x IS NULL THEN\n      SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = 39866, \
+                     MESSAGE_TEXT = 'an arithmetic operator was applied to a null value';\n    \
+                     END IF;\n    RETURN x;\n  END;\n"
+                ));
+            }
         }
         spec.push_str("END");
         body.push_str("END");
@@ -604,6 +617,16 @@ impl Gen<'_> {
             Builtin::Ceil => format!("(CEIL({}) + 0e0)", self.expr(&a0)),
             Builtin::Round => format!("(FLOOR({} + 5e-1) + 0e0)", self.expr(&a0)),
             Builtin::Sqrt => format!("SQRT({})", self.expr(&a0)),
+            Builtin::NotNull => {
+                self.uses_nn = true;
+                let f = if self.f.ty_of(&a0) == Ty::Int {
+                    "nn_i"
+                } else {
+                    "nn_f"
+                };
+                let x = self.expr(&a0);
+                format!("{}.{f}({x})", self.pkg)
+            }
             Builtin::Pow => format!("POW({}, {})", self.expr(&a0), self.expr(&a1)),
             Builtin::Max | Builtin::Min => {
                 let f = if b == Builtin::Max {

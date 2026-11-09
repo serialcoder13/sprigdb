@@ -78,9 +78,41 @@ fn digest_of(t: &TableMeta, r: MyRow) -> RowDigest {
     }
 }
 
-/// Whether a table name is one of the mover's or a fence's internal names.
+/// Internal tables that move with their shard: chapter 41's
+/// exactly-once markers of after-commit triggers (`__sprig_ldone`), which
+/// must stay in the same schema as the writes they commit with.
+pub const MOVED_INTERNAL: &[&str] = &["__sprig_ldone"];
+
+/// `SET NAMES` for a stored program's `character_set_client` and
+/// `collation_connection` (`SHOW CREATE` columns 3 and 4), so the target
+/// parses its string literals as the source did; the copy session is
+/// otherwise `SET NAMES binary`, which turns them into binary strings
+/// (and `'x' COLLATE utf8mb4_bin` into error 1253).
+fn set_names(charset: Option<String>, collation: Option<String>) -> Vec<String> {
+    let ok = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    match (charset, collation) {
+        (Some(c), Some(k)) if ok(&c) && ok(&k) && k.starts_with(&c) => {
+            vec![format!("SET NAMES {c} COLLATE {k}")]
+        }
+        (Some(c), _) if ok(&c) => vec![format!("SET NAMES {c}")],
+        _ => Vec::new(),
+    }
+}
+
+/// `body` between its `SET NAMES` and the copy session's own.
+fn in_names(out: &mut Vec<String>, names: Vec<String>, body: String) {
+    let back = !names.is_empty();
+    out.extend(names);
+    out.push(body);
+    if back {
+        out.push("SET NAMES binary".to_owned());
+    }
+}
+
+/// Whether a table name is one of the mover's or a fence's internal names
+/// (the tables of [`MOVED_INTERNAL`] are copied like any other).
 fn internal(name: &str) -> bool {
-    name.starts_with(INTERNAL_OBJECT_PREFIX)
+    name.starts_with(INTERNAL_OBJECT_PREFIX) && !MOVED_INTERNAL.contains(&name)
 }
 
 impl MysqlSource {
@@ -308,7 +340,9 @@ impl MysqlSource {
                             mode.unwrap_or_default().replace('\'', "")
                         ));
                         out.push(format!("DROP {kind} IF EXISTS {}", quote(&name)));
-                        out.push(body);
+                        // The routine keeps the character set it was
+                        // created with: its literals are parsed in it.
+                        in_names(&mut out, set_names(row.get(3), row.get(4)), body);
                     }
                 }
             }
@@ -428,7 +462,7 @@ impl SourceIo for MysqlSource {
                             "SET SESSION sql_mode = '{}'",
                             mode.unwrap_or_default().replace('\'', "")
                         ));
-                        out.push(body);
+                        in_names(&mut out, set_names(r.get(3), r.get(4)), body);
                     }
                 }
             }

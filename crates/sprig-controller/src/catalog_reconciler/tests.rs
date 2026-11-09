@@ -296,12 +296,14 @@ async fn orphans_are_quarantined_then_dropped_when_empty() {
         orphan_retention: Duration::from_secs(7 * 86_400),
         ..now_cfg()
     };
-    let rec = env.reconciler(week);
+    // Groups 7 and 8 have no shard maps.
+    let no_maps: Arc<dyn GroupMaps> = Arc::new(FixedGroups(Ok(BTreeSet::new())));
+    let rec = env.reconciler(week).with_group_maps(Arc::clone(&no_maps));
     let r = rec.pass(env.tenant).await.unwrap();
     assert_eq!(r.orphans, [empty, full]);
     assert!(r.orphans_dropped.is_empty(), "quarantined first");
     // Past the quarantine (retention zero): the empty one goes.
-    let rec = env.reconciler(now_cfg());
+    let rec = env.reconciler(now_cfg()).with_group_maps(no_maps);
     rec.pass(env.tenant).await.unwrap();
     let r = rec.pass(env.tenant).await.unwrap();
     assert_eq!(r.orphans_dropped, [empty]);
@@ -419,7 +421,8 @@ async fn the_loop_lists_active_tenants_here_and_paces_itself() {
         }
         other => panic!("{other:?}"),
     }
-    // A tenant that isn't active isn't reconciled.
+    // A tenant being deleted is reconciled too (its leftovers go); one
+    // that failed isn't.
     env.dir
         .update(env.tenant, |e| {
             e.state = TenantState::Deleting;
@@ -427,5 +430,104 @@ async fn the_loop_lists_active_tenants_here_and_paces_itself() {
         })
         .await
         .unwrap();
+    assert_eq!(rec.all_keys(&cx).await.unwrap(), [env.tenant]);
+    env.dir
+        .update(env.tenant, |e| {
+            e.state = TenantState::Failed;
+            Ok(true)
+        })
+        .await
+        .unwrap();
     assert!(rec.all_keys(&cx).await.unwrap().is_empty());
+}
+
+/// Chapter 08's stuck-state handling for a tenant being deleted (the
+/// tenant `r6-inh-c` stayed `deleting` with a stuck `CREATE DATABASE` and
+/// a database nobody could log in to drop): the stuck job is resolved,
+/// then every database left is dropped through the DDL path, so cleanup
+/// can finish.
+#[tokio::test]
+async fn a_deleting_tenants_stuck_job_and_databases_go() {
+    let env = billing().await;
+    env.crash(
+        DdlStep::Prepared,
+        create_db("leaks"),
+        "CREATE DATABASE leaks",
+    )
+    .await;
+    env.dir
+        .update(env.tenant, |e| {
+            e.state = TenantState::Deleting;
+            Ok(true)
+        })
+        .await
+        .unwrap();
+    let r = env.reconciler(now_cfg()).pass(env.tenant).await.unwrap();
+    assert_eq!(r.resolved.len(), 1, "{r:?}");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert!(r.deleted_databases.contains(&"billing".to_owned()), "{r:?}");
+    assert!(
+        env.snapshot()
+            .databases
+            .iter()
+            .all(|d| d.state == DbState::Dropped),
+        "every database dropped"
+    );
+    // A second pass has nothing left to do.
+    let r = env.reconciler(now_cfg()).pass(env.tenant).await.unwrap();
+    assert!(r.deleted_databases.is_empty() && r.errors.is_empty());
+}
+
+/// Group maps from a fixed answer.
+struct FixedGroups(std::result::Result<BTreeSet<GroupId>, ()>);
+
+#[async_trait::async_trait]
+impl GroupMaps for FixedGroups {
+    async fn groups(&self, _tenant: TenantId) -> Result<BTreeSet<GroupId>> {
+        self.0
+            .clone()
+            .map_err(|()| SprigError::internal("etcd unreachable"))
+    }
+}
+
+/// Chapter 20: a split's new shard schemas start empty, and a retired
+/// source waits for the mover to drop it. Shard schemas of a group with a
+/// shard map are never orphans, and when the maps can't be read (or no
+/// source is set) no group's shard schema is.
+#[tokio::test]
+async fn shard_schemas_of_mapped_groups_are_never_orphans() {
+    let env = billing().await;
+    let child = SchemaName::shard(env.tenant, DbId(1), GroupId(9), ShardId(5));
+    let retired = SchemaName::shard(env.tenant, DbId(1), GroupId(9), ShardId(2));
+    let stray = SchemaName::shard(env.tenant, DbId(1), GroupId(11), ShardId(1));
+    for s in [child, retired, stray] {
+        env.exec.create_schema(s);
+    }
+    let mapped: Arc<dyn GroupMaps> = Arc::new(FixedGroups(Ok([GroupId(9)].into())));
+    let rec = env.reconciler(now_cfg()).with_group_maps(mapped);
+    // Quarantined on the first pass, dropped (empty) on the second.
+    for _ in 0..2 {
+        let r = rec.pass(env.tenant).await.unwrap();
+        assert_eq!(r.orphans, [stray]);
+    }
+    assert!(rec.pass(env.tenant).await.unwrap().orphans.is_empty());
+    assert!(env.exec.has_schema(&child) && env.exec.has_schema(&retired));
+    assert!(
+        !env.exec.has_schema(&stray),
+        "an unmapped group's empty schema still goes"
+    );
+    // Maps unreadable: nothing of a group is an orphan.
+    env.exec.create_schema(stray);
+    let down: Arc<dyn GroupMaps> = Arc::new(FixedGroups(Err(())));
+    let rec = env.reconciler(now_cfg()).with_group_maps(down);
+    for _ in 0..3 {
+        let r = rec.pass(env.tenant).await.unwrap();
+        assert!(r.orphans.is_empty(), "{:?}", r.orphans);
+    }
+    // No source at all: the same.
+    let rec = env.reconciler(now_cfg());
+    for _ in 0..3 {
+        assert!(rec.pass(env.tenant).await.unwrap().orphans.is_empty());
+    }
+    assert!(env.exec.has_schema(&child) && env.exec.has_schema(&stray));
 }

@@ -16,6 +16,8 @@
 //! | 8. Fleet simulator | `sprig-testkit::fleet` |
 //! | 9. Schema caps and the creation rate limit | [`model`], [`constraints`], [`ratelimit`] |
 //!
+//! Chapter 20 (R1): automatic split, merge and move, in [`shards`].
+//!
 //! The planner is pure and deterministic over a [`model::FleetView`]; the
 //! controller builds the view from etcd, probes, storage scans and gateway
 //! load reports, and the [`schedule::Scheduler`] turns plans into decisions
@@ -34,6 +36,7 @@ pub mod ratelimit;
 pub mod recommend;
 pub mod schedule;
 pub mod settings;
+pub mod shards;
 pub mod thrash;
 pub mod writers;
 

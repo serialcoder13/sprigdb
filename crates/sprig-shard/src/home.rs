@@ -116,6 +116,21 @@ impl HomeEntry {
         serde_json::to_vec(&self.raw).map_err(|e| bad(&e.to_string()))
     }
 
+    /// The tenant's allowed DCs (chapter 26): the directory entry's
+    /// `residency.allowed_dcs`, resolved from its policy by the
+    /// controllers. `None` when the tenant has no residency (it may be
+    /// anywhere).
+    #[must_use]
+    pub fn allowed_dcs(&self) -> Option<std::collections::BTreeSet<DcId>> {
+        allowed_dcs(&self.raw)
+    }
+
+    /// Whether residency lets the tenant's data be in `dc`.
+    #[must_use]
+    pub fn residency_allows(&self, dc: &DcId) -> bool {
+        self.allowed_dcs().is_none_or(|a| a.contains(dc))
+    }
+
     /// The target DC of the move in progress.
     #[must_use]
     pub fn migration_to(&self) -> Option<DcId> {
@@ -125,6 +140,23 @@ impl HomeEntry {
             .as_str()
             .and_then(|s| DcId::new(s).ok())
     }
+}
+
+/// The allowed DCs of a directory entry given as JSON (see
+/// [`HomeEntry::allowed_dcs`]). A `residency` block whose `allowed_dcs`
+/// is missing or malformed allows nothing: residency fails closed.
+#[must_use]
+pub fn allowed_dcs(raw: &Map<String, Value>) -> Option<std::collections::BTreeSet<DcId>> {
+    let block = raw.get("residency").filter(|v| !v.is_null())?;
+    let Some(list) = block.get("allowed_dcs").and_then(Value::as_array) else {
+        return Some(std::collections::BTreeSet::new());
+    };
+    Some(
+        list.iter()
+            .filter_map(Value::as_str)
+            .filter_map(|d| DcId::new(d).ok())
+            .collect(),
+    )
 }
 
 /// Reads `tenant`'s directory entry.
@@ -253,6 +285,15 @@ pub async fn commit(store: &Arc<dyn MetaStore>, c: &HomeChange) -> Result<HomeCo
             return Ok(HomeCommit::Rejected(format!(
                 "home is {}, not {}",
                 dir.home_dc, c.from
+            )));
+        }
+        // Residency (chapter 26), checked at the commit point against the
+        // entry this transaction compares: a policy tightened during the
+        // move stops it here.
+        if !dir.residency_allows(&c.to) {
+            return Ok(HomeCommit::Rejected(format!(
+                "residency doesn't allow {} for the tenant",
+                c.to
             )));
         }
         if dir.state != "migrating" || dir.migration_to().as_ref() != Some(&c.to) {

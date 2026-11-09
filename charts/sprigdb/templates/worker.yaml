@@ -1,0 +1,43 @@
+{{- /* The worker role (chapter 27, "How the roles deploy on Kubernetes"). */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sprigdb-worker
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels: {app.kubernetes.io/component: worker}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: worker
+        {{- include "sprigdb.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "sprigdb.podSecurity" . | nindent 6 }}
+      containers:
+        - name: worker
+          image: {{ include "sprigdb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["worker", "--config", "/etc/sprigdb/config/sprigdb.toml"]
+          env:
+            - name: SPRIGDB_NODE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          ports:
+            - {name: telemetry, containerPort: 9180}
+          readinessProbe:
+            httpGet: {path: /readyz, port: telemetry}
+          livenessProbe:
+            httpGet: {path: /healthz, port: telemetry}
+            periodSeconds: 5
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            {{- include "sprigdb.tlsMounts" . | nindent 12 }}
+            # Every cluster's system-account credentials, written by the
+            # operator; updated in place, re-read at each connection.
+            - {name: creds, mountPath: /etc/sprigdb/creds, readOnly: true}
+      volumes:
+        {{- include "sprigdb.tlsVolumes" (dict "root" . "role" "worker" "secret" "sprigdb-worker-tls") | nindent 8 }}
+        - name: creds
+          secret: {secretName: sprigdb-cluster-credentials, optional: true}

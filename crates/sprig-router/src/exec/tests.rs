@@ -64,7 +64,7 @@ struct Fake {
 impl ShardBackend for Fake {
     async fn run(
         &mut self,
-        _cluster: &str,
+        _target: &Target,
         sql: &str,
         budget: &mut Budget,
     ) -> Result<ShardOutcome> {
@@ -85,6 +85,7 @@ fn target(sql: &str) -> Target {
         cluster: "c1".into(),
         shard: 1,
         sql: sql.into(),
+        at: crate::plan::ShardAt::default(),
     }
 }
 
@@ -109,7 +110,7 @@ fn texts(o: &Output) -> Vec<Vec<String>> {
                     .collect()
             })
             .collect(),
-        Output::Ok(_) => panic!("rows expected"),
+        Output::Ok(_) | Output::Streamed { .. } => panic!("rows expected"),
     }
 }
 
@@ -356,6 +357,8 @@ async fn writes_sum_and_roll_back_on_error() {
         kind: WriteKind::Update,
         targets: vec![target("u1"), target("u2")],
         rows: 0,
+        claims: Vec::new(),
+        releases: Vec::new(),
     });
     let out = execute(&plan, &mut f, &mut Budget::mb(1)).await.unwrap();
     match out {
@@ -363,7 +366,7 @@ async fn writes_sum_and_roll_back_on_error() {
             assert_eq!(o.affected, 3);
             assert_eq!(o.info, "Rows matched: 4  Changed: 3  Warnings: 0");
         }
-        Output::Rows { .. } => panic!(),
+        Output::Rows { .. } | Output::Streamed { .. } => panic!(),
     }
     assert_eq!(f.log, ["BEGIN", "u1", "u2", "COMMIT"]);
     // A failing shard rolls everything back.
@@ -372,6 +375,8 @@ async fn writes_sum_and_roll_back_on_error() {
         kind: WriteKind::Delete,
         targets: vec![target("u1"), target("missing")],
         rows: 0,
+        claims: Vec::new(),
+        releases: Vec::new(),
     });
     assert!(execute(&plan, &mut f, &mut Budget::mb(1)).await.is_err());
     assert_eq!(f.log, ["BEGIN", "u1", "missing", "ROLLBACK"]);
@@ -383,4 +388,168 @@ fn doubles_print_like_mariadb_for_common_values() {
     assert_eq!(format_f64(3.0), "3");
     assert_eq!(format_f64(0.0), "0");
     assert_eq!(format_f64(1e20), "1e20");
+}
+
+/// A backend whose reads stream: every shard answers from `answers`.
+struct Streams {
+    answers: HashMap<String, ShardOutcome>,
+}
+
+struct OneStream {
+    answers: HashMap<String, ShardOutcome>,
+    rows: std::collections::VecDeque<Row>,
+}
+
+#[async_trait::async_trait]
+impl ShardStream for OneStream {
+    async fn start(&mut self, sql: &str) -> Result<Option<Vec<ColumnDef>>> {
+        match self.answers.get(sql).cloned() {
+            Some(ShardOutcome::Rows(r)) => {
+                self.rows = r.rows.into();
+                Ok(Some(r.columns))
+            }
+            Some(ShardOutcome::Ok(_)) => Ok(None),
+            None => Err(SprigError::backend(1146, *b"42S02", "Table doesn't exist")),
+        }
+    }
+    async fn next_row(&mut self) -> Result<Option<Row>> {
+        // Interleave the streams.
+        tokio::task::yield_now().await;
+        Ok(self.rows.pop_front())
+    }
+    fn warnings(&self) -> u16 {
+        1
+    }
+}
+
+#[async_trait::async_trait]
+impl ShardBackend for Streams {
+    async fn run(&mut self, _t: &Target, sql: &str, _b: &mut Budget) -> Result<ShardOutcome> {
+        self.answers
+            .get(sql)
+            .cloned()
+            .ok_or_else(|| SprigError::internal("no answer"))
+    }
+    fn in_transaction(&self) -> bool {
+        false
+    }
+    async fn open_stream(&mut self, _c: &str) -> Result<Option<Box<dyn ShardStream>>> {
+        Ok(Some(Box::new(OneStream {
+            answers: self.answers.clone(),
+            rows: std::collections::VecDeque::new(),
+        })))
+    }
+    fn max_parallel(&self) -> usize {
+        2
+    }
+}
+
+#[derive(Default)]
+struct Collect {
+    cols: usize,
+    rows: Vec<Row>,
+}
+
+#[async_trait::async_trait]
+impl RowSink for Collect {
+    async fn columns(&mut self, c: &[ColumnDef]) -> Result<()> {
+        self.cols = c.len();
+        Ok(())
+    }
+    async fn row(&mut self, r: &[Option<Bytes>]) -> Result<()> {
+        self.rows.push(r.to_vec());
+        Ok(())
+    }
+}
+
+fn scatter(n: usize, offset: u64, limit: Option<u64>) -> Plan {
+    Plan::Read(ReadPlan {
+        kind: ReadKind::Scatter,
+        targets: (0..n).map(|i| target(&format!("s{i}"))).collect(),
+        hidden: 0,
+        order: Vec::new(),
+        agg: None,
+        offset,
+        limit,
+        pushed_limit: None,
+        group: 1,
+    })
+}
+
+#[tokio::test]
+async fn scatters_stream_from_parallel_shards_with_offset_and_limit() {
+    let mut answers = HashMap::new();
+    for i in 0..5 {
+        answers.insert(
+            format!("s{i}"),
+            rows(
+                vec![int_col("id")],
+                (0..40)
+                    .map(|j| vec![v(&format!("{}", i * 100 + j))])
+                    .collect(),
+            ),
+        );
+    }
+    let mut be = Streams { answers };
+    let mut sink = Collect::default();
+    let out = execute_to(&scatter(5, 0, None), &mut be, &mut Budget::mb(1), &mut sink)
+        .await
+        .unwrap();
+    assert_eq!(out, Output::Streamed { warnings: 5 });
+    assert_eq!(sink.cols, 1);
+    let mut got: Vec<String> = sink
+        .rows
+        .iter()
+        .map(|r| String::from_utf8_lossy(r[0].as_ref().unwrap()).into_owned())
+        .collect();
+    got.sort();
+    let mut want: Vec<String> = (0..5)
+        .flat_map(|i| (0..40).map(move |j| format!("{}", i * 100 + j)))
+        .collect();
+    want.sort();
+    assert_eq!(got, want);
+    // OFFSET and LIMIT apply in the gateway; the rest is drained.
+    let mut sink = Collect::default();
+    execute_to(
+        &scatter(5, 10, Some(25)),
+        &mut be,
+        &mut Budget::mb(1),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sink.rows.len(), 25);
+    // A gathered merge over parallel streams runs out of budget: 39422.
+    let mut big = HashMap::new();
+    for i in 0..3 {
+        big.insert(
+            format!("s{i}"),
+            rows(
+                vec![int_col("id")],
+                (0..20_000).map(|_| vec![v(&"x".repeat(40))]).collect(),
+            ),
+        );
+    }
+    let mut be = Streams { answers: big };
+    let plan = Plan::Read(ReadPlan {
+        kind: ReadKind::Aggregate,
+        ..match scatter(3, 0, None) {
+            Plan::Read(r) => r,
+            _ => unreachable!(),
+        }
+    });
+    let e = execute(&plan, &mut be, &mut Budget::mb(1))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::RouterMemoryLimit));
+    // A shard error ends the stream with that error.
+    let mut be = Streams {
+        answers: HashMap::new(),
+    };
+    let mut sink = Collect::default();
+    assert!(
+        execute_to(&scatter(3, 0, None), &mut be, &mut Budget::mb(1), &mut sink)
+            .await
+            .is_err()
+    );
 }

@@ -11,23 +11,15 @@ use sprig_common::ids::{ClusterId, ShardId};
 use crate::xid::{AnchorRef, Dtid, bqual};
 
 /// The decision table's name inside every shard schema.
-pub const DTX_TABLE: &str = "__sprig_dtx";
+pub const DTX_TABLE: &str = sprig_catalog::ddl::DTX_TABLE;
 
-/// `CREATE TABLE` for the decision table (chapters 15 and 21 create it with
-/// every shard schema; the coordinator's tests and the resolver create it
-/// when missing).
+/// `CREATE TABLE` for the decision table (chapter 08's `CREATE DATABASE`
+/// creates it with every database schema, and split, merge and move copy
+/// it into every child shard; the coordinator's tests and the resolver
+/// create it when missing). The text is the catalog's.
 #[must_use]
 pub fn create_table_sql(schema: &str) -> String {
-    format!(
-        "CREATE TABLE IF NOT EXISTS `{schema}`.`{DTX_TABLE}` (\
-         dtid BINARY(16) NOT NULL, \
-         outcome ENUM('commit','abort','pending') NOT NULL, \
-         decider BINARY(16) NULL, \
-         coordinator VARCHAR(64) NOT NULL, \
-         participants VARBINARY(4096) NULL, \
-         created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), \
-         PRIMARY KEY (dtid), KEY (created_at)) ENGINE=InnoDB"
-    )
+    sprig_catalog::ddl::dtx_table_sql(schema)
 }
 
 /// A recorded outcome.

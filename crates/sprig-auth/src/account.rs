@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use sprig_common::Result;
-use sprig_common::ids::TenantId;
+use sprig_common::ids::{DcId, TenantId};
 use sprig_meta::{Consistency, MetaStore, Record, Versioned};
 
 use crate::store::LoginForm;
@@ -136,6 +136,45 @@ pub struct TenantInfo {
     pub suspended: bool,
 }
 
+/// A tenant's residency as logins see it (chapter 26; chapter 14,
+/// "Credential residency"): the directory entry's `residency` block.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TenantResidency {
+    /// The allowed DCs; empty: none (a block without a readable set fails
+    /// closed).
+    pub allowed_dcs: Vec<DcId>,
+    /// `residency.deny_remote_access`.
+    pub deny_remote_access: bool,
+}
+
+impl TenantResidency {
+    /// The residency of a directory entry's `residency` value; `None` for
+    /// none.
+    #[must_use]
+    pub fn of(v: &serde_json::Value) -> Option<Self> {
+        if v.is_null() {
+            return None;
+        }
+        let allowed_dcs = v
+            .get("allowed_dcs")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter_map(|d| DcId::new(d).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            allowed_dcs,
+            deny_remote_access: v
+                .get("deny_remote_access")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+}
+
 /// Finds tenants by name: `tenant-names/<name>` and `tenants/<id>` in the
 /// global tier (chapter 23).
 #[async_trait::async_trait]
@@ -146,17 +185,43 @@ pub trait TenantDirectory: Send + Sync + 'static {
     /// The global tier's error if it can't be read; logins then fail with
     /// 39301.
     async fn lookup(&self, name: &str) -> Result<Option<TenantInfo>>;
+
+    /// The residency of the tenant named `name` (chapter 26); `None` for a
+    /// tenant without one, or no such tenant. Directories that don't know
+    /// residency have none.
+    ///
+    /// # Errors
+    /// The global tier's error if it can't be read.
+    async fn residency(&self, name: &str) -> Result<Option<TenantResidency>> {
+        let _ = name;
+        Ok(None)
+    }
 }
 
 /// A fixed set of tenants: tests and single-tenant development.
 #[derive(Debug, Default)]
-pub struct StaticTenants(HashMap<String, TenantInfo>);
+pub struct StaticTenants(
+    HashMap<String, TenantInfo>,
+    Mutex<HashMap<String, TenantResidency>>,
+);
 
 impl StaticTenants {
     /// The tenants, keyed by name.
     #[must_use]
     pub fn new(tenants: impl IntoIterator<Item = TenantInfo>) -> Self {
-        Self(tenants.into_iter().map(|t| (t.name.clone(), t)).collect())
+        Self(
+            tenants.into_iter().map(|t| (t.name.clone(), t)).collect(),
+            Mutex::new(HashMap::new()),
+        )
+    }
+
+    /// Sets (or with `None` clears) the residency of tenant `name`.
+    pub fn set_residency(&self, name: &str, r: Option<TenantResidency>) {
+        let mut m = self.1.lock().unwrap_or_else(PoisonError::into_inner);
+        match r {
+            Some(r) => m.insert(name.to_owned(), r),
+            None => m.remove(name),
+        };
     }
 
     /// One active tenant.
@@ -175,6 +240,15 @@ impl StaticTenants {
 impl TenantDirectory for StaticTenants {
     async fn lookup(&self, name: &str) -> Result<Option<TenantInfo>> {
         Ok(self.0.get(name).cloned())
+    }
+
+    async fn residency(&self, name: &str) -> Result<Option<TenantResidency>> {
+        Ok(self
+            .1
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .cloned())
     }
 }
 
@@ -200,6 +274,9 @@ struct EntryRecord {
     /// Tenant ids root first, self included: `"/1/42/77/"`.
     #[serde(default)]
     path: String,
+    /// Chapter 26's block, read leniently.
+    #[serde(default)]
+    residency: serde_json::Value,
 }
 
 impl Versioned for EntryRecord {
@@ -218,8 +295,11 @@ impl Versioned for EntryRecord {
 pub struct MetaTenants {
     store: Arc<dyn MetaStore>,
     ttl: Duration,
-    cache: Mutex<HashMap<String, (Instant, Option<TenantInfo>)>>,
+    cache: Mutex<HashMap<String, (Instant, Option<Found>)>>,
 }
+
+/// A cached lookup.
+type Found = (TenantInfo, Option<TenantResidency>);
 
 impl std::fmt::Debug for MetaTenants {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -255,7 +335,7 @@ impl MetaTenants {
         }
     }
 
-    async fn read(&self, name: &str) -> Result<Option<TenantInfo>> {
+    async fn read(&self, name: &str) -> Result<Option<Found>> {
         let key = self.store.tier().key(&format!("tenant-names/{name}"))?;
         let Some(kv) = self.store.get(&key, Consistency::Serializable).await? else {
             return Ok(None);
@@ -282,22 +362,23 @@ impl MetaTenants {
             }
             suspended = self.entry(anc).await?.is_some_and(|a| a.suspended);
         }
-        Ok(Some(TenantInfo {
-            id: TenantId(id),
-            name: if e.name.is_empty() {
-                name.to_owned()
-            } else {
-                e.name
+        let residency = TenantResidency::of(&e.residency);
+        Ok(Some((
+            TenantInfo {
+                id: TenantId(id),
+                name: if e.name.is_empty() {
+                    name.to_owned()
+                } else {
+                    e.name
+                },
+                can_log_in: matches!(e.state.as_str(), "active" | "migrating" | "failing_over"),
+                suspended,
             },
-            can_log_in: matches!(e.state.as_str(), "active" | "migrating" | "failing_over"),
-            suspended,
-        }))
+            residency,
+        )))
     }
-}
 
-#[async_trait::async_trait]
-impl TenantDirectory for MetaTenants {
-    async fn lookup(&self, name: &str) -> Result<Option<TenantInfo>> {
+    async fn found(&self, name: &str) -> Result<Option<Found>> {
         let now = Instant::now();
         if let Some((at, info)) = self
             .cache
@@ -319,6 +400,17 @@ impl TenantDirectory for MetaTenants {
         }
         cache.insert(name.to_owned(), (now, info.clone()));
         Ok(info)
+    }
+}
+
+#[async_trait::async_trait]
+impl TenantDirectory for MetaTenants {
+    async fn lookup(&self, name: &str) -> Result<Option<TenantInfo>> {
+        Ok(self.found(name).await?.map(|f| f.0))
+    }
+
+    async fn residency(&self, name: &str) -> Result<Option<TenantResidency>> {
+        Ok(self.found(name).await?.and_then(|f| f.1))
     }
 }
 

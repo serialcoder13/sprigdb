@@ -2,13 +2,16 @@
 //! by which key, in which table group, and where each shard lives.
 //!
 //! [`Topology`] is the router's own small interface to chapter 15's
-//! layout. Until table groups and shard maps reach the catalog,
-//! [`StaticTopology`] serves it from a JSON description (the gateway's
-//! `[gateway] router_topology_file`, a development and test hook). Keys
-//! normalize and hash with chapter 15's `sprig-shard` (`hash_key`: the
-//! one normalizer, then `xxh3_64`), so rows the router writes sit where
-//! splits, moves and the feed expect them; a shard owns the hashes from
-//! its `lo` up to the next shard's (chapter 15's range entries).
+//! layout. [`StaticTopology`] serves it from memory: the gateway builds one
+//! per tenant with [`catalog::build`] from the catalog's table groups and
+//! members and `sprig-shard`'s shard maps; unit tests build one from a JSON
+//! description ([`TopologyFile`]). Keys normalize and hash with chapter
+//! 15's `sprig-shard` (`hash_key`: the one normalizer, then `xxh3_64`), so
+//! rows the router writes sit where splits, moves and the feed expect them;
+//! a shard owns the hashes from its `lo` up to the next shard's (chapter
+//! 15's range entries).
+
+pub mod catalog;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -41,13 +44,26 @@ pub struct ShardLoc {
     pub cluster: String,
     /// The lowest routing hash it owns.
     pub lo: u64,
+    /// The range's epoch (raised by every split, merge and move).
+    pub epoch: u64,
+    /// While a mover cutover holds the range: when the hold ends (ms since
+    /// the Unix epoch). New work waits for it (chapter 10, "Cutover").
+    pub held_until_ms: Option<u64>,
 }
 
-/// A table group: one key class and the shards, ordered by `lo`.
+/// A table group's shards as one logical database sees them: one key
+/// class and the shards, ordered by `lo`. Members of one group in two
+/// databases share shards but not schemas, so each database gets its own
+/// `Group` (same `id`, its own `db`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     /// Group id within the tenant.
     pub id: u32,
+    /// The logical database whose schemas `shards` name (0 in test
+    /// layouts).
+    pub db: u32,
+    /// The shard map's `map_version` (0 in test layouts).
+    pub version: u64,
     /// The key class.
     pub key_class: KeyClass,
     /// Chapter 15's key specification for the class.
@@ -61,6 +77,36 @@ impl Group {
     /// `None` when the value doesn't normalize (39405: scatter instead).
     #[must_use]
     pub fn shard_of(&self, v: &KeyValue) -> Option<usize> {
+        let h = self.hash_of(v)?;
+        let i = self.route(h);
+        crate::write_notes::note(self, i, h);
+        Some(i)
+    }
+
+    /// Shard `i`'s place, for transaction branches.
+    #[must_use]
+    pub fn at(&self, i: usize) -> crate::plan::ShardAt {
+        self.shards
+            .get(i)
+            .map(|s| crate::plan::ShardAt {
+                group: self.id,
+                db: self.db,
+                lo: s.lo,
+                schema: s.schema.clone(),
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether rows of this group and `o`'s sit on the same shards: the
+    /// same group and logical database.
+    #[must_use]
+    pub fn same_layout(&self, o: &Group) -> bool {
+        self.id == o.id && self.db == o.db
+    }
+
+    /// The routing hash of key value `v` (chapter 15's `hash_key`).
+    #[must_use]
+    pub fn hash_of(&self, v: &KeyValue) -> Option<u64> {
         let kv = match (self.key_class, v) {
             (KeyClass::Int, KeyValue::Int(i)) => sprig_shard::KeyValue::Int(*i),
             (KeyClass::Str { .. }, KeyValue::Bytes(b)) => sprig_shard::KeyValue::Str {
@@ -70,8 +116,9 @@ impl Group {
             (KeyClass::Binary, KeyValue::Bytes(b)) => sprig_shard::KeyValue::Bytes(b),
             _ => return None,
         };
-        let (h, _) = sprig_shard::hash_key(&self.spec, &[kv]).ok()?;
-        Some(self.route(h.0))
+        sprig_shard::hash_key(&self.spec, &[kv])
+            .ok()
+            .map(|(h, _)| h.0)
     }
 
     /// The shard that owns routing hash `h`.
@@ -89,11 +136,13 @@ impl Group {
 pub enum TableKind {
     /// Rows spread over the group's shards by one key column.
     Sharded {
-        /// The key column, lowercase.
+        /// The key column, lowercase; empty when no single column holds
+        /// the key (a parent member or a composite key): every read
+        /// scatters and inserts are refused.
         key: String,
-        /// Its position in the table's column list (`INSERT` without a
-        /// column list).
-        key_ordinal: usize,
+        /// Its position among the table's visible columns (`INSERT`
+        /// without a column list); `None` when unknown.
+        key_ordinal: Option<usize>,
         /// Every unique key contains the key column, so upserts and
         /// `REPLACE` are exact per shard.
         upsert_safe: bool,
@@ -115,6 +164,67 @@ pub struct TableEntry {
     pub kind: TableKind,
     /// Its group (for reference tables, a group of the shards' clusters).
     pub group: Arc<Group>,
+    /// Its unique lookup indexes (chapter 19) the router maintains and
+    /// routes through: one value column each.
+    pub lookups: Vec<Arc<LookupRef>>,
+    /// A maintained lookup index the router can't follow (several value
+    /// columns, an unknown column type): writes are refused (39420
+    /// `lookup`) rather than left unmaintained.
+    pub lookup_gap: bool,
+    /// The visible columns in order, lowercase, from the stored definition
+    /// (empty when unknown): an `INSERT` without a column list gets one,
+    /// so the router can add `_sprig_rk` (chapter 15).
+    pub columns: Vec<String>,
+    /// Writes add `_sprig_rk` (the member is `filling` or later).
+    pub fill_rk: bool,
+}
+
+/// A unique lookup index of a sharded table (chapter 19), as the router
+/// uses it: writes claim and release its values in the write's
+/// transaction (`sprig_txn::lookup::DistTxn`), and reads, updates and
+/// deletes with an equality on its column go to the shards its rows
+/// name.
+#[derive(Debug, Clone)]
+pub struct LookupRef {
+    /// The index (columns, owner primary key, lookup group, state).
+    pub index: sprig_shard::lookup::LookupIndex,
+    /// Its value column, lowercase.
+    pub column: String,
+    /// How a literal of the column converts.
+    pub class: KeyClass,
+    /// The owner's primary-key columns, lowercase, in key order.
+    pub pk: Vec<String>,
+    /// The value column's and the primary-key columns' positions among
+    /// the visible columns (`INSERT` without a column list).
+    pub ordinals: Vec<Option<usize>>,
+    /// Where lookup rows and owner rows live.
+    pub placement: Arc<sprig_shard::lookup::MapPlacement>,
+}
+
+impl PartialEq for LookupRef {
+    fn eq(&self, o: &Self) -> bool {
+        self.index == o.index
+            && self.placement.lookup_map == o.placement.lookup_map
+            && self.placement.owner_map == o.placement.owner_map
+    }
+}
+
+impl Eq for LookupRef {}
+
+impl LookupRef {
+    /// Whether reads may route through it (`public`; a `write_only` or
+    /// `backfilling` index is maintained but not complete).
+    #[must_use]
+    pub fn routes(&self) -> bool {
+        self.index.state == sprig_shard::lookup::LookupState::Public
+    }
+
+    /// The class of key part `i` of the lookup's value or the owner's
+    /// primary key, as `sprig-shard` normalizes it.
+    #[must_use]
+    pub fn pk_class(&self, i: usize) -> Option<sprig_shard::KeyClass> {
+        self.index.owner_pk.get(i).map(|c| c.class)
+    }
 }
 
 impl TableEntry {
@@ -122,8 +232,8 @@ impl TableEntry {
     #[must_use]
     pub fn key(&self) -> Option<&str> {
         match &self.kind {
-            TableKind::Sharded { key, .. } => Some(key),
-            TableKind::Reference { .. } => None,
+            TableKind::Sharded { key, .. } if !key.is_empty() => Some(key),
+            _ => None,
         }
     }
 
@@ -183,6 +293,35 @@ impl StaticTopology {
     pub fn is_empty(&self) -> bool {
         self.tables.is_empty()
     }
+
+    /// Every table, with the default schema it is known under.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &TableEntry)> {
+        self.tables.iter().map(|((s, _), e)| (s.as_str(), e))
+    }
+
+    /// Every shard of the sharded tables under the default schema
+    /// `schema`, each schema once, by group and then shard: where chapter
+    /// 21 deploys a database's routines, events and views (added by r1ddl).
+    #[must_use]
+    pub fn shards_under(&self, schema: &str) -> Vec<ShardLoc> {
+        let schema = schema.to_ascii_lowercase();
+        let mut groups: Vec<&Arc<Group>> = self
+            .tables
+            .iter()
+            .filter(|((s, _), e)| *s == schema && !e.is_reference())
+            .map(|(_, e)| &e.group)
+            .collect();
+        groups.sort_by_key(|g| g.id);
+        let mut out: Vec<ShardLoc> = Vec::new();
+        for g in groups {
+            for sh in &g.shards {
+                if !out.iter().any(|o| o.schema == sh.schema) {
+                    out.push(sh.clone());
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Topology for StaticTopology {
@@ -215,8 +354,8 @@ impl Topology for StaticTopology {
     }
 }
 
-/// The JSON description `[gateway] router_topology_file` names: per tenant
-/// name, groups and tables.
+/// A JSON description of tenants' layouts, per tenant name: groups and
+/// tables (unit tests and tools; the gateway reads the catalog).
 ///
 /// ```json
 /// {"tenants": {"acme": {
@@ -285,7 +424,7 @@ pub struct TableFile {
     pub key: Option<String>,
     /// Key column position, from 0.
     #[serde(default)]
-    pub key_ordinal: usize,
+    pub key_ordinal: Option<usize>,
     /// Every unique key contains the key.
     #[serde(default)]
     pub upsert_safe: bool,
@@ -337,6 +476,8 @@ impl TenantFile {
                     schema: s.schema.clone(),
                     cluster: s.cluster.clone(),
                     lo: s.lo.unwrap_or(lo),
+                    epoch: 1,
+                    held_until_ms: None,
                 })
                 .collect();
             shards.sort_by_key(|s| s.lo);
@@ -347,6 +488,8 @@ impl TenantFile {
                 g.id,
                 Arc::new(Group {
                     id: g.id,
+                    db: 0,
+                    version: 0,
                     key_class,
                     spec,
                     shards,
@@ -379,6 +522,10 @@ impl TenantFile {
                     name: t.table.to_ascii_lowercase(),
                     kind,
                     group,
+                    lookups: Vec::new(),
+                    lookup_gap: false,
+                    columns: Vec::new(),
+                    fill_rk: false,
                 },
             );
         }
@@ -445,5 +592,30 @@ mod tests {
         assert!(t.table("T1_D1_G1_S1", "orders").is_some());
         assert!(t.mentions("select * from `orders` where x=1"));
         assert!(!t.mentions("select * from orders_x"));
+    }
+
+    #[test]
+    fn shards_under_a_schema_list_each_shard_once() {
+        let f: TopologyFile = serde_json::from_str(
+            r#"{"tenants": {"a": {"groups": [
+                {"id": 9, "key_class": "int", "shards": [
+                  {"shard": 1, "schema": "t1_d1_g9_s1", "cluster": "c1"},
+                  {"shard": 2, "schema": "t1_d1_g9_s2", "cluster": "c2"}]},
+                {"id": 8, "key_class": "int", "shards": [
+                  {"shard": 1, "schema": "t1_d1_g8_s1", "cluster": "c1"}]}],
+              "tables": [{"schema": "t1_d1_g1_s1", "table": "orders", "group": 9, "key": "cid"},
+                         {"schema": "t1_d1_g1_s1", "table": "items", "group": 9, "key": "cid"},
+                         {"schema": "t1_d1_g1_s1", "table": "tags", "group": 8, "key": "id"},
+                         {"schema": "t1_d2_g1_s1", "table": "x", "group": 8, "key": "id"}]}}}"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let t = f.tenants["a"].build().unwrap_or_else(|e| panic!("{e}"));
+        let s: Vec<String> = t
+            .shards_under("T1_D1_G1_S1")
+            .into_iter()
+            .map(|l| l.schema)
+            .collect();
+        assert_eq!(s, ["t1_d1_g8_s1", "t1_d1_g9_s1", "t1_d1_g9_s2"]);
+        assert!(t.shards_under("t1_d9_g1_s1").is_empty());
     }
 }

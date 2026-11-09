@@ -2,28 +2,37 @@
 //! per-shard statements through a [`ShardBackend`] and combines the
 //! answers into one result.
 //!
-//! R1's first executor holds each shard's rows in gateway memory, charged
-//! to `router.max_statement_memory_mb` (39422 past it), and runs shards
-//! one after another on the session's connection to each cluster, so a
-//! statement inside a client transaction sees that transaction. Streaming
-//! with backpressure and parallel shard streams are chapter 17's build
-//! step 3 still to come.
+//! Outside a transaction, the shards of a read run in parallel, each on a
+//! backend connection of its own ([`ShardBackend::open_stream`]), at most
+//! `router.max_parallel_shards` at once. A scatter streams: rows go to the
+//! client's [`RowSink`] as they arrive, through a bounded buffer whose
+//! bytes are charged to `router.max_statement_memory_mb` until written.
+//! Merges, aggregates and lookup joins gather their shards' rows in
+//! parallel, charged to the same budget (39422 past it), and combine them
+//! in gateway memory. Inside a transaction every statement runs on the
+//! session's own connection to each cluster, one shard after another, so it
+//! sees the transaction.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use bytes::Bytes;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_proto_mysql::ColumnDef;
 
 use crate::collation;
+use sprig_shard::KeyValueOwned;
+
 use crate::plan::{
-    AggCall, AggFunc, AggPlan, CmpOp, ColRef, FinalSort, JoinCol, KeyCols, LookupJoinPlan, Operand,
-    OutCol, Plan, Pred, ReadKind, ReadPlan, SortKey, Target, WriteKind, WritePlan,
+    AggCall, AggFunc, AggPlan, Claim, CmpOp, ColRef, FinalSort, JoinCol, KeyCols, LookupJoinPlan,
+    LookupProbe, Operand, OutCol, Plan, Pred, ReadKind, ReadPlan, SortKey, Target, ViaLookup,
+    WriteKind, WritePlan,
 };
 use crate::reject::{Reason, Rejection};
-use crate::topology::{KeyClass, KeyValue};
+use crate::topology::{KeyClass, KeyValue, LookupRef};
 use crate::value::{ColClass, Dec, canonical, class_of, cmp_decimal_text, cmp_value, cmp_weights};
 
 /// One text row: a value per column, `None` for NULL.
@@ -97,24 +106,172 @@ impl Budget {
 }
 
 /// Runs statements on shards for the executor. The gateway implements it
-/// over the session's backend connections.
+/// over the session's backend connections (one per cluster).
 #[async_trait::async_trait]
 pub trait ShardBackend: Send {
-    /// Runs `sql` on `cluster` and returns the whole answer, charging rows
-    /// to `budget`.
+    /// Runs `sql` on the shard of `target` (its cluster; inside a
+    /// transaction, that cluster's branch) and returns the whole answer,
+    /// charging rows to `budget`.
     ///
     /// # Errors
-    /// The backend's error (an ERR packet becomes a `Backend` error).
-    async fn run(&mut self, cluster: &str, sql: &str, budget: &mut Budget) -> Result<ShardOutcome>;
+    /// The backend's error (an ERR packet becomes a `Backend` error), or
+    /// what the transaction coordinator returns instead.
+    async fn run(
+        &mut self,
+        target: &Target,
+        sql: &str,
+        budget: &mut Budget,
+    ) -> Result<ShardOutcome>;
 
     /// Whether the session is inside a transaction (writes then use a
     /// statement savepoint instead of their own transaction).
     fn in_transaction(&self) -> bool;
+
+    /// Before a multi-shard write on `targets`: chapter 18's write rule,
+    /// then an implicit transaction (autocommit) or a statement savepoint.
+    /// The default runs `BEGIN` or `SAVEPOINT __sprig_stmt` on the first
+    /// target's cluster (backends without a coordinator, tests).
+    ///
+    /// # Errors
+    /// 39440 or 39444 before anything ran; the backend's errors.
+    async fn begin_write(&mut self, targets: &[Target], budget: &mut Budget) -> Result<()> {
+        let Some(first) = targets.first() else {
+            return Ok(());
+        };
+        let sql = if self.in_transaction() {
+            "SAVEPOINT __sprig_stmt"
+        } else {
+            "BEGIN"
+        };
+        self.run(first, sql, budget).await.map(|_| ())
+    }
+
+    /// After a multi-shard write: commit (or roll back) the implicit
+    /// transaction, or release (or roll back to) the statement savepoint.
+    ///
+    /// # Errors
+    /// The backend's or the coordinator's errors.
+    async fn end_write(&mut self, targets: &[Target], ok: bool, budget: &mut Budget) -> Result<()> {
+        let Some(first) = targets.first() else {
+            return Ok(());
+        };
+        let sql = match (self.in_transaction(), ok) {
+            (true, true) => "RELEASE SAVEPOINT __sprig_stmt",
+            (true, false) => "ROLLBACK TO SAVEPOINT __sprig_stmt",
+            (false, true) => "COMMIT",
+            (false, false) => "ROLLBACK",
+        };
+        self.run(first, sql, budget).await.map(|_| ())
+    }
+
+    /// A backend connection of its own to `cluster`, for one parallel
+    /// stream of a read; `None` when statements must stay on the session's
+    /// connections (inside a transaction, or a backend without streams).
+    ///
+    /// # Errors
+    /// The backend's errors.
+    async fn open_stream(&mut self, cluster: &str) -> Result<Option<Box<dyn ShardStream>>> {
+        let _ = cluster;
+        Ok(None)
+    }
+
+    /// `router.max_parallel_shards`.
+    fn max_parallel(&self) -> usize {
+        1
+    }
+
+    /// Chapter 19's `claim` of one value an inserted row holds, in the
+    /// write's transaction (after [`Self::begin_write`]). The default
+    /// refuses: a backend without lookup sessions can't keep them exact.
+    ///
+    /// # Errors
+    /// 1062 when another row holds the value; 39461; lock waits.
+    async fn lookup_claim(&mut self, claim: &Claim) -> Result<()> {
+        let _ = claim;
+        Err(rejected(
+            Reason::Lookup,
+            "this backend doesn't maintain lookups",
+        ))
+    }
+
+    /// Chapter 19's `release` of a value a deleted row held (buffered
+    /// until the transaction commits).
+    ///
+    /// # Errors
+    /// Normalization errors; the default refuses.
+    async fn lookup_release(
+        &mut self,
+        lookup: &LookupRef,
+        value: Vec<KeyValueOwned>,
+        owner_pk: Vec<KeyValueOwned>,
+    ) -> Result<()> {
+        let _ = (lookup, value, owner_pk);
+        Err(rejected(
+            Reason::Lookup,
+            "this backend doesn't maintain lookups",
+        ))
+    }
+
+    /// The routing hashes of the rows holding `probe`'s values (chapter
+    /// 19's `route`), as the session's transaction sees them.
+    ///
+    /// # Errors
+    /// 39461 when a lookup shard is unreachable; the default refuses.
+    async fn lookup_owners(&mut self, probe: &LookupProbe) -> Result<Vec<u64>> {
+        let _ = probe;
+        Err(rejected(
+            Reason::Lookup,
+            "this backend doesn't read lookups",
+        ))
+    }
+}
+
+/// One shard statement on a backend connection of its own, read row by
+/// row (chapter 17's `ShardStream`).
+#[async_trait::async_trait]
+pub trait ShardStream: Send {
+    /// Sends `sql`; the result's column definitions, or `None` for an OK
+    /// packet.
+    ///
+    /// # Errors
+    /// The backend's error.
+    async fn start(&mut self, sql: &str) -> Result<Option<Vec<ColumnDef>>>;
+
+    /// The next row, `None` after the last.
+    ///
+    /// # Errors
+    /// The backend's error (an ERR packet after rows).
+    async fn next_row(&mut self) -> Result<Option<Row>>;
+
+    /// Warnings, once the last row was read.
+    fn warnings(&self) -> u16;
+}
+
+/// Where a streamed scatter's rows go (the gateway encodes them for the
+/// client as they arrive).
+#[async_trait::async_trait]
+pub trait RowSink: Send {
+    /// The result's visible columns, before the first row.
+    ///
+    /// # Errors
+    /// The client is gone.
+    async fn columns(&mut self, columns: &[ColumnDef]) -> Result<()>;
+
+    /// One row, visible columns only.
+    ///
+    /// # Errors
+    /// The client is gone.
+    async fn row(&mut self, row: &[Option<Bytes>]) -> Result<()>;
 }
 
 /// The combined answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
+    /// The rows went to the [`RowSink`] already.
+    Streamed {
+        /// Warnings, summed.
+        warnings: u16,
+    },
     /// A resultset.
     Rows {
         /// Column definitions (from the first shard, physical names).
@@ -143,6 +300,14 @@ pub async fn execute(
     be: &mut dyn ShardBackend,
     budget: &mut Budget,
 ) -> Result<Output> {
+    let narrowed;
+    let plan = match plan {
+        Plan::ViaLookup(v) => {
+            narrowed = narrow(v, be).await?;
+            &narrowed
+        }
+        p => p,
+    };
     metrics::counter!("sprig_router_statements_total", "plan" => plan.kind()).increment(1);
     match plan {
         Plan::Read(r) => {
@@ -164,7 +329,7 @@ pub async fn execute(
         Plan::LookupJoin(j) => lookup_join(j, be, budget).await,
         Plan::Write(w) => write(w, be, budget).await,
         Plan::Explain(p) => explain(p, be, budget).await,
-        Plan::Pass(t) => match be.run(&t.cluster, &t.sql, budget).await? {
+        Plan::Pass(t) => match be.run(t, &t.sql, budget).await? {
             ShardOutcome::Rows(r) => Ok(Output::Rows {
                 columns: r.columns,
                 rows: r.rows,
@@ -173,17 +338,329 @@ pub async fn execute(
             ShardOutcome::Ok(ok) => Ok(Output::Ok(ok)),
         },
         Plan::Reject(r) => Err(r.error()),
-        Plan::NotRouted => Err(SprigError::internal(
+        Plan::NotRouted | Plan::ViaLookup(_) => Err(SprigError::internal(
             "execute of a statement the router doesn't route",
         )),
     }
 }
 
+/// A lookup-narrowed plan, narrowed: the owners' hashes read through the
+/// backend (`sprig_router_lookup_routes_total`).
+async fn narrow(v: &ViaLookup, be: &mut dyn ShardBackend) -> Result<Plan> {
+    let rks = be.lookup_owners(&v.probe).await?;
+    metrics::counter!("sprig_router_lookup_routes_total").increment(1);
+    Ok(v.narrow(&rks))
+}
+
+/// Runs `plan` as [`execute`] does, except that a scatter outside a
+/// transaction streams its rows to `sink` from parallel shard streams
+/// ([`Output::Streamed`]); other plans return their rows.
+///
+/// # Errors
+/// As [`execute`]. An error after rows went to `sink` ends the result.
+pub async fn execute_to(
+    plan: &Plan,
+    be: &mut dyn ShardBackend,
+    budget: &mut Budget,
+    sink: &mut dyn RowSink,
+) -> Result<Output> {
+    let narrowed;
+    let plan = match plan {
+        Plan::ViaLookup(v) => {
+            narrowed = narrow(v, be).await?;
+            &narrowed
+        }
+        p => p,
+    };
+    if let Plan::Read(r) = plan
+        && r.kind == ReadKind::Scatter
+        && let Some(streams) = open_streams(&r.targets, be).await?
+    {
+        metrics::counter!("sprig_router_statements_total", "plan" => "scatter").increment(1);
+        metrics::histogram!("sprig_router_fanout_shards")
+            .record(u32::try_from(r.targets.len()).map_or(f64::MAX, f64::from));
+        return stream_scatter(r, streams, be.max_parallel(), budget, sink).await;
+    }
+    execute(plan, be, budget).await
+}
+
+/// What a scatter's stream tasks report.
+enum Ev {
+    Head(Vec<ColumnDef>),
+    Row(Row, u32),
+    Done(u16),
+    Failed(SprigError),
+}
+
+/// A row's share of the stream buffer, in KiB.
+fn kib(r: &Row) -> u32 {
+    u32::try_from(row_bytes(r) / 1024 + 1).unwrap_or(u32::MAX)
+}
+
+/// A scatter, streamed: each shard's rows go to `sink` as they arrive
+/// (rows of one shard stay in order). Rows wait in a buffer of at most the
+/// statement's memory budget; a full buffer stops the streams reading
+/// (backpressure). `OFFSET` and `LIMIT` apply here; the rest of each shard's
+/// answer (at most `m+n` rows, pushed down) is drained so connections stay
+/// reusable.
+async fn stream_scatter(
+    plan: &ReadPlan,
+    streams: Vec<Box<dyn ShardStream>>,
+    width: usize,
+    budget: &Budget,
+    sink: &mut dyn RowSink,
+) -> Result<Output> {
+    let total_kib = u32::try_from((budget.left / 1024).max(1)).unwrap_or(u32::MAX >> 4);
+    let total_kib =
+        total_kib.min(u32::try_from(tokio::sync::Semaphore::MAX_PERMITS).unwrap_or(u32::MAX));
+    let buffer = Arc::new(tokio::sync::Semaphore::new(total_kib as usize));
+    let gate = Arc::new(tokio::sync::Semaphore::new(width.max(1)));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Ev>(64);
+    let mut set = tokio::task::JoinSet::new();
+    let n = streams.len();
+    for (mut s, t) in streams.into_iter().zip(&plan.targets) {
+        let (tx, buffer, gate, sql) = (
+            tx.clone(),
+            Arc::clone(&buffer),
+            Arc::clone(&gate),
+            t.sql.clone(),
+        );
+        set.spawn(async move {
+            let Ok(_slot) = gate.acquire_owned().await else {
+                return;
+            };
+            let run = async {
+                let cols = s
+                    .start(&sql)
+                    .await?
+                    .ok_or_else(|| SprigError::internal("a shard read answered with OK"))?;
+                if tx.send(Ev::Head(cols)).await.is_err() {
+                    return Ok(None);
+                }
+                while let Some(r) = s.next_row().await? {
+                    let k = kib(&r);
+                    if k > total_kib {
+                        return Err(over_budget());
+                    }
+                    let Ok(p) = buffer.acquire_many(k).await else {
+                        return Ok(None);
+                    };
+                    p.forget();
+                    if tx.send(Ev::Row(r, k)).await.is_err() {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(s.warnings()))
+            };
+            let ev = match run.await {
+                Ok(Some(w)) => Ev::Done(w),
+                Ok(None) => return,
+                Err(e) => Ev::Failed(e),
+            };
+            let _ = tx.send(ev).await;
+        });
+    }
+    drop(tx);
+    let mut columns: Option<Vec<ColumnDef>> = None;
+    let mut visible = 0usize;
+    let mut skip = plan.offset;
+    let mut left = plan.limit.unwrap_or(u64::MAX);
+    let mut warnings: u16 = 0;
+    let mut done = 0usize;
+    while done < n {
+        let Some(ev) = rx.recv().await else {
+            break;
+        };
+        match ev {
+            Ev::Head(c) => match &columns {
+                None => {
+                    visible = c
+                        .len()
+                        .checked_sub(plan.hidden)
+                        .ok_or_else(|| SprigError::internal("fewer columns than hidden ones"))?;
+                    sink.columns(&c[..visible]).await?;
+                    columns = Some(c);
+                }
+                Some(first) => {
+                    if let Err(e) = same_columns(first, &c) {
+                        set.abort_all();
+                        return Err(e);
+                    }
+                }
+            },
+            Ev::Row(r, k) => {
+                let out = if skip > 0 {
+                    skip -= 1;
+                    Ok(())
+                } else if left > 0 {
+                    left -= 1;
+                    sink.row(&r[..visible.min(r.len())]).await
+                } else {
+                    Ok(())
+                };
+                buffer.add_permits(k as usize);
+                if let Err(e) = out {
+                    set.abort_all();
+                    return Err(e);
+                }
+            }
+            Ev::Done(w) => {
+                done += 1;
+                warnings = warnings.saturating_add(w);
+            }
+            Ev::Failed(e) => {
+                set.abort_all();
+                return Err(e);
+            }
+        }
+    }
+    if done < n {
+        return Err(SprigError::internal(
+            "a shard stream ended without an answer",
+        ));
+    }
+    if columns.is_none() {
+        return Err(SprigError::internal("a scatter without column definitions"));
+    }
+    Ok(Output::Streamed { warnings })
+}
+
 async fn rows_of(t: &Target, be: &mut dyn ShardBackend, budget: &mut Budget) -> Result<ShardRows> {
-    match be.run(&t.cluster, &t.sql, budget).await? {
+    match be.run(t, &t.sql, budget).await? {
         ShardOutcome::Rows(r) => Ok(r),
         ShardOutcome::Ok(_) => Err(SprigError::internal("a shard read answered with OK")),
     }
+}
+
+/// The bytes a row holds in gateway memory, for the budget.
+fn row_bytes(r: &Row) -> u64 {
+    r.iter()
+        .map(|v| v.as_ref().map_or(0, Bytes::len) as u64 + 16)
+        .sum()
+}
+
+/// The streams of `targets` (in target order), or `None` when they must
+/// run on the session's connections.
+async fn open_streams(
+    targets: &[Target],
+    be: &mut dyn ShardBackend,
+) -> Result<Option<Vec<Box<dyn ShardStream>>>> {
+    if targets.len() < 2 || be.max_parallel() < 2 {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(targets.len());
+    for t in targets {
+        match be.open_stream(&t.cluster).await? {
+            Some(s) => out.push(s),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(out))
+}
+
+/// One stream's whole answer, its rows charged to the shared budget.
+async fn collect(
+    mut s: Box<dyn ShardStream>,
+    sql: String,
+    left: Arc<AtomicU64>,
+) -> Result<ShardRows> {
+    let columns = s
+        .start(&sql)
+        .await?
+        .ok_or_else(|| SprigError::internal("a shard read answered with OK"))?;
+    let mut rows = Vec::new();
+    while let Some(r) = s.next_row().await? {
+        take(&left, row_bytes(&r))?;
+        rows.push(r);
+    }
+    Ok(ShardRows {
+        columns,
+        rows,
+        warnings: s.warnings(),
+    })
+}
+
+fn over_budget() -> SprigError {
+    SprigError::new(
+        SprigCode::RouterMemoryLimit,
+        "The statement's rows held in the gateway passed router.max_statement_memory_mb",
+    )
+}
+
+/// Takes `n` bytes from a shared budget.
+fn take(left: &AtomicU64, n: u64) -> Result<()> {
+    left.fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |l| {
+        l.checked_sub(n)
+    })
+    .map(|_| ())
+    .map_err(|_| over_budget())
+}
+
+/// Every target's answer, in target order: in parallel on streams of their
+/// own when the backend offers them (at most `max_parallel()` at once),
+/// else one after another on the session's connections.
+async fn gather(
+    targets: &[Target],
+    be: &mut dyn ShardBackend,
+    budget: &mut Budget,
+) -> Result<Vec<ShardRows>> {
+    let Some(streams) = open_streams(targets, be).await? else {
+        let mut out = Vec::with_capacity(targets.len());
+        for t in targets {
+            out.push(rows_of(t, be, budget).await?);
+        }
+        return Ok(out);
+    };
+    let left = Arc::new(AtomicU64::new(budget.left));
+    let width = be.max_parallel().max(1);
+    let mut results: Vec<Option<ShardRows>> = vec![None; targets.len()];
+    let mut set = tokio::task::JoinSet::new();
+    let mut pending = streams.into_iter().zip(targets).enumerate();
+    let mut running = 0usize;
+    loop {
+        while running < width {
+            let Some((i, (s, t))) = pending.next() else {
+                break;
+            };
+            let left = Arc::clone(&left);
+            let sql = t.sql.clone();
+            set.spawn(async move { (i, collect(s, sql, left).await) });
+            running += 1;
+        }
+        let Some(done) = set.join_next().await else {
+            break;
+        };
+        running -= 1;
+        let (i, r) = done.map_err(|e| SprigError::internal(format!("shard stream task: {e}")))?;
+        match r {
+            Ok(rows) => results[i] = Some(rows),
+            Err(e) => {
+                set.abort_all();
+                return Err(e);
+            }
+        }
+    }
+    budget.left = left.load(AtomicOrdering::Relaxed);
+    results
+        .into_iter()
+        .map(|r| r.ok_or_else(|| SprigError::internal("a shard stream without an answer")))
+        .collect()
+}
+
+/// Checks that a shard's columns match the first shard's.
+fn same_columns(first: &[ColumnDef], other: &[ColumnDef]) -> Result<()> {
+    if first.len() != other.len()
+        || first
+            .iter()
+            .zip(other)
+            .any(|(a, b)| a.col_type != b.col_type || a.charset != b.charset)
+    {
+        return Err(rejected(
+            Reason::SchemaSkew,
+            "shards disagree on result columns",
+        ));
+    }
+    Ok(())
 }
 
 /// Every target's rows, combined: all columns (hidden too), the number of
@@ -196,22 +673,10 @@ async fn run_read(
     let mut columns: Option<Vec<ColumnDef>> = None;
     let mut rows: Vec<Row> = Vec::new();
     let mut warnings: u16 = 0;
-    for t in &plan.targets {
-        let r = rows_of(t, be, budget).await?;
+    for r in gather(&plan.targets, be, budget).await? {
         match &columns {
             None => columns = Some(r.columns),
-            Some(c) => {
-                if c.len() != r.columns.len()
-                    || c.iter()
-                        .zip(&r.columns)
-                        .any(|(a, b)| a.col_type != b.col_type || a.charset != b.charset)
-                {
-                    return Err(rejected(
-                        Reason::SchemaSkew,
-                        "shards disagree on result columns",
-                    ));
-                }
-            }
+            Some(c) => same_columns(c, &r.columns)?,
         }
         warnings = warnings.saturating_add(r.warnings);
         rows.extend(r.rows);
@@ -950,26 +1415,25 @@ async fn lookup_join(
         }
         let mut matches: HashMap<Vec<u8>, Vec<Row>> = HashMap::new();
         let mut yclass: Option<ColClass> = None;
-        for (s, lits) in per.iter().enumerate() {
-            if lits.is_empty() {
-                continue;
-            }
-            let loc = &j.inner_group.shards[s];
-            let sql = j
-                .inner_template
-                .replace("\u{1}S", &loc.schema.replace('`', "``"))
-                .replace("\u{1}K", &lits.join(", "));
-            metrics::counter!("sprig_router_lookup_batches_total").increment(1);
-            let r = rows_of(
-                &Target {
+        let inner: Vec<Target> = per
+            .iter()
+            .enumerate()
+            .filter(|(_, lits)| !lits.is_empty())
+            .map(|(s, lits)| {
+                let loc = &j.inner_group.shards[s];
+                Target {
                     cluster: loc.cluster.clone(),
                     shard: loc.shard,
-                    sql,
-                },
-                be,
-                budget,
-            )
-            .await?;
+                    at: j.inner_group.at(s),
+                    sql: j
+                        .inner_template
+                        .replace("\u{1}S", &loc.schema.replace('`', "``"))
+                        .replace("\u{1}K", &lits.join(", ")),
+                }
+            })
+            .collect();
+        metrics::counter!("sprig_router_lookup_batches_total").increment(inner.len() as u64);
+        for r in gather(&inner, be, budget).await? {
             warnings = warnings.saturating_add(r.warnings);
             let n_i = r.columns.len();
             let iat = |c: ColRef| c.index(n_i, j.inner_hidden);
@@ -1057,6 +1521,7 @@ async fn lookup_join(
                     cluster: loc.cluster.clone(),
                     shard: loc.shard,
                     sql,
+                    at: j.inner_group.at(0),
                 },
                 be,
                 budget,
@@ -1108,28 +1573,95 @@ fn info_numbers(info: &str) -> Vec<(String, u64)> {
     out
 }
 
+/// Chapter 19 before a write's rows: the deleted rows' values are read
+/// (locked) and released, the inserted rows' values claimed.
+async fn lookups_before(
+    w: &WritePlan,
+    be: &mut dyn ShardBackend,
+    budget: &mut Budget,
+) -> Result<()> {
+    for rel in &w.releases {
+        let l = &rel.lookup;
+        let mut parts: Vec<sprig_shard::KeyClass> =
+            l.index.columns.iter().map(|c| c.class).collect();
+        parts.extend(l.index.owner_pk.iter().map(|c| c.class));
+        for t in &rel.reads {
+            let ShardOutcome::Rows(rows) = be.run(t, &t.sql, budget).await? else {
+                continue;
+            };
+            for row in rows.rows {
+                let mut vals = Vec::with_capacity(parts.len());
+                for (i, part) in parts.iter().enumerate() {
+                    let v = row.get(i).and_then(|v| v.as_deref());
+                    vals.push(crate::planner::decode_read(v, *part).ok_or_else(|| {
+                        SprigError::internal("a lookup value the release read can't decode")
+                    })?);
+                }
+                let value = vals.drain(..l.index.columns.len()).collect();
+                be.lookup_release(l, value, vals).await?;
+            }
+        }
+    }
+    // Two rows of one statement with equal values (under the column's
+    // collation): the second claim would take the first's value as an
+    // orphan, since neither row is written yet. MariaDB refuses the
+    // statement; so does the router.
+    let mut seen = std::collections::HashSet::new();
+    for c in &w.claims {
+        if c.value.iter().any(|v| matches!(v, KeyValueOwned::Null)) {
+            continue;
+        }
+        let h = sprig_shard::lookup::value_hash(&c.lookup.index, &c.value)?;
+        if !seen.insert((c.lookup.index.id, h)) {
+            let shown = c
+                .value
+                .iter()
+                .map(|v| match v {
+                    KeyValueOwned::Str { bytes, .. } | KeyValueOwned::Bytes(bytes) => {
+                        String::from_utf8_lossy(bytes).into_owned()
+                    }
+                    KeyValueOwned::Int(i) => i.to_string(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join("-");
+            return Err(SprigError::standard(
+                1062,
+                *b"23000",
+                format!(
+                    "Duplicate entry '{shown}' for key '{}'",
+                    c.lookup.index.index_name
+                ),
+            ));
+        }
+    }
+    for c in &w.claims {
+        be.lookup_claim(c).await?;
+    }
+    if !w.claims.is_empty() {
+        metrics::counter!("sprig_router_lookup_claims_total").increment(w.claims.len() as u64);
+    }
+    Ok(())
+}
+
 async fn write(w: &WritePlan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Result<Output> {
     metrics::histogram!("sprig_router_fanout_shards")
         .record(u32::try_from(w.targets.len()).map_or(f64::MAX, f64::from));
     let Some(first) = w.targets.first() else {
         return Ok(Output::Ok(ShardOk::default()));
     };
-    let cluster = first.cluster.clone();
-    let in_txn = be.in_transaction();
-    let (begin, undo, end) = if in_txn {
-        (
-            "SAVEPOINT __sprig_stmt",
-            "ROLLBACK TO SAVEPOINT __sprig_stmt",
-            "RELEASE SAVEPOINT __sprig_stmt",
-        )
-    } else {
-        ("BEGIN", "ROLLBACK", "COMMIT")
-    };
-    be.run(&cluster, begin, budget).await?;
+    let _ = first;
+    be.begin_write(&w.targets, budget).await?;
+    if let Err(e) = lookups_before(w, be, budget).await {
+        if let Err(u) = be.end_write(&w.targets, false, budget).await {
+            tracing::warn!(error = %u, "undoing a failed write's lookups");
+        }
+        return Err(e);
+    }
     let mut total = ShardOk::default();
     let (mut a, mut b, mut warn_info) = (0u64, 0u64, 0u64);
     for t in &w.targets {
-        match be.run(&t.cluster, &t.sql, budget).await {
+        match be.run(t, &t.sql, budget).await {
             Ok(ShardOutcome::Ok(ok)) => {
                 total.affected += ok.affected;
                 if total.last_insert_id == 0 {
@@ -1166,14 +1698,14 @@ async fn write(w: &WritePlan, be: &mut dyn ShardBackend, budget: &mut Budget) ->
             }
             Ok(ShardOutcome::Rows(_)) => {}
             Err(e) => {
-                if let Err(u) = be.run(&cluster, undo, budget).await {
+                if let Err(u) = be.end_write(&w.targets, false, budget).await {
                     tracing::warn!(error = %u, "undoing a failed multi-shard write");
                 }
                 return Err(e);
             }
         }
     }
-    be.run(&cluster, end, budget).await?;
+    be.end_write(&w.targets, true, budget).await?;
     total.info = match w.kind {
         WriteKind::Insert if w.rows > 1 => {
             format!("Records: {a}  Duplicates: {b}  Warnings: {warn_info}")
@@ -1276,6 +1808,24 @@ impl ExplainRows {
 async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Result<Output> {
     let mut rows = ExplainRows::default();
     let mut shard_sql: Vec<&Target> = Vec::new();
+    let p = match p {
+        Plan::ViaLookup(v) => {
+            rows.push(
+                None,
+                "Lookup",
+                format!(
+                    "{} ({})",
+                    v.probe.lookup.index.index_name, v.probe.lookup.column
+                ),
+                format!(
+                    "{} value(s): only the shards of the rows holding them",
+                    v.probe.values.len()
+                ),
+            );
+            &v.plan
+        }
+        p => p,
+    };
     match p {
         Plan::Pass(t) => {
             rows.push(None, "Route", format!("shard {}", t.shard), t.sql.clone());
@@ -1344,17 +1894,13 @@ async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Re
                 format!("{}: {}", r.reason.as_str(), r.detail),
             );
         }
-        Plan::Explain(_) | Plan::NotRouted => {}
+        Plan::Explain(_) | Plan::NotRouted | Plan::ViaLookup(_) => {}
     }
     // One representative shard's MariaDB plan.
     for t in shard_sql {
         let parent = rows.0.len();
         let json = match be
-            .run(
-                &t.cluster,
-                &format!("EXPLAIN FORMAT=JSON {}", t.sql),
-                budget,
-            )
+            .run(t, &format!("EXPLAIN FORMAT=JSON {}", t.sql), budget)
             .await
         {
             Ok(ShardOutcome::Rows(r)) => r

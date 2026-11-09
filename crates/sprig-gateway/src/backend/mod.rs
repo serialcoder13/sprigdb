@@ -93,6 +93,7 @@ pub mod pool;
 mod session;
 pub mod settings;
 pub mod state;
+mod txn;
 pub mod writer;
 
 use std::collections::HashMap;

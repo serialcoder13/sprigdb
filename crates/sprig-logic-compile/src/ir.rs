@@ -261,6 +261,10 @@ pub enum Builtin {
     EndsWith,
     /// The code-point index of `b` in `a`, or -1.
     IndexOf,
+    /// Its argument; a runtime error (39866) when it is `NULL`. KIRun's
+    /// arithmetic operators refuse a null operand, so the KIRun front end
+    /// wraps every operand that may be `NULL`.
+    NotNull,
 }
 
 impl Builtin {
@@ -291,6 +295,7 @@ impl Builtin {
             Builtin::StartsWith => "starts_with",
             Builtin::EndsWith => "ends_with",
             Builtin::IndexOf => "index_of",
+            Builtin::NotNull => "not_null",
         }
     }
 }
@@ -620,7 +625,9 @@ impl Function {
                 Builtin::ToStr | Builtin::JsonStr | Builtin::Upper | Builtin::Lower => Ty::Str,
                 Builtin::ToJson => Ty::Json,
                 Builtin::JsonLength | Builtin::Len | Builtin::IndexOf => Ty::Int,
-                Builtin::Abs => args.first().map_or(Ty::Float, |a| self.ty_of(a)),
+                Builtin::Abs | Builtin::NotNull => {
+                    args.first().map_or(Ty::Float, |a| self.ty_of(a))
+                }
                 Builtin::Max | Builtin::Min => args
                     .iter()
                     .map(|a| self.ty_of(a))

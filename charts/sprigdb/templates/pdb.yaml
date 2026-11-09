@@ -1,0 +1,12 @@
+{{- range $c := list "etcd-dc" "controller" "gateway" "operator" }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sprigdb-{{ $c }}
+  labels: {{- include "sprigdb.labels" $ | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/component: {{ $c }}}
+{{- end }}

@@ -120,10 +120,6 @@ impl SampleValidation {
     }
 }
 
-fn catalog_err(e: impl std::error::Error + Send + Sync + 'static) -> SprigError {
-    SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
-}
-
 fn ms_time(ms: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(ms)
 }
@@ -272,9 +268,15 @@ impl ValidationHook for SampleValidation {
             });
         };
         let ep = self.locator.writer(tenant).await?;
-        let mut q = ep.pool.get_conn().await.map_err(catalog_err)?;
         let store = AutoIndexStore::of(&ep.store);
-        let Some(cand_row) = store.candidate(&mut q, row.candidate_id).await? else {
+        // One short catalog connection at a time: the catalog snapshot and
+        // the samples below take their own, and the validation itself can
+        // run for minutes (the R0 catalog-connection deadlock).
+        let cand_row = {
+            let mut q = crate::catalogs::acquire(&ep.pool, "auto_index validation").await?;
+            store.candidate(&mut q, row.candidate_id).await?
+        };
+        let Some(cand_row) = cand_row else {
             return Ok(Validated::Rejected {
                 reason: format!("no candidate {}", row.candidate_id),
             });
@@ -348,6 +350,7 @@ impl ValidationHook for SampleValidation {
         let cluster = object.view.cluster.to_string();
         let shard = shard_of(&target.schema);
         let first = &reports[0];
+        let mut q = crate::catalogs::acquire(&ep.pool, "auto_index validation").await?;
         let vid = store
             .insert_validation(
                 &mut q,
@@ -361,13 +364,13 @@ impl ValidationHook for SampleValidation {
             elapsed_ms = first.elapsed_ms(), "auto_index: validated");
         if first.verdict.kind == VerdictKind::Accepted || kept_canary(first) {
             store.set_validation(&mut q, row.index_id, vid).await?;
-            let _ = q.disconnect().await;
+            drop(q);
             return Ok(Validated::Accepted {
                 validation_id: Some(vid),
             });
         }
         if first.verdict.kind != VerdictKind::Rejected {
-            let _ = q.disconnect().await;
+            drop(q);
             return Ok(Validated::Pending);
         }
         let mut reason = format!("validation: {}", first.verdict.reason);
@@ -401,6 +404,8 @@ impl ValidationHook for SampleValidation {
             let vid2 = store
                 .insert_validation(&mut q, &validation_row(retry, cid, &cluster, shard))
                 .await?;
+            // `put_index` below takes its own connection.
+            drop(q);
             tracing::info!(%tenant, index = %retry.index, verdict = retry.verdict.kind.as_str(),
                 reason = %retry.verdict.reason, "auto_index: covering retry validated");
             if retry.verdict.kind == VerdictKind::Accepted {
@@ -448,8 +453,9 @@ impl ValidationHook for SampleValidation {
                     retry.verdict.reason
                 );
             }
+        } else {
+            drop(q);
         }
-        let _ = q.disconnect().await;
         Ok(Validated::Rejected { reason })
     }
 }

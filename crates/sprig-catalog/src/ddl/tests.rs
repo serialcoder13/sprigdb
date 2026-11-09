@@ -252,6 +252,14 @@ async fn the_whole_life_of_a_database_and_a_table() {
     assert_eq!(sv.ddl_job_id, o.job);
     assert_eq!(sv.applied_by, Some(UserId(7)));
     assert_eq!(env.exec.names(&s, ObjectKind::Table), ["orders"]);
+    assert!(
+        env.exec.has_object(&s, ObjectKind::Table, "__sprig_dtx"),
+        "CREATE DATABASE made chapter 18's decision table"
+    );
+    assert!(
+        env.object("__sprig_dtx").is_none(),
+        "internal: no catalog row"
+    );
 
     // ALTER: schema version 2.
     let v3 = env
@@ -1317,6 +1325,7 @@ fn intents_round_trip_as_json() {
         started_ms: 1_700_000_000_000,
         ddl: "RENAME TABLE a TO b".to_owned(),
         user: Some(UserId(7)),
+        shards: None,
         op: IntentOp::Rename {
             moves: vec![Move {
                 object: ObjectId(3),

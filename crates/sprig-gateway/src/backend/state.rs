@@ -300,6 +300,12 @@ pub struct SessionVars {
     /// `wsrep_sync_wait`, ...): the gateway answers these; backend
     /// connections keep the gateway's values.
     pub gateway_vars: BTreeMap<String, String>,
+    /// The MySQL persona's view of `sql_mode` (chapter 28, R4): what
+    /// `@@sql_mode` answers. `vars["sql_mode"]` holds the backend value.
+    pub client_sql_mode: Option<String>,
+    /// A literal `SET sql_mode` on its way: its view and backend value,
+    /// recorded when the backend reports the same value.
+    pub pending_sql_mode: Option<(String, String)>,
 }
 
 /// The persona baselines (chapter 06, "New connections").
@@ -343,8 +349,13 @@ impl SessionVars {
     #[must_use]
     pub fn login(persona: Persona, collation_id: u16, schema: Option<String>) -> Self {
         let mut vars = BTreeMap::new();
+        let mut client_sql_mode = None;
         if persona == Persona::MySql84 {
-            vars.insert("sql_mode".to_owned(), persona::MYSQL84_SQL_MODE.to_owned());
+            // Chapter 28 (R4): MariaDB runs the backend value of MySQL's
+            // default; `@@sql_mode` shows MySQL's.
+            let m = sprig_sql::compat::sqlmode::MYSQL84_DEFAULT;
+            vars.insert("sql_mode".to_owned(), m.backend());
+            client_sql_mode = Some(m.render());
             // D9: MySQL 8.4 has no snapshot-isolation check; MariaDB 11.8's
             // default (ON) fails conflicting REPEATABLE READ updates with
             // 1020, which MySQL applications don't retry.
@@ -356,6 +367,7 @@ impl SessionVars {
         let mut s = Self {
             schema,
             vars,
+            client_sql_mode,
             ..Self::default()
         };
         if let Some((cs, coll)) = charset::login(collation_id, charset::DEFAULT_CHARSET_COLLATIONS)
@@ -718,6 +730,37 @@ fn charset_changed(
 }
 
 impl SessionVars {
+    /// A literal `SET sql_mode` is about to run on the MySQL persona: its
+    /// client view and backend value (chapter 28, R4).
+    pub fn expect_sql_mode(&mut self, view: String, backend: String) {
+        self.pending_sql_mode = Some((view, backend));
+    }
+
+    /// The MySQL persona after a statement: when it changed `sql_mode`,
+    /// the client's view and the backend value follow from what MariaDB
+    /// reported. A literal `SET` (rewritten to its backend value) keeps the
+    /// view it was given; any other change (an expression, a restored
+    /// variable) is read as MySQL names, and the backend value replaces
+    /// what the connection holds at the next sync.
+    pub fn mysql_sql_mode_after(&mut self, o: &Observed) {
+        let pending = self.pending_sql_mode.take();
+        if self.client_sql_mode.is_none() {
+            return;
+        }
+        let Some((_, tracked)) = o.vars.iter().find(|(n, _)| n == "sql_mode") else {
+            return;
+        };
+        if let Some((view, backend)) = pending
+            && sprig_sql::compat::sqlmode::same_modes(&backend, tracked)
+        {
+            self.client_sql_mode = Some(view);
+            return;
+        }
+        let m = sprig_sql::compat::sqlmode::from_mariadb(tracked);
+        self.client_sql_mode = Some(m.render());
+        self.vars.insert("sql_mode".to_owned(), m.backend());
+    }
+
     /// Applies what tracking reported for a statement of this session.
     pub fn apply(&mut self, o: &Observed) {
         if let Some(s) = &o.schema {
@@ -934,9 +977,62 @@ mod tests {
     }
 
     #[test]
+    fn sql_mode_views_follow_the_backend() {
+        let mut m = SessionVars::login(Persona::MySql84, 255, None);
+        // A literal SET, rewritten to its backend value.
+        m.expect_sql_mode(
+            "ANSI_VIEW".into(),
+            "REAL_AS_FLOAT,TIME_ROUND_FRACTIONAL".into(),
+        );
+        let o = Observed {
+            vars: vec![(
+                "sql_mode".into(),
+                "REAL_AS_FLOAT,TIME_ROUND_FRACTIONAL".into(),
+            )],
+            ..Observed::default()
+        };
+        m.apply(&o);
+        m.mysql_sql_mode_after(&o);
+        assert_eq!(m.client_sql_mode.as_deref(), Some("ANSI_VIEW"));
+        // An expression: MySQL's names read back, the backend value fixed.
+        let o = Observed {
+            vars: vec![(
+                "sql_mode".into(),
+                "ONLY_FULL_GROUP_BY,NO_AUTO_VALUE_ON_ZERO".into(),
+            )],
+            ..Observed::default()
+        };
+        m.apply(&o);
+        m.mysql_sql_mode_after(&o);
+        assert_eq!(
+            m.client_sql_mode.as_deref(),
+            Some("ONLY_FULL_GROUP_BY,NO_AUTO_VALUE_ON_ZERO")
+        );
+        assert_eq!(
+            m.vars["sql_mode"],
+            "NO_AUTO_VALUE_ON_ZERO,TIME_ROUND_FRACTIONAL"
+        );
+        // The MariaDB persona has no view.
+        let mut d = SessionVars::login(Persona::MariaDb, 45, None);
+        d.apply(&o);
+        d.mysql_sql_mode_after(&o);
+        assert!(d.client_sql_mode.is_none());
+    }
+
+    #[test]
     fn login_state_per_persona() {
         let m = SessionVars::login(Persona::MySql84, 255, Some("app".into()));
-        assert_eq!(m.vars["sql_mode"], persona::MYSQL84_SQL_MODE);
+        // Chapter 28 (R4): the client sees MySQL's default; MariaDB runs
+        // it without ONLY_FULL_GROUP_BY and with TIME_ROUND_FRACTIONAL.
+        assert_eq!(
+            m.client_sql_mode.as_deref(),
+            Some(persona::MYSQL84_SQL_MODE)
+        );
+        assert_eq!(
+            m.vars["sql_mode"],
+            "STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,\
+             NO_ENGINE_SUBSTITUTION,TIME_ROUND_FRACTIONAL"
+        );
         // MySQL 8 clients send utf8mb4_0900_ai_ci (255): MariaDB keeps it.
         assert_eq!(m.vars["collation_connection"], "utf8mb4_0900_ai_ci");
         assert_eq!(m.vars["innodb_snapshot_isolation"], "OFF");

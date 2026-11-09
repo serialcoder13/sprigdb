@@ -60,6 +60,20 @@ impl std::fmt::Debug for JobCtx {
 }
 
 impl JobCtx {
+    /// The job's attempt (its owner's `attempt`, 0 if unassigned): it
+    /// rises with every reassignment, so it fences a worker that lost the
+    /// job but still runs (chapter 42's copy worker uses it as its epoch).
+    pub async fn attempt(&self) -> u32 {
+        self.claimed
+            .lock()
+            .await
+            .job
+            .job()
+            .owner
+            .as_ref()
+            .map_or(0, |o| o.attempt)
+    }
+
     /// Writes progress, compared on the job's revision. `false` (and the
     /// cancel token fired) when the job is no longer this worker's.
     ///
@@ -268,6 +282,34 @@ impl WorkerRuntime {
                 () = session.lost() => return true,
                 _ = tick.tick() => {}
             }
+            // Jobs that are `running` under this worker's id but not running
+            // here: a worker restarted under its old id before its lease ran
+            // out, or a progress write that timed out but committed (the
+            // next write then fails its revision check and the job stops
+            // here, though the record still names this worker). Dispatch
+            // sees their owner alive and never requeues them, so they resume
+            // here, from their checkpoint.
+            match dispatch::list_jobs(self.store.as_ref()).await {
+                Ok(jobs) => {
+                    for j in jobs {
+                        let mine = j.job().state == dispatch::JobState::Running
+                            && j.job()
+                                .owner
+                                .as_ref()
+                                .is_some_and(|o| o.worker_id == self.id);
+                        let local = self
+                            .running
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .contains(&j.job().job_id);
+                        if mine && !local {
+                            tracing::info!(job = %j.job().job_id, kind = %j.job().kind, "resuming a job this worker owns but isn't running");
+                            self.start(Claimed { job: j }, term.child_token());
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "can't list jobs to resume"),
+            }
             let assigned = match dispatch::assigned_to(self.store.as_ref(), &self.id).await {
                 Ok(a) => a,
                 Err(e) => {
@@ -330,10 +372,10 @@ impl WorkerRuntime {
                 match dispatch::finish(store.as_ref(), clock.as_ref(), c, result).await {
                     Ok(Ownership::Held) => tracing::info!(job = %job.job_id, "job finished"),
                     Ok(Ownership::Lost) => {
-                        tracing::info!(job = %job.job_id, "job changed before it finished; result dropped")
+                        tracing::info!(job = %job.job_id, "job changed before it finished; result dropped");
                     }
                     Err(e) => {
-                        tracing::warn!(job = %job.job_id, error = %e, "can't record the job's end")
+                        tracing::warn!(job = %job.job_id, error = %e, "can't record the job's end");
                     }
                 }
             }

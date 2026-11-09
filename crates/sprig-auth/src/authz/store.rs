@@ -178,6 +178,11 @@ pub enum PrivTarget {
         /// case-insensitively).
         column: String,
     },
+    /// A MySQL partial revoke (`auth.partial_revokes`, R4): the actions
+    /// a tenant-level (`*.*`) grant of the same grantee doesn't give on
+    /// this database, by its name key. A `database` row with `restriction
+    /// = 1`.
+    Restriction(String),
     /// `db.t` or `db.t (c)` held by name: the grant of a table or view that
     /// was dropped with `auth.grants_on_drop = keep`. It applies to the
     /// relation with that name whenever one exists (see the module docs).
@@ -236,7 +241,7 @@ impl PrivTarget {
     pub fn level(&self) -> Level {
         match self {
             PrivTarget::Tenant => Level::Tenant,
-            PrivTarget::Database(_) => Level::Database,
+            PrivTarget::Database(_) | PrivTarget::Restriction(_) => Level::Database,
             PrivTarget::Object { .. } | PrivTarget::Named { column: None, .. } => Level::Object,
             PrivTarget::Column { .. }
             | PrivTarget::Named {
@@ -245,11 +250,18 @@ impl PrivTarget {
         }
     }
 
+    /// The `restriction` column: 1 for a partial revoke.
+    fn restriction(&self) -> u8 {
+        u8::from(matches!(self, PrivTarget::Restriction(_)))
+    }
+
     /// `(db_id, object_id, column_name, name_pattern)`.
     fn parts(&self) -> (u32, u64, String, String) {
         match self {
             PrivTarget::Tenant => (0, 0, String::new(), String::new()),
-            PrivTarget::Database(n) => (0, 0, String::new(), n.clone()),
+            PrivTarget::Database(n) | PrivTarget::Restriction(n) => {
+                (0, 0, String::new(), n.clone())
+            }
             PrivTarget::Object { db, object } => (db.0, object.0, String::new(), String::new()),
             PrivTarget::Column { db, object, column } => {
                 (db.0, object.0, column.clone(), String::new())
@@ -412,8 +424,9 @@ impl AuthzStore {
         let privs: Vec<Row> = q
             .query(format!(
                 "SELECT priv_id, grantee_kind, grantee_id, level, db_id, object_id, column_name, \
-                 name_pattern, actions FROM {} \
-                 WHERE grantee_tenant_id = 0 AND restriction = 0 \
+                 name_pattern, actions, restriction FROM {} \
+                 WHERE grantee_tenant_id = 0 \
+                 AND (restriction = 0 OR level = 'database') \
                  AND level IN ('tenant','database','object','column') ORDER BY priv_id",
                 self.privileges
             ))
@@ -433,6 +446,9 @@ impl AuthzStore {
             };
             let target = match (Level::parse(&level), named) {
                 (Some(Level::Tenant), _) => PrivTarget::Tenant,
+                (Some(Level::Database), _) if get::<u8>(r, 9)? != 0 => {
+                    PrivTarget::Restriction(pattern.clone())
+                }
                 (Some(Level::Database), _) => PrivTarget::Database(pattern.clone()),
                 (Some(Level::Object | Level::Column), Some((db_key, name_key))) => {
                     let column: String = get(r, 6)?;
@@ -480,8 +496,9 @@ impl AuthzStore {
         q.exec_drop(
             format!(
                 "INSERT INTO {} (grantee_tenant_id, grantee_kind, grantee_id, level, db_id, \
-                 object_id, column_name, name_pattern, actions, granted_by, granted_at) \
-                 VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3)) \
+                 object_id, column_name, name_pattern, restriction, actions, granted_by, \
+                 granted_at) \
+                 VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3)) \
                  ON DUPLICATE KEY UPDATE actions = actions | VALUES(actions), \
                  granted_by = VALUES(granted_by), granted_at = VALUES(granted_at)",
                 self.privileges
@@ -494,6 +511,7 @@ impl AuthzStore {
                 Value::from(object),
                 Value::from(column),
                 Value::from(pattern),
+                Value::from(target.restriction()),
                 Value::from(actions.0),
                 Value::from(granted_by.map(|u| u.0)),
             ],
@@ -518,7 +536,7 @@ impl AuthzStore {
         let (db, object, column, pattern) = target.parts();
         let key = "grantee_tenant_id = 0 AND grantee_kind = ? AND grantee_id = ? AND level = ? \
                    AND db_id = ? AND object_id = ? AND column_name = ? AND kv_prefix = '' \
-                   AND element = 0 AND name_pattern = ? AND restriction = 0";
+                   AND element = 0 AND name_pattern = ? AND restriction = ?";
         let params = || {
             vec![
                 Value::from(grantee.kind()),
@@ -528,6 +546,7 @@ impl AuthzStore {
                 Value::from(object),
                 Value::from(column.as_str()),
                 Value::from(pattern.as_str()),
+                Value::from(target.restriction()),
             ]
         };
         let before: Option<u64> = q

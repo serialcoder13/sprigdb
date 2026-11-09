@@ -23,6 +23,8 @@
 //! - [`plsql`]: PL/SQL generation (package spec and body, entry
 //!   procedure) under `sql_mode = ORACLE`;
 //! - [`interp`]: a reference interpreter of the IR;
+//! - [`pure`]: bodies as plain SQL expressions, for `CHECK` constraints
+//!   and generated columns (R7 order 3);
 //! - [`js`]: the JavaScript front end's place, which for now sends every
 //!   function to the engine tier.
 //!
@@ -51,6 +53,7 @@ pub mod ir;
 pub mod js;
 pub mod kirun;
 pub mod plsql;
+pub mod pure;
 pub mod sql;
 
 use std::fmt;

@@ -72,6 +72,10 @@ pub struct TenantSession {
     pub show_auto_indexes: bool,
     /// Chapter 29: active roles and the compiled privileges.
     pub authz: super::authz::SessionAuthz,
+    /// Chapter 32: the type layer's session state.
+    pub types: crate::exec::types::TypesSession,
+    /// Chapter 42: the session's space.
+    pub inherit: crate::exec::inherit::InheritSession,
     long_data_max: Arc<AtomicU64>,
     watch: Option<JoinHandle<()>>,
 }
@@ -118,6 +122,8 @@ impl TenantSession {
             current: None,
             show_auto_indexes: false,
             authz: super::authz::SessionAuthz::default(),
+            types: crate::exec::types::TypesSession::default(),
+            inherit: crate::exec::inherit::InheritSession::default(),
             long_data_max: Arc::new(AtomicU64::new(LONG_DATA_MAX_BYTES.default)),
             watch: None,
         })
@@ -322,6 +328,7 @@ impl TenantSession {
         self.temp.clear();
         self.warnings = None;
         self.show_auto_indexes = false;
+        self.inherit = crate::exec::inherit::InheritSession::default();
     }
 
     /// What the session may see of internal objects: the persona's

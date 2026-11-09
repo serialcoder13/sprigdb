@@ -11,7 +11,14 @@
 //!   `--catalog mysql://...@host:port/t<tenant>_sprig` (an operator's
 //!   connection), until the Admin API serves them.
 //!
-//! `logs`, `rollback` and `dead-letters` are not implemented yet.
+//! - `logs [name] [--limit n] [--follow]`: what after-commit triggers and
+//!   schedules did (`logic_log`), oldest first;
+//! - `dead-letters list [--binding b] [--state s]`, `dead-letters replay
+//!   <id>... | --all [--binding b]` (back to the trigger's worker, which
+//!   runs them in order with the active version) and `dead-letters
+//!   discard <id>... | --all [--binding b]`.
+//!
+//! `rollback` is not implemented yet.
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use mysql_async::prelude::Queryable;
@@ -24,6 +31,7 @@ use sprig_logic_compile::{Options, Runtime, StaticColumns, compile};
 use crate::{Failed, Output};
 
 /// `sprigctl logic`.
+#[allow(clippy::too_many_lines)] // one builder chain
 pub(crate) fn group() -> Command {
     let file = || {
         Arg::new("file")
@@ -92,14 +100,87 @@ pub(crate) fn group() -> Command {
                 .arg(Arg::new("name").required(true))
                 .arg(catalog()),
         )
-        .subcommand(later("logs"))
+        .subcommand(
+            Command::new("logs")
+                .about("What triggers and schedules did (logic_log), oldest first")
+                .arg(Arg::new("name").help("A module's name (default: every module)"))
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_parser(clap::value_parser!(u32))
+                        .default_value("50"),
+                )
+                .arg(
+                    Arg::new("follow")
+                        .long("follow")
+                        .short('f')
+                        .action(ArgAction::SetTrue)
+                        .help("Keep printing new lines"),
+                )
+                .arg(catalog()),
+        )
         .subcommand(later("rollback"))
-        .subcommand(later("dead-letters"))
+        .subcommand(
+            Command::new("dead-letters")
+                .about("After-commit trigger events that kept failing")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("list")
+                        .about("List dead letters, oldest first")
+                        .arg(Arg::new("binding").long("binding").value_parser(clap::value_parser!(u64)))
+                        .arg(
+                            Arg::new("state")
+                                .long("state")
+                                .value_parser(["dead", "replaying", "replayed", "discarded"]),
+                        )
+                        .arg(
+                            Arg::new("limit")
+                                .long("limit")
+                                .value_parser(clap::value_parser!(u32))
+                                .default_value("100"),
+                        )
+                        .arg(catalog()),
+                )
+                .subcommand(dl_change("replay", "Replay dead letters with the active version, in order"))
+                .subcommand(dl_change("discard", "Discard dead letters"))
+                .arg_required_else_help(true),
+        )
+}
+
+fn dl_change(name: &'static str, about: &'static str) -> Command {
+    Command::new(name)
+        .about(about)
+        .arg(
+            Arg::new("ids")
+                .num_args(0..)
+                .value_parser(clap::value_parser!(u64))
+                .help("Dead letter ids"),
+        )
+        .arg(
+            Arg::new("all")
+                .long("all")
+                .action(ArgAction::SetTrue)
+                .help("Every dead letter (of --binding)"),
+        )
+        .arg(
+            Arg::new("binding")
+                .long("binding")
+                .value_parser(clap::value_parser!(u64)),
+        )
+        .arg(
+            Arg::new("catalog")
+                .long("catalog")
+                .required(true)
+                .help("The tenant's catalog: mysql://user:pass@host:port/t<tenant>_sprig"),
+        )
 }
 
 /// Whether the subcommand is implemented.
 pub(crate) fn implemented(name: &str) -> bool {
-    matches!(name, "compile" | "deploy" | "list" | "show")
+    matches!(
+        name,
+        "compile" | "deploy" | "list" | "show" | "logs" | "dead-letters"
+    )
 }
 
 fn read(m: &ArgMatches) -> Result<(String, String), Failed> {
@@ -279,7 +360,143 @@ pub(crate) async fn run(sub: &ArgMatches, out: Output) -> Result<(), Failed> {
             let _ = c.disconnect().await;
             Ok(())
         }
+        Some(("logs", m)) => logs(m, out).await,
+        Some(("dead-letters", m)) => dead_letters(m, out).await,
         _ => Err("not implemented yet".to_owned().into()),
+    }
+}
+
+async fn logs(m: &ArgMatches, out: Output) -> Result<(), Failed> {
+    let (mut c, store) = catalog(m).await?;
+    let module = match m.get_one::<String>("name") {
+        Some(n) => {
+            let all = store
+                .modules(&mut c, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            Some(
+                all.into_iter()
+                    .find(|r| r.name == *n)
+                    .ok_or_else(|| format!("no logic module {n}"))?
+                    .module_id,
+            )
+        }
+        None => None,
+    };
+    let limit = m.get_one::<u32>("limit").copied().unwrap_or(50);
+    let follow = m.get_flag("follow");
+    let mut after = 0u64;
+    loop {
+        let rows = store
+            .logs(&mut c, module, after, limit)
+            .await
+            .map_err(|e| e.to_string())?;
+        for r in &rows {
+            after = after.max(r.log_id);
+            if out == Output::Json {
+                println!("{}", serde_json::to_string(r).unwrap_or_default());
+            } else {
+                println!(
+                    "{} {:<5} {:<8} module {} {}{}",
+                    r.at,
+                    r.level,
+                    r.source,
+                    r.module_id,
+                    r.version.map_or_else(String::new, |v| format!("v{v} ")),
+                    r.message
+                );
+            }
+        }
+        if !follow {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let _ = c.disconnect().await;
+    Ok(())
+}
+
+async fn dead_letters(m: &ArgMatches, out: Output) -> Result<(), Failed> {
+    match m.subcommand() {
+        Some(("list", m)) => {
+            let (mut c, store) = catalog(m).await?;
+            let rows = store
+                .dead_letters(
+                    &mut c,
+                    m.get_one::<u64>("binding").copied(),
+                    m.get_one::<String>("state").map(String::as_str),
+                    m.get_one::<u32>("limit").copied().unwrap_or(100),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            if out == Output::Json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&rows).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "{:<6} {:<8} {:<4} {:<10} {:<8} {:<20} {:<28} ERROR",
+                    "ID", "BINDING", "VER", "STATE", "TRIES", "FAILED", "EVENT"
+                );
+                for r in rows {
+                    println!(
+                        "{:<6} {:<8} {:<4} {:<10} {:<8} {:<20} {:<28} {} {}",
+                        r.dl_id,
+                        r.binding_id,
+                        r.version,
+                        r.state,
+                        r.attempts,
+                        r.last_failed_at,
+                        format!("{} {}", r.event["op"].as_str().unwrap_or(""), r.event_key),
+                        r.error_code,
+                        r.error_message
+                    );
+                    println!("       row {}", r.event["row"]);
+                }
+            }
+            let _ = c.disconnect().await;
+            Ok(())
+        }
+        Some((verb @ ("replay" | "discard"), m)) => {
+            let ids: Vec<u64> = m
+                .get_many::<u64>("ids")
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect();
+            if ids.is_empty() && !m.get_flag("all") {
+                return Err("name dead letter ids, or --all".to_owned().into());
+            }
+            let (mut c, store) = catalog(m).await?;
+            let to = if verb == "replay" {
+                "replaying"
+            } else {
+                "discarded"
+            };
+            let n = store
+                .set_dead_letters(
+                    &mut c,
+                    m.get_one::<u64>("binding").copied(),
+                    &ids,
+                    "dead",
+                    to,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            if verb == "replay" {
+                println!(
+                    "{n} dead letters queued for replay (the trigger's worker runs them in order)"
+                );
+            } else {
+                println!("{n} dead letters discarded");
+            }
+            let _ = c.disconnect().await;
+            Ok(())
+        }
+        _ => Err("dead-letters takes list, replay or discard"
+            .to_owned()
+            .into()),
     }
 }
 

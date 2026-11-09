@@ -1,0 +1,44 @@
+# sprigdb .deb and .rpm for amd64 and arm64 (chapter 27, "VM packaging").
+# Untested: nfpm isn't installed where this was written. Build with
+#   ARCH=amd64 VERSION=0.0.1 nfpm package -p deb -f deploy/packaging/nfpm.yaml
+name: sprigdb
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: database
+priority: optional
+maintainer: SprigDB <dev@sprigdb.invalid>
+description: SprigDB, a gateway layer over MariaDB (gateway, controller, worker, agent).
+license: Apache-2.0
+homepage: https://github.com/serialcoder13/sprigdb
+contents:
+  - src: target/release/sprigdb
+    dst: /usr/bin/sprigdb
+    file_info: {mode: 0755}
+  - src: target/release/sprigctl
+    dst: /usr/bin/sprigctl
+    file_info: {mode: 0755}
+  - src: deploy/vm/systemd/sprigdb-gateway.service
+    dst: /usr/lib/systemd/system/sprigdb-gateway.service
+  - src: deploy/vm/systemd/sprigdb-controller.service
+    dst: /usr/lib/systemd/system/sprigdb-controller.service
+  - src: deploy/vm/systemd/sprigdb-worker.service
+    dst: /usr/lib/systemd/system/sprigdb-worker.service
+  - src: deploy/vm/systemd/sprigdb-agent.service
+    dst: /usr/lib/systemd/system/sprigdb-agent.service
+  - src: deploy/vm/systemd/sprigdb-etcd-dc.service
+    dst: /usr/lib/systemd/system/sprigdb-etcd-dc.service
+  - src: deploy/vm/systemd/sprigdb-etcd-global.service
+    dst: /usr/lib/systemd/system/sprigdb-etcd-global.service
+  - src: deploy/vm/systemd/mariadb.service.d/10-sprigdb-limits.conf
+    dst: /usr/lib/systemd/system/mariadb.service.d/10-sprigdb-limits.conf
+  - src: deploy/packaging/sprigdb.example.toml
+    dst: /etc/sprigdb/sprigdb.toml
+    type: config|noreplace
+    file_info: {mode: 0640, group: sprigdb}
+  - dst: /etc/sprigdb/creds
+    type: dir
+    file_info: {mode: 0750, group: sprigdb}
+scripts:
+  preinstall: deploy/packaging/preinstall.sh
+  postinstall: deploy/packaging/postinstall.sh

@@ -1,0 +1,56 @@
+---
+# Install the package, etcd where needed, certificates and the small
+# sprigdb.toml; start the agent on database hosts so they join the free
+# pool (chapter 27).
+- name: Install the sprigdb package (deb)
+  ansible.builtin.apt:
+    deb: "{{ sprigdb_package_dir }}/sprigdb_{{ sprigdb_version }}_{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}.deb"
+  when: ansible_os_family == "Debian"
+
+- name: Install the sprigdb package (rpm)
+  ansible.builtin.dnf:
+    name: "{{ sprigdb_package_dir }}/sprigdb-{{ sprigdb_version }}-1.{{ ansible_architecture }}.rpm"
+    disable_gpg_check: true
+  when: ansible_os_family == "RedHat"
+
+- name: Install etcd from the upstream release archive
+  when: "'etcd' in sprigdb_roles"
+  block:
+    - name: Create the etcd user
+      ansible.builtin.user: {name: etcd, system: true, shell: /usr/sbin/nologin, create_home: false}
+    - name: Unpack etcd
+      ansible.builtin.unarchive:
+        src: "{{ etcd_archive_url }}"
+        dest: /usr/local/bin
+        remote_src: true
+        extra_opts: [--strip-components=1, --wildcards, "*/etcd", "*/etcdctl", "*/etcdutl"]
+        creates: /usr/local/bin/etcd
+
+- name: Certificates from the deployment's CA
+  ansible.builtin.copy:
+    dest: "/etc/sprigdb/tls/{{ item.name }}"
+    content: "{{ item.content }}"
+    owner: root
+    group: sprigdb
+    mode: "{{ item.mode }}"
+  loop:
+    - {name: ca.pem, content: "{{ sprigdb_ca_pem }}", mode: "0644"}
+    - {name: cert.pem, content: "{{ sprigdb_cert_pem }}", mode: "0644"}
+    - {name: key.pem, content: "{{ sprigdb_key_pem }}", mode: "0640"}
+  no_log: true
+
+- name: sprigdb.toml
+  ansible.builtin.template:
+    src: sprigdb.toml.j2
+    dest: /etc/sprigdb/sprigdb.toml
+    owner: root
+    group: sprigdb
+    mode: "0640"
+
+- name: Enable and start this host's SprigDB units
+  ansible.builtin.systemd_service:
+    name: "sprigdb-{{ item }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ sprigdb_roles | map('replace', 'db', 'agent') | map('replace', 'etcd', 'etcd-dc') | list }}"

@@ -1,0 +1,11 @@
+SELECT @@max_execution_time, @@global.max_execution_time;
+SET max_execution_time = 1500;
+SELECT @@max_execution_time, @@session.max_execution_time;
+SET SESSION max_execution_time = DEFAULT;
+SELECT @@max_execution_time;
+SELECT /*+ MAX_EXECUTION_TIME(10000) */ 1 + 1;
+SELECT /*+ SET_VAR(sort_buffer_size = 1048576) */ 2 + 2;
+SELECT @@terminology_use_previous;
+SET @@SESSION.terminology_use_previous = BEFORE_8_2_0;
+SET @@SESSION.terminology_use_previous = NONE;
+SELECT 'done';

@@ -24,6 +24,11 @@ pub struct ControllerRecord {
     /// The build.
     #[serde(default)]
     pub version: String,
+    /// `host:port` of the internal services (chapter 25's permits, peer
+    /// pings and observations; chapter 23's relay): where gateways and
+    /// agents renew their permits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_addr: Option<String>,
 }
 
 impl Versioned for ControllerRecord {
@@ -117,6 +122,7 @@ mod tests {
         let rec = ControllerRecord {
             admin_addr: "127.0.0.1:7480".into(),
             version: "t".into(),
+            internal_addr: None,
         };
         let task = tokio::spawn(keep(
             Arc::clone(&store),

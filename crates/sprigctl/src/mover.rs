@@ -42,23 +42,19 @@ struct MoveJobs {
 
 /// `sprigctl shard`.
 pub(crate) fn shard_group() -> Command {
-    let later = |n: &'static str| {
-        Command::new(n).arg(
-            Arg::new("args")
-                .num_args(0..)
-                .trailing_var_arg(true)
-                .allow_hyphen_values(true)
-                .help("Arguments (not parsed yet)"),
-        )
-    };
-    Command::new("shard")
+    crate::sharding::shard_subcommands(Command::new("shard"))
         .about("Shards")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
             Command::new("move")
-                .about("Move a tenant's shards to another cluster, online (R0: the whole tenant)")
+                .about(
+                    "Move one shard of a table group (<tenant> <group> <shard>), or a tenant \
+                     without table groups whole (<tenant>), to another cluster, online",
+                )
                 .arg(Arg::new("tenant").required(true).help("The tenant"))
+                .arg(Arg::new("group").help("The table group id (a shard move)"))
+                .arg(Arg::new("shard").help("The shard id (a shard move)"))
                 .arg(
                     Arg::new("to")
                         .long("to")
@@ -89,9 +85,6 @@ pub(crate) fn shard_group() -> Command {
                         .help("Then pin the tenant to the target (chapter 11)"),
                 ),
         )
-        .subcommand(later("list"))
-        .subcommand(later("split"))
-        .subcommand(later("merge"))
 }
 
 /// `sprigctl job`.

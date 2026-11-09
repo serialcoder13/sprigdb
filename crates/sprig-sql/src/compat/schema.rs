@@ -526,6 +526,68 @@ pub fn show_columns_sql(
     sql
 }
 
+/// `SHOW INDEX` on 3306 as a query over MariaDB's `STATISTICS` for
+/// `table` in the physical schema `schema`, in MySQL 8.4's shape:
+/// `Visible` (MariaDB's `Ignored`, inverted) and `Expression` (`NULL`:
+/// functional key parts aren't emulated yet) instead of `Ignored`. As for
+/// [`show_columns_sql`], the derived table reads nothing from the table,
+/// so a missing table fails with 1146. `filter` is the client's `WHERE
+/// ...` text over the result's columns.
+#[must_use]
+pub fn show_index_sql(schema: &str, table: &str, filter: Option<&[u8]>, lit: Lit<'_>) -> Vec<u8> {
+    let inner = format!(
+        "SELECT `TABLE_NAME` AS `Table`, `NON_UNIQUE` AS `Non_unique`, \
+         `INDEX_NAME` AS `Key_name`, `SEQ_IN_INDEX` AS `Seq_in_index`, \
+         `COLUMN_NAME` AS `Column_name`, `COLLATION` AS `Collation`, \
+         `CARDINALITY` AS `Cardinality`, `SUB_PART` AS `Sub_part`, `PACKED` AS `Packed`, \
+         `NULLABLE` AS `Null`, `INDEX_TYPE` AS `Index_type`, `COMMENT` AS `Comment`, \
+         `INDEX_COMMENT` AS `Index_comment`, IF(`IGNORED` = {yes}, {no}, {yes}) AS `Visible`, \
+         CAST(NULL AS CHAR) AS `Expression` FROM information_schema.STATISTICS \
+         WHERE `TABLE_SCHEMA` = {} AND `TABLE_NAME` = {} \
+         AND (SELECT 1 FROM {}.{} LIMIT 0) IS NULL",
+        lit(schema),
+        lit(table),
+        quote(schema),
+        quote(table),
+        yes = lit("YES"),
+        no = lit("NO"),
+    );
+    match filter {
+        Some(f) => {
+            let mut sql = format!("SELECT * FROM ({inner}) AS `STATISTICS` ").into_bytes();
+            sql.extend_from_slice(f);
+            sql
+        }
+        None => inner.into_bytes(),
+    }
+}
+
+/// `SHOW INDEX` on 3306 rewritten over `STATISTICS` (see
+/// [`show_index_sql`]); `None` leaves the statement to MariaDB.
+#[must_use]
+pub fn show_index_rewrite(
+    info: &ShowInfo,
+    text: &[u8],
+    current: Option<&str>,
+    map: &dyn NameMap,
+    lit: Lit<'_>,
+) -> Option<Vec<u8>> {
+    let table = info.object.as_deref()?;
+    let schema = target_schema(info.schema.as_deref(), current, map)?;
+    let filter = info.filter.clone().map(|f| {
+        let mut b = text.get(f).unwrap_or_default();
+        while let Some((last, rest)) = b.split_last() {
+            if *last == b';' || last.is_ascii_whitespace() {
+                b = rest;
+            } else {
+                break;
+            }
+        }
+        b
+    });
+    Some(show_index_sql(&schema, table, filter, lit))
+}
+
 /// The physical schema a `SHOW` or `DESCRIBE` reads: the one it names, or
 /// the representative schema of the session's current database. `None`
 /// for a system schema or when neither is known.

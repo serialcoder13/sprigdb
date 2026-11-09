@@ -43,6 +43,12 @@ use crate::bootstrap::DcRecord;
 use crate::permit::Permit;
 use crate::{Cmp, Consistency, Key, LeaseId, MetaStore, Op, Record, Tier, Txn, Versioned};
 
+/// A failed round of [`DcLease::run`] is retried this soon.
+pub const RETRY_AFTER: Duration = Duration::from_millis(250);
+
+/// The shortest time a keep-alive is given, even right at the deadline.
+pub const MIN_RENEW_BUDGET: Duration = Duration::from_millis(200);
+
 /// DC states in which a DC may hold valid permits: `draining` still
 /// serves the tenants that migration hasn't moved yet.
 pub const PERMIT_STATES: [&str; 3] = ["active", "joining", "draining"];
@@ -193,8 +199,7 @@ impl DcLease {
     #[must_use]
     pub fn valid_until(&self) -> Option<Instant> {
         let s = self.lock();
-        s.deadline
-            .and_then(|d| d.checked_sub(self.opts.fence_lead))
+        s.deadline.and_then(|d| d.checked_sub(self.opts.fence_lead))
     }
 
     /// Whether the DC lease is certainly alive now (see
@@ -230,10 +235,7 @@ impl DcLease {
         if !PERMIT_STATES.contains(&s.record_state.as_str()) {
             return Permit::fenced(epoch);
         }
-        let Some(until) = s
-            .deadline
-            .and_then(|d| d.checked_sub(self.opts.fence_lead))
-        else {
+        let Some(until) = s.deadline.and_then(|d| d.checked_sub(self.opts.fence_lead)) else {
             return Permit::fenced(epoch);
         };
         if now >= until {
@@ -264,21 +266,29 @@ impl DcLease {
     }
 
     async fn round(&self, may_take: bool) -> Result<()> {
-        let dckey = dc_key(&self.dc)?;
-        let dc = self.store.get(&dckey, Consistency::Linearizable).await?;
-        let rec = match &dc {
-            Some(kv) => Some((Record::<DcRecord>::decode(&kv.value)?, kv.mod_revision)),
+        // The lease first: its renewal never waits behind another read
+        // (r2next: a slow linearizable read of the DC record used to hold
+        // up the keep-alive until the permits lapsed).
+        let held = self.lock().lease;
+        let renewed = match held {
+            Some((lease, _)) => Some(self.renew(lease).await),
             None => None,
+        };
+        // The DC record: its state gates permits. A failed read keeps the
+        // last state; it can't extend anything.
+        let dckey = dc_key(&self.dc)?;
+        let rec = match self.store.get(&dckey, Consistency::Linearizable).await {
+            Ok(Some(kv)) => Some((Record::<DcRecord>::decode(&kv.value)?, kv.mod_revision)),
+            Ok(None) => None,
+            Err(e) => return renewed.unwrap_or(Err(e)),
         };
         let state = rec
             .as_ref()
             .map(|(r, _)| r.body.state.clone())
             .unwrap_or_default();
         self.lock().record_state.clone_from(&state);
-
-        let held = self.lock().lease;
-        if let Some((lease, _)) = held {
-            return self.renew(lease).await;
+        if let Some(r) = renewed {
+            return r;
         }
         // No lease: adopt the DC's, if there is one.
         let lkey = lease_key(&self.dc)?;
@@ -297,9 +307,21 @@ impl DcLease {
         self.take(rec, rev, &dckey, &lkey).await
     }
 
+    /// How long a keep-alive sent now may take: until the permits would end
+    /// (the deadline minus the fence lead), at least [`MIN_RENEW_BUDGET`];
+    /// one period without a deadline yet.
+    fn renew_budget(&self, now: Instant) -> Duration {
+        let s = self.lock();
+        match s.deadline.and_then(|d| d.checked_sub(self.opts.fence_lead)) {
+            Some(until) => until.saturating_duration_since(now).max(MIN_RENEW_BUDGET),
+            None => self.opts.period,
+        }
+    }
+
     async fn renew(&self, lease: LeaseId) -> Result<()> {
         let ts = self.clock.now();
-        let r = tokio::time::timeout(self.opts.period, self.store.keep_alive(lease)).await;
+        let budget = self.renew_budget(ts);
+        let r = tokio::time::timeout(budget, self.store.keep_alive(lease)).await;
         match r {
             Ok(Ok(Some(granted))) => {
                 let mut s = self.lock();
@@ -317,7 +339,7 @@ impl DcLease {
             Ok(Err(e)) => Err(e),
             Err(_) => Err(SprigError::new(
                 sprig_common::SprigCode::MetaUnavailable,
-                "DC lease keep-alive timed out",
+                "DC lease keep-alive got no answer while the permits were valid",
             )),
         }
     }
@@ -378,13 +400,20 @@ impl DcLease {
     }
 
     /// Renews every period until dropped; `leading` says whether this
-    /// controller may take a new lease.
+    /// controller may take a new lease. A failed round is retried after
+    /// [`RETRY_AFTER`], so one slow or lost keep-alive costs a quarter
+    /// second, not a period (r2next).
     pub async fn run(&self, leading: impl Fn() -> bool) {
         loop {
-            if let Err(e) = self.tick(leading()).await {
-                tracing::debug!(dc = %self.dc, error = %e, "DC lease round failed");
-            }
-            tokio::time::sleep(self.opts.period).await;
+            let started = tokio::time::Instant::now();
+            let wait = match self.tick(leading()).await {
+                Ok(()) => self.opts.period.saturating_sub(started.elapsed()),
+                Err(e) => {
+                    tracing::warn!(dc = %self.dc, error = %e, "DC lease round failed; retrying");
+                    RETRY_AFTER
+                }
+            };
+            tokio::time::sleep(wait).await;
         }
     }
 }

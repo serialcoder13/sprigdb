@@ -128,7 +128,17 @@ impl MemExecutor {
         self.lock().schemas.contains_key(schema)
     }
 
-    /// The names of `kind` objects in `schema`, sorted.
+    /// Whether `schema` holds the object `name` of `kind`.
+    #[must_use]
+    pub fn has_object(&self, schema: &SchemaName, kind: ObjectKind, name: &str) -> bool {
+        self.lock()
+            .schemas
+            .get(schema)
+            .is_some_and(|s| s.objects.values().any(|o| o.kind == kind && o.name == name))
+    }
+
+    /// The names of `kind` objects in `schema`, sorted; internal
+    /// (`__sprig_`) objects, such as the decision table, left out.
     #[must_use]
     pub fn names(&self, schema: &SchemaName, kind: ObjectKind) -> Vec<String> {
         self.lock()
@@ -137,7 +147,7 @@ impl MemExecutor {
             .map(|s| {
                 s.objects
                     .values()
-                    .filter(|o| o.kind == kind)
+                    .filter(|o| o.kind == kind && !o.name.starts_with("__sprig_"))
                     .map(|o| o.name.clone())
                     .collect()
             })
@@ -276,7 +286,7 @@ impl MemExecutor {
                     },
                 );
             }
-            Effect::Alter { kind, name } => {
+            Effect::Alter { kind, name } | Effect::Restore { kind, name } => {
                 let o = s
                     .schemas
                     .get_mut(&schema)

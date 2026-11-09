@@ -277,12 +277,25 @@ impl Watchdog {
                 let mut fenced = false;
                 let nap = (stall / 4).max(Duration::from_millis(5));
                 while !s.load(Ordering::SeqCst) {
+                    let slept_from = Instant::now();
                     std::thread::sleep(nap);
                     let t = ticks();
                     if t != last {
                         last = t;
                         since = Instant::now();
                         fenced = false;
+                        continue;
+                    }
+                    // The watchdog's own nap overran by more than `stall`:
+                    // the whole process was paused (SIGSTOP, a frozen VM),
+                    // not just the loop. Fence (any permit has expired
+                    // meanwhile) and give the loop time to tick again
+                    // before judging it stuck.
+                    if slept_from.elapsed() >= nap + stall {
+                        tracing::warn!(paused = ?slept_from.elapsed(), "process was paused: fencing");
+                        fence();
+                        fenced = true;
+                        since = Instant::now();
                         continue;
                     }
                     let stuck = since.elapsed();
@@ -322,6 +335,75 @@ impl Drop for Watchdog {
         }
     }
 }
+
+/// A gateway's admission of new connections while its DC returns: a token
+/// bucket refilled at the permit's `admit_per_second` (0: no limit);
+/// refused clients get 39531 with a retry delay of 1-5 s, fully jittered
+/// (chapter 25, "Traffic returns in steps").
+#[derive(Debug, Clone)]
+pub struct Admission {
+    tokens: f64,
+    last: Instant,
+    seed: u64,
+}
+
+impl Admission {
+    /// An empty bucket at `now` (a returning gateway starts with none).
+    #[must_use]
+    pub fn new(now: Instant, seed: u64) -> Self {
+        Self {
+            tokens: 0.0,
+            last: now,
+            seed: seed | 1,
+        }
+    }
+
+    fn jitter(&mut self) -> Duration {
+        // xorshift64: full jitter between 1 and 5 s, no shared RNG needed.
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 7;
+        self.seed ^= self.seed << 17;
+        Duration::from_millis(1000 + self.seed % 4001)
+    }
+
+    /// Admits one connection or returns 39531 with a retry delay.
+    ///
+    /// # Errors
+    /// 39531 `ER_SPRIG_ADMISSION_BACKOFF` (SQLSTATE 08S01).
+    pub fn admit(&mut self, now: Instant, rate: u32) -> Result<()> {
+        self.admit_or_wait(now, rate).map_err(|wait| {
+            SprigError::new(
+                SprigCode::AdmissionBackoff,
+                format!(
+                    "this data center is returning from an outage and admits connections in steps; \
+                     retry in {} ms",
+                    wait.as_millis()
+                ),
+            )
+        })
+    }
+
+    /// As [`Self::admit`], returning only the retry delay of a refusal.
+    ///
+    /// # Errors
+    /// The delay after which the client should retry.
+    pub fn admit_or_wait(&mut self, now: Instant, rate: u32) -> std::result::Result<(), Duration> {
+        if rate == 0 {
+            return Ok(());
+        }
+        let dt = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        let cap = f64::from(rate);
+        self.tokens = (self.tokens + dt * cap).min(cap);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            return Ok(());
+        }
+        Err(self.jitter())
+    }
+}
+
+pub mod http;
 
 #[cfg(test)]
 mod tests;

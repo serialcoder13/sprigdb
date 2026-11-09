@@ -48,6 +48,7 @@
 pub mod backend;
 pub mod dc;
 pub mod exec;
+pub mod failover;
 pub mod frontend;
 pub mod http;
 pub mod lifecycle;
@@ -63,6 +64,7 @@ pub mod session;
 pub mod tenant;
 pub mod tls;
 pub mod workload;
+pub mod write_load;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,7 +72,7 @@ use std::time::Duration;
 use sprig_common::time::{Clock, SystemClock};
 use sprig_common::{Result, Role, RoleContext, SprigError};
 use sprig_meta::etcd::{DEFAULT_REQUEST_TIMEOUT, EtcdTls, connect_tiers};
-use sprig_meta::{MemStore, Tier};
+use sprig_meta::{MemStore, MetaStore, Tier};
 use sprig_settings::{LiveSettings, Registry, SettingCtx, SettingsStores};
 
 use crate::frontend::GatewayContext;
@@ -172,6 +174,16 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         )
         .await;
 
+    // Chapter 25 (R2): the DC permit, its watchdog and admission while the
+    // DC returns from an outage.
+    let _fence = failover::start(
+        Arc::clone(&stores.dc),
+        dc.clone(),
+        gateway_id.clone(),
+        Some(&live),
+        stop.clone(),
+    );
+
     // The peer service (chapter 04 step 10).
     let peer_tls = ctx
         .config
@@ -183,15 +195,20 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
 
     // Logins (chapter 14) and, for catalog logins, the tenant services
     // (chapters 07 and 08).
+    // Chapter 26: logins of tenants pinned elsewhere go to a gateway of an
+    // allowed DC over the peer service.
+    let handoff = Arc::new(sprig_auth::handoff::HandoffConfig {
+        here: dc.clone(),
+        peers: Arc::new(peer::PeerHandoff::new(Arc::clone(&peers))),
+    });
     let (login, tenants, login_tasks) = logins(
         &rctx,
         &live,
         Arc::clone(&backends),
         Arc::clone(&sessions),
         clock.clone(),
+        handoff,
     )?;
-    // Chapter 17 (R1): the router's interim topology file, if configured.
-    exec::router::init(rctx.config.gateway.router_topology_file.as_deref());
     let mut executor = exec::PassThrough::new(
         Arc::clone(&backends),
         exec::ExecSettingsSource::Live {
@@ -270,6 +287,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     });
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
     let peer_host = Arc::new(PeerHost {
+        login: Arc::clone(&login),
         core: Arc::clone(&core),
         sessions: Arc::clone(&sessions),
         gateway_id: gateway_id.clone(),
@@ -428,6 +446,7 @@ async fn report_load(
 
 /// The gateway's side of the peer service.
 struct PeerHost {
+    login: Arc<sprig_auth::LoginService>,
     core: Arc<http::Core>,
     sessions: Arc<SessionTable>,
     gateway_id: String,
@@ -453,6 +472,14 @@ impl peer::PeerHost for PeerHost {
         req: sprig_api::proto::internal::ForwardRequest,
     ) -> sprig_api::proto::internal::ForwardReply {
         http::rest::forwarded(&self.core, req).await
+    }
+
+    async fn handoff(
+        &self,
+        start: sprig_auth::handoff::HandoffStart,
+        password: zeroize::Zeroizing<Vec<u8>>,
+    ) -> sprig_auth::handoff::HandoffResult {
+        sprig_auth::handoff::serve_handoff(&self.login, start, &password).await
     }
 }
 
@@ -489,6 +516,7 @@ fn logins(
     backends: Arc<backend::Backends>,
     sessions: Arc<SessionTable>,
     clock: Arc<dyn Clock>,
+    handoff: Arc<sprig_auth::handoff::HandoffConfig>,
 ) -> Result<Logins> {
     use sprig_auth::{CatalogLogins, FastCache, LoginService, LoginSource, MetaTenants};
     use sprig_common::config::LoginModeConfig;
@@ -553,7 +581,8 @@ fn logins(
             let svc = LoginService::new(LoginSource::Catalog(Arc::new(catalogs)), fast_cache)
                 .with_clock(clock)
                 .with_login_state(Arc::new(state))
-                .with_audit(audit);
+                .with_audit(audit)
+                .with_handoff(handoff);
             Ok((Arc::new(svc), Some(tenants), Vec::new()))
         }
     }
@@ -592,7 +621,30 @@ async fn settings_stores(ctx: &RoleContext) -> Result<SettingsStores> {
     let global = tiers
         .global
         .ok_or_else(|| SprigError::internal("connect_tiers returned no global store"))?;
-    SettingsStores::new(Arc::new(global), Arc::new(tiers.dc))
+    let global: Arc<dyn MetaStore> = Arc::new(global);
+    let dc: Arc<dyn MetaStore> = Arc::new(tiers.dc);
+    // Two tiers (r2next): other DCs' shard maps and cluster records come
+    // through their controllers' relay (chapter 23 step 11); one etcd
+    // serves them directly.
+    let dc: Arc<dyn MetaStore> = if two_tier(meta) {
+        Arc::new(sprig_meta::relay::RoutedStore::new(dc, Arc::clone(&global)))
+    } else {
+        dc
+    };
+    SettingsStores::new(global, dc)
+}
+
+/// Whether `[meta]` names a global tier apart from the DC's.
+fn two_tier(meta: &sprig_common::config::MetaConfig) -> bool {
+    let norm = |v: &[String]| {
+        let mut v: Vec<String> = v
+            .iter()
+            .map(|s| s.trim_end_matches('/').to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    !meta.global_seeds.is_empty() && norm(&meta.global_seeds) != norm(&meta.dc_seeds)
 }
 
 #[cfg(test)]

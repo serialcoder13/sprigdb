@@ -8,6 +8,11 @@
 //! Settings are the `mover.*` defaults (live resolution per job is a later
 //! step). Index builds (chapter 13) don't run here yet.
 
+pub mod inherit;
+pub mod logic;
+pub mod permit;
+pub mod runtime;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +33,7 @@ use sprig_shard::TenantMaps;
 ///
 /// # Errors
 /// etcd can't be reached at start.
+#[allow(clippy::too_many_lines)] // one wiring sequence
 pub async fn run(ctx: RoleContext) -> Result<()> {
     let role = Role::Worker;
     let cfg = &ctx.config;
@@ -46,13 +52,18 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .global
             .ok_or_else(|| SprigError::internal("workers connect the global tier"))?,
     );
-    let registry = ClusterRegistry::new(global, dc.clone())?;
+    let registry = ClusterRegistry::new(Arc::clone(&global), dc.clone())?;
+    let registry_logic = registry.clone();
+    let dc_logic = dc.clone();
     let settings = MoverSettings::default();
     // Moves between DCs (chapter 24) commit on the one etcd of R0's
     // single-etcd mode: this DC's tier reaches the others.
     let factory = Arc::new(
         MysqlEnvFactory::new(registry, TenantMaps::new(dc.clone()), settings.clone())
-            .with_home_changes(dc.clone()),
+            .with_home_changes(dc.clone())
+            // Splits, merges and shard moves (chapter 20) cut over on the
+            // table groups' maps in this DC's tier.
+            .with_group_maps(dc.clone()),
     );
     let store = JobStore::new(dc, Arc::new(SystemClock));
     let worker = cfg
@@ -62,10 +73,84 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         .unwrap_or_else(|| format!("worker-{}", std::process::id()));
     let mut opts = WorkerOpts::new(&worker);
     opts.lease = settings.job_lease;
-    let runtime = JobRuntime::new(store, factory, opts);
+    // Chapter 25: mover jobs (cutovers, moves between DCs) run only while
+    // the worker holds a valid DC permit (r2next).
+    let (keeper, watchdog) = permit::keep(
+        &worker,
+        dc_logic.clone(),
+        Duration::from_millis(1000),
+        ctx.shutdown.clone(),
+    );
+    // The permit loop stops with the shutdown, and its heartbeat with it:
+    // the watchdog goes first, so it doesn't abort the drain.
+    let sd = ctx.shutdown.clone();
+    tokio::spawn(async move {
+        sd.cancelled().await;
+        std::thread::spawn(move || drop(watchdog));
+    });
+    let gate_factory: Arc<dyn sprig_mover::EnvFactory> = factory;
+    let (gate_store, gate_opts) = (store, opts);
+    // Chapter 23's job runtime with chapter 41's logic jobs: after-commit
+    // triggers and scheduled runs (R7 order 5).
+    let pools: Arc<dyn sprig_controller::catalogs::ClusterPools> = Arc::new(
+        sprig_controller::catalogs::RegistryPools::new(registry_logic.clone(), None)
+            .budget("logic", 8),
+    );
+    // Shards get their own connection budget: a trigger holds a shard's
+    // connection while it runs, and must never wait for a catalog one
+    // from the same budget (chapter 13's rule for catalog pools).
+    let shard_pools: Arc<dyn sprig_controller::catalogs::ClusterPools> = Arc::new(
+        sprig_controller::catalogs::RegistryPools::new(registry_logic.clone(), None)
+            .budget("logic_shards", 16),
+    );
+    let env = logic::LogicEnv {
+        dc: dc_logic.clone(),
+        registry: registry_logic.clone(),
+        pools: shard_pools,
+        locator: Arc::new(sprig_controller::catalogs::ShardMapLocator::new(
+            dc_logic.clone(),
+            Arc::clone(&pools),
+            sprig_controller::catalogs::default_naming(),
+        )),
+        clusters: Arc::new(logic::RegistryClusters::new(
+            registry_logic,
+            Arc::clone(&pools),
+        )),
+        opts: logic::run_opts_from_env(),
+        trigger_budget: Duration::from_millis(30_000),
+        job_budget: Duration::from_millis(300_000),
+    };
+    // Chapter 42's copy worker: one job per tenant tree.
+    let inherit_env = Arc::new(inherit::LiveEnv::new(
+        dc_logic.clone(),
+        Arc::clone(&global),
+        Arc::clone(&env.locator),
+        Arc::clone(&env.pools),
+        Arc::clone(&env.clusters),
+    )?);
+    let jobs = runtime::WorkerRuntime::new(dc_logic, Arc::new(SystemClock), worker.clone())
+        .with_handler(Arc::new(logic::LogicTrigger(env.clone())))
+        .with_handler(Arc::new(logic::LogicSchedule(env)))
+        .with_handler(Arc::new(inherit::InheritCopy(inherit_env)));
     ctx.health.set_ready();
-    tracing::info!(%role, %worker, "ready: running mover jobs");
-    let r = runtime.run(ctx.shutdown.clone()).await;
+    tracing::info!(%role, %worker, "ready: running mover and logic jobs");
+    let shutdown = ctx.shutdown.clone();
+    let jobs_task = tokio::spawn(async move { jobs.run(shutdown).await });
+    let k = Arc::clone(&keeper);
+    let r = permit::gated(
+        move || k.may_write(),
+        ctx.shutdown.clone(),
+        move |stop| {
+            let runtime = JobRuntime::new(
+                gate_store.clone(),
+                Arc::clone(&gate_factory),
+                gate_opts.clone(),
+            );
+            async move { runtime.run(stop).await }
+        },
+    )
+    .await;
+    let _ = jobs_task.await;
     ctx.health.set_draining();
     tracing::info!(%role, "stopped");
     r

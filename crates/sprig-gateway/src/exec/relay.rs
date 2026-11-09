@@ -233,7 +233,8 @@ pub(crate) fn map_error(mut e: SprigError, ctx: &OutputCtx<'_>) -> SprigError {
     if let std::borrow::Cow::Owned(m) = map_message(&e.message, ctx) {
         e.message = m;
     }
-    e
+    // Chapter 41: a validation's CHECK failure is 39863 (R7 order 3).
+    sprig_logic::triggers::map_check_error(e)
 }
 
 /// The `OK` packet's schema change with the physical schema as the

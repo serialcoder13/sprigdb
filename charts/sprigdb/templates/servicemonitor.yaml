@@ -1,0 +1,12 @@
+{{- if .Values.monitoring.serviceMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sprigdb
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: sprigdb}
+  endpoints:
+    - {port: telemetry, path: /metrics, interval: 15s}
+{{- end }}

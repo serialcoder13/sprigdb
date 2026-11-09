@@ -47,6 +47,8 @@
 //! - [`failover`]: chapter 25's DC failover: permits and observers
 //!   served from the DC lease, the global leader's decision, promotion
 //!   with its commit point, and recovery of a returning DC (R2).
+//! - [`residency`]: chapter 26's policies, their resolution through the
+//!   tenant tree, compliance plans and the `residency` loop (R2).
 //!
 //! Not yet: the relay and peer services (R2), the latency prober, the
 //! global loops (`directory`, `tree_moves`, `dc_registry`), subtree moves,
@@ -64,19 +66,27 @@ pub mod catalogs;
 pub mod dc;
 pub mod dispatch;
 pub mod failover;
+pub mod inherit_loop;
+pub mod latency;
 pub mod live;
+pub mod logic_loop;
 pub mod migrate;
 pub mod monitor;
 pub mod registration;
+pub mod residency;
 pub mod runtime;
 pub mod settings;
 pub mod settings_admin;
+pub mod sharding;
+pub mod sharding_runtime;
 pub mod tenants;
 pub mod traffic;
 pub mod tree;
 pub mod tree_settings;
+pub mod txn_resolver;
 pub mod users;
 pub mod workload_rollup;
+pub mod write_load;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,6 +196,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     };
     let registry = ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?;
     let registry_for_balancer = registry.clone();
+    let registry_for_sharding = registry.clone();
     let monitor = Arc::new(ClusterMonitor::new(
         registry.clone(),
         settings.live.clone(),
@@ -210,7 +221,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         dc.clone(),
         Some(settings.live.clone()),
         Arc::clone(&clock),
-    );
+    )
+    .with_group_maps(Arc::new(sprig_shard::ShardMapStore::new(Arc::clone(
+        &stores.dc,
+    ))));
     let settings_admin = Arc::new(SettingsService::new(
         settings.live.clone(),
         versioner.clone(),
@@ -222,10 +236,23 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Directory::new(Arc::clone(&stores.global)),
         Arc::clone(&clock),
     ));
+    // Automatic indexing holds a catalog connection for a whole pass (and
+    // its Admin API for a request) while it reads snapshots, samples and
+    // decisions: those long-held connections come from their own budget,
+    // so they can never starve the short calls of every other loop
+    // (`catalogs` module docs; the R0 catalog-connection deadlock).
+    let ai_sessions = ShardMapLocator::new(
+        Arc::clone(&stores.dc),
+        Arc::new(
+            RegistryPools::new(registry.clone(), Some(Arc::clone(&monitor)))
+                .budget("autoindex", autoindex_loop::SESSIONS),
+        ),
+        default_naming(),
+    );
     let indexes = Arc::new(
         autoindex_admin::AutoIndexService::new(
             Directory::new(Arc::clone(&stores.global)),
-            Arc::new(locator.clone()),
+            Arc::new(ai_sessions.clone()),
             versioner.clone(),
             settings.live.clone(),
             Arc::clone(&clock),
@@ -252,6 +279,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     // chapter 12's workload store in the tenants' catalogs.
     let jobs = autoindex_loop::JobShardLocks::new(Arc::clone(&stores.dc));
     let catalog_locator: Arc<dyn sprig_catalog::CatalogLocator> = Arc::new(locator.clone());
+    let logic_locator = Arc::clone(&catalog_locator);
     let workload_store: Arc<dyn sprig_workload::store::WorkloadStore> = Arc::new(
         sprig_workload::store::CatalogWorkloadStore::new(Arc::clone(&catalog_locator)),
     );
@@ -274,14 +302,17 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         }
         None => Arc::clone(&clock),
     };
-    let ai_env = Arc::new(autoindex_env::ControllerEnv::new(
-        dc.clone(),
-        locator.clone(),
-        registry.clone(),
-        Some(Arc::clone(&monitor)),
-        Some(settings.live.clone()),
-        jobs.clone(),
-    ));
+    let ai_env = Arc::new(
+        autoindex_env::ControllerEnv::new(
+            dc.clone(),
+            locator.clone(),
+            registry.clone(),
+            Some(Arc::clone(&monitor)),
+            Some(settings.live.clone()),
+            jobs.clone(),
+        )
+        .with_sessions(ai_sessions),
+    );
     let ai_eval = autoindex_env::EvalShim::new(
         Arc::clone(&ai_env),
         Arc::clone(&ai_clock),
@@ -344,10 +375,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         dc.clone(),
         ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?,
         Arc::clone(&stores.dc),
-        Arc::new(RegistryPools::new(
-            registry_for_balancer,
-            Some(Arc::clone(&monitor)),
-        )),
+        Arc::new(
+            RegistryPools::new(registry_for_balancer, Some(Arc::clone(&monitor)))
+                .budget("balancer", catalogs::POOL_MAX),
+        ),
         Arc::new(locator.clone()),
         Directory::new(Arc::clone(&stores.global)),
         Some(settings.live.clone()),
@@ -355,6 +386,28 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Some(move_exec),
         cfg.node.id().clone(),
     ));
+    // Chapters 16 and 20 (R1): the advisor's first design and automatic
+    // split, merge and move, per tenant homed here.
+    let sharding = Arc::new(sharding_runtime::ShardingRuntime::new(
+        dc.clone(),
+        Arc::clone(&stores.dc),
+        Arc::clone(&stores.global),
+        Arc::clone(&clock),
+        Arc::new(
+            RegistryPools::new(registry_for_sharding, Some(Arc::clone(&monitor)))
+                .budget("sharding", sharding_runtime::POOL_MAX),
+        ),
+        Arc::new(sprig_balancer::decisions::CatalogDecisionLog::new(
+            Arc::new(locator.clone()),
+        )),
+        Some(settings.live.clone()),
+        &format!("controller:{}", cfg.node.id()),
+    )
+    .with_publish(versioner.clone()));
+    // Chapter 20: load splits need placement's hot clusters.
+    sharding
+        .write_load()
+        .set_placement(Arc::clone(&balancer) as Arc<dyn write_load::HotClusters>);
     let tenants = Arc::new(TenantService::new(
         Arc::clone(&stores.dc),
         locator,
@@ -389,7 +442,59 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(workload_rollup))
         .with_loop(Loop::new(Arc::clone(&balancer)))
         .with_loop(Loop::new(migrate::MigrationLoop::new(Arc::clone(&moves))))
+        .with_loop(Loop::from_arc(Arc::clone(&sharding)))
+        // Chapter 18: in-doubt distributed transactions and decision rows.
+        .with_loop(Loop::new(txn_resolver::ResolverLoop::for_controller(
+            &dc,
+            &stores,
+            Arc::clone(&monitor),
+            settings.live.clone(),
+        )?))
+        // Chapter 41 (R7 order 5): after-commit trigger jobs and schedules.
+        .with_loop(Loop::new(logic_loop::LogicLoop::new(logic_locator)))
+        .with_loop(Loop::new(inherit_loop::InheritLoop))
         .global_candidate(cfg.controller.global_candidate);
+    // Chapter 25 (R2): the DC lease, permits, observations, the return of
+    // a lost DC and the global failover decision (failover::role).
+    let failover = failover::role::FailoverRole::new(
+        dc.clone(),
+        cfg.node.id(),
+        stores.clone(),
+        Arc::clone(&clock),
+        Some(settings.live.clone()),
+        single_etcd(&cfg.meta),
+    );
+    let rt = failover.loops().into_iter().fold(rt, Runtime::with_loop);
+    // Chapter 26 (R2): residency policies, their convergence loop and the
+    // Admin calls.
+    let residency = Arc::new(residency::Residency::new(
+        dc.clone(),
+        Arc::clone(&stores.global),
+        failover.dc_tiers(),
+        Arc::clone(&clock),
+        Some(Arc::clone(&moves)),
+    ));
+    let rt = rt.with_loop(Loop::new(residency::ResidencyLoop(Arc::clone(&residency))));
+    // Chapter 23 steps 12 and 13 (R2): the latency matrix and the DC
+    // lifecycle.
+    let latency = latency::LatencyProber::new(
+        dc.clone(),
+        Arc::clone(&stores.global),
+        Some(settings.live.clone()),
+    );
+    let rt = latency.loops().into_iter().fold(rt, Runtime::with_loop);
+    let (internal, internal_addr) = failover::role::bind(
+        cfg.controller.internal_addr,
+        cfg.controller.internal_advertise.as_deref(),
+    )
+    .await?;
+    let internal_task = failover.serve_internal(
+        internal,
+        &internal_addr,
+        axum::Router::new(),
+        ctx.shutdown.clone(),
+    );
+    let failover_tasks = failover.spawn(&rt.status(), &ctx.shutdown);
 
     let token = cfg
         .controller
@@ -409,7 +514,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             .with_settings(settings_admin)
             .with_indexes(indexes)
             .with_placement(balancer)
-            .with_moves(moves),
+            .with_moves(moves)
+            .with_sharding(sharding.sharding())
+            .with_failover(Arc::clone(&failover))
+            .with_residency(residency),
     );
     let admin = tokio::spawn(http::serve(
         listener,
@@ -424,12 +532,13 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         registration::ControllerRecord {
             admin_addr: registration::advertised(admin_addr),
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            internal_addr: Some(internal_addr.clone()),
         },
         ctx.shutdown.clone(),
     ));
 
     ctx.health.set_ready();
-    tracing::info!(%role, %dc, admin = %admin_addr, "ready");
+    tracing::info!(%role, %dc, admin = %admin_addr, internal = %internal_addr, "ready");
     rt.run(ctx.shutdown.clone()).await;
     ctx.health.set_draining();
     match admin.await {
@@ -438,8 +547,26 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Err(e) => tracing::warn!(error = %e, "the Admin API task failed"),
     }
     let _ = registered.await;
+    for t in failover_tasks {
+        let _ = t.await;
+    }
+    let _ = internal_task.await;
     tracing::info!(%role, "stopped every loop");
     Ok(())
+}
+
+/// Single-etcd mode: one etcd serves both tiers (no global seeds, or the
+/// same seeds as the DC's).
+fn single_etcd(meta: &sprig_common::config::MetaConfig) -> bool {
+    let norm = |v: &[String]| {
+        let mut v: Vec<String> = v
+            .iter()
+            .map(|s| s.trim_end_matches('/').to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    meta.global_seeds.is_empty() || norm(&meta.global_seeds) == norm(&meta.dc_seeds)
 }
 
 /// Bootstraps the first DC (`[controller] bootstrap = true`) or waits for

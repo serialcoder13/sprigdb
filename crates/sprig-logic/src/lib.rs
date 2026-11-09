@@ -15,9 +15,13 @@
 //! - [`service`]: a deploy end to end, which the gateway runs for a
 //!   declaration.
 //!
-//! Not yet: validations, triggers, schedules, computed fields, the
-//! fallback runtime (`sprig-logic-js`, the `kirun` crate), invocation from
-//! other protocols, rollout and rollback, deploys through chapter 21.
+//! - [`invoke`]: calling an engine-tier version through its wrapper's
+//!   marker row, on the fallback runtime ([`engine`]);
+//! - [`settings`]: the fallback tier's budgets and outbound allowlist.
+//!
+//! Not yet: validations, triggers, schedules, computed fields, QuickJS
+//! for JavaScript, invocation from other protocols, rollout and rollback,
+//! deploys through chapter 21.
 
 // Hand-written lexers and parsers read best with short names.
 #![allow(
@@ -29,10 +33,23 @@
 )]
 
 pub mod catalog;
+pub mod cron;
 pub mod declare;
 pub mod deploy;
+pub mod enforce;
+pub mod invoke;
 pub mod placement;
+pub mod schedule;
 pub mod service;
+pub mod settings;
+pub mod triggers;
+
+/// The fallback tier (`sprig-logic-js`): the native KIRun runtime, its
+/// `db` bridge, budgets and outbound allowlist.
+pub use sprig_logic_js as engine;
+
+/// The compiler (`sprig-logic-compile`).
+pub use sprig_logic_compile as compiler;
 
 pub use catalog::{LOGIC_MODULE, LogicStore};
 pub use declare::{Declaration, is_declaration};

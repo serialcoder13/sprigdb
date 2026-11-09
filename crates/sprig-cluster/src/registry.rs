@@ -415,6 +415,30 @@ impl ClusterRegistry {
             ));
         }
         let (number, cluster_id) = self.allocate_id(&reg.name).await?;
+        self.register_numbered(reg, number, cluster_id).await
+    }
+
+    /// Registers `reg` under a number [`Self::allocate_id`] reserved
+    /// earlier: the VM provisioner (chapter 27) needs the number for the
+    /// nodes' `server_id` and `gtid_domain_id` before the cluster exists.
+    ///
+    /// # Errors
+    /// As [`Self::register`]; `Internal` if `cluster_id` isn't `number`'s.
+    pub async fn register_numbered(
+        &self,
+        reg: Registration,
+        number: u32,
+        cluster_id: ClusterId,
+    ) -> Result<StoredCluster> {
+        if Self::cluster_id(&self.dc_id, number)? != cluster_id {
+            return Err(SprigError::internal(format!(
+                "cluster id {cluster_id} isn't number {number} of {}",
+                self.dc_id
+            )));
+        }
+        if reg.nodes.is_empty() {
+            return Err(SprigError::internal("a cluster needs at least one node"));
+        }
         let body = ClusterRecord {
             cluster_id: cluster_id.clone(),
             cluster_number: number,

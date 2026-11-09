@@ -1,0 +1,4 @@
+SprigDB for data center {{ .Values.dc.id }} is installed in {{ .Release.Namespace }}.
+It needs mariadb-operator, cert-manager and trust-manager in this cluster.
+Pools: {{ range .Values.pools }}{{ .name }} ({{ .topology }}, {{ .minClusters | default 0 }}-{{ .maxClusters }}) {{ end }}
+  kubectl -n {{ .Release.Namespace }} get sprigclusters

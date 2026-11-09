@@ -1,0 +1,18 @@
+# Written by the sprigdb Ansible role (chapter 27). Everything else is a
+# live setting.
+[node]
+dc = "{{ sprigdb_dc }}"
+id = "{{ inventory_hostname_short }}"
+
+[meta]
+dc_seeds = {{ sprigdb_dc_seeds | to_json }}
+global_seeds = {{ sprigdb_global_seeds | to_json }}
+deployment_id = "{{ sprigdb_deployment_id }}"
+
+[tls]
+ca = "/etc/sprigdb/tls/ca.pem"
+cert = "/etc/sprigdb/tls/cert.pem"
+key = "/etc/sprigdb/tls/key.pem"
+
+[telemetry]
+bootstrap_addr = "0.0.0.0:9180"

@@ -159,7 +159,10 @@ impl GaleraQuorum {
         quorum_wait: Duration,
         manual: bool,
     ) -> GaleraAction {
-        for n in nodes.iter().filter(|n| n.reachable && n.cluster_status == "Primary") {
+        for n in nodes
+            .iter()
+            .filter(|n| n.reachable && n.cluster_status == "Primary")
+        {
             self.highest_primary = self.highest_primary.max(n.last_committed);
             self.seen.insert(n.node.clone(), n.last_committed);
         }
@@ -181,15 +184,11 @@ impl GaleraQuorum {
         if manual {
             return GaleraAction::Blocked("quorum lost; failover.mode is manual".into());
         }
-        let Some(best) = nodes
-            .iter()
-            .filter(|n| n.reachable)
-            .max_by(|a, b| {
-                a.last_committed
-                    .cmp(&b.last_committed)
-                    .then_with(|| b.node.cmp(&a.node))
-            })
-        else {
+        let Some(best) = nodes.iter().filter(|n| n.reachable).max_by(|a, b| {
+            a.last_committed
+                .cmp(&b.last_committed)
+                .then_with(|| b.node.cmp(&a.node))
+        }) else {
             return GaleraAction::Blocked("quorum lost; no node is reachable".into());
         };
         if best.last_committed < self.highest_primary {

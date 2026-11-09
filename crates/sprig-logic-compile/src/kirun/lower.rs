@@ -29,8 +29,8 @@ use super::expr::{self, KBin, KExpr, KUn, Num};
 use super::model::{Definition, ParamRef, RefKind, SchemaDef, Step};
 use crate::Reason;
 use crate::ir::{
-    BinOp, Bound, Builtin, DbOp, EventDef, Expr, Function, Literal, LocalId, Param, PathSeg,
-    SqlShape, Stmt, Ty, UnOp,
+    BinOp, Bound, Builtin, DbOp, ErrorSpec, EventDef, Expr, Function, Literal, LocalId, Param,
+    PathSeg, SqlShape, Stmt, Ty, UnOp,
 };
 use crate::sql::{self, Columns, Want};
 
@@ -97,6 +97,7 @@ pub fn lower(def: &Definition, cat: &dyn Columns) -> Result<Lowered> {
         scope: Vec::new(),
         loops: BTreeMap::new(),
         writes: BTreeSet::new(),
+        non_null_params: BTreeSet::new(),
     };
     if !def.parts.is_empty() {
         l.reason(
@@ -107,7 +108,8 @@ pub fn lower(def: &Definition, cat: &dyn Columns) -> Result<Lowered> {
     }
     l.signature();
     l.graph()?;
-    let body = l.scope_block(None)?;
+    let mut body = l.argument_checks();
+    body.extend(l.scope_block(None)?);
     l.f.body = body;
     Ok(Lowered {
         func: l.f,
@@ -131,6 +133,8 @@ struct L<'a> {
     scope: Vec<Ev>,
     loops: BTreeMap<String, LocalId>,
     writes: BTreeSet<String>,
+    /// Parameters the argument checks prove are never `NULL`.
+    non_null_params: BTreeSet<u16>,
 }
 
 /// A schema's IR type and bounds.
@@ -225,6 +229,82 @@ impl L<'_> {
             .collect();
         events.sort_by_key(|e| e.name != "output");
         self.f.events = events;
+    }
+
+    /// KIRun validates a call's arguments against the parameters'
+    /// schemas before the first step; so does compiled code (the fallback
+    /// tier runs KIRun itself): `NULL` where the schema doesn't allow it,
+    /// an `INTEGER` outside Java's `int` range, and `minimum` and `maximum`
+    /// are 39866. A parameter with a `defaultValue`, no type or several
+    /// values is left to the body.
+    fn argument_checks(&mut self) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        let fname = self.f.name.clone();
+        for (i, (name, p)) in self.def.parameters.0.iter().enumerate() {
+            if p.variable_argument || p.schema.default_value.is_some() {
+                continue;
+            }
+            let ts = p.schema.types();
+            if ts.is_empty() {
+                continue;
+            }
+            let Ok(ix) = u16::try_from(i) else { continue };
+            let v = || Expr::Param(ix);
+            let fail = |what: String| {
+                vec![Stmt::Throw(ErrorSpec {
+                    code: SprigCode::LogicRuntimeError.number(),
+                    message: Expr::Lit(Literal::Str(format!("{fname}: argument {name} {what}"))),
+                })]
+            };
+            let nullable = match &p.schema.ty {
+                Some(crate::kirun::model::TypeSpec::One(t)) => t.eq_ignore_ascii_case("NULL"),
+                Some(crate::kirun::model::TypeSpec::Many(v)) => {
+                    v.iter().any(|t| t.eq_ignore_ascii_case("NULL"))
+                }
+                None => true,
+            };
+            if !nullable {
+                self.non_null_params.insert(ix);
+                out.push(Stmt::If(
+                    // `=` is null-safe in the IR.
+                    Expr::bin(BinOp::Eq, v(), Expr::Lit(Literal::Null)),
+                    fail("is null, which its schema doesn't allow".to_owned()),
+                    Vec::new(),
+                ));
+            }
+            if ts == ["INTEGER"] {
+                out.push(Stmt::If(
+                    Expr::bin(
+                        BinOp::Or,
+                        Expr::bin(BinOp::Lt, v(), Expr::Lit(Literal::Int(i64::from(i32::MIN)))),
+                        Expr::bin(BinOp::Gt, v(), Expr::Lit(Literal::Int(i64::from(i32::MAX)))),
+                    ),
+                    fail("is out of the INTEGER range".to_owned()),
+                    Vec::new(),
+                ));
+            }
+            if let Some(m) = p.schema.minimum {
+                out.push(Stmt::If(
+                    Expr::bin(BinOp::Lt, v(), Expr::Lit(Literal::Float(m))),
+                    fail(format!(
+                        "is below its minimum {}",
+                        crate::interp::num_str(m)
+                    )),
+                    Vec::new(),
+                ));
+            }
+            if let Some(m) = p.schema.maximum {
+                out.push(Stmt::If(
+                    Expr::bin(BinOp::Gt, v(), Expr::Lit(Literal::Float(m))),
+                    fail(format!(
+                        "is above its maximum {}",
+                        crate::interp::num_str(m)
+                    )),
+                    Vec::new(),
+                ));
+            }
+        }
+        out
     }
 
     // -- the graph ---------------------------------------------------------
@@ -635,6 +715,21 @@ impl L<'_> {
                 let mut fields = Vec::new();
                 for r in step.refs("results") {
                     let (fname, value) = self.result_entry(s, r)?;
+                    // KIRun fails the run when a result is a plain path to
+                    // a value that isn't there (kirun-java's Java `null`,
+                    // "t2"): a column of a row `QueryOne` didn't find.
+                    if let Some(found) = self.missing_row_guard(r) {
+                        out.push(Stmt::If(
+                            Expr::Unary(UnOp::Not, Box::new(Expr::Local(found))),
+                            vec![Stmt::Throw(ErrorSpec {
+                                code: SprigCode::LogicRuntimeError.number(),
+                                message: Expr::Lit(Literal::Str(format!(
+                                    "step {s}: result {fname} reads a column of a row that wasn't found"
+                                ))),
+                            })],
+                            Vec::new(),
+                        ));
+                    }
                     fields.push((fname, value));
                 }
                 let mut typed = Vec::new();
@@ -795,7 +890,7 @@ impl L<'_> {
                 let args = self.var_args(s, "value")?;
                 let mut acc: Option<Expr> = None;
                 for a in args {
-                    let a = self.text(a, &at);
+                    let a = self.text_arg(a, &at);
                     acc = Some(match acc {
                         None => a,
                         Some(x) => Expr::bin(BinOp::Concat, x, a),
@@ -806,7 +901,7 @@ impl L<'_> {
             }
             "System.String.Length" | "System.String.UpperCase" | "System.String.LowerCase" => {
                 let a = self.arg(s, "string")?.unwrap_or(Expr::Lit(Literal::Null));
-                let a = self.text(a, &at);
+                let a = self.text_arg(a, &at);
                 let b = match func.as_str() {
                     "System.String.Length" => Builtin::Len,
                     "System.String.UpperCase" => Builtin::Upper,
@@ -822,7 +917,7 @@ impl L<'_> {
                 let b = self
                     .arg(s, "searchString")?
                     .unwrap_or(Expr::Lit(Literal::Null));
-                let (a, b) = (self.text(a, &at), self.text(b, &at));
+                let (a, b) = (self.text_arg(a, &at), self.text_arg(b, &at));
                 let f = match func.as_str() {
                     "System.String.Contains" => Builtin::Contains,
                     "System.String.StartsWith" => Builtin::StartsWith,
@@ -881,6 +976,39 @@ impl L<'_> {
             json_lit(&raw)
         };
         Ok((name, e))
+    }
+
+    /// For a `GenerateEvent` result that is exactly
+    /// `Steps.<step>.<event>.row.<column>` of a `QueryOne`, the row's
+    /// `found` flag.
+    fn missing_row_guard(&self, r: &ParamRef) -> Option<LocalId> {
+        let inner = r.value.as_ref()?.get("value")?;
+        if inner
+            .get("isExpression")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return None;
+        }
+        let mut t = inner.get("value")?.as_str()?.trim();
+        while t.starts_with('(') && t.ends_with(')') {
+            t = t[1..t.len() - 1].trim();
+        }
+        let parts: Vec<&str> = t.split('.').collect();
+        let ident =
+            |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if parts.len() != 5
+            || parts[0] != "Steps"
+            || parts[3] != "row"
+            || !parts.iter().all(|p| ident(p))
+        {
+            return None;
+        }
+        let syms = self.syms.get(&(parts[1].to_owned(), parts[2].to_owned()))?;
+        syms.iter().find_map(|(n, sym)| match sym {
+            Sym::Row { found, .. } if n == "row" => Some(*found),
+            _ => None,
+        })
     }
 
     /// Assigns `v` to a new local and exposes it as `output.<field>`.
@@ -1149,6 +1277,34 @@ impl L<'_> {
         }
     }
 
+    /// Whether `e` is never `NULL`: literals, parameters the argument
+    /// checks guarantee, and arithmetic over those.
+    fn is_non_null(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Lit(l) => *l != Literal::Null,
+            Expr::Param(i) => self.non_null_params.contains(i),
+            Expr::Builtin(Builtin::NotNull, _) => true,
+            Expr::Builtin(Builtin::ToFloat, a) => a.iter().all(|x| self.is_non_null(x)),
+            Expr::Unary(UnOp::Neg, a) => self.is_non_null(a),
+            Expr::Binary(
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::IntDiv | BinOp::Mod,
+                a,
+                b,
+            ) => self.is_non_null(a) && self.is_non_null(b),
+            _ => false,
+        }
+    }
+
+    /// `e`, failing at run time (39866) when it is `NULL`, as KIRun's
+    /// arithmetic does.
+    fn non_null(&self, e: Expr) -> Expr {
+        if self.is_non_null(&e) {
+            e
+        } else {
+            Expr::call(Builtin::NotNull, vec![e])
+        }
+    }
+
     fn number(&mut self, e: Expr, at: &str) -> Expr {
         match self.f.ty_of(&e) {
             Ty::Int | Ty::Float | Ty::Null => e,
@@ -1161,6 +1317,24 @@ impl L<'_> {
                 );
                 e
             }
+        }
+    }
+
+    /// An argument of a `System.String.*` function. KIRun's string
+    /// functions take only text (a number is refused by the parameter's
+    /// `STRING` schema), so a number or boolean here sends the function
+    /// to the engine tier, where KIRun gives its own error.
+    fn text_arg(&mut self, e: Expr, at: &str) -> Expr {
+        match self.f.ty_of(&e) {
+            Ty::Int | Ty::Float | Ty::Bool => {
+                self.reason(
+                    "kirun.string_types",
+                    at,
+                    "KIRun's string functions refuse a number or boolean argument",
+                );
+                e
+            }
+            _ => self.text(e, at),
         }
     }
 
@@ -1216,7 +1390,10 @@ impl L<'_> {
                 let a = self.expr(a, at)?;
                 match op {
                     KUn::Plus => self.number(a, at),
-                    KUn::Minus => Expr::Unary(UnOp::Neg, Box::new(self.number(a, at))),
+                    KUn::Minus => {
+                        let a = self.number(a, at);
+                        Expr::Unary(UnOp::Neg, Box::new(self.non_null(a)))
+                    }
                     KUn::Not => Expr::Unary(UnOp::Not, Box::new(a)),
                     KUn::BitNot => return Err(r("kirun.bitwise", "~ has no compiled form".into())),
                 }
@@ -1247,7 +1424,31 @@ impl L<'_> {
                                 return Err(r("types.mismatch", format!("{} on {t}", op.text())));
                             }
                         }
+                        // KIRun's `+` concatenates and `*` repeats when a
+                        // side turns out to be text at run time.
+                        if matches!(op, KBin::Add | KBin::Mul) && (ta == Ty::Json || tb == Ty::Json)
+                        {
+                            return Err(r(
+                                "kirun.dynamic_types",
+                                format!(
+                                    "{} on a value of unknown type, which KIRun treats as text when it is text; \
+                                     convert it with `- 0` first",
+                                    op.text()
+                                ),
+                            ));
+                        }
                         let (a, b) = (self.number(a, at), self.number(b, at));
+                        // KIRun: `null + x` is `x`, a number plus null
+                        // fails, and the other operators refuse null.
+                        if *op == KBin::Add && !self.is_non_null(&a) {
+                            let b2 = self.non_null(b.clone());
+                            return Ok(Expr::Cond(
+                                Box::new(Expr::bin(BinOp::Eq, a.clone(), Expr::Lit(Literal::Null))),
+                                Box::new(b),
+                                Box::new(Expr::bin(BinOp::Add, a, b2)),
+                            ));
+                        }
+                        let (a, b) = (self.non_null(a), self.non_null(b));
                         let o = match op {
                             KBin::Add => BinOp::Add,
                             KBin::Sub => BinOp::Sub,

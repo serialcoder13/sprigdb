@@ -16,18 +16,32 @@
 //! - **gateways, agents, workers**: `sprig_meta::permit::PermitHolder`
 //!   and its watchdog, renewed through [`client::HttpPermitSource`].
 //!
-//! Cluster-level failover per topology is `sprig_cluster::failover`.
+//! Cluster-level failover per topology is `sprig_cluster::failover`;
+//! [`cluster`] is the DC leader's `cluster_failover` loop that drives it.
 //! Settings are [`settings`].
+//!
+//! In the controller role ([`role`], R2 wiring): every controller keeps
+//! the DC lease and serves the internal routes; the DC leader publishes
+//! the observe targets and runs the return of its DC; the global leader
+//! runs the decision. [`nodes`] is the MariaDB side (standby replication,
+//! the copy fence, standby lags, the diverged report); [`manual`] is
+//! `sprigctl tenant failover` and `sprigctl tenant standby`.
 
 pub mod client;
+pub mod cluster;
 pub mod decision;
 pub mod global;
+pub mod manual;
+pub mod nodes;
 pub mod observe;
 pub mod promote;
 pub mod record;
 pub mod recovery;
+pub mod relay;
+pub mod role;
 pub mod service;
 pub mod settings;
+pub mod two_tier;
 
 pub use global::{GlobalFailover, ObserverClient};
 pub use promote::{Guard, PromoteHooks, Promotion};

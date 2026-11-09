@@ -34,6 +34,11 @@ hibernate_checks = [
 prisma_checks = ["connect", "db_pull", "generate", "query", "transaction"]
 dump_checks = ["source", "dump", "restore", "checksum", "objects"]
 tpcc_checks = ["prepare", "run", "check", "cleanup"]
+# persona-sql (compat/, chapter 28 R4): SQL corpora compared value for value
+# with the reference server's captured output (gis is n/a on mariadb).
+persona_checks = [
+  "sql_mode", "max_execution_time", "errors", "show_index", "show_grants", "roles", "gis",
+]
 
 # Which list each connector reports; "checks" when not named here.
 [check_sets]
@@ -46,6 +51,7 @@ hibernate-mariadb = "hibernate_checks"
 prisma = "prisma_checks"
 mysqldump = "dump_checks"
 mariadb-dump = "dump_checks"
+persona-sql = "persona_checks"
 
 # --- connector limits (both personas) ----------------------------------------
 
@@ -153,3 +159,6 @@ reset_connection = "n/a"
 restore = "fail"
 checksum = "fail"
 objects = "fail"
+
+[mariadb.persona-sql]
+gis = "n/a"               # MySQL's SRID 4326 semantics belong to the MySQL persona

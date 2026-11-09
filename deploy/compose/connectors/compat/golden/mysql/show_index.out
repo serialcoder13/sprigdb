@@ -1,0 +1,12 @@
+c_idx	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
+c_idx	0	uk_name	1	name	A	0	NULL	NULL	YES	BTREE			YES	NULL
+c_idx	1	k_cat	1	cat	A	0	NULL	NULL	YES	BTREE			NO	NULL
+c_idx	1	k_name_cat	1	name	A	0	NULL	NULL	YES	BTREE			YES	NULL
+c_idx	1	k_name_cat	2	cat	A	0	NULL	NULL	YES	BTREE			YES	NULL
+c_idx	1	k_cat	1	cat	A	0	NULL	NULL	YES	BTREE			NO	NULL
+k_cat	YES
+k_name_cat	YES
+k_name_cat	YES
+PRIMARY	YES
+uk_name	YES
+ERROR 1146 (42S02): Table '@DB@.c_idx_nosuch' doesn't exist

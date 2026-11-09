@@ -124,6 +124,10 @@ pub struct AccountCtx<'a> {
     /// `auth.unsafe_privilege_action = error`: refuse server-wide
     /// privileges with 1227 instead of dropping them with 39350.
     pub unsafe_error: bool,
+    /// `auth.partial_revokes` (MySQL's `partial_revokes`, R4): a
+    /// database-level `REVOKE` of what `*.*` gives stores a restriction
+    /// instead of failing with 1141.
+    pub partial_revokes: bool,
     /// Wall-clock time.
     pub clock: &'a dyn Clock,
 }
@@ -317,10 +321,15 @@ fn role_not_granted(persona: Persona, role: &AccountRef, user: &AccountRef) -> S
                 role.name, role.host, user.name, user.host
             ),
         ),
+        // MariaDB 11.8's wording for a role that exists but isn't granted
+        // (measured, R4).
         Persona::MariaDb => SprigError::standard(
             1959,
             *b"OP000",
-            format!("Invalid role specification `{}`", role.name),
+            format!(
+                "User `{}`@`{}` has not been granted role `{}`",
+                user.name, user.host, role.name
+            ),
         ),
     }
 }
@@ -657,7 +666,9 @@ impl AccountCtx<'_> {
         let need = actions.with(Action::GrantOption);
         let held = match target {
             PrivTarget::Tenant => p.tenant,
-            PrivTarget::Database(k) => p.actions_on(Target::Database { db_key: k }),
+            PrivTarget::Database(k) | PrivTarget::Restriction(k) => {
+                p.actions_on(Target::Database { db_key: k })
+            }
             PrivTarget::Named {
                 db_key, name_key, ..
             } => p.actions_on(Target::Named { db_key, name_key }),
@@ -677,7 +688,9 @@ impl AccountCtx<'_> {
         }
         Err(match target {
             PrivTarget::Tenant => global_denied(self.user_name, self.user_host),
-            PrivTarget::Database(_) => db_denied(self.user_name, self.user_host, db),
+            PrivTarget::Database(_) | PrivTarget::Restriction(_) => {
+                db_denied(self.user_name, self.user_host, db)
+            }
             _ => table_denied(
                 self.persona,
                 "GRANT",
@@ -823,6 +836,26 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
                 let grantee = cx
                     .grantee(&state, &acc)
                     .ok_or_else(|| no_account(cx.persona))?;
+                // A partial revoke on this database is lifted rather than
+                // granted over (MySQL 8.4, measured).
+                let mut actions = actions;
+                if let PrivTarget::Database(k) = &target {
+                    let restricted = held(&state, grantee, &PrivTarget::Restriction(k.clone()));
+                    let lift = actions.intersect(restricted);
+                    if !lift.is_empty() {
+                        ops.push(Op::Revoke {
+                            grantee,
+                            twin: None,
+                            target: PrivTarget::Restriction(k.clone()),
+                            actions: lift,
+                            missing: None,
+                        });
+                        actions = actions.minus(lift);
+                        if actions.is_empty() && cols.is_empty() {
+                            continue;
+                        }
+                    }
+                }
                 if !actions.is_empty() || cols.is_empty() {
                     ops.push(Op::Grant(grantee, target.clone(), actions));
                 }
@@ -859,9 +892,64 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
                     .ok_or_else(|| no_account(cx.persona))?;
                 let missing = || match &target {
                     PrivTarget::Tenant => None,
-                    PrivTarget::Database(_) => Some(no_such_grant(&acc, None)),
+                    PrivTarget::Database(_) | PrivTarget::Restriction(_) => {
+                        Some(no_such_grant(&acc, None))
+                    }
                     _ => Some(no_such_grant(&acc, Some(&table))),
                 };
+                let mut actions = actions;
+                match &target {
+                    // `*.*` also clears those actions from the grantee's
+                    // partial revokes (MySQL 8.4, measured).
+                    PrivTarget::Tenant => {
+                        for p in state.privileges_of(grantee) {
+                            if let PrivTarget::Restriction(_) = &p.target
+                                && !p.actions.intersect(actions).is_empty()
+                            {
+                                ops.push(Op::Revoke {
+                                    grantee,
+                                    twin: None,
+                                    target: p.target.clone(),
+                                    actions,
+                                    missing: None,
+                                });
+                            }
+                        }
+                    }
+                    // MySQL refuses to revoke what the level doesn't hold
+                    // (1141, 1147), and with partial revokes on turns
+                    // what `*.*` gives into a restriction; MariaDB only
+                    // needs the row to exist.
+                    PrivTarget::Database(k) if cx.persona == Persona::MySql84 => {
+                        let have = held(&state, grantee, &target);
+                        let unheld = actions.minus(have);
+                        if !unheld.is_empty() {
+                            let global = held(&state, grantee, &PrivTarget::Tenant);
+                            if cx.partial_revokes && global.contains(unheld) {
+                                ops.push(Op::Grant(
+                                    grantee,
+                                    PrivTarget::Restriction(k.clone()),
+                                    unheld,
+                                ));
+                                actions = actions.intersect(have);
+                            } else {
+                                return Err(no_such_grant(&acc, None));
+                            }
+                        }
+                    }
+                    PrivTarget::Object { .. } | PrivTarget::Named { .. }
+                        if cx.persona == Persona::MySql84 =>
+                    {
+                        let mut have = held(&state, grantee, &target);
+                        if let Some(t) = cx.twin(&target) {
+                            have = have.union(held(&state, grantee, &t));
+                        }
+                        if !actions.minus(have).is_empty() {
+                            return Err(no_such_grant(&acc, Some(&table)));
+                        }
+                    }
+                    _ => {}
+                }
                 if !actions.is_empty() {
                     ops.push(Op::Revoke {
                         grantee,
@@ -1296,6 +1384,14 @@ async fn drop_users(
         }
     }
     Ok(version)
+}
+
+/// The actions `grantee`'s own row at `target` holds in the snapshot.
+fn held(state: &AuthzState, grantee: Grantee, target: &PrivTarget) -> ActionSet {
+    state
+        .privileges_of(grantee)
+        .filter(|p| &p.target == target)
+        .fold(ActionSet::EMPTY, |a, p| a.union(p.actions))
 }
 
 /// Applies `ops` in one auth change; `None` when there was nothing to do.

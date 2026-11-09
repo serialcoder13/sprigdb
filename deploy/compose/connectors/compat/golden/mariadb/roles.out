@@ -1,0 +1,7 @@
+r4c_r1
+r4c_r1
+ERROR 1142 (42000): INSERT command denied to user 'r4c_u1'@'HOST' for table `@DB@`.`c_g1`
+r4c_r2
+NULL
+r4c_r1
+ERROR 1959 (OP000): User `r4c_u1`@`%` has not been granted role `r4c_r3`

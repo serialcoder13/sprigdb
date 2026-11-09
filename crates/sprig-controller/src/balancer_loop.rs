@@ -39,7 +39,7 @@
 //! per-cluster keys); tenant-scope values wait for the catalogs' settings
 //! to be read here, as in the other DC loops.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -234,6 +234,12 @@ impl BalancerLoop {
             opts.at = Some(page.revision);
             opts.after = page.kvs.last().map(|kv| kv.key.clone());
         }
+        // A pin names where its tenant is: one an operator's move left
+        // behind follows it (chapter 11, "Manual moves and pins").
+        let placements: BTreeMap<TenantId, ClusterId> = units.iter().cloned().collect();
+        if let Err(e) = self.follow_pins(&placements).await {
+            tracing::warn!(error = %e, "pins not brought up to date");
+        }
         let mut by_cluster: BTreeMap<ClusterId, Vec<TenantId>> = BTreeMap::new();
         for (t, c) in units {
             by_cluster.entry(c).or_default().push(t);
@@ -268,6 +274,13 @@ impl BalancerLoop {
                 v.add_shard(ShardView::new(ShardKey::new(t.0, 0, 0), c.clone(), load));
             }
         }
+        // Chapter 26: each tenant's allowed DCs. No view without them (a
+        // plan that ignored residency could place a copy outside).
+        for (t, a) in crate::residency::allowed_map(&**self.dir.store()).await? {
+            if let Some(tv) = v.tenants.get_mut(&t) {
+                tv.allowed_dcs = Some(a);
+            }
+        }
         // Operator pins: a pinned tenant is never a candidate. No view
         // without them (a plan that ignored pins could move one).
         sprig_balancer::pins::apply_pins(
@@ -276,7 +289,75 @@ impl BalancerLoop {
                 .list()
                 .await?,
         );
+        // R1: a tenant with table groups doesn't move whole (the mover
+        // refuses it with 39472; chapter 20). Its shards move one by one,
+        // so the tenant-level plan leaves it where it is.
+        for t in sharded_tenants(&*self.dc_store).await? {
+            if let Some(tv) = v.tenants.get_mut(&t) {
+                tv.pinned = true;
+            }
+        }
         Ok((v, qps))
+    }
+
+    /// Re-points pins at their tenants' clusters once no move of the
+    /// tenant is in flight before its commit (`sprig_balancer::pins`
+    /// module docs); each is a `shard.pin` decision.
+    async fn follow_pins(&self, placements: &BTreeMap<TenantId, ClusterId>) -> Result<()> {
+        let store = sprig_balancer::pins::PinStore::new(Arc::clone(&self.dc_store));
+        let pins = store.list().await?;
+        if pins.is_empty() {
+            return Ok(());
+        }
+        let moving: std::collections::BTreeSet<TenantId> =
+            sprig_mover::JobStore::new(Arc::clone(&self.dc_store), Arc::clone(&self.clock))
+                .all()
+                .await?
+                .into_iter()
+                .map(|(r, _)| r)
+                .filter(|r| !r.state.is_terminal() && !r.state.is_committed())
+                .map(|r| r.tenant_id)
+                .collect();
+        for p in sprig_balancer::pins::follow_moves(&pins, placements, &moving) {
+            let was = pins.get(&p.tenant_id).map(|o| o.cluster.clone());
+            store.pin(&p).await?;
+            tracing::info!(tenant = %p.tenant_id, from = ?was, to = %p.cluster,
+                "pin follows its tenant");
+            let d = sprig_balancer::decisions::NewDecision {
+                decided_at_us: i64::try_from(secs(&*self.clock)).unwrap_or(0) * 1_000_000,
+                component: "balancer".to_owned(),
+                kind: "shard.pin".to_owned(),
+                subject_type: "shard".to_owned(),
+                subject_id: format!("t{}/g0/s0", p.tenant_id),
+                mode: sprig_balancer::decisions::Mode::Operator,
+                outcome: sprig_balancer::decisions::Outcome::Succeeded,
+                reason_code: "pin_follows_tenant".to_owned(),
+                summary: format!(
+                    "the pin of t{} moved from {} to {}, where the tenant is now \
+                     (an operator's move committed or rolled back)",
+                    p.tenant_id,
+                    was.as_ref().map_or("-".to_owned(), ToString::to_string),
+                    p.cluster
+                ),
+                evidence: serde_json::json!({
+                    "from": was.map(|c| c.to_string()),
+                    "to": p.cluster.to_string(),
+                    "pinned_by": p.pinned_by,
+                }),
+                alternatives: None,
+                job_id: None,
+                parent_id: None,
+                actor: p.pinned_by.clone(),
+                dc_id: self.dc.to_string(),
+            };
+            if let Err(e) = BoundedLog(Arc::clone(&self.log))
+                .record(p.tenant_id, &d)
+                .await
+            {
+                tracing::warn!(tenant = %p.tenant_id, error = %e, "pin decision not written");
+            }
+        }
+        Ok(())
     }
 
     fn tenant_knobs(&self, t: TenantId) -> TenantKnobs {
@@ -298,7 +379,7 @@ impl BalancerLoop {
         tenants: &[TenantId],
     ) -> Result<BTreeMap<TenantId, (LoadVector, f64)>> {
         let pool = self.pools.writer(c).await?;
-        let mut conn = pool.get_conn().await.map_err(scan_err)?;
+        let mut conn = crate::catalogs::acquire(&pool, "balancer storage scan").await?;
         let page = sprig_balancer::load::page_size(&mut conn).await?;
         let now = secs(&*self.clock);
         let window = self.settings().window.as_secs();
@@ -478,6 +559,26 @@ impl BalancerLoop {
     #[must_use]
     pub fn decisions(&self) -> Arc<dyn DecisionLog> {
         Arc::clone(&self.log) as Arc<dyn DecisionLog>
+    }
+
+    /// Clusters the last run's load model put above their high watermark
+    /// (`full` above `balancer.high_pct`), for chapter 20's load splits;
+    /// `None` before the first run.
+    pub async fn above_high(&self) -> Option<BTreeSet<ClusterId>> {
+        let g = self.inner.lock().await;
+        let (view, report) = (g.last_view.as_ref()?, g.last_report.as_ref()?);
+        Some(
+            report
+                .fullness
+                .iter()
+                .filter(|(c, f)| {
+                    view.clusters
+                        .get(*c)
+                        .is_some_and(|v| f.value > v.limits.high)
+                })
+                .map(|(c, _)| c.clone())
+                .collect(),
+        )
     }
 }
 
@@ -682,6 +783,33 @@ impl Reconciler for Arc<BalancerLoop> {
             .record(started.elapsed().as_secs_f64());
         Ok(Outcome::RequeueAfter(interval.max(Duration::from_secs(5))))
     }
+}
+
+/// Tenants with a table group's shard map (`shardmaps/<tenant>/<g>`,
+/// `g > 0`) in `dc`.
+async fn sharded_tenants(dc: &dyn sprig_meta::MetaStore) -> Result<BTreeSet<TenantId>> {
+    let prefix = dc.tier().key("shardmaps/")?;
+    let mut out = BTreeSet::new();
+    let mut opts = sprig_meta::ListOpts::default();
+    loop {
+        let page = dc.list(&prefix, opts.clone()).await?;
+        for kv in &page.kvs {
+            let mut it = kv.key.as_str().rsplit('/');
+            let g = it.next().and_then(|g| g.parse::<u32>().ok());
+            let t = it.next().and_then(|t| t.parse::<u64>().ok());
+            if let (Some(g), Some(t)) = (g, t)
+                && g != 0
+            {
+                out.insert(TenantId(t));
+            }
+        }
+        if !page.more {
+            break;
+        }
+        opts.at = Some(page.revision);
+        opts.after = page.kvs.last().map(|kv| kv.key.clone());
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -61,6 +61,10 @@ pub enum Reason {
     CrossCluster,
     /// Shards answered with different result columns.
     SchemaSkew,
+    /// A write form that would leave a unique lookup index (chapter 19)
+    /// unmaintained: an upsert, `INSERT IGNORE`, a non-literal value, an
+    /// `UPDATE` of a lookup or primary-key column, a limited `DELETE`.
+    Lookup,
     /// A statement form the router doesn't distribute.
     Unsupported,
 }
@@ -94,6 +98,7 @@ impl Reason {
             Self::InsertKey => "insert_key",
             Self::CrossCluster => "cross_cluster",
             Self::SchemaSkew => "schema_skew",
+            Self::Lookup => "lookup",
             Self::Unsupported => "unsupported",
         }
     }

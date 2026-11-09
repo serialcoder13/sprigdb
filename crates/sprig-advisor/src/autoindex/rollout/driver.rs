@@ -192,6 +192,17 @@ pub async fn advance<Q: Queryable + Send>(
         }
         Err(e) => return Ok(wait(format!("shard lock unreadable: {e}"), s.retry_after)),
     }
+    // Chapter 21: no build while a schema change holds the table.
+    match schema_change_on(store, q, row.object).await {
+        Ok(None) => {}
+        Ok(Some(job)) => {
+            return Ok(wait(
+                format!("a schema change (job {job}) holds the table"),
+                s.poll.max(Duration::from_secs(30)),
+            ));
+        }
+        Err(e) => return Ok(wait(format!("catalog unreadable: {e}"), s.retry_after)),
+    }
     let running = match running_builds(cx.view).await {
         Ok(n) => n,
         Err(e) => return Ok(wait(format!("writer unreachable: {e}"), s.retry_after)),
@@ -335,6 +346,26 @@ fn unreachable_recommend() -> BuildOutcome {
 }
 
 /// Sprig builds running on the cluster's writer (any controller's).
+/// The DDL job holding `object` (its `objects.pending_job_id`, chapter
+/// 21), if any: builds wait until the schema change has published.
+async fn schema_change_on<Q: Queryable + Send>(
+    store: &AutoIndexStore,
+    q: &mut Q,
+    object: sprig_common::ids::ObjectId,
+) -> std::result::Result<Option<String>, String> {
+    let sql = format!(
+        "SELECT LOWER(HEX(pending_job_id)) FROM {}.objects WHERE object_id = ?",
+        sprig_common::names::quote(store.schema())
+    );
+    match q.exec_first::<Option<String>, _, _>(sql, (object.0,)).await {
+        Ok(r) => Ok(r.flatten()),
+        // A catalog without `objects` (a test catalog of this module alone)
+        // has no DDL jobs.
+        Err(mysql_async::Error::Server(e)) if e.code == 1146 => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 async fn running_builds(view: &ClusterView) -> std::result::Result<u32, String> {
     let Some(w) = view.nodes.writer() else {
         return Err("no writer".into());

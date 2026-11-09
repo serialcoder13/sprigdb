@@ -33,9 +33,9 @@ use sprig_advisor::autoindex::replay::{
 use sprig_catalog::cache::{Loaded, TenantCatalog};
 use sprig_catalog::store::DbState;
 use sprig_catalog::{CatalogLocator, ddl::shard_schemas};
+use sprig_common::Result;
 use sprig_common::ids::{Fingerprint, ObjectId, TenantId};
 use sprig_common::time::Clock;
-use sprig_common::{Result, SprigError};
 use sprig_proto_mysql::packets::Persona;
 use sprig_settings::Registry;
 use sprig_sql::lex::LexOptions;
@@ -78,7 +78,12 @@ pub async fn tenant_catalog(
     tenant: TenantId,
 ) -> Result<TenantCatalog> {
     let ep = locator.writer(tenant).await?;
-    let snap = ep.store.snapshot(&ep.pool, None).await?;
+    let snap = crate::catalogs::bounded(
+        "tenant catalog snapshot",
+        crate::autoindex_env::SNAPSHOT_WORK,
+        ep.store.snapshot(&ep.pool, None),
+    )
+    .await?;
     Ok(TenantCatalog::build(
         Registry::global()?,
         tenant,
@@ -188,13 +193,7 @@ pub async fn statements(
         return Ok(Vec::new());
     }
     let ep = locator.reader(tenant).await?;
-    let mut conn = ep.pool.get_conn().await.map_err(|e| {
-        SprigError::new(
-            sprig_common::SprigCode::CatalogUnavailable,
-            "catalog unavailable",
-        )
-        .with_source(e)
-    })?;
+    let mut conn = crate::catalogs::acquire(&ep.pool, "workload samples").await?;
     let t = WorkloadTables::new(ep.store.schema());
     let ids: Vec<Fingerprint> = fps.iter().map(|(f, _)| *f).collect();
     let texts: BTreeMap<Fingerprint, String> = t
@@ -400,13 +399,7 @@ impl observe::WorkloadSource for ObserveSource {
             return Ok(Some(BTreeSet::new()));
         }
         let ep = self.locator.reader(tenant).await?;
-        let mut conn = ep.pool.get_conn().await.map_err(|e| {
-            SprigError::new(
-                sprig_common::SprigCode::CatalogUnavailable,
-                "catalog unavailable",
-            )
-            .with_source(e)
-        })?;
+        let mut conn = crate::catalogs::acquire(&ep.pool, "workload fingerprints").await?;
         let t = WorkloadTables::new(ep.store.schema());
         Ok(Some(
             t.fingerprints(&mut conn, fps)

@@ -478,6 +478,20 @@ fn plan_show(
             {
                 text = sql;
             }
+            // 3306: SHOW INDEX in MySQL 8.4's shape (`Visible`,
+            // `Expression`; chapter 28, R4).
+            if kind == ShowKind::Index
+                && persona == Persona::MySql84
+                && let Some(sql) = crate::compat::schema::show_index_rewrite(
+                    &info,
+                    &text,
+                    current,
+                    ctx.rewrite.map,
+                    &|v| sql_string(v, nbe),
+                )
+            {
+                text = sql;
+            }
             forward(text, ResultMapper::show(kind, ctx.vis))
         }
     };

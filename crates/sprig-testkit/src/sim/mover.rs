@@ -67,6 +67,8 @@ use super::{SimClock, SimRng, World};
 use crate::faults::Node;
 
 mod feed;
+// Chapter 41's after-commit triggers on the same feed (R7 order 5).
+mod logic;
 
 /// The tenant moved.
 const TENANT: TenantId = TenantId(1);
@@ -1074,12 +1076,74 @@ async fn client(
 ///
 /// # Errors
 /// The first broken invariant.
-#[allow(clippy::too_many_lines)]
 pub async fn run_move(world: World) -> std::result::Result<(), String> {
+    run_move_with(world, Variant::default()).await
+}
+
+/// Runs one seed of an idle tenant (no client writes): another job holds
+/// the target's copy slots for a while in some seeds, and in most seeds an
+/// operator cancels the job in a state drawn from every state before the
+/// commit (decision R0-fix 2). A cancel accepted before `ready` must end
+/// `rolled_back`; every job must end (invariant 7).
+///
+/// # Errors
+/// The first broken invariant.
+pub async fn run_idle_move(world: World) -> std::result::Result<(), String> {
+    run_move_with(
+        world,
+        Variant {
+            idle: true,
+            cancel: true,
+            triggers: false,
+        },
+    )
+    .await
+}
+
+/// What a run changes from the default scenario.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Variant {
+    /// No clients: nothing writes to the tenant during its move.
+    pub idle: bool,
+    /// Hog the target's copy slots for a while, and cancel the job in a
+    /// drawn state.
+    pub cancel: bool,
+    /// Run an after-commit trigger's worker on the tenant's feed too
+    /// (chapter 41), killed at random (invariant 9).
+    pub triggers: bool,
+}
+
+/// Runs one seed of [`run_move`] with an after-commit trigger on the
+/// tenant's feed, whose worker is killed at random: every client change
+/// must run exactly once (invariant 9).
+///
+/// # Errors
+/// The first broken invariant.
+pub async fn run_move_triggers(world: World) -> std::result::Result<(), String> {
+    run_move_with(
+        world,
+        Variant {
+            triggers: true,
+            ..Variant::default()
+        },
+    )
+    .await
+}
+
+/// The copy slots another job holds on the target, and when they free.
+const HOG: &str = "sim-hog";
+
+#[allow(clippy::too_many_lines)]
+async fn run_move_with(world: World, variant: Variant) -> std::result::Result<(), String> {
     let rng = world.rng().fork();
-    let sc = MoverScenario::random(&rng);
+    let mut sc = MoverScenario::random(&rng);
     let rates = Rates::draw(&rng, sc.faults);
-    world.record(format!("scenario {sc:?} rates {rates:?}"));
+    if variant.idle {
+        sc.clients = 0;
+    }
+    world.record(format!(
+        "scenario {sc:?} rates {rates:?} variant {variant:?}"
+    ));
     let dc = sprig_common::ids::DcId::new(DC).map_err(|e| e.to_string())?;
     let tier = Tier::Dc(dc);
     let (src, tgt) = (cluster("dc-a-c1"), cluster("dc-a-c2"));
@@ -1190,6 +1254,18 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
     let feed_goal: feed::Goal = Arc::default();
     let feed_log: Arc<Mutex<feed::FeedLog>> = Arc::default();
     let feed_stop = CancellationToken::new();
+    let trig_log: Arc<Mutex<logic::TriggerLog>> = Arc::default();
+    let mut trig_task = variant.triggers.then(|| {
+        tokio::spawn(logic::trigger_worker(
+            world.clone(),
+            feed_clusters.clone(),
+            tier.clone(),
+            sc.faults,
+            feed_goal.clone(),
+            trig_log.clone(),
+            feed_stop.clone(),
+        ))
+    });
     let mut feed_task = tokio::spawn(feed::consumer(
         world.clone(),
         feed_clusters,
@@ -1219,6 +1295,46 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
     let purge_at = (sc.faults && rng.chance(0.2))
         .then(|| rng.duration(Duration::from_millis(200), Duration::from_secs(10)));
     let deadline = Duration::from_secs(1200);
+    // Drawn after every default draw, so the default scenario's seeds
+    // replay as before.
+    let cancel_states = [
+        JobState::Planned,
+        JobState::Preparing,
+        JobState::Copying,
+        JobState::CatchingUp,
+        JobState::Verifying,
+        JobState::Ready,
+    ];
+    let cancel_at = (variant.cancel && rng.chance(0.8)).then(|| *rng.pick(&cancel_states));
+    let mut cancelled: Option<JobState> = None;
+    let mut cancelled_at = Duration::ZERO;
+    let hog_until = (variant.cancel && rng.chance(0.4))
+        .then(|| rng.duration(Duration::from_secs(1), Duration::from_secs(300)));
+    if let Some(until) = hog_until {
+        let n = settings.max_copies_per_cluster.max(1);
+        let mut then = Vec::new();
+        for i in 0..n {
+            then.push(Op::Put {
+                key: tier
+                    .key(&format!("mover/slots/copy/{tgt}/{i}"))
+                    .map_err(|e| e.to_string())?,
+                value: HOG.as_bytes().to_vec(),
+                lease: None,
+            });
+        }
+        admin
+            .txn(Txn {
+                when: vec![],
+                then,
+                otherwise: vec![],
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        world.record(format!(
+            "another job holds {tgt}'s copy slots for {until:?}"
+        ));
+    }
+    let mut hogging = hog_until.is_some();
     let started = world.elapsed();
     let end_state = loop {
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1228,11 +1344,56 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
                 "invariant 7: the job didn't end within {deadline:?}"
             ));
         }
+        if hogging && hog_until.is_some_and(|u| now >= u) {
+            hogging = false;
+            let n = settings.max_copies_per_cluster.max(1);
+            let mut then = Vec::new();
+            for i in 0..n {
+                then.push(Op::Delete(
+                    tier.key(&format!("mover/slots/copy/{tgt}/{i}"))
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            let _ = admin
+                .txn(Txn {
+                    when: vec![],
+                    then,
+                    otherwise: vec![],
+                })
+                .await;
+            world.record("the other job freed the copy slots");
+        }
         let Ok(st) = mover.status(&id).await else {
             continue;
         };
-        if st.state.is_terminal() || st.state == JobState::Paused {
+        if st.state.is_terminal() || (st.state == JobState::Paused && cancelled.is_none()) {
             break st;
+        }
+        // A cancel takes effect promptly in every state: within the
+        // lease and a few polls, not when whatever it waits for ends.
+        if cancelled.is_some_and(|c| c != JobState::Ready)
+            && now.saturating_sub(cancelled_at) > Duration::from_secs(60)
+        {
+            return Err(format!(
+                "cancel: accepted in {:?} {:?} ago, the job is still {}",
+                cancelled,
+                now.saturating_sub(cancelled_at),
+                st.state
+            ));
+        }
+        if let Some(cs) = cancel_at
+            && cancelled.is_none()
+            && st.state == cs
+            && rng.chance(0.3)
+        {
+            match mover.cancel(&id, "sim").await {
+                Ok(()) => {
+                    world.record(format!("cancel accepted in {}", st.state));
+                    cancelled = Some(st.state);
+                    cancelled_at = now;
+                }
+                Err(e) => world.record(format!("cancel refused in {}: {e}", st.state)),
+            }
         }
         if let Some(cs) = crash_at
             && !crashed
@@ -1311,11 +1472,27 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
         }
         None => false,
     };
+    let trig_done = match (&mut trig_task, feed_done) {
+        (Some(t), true) => tokio::time::timeout(Duration::from_secs(600), t).await.is_ok(),
+        _ => false,
+    };
     feed_stop.cancel();
     feed_task.abort();
+    if let Some(t) = &trig_task {
+        t.abort();
+    }
     let history = sprig_feed::ownership::history(&admin, TENANT, 0)
         .await
         .map_err(|e| e.to_string())?;
+    if variant.triggers {
+        let seen = feed_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .seen
+            .clone();
+        logic::check_triggers(&seen, &trig_log, trig_done).await?;
+        world.record(logic::summary(&trig_log));
+    }
     let maps = TenantMaps::new(admin);
     let (m, _) = maps.load(TENANT).await.map_err(|e| e.to_string())?;
     let p = Placement::of(&m).map_err(|e| e.to_string())?;
@@ -1324,6 +1501,15 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
         "end {} epoch {} src_ack {:?} tgt_ack {:?}",
         end_state.state, p.epoch, d.last_src_ack, d.first_tgt_ack
     ));
+    if let Some(at) = cancelled
+        && at != JobState::Ready
+        && end_state.state != JobState::RolledBack
+    {
+        return Err(format!(
+            "cancel: accepted in {at}, but the job ended {}",
+            end_state.state
+        ));
+    }
     let (owner, expect_epoch) = match end_state.state {
         JobState::Done => (&d.tgt, 2),
         JobState::RolledBack => (&d.src, 1),

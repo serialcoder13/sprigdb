@@ -14,7 +14,9 @@
 //! - [`topology`]: single nodes (a restart is not a failover; standbys or a
 //!   restore) and external clusters (follow the provider's endpoint);
 //! - [`damper`]: the failover-flapping damper (independent sources, the
-//!   minimum interval, suppression).
+//!   minimum interval, suppression);
+//! - [`writer`]: the writer lease and the agent's registration, shared by
+//!   the agent and the controller's `cluster_failover` loop.
 //!
 //! These are the operations the controller's `cluster_failover` loop
 //! drives; they hold no state of their own beyond what is passed in, so a
@@ -32,7 +34,9 @@ pub mod damper;
 pub mod galera;
 pub mod primary_replica;
 pub mod topology;
+pub mod writer;
 
 pub use damper::{Damp, DownSources, FlapDamper};
 pub use galera::{GaleraAction, GaleraNodeStatus, GaleraQuorum};
 pub use primary_replica::{Candidate, Choice, DivergedRange, ReplSource, ReplicaState};
+pub use writer::{AgentRecord, MysqldState, WriterLease};

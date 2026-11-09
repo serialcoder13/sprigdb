@@ -24,6 +24,8 @@ sprig-meta.workspace = true
 # Chapter 10's `Mover`: the real executor of planned moves.
 sprig-mover.workspace = true
 sprig-settings.workspace = true
+# Chapter 15's shard maps and schema names (chapter 20).
+sprig-shard.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

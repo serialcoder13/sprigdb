@@ -17,6 +17,10 @@ service GatewayPeer {
   // A transaction-handle call that landed on another gateway (chapter 37,
   // "Transactions"), forwarded with the caller's credentials.
   rpc Forward(ForwardRequest) returns (ForwardReply);
+  // A login of a tenant whose residency (chapter 26) doesn't allow the
+  // calling gateway's DC: this gateway, in an allowed DC, decides it
+  // (chapter 14, "Credential residency") and returns the principal only.
+  rpc HandoffLogin(HandoffLoginRequest) returns (HandoffLoginReply);
 }
 
 message KillRequest {
@@ -85,4 +89,23 @@ message ForwardReply {
   uint32 http_status = 1;
   // The REST reply body (a result or an error).
   string body_json = 2;
+}
+
+message HandoffLoginRequest {
+  // sprig-auth's HandoffStart as JSON: the login's request fields and the
+  // source DC.
+  string start_json = 1;
+  // The password the client sent in clear text over TLS to the source.
+  bytes password = 2;
+}
+
+message HandoffLoginReply {
+  // The login was accepted.
+  bool accepted = 1;
+  // When accepted: sprig-auth's PrincipalWire as JSON.
+  string principal_json = 2;
+  // When refused: the MySQL error packet's number, SQLSTATE and message.
+  uint32 error_code = 3;
+  string sql_state = 4;
+  string error_message = 5;
 }

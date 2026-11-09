@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, Row};
-use sprig_common::ids::ClusterId;
+use sprig_common::ids::{ClusterId, DbId, GroupId, TenantId};
 
 use crate::backend::{BranchConn, ClusterAdmin, ClusterCaps, Ctl, DbError, DbResult, TxnBackend};
 use crate::decision::{DTX_TABLE, Decision, DecisionRow, decode_participants};
@@ -131,17 +131,44 @@ pub struct MyCluster {
     pub caps: ClusterCaps,
 }
 
-/// The admin on pooled `mysql_async` connections, one small pool per
-/// cluster.
+/// The longest the admin waits for a pooled connection.
+pub const ADMIN_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Where an admin gets its pools when clusters come and go (the
+/// controller's cluster registry): a pool of `sprig_ctl` connections to a
+/// cluster's writer. The source owns the pools, so a writer change can
+/// hand out a new one.
+#[async_trait::async_trait]
+pub trait PoolSource: Send + Sync {
+    /// The pool for `cluster`'s writer.
+    ///
+    /// # Errors
+    /// An unknown cluster, no writer, or a credential that doesn't
+    /// resolve.
+    async fn pool(&self, cluster: &ClusterId) -> DbResult<Pool>;
+}
+
+enum Pools {
+    Fixed(BTreeMap<ClusterId, Pool>),
+    Source(Arc<dyn PoolSource>),
+}
+
+/// The admin on pooled `mysql_async` connections: one small pool per
+/// cluster, fixed ([`MyAdmin::new`]) or from a [`PoolSource`]
+/// ([`MyAdmin::over`]).
 pub struct MyAdmin {
-    pools: BTreeMap<ClusterId, Pool>,
+    pools: Pools,
 }
 
 impl std::fmt::Debug for MyAdmin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MyAdmin")
-            .field("clusters", &self.pools.keys().collect::<Vec<_>>())
-            .finish()
+        match &self.pools {
+            Pools::Fixed(p) => f
+                .debug_struct("MyAdmin")
+                .field("clusters", &p.keys().collect::<Vec<_>>())
+                .finish(),
+            Pools::Source(_) => f.debug_struct("MyAdmin").finish_non_exhaustive(),
+        }
     }
 }
 
@@ -188,25 +215,68 @@ impl MyAdmin {
     #[must_use]
     pub fn new(clusters: &BTreeMap<ClusterId, MyCluster>) -> Self {
         Self {
-            pools: clusters
-                .iter()
-                .map(|(k, c)| (k.clone(), pool_for(&c.admin_opts)))
-                .collect(),
+            pools: Pools::Fixed(
+                clusters
+                    .iter()
+                    .map(|(k, c)| (k.clone(), pool_for(&c.admin_opts)))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// An admin over the pools `source` hands out.
+    #[must_use]
+    pub fn over(source: Arc<dyn PoolSource>) -> Self {
+        Self {
+            pools: Pools::Source(source),
         }
     }
 
     async fn conn(&self, cluster: &ClusterId) -> DbResult<Conn> {
-        let p = self
-            .pools
-            .get(cluster)
-            .ok_or_else(|| DbError::new(0, format!("unknown cluster {cluster}")))?;
-        p.get_conn().await.map_err(|e| db_error(&e))
+        let p = match &self.pools {
+            Pools::Fixed(m) => m
+                .get(cluster)
+                .cloned()
+                .ok_or_else(|| DbError::new(0, format!("unknown cluster {cluster}")))?,
+            Pools::Source(s) => s.pool(cluster).await?,
+        };
+        match tokio::time::timeout(ADMIN_ACQUIRE_TIMEOUT, p.get_conn()).await {
+            Ok(r) => r.map_err(|e| db_error(&e)),
+            Err(_) => Err(DbError::lost(format!(
+                "no admin connection to {cluster} within {} s",
+                ADMIN_ACQUIRE_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
-    /// Closes the pools.
+    /// The schemas on `cluster` named `t<tenant>_d<db>_g<group>_s<n>`, any
+    /// `n` (`SHOW DATABASES LIKE`, which opens no tables).
+    ///
+    /// # Errors
+    /// The server's error, or a lost connection.
+    pub async fn group_schemas(
+        &self,
+        cluster: &ClusterId,
+        tenant: TenantId,
+        db: DbId,
+        group: GroupId,
+    ) -> DbResult<Vec<String>> {
+        let mut c = self.conn(cluster).await?;
+        let names: Vec<String> = c
+            .query(format!(
+                "SHOW DATABASES LIKE 't{tenant}\\_d{db}\\_g{group}\\_s%'"
+            ))
+            .await
+            .map_err(|e| db_error(&e))?;
+        Ok(crate::locate::group_schemas_of(tenant, db, group, names))
+    }
+
+    /// Closes the pools (a fixed admin; a source closes its own).
     pub async fn close(self) {
-        for (_, p) in self.pools {
-            let _ = p.disconnect().await;
+        if let Pools::Fixed(m) = self.pools {
+            for (_, p) in m {
+                let _ = p.disconnect().await;
+            }
         }
     }
 }

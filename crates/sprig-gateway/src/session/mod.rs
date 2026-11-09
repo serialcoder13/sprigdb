@@ -131,6 +131,8 @@ pub enum CloseReason {
     /// The session's account was dropped or locked (chapter 14,
     /// `auth.close_sessions_on_revoke`): 39306.
     Revoked,
+    /// A distributed `COMMIT`'s outcome is unknown (chapter 18): 39441.
+    OutcomeUnknown,
 }
 
 impl CloseReason {
@@ -149,6 +151,10 @@ impl CloseReason {
                 SprigCode::SessionRevoked,
                 "this session was closed: its account was dropped or locked",
             ),
+            CloseReason::OutcomeUnknown => SprigError::new(
+                SprigCode::CommitOutcomeUnknown,
+                "the last COMMIT's outcome is unknown; this connection is closed",
+            ),
         }
     }
 
@@ -157,6 +163,7 @@ impl CloseReason {
             CloseReason::Drain => 1,
             CloseReason::ListenerRetired => 2,
             CloseReason::Revoked => 3,
+            CloseReason::OutcomeUnknown => 4,
         }
     }
 
@@ -165,6 +172,7 @@ impl CloseReason {
             1 => Some(CloseReason::Drain),
             2 => Some(CloseReason::ListenerRetired),
             3 => Some(CloseReason::Revoked),
+            4 => Some(CloseReason::OutcomeUnknown),
             _ => None,
         }
     }

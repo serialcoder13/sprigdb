@@ -1,0 +1,29 @@
+{{- /* sprigdb.toml per role (chapter 27): the small process file; everything
+     else is live settings. */ -}}
+{{- range $role := list "controller" "gateway" "worker" "agent" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sprigdb-{{ $role }}
+  labels: {{- include "sprigdb.labels" $ | nindent 4 }}
+data:
+  sprigdb.toml: |
+    [node]
+    dc = "{{ $.Values.dc.id }}"
+    [meta]
+    dc_seeds = {{ include "sprigdb.dcSeeds" $ }}
+    global_seeds = {{ $.Values.global.endpoints | toJson }}
+    deployment_id = "{{ $.Values.deploymentId }}"
+    [tls]
+    ca = "/etc/sprigdb/ca/ca.crt"
+    cert = "/etc/sprigdb/tls/tls.crt"
+    key = "/etc/sprigdb/tls/tls.key"
+    [telemetry]
+    bootstrap_addr = "0.0.0.0:9180"
+    {{- if eq $role "controller" }}
+    [controller]
+    global_candidate = {{ $.Values.controller.globalCandidate }}
+    admin_addr = "0.0.0.0:7480"
+    {{- end }}
+{{- end }}

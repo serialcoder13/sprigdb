@@ -600,6 +600,14 @@ fn builtin(b: Builtin, a: &[Value]) -> Result<Value> {
     let a1 = a.get(1).cloned().unwrap_or(V::Null);
     Ok(match b {
         Builtin::Truthy => V::Bool(truthy(&a0)),
+        Builtin::NotNull => {
+            if a0.is_null() {
+                return Err(runtime(
+                    "an arithmetic operator was applied to a null value",
+                ));
+            }
+            a0
+        }
         Builtin::Present => V::Bool(match a0 {
             V::Null => false,
             V::Bool(b) => b,

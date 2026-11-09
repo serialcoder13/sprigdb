@@ -16,6 +16,7 @@
 //!   anything else                                    → Reject(reason)
 //! ```
 
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
@@ -24,7 +25,8 @@ use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
     FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator, LimitClause, ObjectName,
     ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
-    TableObject, UnaryOperator, Value, visit_expressions_mut, visit_relations, visit_relations_mut,
+    TableObject, UnaryOperator, Value, visit_expressions, visit_expressions_mut, visit_relations,
+    visit_relations_mut,
 };
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::{Parser, ParserOptions};
@@ -82,7 +84,7 @@ pub fn plan(sql: &str, cx: &PlanCtx<'_>) -> Plan {
     // 11.8 rejects `FOR SHARE`): plan without it, then put it back on
     // every SELECT the plan sends.
     let (body, lock) = split_share_lock(sql);
-    match plan_inner(body, cx) {
+    match plan_text(body, cx) {
         Ok(mut p) => {
             if let Some(lock) = lock {
                 add_suffix(&mut p, lock);
@@ -90,6 +92,176 @@ pub fn plan(sql: &str, cx: &PlanCtx<'_>) -> Plan {
             p
         }
         Err(r) => Plan::Reject(r),
+    }
+}
+
+/// A prepared statement's template, parsed once (chapter 17, "Prepared
+/// statements"): the gateway caches it per statement text and plans each
+/// execution from it with the parameters' values, so an execution never
+/// parses SQL.
+#[derive(Debug, Clone)]
+pub struct Template {
+    stmt: Statement,
+    /// The text the spans refer to (the template without a trailing
+    /// `LOCK IN SHARE MODE`).
+    body: String,
+    lock: Option<&'static str>,
+    /// Placeholder positions, by span start: the n-th `?` of the text.
+    params: usize,
+}
+
+impl Template {
+    /// The number of `?` placeholders.
+    #[must_use]
+    pub fn params(&self) -> usize {
+        self.params
+    }
+}
+
+/// A parameter value, as the planner substitutes it for a placeholder.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamLit {
+    /// `NULL`.
+    Null,
+    /// An integer.
+    Int(i128),
+    /// A floating-point number (a `DOUBLE` literal, `1.5e0`).
+    Double(f64),
+    /// A string in the connection's character set (`_<charset> X'…'`).
+    Str {
+        /// The bytes.
+        bytes: Vec<u8>,
+        /// The character set name (`utf8mb4`).
+        charset: String,
+    },
+    /// A binary string (`X'…'`).
+    Bytes(Vec<u8>),
+    /// A literal the caller rendered (`TIMESTAMP'2026-01-02 03:04:05'`).
+    Raw(String),
+}
+
+/// What [`plan_prepared`] decided: the plan, and whether a single-shard
+/// plan's SQL still holds the client's placeholders (run it as the
+/// backend's prepared statement with the client's parameters) or holds
+/// the values (run it as text).
+#[derive(Debug, Clone)]
+pub struct PreparedPlan {
+    /// The plan.
+    pub plan: Plan,
+    /// `Plan::Pass` SQL with the template's `?` placeholders.
+    pub placeholders: bool,
+}
+
+/// Parses a prepared statement's text once; `Ok(None)` when it names no
+/// table of the topology (relay it as before).
+///
+/// # Errors
+/// The rejection (reason `parse`) for text the router's parser doesn't
+/// read.
+pub fn parse_template(sql: &str, topo: &dyn Topology) -> R<Option<Template>> {
+    if !topo.mentions(sql) {
+        return Ok(None);
+    }
+    let (body, lock) = split_share_lock(sql);
+    let stmt = parse(body)?;
+    let mut n = 0usize;
+    let _ = visit_expressions(&stmt, |e| {
+        if let Expr::Value(v) = e
+            && matches!(v.value, Value::Placeholder(_))
+        {
+            n += 1;
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    Ok(Some(Template {
+        stmt,
+        body: body.to_owned(),
+        lock,
+        params: n,
+    }))
+}
+
+fn param_expr(p: &ParamLit) -> Expr {
+    let hex = |b: &[u8]| {
+        let mut h = String::with_capacity(b.len() * 2);
+        for x in b {
+            let _ = write!(h, "{x:02X}");
+        }
+        h
+    };
+    match p {
+        ParamLit::Null => Expr::value(Value::Null),
+        ParamLit::Int(i) => Expr::value(Value::Number(i.to_string(), false)),
+        ParamLit::Double(f) => {
+            if f.is_finite() {
+                Expr::value(Value::Number(format!("{f:e}"), false))
+            } else {
+                Expr::value(Value::Null)
+            }
+        }
+        ParamLit::Str { bytes, charset } => Expr::Prefixed {
+            prefix: Ident::new(format!("_{charset}")),
+            value: Box::new(Expr::value(Value::HexStringLiteral(hex(bytes)))),
+        },
+        ParamLit::Bytes(b) => Expr::value(Value::HexStringLiteral(hex(b))),
+        ParamLit::Raw(t) => Parser::new(&MySqlDialect {})
+            .try_with_sql(t)
+            .and_then(|mut p| p.parse_expr())
+            .unwrap_or_else(|_| Expr::value(Value::Null)),
+    }
+}
+
+/// Plans one execution of a prepared statement: its placeholders replaced
+/// by `params` (in text order) in a copy of the parsed template. A
+/// single-shard plan is spliced from the template text and keeps its
+/// placeholders; other plans render the values.
+#[must_use]
+pub fn plan_prepared(t: &Template, params: &[ParamLit], cx: &PlanCtx<'_>) -> PreparedPlan {
+    let mut spans = Vec::with_capacity(t.params);
+    let _ = visit_expressions(&t.stmt, |e| {
+        if let Expr::Value(v) = e
+            && matches!(v.value, Value::Placeholder(_))
+        {
+            spans.push((v.span.start.line, v.span.start.column));
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    let mut order = spans.clone();
+    order.sort_unstable();
+    let mut stmt = t.stmt.clone();
+    let _ = visit_expressions_mut(&mut stmt, |e| {
+        if let Expr::Value(v) = e
+            && matches!(v.value, Value::Placeholder(_))
+        {
+            let at = (v.span.start.line, v.span.start.column);
+            let i = order.binary_search(&at).unwrap_or(usize::MAX);
+            *e = params
+                .get(i)
+                .map_or_else(|| Expr::value(Value::Null), param_expr);
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    if params.len() != t.params {
+        return PreparedPlan {
+            plan: Plan::Reject(Rejection::new(
+                Reason::Unsupported,
+                "a parameter count that doesn't match the statement",
+            )),
+            placeholders: false,
+        };
+    }
+    let src = Src {
+        text: &t.body,
+        template: true,
+        kept: Cell::new(false),
+    };
+    let mut plan = plan_stmt(&stmt, &src, cx).unwrap_or_else(Plan::Reject);
+    if let Some(lock) = t.lock {
+        add_suffix(&mut plan, lock);
+    }
+    PreparedPlan {
+        placeholders: matches!(plan, Plan::Pass(_)) && src.kept.get(),
+        plan,
     }
 }
 
@@ -123,6 +295,7 @@ fn add_suffix(p: &mut Plan, lock: &str) {
             j.inner_template.push_str(lock);
         }
         Plan::Explain(inner) => add_suffix(inner, lock),
+        Plan::ViaLookup(v) => add_suffix(&mut v.plan, lock),
         Plan::NotRouted | Plan::Write(_) | Plan::Reject(_) => {}
     }
 }
@@ -163,16 +336,46 @@ fn parse(sql: &str) -> R<Statement> {
     }
 }
 
-fn plan_inner(sql: &str, cx: &PlanCtx<'_>) -> R<Plan> {
+/// The text a statement was parsed from: single-shard statements are
+/// spliced from it (only schema names change), never re-rendered.
+struct Src<'s> {
+    text: &'s str,
+    /// The text is a prepared statement's template: a single-shard plan
+    /// keeps its placeholders, for the backend's own prepared statement.
+    template: bool,
+    /// Set when a Pass target's SQL was spliced from a template, so it
+    /// still holds the client's placeholders.
+    kept: Cell<bool>,
+}
+
+impl<'s> Src<'s> {
+    fn text(text: &'s str) -> Self {
+        Self {
+            text,
+            template: false,
+            kept: Cell::new(false),
+        }
+    }
+}
+
+fn plan_text(sql: &str, cx: &PlanCtx<'_>) -> R<Plan> {
     let stmt = parse(sql)?;
-    match &stmt {
-        Statement::Query(q) => plan_query(&stmt, q, sql, cx),
-        Statement::Insert(_) => plan_insert(&stmt, cx),
-        Statement::Update(_) | Statement::Delete(_) => plan_update_delete(&stmt, cx),
+    plan_stmt(&stmt, &Src::text(sql), cx)
+}
+
+fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
+    match stmt {
+        Statement::Query(q) => {
+            plan_query(stmt, q, src, cx).map(|p| lookups::via_lookup(stmt, p, cx))
+        }
+        Statement::Insert(_) => plan_insert(stmt, src, cx),
+        Statement::Update(_) | Statement::Delete(_) => {
+            plan_update_delete(stmt, src, cx).map(|p| lookups::via_lookup(stmt, p, cx))
+        }
         Statement::Explain { statement, .. } => {
             // Plain EXPLAIN: one shard's plan (chapter 17, "EXPLAIN").
             let inner = statement.to_string();
-            match plan_inner(&inner, cx)? {
+            match plan_text(&inner, cx)? {
                 Plan::NotRouted => Ok(Plan::NotRouted),
                 Plan::Pass(t) => Ok(Plan::Pass(Target {
                     sql: format!("EXPLAIN {}", t.sql),
@@ -181,12 +384,17 @@ fn plan_inner(sql: &str, cx: &PlanCtx<'_>) -> R<Plan> {
                 Plan::Read(r) => first_explain(&r.targets),
                 Plan::Write(w) => first_explain(&w.targets),
                 Plan::LookupJoin(j) => first_explain(&j.outer.targets),
+                Plan::ViaLookup(v) => match &v.plan {
+                    Plan::Read(r) => first_explain(&r.targets),
+                    Plan::Write(w) => first_explain(&w.targets),
+                    _ => reject(Reason::Unsupported, "no target to explain"),
+                },
                 p @ (Plan::Reject(_) | Plan::Explain(_)) => Ok(p),
             }
         }
         _ => {
             let mut any = false;
-            let _ = visit_relations(&stmt, |n| {
+            let _ = visit_relations(stmt, |n| {
                 if resolve_name(n, cx).is_some() {
                     any = true;
                 }
@@ -285,6 +493,131 @@ fn render(
         });
     }
     s.to_string()
+}
+
+/// The byte offset of a parser location (1-based line, 1-based column in
+/// characters) in `text`.
+fn byte_at(text: &str, line: u64, col: u64) -> Option<usize> {
+    let mut start = 0usize;
+    for _ in 1..line {
+        start += text.get(start..)?.find('\n')? + 1;
+    }
+    let rest = text.get(start..)?;
+    let c = usize::try_from(col.checked_sub(1)?).ok()?;
+    if c <= rest.len() && rest.as_bytes()[..c].is_ascii() {
+        return Some(start + c);
+    }
+    let mut n = 0;
+    for (i, _) in rest.char_indices() {
+        if n == c {
+            return Some(start + i);
+        }
+        n += 1;
+    }
+    (n == c).then_some(start + rest.len())
+}
+
+/// The byte range of `id` in `text`, checked to hold that identifier.
+fn ident_range(text: &str, id: &Ident) -> Option<(usize, usize)> {
+    let (a, b) = (id.span.start, id.span.end);
+    if a.line == 0 || b.line == 0 {
+        return None;
+    }
+    let s = byte_at(text, a.line, a.column)?;
+    let e = byte_at(text, b.line, b.column)?;
+    let got = text.get(s..e)?;
+    let bare = got
+        .strip_prefix('`')
+        .and_then(|g| g.strip_suffix('`'))
+        .unwrap_or(got);
+    (!id.value.contains('`') && bare.eq_ignore_ascii_case(&id.value)).then_some((s, e))
+}
+
+fn quoted(schema: &str) -> String {
+    format!("`{}`", schema.replace('`', "``"))
+}
+
+/// `text` with each listed table occurrence moved to its schema by editing
+/// the text at the parser's spans: what [`render`] does, without printing
+/// the statement again (chapter 17's `splice_names`). `None` when a span
+/// is missing or doesn't hold the name, so the caller renders instead.
+fn splice(
+    text: &str,
+    stmt: &Statement,
+    occ: &HashMap<Loc, String>,
+    by_name: &HashMap<(String, String), String>,
+) -> Option<String> {
+    let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(occ.len());
+    let mut ok = true;
+    let _ = visit_relations(stmt, |n| {
+        if let Some(schema) = occ.get(&loc_of(n)) {
+            match ident_parts(n).as_deref() {
+                Some([t]) => match ident_range(text, t) {
+                    Some((b, _)) => edits.push((b, b, format!("{}.", quoted(schema)))),
+                    None => ok = false,
+                },
+                Some([q, _]) => match ident_range(text, q) {
+                    Some((b, e)) => edits.push((b, e, quoted(schema))),
+                    None => ok = false,
+                },
+                _ => ok = false,
+            }
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    if !by_name.is_empty() {
+        let _ = visit_expressions(stmt, |e| {
+            if let Expr::CompoundIdentifier(parts) = e
+                && parts.len() == 3
+                && let Some(schema) = by_name.get(&(
+                    parts[0].value.to_ascii_lowercase(),
+                    parts[1].value.to_ascii_lowercase(),
+                ))
+            {
+                match ident_range(text, &parts[0]) {
+                    Some((b, e)) => edits.push((b, e, quoted(schema))),
+                    None => ok = false,
+                }
+            }
+            ControlFlow::<()>::Continue(())
+        });
+    }
+    if !ok {
+        return None;
+    }
+    edits.sort_by_key(|e| (e.0, e.1));
+    edits.dedup_by_key(|e| (e.0, e.1));
+    let mut out = String::with_capacity(text.len() + 48 * edits.len());
+    let mut at = 0;
+    for (b, e, r) in edits {
+        if b < at {
+            return None;
+        }
+        out.push_str(text.get(at..b)?);
+        out.push_str(&r);
+        at = e;
+    }
+    out.push_str(text.get(at..)?);
+    Some(out)
+}
+
+/// A single-shard statement's SQL: spliced from the source text when the
+/// statement is the one parsed from it, else rendered.
+fn pass_sql(
+    stmt: &Statement,
+    src: Option<&Src<'_>>,
+    occ: &HashMap<Loc, String>,
+    by_name: &HashMap<(String, String), String>,
+) -> String {
+    if let Some(src) = src
+        && let Some(t) = splice(src.text, stmt, occ, by_name)
+    {
+        if src.template {
+            src.kept.set(true);
+        }
+        return t;
+    }
+    render(stmt, occ, by_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -468,7 +801,8 @@ fn analyse<'a, 'q>(select: &'q Select, cx: &PlanCtx<'a>) -> R<Block<'a, 'q>> {
         } = e
             && let (Some(a), Some(c)) = (key_rel(&b.rels, left), key_rel(&b.rels, right))
             && a != c
-            && b.rels[a].entry.map(|x| x.group.id) == b.rels[c].entry.map(|x| x.group.id)
+            && let (Some(ea), Some(ec)) = (b.rels[a].entry, b.rels[c].entry)
+            && ea.group.same_layout(&ec.group)
         {
             let (ra, rc) = (find(&mut b.parent, a), find(&mut b.parent, c));
             b.parent[ra] = rc;
@@ -671,6 +1005,32 @@ pub(crate) fn key_literal(e: &Expr, class: KeyClass) -> Option<KeyValue> {
             KeyValue::Int(i) if matches!(class, KeyClass::Int) => Some(KeyValue::Int(-i)),
             _ => None,
         },
+        // A string with a UTF-8 or binary introducer (prepared statements'
+        // parameters arrive as `_utf8mb4 X'…'`).
+        Expr::Prefixed { prefix, value } => {
+            let intro = prefix.value.to_ascii_lowercase();
+            let bytes = match &**value {
+                Expr::Value(v) => match &v.value {
+                    Value::HexStringLiteral(h) => hex(h)?,
+                    Value::SingleQuotedString(s) => unescape(s),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            match (intro.as_str(), class) {
+                ("_utf8mb4" | "_utf8mb3" | "_utf8", KeyClass::Str { .. })
+                | ("_binary", KeyClass::Binary) => Some(KeyValue::Bytes(bytes)),
+                ("_utf8mb4" | "_utf8mb3" | "_utf8" | "_binary", KeyClass::Int) => {
+                    match int_text(std::str::from_utf8(&bytes).ok()?, true)? {
+                        KeyValue::Int(i) if i.unsigned_abs() < (1u128 << 53) => {
+                            Some(KeyValue::Int(i))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
         Expr::Value(v) => match (&v.value, class) {
             (Value::Number(n, _), KeyClass::Int) => int_text(n, false),
             (Value::SingleQuotedString(s) | Value::DoubleQuotedString(s), KeyClass::Int) => {
@@ -951,7 +1311,8 @@ struct Occ<'a> {
 }
 
 #[allow(clippy::too_many_lines)] // the SELECT pipeline, step by step
-fn plan_query(stmt: &Statement, q: &Query, sql: &str, cx: &PlanCtx<'_>) -> R<Plan> {
+fn plan_query(stmt: &Statement, q: &Query, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
+    let sql = src.text;
     let mut queries = Vec::new();
     collect_queries_stmt(stmt, &mut queries);
     let mut occs: Vec<(Loc, Occ<'_>)> = Vec::new();
@@ -990,7 +1351,7 @@ fn plan_query(stmt: &Statement, q: &Query, sql: &str, cx: &PlanCtx<'_>) -> R<Pla
         return Ok(Plan::NotRouted);
     }
     // Single shard, one cluster: pass the whole statement.
-    if let Some(p) = try_pass(stmt, &occs, unsharded, cx) {
+    if let Some(p) = try_pass(stmt, Some(src), &occs, unsharded, cx) {
         return Ok(p);
     }
     let lower = sql.to_ascii_lowercase();
@@ -1083,8 +1444,7 @@ fn check_local_cluster(
     unsharded: bool,
     cx: &PlanCtx<'_>,
 ) -> R<()> {
-    let needs_session = unsharded || b.rels.iter().any(Rel::reference);
-    if needs_session
+    if unsharded
         && shards
             .iter()
             .any(|&s| entry.group.shards[s].cluster != cx.session_cluster)
@@ -1094,7 +1454,25 @@ fn check_local_cluster(
             "a join with an unsharded table on another cluster",
         );
     }
+    // A reference table joins inside each shard: its cluster needs a copy.
+    for r in b.rels.iter().filter(|r| r.reference()) {
+        let Some(e) = r.entry else { continue };
+        if shards
+            .iter()
+            .any(|&s| !has_copy(e, &entry.group.shards[s].cluster))
+        {
+            return reject(
+                Reason::CrossCluster,
+                "a reference table without a copy on a shard's cluster",
+            );
+        }
+    }
     Ok(())
+}
+
+/// Whether reference table `e` has a copy on `cluster`.
+fn has_copy(e: &TableEntry, cluster: &str) -> bool {
+    e.group.shards.iter().any(|s| s.cluster == cluster)
 }
 
 fn select_has_window(select: &Select) -> bool {
@@ -1118,12 +1496,14 @@ fn select_has_window(select: &Select) -> bool {
 /// session's when unsharded tables join in): the statement as it is.
 fn try_pass(
     stmt: &Statement,
+    src: Option<&Src<'_>>,
     occs: &[(Loc, Occ<'_>)],
     unsharded: bool,
     cx: &PlanCtx<'_>,
 ) -> Option<Plan> {
     let mut cluster: Option<&str> = None;
     let mut shard_id = 0;
+    let mut at = crate::plan::ShardAt::default();
     let mut map = HashMap::new();
     let mut by_name = HashMap::new();
     for (loc, o) in occs {
@@ -1140,6 +1520,7 @@ fn try_pass(
                 }
                 cluster = Some(&loc_s.cluster);
                 shard_id = loc_s.shard;
+                at = o.entry.group.at(i);
                 map.insert(*loc, loc_s.schema.clone());
                 by_name.insert(
                     (o.default_schema.clone(), o.table.clone()),
@@ -1152,16 +1533,37 @@ fn try_pass(
             }
         }
     }
-    let cluster = cluster.unwrap_or(cx.session_cluster);
-    if (unsharded || occs.iter().any(|(_, o)| o.entry.is_reference()))
-        && cluster != cx.session_cluster
-    {
+    let refs: Vec<&TableEntry> = occs
+        .iter()
+        .map(|(_, o)| o.entry)
+        .filter(|e| e.is_reference())
+        .collect();
+    // Only reference tables: the session's cluster if it has a copy of
+    // each, else the first cluster that does.
+    let cluster = match cluster {
+        Some(c) => c,
+        None if unsharded || refs.iter().all(|e| has_copy(e, cx.session_cluster)) => {
+            cx.session_cluster
+        }
+        None => refs
+            .first()?
+            .group
+            .shards
+            .iter()
+            .map(|s| s.cluster.as_str())
+            .find(|c| refs.iter().all(|e| has_copy(e, c)))?,
+    };
+    if unsharded && cluster != cx.session_cluster {
+        return None;
+    }
+    if refs.iter().any(|e| !has_copy(e, cluster)) {
         return None;
     }
     Some(Plan::Pass(Target {
         cluster: cluster.to_owned(),
         shard: shard_id,
-        sql: render(stmt, &map, &by_name),
+        sql: pass_sql(stmt, src, &map, &by_name),
+        at,
     }))
 }
 
@@ -1382,6 +1784,7 @@ fn targets_for(
                 cluster: loc.cluster.clone(),
                 shard: loc.shard,
                 sql: render(stmt, &map, &by_name),
+                at: entry.group.at(s),
             }
         })
         .collect()
@@ -2255,7 +2658,7 @@ fn insert_before_from(sql: &str, items: &str) -> R<String> {
 // ---------------------------------------------------------------------------
 // Writes
 
-fn plan_insert(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
+fn plan_insert(stmt: &Statement, text_src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
     let Statement::Insert(ins) = stmt else {
         return reject(Reason::Unsupported, "not an INSERT");
     };
@@ -2286,25 +2689,28 @@ fn plan_insert(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
     }
     let (key, key_ordinal, upsert_safe) = match &entry.kind {
         TableKind::Reference { schema } => {
-            if entry
-                .group
-                .shards
-                .iter()
-                .any(|s| s.cluster != cx.session_cluster)
-            {
+            // Copies follow the primary through the change feed (chapter
+            // 15's ref_follow, not built yet): a write is exact only where
+            // one copy exists.
+            let [only] = entry.group.shards.as_slice() else {
                 return reject(
                     Reason::CrossCluster,
                     "a reference-table write on several clusters",
                 );
-            }
+            };
             let mut m = HashMap::new();
             m.insert(loc, schema.clone());
             let mut by = HashMap::new();
             by.insert((default_schema, table), schema.clone());
             return Ok(Plan::Pass(Target {
-                cluster: cx.session_cluster.to_owned(),
+                cluster: only.cluster.clone(),
                 shard: 0,
-                sql: render(stmt, &m, &by),
+                sql: pass_sql(stmt, Some(text_src), &m, &by),
+                at: crate::plan::ShardAt {
+                    db: entry.group.db,
+                    schema: schema.clone(),
+                    ..crate::plan::ShardAt::default()
+                },
             }));
         }
         TableKind::Sharded {
@@ -2324,10 +2730,32 @@ fn plan_insert(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
     {
         return reject(Reason::KeyChange, "ON DUPLICATE KEY UPDATE of the key");
     }
+    if key.is_empty() {
+        return reject(
+            Reason::InsertKey,
+            "an INSERT into a table without a single key column (a parent member or a composite key)",
+        );
+    }
+    lookups::check_gap(entry)?;
     let class = entry.group.key_class;
+    // Chapter 15: every row carries its routing hash in `_sprig_rk`. The
+    // statement is re-rendered with the column added (no splicing).
+    let filled = fill_rk(ins, entry, &key, key_ordinal, class);
+    let (stmt, text_src): (&Statement, Option<&Src<'_>>) = match &filled {
+        Some(f) => (f, None),
+        None => (stmt, Some(text_src)),
+    };
+    let Statement::Insert(ins) = stmt else {
+        return reject(Reason::Unsupported, "not an INSERT");
+    };
     // Rows and the key's position in them.
     let pos = if ins.columns.is_empty() {
-        key_ordinal
+        key_ordinal.ok_or_else(|| {
+            Rejection::new(
+                Reason::InsertKey,
+                "an INSERT without a column list (the key's position is unknown)",
+            )
+        })?
     } else {
         ins.columns
             .iter()
@@ -2341,6 +2769,12 @@ fn plan_insert(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
             })?
     };
     let Some(src) = &ins.source else {
+        if !entry.lookups.is_empty() {
+            return reject(
+                Reason::Lookup,
+                "INSERT … SET on a table with a unique lookup",
+            );
+        }
         // INSERT … SET k = v, …
         let Some(a) = ins
             .assignments
@@ -2352,6 +2786,7 @@ fn plan_insert(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
         let shard = route_value(&a.value, entry, class)?;
         return Ok(Plan::Pass(one_shard_insert(
             stmt,
+            text_src,
             entry,
             shard,
             loc,
@@ -2372,28 +2807,27 @@ fn plan_insert(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
             None => by_shard.push((shard, vec![ri])),
         }
     }
+    // Chapter 19: the rows' unique lookup values, claimed before the rows
+    // are written, in the write's transaction.
+    let claims = lookups::insert_claims(ins, entry, pos, &values.rows)?;
     if by_shard.len() == 1 {
-        return Ok(Plan::Pass(one_shard_insert(
-            stmt,
-            entry,
-            by_shard[0].0,
-            loc,
-            &default_schema,
-        )));
+        let t = one_shard_insert(stmt, text_src, entry, by_shard[0].0, loc, &default_schema);
+        if claims.is_empty() {
+            return Ok(Plan::Pass(t));
+        }
+        return Ok(Plan::Write(WritePlan {
+            kind: WriteKind::Insert,
+            targets: vec![t],
+            rows: values.rows.len() as u64,
+            claims,
+            releases: Vec::new(),
+        }));
     }
     if ins.returning.is_some() {
         return reject(Reason::Unsupported, "INSERT … RETURNING across shards");
     }
-    let cluster = &entry.group.shards[by_shard[0].0].cluster;
-    if by_shard
-        .iter()
-        .any(|(s, _)| entry.group.shards[*s].cluster != *cluster)
-    {
-        return reject(
-            Reason::CrossCluster,
-            "a write on shards of several clusters",
-        );
-    }
+    // Shards on several clusters commit through chapter 18's coordinator
+    // (the gateway's `ShardBackend::begin_write`).
     let mut targets = Vec::new();
     for (shard, rows) in &by_shard {
         let mut s = stmt.clone();
@@ -2403,13 +2837,94 @@ fn plan_insert(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
         {
             v2.rows = rows.iter().map(|&r| values.rows[r].clone()).collect();
         }
-        targets.push(one_shard_insert(&s, entry, *shard, loc, &default_schema));
+        targets.push(one_shard_insert(
+            &s,
+            None,
+            entry,
+            *shard,
+            loc,
+            &default_schema,
+        ));
     }
     Ok(Plan::Write(WritePlan {
         kind: WriteKind::Insert,
         targets,
         rows: values.rows.len() as u64,
+        claims,
+        releases: Vec::new(),
     }))
+}
+
+/// The INSERT with `_sprig_rk` added: the column (and, for an INSERT
+/// without a column list, the visible columns before it) and each row's
+/// routing hash; `None` when it already names `_sprig_rk`, or when a row's
+/// hash can't be known here (the caller's routing refuses those rows).
+fn fill_rk(
+    ins: &sqlparser::ast::Insert,
+    entry: &TableEntry,
+    key: &str,
+    key_ordinal: Option<usize>,
+    class: KeyClass,
+) -> Option<Statement> {
+    const RK: &str = sprig_shard::rk::RK_COLUMN;
+    if !entry.fill_rk {
+        return None;
+    }
+    let col = |n: &str| ObjectName(vec![ObjectNamePart::Identifier(Ident::new(n))]);
+    let named = |c: &ObjectName, n: &str| {
+        ident_parts(c)
+            .and_then(|p| p.last().map(|i| i.value.eq_ignore_ascii_case(n)))
+            .unwrap_or(false)
+    };
+    if ins.columns.iter().any(|c| named(c, RK)) {
+        return None;
+    }
+    let hash = |v: &Expr| -> Option<u64> { entry.group.hash_of(&key_literal(v, class)?) };
+    let number = |h: u64| Expr::value(Value::Number(h.to_string(), false));
+    let mut out = ins.clone();
+    let Some(src) = &mut out.source else {
+        // INSERT … SET: the key's assignment gives the hash.
+        let h = ins
+            .assignments
+            .iter()
+            .find(|a| assigns_key(&a.target, key))
+            .and_then(|a| hash(&a.value))?;
+        out.assignments.push(sqlparser::ast::Assignment {
+            target: sqlparser::ast::AssignmentTarget::ColumnName(col(RK)),
+            value: number(h),
+        });
+        return Some(Statement::Insert(out));
+    };
+    let SetExpr::Values(values) = &mut *src.body else {
+        return None;
+    };
+    let pos = if ins.columns.is_empty() {
+        // Without the table's columns no list can be written: the rows go
+        // as they are and the member's back-fill covers them.
+        if entry.columns.is_empty() {
+            return None;
+        }
+        out.columns = entry.columns.iter().map(|c| col(c)).collect();
+        key_ordinal?
+    } else {
+        ins.columns.iter().position(|c| named(c, key))?
+    };
+    let mut hashes = Vec::with_capacity(values.rows.len());
+    for row in &values.rows {
+        if row.len() != out.columns.len() {
+            // A count mismatch: MariaDB's own 1136 says so.
+            return None;
+        }
+        match row.get(pos).and_then(hash) {
+            Some(h) => hashes.push(h),
+            None => return None,
+        }
+    }
+    out.columns.push(col(RK));
+    for (row, h) in values.rows.iter_mut().zip(hashes) {
+        row.push(number(h));
+    }
+    Some(Statement::Insert(out))
 }
 
 fn assigns_key(t: &sqlparser::ast::AssignmentTarget, key: &str) -> bool {
@@ -2453,6 +2968,7 @@ fn route_value(v: &Expr, entry: &TableEntry, class: KeyClass) -> R<usize> {
 
 fn one_shard_insert(
     stmt: &Statement,
+    src: Option<&Src<'_>>,
     entry: &TableEntry,
     shard: usize,
     loc: Loc,
@@ -2469,11 +2985,12 @@ fn one_shard_insert(
     Target {
         cluster: s.cluster.clone(),
         shard: s.shard,
-        sql: render(stmt, &m, &by),
+        sql: pass_sql(stmt, src, &m, &by),
+        at: entry.group.at(shard),
     }
 }
 
-fn plan_update_delete(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
+fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
     let (kind, twjs, selection, order_by, limit, assignments): (
         WriteKind,
         Vec<&sqlparser::ast::TableWithJoins>,
@@ -2484,7 +3001,7 @@ fn plan_update_delete(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
     ) = match stmt {
         Statement::Update(u) => {
             if u.from.is_some() {
-                return check_single_or(stmt, cx, Reason::MultiTableDml);
+                return check_single_or(stmt, src, cx, Reason::MultiTableDml);
             }
             (
                 WriteKind::Update,
@@ -2497,7 +3014,7 @@ fn plan_update_delete(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
         }
         Statement::Delete(d) => {
             if !d.tables.is_empty() || d.using.is_some() {
-                return check_single_or(stmt, cx, Reason::MultiTableDml);
+                return check_single_or(stmt, src, cx, Reason::MultiTableDml);
             }
             let from = match &d.from {
                 FromTable::WithFromKeyword(v) | FromTable::WithoutKeyword(v) => v,
@@ -2514,22 +3031,26 @@ fn plan_update_delete(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
         _ => return reject(Reason::Unsupported, "not a write"),
     };
     if twjs.len() != 1 || !twjs[0].joins.is_empty() {
-        return check_single_or(stmt, cx, Reason::MultiTableDml);
+        return check_single_or(stmt, src, cx, Reason::MultiTableDml);
     }
     let Some(rel) = relation(&twjs[0].relation, cx, 0) else {
-        return check_single_or(stmt, cx, Reason::MultiTableDml);
+        return check_single_or(stmt, src, cx, Reason::MultiTableDml);
     };
     let Some(entry) = rel.entry else {
         // An unsharded target; subqueries over shards aren't exact.
-        return check_single_or(stmt, cx, Reason::Subquery);
+        return check_single_or(stmt, src, cx, Reason::Subquery);
     };
     if let TableKind::Reference { .. } = entry.kind {
-        return check_single_or(stmt, cx, Reason::Subquery);
+        return check_single_or(stmt, src, cx, Reason::Subquery);
     }
     let key = entry.key().unwrap_or_default().to_owned();
     if assignments.iter().any(|a| assigns_key(&a.target, &key)) {
         return reject(Reason::KeyChange, "an UPDATE of the distribution key");
     }
+    lookups::check_gap(entry)?;
+    lookups::check_update(entry, &|c| {
+        assignments.iter().any(|a| assigns_key(&a.target, c))
+    })?;
     // Subqueries inside the write.
     let mut nested = Vec::new();
     collect_queries_stmt(stmt, &mut nested);
@@ -2538,7 +3059,7 @@ fn plan_update_delete(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
         blocks(q, &mut bl, false);
         for (sel, _) in bl {
             if analyse(sel, cx)?.rels.iter().any(Rel::sharded) {
-                return check_single_or(stmt, cx, Reason::Subquery);
+                return check_single_or(stmt, src, cx, Reason::Subquery);
             }
         }
     }
@@ -2557,7 +3078,7 @@ fn plan_update_delete(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
         Tgt::All => (0..entry.group.shards.len()).collect(),
         Tgt::Set(s) => s,
     };
-    let make = |s: usize| {
+    let make = |s: usize, src: Option<&Src<'_>>| {
         let loc = &entry.group.shards[s];
         let mut m = HashMap::new();
         m.insert(rel.loc, loc.schema.clone());
@@ -2569,16 +3090,38 @@ fn plan_update_delete(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
         Target {
             cluster: loc.cluster.clone(),
             shard: loc.shard,
-            sql: render(stmt, &m, &by),
+            sql: pass_sql(stmt, src, &m, &by),
+            at: entry.group.at(s),
         }
     };
+    // Chapter 19: a DELETE reads what its rows hold in unique lookups,
+    // and releases it once the transaction commits.
+    let shard_list: Vec<usize> = if shards.is_empty() {
+        vec![0]
+    } else {
+        shards.iter().copied().collect()
+    };
+    let releases = if kind == WriteKind::Delete {
+        lookups::delete_releases(stmt, &rel, entry, &shard_list, order_by || limit)?
+    } else {
+        Vec::new()
+    };
+    if !releases.is_empty() && shard_list.len() == 1 {
+        return Ok(Plan::Write(WritePlan {
+            kind,
+            targets: vec![make(shard_list[0], Some(src))],
+            rows: 0,
+            claims: Vec::new(),
+            releases,
+        }));
+    }
     if shards.len() == 1 {
         let s = shards.iter().next().copied().unwrap_or(0);
-        return Ok(Plan::Pass(make(s)));
+        return Ok(Plan::Pass(make(s, Some(src))));
     }
     if shards.is_empty() {
         // Contradictory key predicates: no row matches; any shard says so.
-        return Ok(Plan::Pass(make(0)));
+        return Ok(Plan::Pass(make(0, Some(src))));
     }
     if order_by || limit {
         return reject(
@@ -2586,32 +3129,23 @@ fn plan_update_delete(stmt: &Statement, cx: &PlanCtx<'_>) -> R<Plan> {
             "ORDER BY or LIMIT in a multi-shard write",
         );
     }
-    if lower_has(stmt, ":=") {
+    if src.text.contains(":=") {
         return reject(Reason::Variables, "a variable assignment across shards");
-    }
-    let cluster = &entry.group.shards[*shards.iter().next().unwrap_or(&0)].cluster;
-    if shards
-        .iter()
-        .any(|&s| entry.group.shards[s].cluster != *cluster)
-    {
-        return reject(
-            Reason::CrossCluster,
-            "a write on shards of several clusters",
-        );
     }
     Ok(Plan::Write(WritePlan {
         kind,
-        targets: shards.into_iter().map(make).collect(),
+        targets: shards
+            .into_iter()
+            .map(|s| make(s, (!src.template).then_some(src)))
+            .collect(),
         rows: 0,
+        claims: Vec::new(),
+        releases,
     }))
 }
 
-fn lower_has(stmt: &Statement, needle: &str) -> bool {
-    stmt.to_string().contains(needle)
-}
-
 /// A write the planner doesn't split: exact only on one shard.
-fn check_single_or(stmt: &Statement, cx: &PlanCtx<'_>, reason: Reason) -> R<Plan> {
+fn check_single_or(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>, reason: Reason) -> R<Plan> {
     let mut queries: Vec<&Query> = Vec::new();
     collect_queries_stmt(stmt, &mut queries);
     let mut occs = Vec::new();
@@ -2671,7 +3205,7 @@ fn check_single_or(stmt: &Statement, cx: &PlanCtx<'_>, reason: Reason) -> R<Plan
     if occs.is_empty() {
         return Ok(Plan::NotRouted);
     }
-    match try_pass(stmt, &occs, unsharded, cx) {
+    match try_pass(stmt, Some(src), &occs, unsharded, cx) {
         Some(p) => Ok(p),
         None => reject(reason, "a write over several shards in this form"),
     }
@@ -2696,6 +3230,10 @@ fn empty_select(
         ..*s
     })
 }
+
+mod lookups;
+
+pub(crate) use lookups::decode_read;
 
 #[cfg(test)]
 mod tests;

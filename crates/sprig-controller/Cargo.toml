@@ -30,6 +30,11 @@ sprig-balancer.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
+# Chapter 41's logic loop: trigger jobs and schedules (R7 order 5).
+sprig-feed.workspace = true
+sprig-logic = { path = "../sprig-logic" }
+# Chapter 42: the copy worker's subscriptions and the spaces API.
+sprig-inherit = { path = "../sprig-inherit" }
 sprig-meta.workspace = true
 # `mover.max_copies_per_cluster` is sprig-mover's key (chapter 10).
 sprig-mover.workspace = true
@@ -43,11 +48,16 @@ sprig-proto-mysql.workspace = true
 sprig-sql.workspace = true
 # Chapter 12's workload tables: bootstrap migrates them; the rollup loop.
 sprig-workload.workspace = true
+# Chapter 18's resolver loop (txn_resolver).
+sprig-txn.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# tests/live_split.rs builds a cluster access by hand (chapter 20).
+sprig-binlog.workspace = true
+tracing-subscriber.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }
 # Chapter 25's DC failover simulation (tests/sim_dc_failover.rs).
 sprig-testkit.workspace = true

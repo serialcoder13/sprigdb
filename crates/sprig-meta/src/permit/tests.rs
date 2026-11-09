@@ -54,7 +54,10 @@ impl PermitSource for Down {
 
 fn holder() -> (PermitHolder, Arc<dyn Clock>) {
     let clock: Arc<dyn Clock> = Arc::new(TokioClock::new());
-    (PermitHolder::new("gw-1", "gateway", Arc::clone(&clock)), clock)
+    (
+        PermitHolder::new("gw-1", "gateway", Arc::clone(&clock)),
+        clock,
+    )
 }
 
 #[tokio::test(start_paused = true)]
@@ -70,7 +73,10 @@ async fn the_permit_runs_from_the_send_time() {
     tokio::time::sleep(Duration::from_millis(4500)).await;
     assert!(h.writable());
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!h.writable(), "the 400 ms in flight count against the permit");
+    assert!(
+        !h.writable(),
+        "the 400 ms in flight count against the permit"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -78,7 +84,10 @@ async fn a_refusal_ends_the_permit_at_once() {
     let (h, _clock) = holder();
     let f = Fixed::new(Duration::ZERO, 5000);
     let src: Arc<dyn PermitSource> = f.clone();
-    assert!(h.renew_once(&[Arc::clone(&src)], Duration::from_secs(1)).await);
+    assert!(
+        h.renew_once(&[Arc::clone(&src)], Duration::from_secs(1))
+            .await
+    );
     f.fenced.store(true, Ordering::SeqCst);
     assert!(!h.renew_once(&[src], Duration::from_secs(1)).await);
     assert_eq!(h.remaining(), Duration::ZERO);
@@ -122,7 +131,10 @@ fn the_watchdog_fences_then_aborts_a_stuck_loop() {
     assert!(h.is_forced(), "stalled past watchdog_ms: fenced");
     assert!(!aborted.load(Ordering::SeqCst));
     std::thread::sleep(Duration::from_millis(200));
-    assert!(aborted.load(Ordering::SeqCst), "stalled past twice that: abort");
+    assert!(
+        aborted.load(Ordering::SeqCst),
+        "stalled past twice that: abort"
+    );
     drop(dog);
 }
 

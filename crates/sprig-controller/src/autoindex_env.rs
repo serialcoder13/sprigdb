@@ -50,6 +50,9 @@ use crate::autoindex_loop::{AutoIndexEnv, CandidateSource, Evaluated, JobShardLo
 use crate::catalogs::ShardMapLocator;
 use crate::monitor::ClusterMonitor;
 
+/// How long a catalog snapshot may read once it has its connection.
+pub(crate) const SNAPSHOT_WORK: Duration = Duration::from_secs(60);
+
 /// [`AutoIndexEnv`] over the controller's registry, catalogs and settings.
 pub struct ControllerEnv {
     dc: DcId,
@@ -59,6 +62,9 @@ pub struct ControllerEnv {
     live: Option<LiveSettings>,
     jobs: JobShardLocks,
     migrated: std::sync::Mutex<std::collections::HashSet<TenantId>>,
+    /// Where a pass's long-held catalog connection comes from: its own
+    /// budget (`catalogs` module docs); `locator`'s when unset (tests).
+    sessions: Option<ShardMapLocator>,
 }
 
 impl std::fmt::Debug for ControllerEnv {
@@ -88,7 +94,18 @@ impl ControllerEnv {
             live,
             jobs,
             migrated: std::sync::Mutex::new(std::collections::HashSet::new()),
+            sessions: None,
         }
+    }
+
+    /// The same environment, taking each pass's catalog connection from
+    /// `sessions` (the loop's own connection budget), so a pass that holds
+    /// one while it reads snapshots, samples or decisions through the
+    /// shared budget can never starve the controller's other catalog calls.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: ShardMapLocator) -> Self {
+        self.sessions = Some(sessions);
+        self
     }
 
     /// The cluster as the rollout sees it.
@@ -252,10 +269,13 @@ pub fn resolve_object(
 #[async_trait::async_trait]
 impl AutoIndexEnv for ControllerEnv {
     async fn catalog(&self, tenant: TenantId) -> Result<(Conn, AutoIndexStore)> {
-        let ep = self.locator.writer(tenant).await?;
-        let mut conn = ep.pool.get_conn().await.map_err(|e| {
-            SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
-        })?;
+        let ep = self
+            .sessions
+            .as_ref()
+            .unwrap_or(&self.locator)
+            .writer(tenant)
+            .await?;
+        let mut conn = crate::catalogs::acquire(&ep.pool, "auto_index pass").await?;
         // Tenants bootstrapped before the module joined bootstrap get its
         // tables here; the migrator is idempotent.
         let migrated = self
@@ -285,7 +305,12 @@ impl AutoIndexEnv for ControllerEnv {
             return Ok(out);
         }
         let ep = self.locator.writer(tenant).await?;
-        let snap = ep.store.snapshot(&ep.pool, None).await?;
+        let snap = crate::catalogs::bounded(
+            "auto_index objects",
+            SNAPSHOT_WORK,
+            ep.store.snapshot(&ep.pool, None),
+        )
+        .await?;
         let reg = Self::registry_ref()?;
         let cat = TenantCatalog::build(reg, tenant, Loaded::core(snap));
         // R0: a tenant's shards live on its catalog's cluster.
@@ -388,7 +413,12 @@ impl CandidateSource for EvalShim {
     async fn evaluate(&self, tenant: TenantId, now: SystemTime) -> Result<Evaluated> {
         let env = &self.env;
         let ep = env.locator.writer(tenant).await?;
-        let snap = ep.store.snapshot(&ep.pool, None).await?;
+        let snap = crate::catalogs::bounded(
+            "auto_index evaluation",
+            SNAPSHOT_WORK,
+            ep.store.snapshot(&ep.pool, None),
+        )
+        .await?;
         let reg = ControllerEnv::registry_ref()?;
         let cat = TenantCatalog::build(reg, tenant, Loaded::core(snap));
         let Some(cluster) = env.locator.cluster_of(tenant).await? else {

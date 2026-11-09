@@ -22,6 +22,8 @@ sprig-meta.workspace = true
 sprig-mover.workspace = true
 # The feed handoff in the mover's simulation (chapter 38 build step 10).
 sprig-feed.workspace = true
+# Chapter 41's trigger runner under the mover simulation (R7 order 5).
+sprig-logic = { path = "../sprig-logic" }
 sprig-shard.workspace = true
 serde.workspace = true
 serde_json.workspace = true

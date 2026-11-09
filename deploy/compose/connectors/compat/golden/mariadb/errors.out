@@ -1,0 +1,29 @@
+ERROR 1062 (23000): Duplicate entry '1' for key 'PRIMARY'
+ERROR 1062 (23000): Duplicate entry 'a' for key 'uk_u'
+ERROR 1062 (23000): Duplicate entry 'a' for key 'uk_u'
+ERROR 1364 (HY000): Field 'v' doesn't have a default value
+ERROR 1048 (23000): Column 'v' cannot be null
+ERROR 1452 (23000): Cannot add or update a child row: a foreign key constraint fails (`@DB@`.`c_err_c`, CONSTRAINT `fk_c_err` FOREIGN KEY (`pid`) REFERENCES `c_err_p` (`id`))
+ERROR 1451 (23000): Cannot delete or update a parent row: a foreign key constraint fails (`@DB@`.`c_err_c`, CONSTRAINT `fk_c_err` FOREIGN KEY (`pid`) REFERENCES `c_err_p` (`id`))
+ERROR 1054 (42S22): Unknown column 'nocol' in 'SELECT'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'SET'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'WHERE'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'GROUP BY'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'HAVING'
+ERROR 1054 (42S22): Unknown column 'c_err_p.nocol' in 'ON'
+ERROR 1054 (42S22): Unknown column 'nocol' in 'ORDER BY'
+ERROR 1052 (23000): Column 'id' in WHERE is ambiguous
+ERROR 1146 (42S02): Table '@DB@.c_err_nosuch' doesn't exist
+ERROR 1366 (22007): Incorrect integer value: 'x' for column `@DB@`.`c_err_p`.`id` at row 1
+ERROR 1406 (22001): Data too long for column 'u' at row 1
+ERROR 1292 (22007): Incorrect date value: '2020-13-45' for column `@DB@`.`c_err_p`.`d` at row 1
+ERROR 1060 (42S21): Duplicate column name 'v'
+ERROR 1091 (42000): Can't DROP COLUMN `nocol`; check that it exists
+ERROR 1091 (42000): Can't DROP INDEX `nokey`; check that it exists
+ERROR 1061 (42000): Duplicate key name 'k_v'
+ERROR 4092 (42S02): Unknown VIEW: '@DB@.c_err_nosuchview'
+ERROR 1539 (HY000): Unknown event 'c_err_nosuchevent'
+ERROR 4078 (HY000): Illegal parameter data types int and row for operation '='
+ERROR 4025 (23000): CONSTRAINT `CONSTRAINT_1` failed for `@DB@`.`c_err_j`
+ERROR 4025 (23000): CONSTRAINT `c_err_j.n` failed for `@DB@`.`c_err_j`
+ERROR 1347 (HY000): '@DB@.c_err_p' is not of type 'VIEW'

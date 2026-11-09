@@ -390,3 +390,157 @@ fn share_lock_survives_a_scatter() {
         r.targets[0].sql
     );
 }
+
+#[test]
+fn single_shard_text_is_spliced_not_rendered() {
+    // Comments, spacing, case and hints survive: only schema names change.
+    let t = pass("select /*+ hint */ *  from orders o WHERE o.cid = 42 -- tail");
+    assert!(
+        t.sql.starts_with("select /*+ hint */ *  from `t1_d1_g9_s"),
+        "{}",
+        t.sql
+    );
+    assert!(
+        t.sql.ends_with("`.orders o WHERE o.cid = 42 -- tail"),
+        "{}",
+        t.sql
+    );
+    let t = pass("SELECT `t1_d1_g1_s1`.orders.cid FROM `t1_d1_g1_s1`.`orders` WHERE cid = 7");
+    assert_eq!(t.sql.matches("t1_d1_g1_s1").count(), 0, "{}", t.sql);
+    assert_eq!(t.sql.matches("`t1_d1_g9_s").count(), 2, "{}", t.sql);
+    // Non-ASCII text before the name: columns count characters.
+    let t = pass("SELECT 'ß€', cid FROM orders WHERE cid = 7");
+    assert!(
+        t.sql.starts_with("SELECT 'ß€', cid FROM `t1_d1_g9_s"),
+        "{}",
+        t.sql
+    );
+    // Two lines.
+    let t = pass("SELECT cid\nFROM orders\nWHERE cid = 7");
+    assert!(t.sql.contains("\nFROM `t1_d1_g9_s"), "{}", t.sql);
+}
+
+#[test]
+fn prepared_templates_keep_placeholders_on_one_shard() {
+    let t = topo();
+    let cx = PlanCtx {
+        topo: &t,
+        default_schema: Some(DEF),
+        session_cluster: "c1",
+        max_route_values: 1024,
+        lookup_batch: 256,
+    };
+    let tpl = parse_template("SELECT * FROM orders WHERE cid = ? AND note = ?", &t)
+        .unwrap()
+        .unwrap();
+    assert_eq!(tpl.params(), 2);
+    let pp = plan_prepared(
+        &tpl,
+        &[
+            ParamLit::Int(42),
+            ParamLit::Str {
+                bytes: b"x".to_vec(),
+                charset: "utf8mb4".into(),
+            },
+        ],
+        &cx,
+    );
+    assert!(pp.placeholders);
+    let Plan::Pass(target) = &pp.plan else {
+        panic!("{:?}", pp.plan)
+    };
+    assert_eq!(
+        target.shard,
+        pass("SELECT * FROM orders WHERE cid = 42").shard
+    );
+    assert!(
+        target.sql.ends_with("WHERE cid = ? AND note = ?"),
+        "{}",
+        target.sql
+    );
+    // A string parameter routes an integer key like a string literal.
+    let one = parse_template("SELECT * FROM orders WHERE cid = ?", &t)
+        .unwrap()
+        .unwrap();
+    let pp = plan_prepared(
+        &one,
+        &[ParamLit::Str {
+            bytes: b"42".to_vec(),
+            charset: "utf8mb4".into(),
+        }],
+        &cx,
+    );
+    assert!(matches!(&pp.plan, Plan::Pass(x) if x.shard == target.shard));
+    // Several shards: the values are rendered and the plan runs as text.
+    let tpl = parse_template("SELECT cid FROM orders WHERE cid IN (?, ?, ?)", &t)
+        .unwrap()
+        .unwrap();
+    let pp = plan_prepared(
+        &tpl,
+        &[ParamLit::Int(1), ParamLit::Int(2), ParamLit::Int(3)],
+        &cx,
+    );
+    assert!(!pp.placeholders);
+    match &pp.plan {
+        Plan::Read(r) => assert!(r.targets.iter().all(|t| !t.sql.contains('?'))),
+        other => panic!("{other:?}"),
+    }
+    // Wrong parameter count.
+    assert!(matches!(
+        plan_prepared(&tpl, &[ParamLit::Int(1)], &cx).plan,
+        Plan::Reject(_)
+    ));
+    // Unsharded text isn't parsed at all.
+    assert!(
+        parse_template("SELECT * FROM users WHERE id = ?", &t)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// The single-shard path's planning cost (run with `--release --ignored`):
+/// parse and splice, against parse and print.
+#[test]
+#[ignore = "a measurement, not a check"]
+fn single_shard_planning_cost() {
+    let t = topo();
+    let cx = PlanCtx {
+        topo: &t,
+        default_schema: Some(DEF),
+        session_cluster: "c1",
+        max_route_values: 1024,
+        lookup_batch: 256,
+    };
+    let sql = "SELECT * FROM orders WHERE cid = 4242";
+    let n = 50_000u32;
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(plan(std::hint::black_box(sql), &cx));
+    }
+    let planned = start.elapsed() / n;
+    let stmt = parse(sql).unwrap();
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(parse(std::hint::black_box(sql)).unwrap());
+    }
+    let parsed = start.elapsed() / n;
+    let mut occ = HashMap::new();
+    let _ = visit_relations(&stmt, |o| {
+        occ.insert(loc_of(o), "t1_d1_g9_s3".to_owned());
+        ControlFlow::<()>::Continue(())
+    });
+    let by = HashMap::new();
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(render(&stmt, &occ, &by));
+    }
+    let rendered = start.elapsed() / n;
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(splice(sql, &stmt, &occ, &by));
+    }
+    let spliced = start.elapsed() / n;
+    println!(
+        "point select: plan {planned:?} (parse {parsed:?}); names by printing {rendered:?}, by splicing {spliced:?}"
+    );
+}

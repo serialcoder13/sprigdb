@@ -298,8 +298,9 @@ where
     ///
     /// # Errors
     /// 39792 for a bad name; 39360 if the name belongs to another tenant;
-    /// 39072, 39303, 39508 or 39509 for the parent; 39120 if no cluster
-    /// can take the catalog; 39504 off the leader; catalog errors.
+    /// 39072, 39303, 39508 or 39509 for the parent; 39507 when the
+    /// parent's residency doesn't allow this DC; 39120 if no cluster can
+    /// take the catalog; 39504 off the leader; catalog errors.
     pub async fn create(
         &self,
         req: &CreateTenantRequest,
@@ -329,6 +330,28 @@ where
                     self.dc
                 )));
             }
+            // Chapter 26: a child's residency lies within its parent's;
+            // its home must be one of the parent's allowed DCs.
+            let inherited = match &parent {
+                Some(p) => match sprig_shard::home::read_home(
+                    &**self.directory.store(),
+                    p.body().tenant_id,
+                )
+                .await?
+                {
+                    Some(pe) => crate::residency::child_block(
+                        &p.body().name,
+                        &pe.raw,
+                        &self.dc,
+                        self.clock
+                            .wall()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                    )?,
+                    None => None,
+                },
+                None => None,
+            };
             self.reserve_ids_past_tenant_schemas().await?;
             let new = NewTenant {
                 name: req.name.clone(),
@@ -340,6 +363,14 @@ where
                 .directory
                 .create(&new, self.max_depth(), self.clock.wall())
                 .await?;
+            if let Some(b) = &inherited {
+                crate::residency::write_block(
+                    &**self.directory.store(),
+                    e.body().tenant_id,
+                    b,
+                )
+                .await?;
+            }
             (e, true)
         };
         let done = self.bootstrap(entry.body().tenant_id, guard).await?;

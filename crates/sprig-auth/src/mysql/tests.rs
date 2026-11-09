@@ -128,6 +128,8 @@ pub(crate) struct World {
     pub(crate) clock: Arc<ManualClock>,
     pub(crate) state: Arc<crate::policy::MemLoginState>,
     pub(crate) audit: Arc<crate::audit::MemoryAudit>,
+    /// The directory, for residency (chapter 26).
+    pub(crate) tenants: Arc<StaticTenants>,
 }
 
 /// Tenant `acme` (42) with:
@@ -142,7 +144,16 @@ pub(crate) struct World {
 /// 9 nat@% native only "npw"
 /// 10 svc@% "pw", `api_key` only
 /// and tenant `susp` (43, suspended) with 1 carol@% "pw".
-pub(crate) fn world(mut policy: FixedPolicy) -> World {
+pub(crate) fn world(policy: FixedPolicy) -> World {
+    world_at(policy, None)
+}
+
+/// [`world`] for a gateway handing logins off through `handoff`
+/// (chapter 26).
+pub(crate) fn world_at(
+    mut policy: FixedPolicy,
+    handoff: Option<Arc<crate::handoff::HandoffConfig>>,
+) -> World {
     // Rate limits off unless a test asks: they'd slow the timing tests.
     for key in [
         crate::settings::DELAY_AFTER_FAILURES.key,
@@ -205,7 +216,7 @@ pub(crate) fn world(mut policy: FixedPolicy) -> World {
         .lock()
         .unwrap()
         .insert(SUSP, snapshot(SUSP, susp, 1));
-    let tenants = StaticTenants::new([
+    let tenants = Arc::new(StaticTenants::new([
         TenantInfo {
             id: ACME,
             name: "acme".into(),
@@ -224,9 +235,9 @@ pub(crate) fn world(mut policy: FixedPolicy) -> World {
             can_log_in: false,
             suspended: false,
         },
-    ]);
+    ]));
     let logins = CatalogLogins::new(
-        Arc::new(tenants),
+        Arc::clone(&tenants) as Arc<dyn crate::account::TenantDirectory>,
         catalogs.clone(),
         Arc::new(StaticBackends::new(Some(backend()))),
         Arc::new(policy),
@@ -242,15 +253,19 @@ pub(crate) fn world(mut policy: FixedPolicy) -> World {
     .with_clock(clock.clone());
     let state = crate::policy::MemLoginState::new();
     let audit = crate::audit::MemoryAudit::new();
-    let svc = svc
+    let mut svc = svc
         .with_login_state(state.clone())
         .with_audit(audit.clone());
+    if let Some(h) = handoff {
+        svc = svc.with_handoff(h);
+    }
     World {
         svc: Arc::new(svc),
         catalogs,
         clock,
         state,
         audit,
+        tenants,
     }
 }
 

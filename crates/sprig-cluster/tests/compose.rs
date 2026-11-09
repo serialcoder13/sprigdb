@@ -352,3 +352,58 @@ async fn capture_fixtures() {
         println!("wrote {path}");
     }
 }
+
+/// Chapter 09's XA flag on the real topologies, the way the controller's
+/// registry loop publishes it: a deep pass finds XA, the publisher holds
+/// the upgrade, and light passes (no active probes) must keep proposing
+/// it until the sustain period ends. Single node and primary + replicas
+/// report XA; Galera doesn't. (Before the fix, the light passes carried
+/// the published `false` forward and the upgrade never published.)
+#[tokio::test]
+async fn xa_upgrades_publish_across_light_passes() {
+    use sprig_cluster::driver::{StaticConnector, for_topology};
+    let mut ran = 0;
+    for (var, kind, want) in [
+        ("SPRIG_TEST_MARIADB_SINGLE", TopologyKind::SingleNode, true),
+        (
+            "SPRIG_TEST_MARIADB_REPLICATION",
+            TopologyKind::PrimaryReplica,
+            true,
+        ),
+        ("SPRIG_TEST_MARIADB_GALERA", TopologyKind::Galera, false),
+    ] {
+        let Some(eps) = endpoints(var) else {
+            eprintln!("skipped {kind}: {var} is not set");
+            continue;
+        };
+        ran += 1;
+        let d = for_topology(
+            kind,
+            Arc::new(StaticConnector::new(eps.clone())),
+            ClusterSettings::default(),
+        );
+        let deep = prober().probe_cluster(kind, &eps, ProbeDepth::Deep).await;
+        let mut old = d.derive(&deep, None);
+        assert_eq!(old.derived.xa, want, "{kind}: the deep pass");
+        // What the dev records held: published without XA.
+        old.derived.xa = false;
+        old.version = 7;
+        let sustain = Duration::from_millis(300);
+        let mut pubr = CapabilityPublisher::new(Some(old), sustain);
+        let t0 = Instant::now();
+        let _ = pubr.observe(d.derive(&deep, None), t0);
+        for i in 1..=3u32 {
+            let light = prober().probe_cluster(kind, &eps, ProbeDepth::Light).await;
+            assert!(light.iter().all(|p| p.active.is_none()));
+            let c = d.derive(&light, None);
+            assert_eq!(c.derived.xa, want, "{kind}: light pass {i}");
+            let _ = pubr.observe(c, t0 + Duration::from_millis(150) * i);
+        }
+        let published = pubr.published().map(|p| p.derived.xa);
+        println!("{kind}: XA {want}, published after light passes: {published:?}");
+        assert_eq!(published, Some(want), "{kind}");
+    }
+    if ran == 0 {
+        eprintln!("skipped: no topology variable is set");
+    }
+}

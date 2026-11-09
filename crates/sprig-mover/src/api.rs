@@ -78,6 +78,10 @@ pub struct SourceSpec {
     /// names one).
     #[serde(default)]
     pub tables: Option<Vec<String>>,
+    /// The source shard's hash range (hash-range jobs: split, merge and
+    /// shard moves, chapter 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<HashRange>,
 }
 
 /// A hash range `[lo, hi)`; `hi = None` means 2^64.
@@ -199,6 +203,11 @@ pub struct JobSpec {
     /// tenant's `migration.write_pause_target_ms` (or `--max-pause-ms`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_hold_ms: Option<u64>,
+    /// How long a committed job keeps its sources fenced before dropping
+    /// them, in ms; `None` is `mover.source_retain_hours`. Split and merge
+    /// jobs pass `sharding.retire_hours` (chapter 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_ms: Option<u64>,
 }
 
 impl JobSpec {
@@ -215,6 +224,7 @@ impl JobSpec {
                 shard: 0,
                 schemas: Vec::new(),
                 tables: None,
+                range: None,
             }],
             targets: vec![TargetSpec {
                 cluster: to,
@@ -229,6 +239,7 @@ impl JobSpec {
             decision_id: None,
             requested_by: None,
             max_hold_ms: None,
+            retain_ms: None,
         }
     }
 
@@ -250,6 +261,7 @@ impl JobSpec {
                 shard: 0,
                 schemas: vec![schema.to_owned()],
                 tables: Some(vec![table.to_owned()]),
+                range: None,
             }],
             targets: vec![TargetSpec {
                 cluster,
@@ -268,6 +280,7 @@ impl JobSpec {
             decision_id: None,
             requested_by: None,
             max_hold_ms: None,
+            retain_ms: None,
         }
     }
 
@@ -309,6 +322,67 @@ impl JobSpec {
     #[must_use]
     pub fn target_cluster(&self) -> Option<&ClusterId> {
         self.targets.first().map(|t| &t.cluster)
+    }
+
+    /// A hash-range job of table group `group` (chapter 20): `sources` are
+    /// shards on one cluster, each `(shard, its schemas, its range)`;
+    /// `targets` are new shards `(shard, range)` on `to`. The kind follows
+    /// from the counts: one source to several targets is a split, several
+    /// sources to one target a merge, one to one a shard move.
+    #[must_use]
+    pub fn reshard(
+        tenant: TenantId,
+        group: u32,
+        from: &ClusterId,
+        sources: Vec<(u32, Vec<String>, HashRange)>,
+        to: &ClusterId,
+        targets: Vec<(u32, HashRange)>,
+    ) -> Self {
+        let kind = match (sources.len(), targets.len()) {
+            (1, n) if n > 1 => JobKind::SplitShard,
+            (n, 1) if n > 1 => JobKind::MergeShards,
+            _ => JobKind::MoveShard,
+        };
+        Self {
+            kind,
+            tenant,
+            sources: sources
+                .into_iter()
+                .map(|(shard, schemas, range)| SourceSpec {
+                    cluster: from.clone(),
+                    shard,
+                    schemas,
+                    tables: None,
+                    range: Some(range),
+                })
+                .collect(),
+            targets: targets
+                .into_iter()
+                .map(|(shard, range)| TargetSpec {
+                    cluster: to.clone(),
+                    shard,
+                    schemas: Vec::new(),
+                    range: Some(range),
+                    ddl: None,
+                })
+                .collect(),
+            routing: Routing::HashRange { group },
+            cutover: CutoverMode::Auto,
+            verify: VerifyMode::Full,
+            decision_id: None,
+            requested_by: None,
+            max_hold_ms: None,
+            retain_ms: None,
+        }
+    }
+
+    /// The table group of a hash-range job.
+    #[must_use]
+    pub fn group(&self) -> Option<u32> {
+        match self.routing {
+            Routing::HashRange { group } => Some(group),
+            _ => None,
+        }
     }
 }
 

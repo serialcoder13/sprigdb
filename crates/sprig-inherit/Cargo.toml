@@ -8,5 +8,37 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+metrics.workspace = true
+mysql_async.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-catalog.workspace = true
+sprig-common.workspace = true
+# The copy worker's subscriptions (chapter 38).
+sprig-feed.workspace = true
+sprig-meta.workspace = true
+sprig-proto-mysql.workspace = true
+sprig-settings.workspace = true
+# The lexer (chapter 07) for the extension statements; sqlparser-rs for the
+# statements the rewriter changes.
+sprig-sql.workspace = true
+# The executor boundary chapter 32 built (Runner, Rows, Done, Txn).
+sprig-types = { path = "../sprig-types" }
+sqlparser.workspace = true
+# A task-local marks a destructive ALTER for the prepare-phase check.
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+# The live suite runs the copy worker in the test process (chapter 42,
+# "Materialized copies").
+sprig-cluster.workspace = true
+sprig-controller = { path = "../sprig-controller" }
+sprig-worker = { path = "../sprig-worker" }
+
 [lints]
 workspace = true

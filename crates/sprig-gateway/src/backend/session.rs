@@ -375,6 +375,23 @@ impl BackendSession {
         &self.causal
     }
 
+    /// Sets the causal position (a router stream on its own connection
+    /// waits for what the session's connection to that cluster saw).
+    pub fn set_causal(&mut self, g: GtidSet) {
+        self.causal = g;
+    }
+
+    /// The statement in flight's first packet, when it is an ERR (after
+    /// [`query`](Self::query) returned): the router reads it before
+    /// relaying, to retry after a stale shard map (chapter 17).
+    #[must_use]
+    pub fn first_error(&self) -> Option<&ErrPacket> {
+        match &self.cur.as_ref()?.first.as_ref()?.kind {
+            PacketKind::Err(e) => Some(e),
+            _ => None,
+        }
+    }
+
     /// What the gateway answers after a release: warnings, `FOUND_ROWS()`,
     /// `ROW_COUNT()`.
     #[must_use]
@@ -658,6 +675,8 @@ impl BackendSession {
             observed.unexplained = false;
         }
         self.vars.apply(&observed);
+        // Chapter 28 (R4): the MySQL persona's sql_mode view.
+        self.vars.mysql_sql_mode_after(&observed);
         cur.lease.conn().applied.apply(&observed);
         if observed.charset_changed() {
             // Tracking names the character set only: read the collation

@@ -78,6 +78,7 @@ pub mod meta;
 pub mod mover;
 pub mod net;
 pub mod rng;
+pub mod split;
 pub mod trace;
 
 use std::future::Future;

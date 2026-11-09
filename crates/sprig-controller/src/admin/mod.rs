@@ -46,10 +46,12 @@
 //! an optional bearer token (`[controller] admin_token_file`).
 
 pub mod dcmove;
+pub mod failover;
 pub mod http;
 pub mod jobs;
 pub mod mover;
 pub mod placement_admin;
+pub mod sharding_admin;
 pub mod types;
 
 use std::sync::Arc;
@@ -107,6 +109,9 @@ pub struct AdminService {
     indexes: Option<Arc<dyn AutoIndexAdmin>>,
     placement: Option<Arc<crate::balancer_loop::BalancerLoop>>,
     moves: Option<Arc<crate::migrate::DcMoves>>,
+    failover: Option<Arc<crate::failover::role::FailoverRole>>,
+    sharding: Option<Arc<crate::sharding::ShardingLoop>>,
+    residency: Option<Arc<crate::residency::Residency>>,
 }
 
 impl std::fmt::Debug for AdminService {
@@ -138,6 +143,9 @@ impl AdminService {
             indexes: None,
             placement: None,
             moves: None,
+            failover: None,
+            residency: None,
+            sharding: None,
         }
     }
 
@@ -468,7 +476,7 @@ impl AdminService {
     /// # Errors
     /// 39792 for a request naming another DC; 39503 for an unregistered
     /// DC; 39504 off the leader; 39510 for a provisioner other than
-    /// `external`; 39105 for a name in use; 39511 when a precheck fails.
+    /// `external` or `kubernetes`; 39105 for a name in use; 39511 when a precheck fails.
     pub async fn register_cluster(
         &self,
         req: RegisterClusterRequest,
@@ -480,7 +488,13 @@ impl AdminService {
                 self.dc()
             )));
         }
-        if req.provisioner != ProvisionerKind::External {
+        // The Kubernetes operator registers the clusters it built through
+        // the same prechecks; VM clusters are registered by their own
+        // provisioning job.
+        if !matches!(
+            req.provisioner,
+            ProvisionerKind::External | ProvisionerKind::Kubernetes
+        ) {
             return Err(unsupported(
                 req.provisioner,
                 sprig_provision::ProvisionOp::Register,
@@ -516,7 +530,8 @@ impl AdminService {
             self.registry().clone().with_guard(guard),
             self.monitor.settings_for(None),
         )
-        .with_clock(Arc::clone(&self.clock));
+        .with_clock(Arc::clone(&self.clock))
+        .recorded_as(req.provisioner);
         let rc = RegisterCluster {
             dc,
             name: req.name,

@@ -429,7 +429,8 @@ fn is_settings(sql: &[u8], toks: &[&Token]) -> bool {
         })
     };
     if w(0, "SPRIG") {
-        return true;
+        // `SPRIG PIN`, `UNPIN` and `SHOW` are chapter 16's (`pin_stmt`).
+        return !(w(1, "PIN") || w(1, "UNPIN") || w(1, "SHOW"));
     }
     if w(0, "SHOW") && w(1, "SPRIG") {
         return true;

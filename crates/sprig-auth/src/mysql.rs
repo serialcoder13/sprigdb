@@ -428,6 +428,27 @@ impl CatalogLogins {
 
     /// Steps 1 and the account match: the target of a login whose user
     /// part may be `max_user` characters long.
+    /// The residency of the tenant `req` names (chapter 26), read before
+    /// anything of its credentials is loaded; `None` when the login names
+    /// no tenant or the tenant has none.
+    ///
+    /// # Errors
+    /// The directory's.
+    pub(crate) async fn residency_of(
+        &self,
+        req: &LoginRequest,
+        max_user: usize,
+    ) -> Result<Option<crate::account::TenantResidency>> {
+        let Ok(name) = std::str::from_utf8(&req.login_name) else {
+            return Ok(None);
+        };
+        let suffixes = self.sni_suffixes.load();
+        let Some(parsed) = parse_login(name, req.sni.as_deref(), &suffixes, max_user) else {
+            return Ok(None);
+        };
+        self.tenants.residency(&parsed.tenant).await
+    }
+
     async fn find(&self, req: &LoginRequest, max_user: usize) -> Target {
         let Ok(name) = std::str::from_utf8(&req.login_name) else {
             return Target::Decoy;
@@ -505,6 +526,8 @@ pub struct LoginService {
     audit: Arc<dyn AuditSink>,
     ips: Arc<IpLimiter>,
     delays: Arc<FailureDelays>,
+    /// Chapter 26's login hand-off: this gateway's DC and its peers.
+    handoff: Option<Arc<crate::handoff::HandoffConfig>>,
 }
 
 impl std::fmt::Debug for LoginService {
@@ -533,7 +556,23 @@ impl LoginService {
             clock,
             state: None,
             audit: Arc::new(NoAudit),
+            handoff: None,
         }
+    }
+
+    /// The same service handing logins of tenants pinned elsewhere to an
+    /// allowed DC (chapter 14, "Credential residency"; see
+    /// [`crate::handoff`]).
+    #[must_use]
+    pub fn with_handoff(mut self, handoff: Arc<crate::handoff::HandoffConfig>) -> Self {
+        self.handoff = Some(handoff);
+        self
+    }
+
+    /// The hand-off configuration, if any.
+    #[must_use]
+    pub fn handoff(&self) -> Option<&Arc<crate::handoff::HandoffConfig>> {
+        self.handoff.as_ref()
     }
 
     /// The same service counting failures and locking accounts in `state`
