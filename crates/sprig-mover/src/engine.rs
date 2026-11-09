@@ -1356,6 +1356,10 @@ impl Engine {
             self.env.maps.hold(self.job, self.token, until_ms).await?;
             // 2. Gateways drain open transactions; keep applying meanwhile.
             self.pump(Until::For(s.txn_grace), Some(reserve_at)).await?;
+            // 2b. Prepared distributed-transaction branches (chapter 18):
+            // finish them now, or a prepared branch's metadata locks stall
+            // the rename fence until it times out.
+            self.drain_prepared(reserve_at, "before the fence").await?;
             // 3. Fence the source.
             let planned = self.env.source.plan_fence().await?;
             self.claim
@@ -1377,6 +1381,23 @@ impl Engine {
                     r.receipts = vec![receipt];
                 })
                 .await?;
+            // 3b. Again, now that no session can prepare a new branch: a
+            // branch prepared after 2b (one that touched none of the
+            // fenced tables, or any branch under a fence that doesn't wait
+            // for locks) must not commit after G. When this drain finished
+            // something, G moves past its commits.
+            let mut g = fenced.pos.clone();
+            if self
+                .drain_prepared(reserve_at, "after the fence")
+                .await?
+                .finished_any()
+            {
+                g = self.env.source.binlog_pos().await?;
+            }
+            let fenced = crate::io::Fenced {
+                receipt: fenced.receipt,
+                pos: g,
+            };
             // 4-5. Apply up to G.
             if !self
                 .pump(Until::Pos(fenced.pos.clone()), Some(reserve_at))
@@ -1454,6 +1475,33 @@ impl Engine {
             Err(e) if code(&e) == Some(SprigCode::JobLeaseLost) => Err(e),
             Err(e) => self.abort_cutover(&e.to_string(), held_ms, &triggers).await,
         }
+    }
+
+    /// Chapter 18's `drain_prepared` on the source, given half the time
+    /// left before `reserve_at`: a branch still prepared afterwards aborts
+    /// the attempt (it is retried after `mover.cutover_retry_seconds`).
+    async fn drain_prepared(&self, reserve_at: Instant, when: &str) -> Result<crate::io::Drained> {
+        let left = reserve_at.saturating_duration_since(self.clock.now());
+        let d = self.env.source.drain_prepared(left / 2).await?;
+        if d.finished_any() {
+            metrics::counter!("sprig_mover_xa_drained_total", "outcome" => "commit")
+                .increment(d.committed as u64);
+            metrics::counter!("sprig_mover_xa_drained_total", "outcome" => "rollback")
+                .increment(d.rolled_back as u64);
+            tracing::info!(
+                job = %self.job.0,
+                committed = d.committed,
+                rolled_back = d.rolled_back,
+                "{when}: finished prepared distributed-transaction branches"
+            );
+        }
+        if d.remaining > 0 {
+            return Err(aborted(format!(
+                "{} prepared distributed-transaction branches of the tenant are still in doubt {when}",
+                d.remaining
+            )));
+        }
+        Ok(d)
     }
 
     /// The commit point: the flip, with the feed handoff when this attempt

@@ -52,6 +52,7 @@ pub mod jobs;
 pub mod mover;
 pub mod placement_admin;
 pub mod sharding_admin;
+pub mod txn_admin;
 pub mod types;
 
 use std::sync::Arc;
@@ -112,6 +113,8 @@ pub struct AdminService {
     failover: Option<Arc<crate::failover::role::FailoverRole>>,
     sharding: Option<Arc<crate::sharding::ShardingLoop>>,
     residency: Option<Arc<crate::residency::Residency>>,
+    /// Chapter 18's in-doubt transaction calls, built on first use.
+    txn: std::sync::OnceLock<Arc<txn_admin::TxnAdmin>>,
 }
 
 impl std::fmt::Debug for AdminService {
@@ -146,6 +149,7 @@ impl AdminService {
             failover: None,
             residency: None,
             sharding: None,
+            txn: std::sync::OnceLock::new(),
         }
     }
 

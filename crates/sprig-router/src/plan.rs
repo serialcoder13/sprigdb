@@ -1,6 +1,7 @@
 //! Plans: what the executor runs on which shards and how it combines the
 //! answers (chapter 17's `Plan`, in the forms R1 builds so far).
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use sprig_shard::KeyValueOwned;
@@ -390,6 +391,72 @@ impl ViaLookup {
     }
 }
 
+/// An `INSERT` into a parent member over several shards (chapter 15's
+/// `rk_for_insert`, chapter 17's "INSERT routing"): the executor finds
+/// each row's parent (through the parent's unique lookup, or by asking
+/// every shard), then [`ViaParent::finish`] sends each row to its
+/// parent's shard with the parent's routing hash in `_sprig_rk`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViaParent {
+    /// The `INSERT`, its column list filled in when `_sprig_rk` is added.
+    pub stmt: sqlparser::ast::Statement,
+    /// The child table, lowercase.
+    pub table: String,
+    /// The default schema its name resolved under.
+    pub default_schema: String,
+    /// The parent table, lowercase.
+    pub parent: String,
+    /// The group both live in.
+    pub group: Arc<Group>,
+    /// One per distinct parent key: the condition on the parent's
+    /// referenced columns (`` `iid` = 7 ``).
+    pub probes: Vec<String>,
+    /// One per distinct parent key, when the parent has a public unique
+    /// lookup on its one referenced column: the value to look up.
+    pub lookup: Option<(Arc<LookupRef>, Vec<KeyValueOwned>)>,
+    /// Per row of the statement, in order: its probe.
+    pub row_probe: Vec<usize>,
+    /// Rows get `_sprig_rk` (the member is `filling` or later).
+    pub fill_rk: bool,
+    /// Probes per lookup statement (`router.lookup_batch_size`).
+    pub batch: usize,
+}
+
+// Key values hold no NaN: literals only.
+impl Eq for ViaParent {}
+
+/// Where one parent key was found: per shard index, the routing hash its
+/// row holds (`None`: `_sprig_rk` wasn't read or is `NULL`).
+pub type ParentHits = Vec<(usize, Option<u64>)>;
+
+impl ViaParent {
+    /// The statement that reads probes `probes` from the parent's copy in
+    /// shard schema `schema`: one row per hit, `(probe, _sprig_rk)`.
+    #[must_use]
+    pub fn lookup_sql(&self, schema: &str, probes: std::ops::Range<usize>) -> String {
+        let q = |s: &str| format!("`{}`", s.replace('`', "``"));
+        let rk = if self.fill_rk {
+            q(sprig_shard::rk::RK_COLUMN)
+        } else {
+            "NULL".to_owned()
+        };
+        let mut out = String::new();
+        for i in probes {
+            if !out.is_empty() {
+                out.push_str(" UNION ALL ");
+            }
+            let _ = write!(
+                out,
+                "SELECT {i}, {rk} FROM {}.{} WHERE {}",
+                q(schema),
+                q(&self.parent),
+                self.probes.get(i).map_or("FALSE", String::as_str)
+            );
+        }
+        out
+    }
+}
+
 /// A plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
@@ -406,6 +473,8 @@ pub enum Plan {
     Write(WritePlan),
     /// A read or write narrowed by a unique lookup.
     ViaLookup(Box<ViaLookup>),
+    /// An `INSERT` into a parent member over several shards.
+    ViaParent(Box<ViaParent>),
     /// `EXPLAIN FORMAT=SPRIG`: the plan of the statement.
     Explain(Box<Plan>),
     /// No exact plan.
@@ -423,6 +492,7 @@ impl Plan {
             Self::LookupJoin(_) => "lookup_join",
             Self::Write(_) => "write",
             Self::ViaLookup(_) => "via_lookup",
+            Self::ViaParent(_) => "via_parent",
             Self::Explain(_) => "explain",
             Self::Reject(_) => "reject",
         }

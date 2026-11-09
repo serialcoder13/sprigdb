@@ -75,6 +75,52 @@ async fn plain_statements_are_not_typed() {
     ));
 }
 
+/// Names that merely start with `sprig_` (the connector matrix's dump
+/// databases `sprig_dump_*`) are not `SPRIG_*` calls: only the real
+/// function names, in call position, are (r4fix).
+#[tokio::test]
+async fn sprig_prefixed_names_are_not_functions() {
+    let mut f = Fake::default();
+    for sql in [
+        "CREATE DATABASE sprig_dump_1",
+        "SELECT * FROM sprig_dump_1.plain",
+        "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sprig_dump_1`.`sprig_t`",
+        "INSERT INTO sprig_dump_1.sprig_t (sprig_depth) VALUES (1)",
+        "UPDATE sprig_t SET sprig_path = 'x'",
+        "DELETE FROM sprig_dump_1.sprig_t",
+        "SELECT sprig_depth, `sprig_subtree` FROM sprig_dump_1.sprig_t",
+        "SELECT sprig_dump_1.sprig_depth(1)",
+        "SELECT 'SPRIG_DEPTH(org_unit)'",
+    ] {
+        assert!(
+            matches!(run(sql, &mut f).await.unwrap(), Handled::NotTyped),
+            "{sql}"
+        );
+    }
+    assert!(f.log.is_empty(), "{:?}", f.log);
+    let lex = LexOptions::mariadb();
+    for sql in [
+        "SELECT SPRIG_DEPTH(org_unit) FROM org_unit",
+        "SELECT * FROM t WHERE sprig_subtree (t, 1)",
+        "SELECT SPRIG_ORIGIN() FROM v",
+        "select sprig_ancestors(t, 1), Sprig_Descendants(t, 2), sprig_path(t)",
+    ] {
+        assert!(grammar::calls_sprig_function(sql.as_bytes(), &lex), "{sql}");
+    }
+    for sql in [
+        "SELECT * FROM sprig_dump_1.t",
+        "SELECT sprig_depth FROM t",
+        "SELECT sprig_dump_1.sprig_depth(1)",
+        "SELECT sprig_other(1)",
+        "SELECT `SPRIG_DEPTH`(t)",
+    ] {
+        assert!(
+            !grammar::calls_sprig_function(sql.as_bytes(), &lex),
+            "{sql}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn inserts_write_each_level() {
     let mut f = Fake::default();

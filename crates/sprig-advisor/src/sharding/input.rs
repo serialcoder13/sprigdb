@@ -22,7 +22,9 @@ use sprig_workload::fingerprint::FpKind;
 use sprig_workload::shape::{JoinOp, PredOp, Shape, WriteKind};
 use sprig_workload::store::WorkloadTables;
 
-use super::design::{Column, ForeignKey, Input, JoinEdge, Obj, Stmt, Table, Touch, Unit};
+use sprig_shard::colocate::SqlType;
+
+use super::design::{Column, ForeignKey, Input, JoinEdge, Obj, Rules, Stmt, Table, Touch, Unit};
 
 fn db_err(what: &str, e: &mysql_async::Error) -> SprigError {
     SprigError::new(SprigCode::CatalogUnavailable, format!("{what}: {e}"))
@@ -227,6 +229,7 @@ pub async fn tables(
                     class: class_of(ty, coll.as_deref()),
                     ndv: ndv(c),
                     top_share: None,
+                    sql: SqlType::parse(ty, coll.as_deref()),
                 })
                 .collect();
             let pk = idx.get("PRIMARY").map(|x| x.1.clone()).unwrap_or_default();
@@ -274,6 +277,26 @@ pub async fn tables(
     Ok((tables, fks, located))
 }
 
+/// Which equality a fingerprint kind's joins use (chapter 22, "Comparison
+/// rules per query language"), for every model whose shapes the advisor
+/// reads: SQL and what compiles to it (the Analytics API, REST and gRPC)
+/// use SQL's; MongoDB shapes (`$lookup`, recorded from R5) use MongoDB's.
+/// Key-value, Redis, vector, search and logic fingerprints carry no join
+/// edges yet (R5 and R6); `None` for them.
+#[must_use]
+pub fn join_rules(kind: FpKind) -> Option<Rules> {
+    match kind {
+        FpKind::Sql | FpKind::Analytics | FpKind::Api => Some(Rules::Sql),
+        FpKind::Mongo => Some(Rules::Mongo),
+        FpKind::Redis
+        | FpKind::Kv
+        | FpKind::Vector
+        | FpKind::Search
+        | FpKind::Logic
+        | FpKind::Txn => None,
+    }
+}
+
 fn alias_object(shape: &Shape, alias: Option<&str>) -> Option<Obj> {
     shape
         .tables
@@ -305,9 +328,9 @@ pub fn statement(
             (!writes.is_empty()).then_some(Unit { weight, writes }),
         );
     }
-    if kind != FpKind::Sql {
+    let Some(rules) = join_rules(kind) else {
         return (None, None);
-    }
+    };
     let mut touches: BTreeMap<Obj, Touch> = BTreeMap::new();
     for t in &shape.tables {
         if let Some(o) = t.object_id.map(|o| o.0)
@@ -362,6 +385,7 @@ pub fn statement(
             (known(a) && known(b) && a != b).then(|| JoinEdge {
                 a: (a, j.l.col.clone()),
                 b: (b, j.r.col.clone()),
+                rules,
             })
         })
         .collect();

@@ -168,12 +168,39 @@ impl GatewayDdl<'_> {
             .ok_or_else(|| SprigError::internal("CURRENT_USER() returned no account"))
     }
 
+    /// The `sql_mode` a stored program created by this session records
+    /// (`None`: the server's default, which `sprig_ctl` runs too), and the
+    /// lexer options of the session's text (chapter 28, R4; gaps row 27).
+    async fn session_modes(&self) -> (Option<String>, LexOptions) {
+        let bs = self.bs.lock().await;
+        let vars = bs.vars();
+        let backend = vars.vars.get("sql_mode").cloned();
+        let stored = match &vars.client_sql_mode {
+            // 3306: the client's view, with ONLY_FULL_GROUP_BY marked.
+            Some(view) => sprig_sql::compat::sqlmode::parse_mysql(view)
+                .ok()
+                .map(sprig_sql::compat::sqlmode::Mode::stored_program)
+                .or_else(|| backend.clone()),
+            None => backend.clone(),
+        };
+        let has = |n: &str| {
+            backend
+                .as_deref()
+                .is_some_and(|m| m.split(',').any(|i| i.trim().eq_ignore_ascii_case(n)))
+        };
+        let lex = LexOptions::mariadb()
+            .ansi_quotes(has("ANSI_QUOTES") || has("ANSI"))
+            .no_backslash_escapes(has("NO_BACKSLASH_ESCAPES"));
+        (stored, lex)
+    }
+
     /// A stored program: as `sprig_ctl`, with the session's account as
-    /// `DEFINER`, then the definer MariaDB recorded is checked.
-    async fn stored_program(&self, stmt: &PhysicalDdl) -> Result<()> {
+    /// `DEFINER` and the session's `sql_mode`, then the definer MariaDB
+    /// recorded is checked.
+    async fn stored_program(&self, stmt: &PhysicalDdl, mode: Option<&str>) -> Result<()> {
         let (user, host) = self.session_account().await?;
         let definer = format!("DEFINER={}@{}", bq(&user), bq(&host));
-        let sql = with_definer(&stmt.sql, &definer, &stmt.effect);
+        let sql = in_mode(&with_definer(&stmt.sql, &definer, &stmt.effect), mode);
         let st = PhysicalDdl {
             sql,
             ..stmt.clone()
@@ -365,6 +392,47 @@ fn insert_definer(sql: &[u8], lex: LexOptions, definer: &str) -> Option<Vec<u8>>
     Some(out)
 }
 
+/// `sql` run under `mode` (chapter 28, R4; gaps row 27): MariaDB records
+/// the creating session's `sql_mode` with each routine, trigger and event,
+/// as MySQL does, and parses the statement under it. `sprig_ctl`'s pooled
+/// connection gets `SET SESSION sql_mode` first, in the same request; the
+/// pool resets the connection when it comes back.
+fn in_mode(sql: &str, mode: Option<&str>) -> String {
+    match mode {
+        Some(m) => format!(
+            "SET SESSION sql_mode = {}; {sql}",
+            sprig_sql::names::rewrite::sql_string(m, false)
+        ),
+        None => sql.to_owned(),
+    }
+}
+
+/// Chapter 07 step 12: a `CREATE` or `ALTER` of a view, routine, trigger
+/// or event with its account functions and `DATABASE()` turned into
+/// lookups of logical names ([`sprig_sql::names::stored::substitute`]);
+/// `None` when there is nothing to change.
+fn names_in_body(stmt: &PhysicalDdl, lex: LexOptions) -> Option<PhysicalDdl> {
+    let kind = match &stmt.effect {
+        Effect::Create { kind, .. } | Effect::Alter { kind, .. } => *kind,
+        _ => return None,
+    };
+    if !matches!(
+        kind,
+        ObjectKind::View
+            | ObjectKind::Procedure
+            | ObjectKind::Function
+            | ObjectKind::Trigger
+            | ObjectKind::Event
+    ) {
+        return None;
+    }
+    let sql = sprig_sql::names::stored::substitute(&stmt.sql, &lex)?;
+    Some(PhysicalDdl {
+        sql,
+        ..stmt.clone()
+    })
+}
+
 /// Routines, triggers and events: with binary logging on, MariaDB refuses
 /// to create them (1419) for an account without `SUPER`, unless
 /// `log_bin_trust_function_creators` is on server-wide. R0 runs them as
@@ -414,8 +482,11 @@ fn not_sent(e: SprigError) -> SprigError {
 #[async_trait::async_trait]
 impl DdlExecutor for GatewayDdl<'_> {
     async fn execute(&self, stmt: &PhysicalDdl) -> Result<()> {
+        let (mode, lex) = self.session_modes().await;
+        let sub = names_in_body(stmt, lex);
+        let stmt = sub.as_ref().unwrap_or(stmt);
         if stored_program(&stmt.effect) {
-            return self.stored_program(stmt).await;
+            return self.stored_program(stmt, mode.as_deref()).await;
         }
         if stmt.effect.on_schema() {
             return self.ctl.execute(stmt).await;
@@ -576,7 +647,11 @@ impl MoverLocks {
                 Ok(Some(h)) => h,
                 // etcd slow or briefly unreachable: look again until the
                 // deadline rather than fail the change.
-                Err(e) if e.retryable && tokio::time::Instant::now() < deadline => {
+                Err(e)
+                    if e.retryable
+                        && e.code() != Some(SprigCode::ShardMoved)
+                        && tokio::time::Instant::now() < deadline =>
+                {
                     tracing::debug!(%tenant, error = %e, "shard locks unreadable; retrying");
                     tokio::time::sleep(self.poll).await;
                     continue;
@@ -686,7 +761,12 @@ impl<'a> ShardedDdl<'a> {
         self.route(schema).map(|(_, p)| MariaExecutor::new(p))
     }
 
-    async fn stored_program_on(&self, pool: &mysql_async::Pool, stmt: &PhysicalDdl) -> Result<()> {
+    async fn stored_program_on(
+        &self,
+        pool: &mysql_async::Pool,
+        stmt: &PhysicalDdl,
+        mode: Option<&str>,
+    ) -> Result<()> {
         let Some((user, host)) = self.definer.clone() else {
             return Err(SprigError::internal(
                 "a stored program on several shards needs the creating user",
@@ -694,7 +774,7 @@ impl<'a> ShardedDdl<'a> {
         };
         let definer = format!("DEFINER={}@{}", bq(&user), bq(&host));
         let st = PhysicalDdl {
-            sql: with_definer(&stmt.sql, &definer, &stmt.effect),
+            sql: in_mode(&with_definer(&stmt.sql, &definer, &stmt.effect), mode),
             ..stmt.clone()
         };
         MariaExecutor::new(pool.clone()).execute(&st).await?;
@@ -708,8 +788,11 @@ impl DdlExecutor for ShardedDdl<'_> {
         let Some((_, pool)) = self.route(&stmt.schema) else {
             return self.inner.execute(stmt).await;
         };
+        let (mode, lex) = self.inner.session_modes().await;
+        let sub = names_in_body(stmt, lex);
+        let stmt = sub.as_ref().unwrap_or(stmt);
         if stored_program(&stmt.effect) && !matches!(stmt.effect, Effect::Drop { .. }) {
-            return self.stored_program_on(&pool, stmt).await;
+            return self.stored_program_on(&pool, stmt, mode.as_deref()).await;
         }
         // Undo re-creations (`Effect::Restore`) keep the definer they had.
         MariaExecutor::new(pool).execute(stmt).await
@@ -816,6 +899,71 @@ mod tests {
     }
 
     const D: &str = "DEFINER=`t1_u7`@`%`";
+
+    #[test]
+    fn stored_code_runs_in_the_session_mode_with_logical_names() {
+        assert_eq!(
+            in_mode("CREATE PROCEDURE p() SELECT 1", Some("PIPES_AS_CONCAT")),
+            "SET SESSION sql_mode = 'PIPES_AS_CONCAT'; CREATE PROCEDURE p() SELECT 1"
+        );
+        assert_eq!(
+            in_mode("CREATE VIEW v AS SELECT 1", None),
+            "CREATE VIEW v AS SELECT 1"
+        );
+        let schema: SchemaName = "t1_d1_g1_s1".parse().unwrap();
+        let stmt = |sql: &str, effect: Effect| PhysicalDdl {
+            schema,
+            sql: sql.to_owned(),
+            effect,
+        };
+        let lex = LexOptions::mariadb();
+        let v = names_in_body(
+            &stmt(
+                "CREATE VIEW v AS SELECT CURRENT_USER() AS u",
+                create(ObjectKind::View),
+            ),
+            lex,
+        )
+        .unwrap();
+        assert!(
+            v.sql.contains("`__sprig_sys`.`__sprig_names_v`"),
+            "{}",
+            v.sql
+        );
+        let p = names_in_body(
+            &stmt(
+                "CREATE PROCEDURE p() SELECT DATABASE() INTO @d",
+                create(ObjectKind::Procedure),
+            ),
+            lex,
+        )
+        .unwrap();
+        assert!(p.sql.contains("WHERE `name` = DATABASE())"), "{}", p.sql);
+        // Tables and drops are left alone.
+        assert!(
+            names_in_body(
+                &stmt(
+                    "CREATE TABLE t (u VARCHAR(80) DEFAULT (CURRENT_USER()))",
+                    create(ObjectKind::Table)
+                ),
+                lex
+            )
+            .is_none()
+        );
+        assert!(
+            names_in_body(
+                &stmt(
+                    "DROP VIEW v",
+                    Effect::Drop {
+                        kind: ObjectKind::View,
+                        names: vec!["v".into()]
+                    }
+                ),
+                lex
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn stored_programs_get_the_session_account_as_definer() {
@@ -980,5 +1128,12 @@ mod mover_lock_tests {
         put(&s, &format!("mover/shard-locks/{T}/g3s7"), b"job-b").await;
         let e = locks.wait(T, &[shard(7)]).await.unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::ShardMoved));
+        // ...at once, however long the change may wait.
+        let patient = MoverLocks::new(Arc::clone(&s), Duration::from_secs(30))
+            .with_poll(Duration::from_millis(5));
+        let t0 = std::time::Instant::now();
+        let e = patient.wait(T, &[shard(7)]).await.unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::ShardMoved));
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
     }
 }

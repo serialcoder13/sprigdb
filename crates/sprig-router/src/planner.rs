@@ -296,7 +296,7 @@ fn add_suffix(p: &mut Plan, lock: &str) {
         }
         Plan::Explain(inner) => add_suffix(inner, lock),
         Plan::ViaLookup(v) => add_suffix(&mut v.plan, lock),
-        Plan::NotRouted | Plan::Write(_) | Plan::Reject(_) => {}
+        Plan::NotRouted | Plan::Write(_) | Plan::ViaParent(_) | Plan::Reject(_) => {}
     }
 }
 
@@ -389,6 +389,10 @@ fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
                     Plan::Write(w) => first_explain(&w.targets),
                     _ => reject(Reason::Unsupported, "no target to explain"),
                 },
+                Plan::ViaParent(_) => reject(
+                    Reason::Unsupported,
+                    "EXPLAIN of an INSERT whose rows follow their parents",
+                ),
                 p @ (Plan::Reject(_) | Plan::Explain(_)) => Ok(p),
             }
         }
@@ -799,7 +803,9 @@ fn analyse<'a, 'q>(select: &'q Select, cx: &PlanCtx<'a>) -> R<Block<'a, 'q>> {
             op: BinaryOperator::Eq,
             right,
         } = e
-            && let (Some(a), Some(c)) = (key_rel(&b.rels, left), key_rel(&b.rels, right))
+            && let Some((a, c)) = key_rel(&b.rels, left)
+                .zip(key_rel(&b.rels, right))
+                .or_else(|| parent_edge(&b.rels, left, right))
             && a != c
             && let (Some(ea), Some(ec)) = (b.rels[a].entry, b.rels[c].entry)
             && ea.group.same_layout(&ec.group)
@@ -892,6 +898,35 @@ fn col_rel(rels: &[Rel<'_>], e: &Expr) -> Option<(usize, String)> {
             Some((i, p[2].value.to_ascii_lowercase()))
         }
         _ => None,
+    }
+}
+
+/// A parent member joined to its own parent on its one-column foreign key
+/// (`l.iid = i.iid`, the parent's referenced column unique): each child row
+/// pairs only with its parent, which shares its shard (chapter 15's
+/// `colocation_safe` through a parent chain). The two relations, child
+/// first.
+fn parent_edge(rels: &[Rel<'_>], x: &Expr, y: &Expr) -> Option<(usize, usize)> {
+    let one = |c: &(usize, String), p: &(usize, String)| -> bool {
+        let (Some(ce), Some(pe)) = (rels[c.0].entry, rels[p.0].entry) else {
+            return false;
+        };
+        let Some(l) = &ce.parent else { return false };
+        l.parent_unique
+            && l.columns.len() == 1
+            && l.columns[0] == c.1
+            && l.parent_columns[0] == p.1
+            && pe.name == l.table
+            && !pe.is_reference()
+            && rels[p.0].default_schema == rels[c.0].default_schema
+    };
+    let (a, b) = (col_rel(rels, x)?, col_rel(rels, y)?);
+    if one(&a, &b) {
+        Some((a.0, b.0))
+    } else if one(&b, &a) {
+        Some((b.0, a.0))
+    } else {
+        None
     }
 }
 
@@ -2719,6 +2754,12 @@ fn plan_insert(stmt: &Statement, text_src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan
             upsert_safe,
         } => (key.clone(), *key_ordinal, *upsert_safe),
     };
+    if key.is_empty()
+        && let Some(link) = &entry.parent
+    {
+        // Chapter 15: a parent member's rows go where their parent is.
+        return parents::plan_insert(stmt, text_src, entry, link, &default_schema, cx);
+    }
     if (ins.on.is_some() || ins.replace_into) && !upsert_safe {
         return reject(
             Reason::UpsertUnique,
@@ -2974,19 +3015,41 @@ fn one_shard_insert(
     loc: Loc,
     default_schema: &str,
 ) -> Target {
-    let s = &entry.group.shards[shard];
+    shard_insert(
+        stmt,
+        src,
+        &entry.group,
+        &entry.name,
+        shard,
+        loc,
+        default_schema,
+    )
+}
+
+/// `stmt` (an `INSERT` into `table`, named at `loc`) for shard `shard` of
+/// `group`.
+fn shard_insert(
+    stmt: &Statement,
+    src: Option<&Src<'_>>,
+    group: &crate::topology::Group,
+    table: &str,
+    shard: usize,
+    loc: Loc,
+    default_schema: &str,
+) -> Target {
+    let s = &group.shards[shard];
     let mut m = HashMap::new();
     m.insert(loc, s.schema.clone());
     let mut by = HashMap::new();
     by.insert(
-        (default_schema.to_owned(), entry.name.clone()),
+        (default_schema.to_owned(), table.to_owned()),
         s.schema.clone(),
     );
     Target {
         cluster: s.cluster.clone(),
         shard: s.shard,
         sql: pass_sql(stmt, src, &m, &by),
-        at: entry.group.at(shard),
+        at: group.at(shard),
     }
 }
 
@@ -3046,6 +3109,21 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     let key = entry.key().unwrap_or_default().to_owned();
     if assignments.iter().any(|a| assigns_key(&a.target, &key)) {
         return reject(Reason::KeyChange, "an UPDATE of the distribution key");
+    }
+    // A parent member's foreign key decides its shard and `_sprig_rk`
+    // (chapter 15): changing it is a key change, unless the group has one
+    // shard and no `_sprig_rk` yet (nothing depends on it).
+    if let Some(link) = &entry.parent
+        && (entry.fill_rk || entry.group.shards.len() > 1)
+        && link
+            .columns
+            .iter()
+            .any(|c| assignments.iter().any(|a| assigns_key(&a.target, c)))
+    {
+        return reject(
+            Reason::KeyChange,
+            "an UPDATE of the foreign key a parent member follows",
+        );
     }
     lookups::check_gap(entry)?;
     lookups::check_update(entry, &|c| {
@@ -3232,6 +3310,7 @@ fn empty_select(
 }
 
 mod lookups;
+mod parents;
 
 pub(crate) use lookups::decode_read;
 

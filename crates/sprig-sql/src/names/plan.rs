@@ -48,6 +48,9 @@ pub struct PlanCtx<'a> {
     pub sessions: Option<&'a dyn SessionSource>,
     /// Which databases the user may see (chapter 29); all without it.
     pub visible: Option<&'a (dyn Fn(&LogicalDb) -> bool + Sync)>,
+    /// The session's cluster has chapter 07's name lookup (step 12): see
+    /// [`InfoSchemaCtx::stored_names`].
+    pub stored_names: bool,
 }
 
 impl std::fmt::Debug for PlanCtx<'_> {
@@ -70,7 +73,15 @@ impl<'a> PlanCtx<'a> {
             registry,
             sessions: None,
             visible: None,
+            stored_names: false,
         }
+    }
+
+    /// With chapter 07's name lookup on the session's cluster.
+    #[must_use]
+    pub fn stored_names(mut self, on: bool) -> Self {
+        self.stored_names = on;
+        self
     }
 
     /// With a visibility.
@@ -232,6 +243,7 @@ fn first_word(tokens: &[Token], sql: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+#[allow(clippy::too_many_lines)] // one arm per statement kind
 fn plan_statement(
     text: Vec<u8>,
     info: &StatementInfo,
@@ -317,6 +329,7 @@ fn plan_statement(
         visible: ctx.visible,
         in_information_schema: in_is,
         user: ctx.rewrite.account.map(|a| (a.user, a.client_host)),
+        stored_names: ctx.stored_names,
     };
     if !info.system_refs.is_empty() || in_is {
         if let Some(r) = rewrite_information_schema(&text, info.kind, &is_ctx)? {

@@ -264,6 +264,11 @@ pub fn map_column_def(cd: &mut ColumnDef, ctx: &OutputCtx<'_>) -> usize {
         &mut cd.name,
         &mut cd.org_name,
     ] {
+        // A column named after an expression with a stored body's lookup
+        // (chapter 07 step 12) shows the call instead.
+        if let Cow::Owned(o) = super::stored::restore(field) {
+            *field = bytes::Bytes::from(o);
+        }
         let m = map_bytes(field, ctx);
         if let Cow::Owned(o) = m.text {
             foreign += m.foreign;

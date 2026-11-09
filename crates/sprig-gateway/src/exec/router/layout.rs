@@ -55,6 +55,8 @@ pub(crate) struct MemberRow {
     /// `rk_state` is `filling`, `backfilling` or `ready`: writes carry
     /// `_sprig_rk`.
     pub rk_fill: bool,
+    /// A parent member's `parent_fk` (the constraint to its parent).
+    pub parent_fk: Option<String>,
 }
 
 /// One `reference_tables` row.
@@ -193,10 +195,19 @@ impl CatalogExtension for ShardingExtension {
             ))
             .await
             .map_err(db_err)?;
-        let members: Vec<(u64, u32, u32, String, Option<String>, Option<String>, String)> = conn
+        let members: Vec<(
+            u64,
+            u32,
+            u32,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        )> = conn
             .query(format!(
                 "SELECT m.object_id, m.group_id, m.db_id, m.routing, CAST(m.key_columns AS CHAR), \
-                        v.create_sql, CAST(m.rk_state AS CHAR) \
+                        v.create_sql, CAST(m.rk_state AS CHAR), m.parent_fk \
                  FROM `{schema}`.group_members m \
                  LEFT JOIN `{schema}`.objects o ON o.object_id = m.object_id \
                  LEFT JOIN `{schema}`.schema_versions v \
@@ -242,15 +253,16 @@ impl CatalogExtension for ShardingExtension {
                 .and_then(|v| KeySpec::from_json(&v).ok());
             state.groups.push(GroupRow { id, kind, spec });
         }
-        for (object, group, db, routing, cols, create_sql, rk) in members {
+        for (object, group, db, routing, cols, create_sql, rk, parent_fk) in members {
             state.members.push(MemberRow {
                 object,
                 group,
                 db,
-                routing,
                 key_columns: cols.and_then(|c| serde_json::from_str(&c).ok()),
                 create_sql,
                 rk_fill: rk != "absent",
+                parent_fk: (routing == "parent").then_some(parent_fk).flatten(),
+                routing,
             });
         }
         for (id, object, index_name, cols, unique, origin, group, st) in lookups {
@@ -480,6 +492,7 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
                     .flatten(),
                 create_sql: m.create_sql.clone(),
                 fill_rk: m.rk_fill,
+                parent_fk: m.parent_fk.clone(),
                 lookups: state
                     .lookups
                     .iter()

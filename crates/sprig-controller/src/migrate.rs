@@ -379,7 +379,12 @@ impl DcMoves {
             .filter_map(|j| j.source.clone())
             .collect();
         let to_cluster = self
-            .target_cluster(&to, req.cluster.as_deref(), &retained, e.allowed_dcs().as_ref())
+            .target_cluster(
+                &to,
+                req.cluster.as_deref(),
+                &retained,
+                e.allowed_dcs().as_ref(),
+            )
             .await?;
         let budget = req
             .max_pause_ms

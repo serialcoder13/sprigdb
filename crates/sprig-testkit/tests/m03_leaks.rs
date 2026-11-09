@@ -317,6 +317,11 @@ async fn run(conn: &mut Conn, wire: &Wire, sql: &str) -> Outcome {
     }
     for chunk in wire.take() {
         out.leaks.extend(physical_name_leaks(&chunk));
+        // Chapter 07 step 12: the name lookup inside stored bodies never
+        // shows (SHOW CREATE, definitions, generated column names).
+        if chunk.windows(13).any(|w| w == b"__sprig_names") {
+            out.leaks.push("__sprig_names".into());
+        }
     }
     out.leaks.extend(col_leaks);
     out.leaks.sort();
@@ -358,6 +363,21 @@ const SETUP: &[&str] = &[
     "CREATE DATABASE {vault}",
     "CREATE TABLE {vault}.secrets (id INT PRIMARY KEY, v VARCHAR(80))",
     "INSERT INTO {vault}.secrets VALUES (1, '{secret}')",
+    // Account functions and DATABASE() inside views and stored code
+    // (chapter 07 step 12, R4): they run inside MariaDB as the backend
+    // account, in the physical schema.
+    "CREATE VIEW {db}.v_who AS SELECT CURRENT_USER(), USER() AS u, SESSION_USER() AS su, \
+     DATABASE() AS d, CURRENT_USER AS cu2",
+    "CREATE SQL SECURITY INVOKER VIEW {db}.v_inv AS SELECT CURRENT_USER() AS cu, SCHEMA() AS s",
+    "CREATE VIEW {db}.v_mine AS SELECT id, msg FROM {db}.audit WHERE msg = CURRENT_USER()",
+    "CREATE FUNCTION {db}.f_who() RETURNS VARCHAR(300) DETERMINISTIC \
+     RETURN CONCAT_WS('|', CURRENT_USER(), USER(), DATABASE())",
+    "CREATE PROCEDURE {db}.p_who() BEGIN SELECT CURRENT_USER(), USER(), DATABASE(); \
+     INSERT INTO {db}.audit (msg) VALUES (CONCAT_WS('|', CURRENT_USER(), DATABASE())); END",
+    "CREATE TRIGGER {db}.trg_parent_bi BEFORE INSERT ON {db}.parent FOR EACH ROW \
+     SET NEW.name = IF(NEW.name = 'who', CONCAT_WS('|', CURRENT_USER(), SESSION_USER(), DATABASE()), NEW.name)",
+    "CREATE EVENT {db}.ev_who ON SCHEDULE EVERY 1 DAY DISABLE \
+     DO INSERT INTO {db}.audit (msg) VALUES (CONCAT_WS('|', CURRENT_USER(), USER(), DATABASE()))",
 ];
 
 /// The corpus: label, statement, expectation.
@@ -439,6 +459,183 @@ const CORPUS: &[(&str, &str, Expect)] = &[
         Expect::Any,
     ),
     ("show grants", "SHOW GRANTS", Expect::Any),
+    // Account functions and DATABASE() inside views and stored code
+    // (chapter 07 step 12, R4). `$` before a value keeps the output scrub
+    // from mapping it (it isn't a name boundary there) while the detector
+    // still sees a `t<digits>_` after it: these pass only if MariaDB itself
+    // computed the logical name.
+    (
+        "view: account functions",
+        "SELECT * FROM {db}.v_who",
+        Expect::Ok,
+    ),
+    (
+        "view: values at the source",
+        "SELECT CONCAT('$', cu2, '$', u, '$', d) FROM {db}.v_who",
+        Expect::Ok,
+    ),
+    ("invoker view", "SELECT * FROM {db}.v_inv", Expect::Ok),
+    (
+        "function: account functions",
+        "SELECT CONCAT('$', {db}.f_who())",
+        Expect::Ok,
+    ),
+    (
+        "subquery over a view and a function",
+        "SELECT (SELECT cu2 FROM {db}.v_who), {db}.f_who()",
+        Expect::Ok,
+    ),
+    (
+        "procedure: account functions",
+        "CALL {db}.p_who()",
+        Expect::Ok,
+    ),
+    (
+        "trigger: account functions",
+        "INSERT INTO {db}.parent VALUES (9, 'who')",
+        Expect::Ok,
+    ),
+    (
+        "stored rows",
+        "SELECT CONCAT('$', name) FROM {db}.parent WHERE id = 9 \
+         UNION ALL SELECT CONCAT('$', msg) FROM {db}.audit",
+        Expect::Ok,
+    ),
+    (
+        "view comparing CURRENT_USER()",
+        "SELECT COUNT(*) FROM {db}.v_mine",
+        Expect::Ok,
+    ),
+    (
+        "show create view: account functions",
+        "SHOW CREATE VIEW {db}.v_who",
+        Expect::Ok,
+    ),
+    (
+        "show create function: account functions",
+        "SHOW CREATE FUNCTION {db}.f_who",
+        Expect::Ok,
+    ),
+    (
+        "show create procedure: account functions",
+        "SHOW CREATE PROCEDURE {db}.p_who",
+        Expect::Ok,
+    ),
+    (
+        "show create trigger: account functions",
+        "SHOW CREATE TRIGGER {db}.trg_parent_bi",
+        Expect::Ok,
+    ),
+    (
+        "show create event",
+        "SHOW CREATE EVENT {db}.ev_who",
+        Expect::Ok,
+    ),
+    ("show events", "SHOW EVENTS FROM {db}", Expect::Ok),
+    (
+        "is views: definitions",
+        "SELECT TABLE_NAME, DEFINER, VIEW_DEFINITION FROM information_schema.VIEWS \
+         WHERE TABLE_SCHEMA = '{db}'",
+        Expect::Ok,
+    ),
+    (
+        "is routines: definitions",
+        "SELECT ROUTINE_NAME, DEFINER, ROUTINE_DEFINITION, SQL_MODE FROM information_schema.ROUTINES \
+         WHERE ROUTINE_SCHEMA = '{db}'",
+        Expect::Ok,
+    ),
+    (
+        "is triggers: definitions",
+        "SELECT TRIGGER_NAME, DEFINER, ACTION_STATEMENT FROM information_schema.TRIGGERS \
+         WHERE EVENT_OBJECT_SCHEMA = '{db}'",
+        Expect::Ok,
+    ),
+    (
+        "is events: definitions",
+        "SELECT EVENT_NAME, DEFINER, EVENT_DEFINITION FROM information_schema.EVENTS \
+         WHERE EVENT_SCHEMA = '{db}'",
+        Expect::Ok,
+    ),
+    (
+        "is views: definer at the source",
+        "SELECT CONCAT('$', DEFINER), HEX(DEFINER) = HEX(CONCAT(SUBSTRING_INDEX(CURRENT_USER(), '@', 1), '@%')) \
+         FROM information_schema.VIEWS WHERE TABLE_SCHEMA = '{db}'",
+        Expect::Ok,
+    ),
+    (
+        "is routines: definer at the source",
+        "SELECT CONCAT('$', DEFINER) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '{db}'",
+        Expect::Ok,
+    ),
+    (
+        "is triggers: definer at the source",
+        "SELECT CONCAT('$', DEFINER) FROM information_schema.TRIGGERS \
+         WHERE EVENT_OBJECT_SCHEMA = '{db}'",
+        Expect::Ok,
+    ),
+    (
+        "is events: definer at the source",
+        "SELECT CONCAT('$', DEFINER) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = '{db}'",
+        Expect::Ok,
+    ),
+    (
+        "is user_privileges: grantee at the source",
+        "SELECT CONCAT('$', GRANTEE) FROM information_schema.USER_PRIVILEGES",
+        Expect::Ok,
+    ),
+    (
+        "is schema_privileges: grantee at the source",
+        "SELECT CONCAT('$', GRANTEE) FROM information_schema.SCHEMA_PRIVILEGES",
+        Expect::Ok,
+    ),
+    (
+        "definer copied into a table",
+        "INSERT INTO {db}.audit (msg) SELECT DEFINER FROM information_schema.VIEWS \
+         WHERE TABLE_SCHEMA = '{db}' LIMIT 1",
+        Expect::Ok,
+    ),
+    (
+        "copied definer read back",
+        "SELECT CONCAT('$', msg) FROM {db}.audit",
+        Expect::Ok,
+    ),
+    (
+        "account table in a view",
+        "CREATE VIEW {db}.v_up AS SELECT GRANTEE FROM information_schema.USER_PRIVILEGES",
+        Expect::Any,
+    ),
+    (
+        "account table view rows",
+        "SELECT CONCAT('$', GRANTEE) FROM {db}.v_up",
+        Expect::Any,
+    ),
+    (
+        "account table in a function",
+        "CREATE FUNCTION {db}.f_up() RETURNS VARCHAR(300) DETERMINISTIC \
+         RETURN (SELECT MAX(GRANTEE) FROM information_schema.USER_PRIVILEGES)",
+        Expect::Any,
+    ),
+    (
+        "account table function value",
+        "SELECT CONCAT('$', {db}.f_up())",
+        Expect::Any,
+    ),
+    (
+        "account function in a column default",
+        "CREATE TABLE {db}.t_dflt (id INT, u VARCHAR(120) DEFAULT (CURRENT_USER()), \
+         d VARCHAR(120) DEFAULT (DATABASE()))",
+        Expect::Any,
+    ),
+    (
+        "column default row",
+        "INSERT INTO {db}.t_dflt (id) VALUES (1)",
+        Expect::Any,
+    ),
+    (
+        "column default value",
+        "SELECT CONCAT('$', u, '$', d) FROM {db}.t_dflt",
+        Expect::Any,
+    ),
     // Account statements (chapter 29, M0.5): grantees, grant targets and
     // errors name logical databases and tenant users only.
     (
@@ -1199,7 +1396,11 @@ async fn leak_suite() {
 /// are plain users of the Compose single node, they are left out rather
 /// than changing `log_bin_trust_function_creators` on a shared server.
 fn needs_super_in_baseline(sql: &str) -> bool {
-    sql.contains("trg_child_ai") || sql.contains("f_double")
+    sql.contains("trg_child_ai")
+        || sql.contains("f_double")
+        || sql.contains("f_who")
+        || sql.contains("f_up")
+        || sql.contains("trg_parent_bi")
 }
 
 /// The tenant at `i` mutably and the other one.

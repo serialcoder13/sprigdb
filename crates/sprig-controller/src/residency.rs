@@ -41,7 +41,7 @@
 pub mod policy;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -118,11 +118,13 @@ impl ResidencyBlock {
     pub fn of(raw: &Map<String, Value>) -> Option<Self> {
         let v = raw.get("residency").filter(|v| !v.is_null())?;
         // A block that doesn't parse allows nothing (fail closed).
-        Some(serde_json::from_value(v.clone()).unwrap_or_else(|_| ResidencyBlock {
-            state: "violated".into(),
-            pending: vec!["the residency block doesn't parse".into()],
-            ..ResidencyBlock::default()
-        }))
+        Some(
+            serde_json::from_value(v.clone()).unwrap_or_else(|_| ResidencyBlock {
+                state: "violated".into(),
+                pending: vec!["the residency block doesn't parse".into()],
+                ..ResidencyBlock::default()
+            }),
+        )
     }
 
     /// The allowed set.
@@ -321,10 +323,9 @@ impl fmt::Display for Step {
                 list_dcs(outside)
             ),
             Step::StopMove(d) => write!(f, "the move in progress to {d} is refused at its commit"),
-            Step::PauseFeed { dc, name } => write!(
-                f,
-                "pause change-feed subscription {name}, consumed in {dc}"
-            ),
+            Step::PauseFeed { dc, name } => {
+                write!(f, "pause change-feed subscription {name}, consumed in {dc}")
+            }
         }
     }
 }
@@ -366,24 +367,7 @@ pub fn plan(f: &Facts, allowed: &BTreeSet<DcId>, targets: &[DcId]) -> Plan {
     {
         p.steps.push(Step::StopMove(to.clone()));
     }
-    if !allowed.contains(&f.home_dc) {
-        if let Some(pin) = &f.pinned_dc {
-            p.blocking.push(format!(
-                "the tenant is pinned to {pin}, outside the allowed DCs: sprigctl tenant unpin {} first",
-                f.name
-            ));
-        } else if let Some(to) = targets.iter().find(|d| allowed.contains(d)) {
-            p.steps.push(Step::MoveHome {
-                from: f.home_dc.clone(),
-                to: to.clone(),
-            });
-        } else {
-            p.blocking.push(format!(
-                "no allowed DC ({}) has an active cluster that keeps every copy inside the allowed DCs",
-                list_dcs(allowed)
-            ));
-        }
-    } else {
+    if allowed.contains(&f.home_dc) {
         for c in &f.clusters {
             let outside: BTreeSet<DcId> = c.dcs.difference(allowed).cloned().collect();
             if !outside.is_empty() {
@@ -393,6 +377,21 @@ pub fn plan(f: &Facts, allowed: &BTreeSet<DcId>, targets: &[DcId]) -> Plan {
                 });
             }
         }
+    } else if let Some(pin) = &f.pinned_dc {
+        p.blocking.push(format!(
+            "the tenant is pinned to {pin}, outside the allowed DCs: sprigctl tenant unpin {} first",
+            f.name
+        ));
+    } else if let Some(to) = targets.iter().find(|d| allowed.contains(d)) {
+        p.steps.push(Step::MoveHome {
+            from: f.home_dc.clone(),
+            to: to.clone(),
+        });
+    } else {
+        p.blocking.push(format!(
+            "no allowed DC ({}) has an active cluster that keeps every copy inside the allowed DCs",
+            list_dcs(allowed)
+        ));
     }
     for s in &f.standby_dcs {
         if !allowed.contains(s) {
@@ -677,12 +676,8 @@ impl Residency {
     /// Allowed DCs that could take a home: active, full, with an active
     /// cluster whose copies all stay inside `allowed`; nearest to `from`
     /// first by the latency matrix, then by id.
-    async fn targets(
-        &self,
-        dcs: &[DcRecord],
-        allowed: &BTreeSet<DcId>,
-        from: &DcId,
-    ) -> Vec<DcId> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // RTT ms, sorting only
+    async fn targets(&self, dcs: &[DcRecord], allowed: &BTreeSet<DcId>, from: &DcId) -> Vec<DcId> {
         let matrix = crate::latency::Matrix::read(&*self.global)
             .await
             .unwrap_or_default();
@@ -708,7 +703,7 @@ impl Residency {
             (
                 matrix
                     .rtt(from.as_str(), d.as_str())
-                    .map_or(u64::MAX, |r| (r * 1000.0) as u64),
+                    .map_or(u64::MAX, |r| (r.max(0.0) * 1000.0) as u64),
                 d.clone(),
             )
         });
@@ -819,11 +814,12 @@ impl Residency {
                 if let Some(Some(set)) = allowed.get(&a)
                     && own.intersection(set).next().is_none()
                 {
-                    msg.push_str(&format!(
+                    let _ = write!(
+                        msg,
                         "; ancestor {} allows only {}",
                         ae.name(),
                         list_dcs(set)
-                    ));
+                    );
                     break;
                 }
                 up = ae.parent();
@@ -1048,9 +1044,9 @@ impl Residency {
         };
         let set_v: Vec<DcId> = set.iter().cloned().collect();
         let at = now_ms(&*self.clock);
-        let write = block.as_ref().is_none_or(|b| {
-            b.allowed_dcs != set_v || b.state != state || b.pending != pending
-        });
+        let write = block
+            .as_ref()
+            .is_none_or(|b| b.allowed_dcs != set_v || b.state != state || b.pending != pending);
         if write {
             home::update_home(&*self.global, tenant, |x| {
                 let mut b = ResidencyBlock::of(&x.raw).unwrap_or_default();
@@ -1058,7 +1054,7 @@ impl Residency {
                     return Ok(false);
                 }
                 b.allowed_dcs.clone_from(&set_v);
-                b.state = state.to_owned();
+                state.clone_into(&mut b.state);
                 b.pending.clone_from(&pending);
                 b.updated_ms = at;
                 x.raw.insert(
@@ -1089,7 +1085,8 @@ impl Residency {
             && let Ok(page) = tier.list(&prefix, ListOpts::default()).await
         {
             for kv in page.kvs {
-                if Record::<ShardMap>::decode(&kv.value).is_ok_and(|m| m.body.role == MapRole::Standby)
+                if Record::<ShardMap>::decode(&kv.value)
+                    .is_ok_and(|m| m.body.role == MapRole::Standby)
                 {
                     let _ = tier
                         .txn(Txn {
@@ -1106,11 +1103,7 @@ impl Residency {
             if !list.contains(dc) {
                 return Ok(false);
             }
-            let kept: Vec<&str> = list
-                .iter()
-                .filter(|d| *d != dc)
-                .map(DcId::as_str)
-                .collect();
+            let kept: Vec<&str> = list.iter().filter(|d| *d != dc).map(DcId::as_str).collect();
             e.raw.insert("standby_dcs".into(), json!(kept));
             Ok(true)
         })
@@ -1257,7 +1250,11 @@ pub fn child_block(
 ///
 /// # Errors
 /// The store's errors; 39070 when the entry kept changing.
-pub async fn write_block(global: &dyn MetaStore, id: TenantId, block: &ResidencyBlock) -> Result<()> {
+pub async fn write_block(
+    global: &dyn MetaStore,
+    id: TenantId,
+    block: &ResidencyBlock,
+) -> Result<()> {
     let v = serde_json::to_value(block).map_err(|e| SprigError::internal(e.to_string()))?;
     home::update_home(global, id, |e| {
         e.raw.insert("residency".into(), v.clone());

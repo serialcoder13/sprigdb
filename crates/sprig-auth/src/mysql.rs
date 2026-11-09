@@ -168,6 +168,20 @@ pub trait BackendResolver: Send + Sync + 'static {
     /// # Errors
     /// 39998 if nothing is configured for the tenant.
     fn backend(&self, tenant: &TenantInfo, user: &AuthUser) -> Result<BackendTarget>;
+
+    /// The backend target of user `user_id` of `tenant`, whose login
+    /// another DC decided (chapter 26's hand-off): this gateway's own
+    /// account and credential on `cluster`, never the deciding gateway's.
+    /// `None` when this resolver needs the catalog row.
+    fn backend_for(
+        &self,
+        tenant: &TenantInfo,
+        user_id: UserId,
+        cluster: &ClusterId,
+    ) -> Option<Result<BackendTarget>> {
+        let _ = (tenant, user_id, cluster);
+        None
+    }
 }
 
 /// One backend account per tenant, from configuration: the interim mapping
@@ -237,6 +251,26 @@ impl StaticBackends {
 }
 
 impl BackendResolver for StaticBackends {
+    fn backend_for(
+        &self,
+        tenant: &TenantInfo,
+        _user_id: UserId,
+        _cluster: &ClusterId,
+    ) -> Option<Result<BackendTarget>> {
+        Some(
+            self.tenants
+                .get(&tenant.id)
+                .or(self.default.as_ref())
+                .cloned()
+                .ok_or_else(|| {
+                    SprigError::new(
+                        SprigCode::ConfigInvalid,
+                        format!("no backend configured for tenant {}", tenant.name),
+                    )
+                }),
+        )
+    }
+
     fn backend(&self, tenant: &TenantInfo, _user: &AuthUser) -> Result<BackendTarget> {
         self.tenants
             .get(&tenant.id)
@@ -434,6 +468,21 @@ impl CatalogLogins {
     ///
     /// # Errors
     /// The directory's.
+    /// This gateway's backend target for a principal another DC accepted
+    /// (see [`BackendResolver::backend_for`]).
+    pub(crate) fn local_backend(&self, p: &Principal) -> Option<Result<BackendTarget>> {
+        let (Some(tenant), Some(user_id)) = (p.tenant, p.user_id) else {
+            return None;
+        };
+        let info = TenantInfo {
+            id: tenant,
+            name: p.tenant_name.clone().unwrap_or_default(),
+            can_log_in: true,
+            suspended: false,
+        };
+        self.backends.backend_for(&info, user_id, &p.backend.cluster)
+    }
+
     pub(crate) async fn residency_of(
         &self,
         req: &LoginRequest,

@@ -31,6 +31,7 @@ use super::map::{NameMap, Purpose};
 use super::output::{OutputCtx, map_bytes, map_column_def, map_text};
 use super::rewrite::unrewrite;
 use super::show::ShowKind;
+use super::stored;
 
 /// A text row; `None` is SQL NULL.
 pub type TextRow = Vec<Option<Bytes>>;
@@ -146,6 +147,9 @@ pub struct ResultMapper {
     persona: Persona,
     roles: Vec<Option<Role>>,
     fixed: Option<Vec<ColumnDef>>,
+    /// On 3306, the columns holding a stored program's `sql_mode`, shown
+    /// in MySQL's names ([`crate::compat::sqlmode::stored_program_view`]).
+    sql_mode_cols: Vec<usize>,
     group: Vec<TextRow>,
     foreign: u64,
     hidden: u64,
@@ -159,6 +163,7 @@ impl ResultMapper {
             persona: Persona::MariaDb,
             roles: Vec::new(),
             fixed: None,
+            sql_mode_cols: Vec::new(),
             group: Vec::new(),
             foreign: 0,
             hidden: 0,
@@ -243,6 +248,21 @@ impl ResultMapper {
         }
         for d in defs.iter_mut() {
             self.foreign += map_column_def(d, ctx) as u64;
+        }
+        if self.persona == Persona::MySql84 && self.mode != Mode::Relay {
+            self.sql_mode_cols = defs
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| {
+                    let org = if d.org_name.is_empty() {
+                        &d.name
+                    } else {
+                        &d.org_name
+                    };
+                    org.eq_ignore_ascii_case(b"sql_mode")
+                })
+                .map(|(i, _)| i)
+                .collect();
         }
         let Mode::Show(kind) = self.mode else {
             return;
@@ -348,7 +368,19 @@ impl ResultMapper {
     }
 
     fn scrub_row(&mut self, mut row: TextRow, ctx: &OutputCtx<'_>) -> TextRow {
+        for &i in &self.sql_mode_cols {
+            if let Some(Some(v)) = row.get_mut(i) {
+                let shown =
+                    crate::compat::sqlmode::stored_program_view(&String::from_utf8_lossy(v));
+                *v = Bytes::from(shown);
+            }
+        }
         for v in row.iter_mut().flatten() {
+            // Chapter 07 step 12: lookups in stored bodies read back as
+            // the calls the client wrote.
+            if let std::borrow::Cow::Owned(o) = stored::restore(v) {
+                *v = Bytes::from(o);
+            }
             let m = map_bytes(v, ctx);
             if let std::borrow::Cow::Owned(o) = m.text {
                 self.foreign += m.foreign as u64;
@@ -442,6 +474,7 @@ impl ResultMapper {
     }
 
     fn definition(&mut self, text: &str, ctx: &OutputCtx<'_>) -> String {
+        let text = stored::restore_str(text);
         let un = unrewrite(text.as_bytes(), ctx.map, &ctx.lex);
         let m = map_bytes(&un, ctx);
         self.foreign += m.foreign as u64;

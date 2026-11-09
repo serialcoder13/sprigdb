@@ -16,9 +16,10 @@
 //!   truncates).
 //!
 //! Values are parsed as MySQL 8.4 does ([`parse_mysql`]): names in any
-//! case, empty items skipped, any other item (MariaDB-only modes, modes
-//! MySQL 8.0 removed such as `NO_AUTO_CREATE_USER`, stray spaces) fails
-//! with 1231. A number is the set of MySQL's bits.
+//! case, empty items skipped, any other item (modes MySQL 8.0 removed
+//! such as `MAXDB`, stray spaces) fails with 1231. The MariaDB-only names
+//! SprigDB's own dumps can carry (`NO_AUTO_CREATE_USER`, ...) are accepted
+//! and ignored. A number is the set of MySQL's bits.
 
 /// One mode: its MySQL 8.4 bit (the display order), its name, and whether
 /// MariaDB knows it.
@@ -220,6 +221,19 @@ const fn expand(bits: u64) -> u64 {
     b
 }
 
+/// MariaDB-only modes that SprigDB's own output can carry: stored programs
+/// keep the `sql_mode` MariaDB recorded, and `mysqldump` through 3306
+/// writes it back as `SET sql_mode = '...,NO_AUTO_CREATE_USER,...'`
+/// (measured with the M0.3 harness). They are accepted and ignored, so a
+/// dump restores; MySQL 8.4 itself would refuse them with 1231.
+const MARIADB_REPORTED: &[&str] = &[
+    "NO_AUTO_CREATE_USER",
+    "TIME_ROUND_FRACTIONAL",
+    "EMPTY_STRING_IS_NULL",
+    "SIMULTANEOUS_ASSIGNMENT",
+    "IGNORE_BAD_TABLE_OPTIONS",
+];
+
 /// Parses a value the MySQL way: comma-separated names, any case, empty
 /// items skipped. The first item MySQL 8.4 doesn't know is the error.
 ///
@@ -228,7 +242,11 @@ const fn expand(bits: u64) -> u64 {
 pub fn parse_mysql(text: &str) -> Result<Mode, BadValue> {
     let mut bits = 0;
     for item in text.split(',') {
-        if item.is_empty() {
+        if item.is_empty()
+            || MARIADB_REPORTED
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(item))
+        {
             continue;
         }
         match by_name(item) {
@@ -304,6 +322,52 @@ impl Mode {
     }
 }
 
+/// The MariaDB-only name that marks `ONLY_FULL_GROUP_BY` in a stored
+/// program's recorded `sql_mode` (see [`Mode::stored_program`]). MariaDB
+/// 11.8 gives it no meaning inside stored code: it only stops `GRANT` from
+/// creating accounts, which tenants' code can't do.
+pub const ONLY_FULL_GROUP_BY_MARK: &str = "NO_AUTO_CREATE_USER";
+
+impl Mode {
+    /// The mode a stored program created by a 3306 session records: the
+    /// session's backend value, plus [`ONLY_FULL_GROUP_BY_MARK`] when the
+    /// client's view has `ONLY_FULL_GROUP_BY` (which MariaDB doesn't run),
+    /// so `SHOW CREATE` shows it again ([`stored_program_view`]).
+    #[must_use]
+    pub fn stored_program(self) -> String {
+        let mut b = self.backend();
+        if self.only_full_group_by() {
+            if !b.is_empty() {
+                b.push(',');
+            }
+            b.push_str(ONLY_FULL_GROUP_BY_MARK);
+        }
+        b
+    }
+}
+
+/// What 3306 shows as a stored program's `sql_mode` (`SHOW CREATE
+/// PROCEDURE`, `information_schema.ROUTINES.SQL_MODE`, ...), from the
+/// value MariaDB recorded: MySQL's names, `ONLY_FULL_GROUP_BY` where
+/// [`ONLY_FULL_GROUP_BY_MARK`] is, and `TIME_TRUNCATE_FRACTIONAL` where
+/// `TIME_ROUND_FRACTIONAL` is missing (MariaDB truncates there).
+#[must_use]
+pub fn stored_program_view(recorded: &str) -> String {
+    let has = |n: &str| {
+        recorded
+            .split(',')
+            .any(|i| i.trim().eq_ignore_ascii_case(n))
+    };
+    let mut m = from_mariadb(recorded);
+    if has(ONLY_FULL_GROUP_BY_MARK) {
+        m.0 |= ONLY_FULL_GROUP_BY;
+    }
+    if !has("TIME_ROUND_FRACTIONAL") {
+        m.0 |= TIME_TRUNCATE_FRACTIONAL;
+    }
+    m.render()
+}
+
 /// Whether two `sql_mode` strings name the same modes (any order, any
 /// case).
 #[must_use]
@@ -324,6 +388,31 @@ pub fn same_modes(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_programs_record_and_show_the_client_mode() {
+        let d = MYSQL84_DEFAULT;
+        let rec = d.stored_program();
+        assert_eq!(
+            rec,
+            "STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,\
+             NO_ENGINE_SUBSTITUTION,TIME_ROUND_FRACTIONAL,NO_AUTO_CREATE_USER"
+        );
+        assert_eq!(stored_program_view(&rec), d.render());
+        let p = parse_mysql("PIPES_AS_CONCAT").unwrap();
+        assert_eq!(p.stored_program(), "PIPES_AS_CONCAT,TIME_ROUND_FRACTIONAL");
+        assert_eq!(stored_program_view(&p.stored_program()), "PIPES_AS_CONCAT");
+        // MariaDB's default, as stored programs had before (sprig_ctl's).
+        assert_eq!(
+            stored_program_view(
+                "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
+            ),
+            "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,\
+             NO_ENGINE_SUBSTITUTION,TIME_TRUNCATE_FRACTIONAL"
+        );
+        assert_eq!(Mode(0).stored_program(), "TIME_ROUND_FRACTIONAL");
+        assert_eq!(stored_program_view("TIME_ROUND_FRACTIONAL"), "");
+    }
 
     // Captured from MySQL 8.4.11 and MariaDB 11.8.9 on 9 November 2026.
     #[test]
@@ -368,12 +457,7 @@ mod tests {
 
     #[test]
     fn mysql_refuses_what_it_removed_or_never_had() {
-        for bad in [
-            "NO_AUTO_CREATE_USER",
-            "MAXDB",
-            "BOGUS",
-            "TIME_ROUND_FRACTIONAL",
-        ] {
+        for bad in ["MAXDB", "ORACLE", "BOGUS"] {
             assert_eq!(parse_mysql(bad), Err(BadValue(bad.to_owned())));
         }
         assert_eq!(
@@ -409,6 +493,11 @@ mod tests {
              NO_ENGINE_SUBSTITUTION,TIME_ROUND_FRACTIONAL",
         );
         assert_eq!(m, parse_mysql("TRADITIONAL").unwrap());
+        // A dump's routine mode restores.
+        assert_eq!(
+            parse_mysql("STRICT_TRANS_TABLES,NO_AUTO_CREATE_USER").unwrap(),
+            parse_mysql("STRICT_TRANS_TABLES").unwrap()
+        );
         // The client's view restored from a variable keeps ONLY_FULL_GROUP_BY.
         let v = from_mariadb(&MYSQL84_DEFAULT.render());
         assert_eq!(v, MYSQL84_DEFAULT);

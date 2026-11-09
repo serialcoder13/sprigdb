@@ -101,6 +101,9 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
             "/admin/v1/tenants/{name}/decisions/{id}",
             get(explain_decision),
         )
+        // Chapter 18: in-doubt distributed transactions.
+        .route("/admin/v1/txns", get(list_txns))
+        .route("/admin/v1/txns/{dtid}", get(show_txn).post(txn_method))
         .route("/admin/v1/settings", get(list_setting_keys))
         .route(
             "/admin/v1/settings/{key}",
@@ -1086,6 +1089,50 @@ async fn advisor_apply(
         app.svc.advisor_apply(&name, req).await
     };
     respond(r.await)
+}
+
+/// `GET /admin/v1/txns?tenant=`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct TxnsQuery {
+    tenant: Option<String>,
+}
+
+async fn list_txns(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        let q: TxnsQuery = query(&uri)?;
+        app.svc.list_txns(q.tenant.as_deref()).await
+    };
+    respond(r.await)
+}
+
+async fn show_txn(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(dtid): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.show_txn(&dtid).await
+    };
+    respond(r.await)
+}
+
+/// `{dtid}:resolve`.
+async fn txn_method(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    if let Err(e) = authorize(&app, &headers) {
+        return error_response(&e);
+    }
+    match name.rsplit_once(':') {
+        Some((dtid, "resolve")) => respond(app.svc.resolve_txn(dtid).await),
+        _ => error_response(&invalid(format!(
+            "POST /admin/v1/txns/{name}: expected {{dtid}}:resolve"
+        ))),
+    }
 }
 
 async fn not_routed() -> Response {

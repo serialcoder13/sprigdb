@@ -103,10 +103,12 @@ async fn registration_is_refused_with_the_right_codes() {
         code(&a.svc.register_cluster(other).await.unwrap_err()),
         Some(SprigCode::AdminRequestInvalid)
     );
-    let mut k8s = request("c");
-    k8s.provisioner = ProvisionerKind::Kubernetes;
+    // Kubernetes clusters register through the same prechecks (chapter
+    // 27's operator); VM clusters come from their provisioning job.
+    let mut vm = request("c");
+    vm.provisioner = ProvisionerKind::Vm;
     assert_eq!(
-        code(&a.svc.register_cluster(k8s).await.unwrap_err()),
+        code(&a.svc.register_cluster(vm).await.unwrap_err()),
         Some(SprigCode::ProvisionerUnsupported)
     );
     let e = a.svc.register_cluster(request("c")).await.unwrap_err();

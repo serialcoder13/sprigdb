@@ -364,12 +364,12 @@ mod tests {
 
     #[test]
     fn refused_values() {
-        match set("SET sql_mode = 'NO_AUTO_CREATE_USER'") {
+        match set("SET sql_mode = 'MAXDB'") {
             Some(SetRewrite::Refused(e)) => {
                 assert_eq!(e.code, 1231);
                 assert_eq!(
                     e.message,
-                    "Variable 'sql_mode' can't be set to the value of 'NO_AUTO_CREATE_USER'"
+                    "Variable 'sql_mode' can't be set to the value of 'MAXDB'"
                 );
             }
             other => panic!("{other:?}"),

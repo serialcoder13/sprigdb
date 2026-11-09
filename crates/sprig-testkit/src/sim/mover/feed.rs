@@ -271,7 +271,11 @@ pub(super) struct FeedLog {
 /// its binlog length.
 pub(super) type Goal = Arc<Mutex<Option<(ClusterId, u64)>>>;
 
-pub(super) fn reached(token: Option<&ResumeToken>, goal: &(ClusterId, u64), tgt: &ClusterId) -> bool {
+pub(super) fn reached(
+    token: Option<&ResumeToken>,
+    goal: &(ClusterId, u64),
+    tgt: &ClusterId,
+) -> bool {
     let Some(t) = token else {
         return false;
     };

@@ -34,21 +34,20 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sprig_api::proto::internal::gateway_peer_client::GatewayPeerClient;
 use sprig_api::proto::internal::gateway_peer_server::{GatewayPeer, GatewayPeerServer};
 use sprig_api::proto::internal::{
-    DrainReply, DrainRequest, ForwardReply, ForwardRequest, HandoffLoginReply,
-    HandoffLoginRequest, KillReply, KillRequest, ListSessionsReply, ListSessionsRequest,
-    SessionRow,
+    DrainReply, DrainRequest, ForwardReply, ForwardRequest, HandoffLoginReply, HandoffLoginRequest,
+    KillReply, KillRequest, ListSessionsReply, ListSessionsRequest, SessionRow,
 };
 use sprig_auth::handoff::{HandoffResult, HandoffStart, HandoffTarget, PrincipalWire};
 use sprig_common::ids::{ConnId, DcId, TenantId};
-use sprig_meta::{Tier, TierView};
-use sprig_proto_mysql::{ErrPacket, Persona};
-use zeroize::Zeroizing;
 use sprig_common::{CancellationToken, Result, SprigCode, SprigError};
 use sprig_meta::MetaStore;
+use sprig_meta::{Tier, TierView};
+use sprig_proto_mysql::{ErrPacket, Persona};
 use sprig_settings::{Apply, HardBounds, Scopes, Setting};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
+use zeroize::Zeroizing;
 
 use crate::registry::{self, GatewayRecord};
 use crate::session::{SessionTable, slot_of};
@@ -757,14 +756,26 @@ mod tests {
         let HandoffResult::Accepted(p) = r else {
             panic!("refused: {r:?}");
         };
-        assert_eq!((p.user.as_str(), p.tenant, p.client_ip), ("alice", Some(TenantId(42)), ip));
-        assert_eq!(p.backend.credentials.to_string(), "file:/etc/sprigdb/creds/fra1.toml");
+        assert_eq!(
+            (p.user.as_str(), p.tenant, p.client_ip),
+            ("alice", Some(TenantId(42)), ip)
+        );
+        assert_eq!(
+            p.backend.credentials.to_string(),
+            "file:/etc/sprigdb/creds/fra1.toml"
+        );
         let r = target
             .login(&dc("fra1"), start(ip), Zeroizing::new(b"no".to_vec()))
             .await
             .unwrap();
-        assert!(matches!(r, HandoffResult::Refused(ref e) if e.code == 1045 && &e.sqlstate == b"28000"), "{r:?}");
-        assert_eq!(host.seen.lock().unwrap().as_slice(), [dc("nyc1"), dc("nyc1")]);
+        assert!(
+            matches!(r, HandoffResult::Refused(ref e) if e.code == 1045 && &e.sqlstate == b"28000"),
+            "{r:?}"
+        );
+        assert_eq!(
+            host.seen.lock().unwrap().as_slice(),
+            [dc("nyc1"), dc("nyc1")]
+        );
         // No ready gateway in the DC: an error, so the source tries the
         // next allowed DC (and 39301 when none answers).
         rec.state = registry::GatewayState::Draining;

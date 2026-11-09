@@ -39,6 +39,7 @@ pub mod plan;
 pub mod result;
 pub mod rewrite;
 pub mod show;
+pub mod stored;
 
 pub use autoindex::{
     ExistingIndex, IndexChanges, MAX_INDEXES_PER_TABLE, check_reserved, index_changes, make_room,

@@ -142,7 +142,11 @@ fn probe_values(
 /// A literal as the value `sprig-shard` normalizes: `None` when it isn't
 /// one exact value of the class (an expression, `42.5` against an
 /// integer). `NULL` is [`KeyValueOwned::Null`].
-fn value_of(e: &Expr, class: KeyClass, part: sprig_shard::KeyClass) -> Option<KeyValueOwned> {
+pub(super) fn value_of(
+    e: &Expr,
+    class: KeyClass,
+    part: sprig_shard::KeyClass,
+) -> Option<KeyValueOwned> {
     if let Expr::Value(v) = e
         && matches!(v.value, Value::Null)
     {
@@ -485,6 +489,7 @@ mod tests {
                     create_sql: Some(ACCOUNTS.into()),
                     lookups: vec![lookup],
                     fill_rk: false,
+                    parent_fk: None,
                 },
             }],
         )
@@ -718,6 +723,7 @@ mod tests {
                 create_sql: Some(ACCOUNTS.into()),
                 lookups: Vec::new(),
                 fill_rk,
+                parent_fk: None,
             },
         };
         let t = build(7, std::slice::from_ref(&g), &[table(true)]);

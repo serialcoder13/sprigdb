@@ -19,8 +19,32 @@ use tokio::sync::OnceCell;
 use super::sql::{self, qualified};
 use super::stream::MysqlStream;
 use super::{ClusterAccess, db_err};
-use crate::io::{ChangeStream, Counter, Fenced, Load, SourceIo};
+use crate::io::{ChangeStream, Counter, Drained, Fenced, Load, PreparedDrain, SourceIo};
 use crate::model::{ColumnMeta, Row, RowDigest, TableMeta, Value, Watermark};
+
+/// The names lookup of chapter 07 step 12, as
+/// `sprig_sql::names::stored::setup_sql` creates it (idempotent).
+const NAMES_SETUP: [&str; 3] = [
+    "CREATE TABLE IF NOT EXISTS `__sprig_sys`.`__sprig_names` (`name` VARCHAR(80) NOT NULL PRIMARY KEY, \
+     `logical` VARCHAR(255) NOT NULL, `account` VARCHAR(400) NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 \
+     COLLATE=utf8mb4_bin",
+    "CREATE OR REPLACE SQL SECURITY DEFINER VIEW `__sprig_sys`.`__sprig_names_v` AS SELECT `name`, `logical`, \
+     `account` FROM `__sprig_sys`.`__sprig_names` WHERE LEFT(`name`, LOCATE('_', `name`)) = \
+     LEFT(SESSION_USER(), LOCATE('_', SESSION_USER()))",
+    "GRANT SELECT ON `__sprig_sys`.`__sprig_names_v` TO PUBLIC",
+];
+
+/// A view's statements for the target: `USE`, then its `CREATE OR
+/// REPLACE`. A view reading chapter 07's names lookup needs the lookup on
+/// the target before MariaDB accepts it (the gateway writes its rows
+/// there), so the first such view brings [`NAMES_SETUP`].
+fn push_view(out: &mut Vec<String>, schema: &str, create: &str) {
+    if create.contains("__sprig_names_v") && !out.iter().any(|x| x == NAMES_SETUP[0]) {
+        out.extend(NAMES_SETUP.iter().map(|x| (*x).to_owned()));
+    }
+    out.push(format!("USE {}", quote(schema)));
+    out.push(create.replacen("CREATE ", "CREATE OR REPLACE ", 1));
+}
 
 /// Session settings of the source pool: values as stored, times in UTC.
 const SESSION: &[&str] = &["SET NAMES binary", "SET SESSION time_zone = '+00:00'"];
@@ -40,6 +64,9 @@ pub struct MysqlSource {
     /// The tables last listed, `(schema, table)`: a fence's planned receipt
     /// and counters map fenced names back with them.
     known: Mutex<Vec<(String, String)>>,
+    /// Chapter 18's resolver, which finishes the tenant's prepared
+    /// branches at cutover; `None` leaves them to block the fence.
+    drain: Option<Arc<dyn PreparedDrain>>,
 }
 
 impl std::fmt::Debug for MysqlSource {
@@ -140,7 +167,16 @@ impl MysqlSource {
             schemas: OnceCell::new(),
             sys_ready: OnceCell::new(),
             known: Mutex::new(Vec::new()),
+            drain: None,
         }
+    }
+
+    /// Finishes the tenant's prepared distributed-transaction branches
+    /// through `drain` at cutover (chapter 18's `drain_prepared`).
+    #[must_use]
+    pub fn with_drain(mut self, drain: Option<Arc<dyn PreparedDrain>>) -> Self {
+        self.drain = drain;
+        self
     }
 
     /// The cluster.
@@ -308,8 +344,7 @@ impl MysqlSource {
                     )
                     .await?;
                 if let Some(c) = r.into_iter().next().and_then(|r| r.get::<String, _>(1)) {
-                    out.push(format!("USE {}", quote(s)));
-                    out.push(c.replacen("CREATE ", "CREATE OR REPLACE ", 1));
+                    push_view(&mut out, s, &c);
                 }
             }
             let routines = self
@@ -616,6 +651,13 @@ impl SourceIo for MysqlSource {
 
     async fn fence_reads(&self, _receipt: &serde_json::Value) -> Result<()> {
         Ok(()) // a rename fence blocks reads too
+    }
+
+    async fn drain_prepared(&self, within: Duration) -> Result<Drained> {
+        match &self.drain {
+            Some(d) => d.drain(&self.access.cluster, self.tenant, within).await,
+            None => Ok(Drained::default()),
+        }
     }
 
     async fn unfence(&self, receipt: &serde_json::Value) -> Result<()> {

@@ -69,6 +69,8 @@ use crate::faults::Node;
 mod feed;
 // Chapter 41's after-commit triggers on the same feed (R7 order 5).
 mod logic;
+// Prepared distributed-transaction branches at cutover (chapter 18).
+pub mod xa;
 
 /// The tenant moved.
 const TENANT: TenantId = TenantId(1);
@@ -182,6 +184,8 @@ struct Db {
     /// The last acknowledged write per key: `None` for a delete.
     acked: BTreeMap<(String, i64), Option<String>>,
     ddl_seq: u64,
+    /// Prepared distributed-transaction branches on the source.
+    xa: xa::XaState,
 }
 
 impl Db {
@@ -282,6 +286,8 @@ struct SimSource {
     world: World,
     rates: Rates,
     tables: Vec<String>,
+    /// The XA variant's mode.
+    xa: Option<xa::XaMode>,
 }
 
 impl SimSource {
@@ -430,6 +436,18 @@ impl SourceIo for SimSource {
             }
         }
         let mut db = lock(&self.db);
+        if db.xa.locked() && self.xa.is_some_and(|m| !m.kill_fence) {
+            // The rename waits for the prepared branch's metadata lock
+            // until its lock wait ends.
+            drop(db);
+            xa::fence_refused();
+            self.world
+                .record("fence refused: a prepared branch holds a lock");
+            return Err(SprigError::new(
+                SprigCode::ClusterFenceFailed,
+                "lock wait: a prepared branch holds the table",
+            ));
+        }
         db.fenced = true;
         let s = db.log(Entry::Ddl(format!(
             "RENAME TABLE `{SCHEMA}`.`a` TO `{SCHEMA}`.`__sprig_f_0`"
@@ -444,6 +462,16 @@ impl SourceIo for SimSource {
 
     async fn fence_reads(&self, _receipt: &serde_json::Value) -> Result<()> {
         Ok(())
+    }
+
+    async fn drain_prepared(&self, within: Duration) -> Result<sprig_mover::Drained> {
+        match self.xa {
+            Some(m) if m.drain => {
+                self.call(self.rates.source_err, "drain").await?;
+                Ok(xa::drain(&self.db, &self.notify, &self.world, within).await)
+            }
+            _ => Ok(sprig_mover::Drained::default()),
+        }
     }
 
     async fn unfence(&self, _receipt: &serde_json::Value) -> Result<()> {
@@ -867,6 +895,7 @@ struct Factory {
     rates: Rates,
     tables: Vec<String>,
     settings: MoverSettings,
+    xa: Option<xa::XaMode>,
 }
 
 #[async_trait::async_trait]
@@ -883,6 +912,7 @@ impl EnvFactory for Factory {
                 world: self.world.clone(),
                 rates: self.rates,
                 tables: self.tables.clone(),
+                xa: self.xa,
             }),
             target: Arc::new(SimTarget {
                 db: self.db.clone(),
@@ -1094,7 +1124,7 @@ pub async fn run_idle_move(world: World) -> std::result::Result<(), String> {
         Variant {
             idle: true,
             cancel: true,
-            triggers: false,
+            ..Variant::default()
         },
     )
     .await
@@ -1102,6 +1132,7 @@ pub async fn run_idle_move(world: World) -> std::result::Result<(), String> {
 
 /// What a run changes from the default scenario.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)] // independent switches of one scenario
 pub struct Variant {
     /// No clients: nothing writes to the tenant during its move.
     pub idle: bool,
@@ -1111,6 +1142,12 @@ pub struct Variant {
     /// Run an after-commit trigger's worker on the tenant's feed too
     /// (chapter 41), killed at random (invariant 9).
     pub triggers: bool,
+    /// A coordinator prepares distributed-transaction branches on the
+    /// source ([`xa`]); the cutover drains them (chapter 10, steps 2b
+    /// and 3b) unless `xa_no_drain`.
+    pub xa: bool,
+    /// The XA variant without the drain: the behaviour before it.
+    pub xa_no_drain: bool,
 }
 
 /// Runs one seed of [`run_move`] with an after-commit trigger on the
@@ -1130,6 +1167,43 @@ pub async fn run_move_triggers(world: World) -> std::result::Result<(), String> 
     .await
 }
 
+/// Runs one seed of [`run_move`] with a coordinator preparing
+/// distributed-transaction branches on the source ([`xa`]): crashed and
+/// stalled coordinators leave branches prepared at cutover, which the
+/// cutover drains (chapter 10, steps 2b and 3b). Nothing may be lost: a
+/// branch committed after `G` would be missing on the target.
+///
+/// # Errors
+/// The first broken invariant.
+pub async fn run_move_xa(world: World) -> std::result::Result<(), String> {
+    run_move_with(
+        world,
+        Variant {
+            xa: true,
+            ..Variant::default()
+        },
+    )
+    .await
+}
+
+/// [`run_move_xa`] without the drain: the cutover's behaviour before it.
+/// Under a kill fence, a branch committed after `G` is lost, which the
+/// checks find.
+///
+/// # Errors
+/// The first broken invariant.
+pub async fn run_move_xa_no_drain(world: World) -> std::result::Result<(), String> {
+    run_move_with(
+        world,
+        Variant {
+            xa: true,
+            xa_no_drain: true,
+            ..Variant::default()
+        },
+    )
+    .await
+}
+
 /// The copy slots another job holds on the target, and when they free.
 const HOG: &str = "sim-hog";
 
@@ -1141,6 +1215,10 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
     if variant.idle {
         sc.clients = 0;
     }
+    let xa_mode = variant.xa.then(|| xa::XaMode {
+        kill_fence: rng.chance(0.5),
+        drain: !variant.xa_no_drain,
+    });
     world.record(format!(
         "scenario {sc:?} rates {rates:?} variant {variant:?}"
     ));
@@ -1206,6 +1284,7 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
             rates,
             tables: tables.clone(),
             settings: settings.clone(),
+            xa: xa_mode,
         });
         let clock: Arc<dyn Clock> = world.clock(n);
         let store = JobStore::new(world.etcd().client(n, tier.clone()), clock);
@@ -1239,6 +1318,28 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
             sc.rows,
             stop.clone(),
             src.clone(),
+        )));
+    }
+
+    // Distributed transactions with branches on the source, and the
+    // controller's resolver.
+    if xa_mode.is_some() {
+        let node = Node::from("coord");
+        let maps = TenantMaps::new(world.etcd().client(&node, tier.clone()));
+        clients.push(tokio::spawn(xa::coordinator(
+            world.clone(),
+            db.clone(),
+            notify.clone(),
+            maps,
+            tables.clone(),
+            stop.clone(),
+            src.clone(),
+        )));
+        clients.push(tokio::spawn(xa::resolver(
+            world.clone(),
+            db.clone(),
+            notify.clone(),
+            stop.clone(),
         )));
     }
 
@@ -1473,7 +1574,9 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
         None => false,
     };
     let trig_done = match (&mut trig_task, feed_done) {
-        (Some(t), true) => tokio::time::timeout(Duration::from_secs(600), t).await.is_ok(),
+        (Some(t), true) => tokio::time::timeout(Duration::from_secs(600), t)
+            .await
+            .is_ok(),
         _ => false,
     };
     feed_stop.cancel();
@@ -1528,6 +1631,12 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
     }
     if end_state.state == JobState::Done && p.cluster != tgt {
         return Err("the map doesn't point at the target".into());
+    }
+    if end_state.state == JobState::Done && d.xa.left() > 0 {
+        return Err(format!(
+            "invariant 1 (xa): {} prepared branches outlived the move on the fenced source",
+            d.xa.left()
+        ));
     }
     if let (Some(s), Some(t)) = (d.last_src_ack, d.first_tgt_ack)
         && s > t

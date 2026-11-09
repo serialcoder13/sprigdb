@@ -128,6 +128,59 @@ pub trait SourceIo: Send + Sync {
     async fn load(&self) -> Result<Load>;
     /// Drops the job's schemas (a retained source after the retention).
     async fn drop_schemas(&self) -> Result<()>;
+    /// Finishes every prepared distributed-transaction branch of the job's
+    /// tenant on the source cluster, within `within` (chapter 18's
+    /// `drain_prepared`, cutover steps 2b and 3b). The default finishes
+    /// nothing: a source without a resolver leaves prepared branches to
+    /// block the fence, which then aborts the attempt.
+    ///
+    /// # Errors
+    /// The resolver's errors (`XA RECOVER` failed).
+    async fn drain_prepared(&self, within: Duration) -> Result<Drained> {
+        let _ = within;
+        Ok(Drained::default())
+    }
+}
+
+/// What a drain of prepared branches did (chapter 18's `DrainReport`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Drained {
+    /// Branches committed (their transaction's decision was commit).
+    pub committed: usize,
+    /// Branches rolled back (decided abort, by the insert race if nothing
+    /// was recorded).
+    pub rolled_back: usize,
+    /// Branches still prepared when the time ran out (a live connection
+    /// owns them, or their home can't be reached).
+    pub remaining: usize,
+}
+
+impl Drained {
+    /// Whether the drain finished anything (the source's binlog may then
+    /// have moved past a position read before it).
+    #[must_use]
+    pub fn finished_any(&self) -> bool {
+        self.committed + self.rolled_back > 0
+    }
+}
+
+/// The resolver as the mover reaches it (chapter 18): implemented over
+/// `sprig_txn::Resolver` where the worker builds the mover, so this crate
+/// doesn't depend on the transaction crate.
+#[async_trait::async_trait]
+pub trait PreparedDrain: Send + Sync {
+    /// Finishes every prepared coordinator branch of `tenant` on
+    /// `cluster`, whatever its age, deciding each by its recorded decision
+    /// (or abort, through the insert race), within `within`.
+    ///
+    /// # Errors
+    /// `XA RECOVER` failed.
+    async fn drain(
+        &self,
+        cluster: &ClusterId,
+        tenant: sprig_common::ids::TenantId,
+        within: Duration,
+    ) -> Result<Drained>;
 }
 
 /// The target side of one job: its writer.

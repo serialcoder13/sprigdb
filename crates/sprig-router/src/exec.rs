@@ -28,8 +28,8 @@ use sprig_shard::KeyValueOwned;
 
 use crate::plan::{
     AggCall, AggFunc, AggPlan, Claim, CmpOp, ColRef, FinalSort, JoinCol, KeyCols, LookupJoinPlan,
-    LookupProbe, Operand, OutCol, Plan, Pred, ReadKind, ReadPlan, SortKey, Target, ViaLookup,
-    WriteKind, WritePlan,
+    LookupProbe, Operand, OutCol, ParentHits, Plan, Pred, ReadKind, ReadPlan, SortKey, Target,
+    ViaLookup, ViaParent, WriteKind, WritePlan,
 };
 use crate::reject::{Reason, Rejection};
 use crate::topology::{KeyClass, KeyValue, LookupRef};
@@ -306,6 +306,10 @@ pub async fn execute(
             narrowed = narrow(v, be).await?;
             &narrowed
         }
+        Plan::ViaParent(v) => {
+            narrowed = Box::pin(parents(v, be, budget)).await?;
+            &narrowed
+        }
         p => p,
     };
     metrics::counter!("sprig_router_statements_total", "plan" => plan.kind()).increment(1);
@@ -338,10 +342,105 @@ pub async fn execute(
             ShardOutcome::Ok(ok) => Ok(Output::Ok(ok)),
         },
         Plan::Reject(r) => Err(r.error()),
-        Plan::NotRouted | Plan::ViaLookup(_) => Err(SprigError::internal(
+        Plan::NotRouted | Plan::ViaLookup(_) | Plan::ViaParent(_) => Err(SprigError::internal(
             "execute of a statement the router doesn't route",
         )),
     }
+}
+
+/// A parent member's `INSERT`, placed: where each row's parent is, read
+/// through the parent's unique lookup or from every shard, then each row
+/// sent to its parent's shard (`sprig_router_parent_routes_total`).
+async fn parents(v: &ViaParent, be: &mut dyn ShardBackend, budget: &mut Budget) -> Result<Plan> {
+    let n = v.probes.len();
+    let mut hits: Vec<ParentHits> = vec![Vec::new(); n];
+    let mut fk_checks: Option<bool> = None;
+    let flag = |b: &[u8]| b != b"0";
+    if let Some((lookup, values)) = &v.lookup {
+        for (p, value) in values.iter().enumerate() {
+            let probe = LookupProbe {
+                lookup: Arc::clone(lookup),
+                values: vec![vec![value.clone()]],
+            };
+            for h in be.lookup_owners(&probe).await? {
+                let s = v.group.route(h);
+                if !hits[p].iter().any(|(x, _)| *x == s) {
+                    hits[p].push((s, Some(h)));
+                }
+            }
+        }
+    } else {
+        let probes: Vec<usize> = (0..n).collect();
+        for (i, sh) in v.group.shards.iter().enumerate() {
+            for (c, chunk) in probes.chunks(v.batch.max(1)).enumerate() {
+                let (Some(&a), Some(&b)) = (chunk.first(), chunk.last()) else {
+                    continue;
+                };
+                let mut sql = v.lookup_sql(&sh.schema, a..b + 1);
+                if i == 0 && c == 0 {
+                    sql.push_str(" UNION ALL SELECT -1, @@foreign_key_checks");
+                }
+                let t = Target {
+                    cluster: sh.cluster.clone(),
+                    shard: sh.shard,
+                    sql: sql.clone(),
+                    at: v.group.at(i),
+                };
+                let ShardOutcome::Rows(r) = be.run(&t, &sql, budget).await? else {
+                    return Err(SprigError::internal("a parent lookup answered no rows"));
+                };
+                for row in r.rows {
+                    let p = row
+                        .first()
+                        .and_then(Option::as_ref)
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .and_then(|s| s.parse::<i64>().ok());
+                    let val = row.get(1).and_then(Option::as_ref);
+                    match p {
+                        Some(-1) => fk_checks = Some(val.is_none_or(|b| flag(b))),
+                        Some(p) => {
+                            let rk = val
+                                .and_then(|b| std::str::from_utf8(b).ok())
+                                .and_then(|s| s.parse::<u64>().ok());
+                            if let Some(h) = usize::try_from(p).ok().and_then(|p| hits.get_mut(p))
+                                && !h.iter().any(|(x, _)| *x == i)
+                            {
+                                h.push((i, rk));
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+    }
+    let fk_checks = match fk_checks {
+        Some(f) => f,
+        None if hits.iter().any(Vec::is_empty) => {
+            let t = Target {
+                cluster: v
+                    .group
+                    .shards
+                    .first()
+                    .map(|s| s.cluster.clone())
+                    .unwrap_or_default(),
+                shard: v.group.shards.first().map_or(0, |s| s.shard),
+                sql: "SELECT @@foreign_key_checks".into(),
+                at: v.group.at(0),
+            };
+            match be.run(&t, &t.sql, budget).await? {
+                ShardOutcome::Rows(r) => r
+                    .rows
+                    .first()
+                    .and_then(|row| row.first().cloned().flatten())
+                    .is_none_or(|b| flag(&b)),
+                ShardOutcome::Ok(_) => true,
+            }
+        }
+        None => true,
+    };
+    metrics::counter!("sprig_router_parent_routes_total").increment(1);
+    v.finish(&hits, fk_checks).map_err(|r| r.error())
 }
 
 /// A lookup-narrowed plan, narrowed: the owners' hashes read through the
@@ -368,6 +467,10 @@ pub async fn execute_to(
     let plan = match plan {
         Plan::ViaLookup(v) => {
             narrowed = narrow(v, be).await?;
+            &narrowed
+        }
+        Plan::ViaParent(v) => {
+            narrowed = Box::pin(parents(v, be, budget)).await?;
             &narrowed
         }
         p => p,
@@ -1824,6 +1927,34 @@ async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Re
             );
             &v.plan
         }
+        Plan::ViaParent(v) => {
+            let top = rows.push(
+                None,
+                "ParentRoute",
+                format!("group {}: {} shards", v.group.id, v.group.shards.len()),
+                format!(
+                    "{} row(s) of {} follow {} parent key(s) of {}{}",
+                    v.row_probe.len(),
+                    v.table,
+                    v.probes.len(),
+                    v.parent,
+                    if v.lookup.is_some() {
+                        ", found through its unique lookup"
+                    } else {
+                        ", found by asking every shard"
+                    }
+                ),
+            );
+            if let Some(s) = v.group.shards.first() {
+                rows.push(
+                    Some(top),
+                    "Lookup",
+                    format!("shard {}", s.shard),
+                    v.lookup_sql(&s.schema, 0..v.probes.len().min(v.batch.max(1))),
+                );
+            }
+            p
+        }
         p => p,
     };
     match p {
@@ -1894,7 +2025,7 @@ async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Re
                 format!("{}: {}", r.reason.as_str(), r.detail),
             );
         }
-        Plan::Explain(_) | Plan::NotRouted | Plan::ViaLookup(_) => {}
+        Plan::Explain(_) | Plan::NotRouted | Plan::ViaLookup(_) | Plan::ViaParent(_) => {}
     }
     // One representative shard's MariaDB plan.
     for t in shard_sql {

@@ -395,6 +395,12 @@ pub struct InfoSchemaCtx<'a> {
     pub in_information_schema: bool,
     /// The user and client address, for 1142 messages.
     pub user: Option<(&'a str, &'a str)>,
+    /// The cluster has chapter 07's name lookup
+    /// (`__sprig_sys.__sprig_names_v`, [`super::stored`]): `DEFINER` and
+    /// `GRANTEE` are mapped to the tenant's user names inside MariaDB, so
+    /// no expression over them (`HEX(DEFINER)`, `INSERT ... SELECT`) sees a
+    /// backend account. Without it they are only scrubbed on output.
+    pub stored_names: bool,
 }
 
 impl std::fmt::Debug for InfoSchemaCtx<'_> {
@@ -641,7 +647,35 @@ pub fn rewrite_information_schema(
             continue;
         }
         match r.class {
-            TableClass::PassThrough => continue,
+            TableClass::PassThrough => {
+                if !ACCOUNT_TABLES.contains(&r.table.as_str()) {
+                    continue;
+                }
+                // Chapter 07 step 12: backend accounts never reach a
+                // definition, where nothing maps them.
+                if !runs_now(kind) {
+                    return Err(NameError::Unsupported(format!(
+                        "information_schema.{} in a view or stored program definition",
+                        r.table
+                    )));
+                }
+                let Some(view) = ctx
+                    .stored_names
+                    .then(|| account_view(&r.table, ctx))
+                    .flatten()
+                else {
+                    continue;
+                };
+                let (alias, _) = alias_at(&tk, r.last + 1);
+                let range = tk.t[r.first].start as usize..tk.t[r.last].end as usize;
+                let replacement = if alias.is_some() {
+                    format!("({view})")
+                } else {
+                    format!("({view}) AS {}", quote(&tk.value(r.last)))
+                };
+                edits.push((range, replacement));
+                continue;
+            }
             TableClass::Denied => return Err(denied(&r.table, ctx)),
             TableClass::Sprig => {
                 return Err(NameError::Unsupported(format!(
@@ -1019,6 +1053,69 @@ fn name_lit(s: &str, ctx: &InfoSchemaCtx<'_>) -> String {
     )
 }
 
+/// The account tables MariaDB fills with backend accounts: refused inside
+/// definitions (chapter 07 rule 9), and their `GRANTEE` mapped at the
+/// source with the name lookup.
+const ACCOUNT_TABLES: &[&str] = &["USER_PRIVILEGES", "APPLICABLE_ROLES", "ENABLED_ROLES"];
+
+/// `DEFINER` (`t42_u7@%`) as the tenant's account (`alice@%`), computed by
+/// MariaDB from the name lookup; an account the lookup doesn't know (the
+/// R0 provisioning account) stays for the output scrub.
+fn definer_sql(col: &str) -> String {
+    format!(
+        "CONVERT(IFNULL((SELECT `account` FROM `{sys}`.`{v}` WHERE `name` = \
+         SUBSTRING_INDEX({col}, '@', 1)), {col}) USING utf8mb3) COLLATE utf8mb3_general_ci",
+        sys = super::stored::SYS_SCHEMA,
+        v = super::stored::NAMES_VIEW,
+    )
+}
+
+/// `GRANTEE` (`'t42_u7'@'%'`) as `'alice'@'%'`, as [`definer_sql`].
+fn grantee_sql(col: &str) -> String {
+    format!(
+        "CONVERT(IFNULL((SELECT CONCAT('''', REPLACE(`logical`, '''', ''''''), '''@''', \
+         SUBSTRING_INDEX(`account`, '@', -1), '''') FROM `{sys}`.`{v}` WHERE `name` = \
+         SUBSTRING_INDEX(SUBSTRING({col}, 2), '''', 1)), {col}) USING utf8mb3) \
+         COLLATE utf8mb3_general_ci",
+        sys = super::stored::SYS_SCHEMA,
+        v = super::stored::NAMES_VIEW,
+    )
+}
+
+/// An account table as an inline view with `GRANTEE` mapped.
+fn account_view(table: &str, ctx: &InfoSchemaCtx<'_>) -> Option<String> {
+    let cols: Vec<String> = match ctx.registry.columns(table) {
+        Some(c) => c.to_vec(),
+        None => match table {
+            "USER_PRIVILEGES" => ["GRANTEE", "TABLE_CATALOG", "PRIVILEGE_TYPE", "IS_GRANTABLE"]
+                .map(str::to_owned)
+                .to_vec(),
+            "APPLICABLE_ROLES" => ["GRANTEE", "ROLE_NAME", "IS_GRANTABLE", "IS_DEFAULT"]
+                .map(str::to_owned)
+                .to_vec(),
+            _ => return None,
+        },
+    };
+    if !cols.iter().any(|c| c.eq_ignore_ascii_case("GRANTEE")) {
+        return None;
+    }
+    let list: Vec<String> = cols
+        .iter()
+        .map(|c| {
+            let qc = quote(c);
+            if c.eq_ignore_ascii_case("GRANTEE") {
+                format!("{} AS {qc}", grantee_sql(&qc))
+            } else {
+                qc
+            }
+        })
+        .collect();
+    Some(format!(
+        "SELECT {} FROM information_schema.{table}",
+        list.join(", ")
+    ))
+}
+
 /// Every (physical, logical) pair of the tenant, for `CASE` and `REPLACE`.
 fn all_pairs(ctx: &InfoSchemaCtx<'_>) -> Vec<(String, String)> {
     let mut v = Vec::new();
@@ -1221,6 +1318,10 @@ fn column_sql(
             e.push_str(" ELSE NULL END");
             e
         }
+    } else if ctx.stored_names && up == "DEFINER" {
+        definer_sql(&qc)
+    } else if ctx.stored_names && up == "GRANTEE" {
+        grantee_sql(&qc)
     } else if spec.definitions.contains(&up.as_str()) {
         let mut e = qc;
         for (p, l) in pairs {

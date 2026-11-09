@@ -789,3 +789,73 @@ async fn lookup_sessions_commit_main_through_the_coordinator() {
     );
     teardown(&cs).await;
 }
+
+/// Operators and the mover on in-doubt transactions (R1 close-out): after
+/// a coordinator is killed past the commit point, `indoubt::list` and
+/// `show` report the prepared branch with its `commit` decision, and the
+/// mover's `drain_prepared` commits it at once (no `min_age` wait). After
+/// a kill before the commit point, the list reports no decision, the
+/// operator's `resolve` rolls it back through the insert race, and the
+/// transaction is no longer in doubt (39447).
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_lists_and_resolves_and_the_mover_drains() {
+    use sprig_common::SprigCode;
+    use sprig_txn::indoubt;
+    let test = "r1closeop";
+    let Some(cs) = clusters(test, &["single", "repl"]) else {
+        return;
+    };
+    setup(&cs).await;
+    let b = backend(&cs).await;
+    let r = resolver(&b, &cs);
+    let loc = locator(&cs);
+    let ids: Vec<ClusterId> = cs.iter().map(|c| c.id.clone()).collect();
+
+    // 1. Past the commit point: listed as `commit`; the drain commits it.
+    let dtid = run_child_and_kill(test, "single,repl", true, "CommitPoint");
+    let l = indoubt::list(&*b.admin(), &*loc, &ids, Some(TENANT)).await;
+    let t = l
+        .txns
+        .iter()
+        .find(|t| t.gtrid.dtid == dtid)
+        .expect("listed");
+    assert_eq!(t.decision.as_str(), "commit", "{t:?}");
+    assert_eq!(t.branches.len(), 1);
+    assert_eq!(t.branches[0].0, cs[1].id);
+    let shown = indoubt::show(&*b.admin(), &*loc, &ids, dtid).await.unwrap();
+    assert_eq!(
+        shown.home_at,
+        Some((cs[0].id.clone(), cs[0].schema.clone()))
+    );
+    let started = Instant::now();
+    let rep = r
+        .drain_prepared(
+            &cs[1].id,
+            TENANT,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    println!("drain: {rep:?} in {:?}", started.elapsed());
+    assert_eq!((rep.committed, rep.remaining), (1, 0));
+    assert_eq!(
+        rows(&cs[1].writer, &cs[1].schema).await,
+        vec![(1, "child".to_owned())]
+    );
+
+    // 2. Before the commit point: no decision; `resolve` rolls it back.
+    clear(&cs).await;
+    let dtid = run_child_and_kill(test, "single,repl", true, "Prepared");
+    let shown = indoubt::show(&*b.admin(), &*loc, &ids, dtid).await.unwrap();
+    assert_eq!(shown.decision.as_str(), "none", "{shown:?}");
+    let done = r.resolve(&ids, dtid).await.unwrap();
+    println!("resolve: {done:?}");
+    assert_eq!(done.rolled_back.len(), 1);
+    assert!(done.committed.is_empty() && done.unresolved.is_empty());
+    assert!(rows(&cs[1].writer, &cs[1].schema).await.is_empty());
+    let e = indoubt::show(&*b.admin(), &*loc, &ids, dtid)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::TxnNotInDoubt));
+    teardown(&cs).await;
+}

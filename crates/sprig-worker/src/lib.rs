@@ -12,6 +12,7 @@ pub mod inherit;
 pub mod logic;
 pub mod permit;
 pub mod runtime;
+pub mod xa_drain;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +57,18 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let registry_logic = registry.clone();
     let dc_logic = dc.clone();
     let settings = MoverSettings::default();
+    // Chapter 18's resolver finishes the tenant's prepared branches at
+    // each cutover (chapter 10, steps 2b and 3b).
+    let drain_id = cfg
+        .node
+        .id
+        .clone()
+        .unwrap_or_else(|| format!("worker-{}", std::process::id()));
+    let drain = Arc::new(xa_drain::ResolverDrain::new(
+        &dc,
+        registry.clone(),
+        &drain_id,
+    ));
     // Moves between DCs (chapter 24) commit on the one etcd of R0's
     // single-etcd mode: this DC's tier reaches the others.
     let factory = Arc::new(
@@ -63,7 +76,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .with_home_changes(dc.clone())
             // Splits, merges and shard moves (chapter 20) cut over on the
             // table groups' maps in this DC's tier.
-            .with_group_maps(dc.clone()),
+            .with_group_maps(dc.clone())
+            .with_drain(drain),
     );
     let store = JobStore::new(dc, Arc::new(SystemClock));
     let worker = cfg

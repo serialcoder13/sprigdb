@@ -98,3 +98,32 @@ fn statement_ranges_keep_the_executable_comments_they_open() {
         assert_eq!(&sql[r.statements[0].range.clone()], b"SET @a = 1");
     }
 }
+
+/// Chapter 07 step 12: account functions and `DATABASE()` in a table's
+/// definition would run inside MariaDB as the backend account; no lookup
+/// can replace them there (no subqueries in defaults), so they fail.
+#[test]
+fn account_functions_in_table_definitions_fail() {
+    let m = MemoryNameMap::new(TenantId(1)).with_db(1, "d", 1, 1);
+    let ctx = RewriteCtx::new(&m, Persona::MySql84).current_db(Some("d"));
+    for sql in [
+        "CREATE TABLE t (u VARCHAR(80) DEFAULT (CURRENT_USER()))",
+        "CREATE TABLE t (u VARCHAR(80) DEFAULT (current_user))",
+        "CREATE TABLE d.t (u VARCHAR(80) AS (USER()) VIRTUAL)",
+        "ALTER TABLE t ADD COLUMN s VARCHAR(80) DEFAULT (DATABASE())",
+        "CREATE TABLE t (u VARCHAR(80), CHECK (u <> SESSION_USER()))",
+    ] {
+        assert_eq!(
+            rewrite(sql.as_bytes(), &ctx).unwrap_err().errno(),
+            39051,
+            "{sql}"
+        );
+    }
+    for sql in [
+        "CREATE TABLE t (u VARCHAR(80) DEFAULT 'x', ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE t AS SELECT CURRENT_USER() AS u, DATABASE() AS d",
+        "INSERT INTO t VALUES (CURRENT_USER())",
+    ] {
+        assert!(rewrite(sql.as_bytes(), &ctx).is_ok(), "{sql}");
+    }
+}

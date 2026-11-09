@@ -278,7 +278,11 @@ pub struct RelayLogin {
     peers: Arc<dyn HandoffTarget>,
     result: Option<HandoffResult>,
     used_password: bool,
+    rebackend: Option<Rebackend>,
 }
+
+/// The source gateway's own backend target for an accepted principal.
+type Rebackend = Arc<dyn Fn(&Principal) -> Option<Result<BackendTarget>> + Send + Sync>;
 
 impl std::fmt::Debug for RelayLogin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -307,7 +311,43 @@ impl RelayLogin {
             peers,
             result: None,
             used_password: false,
+            rebackend: None,
         }
+    }
+
+    /// The same relay giving accepted principals this gateway's own
+    /// backend target (its account and credential), never the deciding
+    /// gateway's.
+    #[must_use]
+    pub fn with_rebackend(mut self, f: Rebackend) -> Self {
+        self.rebackend = Some(f);
+        self
+    }
+
+    /// An accepted principal with this gateway's backend target; a refusal
+    /// (39301) when none can be had.
+    fn localize(&self, r: HandoffResult) -> HandoffResult {
+        let HandoffResult::Accepted(mut p) = r else {
+            return r;
+        };
+        match self.rebackend.as_ref().and_then(|f| f(&p)) {
+            Some(Ok(b)) => p.backend = b,
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "no backend for a handed-off login");
+                return HandoffResult::Refused(ErrPacket::from_error(self.req.persona, &e));
+            }
+            None if p.backend.credentials.to_string() == UNRESOLVED => {
+                return HandoffResult::Refused(ErrPacket::from_error(
+                    self.req.persona,
+                    &SprigError::new(
+                        SprigCode::AuthUnavailable,
+                        "no backend account for a handed-off login",
+                    ),
+                ));
+            }
+            None => {}
+        }
+        HandoffResult::Accepted(p)
     }
 
     /// The principal, once accepted.
@@ -346,6 +386,7 @@ impl LoginFlow for RelayLogin {
         for dc in &self.dcs {
             match self.peers.login(dc, start.clone(), password.clone()).await {
                 Ok(r) => {
+                    let r = self.localize(r);
                     metrics::counter!("sprig_auth_handoffs_total", "outcome" => "decided")
                         .increment(1);
                     let ok = matches!(r, HandoffResult::Accepted(_));
@@ -454,11 +495,11 @@ impl LoginService {
 
     async fn begin_as(self: &Arc<Self>, req: LoginRequest, http: bool) -> ResidentLogin {
         match self.route_of(&req, http).await {
-            Route::Local => ResidentLogin::Local(if http {
+            Route::Local => ResidentLogin::Local(Box::new(if http {
                 self.start_http(req).await
             } else {
                 self.start(req).await
-            }),
+            })),
             Route::Deny => {
                 metrics::counter!("sprig_auth_handoffs_total", "outcome" => "denied").increment(1);
                 ResidentLogin::Deny(DenyLogin {
@@ -468,9 +509,14 @@ impl LoginService {
             Route::HandOff(dcs) => {
                 let (here, peers) = match self.handoff() {
                     Some(h) => (h.here.clone(), Arc::clone(&h.peers)),
-                    None => return ResidentLogin::Local(self.start(req).await),
+                    None => return ResidentLogin::Local(Box::new(self.start(req).await)),
                 };
-                ResidentLogin::Relay(RelayLogin::new(req, here, dcs, peers))
+                let mut relay = RelayLogin::new(req, here, dcs, peers);
+                if let crate::mysql::LoginSource::Catalog(c) = self.source() {
+                    let c = Arc::clone(c);
+                    relay = relay.with_rebackend(Arc::new(move |p: &Principal| c.local_backend(p)));
+                }
+                ResidentLogin::Relay(relay)
             }
         }
     }
@@ -510,7 +556,7 @@ impl LoginFlow for DenyLogin {
 #[derive(Debug)]
 pub enum ResidentLogin {
     /// Decided here.
-    Local(MysqlLogin),
+    Local(Box<MysqlLogin>),
     /// Relayed to an allowed DC.
     Relay(RelayLogin),
     /// Refused: 39302.
@@ -533,7 +579,7 @@ impl ResidentLogin {
     #[must_use]
     pub fn local(&self) -> Option<&MysqlLogin> {
         match self {
-            Self::Local(l) => Some(l),
+            Self::Local(l) => Some(l.as_ref()),
             _ => None,
         }
     }
@@ -587,9 +633,15 @@ impl LoginFlow for ResidentLogin {
     }
 }
 
+/// What a principal's backend credential crosses as when it isn't a
+/// `file:` or `env:` reference (chapter 29's derived per-user passwords):
+/// the source gateway derives its own.
+const UNRESOLVED: &str = "env:SPRIG_HANDOFF_UNRESOLVED";
+
 /// A [`Principal`] on the wire (`GatewayPeer.HandoffLogin`'s reply): the
 /// principal's fields only. The backend credential crosses as its
-/// reference, never the secret.
+/// reference, never the secret, and the source replaces the target with
+/// its own ([`RelayLogin::with_rebackend`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrincipalWire {
     /// The tenant.
@@ -640,7 +692,10 @@ impl PrincipalWire {
             auth_version: p.auth_version,
             backend_cluster: p.backend.cluster.to_string(),
             backend_user: p.backend.user.clone(),
-            backend_credentials: p.backend.credentials.to_string(),
+            backend_credentials: match &p.backend.credentials.source {
+                sprig_provision::credentials::SecretSource::Resolved(_) => UNRESOLVED.to_owned(),
+                _ => p.backend.credentials.to_string(),
+            },
         }
     }
 
@@ -668,10 +723,9 @@ impl PrincipalWire {
                 cluster: sprig_common::ids::ClusterId::new(&self.backend_cluster)
                     .map_err(|e| SprigError::internal(format!("handoff principal: {e}")))?,
                 user: self.backend_user.clone(),
-                credentials: self
-                    .backend_credentials
-                    .parse()
-                    .map_err(|e: SprigError| SprigError::internal(format!("handoff principal: {}", e.message)))?,
+                credentials: self.backend_credentials.parse().map_err(|e: SprigError| {
+                    SprigError::internal(format!("handoff principal: {}", e.message))
+                })?,
             },
         })
     }
@@ -758,6 +812,7 @@ mod tests {
         assert!(matches!(v, AuthVerdict::Refuse(ref p) if p.code == 39301));
     }
 
+    #[allow(clippy::unnecessary_wraps)] // reads as set_residency's argument
     fn pinned(dcs: &[&str], deny: bool) -> Option<crate::account::TenantResidency> {
         Some(crate::account::TenantResidency {
             allowed_dcs: dcs.iter().map(|d| dc(d)).collect(),
@@ -802,21 +857,30 @@ mod tests {
             AuthVerdict::Accept
         );
         let p = l.principal().unwrap();
-        assert_eq!((p.user.as_str(), p.tenant), ("alice", Some(crate::mysql::tests::ACME)));
+        assert_eq!(
+            (p.user.as_str(), p.tenant),
+            ("alice", Some(crate::mysql::tests::ACME))
+        );
         // The wire form round-trips.
         assert_eq!(&PrincipalWire::of(p).principal().unwrap(), p);
         // Wrong password: fra1's 1045.
         let mut l = nyc.svc.begin(req("acme.alice")).await;
         assert!(!l.check_password(Zeroizing::new(b"no".to_vec())).await);
         let v = l.decide(Outcome::WrongCredentials, AuthPath::Full).await;
-        assert!(matches!(v, AuthVerdict::Refuse(ref p) if p.code == 1045), "{v:?}");
+        assert!(
+            matches!(v, AuthVerdict::Refuse(ref p) if p.code == 1045),
+            "{v:?}"
+        );
         // deny_remote_access: 39302 after the exchange.
         nyc.tenants.set_residency("acme", pinned(&["fra1"], true));
         let mut l = nyc.svc.begin(req("acme.alice")).await;
         assert!(matches!(l, ResidentLogin::Deny(_)));
         assert!(!l.check_password(Zeroizing::new(b"pw".to_vec())).await);
         let v = l.decide(Outcome::WrongCredentials, AuthPath::Full).await;
-        assert!(matches!(v, AuthVerdict::Refuse(ref p) if p.code == 39302), "{v:?}");
+        assert!(
+            matches!(v, AuthVerdict::Refuse(ref p) if p.code == 39302),
+            "{v:?}"
+        );
         // A block without a readable set allows nowhere: 39302.
         nyc.tenants.set_residency("acme", pinned(&[], false));
         assert!(matches!(
@@ -843,6 +907,9 @@ mod tests {
         fra.tenants.set_residency("acme", pinned(&["ams1"], false));
         let start = HandoffStart::of(&req("acme.alice"), dc("nyc1"));
         let r = serve_handoff(&fra.svc, start, b"pw").await;
-        assert!(matches!(r, HandoffResult::Refused(ref p) if p.code == 39301), "{r:?}");
+        assert!(
+            matches!(r, HandoffResult::Refused(ref p) if p.code == 39301),
+            "{r:?}"
+        );
     }
 }

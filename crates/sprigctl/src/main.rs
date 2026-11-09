@@ -35,6 +35,8 @@
 //!   [`logic`].
 //! - `sprigctl check no-restart` (chapter 47 step 6): settings, listener
 //!   and certificate changes under load with no restart; see [`check`].
+//! - `sprigctl txn list|show|resolve` (chapter 18): in-doubt distributed
+//!   transactions; see [`txn`].
 //!
 //! Every other command group parses and prints "not implemented yet",
 //! exiting with status 1.
@@ -60,6 +62,7 @@ mod residency;
 mod settings;
 mod sharding;
 mod space;
+mod txn;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
@@ -403,7 +406,8 @@ fn cli() -> Command {
         .subcommand(gateway::group())
         .subcommand(check::group())
         .subcommand(logic::group())
-        .subcommand(space::group());
+        .subcommand(space::group())
+        .subcommand(txn::group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -449,7 +453,7 @@ fn main() -> ExitCode {
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
-        | "shard" | "space" => true,
+        | "shard" | "space" | "txn" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "logic" => logic::implemented(&name),
@@ -499,6 +503,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "space" => space::run(sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "txn" => txn::run(&client, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "shard" if sharding::run_shard(&client, sub, output(&matches)).await? => {

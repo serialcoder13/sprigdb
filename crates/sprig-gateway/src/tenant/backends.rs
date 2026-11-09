@@ -242,6 +242,25 @@ impl TenantBackends {
 }
 
 impl BackendResolver for TenantBackends {
+    fn backend_for(
+        &self,
+        tenant: &TenantInfo,
+        user_id: sprig_common::ids::UserId,
+        cluster: &ClusterId,
+    ) -> Option<Result<BackendTarget>> {
+        if let Some(p) = &self.per_user
+            && !self.tenants.contains_key(&tenant.name)
+        {
+            return Some(Ok(p.target(cluster.clone(), tenant.id, user_id)));
+        }
+        let e = self.tenants.get(&tenant.name).or(self.default.as_ref())?;
+        Some(Ok(BackendTarget {
+            cluster: e.cluster.clone().unwrap_or_else(|| cluster.clone()),
+            user: e.user.clone(),
+            credentials: e.credentials.clone(),
+        }))
+    }
+
     fn backend(&self, tenant: &TenantInfo, user: &AuthUser) -> Result<BackendTarget> {
         if let Some(p) = &self.per_user
             && !self.tenants.contains_key(&tenant.name)

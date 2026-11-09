@@ -27,7 +27,8 @@ use sprig_shard::lookup::{
 };
 
 use super::{
-    Group, KeyClass, LookupRef, ShardLoc, StaticTopology, TableEntry, TableKind, even_ranges,
+    Group, KeyClass, LookupRef, ParentLink, ShardLoc, StaticTopology, TableEntry, TableKind,
+    even_ranges,
 };
 
 /// A `lookup_indexes` row of a table (chapter 19), with its lookup group's
@@ -80,6 +81,9 @@ pub enum Membership {
         /// Its `rk_state` is `filling` or later: writes carry `_sprig_rk`
         /// (chapter 15).
         fill_rk: bool,
+        /// A parent member's `parent_fk`: the constraint (in `create_sql`)
+        /// that reaches its parent.
+        parent_fk: Option<String>,
     },
     /// A reference table: a full copy on each listed cluster.
     Reference {
@@ -116,6 +120,53 @@ pub struct TableShape {
     pub types: HashMap<String, String>,
     /// The table's default collation (`COLLATE=` of the table options).
     pub collation: Option<String>,
+    /// Its foreign keys.
+    pub foreign_keys: Vec<ForeignKeyShape>,
+}
+
+/// A `CONSTRAINT ... FOREIGN KEY ... REFERENCES ...` line of `SHOW CREATE
+/// TABLE`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignKeyShape {
+    /// The constraint's name.
+    pub name: String,
+    /// The child's columns, lowercase.
+    pub columns: Vec<String>,
+    /// The referenced table, lowercase (without a schema).
+    pub ref_table: String,
+    /// The referenced columns, lowercase.
+    pub ref_columns: Vec<String>,
+}
+
+impl ForeignKeyShape {
+    /// Reads `CONSTRAINT `n` FOREIGN KEY (`a`, ...) REFERENCES [`db`.]`t`
+    /// (`b`, ...) ...`.
+    fn parse(line: &str) -> Option<Self> {
+        let rest = line.strip_prefix("CONSTRAINT `")?;
+        let (name, rest) = split_ident(rest)?;
+        let upper = rest.to_ascii_uppercase();
+        let fk = upper.find("FOREIGN KEY")?;
+        let refs = upper.find(" REFERENCES ")?;
+        let columns = key_columns(&rest[fk..refs])?;
+        let mut tail = rest[refs + " REFERENCES ".len()..].trim_start();
+        let mut table = String::new();
+        while let Some(t) = tail.strip_prefix('`') {
+            let (n, after) = split_ident(t)?;
+            table = n;
+            tail = after;
+            match tail.strip_prefix('.') {
+                Some(more) => tail = more,
+                None => break,
+            }
+        }
+        let ref_columns = key_columns(tail)?;
+        (!table.is_empty() && columns.len() == ref_columns.len()).then(|| Self {
+            name,
+            columns,
+            ref_table: table.to_ascii_lowercase(),
+            ref_columns,
+        })
+    }
 }
 
 impl TableShape {
@@ -140,6 +191,10 @@ impl TableShape {
                 continue;
             }
             let upper = l.to_ascii_uppercase();
+            if upper.starts_with("CONSTRAINT ") {
+                shape.foreign_keys.extend(ForeignKeyShape::parse(l));
+                continue;
+            }
             if l.starts_with(')') {
                 shape.collation = option_value(l, "COLLATE=")
                     .or_else(|| option_value(l, "DEFAULT COLLATE="))
@@ -294,13 +349,17 @@ fn router_class(spec: &KeySpec) -> Option<KeyClass> {
 pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> StaticTopology {
     let by_id: HashMap<u32, &CatalogGroup> = groups.iter().map(|g| (g.id, g)).collect();
     let mut built: HashMap<(u32, u32), Arc<Group>> = HashMap::new();
-    let mut topo = StaticTopology::default();
+    let mut entries: Vec<(String, TableEntry)> = Vec::new();
+    // Each entry's unique keys (parents' keys decide co-location).
+    let mut uniques: Vec<Vec<Vec<String>>> = Vec::new();
     for t in tables {
         let name = t.name.to_ascii_lowercase();
         let mut lookups = Vec::new();
         let mut lookup_gap = false;
         let mut columns = Vec::new();
         let mut fill = false;
+        let mut parent = None;
+        let mut unique_keys = Vec::new();
         let (kind, group) = match &t.member {
             Membership::Sharded {
                 group,
@@ -308,6 +367,7 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                 create_sql,
                 lookups: catalog_lookups,
                 fill_rk,
+                parent_fk,
             } => {
                 let Some(g) = by_id.get(group) else {
                     continue;
@@ -320,6 +380,7 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                 let shape = create_sql.as_deref().map(TableShape::parse);
                 if let Some(s) = &shape {
                     columns.clone_from(&s.visible);
+                    unique_keys.clone_from(&s.unique_keys);
                 }
                 fill = *fill_rk;
                 let key_ordinal = shape
@@ -327,6 +388,12 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                     .and_then(|s| (!key.is_empty()).then(|| s.ordinal(&key)).flatten());
                 let upsert_safe =
                     !key.is_empty() && shape.as_ref().is_some_and(|s| s.unique_keys_hold(&key));
+                if key.is_empty()
+                    && key_columns.is_none()
+                    && let (Some(fk), Some(s)) = (parent_fk.as_deref(), shape.as_ref())
+                {
+                    parent = parent_link(fk, s);
+                }
                 let group = built
                     .entry((g.id, t.db))
                     .or_insert_with(|| Arc::new(group_of(tenant, t.db, g, routable)))
@@ -360,8 +427,9 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                 )
             }
         };
-        topo.insert(
-            &t.default_schema,
+        uniques.push(unique_keys);
+        entries.push((
+            t.default_schema.to_ascii_lowercase(),
             TableEntry {
                 name,
                 kind,
@@ -370,10 +438,75 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                 lookup_gap,
                 columns,
                 fill_rk: fill,
+                parent,
             },
-        );
+        ));
+    }
+    // A parent link holds only when the parent is a sharded member of the
+    // same group and database (so a child row and its parent share a
+    // shard); otherwise the child's inserts stay refused.
+    // The parent's public unique lookup on its referenced column, if any,
+    // finds parents without asking every shard.
+    let checked: Vec<Checked> = entries
+        .iter()
+        .map(|(schema, e)| {
+            let l = e.parent.as_ref()?;
+            let at = entries.iter().position(|(ps, p)| {
+                ps == schema
+                    && p.name == l.table
+                    && !p.is_reference()
+                    && p.group.same_layout(&e.group)
+            })?;
+            let p = &entries[at].1;
+            let lookup = p
+                .lookups
+                .iter()
+                .find(|x| x.routes() && l.parent_columns.as_slice() == [x.column.clone()])
+                .cloned();
+            let unique = uniques[at]
+                .iter()
+                .any(|k| !k.is_empty() && k.iter().all(|c| l.parent_columns.contains(c)));
+            Some((lookup, unique))
+        })
+        .collect();
+    let mut topo = StaticTopology::default();
+    for ((schema, mut e), c) in entries.into_iter().zip(checked) {
+        match (c, e.parent.as_mut()) {
+            (Some((lookup, unique)), Some(l)) => {
+                l.lookup = lookup;
+                l.parent_unique = unique;
+            }
+            _ => e.parent = None,
+        }
+        topo.insert(&schema, e);
     }
     topo
+}
+
+/// A parent link, checked: the parent's lookup and whether its referenced
+/// columns are unique; `None` when the link doesn't hold.
+type Checked = Option<(Option<Arc<LookupRef>>, bool)>;
+
+/// The parent link of a parent member whose foreign key `fk` is in
+/// `shape`; `None` when the constraint isn't there.
+fn parent_link(fk: &str, shape: &TableShape) -> Option<ParentLink> {
+    let f = shape
+        .foreign_keys
+        .iter()
+        .find(|f| f.name.eq_ignore_ascii_case(fk))?;
+    Some(ParentLink {
+        fk: f.name.clone(),
+        ordinals: f.columns.iter().map(|c| shape.ordinal(c)).collect(),
+        upsert_safe: shape
+            .unique_keys
+            .iter()
+            .all(|k| f.columns.iter().all(|c| k.contains(c))),
+        columns: f.columns.clone(),
+        table: f.ref_table.clone(),
+        parent_columns: f.ref_columns.clone(),
+        lookup: None,
+        parent_unique: false,
+    })
 }
 
 /// The router's view of lookup `l` of table `t` (named `name`): one value
@@ -547,6 +680,7 @@ mod tests {
                     create_sql: Some(CREATE.into()),
                     lookups: Vec::new(),
                     fill_rk: false,
+                    parent_fk: None,
                 },
             },
             CatalogTable {
@@ -559,6 +693,7 @@ mod tests {
                     create_sql: None,
                     lookups: Vec::new(),
                     fill_rk: false,
+                    parent_fk: None,
                 },
             },
             CatalogTable {

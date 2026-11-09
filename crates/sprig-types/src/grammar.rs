@@ -763,6 +763,36 @@ pub fn identifiers(sql: &[u8], lex_opts: &LexOptions) -> Vec<String> {
     (0..t.len()).filter_map(|i| t.ident(i)).collect()
 }
 
+/// The `SPRIG_*` functions of chapters 32 (hierarchies) and 42
+/// (`SPRIG_ORIGIN`, data inheritance).
+pub const SPRIG_FUNCTIONS: [&str; 6] = [
+    "SPRIG_SUBTREE",
+    "SPRIG_DESCENDANTS",
+    "SPRIG_ANCESTORS",
+    "SPRIG_DEPTH",
+    "SPRIG_PATH",
+    "SPRIG_ORIGIN",
+];
+
+/// Whether `sql` calls one of the [`SPRIG_FUNCTIONS`]: the bare word in
+/// function-call position (followed by `(`). A database, table or column
+/// that merely starts with `sprig_` (`sprig_dump_1`), or a quoted name,
+/// doesn't count.
+#[must_use]
+pub fn calls_sprig_function(sql: &[u8], lex_opts: &LexOptions) -> bool {
+    let Some(t) = Toks::new(sql, lex_opts) else {
+        return false;
+    };
+    (0..t.len()).any(|i| {
+        t.kind(i) == Some(TokenKind::Word)
+            && t.punct(i + 1, b'(')
+            && !t.punct(i.wrapping_sub(1), b'.')
+            && SPRIG_FUNCTIONS
+                .iter()
+                .any(|f| t.bytes(i).eq_ignore_ascii_case(f.as_bytes()))
+    })
+}
+
 /// Whether `sql` names something reserved (`_sprig_` columns, `__sprig_`
 /// objects): such a statement is left to chapter 07, which refuses it.
 #[must_use]

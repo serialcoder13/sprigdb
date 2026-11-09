@@ -1,0 +1,9 @@
+ab
+ABC
+ERROR 1406 (22001): Data too long for column 'v' at row 1
+AB
+ABC
+c_smp	PIPES_AS_CONCAT	BEGIN INSERT INTO c_smt VALUES ('abcdef'); SELECT 'a' || 'b'; END
+c_smtr	ANSI_QUOTES,STRICT_TRANS_TABLES	SET NEW."v" = UPPER(NEW."v")
+c_sme	PIPES_AS_CONCAT,NO_UNSIGNED_SUBTRACTION	DELETE FROM c_smt WHERE v = 'x' || 'y'
+c_smp	

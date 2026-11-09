@@ -429,6 +429,10 @@ sprig_codes! {
     /// A transaction would touch more clusters than `txn.max_branches`
     /// (chapter 18).
     TooManyBranches = 39444, "ER_SPRIG_TOO_MANY_BRANCHES", "SprigTooManyBranches", SQLSTATE_GENERAL, false;
+    /// No prepared branch of the named distributed transaction is on the
+    /// data center's clusters: nothing is in doubt (`sprigctl txn show` and
+    /// `resolve`, chapter 18).
+    TxnNotInDoubt = 39447, "ER_SPRIG_TXN_NOT_IN_DOUBT", "SprigTxnNotInDoubt", SQLSTATE_GENERAL, false;
     /// A tenant move between data centers can't start: the tenant is
     /// pinned, not active, already homed in the target, already moving,
     /// or the target has no cluster for it (chapter 24).
@@ -783,6 +787,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::FeedSubscriptionNotFound
         | SprigCode::LogicNotFound
         | SprigCode::JobNotFound
+        | SprigCode::TxnNotInDoubt
         | SprigCode::SpaceNotFound
         | SprigCode::ShareNotFound => (Code::NotFound, 404),
         SprigCode::ClusterExists

@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::too_many_lines)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    clippy::needless_raw_string_hashes
+)]
 
 use std::time::SystemTime;
 
@@ -82,7 +87,10 @@ fn a_cycle_fails_closed() {
     nodes.insert(TenantId(2), node(Some(1), None));
     let r = resolve_tree(&nodes, &registry());
     // Neither recursion nor an unrestricted answer for a broken tree.
-    assert!(r.values().all(|v| v.as_ref().is_some_and(BTreeSet::is_empty)));
+    assert!(
+        r.values()
+            .all(|v| v.as_ref().is_some_and(BTreeSet::is_empty))
+    );
 }
 
 fn facts() -> Facts {
@@ -161,7 +169,10 @@ fn a_missing_or_broken_block_fails_closed() {
     assert_eq!(home::allowed_dcs(&raw), None);
     raw.insert("residency".into(), json!({"policy": "x"}));
     assert_eq!(home::allowed_dcs(&raw), Some(BTreeSet::new()));
-    raw.insert("residency".into(), json!({"allowed_dcs": ["fra1", "BAD DC"]}));
+    raw.insert(
+        "residency".into(),
+        json!({"allowed_dcs": ["fra1", "BAD DC"]}),
+    );
     assert_eq!(home::allowed_dcs(&raw), Some(set(&["fra1"])));
     raw.insert("residency".into(), json!(42));
     assert_eq!(home::allowed_dcs(&raw), Some(BTreeSet::new()));
@@ -274,7 +285,7 @@ async fn world() -> World {
     // acme's map in sin1, its standby map in sin2.
     for (d, role) in [("sin1", MapRole::Home), ("sin2", MapRole::Standby)] {
         let tier = TierView::over(&mem, Tier::Dc(dc(d)));
-        let mut m = ShardMap::catalog(acme, ClusterId::new(&format!("{d}-c1")).unwrap(), 1);
+        let mut m = ShardMap::catalog(acme, ClusterId::new(format!("{d}-c1")).unwrap(), 1);
         m.role = role;
         put(
             &*tier,
@@ -336,9 +347,16 @@ async fn set_policy_dry_run_then_apply() {
         acme_plan[0].contains("from sin1 to ams1") || acme_plan[0].contains("from sin1 to fra1"),
         "{acme_plan:?}"
     );
-    assert!(acme_plan.iter().any(|l| l.contains("drop the standby in sin2")));
+    assert!(
+        acme_plan
+            .iter()
+            .any(|l| l.contains("drop the standby in sin2"))
+    );
     let child_plan = v.plans.iter().find(|p| p.tenant == "acme-eu").unwrap();
-    assert!(child_plan.plan.is_empty(), "fra1 is allowed: {child_plan:?}");
+    assert!(
+        child_plan.plan.is_empty(),
+        "fra1 is allowed: {child_plan:?}"
+    );
     assert_eq!(r.show("acme").await.unwrap().state, "none");
     // Apply.
     let v = r
@@ -423,7 +441,10 @@ async fn the_loop_drops_the_standby_and_reports_what_is_left() {
     assert!(maps.kvs.is_empty(), "the standby map in sin2 is gone");
     let b = ResidencyBlock::of(&e.raw).unwrap();
     assert_eq!(b.state, "converging");
-    assert!(b.pending.iter().any(|p| p.contains("move the home")), "{b:?}");
+    assert!(
+        b.pending.iter().any(|p| p.contains("move the home")),
+        "{b:?}"
+    );
     // Re-tagging sin1 into the EU makes acme compliant where it is.
     let mut sin1 = rec("sin1", json!({"jurisdiction": "EU"}));
     sin1.dc_epoch = 2;
@@ -488,7 +509,11 @@ async fn commit_points_refuse_a_disallowed_target() {
     })
     .await
     .unwrap();
-    let p = Promotion::single_etcd(&w.mem, Guard::Store(Arc::clone(&w.global)), Arc::new(NoHooks));
+    let p = Promotion::single_etcd(
+        &w.mem,
+        Guard::Store(Arc::clone(&w.global)),
+        Arc::new(NoHooks),
+    );
     let r = promote(&p, "f1", w.acme, &dc("sin1"), &dc("sin2"), e.epoch)
         .await
         .unwrap();
@@ -640,7 +665,13 @@ async fn feed_subscriptions_stay_inside_the_residency() {
     assert_eq!(r.reconcile_tenant(w.acme).await.unwrap(), Outcome::Done);
     assert_eq!(fra1.get(w.acme, "logic:b1").await.unwrap().state, "paused");
     assert_eq!(sin2.get(w.acme, "logic:b2").await.unwrap().state, "active");
-    let b = ResidencyBlock::of(&home::read_home(&*w.global, w.acme).await.unwrap().unwrap().raw)
-        .unwrap();
+    let b = ResidencyBlock::of(
+        &home::read_home(&*w.global, w.acme)
+            .await
+            .unwrap()
+            .unwrap()
+            .raw,
+    )
+    .unwrap();
     assert_eq!(b.state, "compliant", "{b:?}");
 }

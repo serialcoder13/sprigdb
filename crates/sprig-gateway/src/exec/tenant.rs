@@ -859,7 +859,9 @@ impl PassSession {
                 let pctx = PlanCtx::new(rw, &ts.services().columns)
                     .vis(ts.visibility(self.persona))
                     .sessions(&sessions)
-                    .visible(&visible);
+                    .visible(&visible)
+                    // Chapter 07 step 12: account columns mapped inside MariaDB.
+                    .stored_names(crate::tenant::stored_names::ready(&ts.principal.backend.cluster));
                 plan(text, &pctx)
             };
             match r {
@@ -1666,7 +1668,9 @@ impl PassSession {
         let pctx = PlanCtx::new(rw, &ts.services().columns)
             .vis(ts.visibility(self.persona))
             .sessions(&sessions)
-            .visible(&visible);
+            .visible(&visible)
+            // Chapter 07 step 12: account columns mapped inside MariaDB.
+            .stored_names(crate::tenant::stored_names::ready(&ts.principal.backend.cluster));
         let p = plan(&sql, &pctx)?;
         let [sp] = p.statements.as_slice() else {
             return Err(SprigError::standard(

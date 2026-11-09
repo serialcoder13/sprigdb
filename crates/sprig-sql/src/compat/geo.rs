@@ -544,35 +544,3 @@ mod tests {
         assert!(rw("SELECT ST_Distance_Sphere(a, b) FROM s").contains("ASIN(SQRT("));
     }
 }
-
-#[cfg(test)]
-mod print_sql {
-    #[test]
-    #[ignore = "prints a rewrite for a manual check"]
-    fn print() {
-        let s = "SELECT a.name, b.name, ST_Distance(a.loc, b.loc) FROM site a JOIN site b ON a.id < b.id";
-        let out = super::rewrite(s.as_bytes(), &crate::lex::LexOptions::mysql84())
-            .unwrap()
-            .unwrap();
-        println!("{}", String::from_utf8(out).unwrap());
-    }
-}
-
-#[cfg(test)]
-mod stack_probe {
-    #[test]
-    #[ignore = "measures parser stack use"]
-    fn probe() {
-        let s = std::env::var("R4_SQL").unwrap();
-        let ok = std::thread::Builder::new()
-            .stack_size(8 << 20)
-            .spawn(move || {
-                let _ =
-                    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, &s);
-            })
-            .unwrap()
-            .join()
-            .is_ok();
-        println!("PARSE ok={ok}");
-    }
-}

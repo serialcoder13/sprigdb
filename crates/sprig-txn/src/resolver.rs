@@ -160,6 +160,16 @@ impl Resolver {
         }
     }
 
+    /// The admin it acts through.
+    pub(crate) fn admin(&self) -> &Arc<dyn ClusterAdmin> {
+        &self.admin
+    }
+
+    /// [`Self::finish`], for `indoubt`'s operator resolve.
+    pub(crate) async fn finish_branch(&self, cluster: &ClusterId, x: &Xid) -> Option<bool> {
+        self.finish(cluster, x).await
+    }
+
     /// Decides and finishes one branch. `Some(committed?)` once finished.
     async fn finish(&self, cluster: &ClusterId, x: &Xid) -> Option<bool> {
         let d = self.decide(&x.gtrid).await.ok()?;

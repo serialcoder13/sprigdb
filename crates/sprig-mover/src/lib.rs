@@ -55,8 +55,11 @@ pub use api::{
     CutoverMode, DdlTransform, HashRange, JobFilter, JobKind, JobSpec, JobState, JobStatus, Mover,
     Progress, Routing, SourceSpec, TargetSpec, VerifyMode,
 };
-pub use io::{ChangeStream, CommitOutcome, HandoffPos, JobEnv, MapIo, SourceIo, TargetIo};
 pub use groupmaps::GroupMapIo;
+pub use io::{
+    ChangeStream, CommitOutcome, Drained, HandoffPos, JobEnv, MapIo, PreparedDrain, SourceIo,
+    TargetIo,
+};
 pub use record::{Claim, JobRecord, JobStore, MetaMover};
 pub use route::ShardRoute;
 pub use settings::MoverSettings;

@@ -32,6 +32,7 @@ pub mod password;
 pub mod pins_sql;
 pub mod session;
 pub mod settings_sql;
+pub mod stored_names;
 
 use std::sync::Arc;
 

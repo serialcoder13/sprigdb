@@ -16,6 +16,21 @@ fn col(n: &str, class: Option<KeyClass>, ndv: f64) -> Column {
         class,
         ndv: Some(ndv),
         top_share: Some(0.01),
+        sql: Some(sql_of(class)),
+    }
+}
+
+/// A SQL type of key class `class` (`DOUBLE` for no class).
+fn sql_of(class: Option<KeyClass>) -> SqlType {
+    use sprig_shard::colocate::SqlFamily as F;
+    match class {
+        Some(KeyClass::Numeric) => SqlType::of(F::Integer),
+        Some(KeyClass::String { collation }) => SqlType::text(collation),
+        Some(KeyClass::Binary) => SqlType::of(F::Binary),
+        Some(KeyClass::Uuid) => SqlType::of(F::Uuid),
+        Some(KeyClass::DateTime) => SqlType::of(F::DateTime),
+        Some(KeyClass::Timestamp) => SqlType::of(F::Timestamp),
+        None => SqlType::of(F::Double),
     }
 }
 
@@ -62,6 +77,7 @@ fn join(a: Obj, x: &str, b: Obj, y: &str) -> JoinEdge {
     JoinEdge {
         a: (a, x.into()),
         b: (b, y.into()),
+        rules: Rules::Sql,
     }
 }
 
@@ -521,4 +537,110 @@ fn the_search_never_moves_a_pinned_table() {
     input.pins.reverse();
     let b = search(&input, &s);
     assert_eq!(a.best, b.best);
+}
+
+/// Chapter 22: `customers` and `events` in one group keyed by customer id,
+/// with statement 9's join `customers.id = events.customer_id` only.
+fn joined(events_sql: SqlType, rules: Rules) -> (Input, Design) {
+    let mut input = shop();
+    input.stmts.retain(|s| s.fingerprint == 9);
+    for s in &mut input.stmts {
+        for j in &mut s.joins {
+            j.rules = rules;
+        }
+    }
+    for t in &mut input.tables {
+        if t.object == EVENTS {
+            for c in &mut t.columns {
+                if c.name == "customer_id" {
+                    c.sql = Some(events_sql);
+                }
+            }
+        }
+    }
+    let d = Design {
+        groups: vec![GroupDesign {
+            name: "customers".into(),
+            key: vec![KeyClass::Numeric],
+            members: vec![
+                Member {
+                    object: CUSTOMERS,
+                    routing: Routing::Columns {
+                        columns: vec!["id".into()],
+                    },
+                },
+                Member {
+                    object: EVENTS,
+                    routing: Routing::Columns {
+                        columns: vec!["customer_id".into()],
+                    },
+                },
+            ],
+        }],
+        unsharded: Vec::new(),
+    };
+    (input, d)
+}
+
+#[test]
+fn a_join_counts_only_when_its_comparison_co_locates() {
+    use sprig_shard::colocate::SqlFamily as F;
+    let s = AdvisorSettings::default();
+    let ci = sprig_shard::collation::collation_by_name("utf8mb4_general_ci")
+        .unwrap()
+        .id;
+    // INT = BIGINT: an integer comparison, local.
+    let (i, d) = joined(SqlType::of(F::Integer), Rules::Sql);
+    assert_eq!(score(&i, &d, &s).stmt_local, 1.0);
+    // INT = DECIMAL: exact, local.
+    let (i, d) = joined(SqlType::of(F::Decimal), Rules::Sql);
+    assert_eq!(score(&i, &d, &s).stmt_local, 1.0);
+    // INT = VARCHAR: MySQL compares in double precision; not local.
+    let (i, d) = joined(SqlType::text(ci), Rules::Sql);
+    assert_eq!(score(&i, &d, &s).stmt_local, 0.0);
+    assert!(!i.stmts[0].joins[0].could_colocate(&i));
+    // The same columns under MongoDB's rules ($lookup, R5): local.
+    let (i, d) = joined(SqlType::text(ci), Rules::Mongo);
+    assert_eq!(score(&i, &d, &s).stmt_local, 1.0);
+    assert!(i.stmts[0].joins[0].could_colocate(&i));
+}
+
+#[test]
+fn string_joins_co_locate_under_the_key_collation_or_a_finer_one() {
+    let s = AdvisorSettings::default();
+    let by = |n: &str| sprig_shard::collation::collation_by_name(n).unwrap().id;
+    let ci = by("utf8mb4_general_ci");
+    let skey = KeyClass::String { collation: ci };
+    let case = |events: &str| {
+        let (mut i, mut d) = joined(SqlType::text(by(events)), Rules::Sql);
+        d.groups[0].key = vec![skey];
+        for t in &mut i.tables {
+            for c in &mut t.columns {
+                if (t.object == CUSTOMERS && c.name == "id") || t.object == EVENTS {
+                    c.class = Some(skey);
+                }
+                if t.object == CUSTOMERS && c.name == "id" {
+                    c.sql = Some(SqlType::text(ci));
+                }
+            }
+        }
+        score(&i, &d, &s).stmt_local
+    };
+    assert_eq!(case("utf8mb4_general_ci"), 1.0);
+    assert_eq!(case("utf8mb4_bin"), 1.0);
+    // MariaDB won't mix these two collations: no co-location.
+    assert_eq!(case("utf8mb4_uca1400_ai_ci"), 0.0);
+}
+
+#[test]
+fn every_model_with_join_edges_has_rules() {
+    use crate::sharding::input::join_rules;
+    use sprig_workload::fingerprint::FpKind;
+    assert_eq!(join_rules(FpKind::Sql), Some(Rules::Sql));
+    assert_eq!(join_rules(FpKind::Analytics), Some(Rules::Sql));
+    assert_eq!(join_rules(FpKind::Api), Some(Rules::Sql));
+    assert_eq!(join_rules(FpKind::Mongo), Some(Rules::Mongo));
+    for k in [FpKind::Redis, FpKind::Kv, FpKind::Vector, FpKind::Search] {
+        assert_eq!(join_rules(k), None);
+    }
 }

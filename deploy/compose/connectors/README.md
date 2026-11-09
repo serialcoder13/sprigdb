@@ -113,6 +113,17 @@ Each reports its own checks (`[check_sets]` in `expected.toml`).
 | `mysqldump`, `mariadb-dump` | `source` (3 tables, 1,003 rows of 30 column types incl. BIT, ENUM, SET, YEAR, POINT, JSON, a generated column; a trigger, a view, a procedure, a function), `dump` (`--single-transaction --routines --triggers --events --hex-blob`), `restore` (into a new schema), `checksum` (`CHECKSUM TABLE` and counts equal), `objects` (`SHOW CREATE` equal; view, procedure, function and trigger work) |
 | `sysbench-tpcc` | `prepare`, `run` (20 s, 2 threads, server-side prepares; the detail counts errors sysbench ignores: 1213, 1205, 1020), `check` (tpcc_check.lua), `cleanup` |
 
+## Persona compatibility (`persona-sql`, chapter 28 R4)
+
+`compat/` holds SQL corpora run by the `mysql` 8.4 client of the `conn-mysql-cli` image (mounted at `/compat`, no image rebuild). Each output is compared line by line with the reference server's: `golden/mysql/` was captured from MySQL 8.4.11 and `golden/mariadb/` from MariaDB 11.8.9, as root, with `SPRIG_COMPAT_CAPTURE=1`. The checks are `sql_mode`, `max_execution_time`, `errors`, `show_index`, `show_grants`, `roles`, `gis` (n/a on persona `mariadb`) and `stored_mode` (stored programs keep the `sql_mode` they were created in; gaps row 27). `SPRIG_COMPAT_CHECKS` runs a subset, for instance to capture one new golden file. `<check>.mariadb.sql` replaces a corpus where MariaDB's syntax differs, and `known.<persona>.sed` removes documented differences from both sides (`decisions/mysql-persona-gaps.md`). Outputs are normalized for `at line N`, the client address and the database name. The `roles` check logs in as a user the corpus creates (`<tenant>.r4c_u1` through the gateway), always over TLS.
+
+```sh
+docker run --rm -v "$PWD/compat:/compat:ro" -v /tmp/cap:/capture -e SPRIG_COMPAT_CAPTURE=1 \
+  -e SPRIG_TLS=disabled -e SPRIG_PERSONA=mysql -e SPRIG_HOST=host.docker.internal -e SPRIG_PORT=13384 \
+  -e SPRIG_USER=root -e SPRIG_PASSWORD=sprig-dev-root -e SPRIG_DATABASE=r4c_conn \
+  --entrypoint /compat/check.sh sprigdb-conn-mysql-cli:dev      # recapture against MySQL 8.4
+```
+
 ## Expected outcomes
 
 `expected.toml` lists every outcome other than `pass`, by persona and connector, with the reason. A check passes the matrix only when its status equals the expected one, so an unexpected pass fails too and the file stays accurate. An expected `fail` is a known incompatibility of the reference server itself, and the gateway must reproduce it. Today's entries:

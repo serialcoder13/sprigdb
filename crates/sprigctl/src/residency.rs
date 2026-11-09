@@ -57,7 +57,10 @@ fn show(v: &ResidencyView) -> String {
             if a.is_empty() {
                 "none".to_owned()
             } else {
-                a.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                a.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             }
         },
     );

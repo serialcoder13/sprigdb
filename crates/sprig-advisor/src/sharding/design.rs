@@ -28,11 +28,26 @@
 //! passes no NDV or skew filter, only the type check); `COLOCATE WITH p ON
 //! (cols)` makes it a column member of `p`'s group on `cols`, in place of
 //! any foreign-key parent. The search never moves a pinned table.
+//!
+//! **Joins across models** (chapter 22, "Co-location through the advisor";
+//! added by r1close). A join edge carries the query language whose
+//! equality it uses ([`Rules`]): SQL's (MySQL's comparison of the two
+//! columns' types) or MongoDB's (`$lookup`, from R5). An edge co-locates
+//! only when `sprig_shard::colocate::edge_colocated` holds: under SQL's
+//! rules both columns must fit the group's key and MySQL's comparison of
+//! their types must imply equal normalized bytes (an `INT` against a
+//! `VARCHAR` compares in double precision and doesn't; a `utf8mb4_bin`
+//! column against a `utf8mb4_general_ci` key does). A parent edge (a
+//! member joined to its foreign-key parent) needs the same of the two
+//! foreign-key columns. Edges that can never co-locate don't propose
+//! moves. Members of a first design have no flags yet, so every member is
+//! taken as clean.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sprig_shard::colocate::{MemberFlags, SqlType, edge_colocated};
 use sprig_shard::pins::{Pin, PinKind};
 use sprig_shard::{KeyClass, KeySpec};
 
@@ -52,6 +67,10 @@ pub struct Column {
     pub ndv: Option<f64>,
     /// The share of rows holding its most common value, if known.
     pub top_share: Option<f64>,
+    /// Its SQL type (chapter 22's type map), for the comparison a join on
+    /// it uses; `None` when unknown (its joins then never co-locate under
+    /// SQL's rules).
+    pub sql: Option<SqlType>,
 }
 
 /// One table.
@@ -107,6 +126,19 @@ pub struct Touch {
     pub write: bool,
 }
 
+/// Which query language's equality a join edge uses (chapter 22,
+/// "Comparison rules per query language").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Rules {
+    /// SQL, and what compiles to it (the Analytics API, REST, gRPC):
+    /// MySQL's comparison of the two columns' types.
+    #[default]
+    Sql,
+    /// MongoDB's `$lookup` (R5): numbers by value across types, a string
+    /// never equals a number.
+    Mongo,
+}
+
 /// A join `a.x = b.y`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinEdge {
@@ -114,7 +146,33 @@ pub struct JoinEdge {
     pub a: (Obj, String),
     /// The other.
     pub b: (Obj, String),
+    /// The equality's rules.
+    pub rules: Rules,
 }
+
+impl JoinEdge {
+    /// Whether this edge could co-locate its two sides in some group: under
+    /// MongoDB's rules always; under SQL's, when both columns' types are
+    /// known and their comparison implies equal normalized bytes under the
+    /// first side's key class. Edges that can't never propose a move.
+    #[must_use]
+    pub fn could_colocate(&self, input: &Input) -> bool {
+        if self.rules == Rules::Mongo {
+            return true;
+        }
+        let (Some(a), Some(b)) = (input.sql_type(&self.a), input.sql_type(&self.b)) else {
+            return false;
+        };
+        a.key_class()
+            .is_some_and(|k| edge_colocated(true, &a, &b, k, CLEAN, CLEAN))
+    }
+}
+
+/// A member of a first design: no flag set yet.
+const CLEAN: MemberFlags = MemberFlags {
+    off_class_seen: false,
+    double_inexact_seen: false,
+};
 
 /// One statement fingerprint over the window.
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +216,11 @@ pub struct Input {
 impl Input {
     fn table(&self, o: Obj) -> Option<&Table> {
         self.tables.iter().find(|t| t.object == o)
+    }
+
+    /// The SQL type of column `side.1` of table `side.0`.
+    fn sql_type(&self, side: &(Obj, String)) -> Option<SqlType> {
+        self.table(side.0)?.column(&side.1)?.sql
     }
 
     /// `o`'s pin.
@@ -744,6 +807,8 @@ enum Place {
 
 struct Placed<'a> {
     at: BTreeMap<Obj, (usize, &'a Routing)>,
+    /// Each group's key, by group index.
+    keys: Vec<&'a [KeyClass]>,
 }
 
 impl Placed<'_> {
@@ -756,8 +821,20 @@ impl Placed<'_> {
             return false;
         }
         let single = |r: &Routing, c: &str| matches!(r, Routing::Columns { columns } if columns.len() == 1 && columns[0] == c);
+        // Chapter 22: the equality itself must imply equal normalized bytes
+        // under `key`, by the edge's rules and the two columns' types.
+        let types_ok = |x: &(Obj, String), y: &(Obj, String), key: Option<KeyClass>| {
+            if j.rules == Rules::Mongo {
+                return true;
+            }
+            match (input.sql_type(x), input.sql_type(y), key) {
+                (Some(tx), Some(ty), Some(k)) => edge_colocated(true, &tx, &ty, k, CLEAN, CLEAN),
+                _ => false,
+            }
+        };
         if single(ra, &j.a.1) && single(rb, &j.b.1) {
-            return true;
+            let key = self.keys.get(*ga).and_then(|k| k.first().copied());
+            return types_ok(&j.a, &j.b, key);
         }
         let parent_edge = |child: &(Obj, String), cr: &Routing, parent: &(Obj, String)| {
             if let Routing::Parent { parent: p, fk } = cr
@@ -767,9 +844,13 @@ impl Placed<'_> {
                     .iter()
                     .find(|f| &f.name == fk && f.child == child.0)
             {
+                // The foreign key's columns, under the parent column's own
+                // class.
+                let key = input.sql_type(parent).and_then(|t| t.key_class());
                 return f.child_cols.len() == 1
                     && f.child_cols[0] == child.1
-                    && f.parent_cols[0] == parent.1;
+                    && f.parent_cols[0] == parent.1
+                    && types_ok(child, parent, key);
             }
             false
         };
@@ -829,7 +910,10 @@ fn find(c: &mut BTreeMap<Obj, Obj>, x: Obj) -> Obj {
 }
 
 fn score_weighted(input: &Input, d: &Design, s: &AdvisorSettings, w: Option<&[f64]>) -> Score {
-    let placed = Placed { at: d.place() };
+    let placed = Placed {
+        at: d.place(),
+        keys: d.groups.iter().map(|g| g.key.as_slice()).collect(),
+    };
     let db_of = |o: Obj| input.table(o).map_or(0, |t| t.db);
     let (mut num, mut den, mut stmt_num, mut stmt_den, mut look) = (0.0, 0.0, 0.0, 0.0, 0.0);
     for (i, st) in input.stmts.iter().enumerate() {
@@ -1014,7 +1098,7 @@ fn moves(input: &Input, d: &Design) -> Vec<Move> {
     let placed = d.place();
     let mut edges: BTreeMap<(Obj, String, Obj, String), f64> = BTreeMap::new();
     for s in &input.stmts {
-        for j in &s.joins {
+        for j in s.joins.iter().filter(|j| j.could_colocate(input)) {
             for (x, y) in [(&j.a, &j.b), (&j.b, &j.a)] {
                 *edges
                     .entry((x.0, x.1.clone(), y.0, y.1.clone()))

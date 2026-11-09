@@ -814,6 +814,7 @@ impl Walker<'_, '_> {
                 return Ok(());
             }
             if word.eq_ignore_ascii_case(b"CURRENT_USER") {
+                self.refuse_in_table(j)?;
                 self.substitute_account(j, j, EditKind::CurrentUser);
                 self.i += 1;
                 return Ok(());
@@ -857,10 +858,29 @@ impl Walker<'_, '_> {
         self.substitute(first, last, kind, lit);
     }
 
+    /// Chapter 07 step 12: an account function or `DATABASE()` in a
+    /// table's definition (a column `DEFAULT`, a generated column, a
+    /// `CHECK`) would run inside MariaDB on every row, as the backend
+    /// account in the physical schema, and store or show backend names.
+    /// MariaDB allows no subquery there, so no lookup can replace it: 39051.
+    fn refuse_in_table(&self, j: usize) -> R {
+        if self.creating_cols && !self.ctx.internal {
+            return Err(NameError::Unsupported(format!(
+                "{}() in a table definition (a column default, generated column or check); \
+                 set the value in the INSERT or with a trigger",
+                String::from_utf8_lossy(self.bytes(j)).to_ascii_uppercase()
+            )));
+        }
+        Ok(())
+    }
+
     /// At a built-in's name, with `(` next.
     fn builtin(&mut self, b: Builtin) -> R {
         let j = self.i;
         let empty_args = self.punct(j + 2, b')');
+        if empty_args && matches!(b, Builtin::Database | Builtin::CurrentUser | Builtin::User) {
+            self.refuse_in_table(j)?;
+        }
         match b {
             Builtin::Database if empty_args => {
                 if !self.no_subst() {

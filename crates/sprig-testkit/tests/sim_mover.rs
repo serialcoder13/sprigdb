@@ -10,7 +10,9 @@
 use std::time::Duration;
 
 use sprig_testkit::sim::Sim;
-use sprig_testkit::sim::mover::{run_idle_move, run_move, run_move_triggers};
+use sprig_testkit::sim::mover::{
+    run_idle_move, run_move, run_move_triggers, run_move_xa, run_move_xa_no_drain, xa,
+};
 
 #[test]
 fn a_tenant_moves_under_load_and_faults() {
@@ -40,4 +42,40 @@ fn a_trigger_runs_each_change_once_across_moves_and_worker_kills() {
         .seeds(100)
         .max_time(Duration::from_secs(3600))
         .run(|w| async move { run_move_triggers(w).await.map_err(Into::into) });
+}
+
+/// A coordinator prepares distributed-transaction branches on the source
+/// while the tenant moves; some coordinators crash (branches in doubt) or
+/// stall (a live connection owns the branch). The cutover finishes them
+/// through the resolver before and after the fence (chapter 10, steps 2b
+/// and 3b); a drain that runs out of time aborts the attempt, which is
+/// retried. Under both the rename fence and a kill fence, nothing is lost
+/// or committed on the source after `G`.
+#[test]
+fn prepared_branches_are_drained_at_cutover() {
+    Sim::new("mover-xa")
+        .seeds(200)
+        .max_time(Duration::from_secs(3600))
+        .run(|w| async move { run_move_xa(w).await.map_err(Into::into) });
+    let (prepared, committed, rolled_back, short, refused) = xa::totals();
+    println!(
+        "xa: {prepared} branches prepared; cutover drains committed {committed} and rolled back \
+         {rolled_back}; {short} drains ran out of time (attempt aborted); {refused} rename fences \
+         refused by a prepared branch"
+    );
+    assert!(committed + rolled_back > 0, "no cutover drained a branch");
+    assert!(short > 0, "no drain ran out of time");
+}
+
+/// The same without the drain (the cutover before it): under a kill
+/// fence a branch committed after `G` is lost, and the checks say so.
+/// Run with `--ignored` to see the sim catch it.
+#[test]
+#[ignore = "shows the bug the drain fixes"]
+#[should_panic(expected = "invariant")]
+fn without_the_drain_a_late_commit_is_lost() {
+    Sim::new("mover-xa-no-drain")
+        .seeds(200)
+        .max_time(Duration::from_secs(3600))
+        .run(|w| async move { run_move_xa_no_drain(w).await.map_err(Into::into) });
 }

@@ -230,21 +230,41 @@ pub fn group_env(
     store: Arc<dyn sprig_meta::MetaStore>,
     server_id_base: u32,
 ) -> Result<JobEnv> {
+    group_env_with(src, tgt, rec, route, store, server_id_base, None)
+}
+
+/// [`group_env`], with chapter 18's resolver finishing the tenant's
+/// prepared branches at cutover.
+///
+/// # Errors
+/// `Internal` for a spec that isn't a hash-range job.
+pub fn group_env_with(
+    src: ClusterAccess,
+    tgt: ClusterAccess,
+    rec: &JobRecord,
+    route: crate::route::ShardRoute,
+    store: Arc<dyn sprig_meta::MetaStore>,
+    server_id_base: u32,
+    drain: Option<Arc<dyn crate::io::PreparedDrain>>,
+) -> Result<JobEnv> {
     let schemas: Vec<String> = rec
         .spec
         .sources
         .iter()
         .flat_map(|s| s.schemas.iter().cloned())
         .collect();
-    let source = Arc::new(MysqlSource::new(
-        src,
-        rec.job_id,
-        rec.tenant_id,
-        schemas,
-        None,
-        server_id(server_id_base, rec.job_id),
-        false,
-    ));
+    let source = Arc::new(
+        MysqlSource::new(
+            src,
+            rec.job_id,
+            rec.tenant_id,
+            schemas,
+            None,
+            server_id(server_id_base, rec.job_id),
+            false,
+        )
+        .with_drain(drain),
+    );
     let target = Arc::new(
         MysqlTarget::new(tgt, rec.job_id, None, source.clone()).with_route(Arc::new(route)),
     );
@@ -270,6 +290,8 @@ pub struct MysqlEnvFactory {
     /// The DC tier holding group shard maps, for hash-range jobs (chapter
     /// 20): set by [`Self::with_group_maps`].
     group_store: Option<Arc<dyn sprig_meta::MetaStore>>,
+    /// Chapter 18's resolver, for cutovers: set by [`Self::with_drain`].
+    drain: Option<Arc<dyn crate::io::PreparedDrain>>,
 }
 
 impl std::fmt::Debug for MysqlEnvFactory {
@@ -290,7 +312,17 @@ impl MysqlEnvFactory {
             addr_overrides: std::collections::HashMap::new(),
             home_store: None,
             group_store: None,
+            drain: None,
         }
+    }
+
+    /// Cutovers finish the tenant's prepared distributed-transaction
+    /// branches on the source through `drain` (chapter 18's resolver)
+    /// before and after the fence.
+    #[must_use]
+    pub fn with_drain(mut self, drain: Arc<dyn crate::io::PreparedDrain>) -> Self {
+        self.drain = Some(drain);
+        self
     }
 
     /// Runs hash-range jobs (split, merge, shard move, chapter 20) too:
@@ -351,17 +383,28 @@ impl EnvFactory for MysqlEnvFactory {
             let store = self.group_store.clone().ok_or_else(|| {
                 SprigError::internal("this worker has no shard-map store for hash-range jobs")
             })?;
-            return group_env(src, tgt, rec, route, store, self.settings.server_id_base);
+            return group_env_with(
+                src,
+                tgt,
+                rec,
+                route,
+                store,
+                self.settings.server_id_base,
+                self.drain.clone(),
+            );
         }
-        let source = Arc::new(MysqlSource::new(
-            src,
-            rec.job_id,
-            rec.tenant_id,
-            s.schemas.clone(),
-            s.tables.clone(),
-            server_id(self.settings.server_id_base, rec.job_id),
-            swap.is_some(),
-        ));
+        let source = Arc::new(
+            MysqlSource::new(
+                src,
+                rec.job_id,
+                rec.tenant_id,
+                s.schemas.clone(),
+                s.tables.clone(),
+                server_id(self.settings.server_id_base, rec.job_id),
+                swap.is_some(),
+            )
+            .with_drain(self.drain.clone()),
+        );
         let target = Arc::new(MysqlTarget::new(tgt, rec.job_id, swap, source.clone()));
         let from = sprig_cluster::registry::dc_of(&s.cluster);
         let to = sprig_cluster::registry::dc_of(&t.cluster);

@@ -138,7 +138,8 @@ pub enum TableKind {
     Sharded {
         /// The key column, lowercase; empty when no single column holds
         /// the key (a parent member or a composite key): every read
-        /// scatters and inserts are refused.
+        /// scatters, and inserts are refused unless the table is a parent
+        /// member ([`TableEntry::parent`]), whose rows follow their parent.
         key: String,
         /// Its position among the table's visible columns (`INSERT`
         /// without a column list); `None` when unknown.
@@ -177,6 +178,41 @@ pub struct TableEntry {
     pub columns: Vec<String>,
     /// Writes add `_sprig_rk` (the member is `filling` or later).
     pub fill_rk: bool,
+    /// A parent member (chapter 15): no key column of its own; its rows
+    /// go where their parent row is, through this foreign key.
+    pub parent: Option<ParentLink>,
+}
+
+/// How a parent member's row finds its shard (chapter 15, "Table groups";
+/// chapter 17, "INSERT routing"): through a declared foreign key to a
+/// member of the same group and database, whose row holds the routing
+/// hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentLink {
+    /// The constraint's name.
+    pub fk: String,
+    /// The child's foreign-key columns, lowercase, in key order.
+    pub columns: Vec<String>,
+    /// Their positions among the child's visible columns (`INSERT`
+    /// without a column list).
+    pub ordinals: Vec<Option<usize>>,
+    /// The parent table, lowercase.
+    pub table: String,
+    /// The parent's referenced columns, lowercase, matching `columns`.
+    pub parent_columns: Vec<String>,
+    /// Every unique key of the child holds every foreign-key column, so
+    /// rows that collide share a parent and a shard: upserts and
+    /// `REPLACE` are exact per shard.
+    pub upsert_safe: bool,
+    /// The parent's public unique lookup (chapter 19) on its one
+    /// referenced column, when it has one: parents are found through it
+    /// instead of by asking every shard.
+    pub lookup: Option<Arc<LookupRef>>,
+    /// The referenced columns hold a unique key of the parent, so a join
+    /// on the foreign key pairs each row with its own parent: such a join
+    /// is co-located (chapter 15's `colocation_safe`, through a parent
+    /// chain).
+    pub parent_unique: bool,
 }
 
 /// A unique lookup index of a sharded table (chapter 19), as the router
@@ -526,6 +562,7 @@ impl TenantFile {
                     lookup_gap: false,
                     columns: Vec::new(),
                     fill_rk: false,
+                    parent: None,
                 },
             );
         }

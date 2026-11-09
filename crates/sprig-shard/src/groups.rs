@@ -279,7 +279,7 @@ pub fn colocation_safe(cmp: &Comparison, g: &TableGroup, a: &GroupMember, b: &Gr
 /// Whether equality under `c` implies equality under `g`: the same
 /// collation, or a `_bin` collation of the same character set that pads no
 /// more than `g` does.
-fn finer_or_equal(c: CollationId, g: CollationId) -> bool {
+pub(crate) fn finer_or_equal(c: CollationId, g: CollationId) -> bool {
     let (Some(c), Some(g)) = (collation::collation(c), collation::collation(g)) else {
         return false;
     };

@@ -169,7 +169,15 @@ fn layout() -> Vec<Grp> {
         Grp {
             id: 901,
             spec: int.clone(),
-            tables: &[("customers", "cid"), ("orders", "cid"), ("accounts", "aid")],
+            // `invoice_lines` is a parent member: it follows `invoices`
+            // through its foreign key (no key column of its own).
+            tables: &[
+                ("customers", "cid"),
+                ("orders", "cid"),
+                ("accounts", "aid"),
+                ("invoices", "cid"),
+                ("invoice_lines", ""),
+            ],
             // Uneven ranges over both clusters.
             shards: [
                 (1, 0u64, 0),
@@ -242,7 +250,24 @@ fn ddl_of(table: &str) -> &'static str {
         "products" => DDL[2],
         "tags" => TAG_DDL,
         "accounts" => ACCOUNTS_DDL,
+        "invoices" => INVOICES_DDL,
+        "invoice_lines" => LINES_DDL,
         _ => REF_DDL,
+    }
+}
+
+/// The tables whose members fill `_sprig_rk` (chapter 15), with the
+/// column on their shard schemas: a column member and its parent member.
+const RK_TABLES: [&str; 2] = ["invoices", "invoice_lines"];
+
+/// Adds `_sprig_rk` to the rk tables just created in the current schema.
+async fn add_rk(c: &mut Conn, t: &str) {
+    if RK_TABLES.contains(&t) {
+        c.query_drop(format!(
+            "ALTER TABLE `{t}` ADD COLUMN `_sprig_rk` BIGINT UNSIGNED NULL INVISIBLE"
+        ))
+        .await
+        .unwrap();
     }
 }
 
@@ -304,13 +329,44 @@ async fn database(e: &Env) -> (DbId, String) {
     )
 }
 
+/// A DDL through the gateway, retried when the gateway's DC write permit
+/// lapsed for a moment (39501, a loaded machine) or etcd was slow (39500).
+async fn gw_ddl(sut: &mut Conn, sql: &str) {
+    for attempt in 0..5 {
+        match sut.query_drop(sql).await {
+            Ok(()) => return,
+            Err(mysql_async::Error::Server(e))
+                if attempt < 4 && matches!(e.code, 39500 | 39501) =>
+            {
+                eprintln!("{sql}: {}; retrying", e.message);
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+            }
+            Err(e) => panic!("{sql}: {e}"),
+        }
+    }
+}
+
 /// Moves the catalog version (a DDL through the gateway), so gateways load
 /// the `sharding` rows the suite wrote behind their back.
 async fn bump(sut: &mut Conn) {
-    sut.query_drop("CREATE TABLE IF NOT EXISTS r1f_bump (x INT)")
-        .await
-        .unwrap();
-    sut.query_drop("DROP TABLE r1f_bump").await.unwrap();
+    // Retried: a gateway whose DC write permit lapsed for a moment (a
+    // loaded machine) answers 39501 to DDL; that isn't what this tests.
+    for attempt in 0..5 {
+        let r = async {
+            sut.query_drop("CREATE TABLE IF NOT EXISTS r1f_bump (x INT)")
+                .await?;
+            sut.query_drop("DROP TABLE r1f_bump").await
+        }
+        .await;
+        match r {
+            Ok(()) => return,
+            Err(e) if attempt < 4 => {
+                eprintln!("bump: {e}; retrying");
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+            }
+            Err(e) => panic!("bump: {e}"),
+        }
+    }
 }
 
 async fn clear_layout(e: &Env, store: &ShardMapStore) {
@@ -351,13 +407,11 @@ async fn setup(e: &Env, sut: &mut Conn) -> World {
     bump(sut).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     // The tables, through the gateway: catalog objects and the template.
-    for t in TABLES {
-        sut.query_drop(format!("DROP TABLE IF EXISTS {t}"))
-            .await
-            .unwrap();
+    for t in TABLES.iter().rev() {
+        gw_ddl(sut, &format!("DROP TABLE IF EXISTS {t}")).await;
     }
     for t in TABLES {
-        sut.query_drop(ddl_of(t)).await.unwrap();
+        gw_ddl(sut, ddl_of(t)).await;
     }
     let (db_id, default_schema) = database(e).await;
     // Chapter 18's decision table came with the database's schema
@@ -417,6 +471,7 @@ async fn setup(e: &Env, sut: &mut Conn) -> World {
         };
         for t in tables {
             c.query_drop(ddl_of(t)).await.unwrap();
+            add_rk(&mut c, t).await;
         }
         if *s == ref_schema {
             c.query_drop(COUNTRIES).await.unwrap();
@@ -481,8 +536,19 @@ async fn setup(e: &Env, sut: &mut Conn) -> World {
                     object: object(t),
                     group: GroupId(g.id),
                     db: db_id,
-                    routing: MemberRouting::Columns(vec![(*k).to_owned()]),
-                    rk_state: RkState::Absent,
+                    routing: if k.is_empty() {
+                        MemberRouting::Parent {
+                            parent: object("invoices"),
+                            fk: "fk_il_inv".into(),
+                        }
+                    } else {
+                        MemberRouting::Columns(vec![(*k).to_owned()])
+                    },
+                    rk_state: if RK_TABLES.contains(t) {
+                        RkState::Filling
+                    } else {
+                        RkState::Absent
+                    },
                     off_class_seen: false,
                 },
             )
@@ -612,7 +678,7 @@ async fn setup(e: &Env, sut: &mut Conn) -> World {
 async fn teardown(e: &Env, w: &World, sut: &mut Conn) {
     clear_layout(e, &w.store).await;
     bump(sut).await;
-    for t in TABLES {
+    for t in TABLES.iter().rev() {
         let _ = sut.query_drop(format!("DROP TABLE IF EXISTS {t}")).await;
     }
     for (i, s) in &w.schemas {
@@ -650,15 +716,23 @@ const DDL: &[&str] = &[
 ];
 const ACCOUNTS_DDL: &str = "CREATE TABLE accounts (aid INT NOT NULL PRIMARY KEY, \
      email VARCHAR(40) COLLATE utf8mb4_general_ci, cid INT, UNIQUE KEY email (email)) DEFAULT CHARSET utf8mb4";
-/// The suite's tables.
-const TABLES: [&str; 6] = [
+/// The suite's tables, parents before children (drops go in reverse).
+const TABLES: [&str; 8] = [
     "customers",
     "orders",
     "products",
     "tags",
     "countries",
     "accounts",
+    "invoices",
+    "invoice_lines",
 ];
+const INVOICES_DDL: &str = "CREATE TABLE invoices (iid INT NOT NULL PRIMARY KEY, cid INT NOT NULL, \
+     total DECIMAL(10,2), memo VARCHAR(20) COLLATE utf8mb4_general_ci) DEFAULT CHARSET utf8mb4";
+const LINES_DDL: &str = "CREATE TABLE invoice_lines (iid INT NOT NULL, line_no INT NOT NULL, \
+     sku VARCHAR(20) COLLATE utf8mb4_general_ci, qty INT, PRIMARY KEY (iid, line_no), \
+     CONSTRAINT fk_il_inv FOREIGN KEY (iid) REFERENCES invoices (iid) ON DELETE CASCADE) \
+     DEFAULT CHARSET utf8mb4";
 const TAG_DDL: &str = "CREATE TABLE tags (tag VARCHAR(20) COLLATE utf8mb4_general_ci NOT NULL PRIMARY KEY, \
      cnt INT) DEFAULT CHARSET utf8mb4";
 const REF_DDL: &str = "CREATE TABLE countries (code CHAR(2) NOT NULL PRIMARY KEY, cname VARCHAR(30)) DEFAULT CHARSET utf8mb4";
@@ -798,6 +872,38 @@ fn seed(r: &mut Rng) -> Vec<String> {
         })
         .collect();
     out.push(format!("INSERT INTO accounts VALUES {}", rows.join(", ")));
+    // `invoices` (keyed by cid) and their lines, a parent member: the
+    // lines' inserts span shards and follow each invoice (chapter 15).
+    let rows: Vec<String> = (1..=60i64)
+        .map(|iid| {
+            let cid = 1 + r.below(120) as i64;
+            let cid = if cid % 17 == 0 { -cid } else { cid };
+            format!(
+                "({iid}, {cid}, {}, {})",
+                opt(r, |r| format!("{}.{:02}", r.below(900), r.below(100))),
+                lit(r.pick(NOTES))
+            )
+        })
+        .collect();
+    out.push(format!("INSERT INTO invoices VALUES {}", rows.join(", ")));
+    let mut lines = Vec::new();
+    for iid in 1..=60i64 {
+        for no in 1..=r.below(4) {
+            lines.push(format!(
+                "({iid}, {no}, {}, {})",
+                lit(r.pick(CATS)),
+                opt(r, |r| r.below(9))
+            ));
+        }
+    }
+    for chunk in lines.chunks(25) {
+        out.push(format!(
+            "INSERT INTO invoice_lines (iid, line_no, sku, qty) VALUES {}",
+            chunk.join(", ")
+        ));
+    }
+    out.push("INSERT INTO invoice_lines VALUES (7, 40, 'pos', 1)".into());
+    out.push("INSERT INTO invoice_lines SET iid = 8, line_no = 40, sku = 'set'".into());
     out
 }
 
@@ -1053,6 +1159,30 @@ fn corpus(r: &mut Rng) -> Vec<(String, Cmp)> {
             .into(),
         Bag,
     ));
+    // A parent member, read through every shard and joined to its parent.
+    for _ in 0..8 {
+        let iid = 1 + r.below(62);
+        let c = k(r);
+        v.push((
+            format!("SELECT * FROM invoice_lines WHERE iid = {iid} ORDER BY line_no"),
+            Ordered,
+        ));
+        v.push((
+            format!(
+                "SELECT i.iid, i.cid, l.line_no, l.sku FROM invoices i JOIN invoice_lines l \
+                 ON l.iid = i.iid WHERE i.cid = {c} ORDER BY l.iid, l.line_no"
+            ),
+            Ordered,
+        ));
+    }
+    v.push((
+        "SELECT iid, COUNT(*), SUM(qty) FROM invoice_lines GROUP BY iid ORDER BY iid".into(),
+        Ordered,
+    ));
+    v.push((
+        "SELECT sku, COUNT(*) FROM invoice_lines GROUP BY sku".into(),
+        Bag,
+    ));
     v
 }
 
@@ -1149,6 +1279,68 @@ fn dml(r: &mut Rng) -> Vec<(String, &'static str)> {
         "tags",
     ));
     v.push(("DELETE FROM tags WHERE tag = 'newtag '".into(), "tags"));
+    // Parent-member writes: rows follow their invoice; a missing parent
+    // fails (1452) or, under IGNORE, is skipped with a warning, as in
+    // MariaDB; changing the foreign key is a key change.
+    for i in 0..4 {
+        let (a, b, c) = (1 + r.below(60), 1 + r.below(60), 1 + r.below(60));
+        let n = 10 + i;
+        v.push((
+            format!(
+                "INSERT INTO invoice_lines (iid, line_no, sku, qty) VALUES ({a}, {n}, 'n', 1), ({b}, {n}, 'N', 2), ({c}, {}, NULL, NULL)",
+                n + 50
+            ),
+            "invoice_lines",
+        ));
+        v.push((
+            format!("UPDATE invoice_lines SET qty = qty + 1 WHERE iid = {a}"),
+            "invoice_lines",
+        ));
+        v.push((
+            format!(
+                "INSERT INTO invoice_lines (iid, line_no, qty) VALUES ({b}, 30, 1) ON DUPLICATE KEY UPDATE qty = qty + 5"
+            ),
+            "invoice_lines",
+        ));
+        v.push((
+            format!("DELETE FROM invoice_lines WHERE iid = {c} AND line_no >= 10"),
+            "invoice_lines",
+        ));
+    }
+    v.push((
+        "INSERT INTO invoice_lines VALUES (999, 1, 'orphan', 1)".into(),
+        "invoice_lines",
+    ));
+    v.push((
+        "INSERT INTO invoice_lines VALUES (3, 41, 'ok', 1), (998, 1, 'orphan', 1)".into(),
+        "invoice_lines",
+    ));
+    v.push((
+        "INSERT IGNORE INTO invoice_lines (iid, line_no, sku) VALUES (5, 30, 'dup'), (998, 1, 'orphan'), (6, 41, 'ok'), (5, 30, 'dup2')".into(),
+        "invoice_lines",
+    ));
+    v.push((
+        "REPLACE INTO invoice_lines (iid, line_no, sku) VALUES (6, 41, 'rep'), (9, 41, 'rep')"
+            .into(),
+        "invoice_lines",
+    ));
+    v.push((
+        "INSERT INTO invoice_lines SET iid = 11, line_no = 42, sku = 'set'".into(),
+        "invoice_lines",
+    ));
+    v.push((
+        "UPDATE invoice_lines SET iid = 12 WHERE iid = 11 AND line_no = 42".into(),
+        "invoice_lines",
+    ));
+    v.push((
+        "INSERT INTO invoice_lines (iid, line_no) SELECT iid, 77 FROM invoices WHERE iid < 3"
+            .into(),
+        "invoice_lines",
+    ));
+    v.push((
+        "DELETE FROM invoices WHERE iid IN (13, 14)".into(),
+        "invoice_lines",
+    ));
     v
 }
 
@@ -1503,6 +1695,22 @@ fn prepared_dml(r: &mut Rng) -> Vec<(&'static str, Vec<Value>, &'static str)> {
             ],
             "orders",
         ));
+        // A parent member through the binary protocol: two rows that
+        // follow two invoices (usually on two shards).
+        v.push((
+            "INSERT INTO invoice_lines (iid, line_no, sku, qty) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+            vec![
+                Value::Int(1 + r.below(60) as i64),
+                Value::Int(90 + i),
+                Value::Bytes(b"prep".to_vec()),
+                Value::Int(1),
+                Value::Int(1 + r.below(60) as i64),
+                Value::Int(90 + i),
+                Value::Bytes(b"prep".to_vec()),
+                Value::NULL,
+            ],
+            "invoice_lines",
+        ));
     }
     v
 }
@@ -1513,6 +1721,8 @@ fn full(t: &str) -> String {
         "tags" => "SELECT cnt FROM tags ORDER BY cnt".to_owned(),
         "products" => "SELECT * FROM products ORDER BY pid".to_owned(),
         "accounts" => "SELECT * FROM accounts ORDER BY aid".to_owned(),
+        "invoices" => "SELECT * FROM invoices ORDER BY iid".to_owned(),
+        "invoice_lines" => "SELECT * FROM invoice_lines ORDER BY iid, line_no".to_owned(),
         _ => "SELECT * FROM orders ORDER BY cid, oid".to_owned(),
     }
 }
@@ -1716,6 +1926,150 @@ async fn transactions(
         "orders",
     )
     .await;
+}
+
+/// Parent members (chapter 15) inside transactions: an invoice and its
+/// lines in one transaction (the lines find a parent the transaction
+/// wrote, on both clusters, committed with XA), a rolled-back one with a
+/// savepoint, `autocommit = 0`, and a missing parent with
+/// `foreign_key_checks = 0` (refused: the orphanage isn't built).
+async fn parent_txns(
+    e: &Env,
+    sut: &mut Conn,
+    reference: &mut Conn,
+    tally: &mut Tally,
+    shards: &[Sh],
+    base: i64,
+) {
+    let (a, b) = keys_by_cluster(e, shards);
+    let (x, y) = (a[0], b[0]);
+    let (i1, i2, i3) = (base, base + 1, base + 2);
+    both(
+        sut,
+        reference,
+        tally,
+        &[
+            "BEGIN".into(),
+            format!("INSERT INTO invoices VALUES ({i1}, {x}, 1.00, 'tx'), ({i2}, {y}, 2.00, 'tx')"),
+            format!(
+                "INSERT INTO invoice_lines VALUES ({i1}, 1, 'a', 1), ({i2}, 1, 'b', 2), ({i1}, 2, 'c', 3)"
+            ),
+            format!("SELECT * FROM invoice_lines WHERE iid IN ({i1}, {i2}) ORDER BY iid, line_no"),
+            "COMMIT".into(),
+        ],
+    )
+    .await;
+    both(
+        sut,
+        reference,
+        tally,
+        &[
+            "START TRANSACTION".into(),
+            format!("INSERT INTO invoices VALUES ({i3}, {x}, 3.00, 'rb')"),
+            format!(
+                "INSERT INTO invoice_lines (iid, line_no, sku) VALUES ({i3}, 1, 'r'), ({i2}, 9, 'r')"
+            ),
+            "SAVEPOINT p1".into(),
+            format!("INSERT INTO invoice_lines (iid, line_no, sku) VALUES ({i1}, 9, 'r')"),
+            "ROLLBACK TO SAVEPOINT p1".into(),
+            "SELECT iid, line_no FROM invoice_lines WHERE sku = 'r' ORDER BY iid".into(),
+            "ROLLBACK".into(),
+            "SET autocommit = 0".into(),
+            format!("INSERT INTO invoice_lines VALUES ({i2}, 3, 'ac', 1), ({i1}, 3, 'ac', 1)"),
+            "COMMIT".into(),
+            "SET autocommit = 1".into(),
+        ],
+    )
+    .await;
+    // With the checks off, MariaDB would keep an orphan; the router can't
+    // place one and refuses (counted as skipped), so the reference drops it.
+    both(
+        sut,
+        reference,
+        tally,
+        &[
+            "SET foreign_key_checks = 0".into(),
+            "INSERT INTO invoice_lines VALUES (997, 1, 'orphan', 1)".into(),
+            format!("INSERT INTO invoice_lines VALUES ({i1}, 4, 'fk0', 1)"),
+            "SET foreign_key_checks = 1".into(),
+        ],
+    )
+    .await;
+    reference
+        .query_drop("DELETE FROM invoice_lines WHERE iid = 997")
+        .await
+        .unwrap();
+    for t in ["invoices", "invoice_lines"] {
+        compare_full(sut, reference, tally, "after parent-member transactions", t).await;
+    }
+}
+
+/// Every `invoice_lines` row sits on its invoice's shard and carries the
+/// invoice's routing hash, and every invoice's `_sprig_rk` is its cid's
+/// hash on the shard owning it, read on the shards themselves.
+async fn parent_rk_check(e: &Env, w: &World, tally: &mut Tally) {
+    let g = &layout()[0];
+    let (m, _) = w.store.load(e.tenant, GroupId(g.id)).await.unwrap();
+    let hash = |cid: i64| {
+        sprig_shard::hash_key(&g.spec, &[KeyValue::Int(i128::from(cid))])
+            .unwrap()
+            .0
+            .0
+    };
+    let (mut lines, mut invoices, mut wrong) = (0usize, 0usize, Vec::new());
+    for (i, r) in m.ranges.iter().enumerate() {
+        let owns = |h: u64| h >= r.lo && m.ranges.get(i + 1).is_none_or(|n| h < n.lo);
+        let schema = shard_schema(e.tenant, w.db_id, GroupId(g.id), r.shard);
+        let ci = e
+            .clusters
+            .iter()
+            .position(|(c, _)| *c == r.cluster)
+            .unwrap();
+        let mut c = root(e, ci, None).await;
+        let inv: Vec<(i64, i64, Option<u64>)> = c
+            .query(format!(
+                "SELECT iid, cid, _sprig_rk FROM `{schema}`.invoices"
+            ))
+            .await
+            .unwrap();
+        for (iid, cid, rk) in inv {
+            invoices += 1;
+            let h = hash(cid);
+            if rk != Some(h) || !owns(h) {
+                wrong.push(format!(
+                    "invoice {iid} (cid {cid}) on {schema}: _sprig_rk {rk:?}, hash {h}"
+                ));
+            }
+        }
+        let ls: Vec<(i64, i64, Option<u64>, Option<i64>)> = c
+            .query(format!(
+                "SELECT l.iid, l.line_no, l._sprig_rk, i.cid FROM `{schema}`.invoice_lines l \
+                 LEFT JOIN `{schema}`.invoices i ON i.iid = l.iid"
+            ))
+            .await
+            .unwrap();
+        for (iid, no, rk, cid) in ls {
+            lines += 1;
+            match cid {
+                Some(cid) if rk == Some(hash(cid)) && owns(hash(cid)) => {}
+                _ => wrong.push(format!(
+                    "line ({iid}, {no}) on {schema}: _sprig_rk {rk:?}, its invoice's cid {cid:?}"
+                )),
+            }
+        }
+    }
+    println!(
+        "parent members: {lines} lines and {invoices} invoices checked on {} shards, {} wrong",
+        m.ranges.len(),
+        wrong.len()
+    );
+    tally.compared += 1;
+    if lines == 0 {
+        wrong.push("no invoice_lines rows on the shards".into());
+    }
+    for x in wrong.iter().take(20) {
+        tally.mismatches.push(format!("PARENT MEMBER {x}"));
+    }
 }
 
 /// Chapter 19 through the router: reads, updates and deletes by a unique
@@ -2021,6 +2375,7 @@ async fn split(
         tc.query_drop(format!("USE `{s}`")).await.unwrap();
         for (t, _) in g.tables {
             tc.query_drop(ddl_of(t)).await.unwrap();
+            add_rk(&mut tc, t).await;
         }
         w.schemas.push((target, s.clone()));
     }
@@ -2077,7 +2432,7 @@ async fn split(
     m.ranges[at].job_id = Some("r1finish-split".into());
     m.ranges[at].hold_until_ms = Some(now + hold_ms);
     m.version += 1;
-    let rev = w.store.compare_and_put(rev, &m).await.unwrap().unwrap();
+    let rev = cas(e, &w.store, rev, &m).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     // Fence: the source's tables are renamed away.
     let src_idx = e
@@ -2109,24 +2464,53 @@ async fn split(
         .await
         .unwrap();
     }
-    // Copy by hash.
+    // Copy by hash, parents before children; `_sprig_rk` goes along, and
+    // a parent member's rows go with their parent (chapter 15).
     for (t, _) in g.tables {
-        let rows: Vec<Row> = sc
-            .query(format!("SELECT * FROM `{src_schema}`.`__fenced_{t}`"))
-            .await
-            .unwrap();
+        let f = format!("`{src_schema}`.`__fenced_{t}`");
+        let (select, key_at, cols) = match *t {
+            "invoices" => (
+                format!("SELECT iid, cid, total, memo, _sprig_rk FROM {f}"),
+                1,
+                Some("iid, cid, total, memo, _sprig_rk"),
+            ),
+            "invoice_lines" => (
+                format!(
+                    "SELECT l.iid, l.line_no, l.sku, l.qty, l._sprig_rk, i.cid FROM {f} l \
+                     JOIN `{src_schema}`.`__fenced_invoices` i ON i.iid = l.iid"
+                ),
+                5,
+                Some("iid, line_no, sku, qty, _sprig_rk"),
+            ),
+            "orders" => (format!("SELECT * FROM {f}"), 1, None),
+            _ => (format!("SELECT * FROM {f}"), 0, None),
+        };
+        let rows: Vec<Row> = sc.query(select).await.unwrap();
+        // Many rows per statement: the fence window stays short.
+        let mut halves: [Vec<Value>; 2] = [Vec::new(), Vec::new()];
+        let mut width = 0;
         for row in rows {
-            let k: i64 = match *t {
-                "orders" => row.get(1).unwrap(),
-                _ => row.get(0).unwrap(),
-            };
+            let k: i64 = row.get(key_at).unwrap();
             let (h, _) = sprig_shard::hash_key(&g.spec, &[KeyValue::Int(i128::from(k))]).unwrap();
-            let to = if h.0 < mid { &new[0].1 } else { &new[1].1 };
-            let vals = row.unwrap();
-            let marks = vec!["?"; vals.len()].join(", ");
-            tc.exec_drop(format!("INSERT INTO `{to}`.`{t}` VALUES ({marks})"), vals)
+            let mut vals = row.unwrap();
+            if *t == "invoice_lines" {
+                vals.truncate(5);
+            }
+            width = vals.len();
+            halves[usize::from(h.0 >= mid)].extend(vals);
+        }
+        let list = cols.map(|c| format!(" ({c})")).unwrap_or_default();
+        for (half, vals) in halves.into_iter().enumerate() {
+            for chunk in vals.chunks(width.max(1) * 100) {
+                let row = format!("({})", vec!["?"; width].join(", "));
+                let rows = vec![row; chunk.len() / width.max(1)].join(", ");
+                tc.exec_drop(
+                    format!("INSERT INTO `{}`.`{t}`{list} VALUES {rows}", new[half].1),
+                    chunk.to_vec(),
+                )
                 .await
                 .unwrap();
+            }
         }
     }
     // The copy reached the target's replicas (reads may go there).
@@ -2150,7 +2534,7 @@ async fn split(
     }
     next.version += 1;
     next.next_shard_id = n2 + 1;
-    w.store.compare_and_put(rev, &next).await.unwrap().unwrap();
+    cas(e, &w.store, rev, &next).await;
     tokio::time::sleep(Duration::from_millis(700)).await;
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let (n, errors) = reader.await.unwrap();
@@ -2189,6 +2573,37 @@ async fn split(
         })
         .collect();
     (shards, errors, under_outcome)
+}
+
+/// Writes `m` over revision `rev`; a slow etcd's error is retried after
+/// checking whether the write went through (its version is there).
+async fn cas(
+    e: &Env,
+    store: &ShardMapStore,
+    rev: sprig_meta::Revision,
+    m: &ShardMap,
+) -> sprig_meta::Revision {
+    let mut rev = rev;
+    for attempt in 0..8u64 {
+        match store.compare_and_put(rev, m).await {
+            Ok(Some(r)) => return r,
+            Ok(None) => {}
+            Err(err) => eprintln!("map write: {err}; checking"),
+        }
+        tokio::time::sleep(Duration::from_millis(300 * (attempt + 1))).await;
+        if let Ok((cur, r)) = store.load(e.tenant, m.group).await {
+            if cur.version == m.version {
+                return r;
+            }
+            assert_eq!(
+                cur.version + 1,
+                m.version,
+                "the map moved under the suite's split"
+            );
+            rev = r;
+        }
+    }
+    panic!("map write never went through");
 }
 
 /// A branch killed inside a transaction spanning clusters: COMMIT fails
@@ -2318,6 +2733,7 @@ async fn differential_against_one_unsharded_mariadb() {
     }
     lookups(&e, &w, &mut sut, &mut reference, &mut tally).await;
     let shards0 = layout().remove(0).shards;
+    parent_txns(&e, &mut sut, &mut reference, &mut tally, &shards0, 500).await;
     transactions(&e, &mut sut, &mut reference, &mut tally, &shards0).await;
     autocommit_off(&e, &mut sut, &mut reference, &mut tally, &shards0).await;
     ddl_in_txn(&e, &mut sut, &mut reference, &mut tally, &shards0).await;
@@ -2382,7 +2798,7 @@ async fn differential_against_one_unsharded_mariadb() {
             .push(format!("READ DURING SPLIT (expired hold) {m}"));
     }
     for (s, mode) in &corpus_now {
-        if s.contains("customers") || s.contains("orders") {
+        if s.contains("customers") || s.contains("orders") || s.contains("invoice") {
             let a = run(&mut sut, s).await;
             let b = run(&mut reference, s).await;
             tally.check(s, *mode, &a, &b);
@@ -2395,6 +2811,7 @@ async fn differential_against_one_unsharded_mariadb() {
     }
     transactions(&e, &mut sut, &mut reference, &mut tally, &shards1).await;
     autocommit_off(&e, &mut sut, &mut reference, &mut tally, &shards1).await;
+    parent_txns(&e, &mut sut, &mut reference, &mut tally, &shards1, 600).await;
     compare_full(
         &mut sut,
         &mut reference,
@@ -2443,6 +2860,7 @@ async fn differential_against_one_unsharded_mariadb() {
     } else {
         false
     };
+    parent_rk_check(&e, &w, &mut tally).await;
     let secs = started.elapsed().as_secs_f64();
     println!(
         "differential: {} statements compared ({} seed and reads, {} prepared, {} writes and transactions, {} after the split), {} skipped as not distributable ({:.1}%), {} mismatches, {secs:.1} s",

@@ -63,6 +63,7 @@ enum Tok {
     Comma,
 }
 
+#[allow(clippy::many_single_char_names)] // a byte lexer: b, i, c
 fn lex(text: &str) -> Result<Vec<(usize, Tok)>> {
     let b = text.as_bytes();
     let mut out = Vec::new();
@@ -123,8 +124,7 @@ fn lex(text: &str) -> Result<Vec<(usize, Tok)>> {
                         }
                     }
                 }
-                let s = String::from_utf8(s)
-                    .map_err(|_| invalid("a policy string isn't UTF-8"))?;
+                let s = String::from_utf8(s).map_err(|_| invalid("a policy string isn't UTF-8"))?;
                 out.push((start, Tok::Str(s)));
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
@@ -211,9 +211,7 @@ impl Parser {
     fn unary(&mut self) -> Result<Expr> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return Err(invalid(format!(
-                "the policy nests deeper than {MAX_DEPTH}"
-            )));
+            return Err(invalid(format!("the policy nests deeper than {MAX_DEPTH}")));
         }
         let r = if self.word("not") {
             self.pos += 1;
@@ -453,6 +451,8 @@ pub fn resolve(p: &Policy, registry: &[DcRecord]) -> BTreeSet<DcId> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_raw_string_hashes)]
+
     use serde_json::{Map, json};
 
     use super::*;
@@ -575,10 +575,7 @@ mod tests {
     #[test]
     fn hash_and_names() {
         let p = Policy::parse(r#"dc = "fra1" or country in ("DE")"#).expect("p");
-        assert_eq!(
-            p.names().into_iter().collect::<Vec<_>>(),
-            ["country", "dc"]
-        );
+        assert_eq!(p.names().into_iter().collect::<Vec<_>>(), ["country", "dc"]);
         assert_eq!(p.hash().len(), 16);
         assert_eq!(p.hash(), Policy::parse(p.text()).expect("again").hash());
         assert_ne!(p.hash(), Policy::parse(r#"dc = "fra1""#).expect("o").hash());

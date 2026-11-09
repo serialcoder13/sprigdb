@@ -28,6 +28,7 @@ fn rewrite(sql: &str, persona: Persona) -> Result<Option<String>, NameError> {
         visible: None,
         in_information_schema: false,
         user: Some(("alice", "203.0.113.7")),
+        stored_names: false,
     };
     rewrite_information_schema(sql.as_bytes(), StmtKind::Select, &ctx)
         .map(|o| o.map(|r| String::from_utf8(r.sql).unwrap()))

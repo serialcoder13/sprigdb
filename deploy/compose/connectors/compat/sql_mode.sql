@@ -1,7 +1,7 @@
 SELECT @@sql_mode;
 SET sql_mode = 'TRADITIONAL';
 SELECT @@sql_mode, @@session.sql_mode;
-SET sql_mode = 'NO_AUTO_CREATE_USER';
+SET sql_mode = 'MAXDB';
 SELECT @@sql_mode;
 SET sql_mode = 'ansi,traditional';
 SELECT @@sql_mode;

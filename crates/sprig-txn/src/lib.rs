@@ -31,6 +31,7 @@
 pub mod backend;
 pub mod coordinator;
 pub mod decision;
+pub mod indoubt;
 pub mod locate;
 pub mod lookup;
 pub mod mysql;

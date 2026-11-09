@@ -940,7 +940,10 @@ async fn scenario(world: World, plan: FaultPlan) -> SimResult {
             Ok(true)
         })
         .await;
-        w2.record(format!("late pin of tenant {LATE_PIN} written: {}", r.is_ok()));
+        w2.record(format!(
+            "late pin of tenant {LATE_PIN} written: {}",
+            r.is_ok()
+        ));
     });
     world.run_plan(&plan).await;
     world.heal_all().await;
@@ -1025,10 +1028,9 @@ async fn check(world: &World, s: &S) -> SimResult {
     // 4. Residency.
     for (at, t, to, _) in &sh.moves {
         if *t == PINNED {
-            return Err(format!(
-                "tenant {PINNED}, allowed only fra1, moved to {to} at {at:?}"
-            )
-            .into());
+            return Err(
+                format!("tenant {PINNED}, allowed only fra1, moved to {to} at {at:?}").into(),
+            );
         }
         if *t == LATE_PIN
             && to != "fra1"

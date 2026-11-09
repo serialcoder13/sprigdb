@@ -1086,6 +1086,7 @@ impl PassSession {
                     j.inner_group.shards.iter().for_each(|s| note(&s.schema));
                 }
                 Plan::ViaLookup(v) => stack.push(&v.plan),
+                Plan::ViaParent(v) => v.group.shards.iter().for_each(|s| note(&s.schema)),
                 Plan::Explain(_) | Plan::NotRouted | Plan::Reject(_) => {}
             }
         }

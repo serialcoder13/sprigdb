@@ -364,12 +364,8 @@ where
                 .create(&new, self.max_depth(), self.clock.wall())
                 .await?;
             if let Some(b) = &inherited {
-                crate::residency::write_block(
-                    &**self.directory.store(),
-                    e.body().tenant_id,
-                    b,
-                )
-                .await?;
+                crate::residency::write_block(&**self.directory.store(), e.body().tenant_id, b)
+                    .await?;
             }
             (e, true)
         };

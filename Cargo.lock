@@ -2855,6 +2855,7 @@ dependencies = [
  "sprig-mover",
  "sprig-settings",
  "sprig-shard",
+ "sprig-txn",
  "tokio",
  "tracing",
 ]

@@ -187,6 +187,8 @@ impl AuthzServices {
         let Some(auth) = TenantAuth::of(cat) else {
             return Ok(());
         };
+        // Chapter 07 step 12: the name pairs stored code looks up.
+        super::stored_names::sync_logged(svc, cat, cluster).await;
         let Some(engine) = engine_for(svc, cat) else {
             return Ok(());
         };

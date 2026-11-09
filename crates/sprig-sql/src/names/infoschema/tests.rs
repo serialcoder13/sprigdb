@@ -51,6 +51,7 @@ fn ctx_with<'a>(
         visible: None,
         in_information_schema: false,
         user: Some(("alice", "203.0.113.7")),
+        stored_names: false,
     };
     f(&mut c);
     c

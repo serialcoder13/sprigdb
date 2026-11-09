@@ -144,8 +144,10 @@ pub fn maybe_typed(sql: &[u8], state: Option<&TypesState>) -> bool {
     has(b"INHERITS") || has(b"HIERARCHY") || has(b"SPRIG_") || has(b"CREATE TYPE")
 }
 
-/// Whether `sql` names a typed or hierarchical table, or a `SPRIG_*`
-/// function, in any of the tenant's databases.
+/// Whether `sql` names a typed or hierarchical table in any of the
+/// tenant's databases, or calls a `SPRIG_*` function
+/// ([`grammar::calls_sprig_function`]: only the real names, in call
+/// position, so a database named `sprig_dump_1` is not one).
 fn names_typed(sql: &[u8], ctx: &Ctx<'_>, state: Option<&TypesState>) -> bool {
     let Some(state) = state else { return false };
     let mut names: Vec<String> = Vec::new();
@@ -153,10 +155,10 @@ fn names_typed(sql: &[u8], ctx: &Ctx<'_>, state: Option<&TypesState>) -> bool {
         names.extend(d.iter().map(|t| t.name.to_lowercase()));
         names.extend(d.hierarchies().map(|h| h.table.to_lowercase()));
     }
-    grammar::identifiers(sql, &ctx.lex).iter().any(|i| {
-        let l = i.to_lowercase();
-        names.contains(&l) || l.starts_with("sprig_")
-    })
+    grammar::identifiers(sql, &ctx.lex)
+        .iter()
+        .any(|i| names.contains(&i.to_lowercase()))
+        || grammar::calls_sprig_function(sql, &ctx.lex)
 }
 
 fn strip_only_marks(stmt: &mut Statement) {

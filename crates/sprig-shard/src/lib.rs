@@ -38,8 +38,12 @@
 //!   (chapter 19).
 //! - [`pins`]: chapter 16's sharding pins (`SPRIG PIN`): the `group_pins`
 //!   table, the conflict rules (39410) and the split-group rule (39411).
+//! - [`colocate`]: chapter 22's SQL part: the type map from SQL types to
+//!   key classes, MySQL's comparison type for `a = b`, and `colocated`
+//!   under SQL's or MongoDB's rules (added by r1close).
 
 pub mod collation;
+pub mod colocate;
 pub mod groups;
 pub mod hash;
 pub mod home;

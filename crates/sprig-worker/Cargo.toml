@@ -27,6 +27,8 @@ sprig-meta.workspace = true
 sprig-mover.workspace = true
 sprig-settings.workspace = true
 sprig-shard.workspace = true
+# Chapter 18's resolver drains prepared branches at mover cutovers.
+sprig-txn.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
