@@ -22,6 +22,7 @@
     clippy::unwrap_used,
     clippy::too_many_lines,
     clippy::similar_names,
+    clippy::many_single_char_names,
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     missing_docs

@@ -386,7 +386,11 @@ $$",
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         };
-        assert_eq!(row, (1, Some(3), Some(39865)), "one dead letter, 3 attempts");
+        assert_eq!(
+            row,
+            (1, Some(3), Some(39865)),
+            "one dead letter, 3 attempts"
+        );
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(
@@ -453,10 +457,11 @@ $$",
                 "SELECT offset_no FROM t{t}_sprig.stream_offsets WHERE group_name = 'r9t_billing' AND partition_no = 1"
             )
         };
-        let _ = r.query_drop(format!(
-            "DELETE FROM t{t}_sprig.stream_offsets WHERE group_name = 'r9t_billing'"
-        ))
-        .await;
+        let _ = r
+            .query_drop(format!(
+                "DELETE FROM t{t}_sprig.stream_offsets WHERE group_name = 'r9t_billing'"
+            ))
+            .await;
         ok(&mut c, "DROP TABLE IF EXISTS r9t_sec.invoices").await;
         ok(&mut c, "CREATE TABLE r9t_sec.invoices (id INT PRIMARY KEY)").await;
         ok(&mut c, "START TRANSACTION").await;
@@ -468,7 +473,10 @@ $$",
         .await;
         ok(&mut c, "ROLLBACK").await;
         let after_rollback: Option<u64> = r.query_first(read(t)).await.unwrap();
-        assert_eq!(after_rollback, None, "a rolled-back commit_offset left nothing");
+        assert_eq!(
+            after_rollback, None,
+            "a rolled-back commit_offset left nothing"
+        );
         ok(&mut c, "START TRANSACTION").await;
         ok(&mut c, "INSERT INTO r9t_sec.invoices VALUES (2)").await;
         ok(
@@ -478,7 +486,11 @@ $$",
         .await;
         ok(&mut c, "COMMIT").await;
         let after_commit: Option<u64> = r.query_first(read(t)).await.unwrap();
-        assert_eq!(after_commit, Some(18), "a committed commit_offset is stored");
+        assert_eq!(
+            after_commit,
+            Some(18),
+            "a committed commit_offset is stored"
+        );
         // Outside a transaction: at once.
         ok(
             &mut c,
@@ -544,11 +556,22 @@ $$",
         ok(&mut c, "START TRANSACTION").await;
         let got = ok(&mut c, "CALL r9t_q.take()").await;
         ok(&mut c, "COMMIT").await;
-        let got = got[0].iter().flatten().cloned().collect::<Vec<_>>().join("|");
-        assert!(got.ends_with("5002"), "only the committed publish arrived: {got}");
+        let got = got[0]
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(
+            got.ends_with("5002"),
+            "only the committed publish arrived: {got}"
+        );
         tokio::time::sleep(Duration::from_secs(1)).await;
         let left = ok(&mut c, "CALL sprig.mq_get('r9t_rb', 10, 1000)").await;
-        assert!(left.is_empty(), "db.mq.ack committed: nothing left ({left:?})");
+        assert!(
+            left.is_empty(),
+            "db.mq.ack committed: nothing left ({left:?})"
+        );
         a.close(200, "done".into()).await.unwrap();
     }
 }
@@ -571,9 +594,7 @@ async fn twelve_streams_on_one_worker_are_all_sequenced() {
             .await;
             ok(
                 &mut c,
-                &format!(
-                    "INSERT INTO r9t_many.s{round}_{i} (key, value) VALUES ('k', 'v{i}')"
-                ),
+                &format!("INSERT INTO r9t_many.s{round}_{i} (key, value) VALUES ('k', 'v{i}')"),
             )
             .await;
         }

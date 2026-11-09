@@ -40,6 +40,12 @@ pub trait Gateway: Send + Sync {
     /// # Errors
     /// No gateway could be reached (the runner retries).
     async fn run(&self, req: &RunRequest) -> Result<RunReply>;
+
+    /// A line for the trigger's run log (`logic_log`): its start, the
+    /// first failure of a record or message. Best effort.
+    async fn note(&self, level: &str, message: &str) {
+        let _ = (level, message);
+    }
 }
 
 /// A stream trigger's view of its stream and its group's offsets.
@@ -197,6 +203,16 @@ async fn run_record(
                     transient
                 } else {
                     attempts += 1;
+                    if attempts == 1 {
+                        gw.note(
+                            "warn",
+                            &format!(
+                                "partition {} offset {}: attempt 1 failed ({} {}); retrying",
+                                r.partition, r.offset, reply.code, reply.message
+                            ),
+                        )
+                        .await;
+                    }
                     if attempts >= opts.max_attempts.max(1) {
                         side.dead_letter(r, attempts, &reply).await?;
                         stats.dead.fetch_add(1, Ordering::Relaxed);
@@ -421,6 +437,18 @@ pub async fn run_queue(
                             }
                             RunOutcome::Failed => {
                                 stats.failed.fetch_add(1, Ordering::Relaxed);
+                                if !r.transient && r.attempts == 0 {
+                                    gw.note(
+                                        "warn",
+                                        &format!(
+                                            "message {}: attempt 1 failed ({} {}); retrying",
+                                            r.message_id.as_deref().unwrap_or("?"),
+                                            r.code,
+                                            r.message
+                                        ),
+                                    )
+                                    .await;
+                                }
                                 let n = if r.transient { 1 } else { r.attempts + 1 };
                                 backoff(
                                     n,

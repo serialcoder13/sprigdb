@@ -26,6 +26,7 @@
     clippy::unwrap_used,
     clippy::too_many_lines,
     clippy::similar_names,
+    clippy::many_single_char_names,
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -539,7 +540,7 @@ async fn throughput_through_the_gateway_without_the_owner() {
     // `SPRIG_THROUGHPUT_ON_OWNER=1`: through the owner's gateway instead,
     // for comparison.
     let on_owner = var("SPRIG_THROUGHPUT_ON_OWNER").is_some();
-    let here = if (owner == "gw-1") != on_owner { b } else { a };
+    let here = if (owner == "gw-1") == on_owner { a } else { b };
     eprintln!("owner {owner}; publishing and consuming through {here}");
     let c = connect(&here).await;
     let ch = c.create_channel().await.unwrap();

@@ -125,17 +125,30 @@ impl BranchConn for BackendSession {
         for c in ctl {
             let sql = c.sql();
             let info = StmtInfo::classify(sql.as_bytes());
-            self.query(&info, sql.as_bytes())
-                .await
-                .map_err(|e| db_error(&e))?;
-            let mut err = None;
-            while let Some(p) = self.next().await.map_err(|e| db_error(&e))? {
-                if let PacketKind::Err(e) = p.kind {
-                    err = Some(DbError::new(e.code, e.message.clone()));
+            // The coordinator's own statements (`SET timestamp`, the lock
+            // wait, savepoints, the redo marker) aren't the branch's writes:
+            // the record pauses for them (found by the gateway's live test
+            // of Sprig 2PC: a recorded `SET timestamp` made every held
+            // branch unreplayable).
+            let rec = self.redo.take();
+            let ran = async {
+                self.query(&info, sql.as_bytes())
+                    .await
+                    .map_err(|e| db_error(&e))?;
+                let mut err = None;
+                while let Some(p) = self.next().await.map_err(|e| db_error(&e))? {
+                    if let PacketKind::Err(e) = p.kind {
+                        err = Some(DbError::new(e.code, e.message.clone()));
+                    }
                 }
+                self.finish().await.map_err(|e| db_error(&e))?;
+                Ok::<Option<DbError>, DbError>(err)
             }
-            self.finish().await.map_err(|e| db_error(&e))?;
-            if let Some(e) = err {
+            .await;
+            if self.redo.is_none() {
+                self.redo = rec;
+            }
+            if let Some(e) = ran? {
                 return Err(e);
             }
             if let Some(r) = self.redo.as_mut() {

@@ -209,7 +209,10 @@ impl ShardingLoop {
         {
             return Err(SprigError::new(
                 SprigCode::ShardBusy,
-                format!("shard {} of group {group} is held by {:?}", r.shard, r.job_id),
+                format!(
+                    "shard {} of group {group} is held by {:?}",
+                    r.shard, r.job_id
+                ),
             ));
         }
         let to = match &req.to {
@@ -562,11 +565,7 @@ impl ShardingLoop {
                 })
                 .max_by_key(|r| r.created_ms);
             let (map, _) = self.maps.load(tenant, GroupId(g)).await?;
-            let cut = from > 0
-                && map
-                    .ranges
-                    .iter()
-                    .all(|r| u64::from(r.shard.0) >= from);
+            let cut = from > 0 && map.ranges.iter().all(|r| u64::from(r.shard.0) >= from);
             let ended = job.is_none_or(|r| r.state.is_terminal());
             if cut {
                 self.rekey_finish(tenant, g, &next, &map).await?;

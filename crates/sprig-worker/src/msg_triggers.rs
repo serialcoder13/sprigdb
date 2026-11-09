@@ -258,16 +258,48 @@ fn rendezvous(seed: u64, id: &str) -> u64 {
     h
 }
 
-/// The runners' gateway: [`Gateways`] for one binding.
+/// The runners' gateway: [`Gateways`] for one binding, and its run log.
 struct GwClient {
     gws: Arc<Gateways>,
     seed: u64,
+    log: RunLog,
+}
+
+/// Where a trigger's run log goes: `logic_log` in its tenant's catalog.
+#[derive(Clone)]
+struct RunLog {
+    catalog: Pool,
+    schema: String,
+    module_id: u64,
+    version: Arc<AtomicU64>,
+}
+
+impl RunLog {
+    async fn write(&self, level: &str, message: &str) {
+        let Ok(mut c) = self.catalog.get_conn().await else {
+            return;
+        };
+        let _ = LogicStore::new(&self.schema)
+            .log(
+                &mut c,
+                self.module_id,
+                Some(self.version.load(Ordering::Relaxed)),
+                level,
+                "trigger",
+                message,
+            )
+            .await;
+    }
 }
 
 #[async_trait]
 impl Gateway for GwClient {
     async fn run(&self, req: &RunRequest) -> Result<RunReply> {
         self.gws.run(self.seed, req).await
+    }
+
+    async fn note(&self, level: &str, message: &str) {
+        self.log.write(level, message).await;
     }
 }
 
@@ -338,13 +370,15 @@ impl MsgEnv {
         // are gone, even when a new one has its name).
         let db_state: Option<String> = c
             .exec_first(
-                format!("SELECT state FROM {}.`databases` WHERE db_id = ?", quote(&schema)),
+                format!(
+                    "SELECT state FROM {}.`databases` WHERE db_id = ?",
+                    quote(&schema)
+                ),
                 (source.db_id,),
             )
             .await
             .map_err(|e| {
-                SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable")
-                    .with_source(e)
+                SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
             })?;
         if db_state.as_deref() != Some("active") {
             return Ok(None);
@@ -644,9 +678,24 @@ impl JobHandler for StreamTrigger {
             source: l.source.clone(),
             version: Arc::clone(&t.version),
         });
+        let log = RunLog {
+            catalog: l.catalog.clone(),
+            schema: l.schema.clone(),
+            module_id: l.source.module_id,
+            version: Arc::clone(&t.version),
+        };
+        log.write(
+            "info",
+            &format!(
+                "trigger on stream {}.{} started (job {}, {} partitions)",
+                l.source.db_name, l.source.name, cx.job_id, def.partitions
+            ),
+        )
+        .await;
         let gw: Arc<dyn Gateway> = Arc::new(GwClient {
             gws: Arc::clone(&env.gateways),
             seed: binding,
+            log,
         });
         let stats = Arc::new(MsgStats::default());
         let stop = cx.cancel.child_token();
@@ -707,9 +756,24 @@ impl JobHandler for QueueTrigger {
             return Ok(json!({"end": "gone", "binding": binding}));
         };
         let t = env.template(tenant, &l);
+        let log = RunLog {
+            catalog: l.catalog.clone(),
+            schema: l.schema.clone(),
+            module_id: l.source.module_id,
+            version: Arc::clone(&t.version),
+        };
+        log.write(
+            "info",
+            &format!(
+                "trigger on queue {} of vhost {} started (job {}, {} lanes)",
+                l.source.name, l.source.db_name, cx.job_id, env.opts.lanes
+            ),
+        )
+        .await;
         let gw: Arc<dyn Gateway> = Arc::new(GwClient {
             gws: Arc::clone(&env.gateways),
             seed: binding,
+            log,
         });
         let stats = Arc::new(MsgStats::default());
         let stop = cx.cancel.child_token();

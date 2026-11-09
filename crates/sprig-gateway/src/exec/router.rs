@@ -581,7 +581,12 @@ impl PassSession {
             // sets it in tests any more.
             let forced = std::env::var("SPRIGDB_ROUTER_XA_CLUSTERS")
                 .is_ok_and(|v| v.split(',').any(|x| x.trim() == c.as_str()));
-            let xa = forced || svc.locator.cluster_xa(&c).await.unwrap_or(false);
+            // And `SPRIGDB_ROUTER_NO_XA_CLUSTERS` the other way: clusters
+            // whose transactions take Sprig 2PC although they have XA (live
+            // tests of chapter 18's held branches through a gateway, R3).
+            let denied = std::env::var("SPRIGDB_ROUTER_NO_XA_CLUSTERS")
+                .is_ok_and(|v| v.split(',').any(|x| x.trim() == c.as_str()));
+            let xa = !denied && (forced || svc.locator.cluster_xa(&c).await.unwrap_or(false));
             f.caps
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

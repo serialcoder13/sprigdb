@@ -406,9 +406,47 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
             compiled_tenant = ActionSet(u64::MAX);
         }
         add(BackendTarget::Db(tenant_pattern.clone()), compiled_tenant);
+        redo_marker_grants(&mut grants, &tenant_pattern);
         out.insert(account(tenant, uid), grants);
     }
     out
+}
+
+/// Chapter 18's Sprig 2PC (R3): a held branch commits with a marker row in
+/// its schema's `__sprig_redo` (`sprig_txn::redo::REDO_TABLE`), inserted by
+/// the session's own account inside the branch's transaction. A user whose
+/// grants in a schema are table-level only, without `INSERT` on the
+/// schema, and who may write there, gets `INSERT` on that table there (with `CREATE`: MariaDB keeps
+/// a table grant on a table that doesn't exist yet only then).
+fn redo_marker_grants(grants: &mut BTreeMap<BackendTarget, ActionSet>, tenant_pattern: &str) {
+    let inserts_in = |grants: &BTreeMap<BackendTarget, ActionSet>, pattern: &str| {
+        grants.iter().any(|(t, a)| {
+            matches!(t, BackendTarget::Db(p) if p == pattern) && a.has(Action::Insert)
+        })
+    };
+    if inserts_in(grants, tenant_pattern) {
+        return;
+    }
+    // Only where the user can write: a branch that writes nothing is
+    // never held.
+    let writes = ActionSet::of(&[Action::Insert, Action::Update, Action::Delete]);
+    let schemas: BTreeSet<String> = grants
+        .iter()
+        .filter(|(_, a)| !a.intersect(writes).is_empty())
+        .filter_map(|(t, _)| match t {
+            BackendTarget::Table(s, _) | BackendTarget::Column(s, _, _) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    for s in schemas {
+        if inserts_in(grants, &escape_db(&s)) {
+            continue;
+        }
+        let t = BackendTarget::Table(s, "__sprig_redo".into());
+        let a = ActionSet::of(&[Action::Insert, Action::Create]).intersect(t.accepts());
+        let e = grants.entry(t).or_default();
+        *e = e.union(a);
+    }
 }
 
 /// The tenant's per-user accounts on the cluster and their grants, read
@@ -766,6 +804,31 @@ mod tests {
             text,
             vec!["GRANT SELECT, CREATE ON `t1_d1_g1_s1`.`orders` TO 't1_u1'@'%'"]
         );
+    }
+
+    #[test]
+    fn table_level_users_can_insert_the_redo_marker() {
+        let t = BackendTarget::Table("t1_d1_g1_s1".into(), "orders".into());
+        let mut g = BTreeMap::new();
+        g.insert(t, ActionSet::of(&[Action::Select, Action::Insert]));
+        redo_marker_grants(&mut g, "t1\\_d%");
+        let redo = BackendTarget::Table("t1_d1_g1_s1".into(), "__sprig_redo".into());
+        assert_eq!(
+            g.get(&redo).copied(),
+            Some(ActionSet::of(&[Action::Insert, Action::Create]))
+        );
+        // A schema-level INSERT covers it already.
+        let mut g = BTreeMap::new();
+        g.insert(
+            BackendTarget::Table("t1_d1_g1_s1".into(), "orders".into()),
+            ActionSet::of(&[Action::Select]),
+        );
+        g.insert(
+            BackendTarget::Db("t1\\_d%".into()),
+            ActionSet::of(&[Action::Insert]),
+        );
+        redo_marker_grants(&mut g, "t1\\_d%");
+        assert_eq!(g.len(), 2);
     }
 
     #[test]

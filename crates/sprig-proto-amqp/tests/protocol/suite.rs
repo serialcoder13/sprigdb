@@ -2141,9 +2141,12 @@ async fn direct_reply_to_rpc() {
         (&b"pong"[..], Some("42"), "r")
     );
     // A forged name is unroutable (returned when mandatory), not delivered.
-    let mut forged = reply_to.clone();
-    forged.pop();
-    forged.push('Q');
+    // (A changed last character can decode to the same bytes: base64's
+    // last character carries only two bits here. Change one in the middle.)
+    let mut forged = reply_to.clone().into_bytes();
+    let at = forged.len() - 10;
+    forged[at] = if forged[at] == b'A' { b'B' } else { b'A' };
+    let forged = String::from_utf8(forged).unwrap();
     server
         .publish(1, "", &forged, true, &rp, b"x")
         .await

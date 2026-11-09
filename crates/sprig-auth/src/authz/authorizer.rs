@@ -1211,6 +1211,8 @@ mod tests {
                 }
                 _ => None,
             })
+            // Chapter 18's redo marker table (a writer's internal grant).
+            .filter(|n| n != "__sprig_redo")
             .collect();
         assert_eq!(names, BTreeSet::from(["orders".to_owned()]));
     }

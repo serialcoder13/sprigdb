@@ -8,5 +8,23 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+metrics.workspace = true
+mysql_async.workspace = true
+# `=~` in Cypher. Already in Cargo.lock (through kirun); MIT/Apache-2.0.
+regex = "1.13"
+serde.workspace = true
+serde_json.workspace = true
+sprig-catalog.workspace = true
+sprig-common.workspace = true
+sprig-settings.workspace = true
+sprig-shard.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
+
 [lints]
 workspace = true

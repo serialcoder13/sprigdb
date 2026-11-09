@@ -185,9 +185,30 @@ impl MasterKeyring {
     }
 
     fn derive(master: &[u8; 32], tenant: TenantId) -> Option<DataKey> {
+        Self::derive_purpose(master, b"workload", tenant)
+    }
+
+    /// The key of `tenant` for `purpose` under the newest master secret,
+    /// with its version: chapter 14's keyring with a purpose label
+    /// (`info = purpose ‖ tenant id`), so a key for one purpose (`sink`,
+    /// chapter 51) opens nothing sealed for another. The workload key's
+    /// derivation is unchanged (`purpose = "workload"`).
+    #[must_use]
+    pub fn current_for(&self, purpose: &[u8], tenant: TenantId) -> Option<(u32, DataKey)> {
+        let (v, m) = self.masters.iter().next_back()?;
+        Some((*v, Self::derive_purpose(m, purpose, tenant)?))
+    }
+
+    /// The key of `tenant` for `purpose` under master `version`.
+    #[must_use]
+    pub fn key_for(&self, purpose: &[u8], tenant: TenantId, version: u32) -> Option<DataKey> {
+        Self::derive_purpose(self.masters.get(&version)?, purpose, tenant)
+    }
+
+    fn derive_purpose(master: &[u8; 32], purpose: &[u8], tenant: TenantId) -> Option<DataKey> {
         let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, SALT).extract(master);
         let tid = tenant.0.to_le_bytes();
-        let info: [&[u8]; 2] = [b"workload", &tid];
+        let info: [&[u8]; 2] = [purpose, &tid];
         let okm = prk.expand(&info, Len32).ok()?;
         let mut out = [0u8; 32];
         okm.fill(&mut out).ok()?;

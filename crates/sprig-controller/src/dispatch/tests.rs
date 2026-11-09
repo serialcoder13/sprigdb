@@ -249,6 +249,68 @@ fn workers_need_free_slots_and_prefer_their_zone() {
     });
 }
 
+/// r9triggers: long-running consumers (stream sequencers, triggers on
+/// streams and queues) have their own pool, so a ninth stream's sequencer
+/// is assigned on a worker whose eight `Other` slots are all taken.
+#[test]
+fn consumer_jobs_have_their_own_pool() {
+    paused().block_on(async {
+        let (_s, stores, clock) = mem("dc-a");
+        let l = lead(&stores, &clock).await;
+        let _w = worker(
+            &stores,
+            &clock,
+            "w1",
+            "z1",
+            &[(JobClass::Other, 8), (JobClass::Consumer, CONSUMER_SLOTS)],
+        )
+        .await;
+        let (cx, _stop) = cx_for(&stores, &clock, Some(l.clone()), ControlSettings::default());
+        let mut others = Vec::new();
+        for _ in 0..9 {
+            others.push(
+                submit(
+                    &l,
+                    &*clock,
+                    job("validate", JobClass::Other, None, &[], 0, "operator"),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let mut consumers = Vec::new();
+        for _ in 0..20 {
+            consumers.push(
+                submit(
+                    &l,
+                    &*clock,
+                    job(
+                        "stream_sequencer",
+                        JobClass::Consumer,
+                        None,
+                        &[],
+                        0,
+                        "streams",
+                    ),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let r = dispatch_pass(&cx).await.unwrap();
+        let by: HashMap<JobId, String> = r.assigned.into_iter().collect();
+        assert_eq!(
+            others.iter().filter(|j| by.contains_key(j)).count(),
+            8,
+            "eight Other slots"
+        );
+        assert!(
+            consumers.iter().all(|j| by.contains_key(j)),
+            "every sequencer is assigned whatever the Other slots hold"
+        );
+    });
+}
+
 #[test]
 fn lost_owners_requeue_with_backoff_then_fail() {
     paused().block_on(async {

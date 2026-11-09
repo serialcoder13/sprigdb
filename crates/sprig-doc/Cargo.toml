@@ -8,5 +8,18 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bson = "=2.15.0"
+# $regex matching in the recheck (MIT or Apache-2.0).
+regex = "1.11"
+serde_json.workspace = true
+sprig-proto-mongo = { path = "../sprig-proto-mongo" }
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
 [lints]
 workspace = true

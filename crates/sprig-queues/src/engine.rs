@@ -809,8 +809,15 @@ impl VShared {
         Ok(())
     }
 
-    async fn forward_store(self: &Arc<Self>, store: &Arc<dyn MsgStore>, now_ms: i64) -> usize {
-        if let Err(e) = store.release_due(now_ms, 500).await {
+    /// One pass over a store's outbox; `release`: move due delayed
+    /// messages first (the lease holder only).
+    async fn forward_store(
+        self: &Arc<Self>,
+        store: &Arc<dyn MsgStore>,
+        now_ms: i64,
+        release: bool,
+    ) -> usize {
+        if release && let Err(e) = store.release_due(now_ms, 500).await {
             tracing::debug!(error = %e, "delayed release failed");
         }
         let rows = match store.outbox(500).await {
@@ -864,14 +871,14 @@ impl VShared {
         let mut next_try = 0i64;
         let mut durable: Option<Arc<dyn MsgStore>> = None;
         loop {
-            tokio::select! {
+            let woken = tokio::select! {
                 () = self.stop.cancelled() => break,
-                () = self.wake.notified() => {}
-                () = tokio::time::sleep(Duration::from_millis(200)) => {}
-            }
+                () = self.wake.notified() => true,
+                () = tokio::time::sleep(Duration::from_millis(200)) => false,
+            };
             let now = deps.clock.now_ms();
             let mem: Arc<dyn MsgStore> = Arc::clone(&self.mem) as Arc<dyn MsgStore>;
-            while self.forward_store(&mem, now).await > 0 {}
+            while self.forward_store(&mem, now, true).await > 0 {}
             if lease.as_ref().is_some_and(CancellationToken::is_cancelled) {
                 lease = None;
             }
@@ -882,7 +889,11 @@ impl VShared {
                     lease = Some(t);
                 }
             }
-            if lease.is_none() {
+            // Without the lease, a wake-up (this gateway's owner wrote dead
+            // letters, or a session committed outbox rows) still forwards
+            // at once: the fast path. The lease holder may forward the
+            // same rows; the message ids make the second time a no-op.
+            if lease.is_none() && !woken {
                 continue;
             }
             // A store a shard move left behind is opened again where the
@@ -891,7 +902,8 @@ impl VShared {
                 durable = deps.catalog.store(&self.r).await.ok();
             }
             if let Some(s) = &durable {
-                while self.forward_store(s, now).await > 0 {}
+                let release = lease.is_some();
+                while self.forward_store(s, now, release).await > 0 {}
             }
         }
         if lease.is_some() {

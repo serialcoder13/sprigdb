@@ -639,7 +639,6 @@ impl PassSession {
             ts.changed(Some(v));
             ts.refresh().await?;
         }
-        metrics::counter!("sprig_fk_ddl_total").increment(1);
         Ok(())
     }
 }

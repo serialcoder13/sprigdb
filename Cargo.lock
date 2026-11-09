@@ -3884,6 +3884,16 @@ version = "0.0.1"
 [[package]]
 name = "sprig-doc"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bson",
+ "proptest",
+ "regex",
+ "serde_json",
+ "sprig-proto-mongo",
+ "tokio",
+]
 
 [[package]]
 name = "sprig-feed"
@@ -3973,6 +3983,20 @@ version = "0.0.1"
 [[package]]
 name = "sprig-graph"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "metrics",
+ "mysql_async",
+ "regex",
+ "serde",
+ "serde_json",
+ "sprig-catalog",
+ "sprig-common",
+ "sprig-settings",
+ "sprig-shard",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "sprig-inherit"

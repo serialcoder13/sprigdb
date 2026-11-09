@@ -319,8 +319,14 @@ async fn setup(p: &Pool, dc: &Arc<dyn MetaStore>, cluster: &ClusterId) {
     })
     .await
     .unwrap();
-    let mut m = ShardMap::presplit(TENANT, GROUP, int().digest, 3, std::slice::from_ref(cluster))
-        .unwrap();
+    let mut m = ShardMap::presplit(
+        TENANT,
+        GROUP,
+        int().digest,
+        3,
+        std::slice::from_ref(cluster),
+    )
+    .unwrap();
     m.tenant_epoch = 1;
     ShardMapStore::new(dc.clone()).create(&m).await.unwrap();
 }
@@ -702,7 +708,11 @@ async fn check(p: &Pool, cache: &ShardMapCache, log: &Log, key: &str, label: &st
                 let id: i64 = text(&v[0]).parse().unwrap();
                 let store: i64 = text(&v[1]).parse().unwrap();
                 let customer: i64 = text(&v[2]).parse().unwrap();
-                let h = rk(if key == "customer_id" { customer } else { store });
+                let h = rk(if key == "customer_id" {
+                    customer
+                } else {
+                    store
+                });
                 if h < lo || hi.is_some_and(|x| h >= x) {
                     misplaced += 1;
                 }
@@ -787,8 +797,7 @@ async fn a_group_is_rekeyed_online_under_writes() {
         )
         .with_test_writer()
         .try_init();
-    let etcd =
-        std::env::var("SPRIG_TEST_ETCD").unwrap_or_else(|_| "http://127.0.0.1:49379".into());
+    let etcd = std::env::var("SPRIG_TEST_ETCD").unwrap_or_else(|_| "http://127.0.0.1:49379".into());
     let dc: Arc<dyn MetaStore> = Arc::new(
         EtcdStore::connect(
             Tier::Dc(DcId::new("r3crekey").unwrap()),
@@ -936,7 +945,11 @@ async fn a_group_is_rekeyed_online_under_writes() {
         )
         .await
         .unwrap();
-    eprintln!("[{:>4}s] re-key job {} submitted", t0.elapsed().as_secs(), job.0);
+    eprintln!(
+        "[{:>4}s] re-key job {} submitted",
+        t0.elapsed().as_secs(),
+        job.0
+    );
     loop {
         assert!(
             started.elapsed() < Duration::from_secs(900),
@@ -965,7 +978,11 @@ async fn a_group_is_rekeyed_online_under_writes() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let took = started.elapsed();
-    eprintln!("[{:>4}s] re-key finished in {} ms", t0.elapsed().as_secs(), took.as_millis());
+    eprintln!(
+        "[{:>4}s] re-key finished in {} ms",
+        t0.elapsed().as_secs(),
+        took.as_millis()
+    );
     // Writes go on by the new key for a while.
     tokio::time::sleep(Duration::from_secs(5)).await;
     paused.store(true, Ordering::Relaxed);
@@ -1055,7 +1072,14 @@ async fn a_group_is_rekeyed_online_under_writes() {
     let _ = bg.await;
     worker.abort();
     let fin = snapshot(&log);
-    let last = check(&p, &cache, &fin, "customer_id", "after the cancelled re-key").await;
+    let last = check(
+        &p,
+        &cache,
+        &fin,
+        "customer_id",
+        "after the cancelled re-key",
+    )
+    .await;
     eprintln!("[{:>4}s] {last}", t0.elapsed().as_secs());
 
     let store = JobStore::new(dc.clone(), Arc::new(SystemClock));
