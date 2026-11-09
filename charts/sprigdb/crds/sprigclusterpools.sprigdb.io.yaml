@@ -71,7 +71,7 @@ spec:
                     - target
                     type: object
                   failoverDriver:
-                    default: operator
+                    default: sprig
                     enum:
                     - operator
                     - sprig

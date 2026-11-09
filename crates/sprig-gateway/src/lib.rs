@@ -128,11 +128,13 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let stores = live.stores();
     let backends = backend::Backends::new(
         dc.clone(),
-        backend::RegistryClusters::new(
+        // The DC tier also holds each cluster's writer lease (chapter 25).
+        backend::RegistryClusters::with_leases(
             sprig_cluster::registry::ClusterRegistry::new(
                 Arc::clone(&stores.global),
                 Arc::clone(&stores.dc),
             )?,
+            Some(Arc::clone(&stores.dc)),
             Duration::from_secs(2),
         ),
         backend::LiveBackendSettings::new(live.clone(), dc.clone()),

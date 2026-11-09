@@ -22,6 +22,7 @@
 
 pub mod accounts;
 pub mod crd;
+pub mod failover;
 pub mod kube;
 pub mod lease;
 pub mod mapping;
@@ -41,8 +42,10 @@ use sprig_common::{Result, Role, RoleContext};
 use crate::kube::{HttpKube, KubeApi, KubeConfig};
 use crate::reconcile::Reconciler;
 
-/// How often the loop lists the custom resources.
+/// How often the loop lists the custom resources and reconciles.
 pub const RESYNC: Duration = Duration::from_secs(5);
+/// How often the failover watch looks at each primary ([`watch_all`]).
+pub const WATCH: Duration = Duration::from_secs(1);
 
 /// The operator's settings, from its pod's environment (the Helm chart's
 /// `operator.yaml`).
@@ -78,6 +81,10 @@ pub struct OperatorConfig {
     pub controller_admin: Option<String>,
     /// How long a `MariaDB` may take to be Ready.
     pub ready_timeout: Duration,
+    /// How long the primary must not answer, with its pod not Ready, before
+    /// the failover watch promotes a replica (chapter 25's
+    /// `failover.cluster_detect_seconds`).
+    pub failover_detect: Duration,
 }
 
 impl OperatorConfig {
@@ -98,6 +105,7 @@ impl OperatorConfig {
             cluster_domain: "cluster.local".into(),
             controller_admin: None,
             ready_timeout: Duration::from_secs(30 * 60),
+            failover_detect: Duration::from_secs(5),
         }
     }
 
@@ -127,6 +135,9 @@ impl OperatorConfig {
         c.controller_admin = opt("SPRIG_OPERATOR_CONTROLLER_ADMIN");
         if let Some(s) = opt("SPRIG_OPERATOR_READY_TIMEOUT_SECONDS").and_then(|s| s.parse().ok()) {
             c.ready_timeout = Duration::from_secs(s);
+        }
+        if let Some(s) = opt("SPRIG_OPERATOR_FAILOVER_DETECT_MS").and_then(|s| s.parse().ok()) {
+            c.failover_detect = Duration::from_millis(s);
         }
         c
     }
@@ -182,6 +193,32 @@ pub async fn pass(rec: &Reconciler, due: &mut HashMap<String, Instant>) -> Resul
     Ok(n)
 }
 
+/// One failover-watch pass over every `SprigCluster`
+/// ([`Reconciler::watch`]); errors are logged.
+///
+/// # Errors
+/// A failed list.
+pub async fn watch_all(rec: &Reconciler) -> Result<()> {
+    let ns = rec.config().namespace.clone();
+    let clusters = rec
+        .kube()
+        .list(&crd::SPRIG_CLUSTER, &ns, None)
+        .await
+        .map_err(sprig_common::SprigError::from)?;
+    for c in &clusters {
+        match rec.watch(c).await {
+            Ok(reconcile::WatchOutcome::Skipped | reconcile::WatchOutcome::Healthy { .. }) => {}
+            Ok(o) => {
+                tracing::info!(cluster = %c["metadata"]["name"], outcome = ?o, "failover watch");
+            }
+            Err(e) => {
+                tracing::warn!(cluster = %c["metadata"]["name"], error = %e, "failover watch failed");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Runs the operator role until `ctx.shutdown` is cancelled.
 ///
 /// The `sprigdb` binary has already bound the telemetry port, so
@@ -228,25 +265,45 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         Duration::from_secs(15),
         clock.clone(),
     );
-    let rec = Reconciler::new(kube, accounts, registrar, cfg, clock);
+    let repl: Arc<dyn failover::ReplicationOps> = Arc::new(failover::MysqlReplication::new(
+        cfg.mariadb_ca_file.as_ref().map(Into::into),
+    ));
+    let rec = Reconciler::new(kube, accounts, registrar, cfg, clock).with_replication(repl);
     ctx.health.set_ready();
     tracing::info!(%role, %identity, "ready");
     let mut due = HashMap::new();
-    let mut tick = tokio::time::interval(RESYNC);
+    let mut tick = tokio::time::interval(WATCH);
+    let mut last_pass: Option<Instant> = None;
+    let mut leading = false;
     loop {
         tokio::select! {
             () = ctx.shutdown.cancelled() => break,
             _ = tick.tick() => {}
         }
         ctx.health.tick();
-        match elector.try_lead().await {
-            Ok(true) => {
-                if let Err(e) = pass(&rec, &mut due).await {
-                    tracing::warn!(error = %e, "operator pass failed");
+        // The lease renews every RESYNC; the watch runs every WATCH while
+        // this operator leads.
+        if last_pass.is_none_or(|t| t.elapsed() >= RESYNC) {
+            last_pass = Some(Instant::now());
+            match elector.try_lead().await {
+                Ok(true) => {
+                    leading = true;
+                    if let Err(e) = pass(&rec, &mut due).await {
+                        tracing::warn!(error = %e, "operator pass failed");
+                    }
+                }
+                Ok(false) => {
+                    leading = false;
+                    due.clear();
+                }
+                Err(e) => {
+                    leading = false;
+                    tracing::warn!(error = %e, "lease");
                 }
             }
-            Ok(false) => due.clear(),
-            Err(e) => tracing::warn!(error = %e, "lease"),
+        }
+        if leading && let Err(e) = watch_all(&rec).await {
+            tracing::warn!(error = %e, "failover watch pass failed");
         }
     }
     ctx.health.set_draining();

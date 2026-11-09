@@ -80,6 +80,31 @@ fn stricter_changes() {
 }
 
 #[test]
+fn a_stricter_spec_keeps_connections_that_meet_it() {
+    let base = Strictness::of(&spec("redis", Protocol::Redis));
+    let with = |f: fn(&mut Strictness)| {
+        let mut s = base;
+        f(&mut s);
+        s
+    };
+    let (v12, v13) = (Some(TlsVersion::V1_2), Some(TlsVersion::V1_3));
+    let required = with(|s| s.tls = TlsMode::Required);
+    let min13 = with(|s| s.min_tls = TlsVersion::V1_3);
+    // Plaintext: only `required` turns it away; the minimum version doesn't
+    // apply to it.
+    assert!(!required.keeps(&base, None));
+    assert!(with(|s| s.tls = TlsMode::Optional).keeps(&base, None));
+    assert!(min13.keeps(&base, None));
+    // TLS meets `required`; 1.2 doesn't meet a 1.3 minimum.
+    assert!(required.keeps(&base, v12) && required.keeps(&base, v13));
+    assert!(!min13.keeps(&base, v12));
+    assert!(min13.keeps(&base, v13));
+    // A moved or disabled listener keeps nothing.
+    assert!(!with(|s| s.enabled = false).keeps(&base, v13));
+    assert!(!with(|s| s.bind = "127.0.0.1:1".parse().unwrap()).keeps(&base, v13));
+}
+
+#[test]
 fn private_addresses() {
     for a in [
         "10.1.2.3",
@@ -457,6 +482,135 @@ async fn looser_changes_keep_connections_and_stricter_ones_drain_every_older_gen
             .await
             .unwrap()
             .ends_with("tls=1.3 gen=3")
+    );
+    mgr.shutdown(Duration::ZERO).await;
+}
+
+/// A TLS 1.2-only client of `a`.
+async fn tls12_connect(a: SocketAddr, ca: &TestCa) -> tokio_rustls::client::TlsStream<TcpStream> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(ca.der.clone()).unwrap();
+    let cfg = rustls::ClientConfig::builder_with_provider(crate::tls::provider())
+        .with_protocol_versions(&[&rustls::version::TLS12])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tcp = TcpStream::connect(a).await.unwrap();
+    let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    tokio_rustls::TlsConnector::from(Arc::new(cfg))
+        .connect(name, tcp)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_stricter_change_closes_only_the_connections_it_no_longer_allows() {
+    let (ca, dir) = (TestCa::new(), TempDir::new());
+    let mgr = manager();
+    let drain = Duration::from_millis(200);
+    let optional = tls_spec("mongo", Protocol::Mongo, TlsMode::Optional, &ca, &dir);
+    mgr.apply(resolution(vec![optional.clone()], drain)).await;
+    let a = addr(&mgr, "mongo").await;
+    let mut plain = TcpStream::connect(a).await.unwrap();
+    assert!(
+        roundtrip(&mut plain, "p")
+            .await
+            .unwrap()
+            .ends_with("tls=none gen=1")
+    );
+    let mut t13 = tls_connect(a, &ca.der).await.unwrap();
+    assert!(
+        roundtrip(&mut t13, "a")
+            .await
+            .unwrap()
+            .ends_with("tls=1.3 gen=1")
+    );
+    let mut t12 = tls12_connect(a, &ca).await;
+    assert!(
+        roundtrip(&mut t12, "b")
+            .await
+            .unwrap()
+            .ends_with("tls=1.2 gen=1")
+    );
+
+    // required: the plaintext connection closes after the drain; both TLS
+    // connections already meet it and stay.
+    let required = ListenerSpec {
+        tls: TlsMode::Required,
+        ..optional
+    };
+    mgr.apply(resolution(vec![required.clone()], drain)).await;
+    assert!(closed_by_server(&mut plain).await);
+    tokio::time::sleep(drain * 3).await;
+    assert!(
+        roundtrip(&mut t13, "c")
+            .await
+            .unwrap()
+            .ends_with("tls=1.3 gen=1")
+    );
+    assert!(
+        roundtrip(&mut t12, "d")
+            .await
+            .unwrap()
+            .ends_with("tls=1.2 gen=1")
+    );
+
+    // Minimum 1.3: the TLS 1.2 connection, from two generations back,
+    // closes; the 1.3 one stays.
+    let min13 = ListenerSpec {
+        min_tls: TlsVersion::V1_3,
+        ..required
+    };
+    mgr.apply(resolution(vec![min13], drain)).await;
+    assert!(closed_by_server(&mut t12).await);
+    tokio::time::sleep(drain * 3).await;
+    assert!(
+        roundtrip(&mut t13, "e")
+            .await
+            .unwrap()
+            .ends_with("tls=1.3 gen=1")
+    );
+    mgr.shutdown(Duration::ZERO).await;
+}
+
+#[tokio::test]
+async fn in_protocol_tls_counts_when_a_mysql_listener_tightens() {
+    let (ca, dir) = (TestCa::new(), TempDir::new());
+    let mgr = manager();
+    let drain = Duration::from_millis(150);
+    let optional = tls_spec("mysql", Protocol::MySql84, TlsMode::Optional, &ca, &dir);
+    mgr.apply(resolution(vec![optional.clone()], drain)).await;
+    let a = addr(&mgr, "mysql").await;
+    let mut plain = TcpStream::connect(a).await.unwrap();
+    assert_eq!(read_line(&mut plain).await.unwrap(), "hello tls=allowed");
+    let mut upgraded = TcpStream::connect(a).await.unwrap();
+    assert_eq!(read_line(&mut upgraded).await.unwrap(), "hello tls=allowed");
+    upgraded.write_all(b"starttls\n").await.unwrap();
+    let mut upgraded = tls_over(upgraded, &ca.der).await.unwrap();
+    assert!(
+        roundtrip(&mut upgraded, "x")
+            .await
+            .unwrap()
+            .ends_with("tls=1.3 gen=1")
+    );
+
+    mgr.apply(resolution(
+        vec![ListenerSpec {
+            tls: TlsMode::Required,
+            ..optional
+        }],
+        drain,
+    ))
+    .await;
+    // The MySQL family closes at a safe point first; the forced close
+    // comes at twice the drain time.
+    assert!(closed_by_server(&mut plain).await);
+    tokio::time::sleep(drain * 4).await;
+    assert!(
+        roundtrip(&mut upgraded, "y")
+            .await
+            .unwrap()
+            .ends_with("tls=1.3 gen=1")
     );
     mgr.shutdown(Duration::ZERO).await;
 }

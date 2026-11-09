@@ -490,6 +490,20 @@ mod tests {
             Some("CREATE TABLE s (loc POINT REF_SYSTEM_ID=4326 NOT NULL , SPATIAL INDEX (loc))")
         );
         assert_eq!(r("SELECT ST_SRID(loc) FROM s"), None);
+        // The executable-comment form after NOT NULL (PyMySQL's issue 363
+        // test, mysqldump 8.4): MariaDB refuses REF_SYSTEM_ID there.
+        let all = mysql_text_rewrites(
+            b"CREATE TABLE i (geom LINESTRING NOT NULL /*!80003 SRID 0 */, SPATIAL KEY geom (geom))",
+            &o,
+            110_809,
+        )
+        .map(|v| String::from_utf8(v).unwrap());
+        assert_eq!(
+            all.as_deref(),
+            Some(
+                "CREATE TABLE i (geom LINESTRING REF_SYSTEM_ID=0 NOT NULL , SPATIAL KEY geom (geom))"
+            )
+        );
     }
 
     #[test]

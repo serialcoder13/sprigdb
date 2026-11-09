@@ -8,16 +8,21 @@
 //!   change reaches new connections only.
 //! - **Stricter listeners:** when `listener.<name>.tls` tightens,
 //!   `tls.min_version` rises, or the listener moves or is disabled,
-//!   sessions accepted under the looser spec are marked
-//!   `close_at_safe_point` (reason `ListenerRetired`) once
+//!   sessions accepted under the looser spec that the new spec no longer
+//!   allows ([`Strictness::keeps`]: plaintext under `required`, TLS 1.2
+//!   under a 1.3 minimum, any session of a moved or disabled listener) are
+//!   marked `close_at_safe_point` (reason `ListenerRetired`) once
 //!   `listener.drain_seconds` has passed (chapter 04). The front end then
 //!   answers their next command with 39004 and closes; a session inside a
-//!   transaction closes after it ends.
+//!   transaction closes after it ends. A session that already meets the
+//!   new spec (TLS, at a high enough version) stays open.
 //!
 //! [`ListenerHooks`] keeps the spec each open MySQL session was accepted
-//! under, so the comparison is exact whatever generations came between.
-//! The listener manager's own hard close of an older generation still
-//! fires at the same deadline (chapter 04 build step 8 moves it later).
+//! under and its transport (updated when the client upgrades to TLS), so
+//! the comparison is exact whatever generations came between. The
+//! listener manager closes the same sessions by force at twice the drain
+//! time if they are still open (an idle one closes then, without a
+//! packet).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -28,47 +33,17 @@ use sprig_common::CancellationToken;
 use sprig_common::ids::{ConnId, DcId};
 use sprig_settings::{LiveSettings, SettingCtx};
 
+use crate::frontend::ConnTransport;
+pub use crate::listener::Strictness;
 use crate::listener::settings::{DRAIN_SECONDS, LISTENERS, TLS_MIN_VERSION};
 use crate::listener::{ListenerSpec, TlsMode, TlsVersion};
 use crate::session::{CloseReason, SessionHandle};
-
-/// The parts of a listener spec that decide whether a change is stricter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Strictness {
-    /// `listener.<name>.enabled`.
-    pub enabled: bool,
-    /// `listener.<name>.bind`.
-    pub bind: SocketAddr,
-    /// `listener.<name>.tls`.
-    pub tls: TlsMode,
-    /// `tls.min_version`.
-    pub min_tls: TlsVersion,
-}
-
-impl Strictness {
-    /// The strictness of `spec`.
-    #[must_use]
-    pub fn of(spec: &ListenerSpec) -> Self {
-        Self {
-            enabled: spec.enabled,
-            bind: spec.bind,
-            tls: spec.tls,
-            min_tls: spec.min_tls,
-        }
-    }
-
-    /// Whether moving from `old` to `self` must retire `old`'s sessions
-    /// (the same rule as the listener manager's).
-    #[must_use]
-    pub fn stricter_than(&self, old: &Self) -> bool {
-        !self.enabled || self.bind != old.bind || self.tls > old.tls || self.min_tls > old.min_tls
-    }
-}
 
 struct Entry {
     handle: Weak<SessionHandle>,
     listener: &'static str,
     accepted: Strictness,
+    transport: Arc<ConnTransport>,
 }
 
 #[derive(Default)]
@@ -115,16 +90,22 @@ impl ListenerHooks {
         Self::default()
     }
 
-    /// Records that `handle` was accepted under `spec`, until the guard
-    /// drops.
+    /// Records that `handle` was accepted under `spec` and runs over
+    /// `transport`, until the guard drops.
     #[must_use]
-    pub fn register(&self, handle: &Arc<SessionHandle>, spec: &ListenerSpec) -> Registered {
+    pub fn register(
+        &self,
+        handle: &Arc<SessionHandle>,
+        spec: &ListenerSpec,
+        transport: Arc<ConnTransport>,
+    ) -> Registered {
         lock(&self.inner.sessions).insert(
             handle.id(),
             Entry {
                 handle: Arc::downgrade(handle),
                 listener: spec.name,
                 accepted: Strictness::of(spec),
+                transport,
             },
         );
         Registered {
@@ -133,28 +114,40 @@ impl ListenerHooks {
         }
     }
 
-    /// Listener `name` is now `now`: sessions it is stricter for are marked
-    /// to close at their next safe point after `drain`. Returns how many
-    /// were scheduled.
+    /// Listener `name` is now `now`: after `drain`, the sessions it is
+    /// stricter for and no longer allows ([`Strictness::keeps`], with the
+    /// session's transport at that time) are marked to close at their next
+    /// safe point. Returns how many sessions it is stricter for (the
+    /// candidates; those already on TLS that meets `now` stay open).
+    #[allow(clippy::must_use_candidate)] // called for its effect; tests read the count
     pub fn listener_changed(&self, name: &'static str, now: Strictness, drain: Duration) -> usize {
-        let doomed: Vec<Weak<SessionHandle>> = lock(&self.inner.sessions)
-            .values()
-            .filter(|e| e.listener == name && now.stricter_than(&e.accepted))
-            .map(|e| e.handle.clone())
-            .collect();
-        let n = doomed.len();
+        let candidates: Vec<(Weak<SessionHandle>, Strictness, Arc<ConnTransport>)> =
+            lock(&self.inner.sessions)
+                .values()
+                .filter(|e| e.listener == name && now.stricter_than(&e.accepted))
+                .map(|e| (e.handle.clone(), e.accepted, Arc::clone(&e.transport)))
+                .collect();
+        let n = candidates.len();
         if n > 0 {
-            tracing::info!(
-                listener = name,
-                sessions = n,
-                drain_s = drain.as_secs(),
-                "listener made stricter: older sessions close at a safe point after the drain time"
-            );
             tokio::spawn(async move {
                 tokio::time::sleep(drain).await;
-                for h in doomed.iter().filter_map(Weak::upgrade) {
-                    h.flags().close_at_safe_point(CloseReason::ListenerRetired);
+                let mut closing = 0usize;
+                for (h, accepted, transport) in &candidates {
+                    if now.keeps(accepted, transport.tls()) {
+                        continue;
+                    }
+                    if let Some(h) = h.upgrade() {
+                        h.flags().close_at_safe_point(CloseReason::ListenerRetired);
+                        closing += 1;
+                    }
                 }
+                tracing::info!(
+                    listener = name,
+                    sessions = n,
+                    closing,
+                    drain_s = drain.as_secs(),
+                    "listener made stricter: older sessions it no longer allows close at a safe point"
+                );
             });
         }
         n

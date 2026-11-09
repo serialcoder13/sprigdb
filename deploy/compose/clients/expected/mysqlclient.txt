@@ -1,0 +1,9 @@
+# mysqlclient (versions.txt) through run.sh: every outcome other than pass.
+# Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (summarize.py). Test ids are pytest's junit classname.name.
+
+# The test needs a slow streaming result: a cross join of
+# information_schema.tables with itself, LIMIT 20000. A tenant sees only its
+# own few tables (chapter 07), so the result is a few hundred rows, done
+# before the second thread looks. Not a protocol difference.
+gateway-* fail tests.test_connection.test_result_concurrent_use_raises :: a tenant's information_schema.tables is small, so the 'slow' result finishes at once

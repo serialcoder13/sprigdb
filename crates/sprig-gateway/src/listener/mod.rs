@@ -11,8 +11,14 @@
 //! - a new bind address is bound first, and only then is the old socket
 //!   closed; if the bind fails the old listener keeps running;
 //! - a stricter change (TLS tightened, minimum version raised, listener
-//!   moved or disabled) closes the older generation's connections once
-//!   `listener.drain_seconds` has passed. A looser change leaves them open.
+//!   moved or disabled) closes, once `listener.drain_seconds` has passed,
+//!   the older generations' connections that the new spec no longer allows
+//!   ([`Strictness::keeps`]): a plaintext connection when TLS becomes
+//!   `required`, a TLS 1.2 one when the minimum rises to 1.3, every one
+//!   when the listener moves or is disabled. A TLS 1.3 connection stays
+//!   open through both TLS changes, and a looser change closes nothing. The
+//!   close is graceful first (`close_soon`, a safe point) and forced at
+//!   twice the drain time for front ends that have safe points.
 //!
 //! Each connection runs in its own task: the PROXY header from trusted
 //! peers, then TLS by mode. Client-speaks-first protocols detect a TLS
@@ -33,7 +39,8 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
@@ -45,7 +52,7 @@ use tokio_util::task::TaskTracker;
 
 pub use self::proxy::{Cidr, ProxyMode, ProxyPolicy};
 pub use self::settings::{LISTENERS, ListenerKeys, Resolution, resolve};
-use crate::frontend::{Frontend, GatewayContext, Protocol, TlsInfo};
+use crate::frontend::{ConnTransport, Frontend, GatewayContext, Protocol, TlsInfo};
 use crate::tls::{self, CertBundle};
 
 /// A listener's TLS mode, ordered from loosest to strictest.
@@ -152,14 +159,69 @@ impl ListenerSpec {
     }
 
     /// Whether moving from `old` to `self` is stricter: connections accepted
-    /// under `old` must then close after `listener.drain_seconds`.
+    /// under `old` that `self` no longer allows ([`Strictness::keeps`])
+    /// must then close after `listener.drain_seconds`.
     fn stricter_than(&self, old: &Self) -> bool {
-        !self.enabled || self.bind != old.bind || self.tls > old.tls || self.min_tls > old.min_tls
+        Strictness::of(self).stricter_than(&Strictness::of(old))
     }
 
     /// Plaintext is accepted on an address outside private ranges.
     fn plaintext_public(&self) -> bool {
         self.enabled && self.tls != TlsMode::Required && !is_private(self.bind.ip())
+    }
+}
+
+/// The parts of a listener spec that decide whether a change is stricter,
+/// and which open connections it closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Strictness {
+    /// `listener.<name>.enabled`.
+    pub enabled: bool,
+    /// `listener.<name>.bind`.
+    pub bind: SocketAddr,
+    /// `listener.<name>.tls`.
+    pub tls: TlsMode,
+    /// `tls.min_version`.
+    pub min_tls: TlsVersion,
+}
+
+impl Strictness {
+    /// The strictness of `spec`.
+    #[must_use]
+    pub fn of(spec: &ListenerSpec) -> Self {
+        Self {
+            enabled: spec.enabled,
+            bind: spec.bind,
+            tls: spec.tls,
+            min_tls: spec.min_tls,
+        }
+    }
+
+    /// Whether moving from `old` to `self` is stricter: TLS tightened,
+    /// minimum version raised, listener moved or disabled. Only then can
+    /// a connection accepted under `old` lose its place
+    /// ([`Strictness::keeps`]).
+    #[must_use]
+    pub fn stricter_than(&self, old: &Self) -> bool {
+        !self.enabled || self.bind != old.bind || self.tls > old.tls || self.min_tls > old.min_tls
+    }
+
+    /// Whether a connection accepted under `accepted` that runs over `tls`
+    /// (`None`: plaintext) may stay open under `self`: the listener is
+    /// still enabled at the same address and the connection already meets
+    /// its TLS mode and minimum version. A TLS connection meets `required`;
+    /// a plaintext one meets `optional` and `off` whatever the minimum
+    /// version. A connection that meets the new spec gains nothing from
+    /// being closed, and closing it costs its client a reconnect and, on
+    /// HTTP/2, a `GOAWAY` race (chapter 04, "Live listener changes").
+    #[must_use]
+    pub fn keeps(&self, accepted: &Self, tls: Option<TlsVersion>) -> bool {
+        self.enabled
+            && self.bind == accepted.bind
+            && match tls {
+                None => self.tls != TlsMode::Required,
+                Some(v) => v >= self.min_tls,
+            }
     }
 }
 
@@ -221,19 +283,48 @@ impl Frontends {
     }
 }
 
+/// One open connection of a [`ConnGroup`]: its transport and its own
+/// close tokens (children of the group's).
+struct ConnEntry {
+    transport: Arc<ConnTransport>,
+    soft: CancellationToken,
+    close: CancellationToken,
+}
+
 /// The connections accepted under one generation of a listener.
 #[derive(Clone)]
 struct ConnGroup {
     /// The spec they were accepted under.
     spec: Arc<ListenerSpec>,
     tracker: TaskTracker,
-    /// Cancelled to close every connection of the group.
+    /// Cancelled to close every connection of the group (shutdown).
     close: CancellationToken,
-    /// Cancelled to ask the group's connections to close at their next
+    /// Cancelled to ask every connection of the group to close at its next
     /// safe point ([`ClientConn::close_soon`](crate::frontend::ClientConn)).
     soft: CancellationToken,
-    /// A drain deadline is already scheduled.
-    draining: Arc<AtomicBool>,
+    /// The open connections, so a stricter change closes only those the new
+    /// spec doesn't allow.
+    conns: Arc<Mutex<HashMap<u64, ConnEntry>>>,
+    next_id: Arc<AtomicU64>,
+}
+
+/// A connection's place in its group; dropping it removes the entry.
+pub(crate) struct ConnSlot {
+    conns: Arc<Mutex<HashMap<u64, ConnEntry>>>,
+    id: u64,
+    pub(crate) transport: Arc<ConnTransport>,
+    pub(crate) soft: CancellationToken,
+    pub(crate) close: CancellationToken,
+}
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        lock(&self.conns).remove(&self.id);
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl ConnGroup {
@@ -243,12 +334,47 @@ impl ConnGroup {
             tracker: TaskTracker::new(),
             close: CancellationToken::new(),
             soft: CancellationToken::new(),
-            draining: Arc::new(AtomicBool::new(false)),
+            conns: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
     fn finished(&self) -> bool {
         self.tracker.is_closed() && self.tracker.is_empty()
+    }
+
+    /// Registers a new connection of the group.
+    fn join(&self) -> ConnSlot {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let transport = Arc::new(ConnTransport::default());
+        let soft = self.soft.child_token();
+        let close = self.close.child_token();
+        lock(&self.conns).insert(
+            id,
+            ConnEntry {
+                transport: Arc::clone(&transport),
+                soft: soft.clone(),
+                close: close.clone(),
+            },
+        );
+        ConnSlot {
+            conns: Arc::clone(&self.conns),
+            id,
+            transport,
+            soft,
+            close,
+        }
+    }
+
+    /// The close tokens (soft, forced) of the open connections that `now`
+    /// no longer allows.
+    fn not_kept(&self, now: &Strictness) -> Vec<(CancellationToken, CancellationToken)> {
+        let accepted = Strictness::of(&self.spec);
+        lock(&self.conns)
+            .values()
+            .filter(|e| !now.keeps(&accepted, e.transport.tls()))
+            .map(|e| (e.soft.clone(), e.close.clone()))
+            .collect()
     }
 }
 
@@ -522,9 +648,12 @@ impl ListenerManager {
 }
 
 /// Stops `group` taking new connections and keeps it with the older
-/// generations. Every older generation that `new` is stricter than closes
-/// what it still has open once `drain` has passed (chapter 04: "for
-/// sessions accepted under the older generation of this name").
+/// generations. In every older generation that `new` is stricter than, the
+/// connections `new` no longer allows ([`Strictness::keeps`], checked when
+/// `drain` has passed, so a MySQL session's in-protocol TLS counts) are
+/// asked to close at their next safe point then, and closed by force at
+/// twice `drain` (chapter 04: "for sessions accepted under the older
+/// generation of this name"). The others stay open.
 fn retire(
     slot: &mut Slot,
     name: &'static str,
@@ -535,8 +664,9 @@ fn retire(
     group.tracker.close();
     slot.old.retain(|g| !g.finished());
     slot.old.push(group);
+    let now = Strictness::of(new);
     for g in &slot.old {
-        if !new.stricter_than(&g.spec) || g.draining.swap(true, Ordering::Relaxed) {
+        if !new.stricter_than(&g.spec) {
             continue;
         }
         let g = g.clone();
@@ -551,13 +681,28 @@ fn retire(
             let soft_after = drain.min(force_after);
             tokio::select! {
                 () = g.tracker.wait() => return,
-                () = tokio::time::sleep(soft_after) => g.soft.cancel(),
+                () = tokio::time::sleep(soft_after) => {}
+            }
+            let doomed = g.not_kept(&now);
+            tracing::info!(
+                listener = name,
+                open = g.tracker.len(),
+                closing = doomed.len(),
+                "listener made stricter: closing the older connections it no longer allows"
+            );
+            if doomed.is_empty() {
+                return;
+            }
+            for (soft, _) in &doomed {
+                soft.cancel();
             }
             tokio::select! {
                 () = g.tracker.wait() => {}
                 () = tokio::time::sleep(force_after.saturating_sub(soft_after)) => {
-                    tracing::info!(listener = name, open = g.tracker.len(), "drain time over: closing connections of an older listener generation");
-                    g.close.cancel();
+                    tracing::info!(listener = name, "drain time over: closing by force the connections of an older listener generation still open");
+                    for (_, close) in &doomed {
+                        close.cancel();
+                    }
                 }
             }
         });

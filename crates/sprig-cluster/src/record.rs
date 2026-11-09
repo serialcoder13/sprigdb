@@ -293,6 +293,12 @@ pub struct ClusterRecord {
     /// Why the cluster is `rejected`, each with the fix where there is one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<String>,
+    /// Each node's `@@server_uuid`, pinned by the first probe that reached
+    /// it at its recorded address; a probe that finds another server there
+    /// refuses the node ([`crate::probe::check_identity`]). Changing a
+    /// node's address forgets its pin (r2opfix).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_uuids: BTreeMap<NodeId, String>,
 }
 
 impl Versioned for ClusterRecord {

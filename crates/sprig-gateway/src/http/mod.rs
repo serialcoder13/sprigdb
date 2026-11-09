@@ -16,11 +16,15 @@
 //!
 //! Steps 1 and 2 are the listener manager's ([`crate::listener`]): the
 //! front end receives a [`ClientConn`] with TLS done (ALPN set on HTTP
-//! listeners). A listener change or a drain asks the connection to close
-//! at its next safe point ([`ClientConn::close_soon`]): hyper then sends
-//! `GOAWAY` (HTTP/2) or `connection: close` (HTTP/1.1) after the requests
-//! in flight, so no request fails; the forced close follows only if a
-//! request outlives the drain time.
+//! listeners). A listener change the connection no longer meets, or a
+//! drain, asks it to close at its next safe point
+//! ([`ClientConn::close_soon`]): HTTP/2 gets `GOAWAY` at once and its
+//! streams finish; HTTP/1.1 gets `connection: close` on its next response,
+//! or is closed after a second idle ([`serve_conn`]). No request the
+//! server has read fails; the forced close follows only if a request
+//! outlives the drain time. A request the client sends while the `GOAWAY`
+//! is on its way never reaches the server, and HTTP/2 clients retry it
+//! (tonic does not on its own: see chapter 37).
 //!
 //! The services: [`sql`] (SQL and transaction handles through the
 //! executor), [`admin`] (the Admin API, forwarded to the controllers, and
@@ -34,6 +38,9 @@ pub mod rest;
 pub mod settings;
 pub mod sink;
 pub mod sql;
+
+#[cfg(test)]
+mod drain_tests;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -49,7 +56,7 @@ use tonic::body::Body;
 use self::admin::AdminApi;
 use self::auth::{HttpAuthenticator, HttpCredentials};
 use self::sql::{Caller, SqlEngine};
-use crate::frontend::{ClientConn, Frontend, GatewayContext, Protocol, TlsInfo};
+use crate::frontend::{ClientConn, Frontend, GatewayContext, MaybeTls, Protocol, TlsInfo};
 
 /// What a request knows of its connection, in the request's extensions.
 #[derive(Debug, Clone)]
@@ -205,7 +212,6 @@ impl Frontend for HttpFrontend {
             listener: conn.listener.name,
             generation: conn.generation,
         };
-        let close_soon = conn.close_soon.clone();
         let core = Arc::clone(&self.core);
         let grpc = self.grpc.clone();
         let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
@@ -215,19 +221,132 @@ impl Frontend for HttpFrontend {
             async move { Ok::<_, Infallible>(route(core, grpc, info, req).await) }
         });
         let streams = self.core.engine.settings().max_streams;
-        let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-        builder.http2().max_concurrent_streams(streams);
-        let served = builder.serve_connection(TokioIo::new(conn.stream), svc);
-        tokio::pin!(served);
-        let r = tokio::select! {
-            r = served.as_mut() => r,
-            () = close_soon.cancelled() => {
-                // A safe point for HTTP: finish what is in flight, accept
-                // nothing new on this connection.
-                served.as_mut().graceful_shutdown();
-                served.await
-            }
-        };
-        r.map_err(|e| sprig_common::SprigError::internal(format!("HTTP connection: {e}")))
+        serve_conn(conn, svc, streams).await
     }
+}
+
+/// How long an HTTP/1.1 connection asked to close waits for its next
+/// request (answered with `connection: close`) before it is closed while
+/// idle. A client in a loop sends within this time and learns of the close
+/// from the response; closing an idle connection at once races the
+/// client's next request, which then fails though the server never read
+/// it.
+const H1_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a connection's requests and its close share.
+#[derive(Default)]
+struct CloseState {
+    /// The connection was asked to close: HTTP/1.1 responses carry
+    /// `connection: close`.
+    closing: std::sync::atomic::AtomicBool,
+    /// The client speaks HTTP/2.
+    h2: std::sync::atomic::AtomicBool,
+    /// Wakes the close when an HTTP/2 request shows up after it began.
+    h2_seen: tokio::sync::Notify,
+}
+
+/// `svc`, marking HTTP/1.1 responses `connection: close` once the
+/// connection is closing, and noting HTTP/2.
+#[derive(Clone)]
+struct CloseAware<S> {
+    inner: S,
+    state: Arc<CloseState>,
+}
+
+impl<S> hyper::service::Service<Request<Incoming>> for CloseAware<S>
+where
+    S: hyper::service::Service<Request<Incoming>, Response = Response<Body>, Error = Infallible>,
+    S::Future: Send + 'static,
+{
+    type Response = Response<Body>;
+    type Error = Infallible;
+    type Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<Response<Body>, Infallible>>
+                + Send,
+        >,
+    >;
+
+    fn call(&self, req: Request<Incoming>) -> Self::Future {
+        use std::sync::atomic::Ordering;
+        let h1 = req.version() < hyper::Version::HTTP_2;
+        if !h1
+            && !self.state.h2.swap(true, Ordering::SeqCst)
+            && self.state.closing.load(Ordering::SeqCst)
+        {
+            self.state.h2_seen.notify_one();
+        }
+        let fut = self.inner.call(req);
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            let mut resp = fut.await?;
+            if h1 && state.closing.load(Ordering::SeqCst) {
+                resp.headers_mut().insert(
+                    hyper::header::CONNECTION,
+                    hyper::header::HeaderValue::from_static("close"),
+                );
+            }
+            Ok(resp)
+        })
+    }
+}
+
+/// Serves one HTTP connection (HTTP/1.1 or HTTP/2) with `svc` until it
+/// ends. When the listener asks it to close ([`ClientConn::close_soon`])
+/// it closes without failing a request the client has sent:
+///
+/// - HTTP/2: `GOAWAY` at once. hyper's h2 server sends the two-step
+///   `GOAWAY` (last stream id 2^31-1, a `PING`, then the last stream it
+///   accepted), serves every stream up to that id to the end, then closes.
+/// - HTTP/1.1: the next response carries `connection: close` and the
+///   connection closes after it; a connection idle for [`H1_IDLE_GRACE`]
+///   closes then (a request already being read is answered first).
+///
+/// The forced close ([`ClientConn::retired`]) is the listener's.
+pub(crate) async fn serve_conn<S>(conn: ClientConn, svc: S, max_streams: u32) -> Result<()>
+where
+    S: hyper::service::Service<Request<Incoming>, Response = Response<Body>, Error = Infallible>
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    use std::sync::atomic::Ordering;
+    let close_soon = conn.close_soon.clone();
+    let state = Arc::new(CloseState::default());
+    if let MaybeTls::Tls(t) = &conn.stream
+        && t.get_ref().1.alpn_protocol() == Some(b"h2".as_slice())
+    {
+        state.h2.store(true, Ordering::SeqCst);
+    }
+    let svc = CloseAware {
+        inner: svc,
+        state: Arc::clone(&state),
+    };
+    let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    builder.http2().max_concurrent_streams(max_streams);
+    let served = builder.serve_connection(TokioIo::new(conn.stream), svc);
+    tokio::pin!(served);
+    let r = tokio::select! {
+        r = served.as_mut() => r,
+        () = close_soon.cancelled() => {
+            state.closing.store(true, Ordering::SeqCst);
+            if !state.h2.load(Ordering::SeqCst) {
+                // HTTP/1.1, or no request yet: let the next response say
+                // `connection: close`; close an idle connection after the
+                // grace, or at once if the client turns out to speak h2.
+                tokio::select! {
+                    r = served.as_mut() => return finish(r),
+                    () = state.h2_seen.notified() => {}
+                    () = tokio::time::sleep(H1_IDLE_GRACE) => {}
+                }
+            }
+            served.as_mut().graceful_shutdown();
+            served.await
+        }
+    };
+    finish(r)
+}
+
+fn finish(r: std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>) -> Result<()> {
+    r.map_err(|e| sprig_common::SprigError::internal(format!("HTTP connection: {e}")))
 }

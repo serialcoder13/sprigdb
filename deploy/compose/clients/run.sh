@@ -168,13 +168,14 @@ case $SUITE in
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/pip"
     suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -- python:3.12-slim-bookworm \
-      sh -c 'mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
+      sh -c 'K=$FILTER; [ -n "$EXCLUDE_RE" ] && K="${K:+($K) and }not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))";
+             mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
              pip install -q -r requirements-dev.txt > /out/pip.log 2>&1 &&
              printf "[{\"host\": \"%s\", \"port\": %s, \"user\": \"%s\", \"password\": \"%s\", \"database\": \"test1\", \"use_unicode\": true, \"local_infile\": true},
                       {\"host\": \"%s\", \"port\": %s, \"user\": \"%stest2\", \"password\": \"some password\", \"database\": \"test2\"}]" \
                "$TARGET_HOST" "$TARGET_PORT" "$TARGET_USER" "$TARGET_PASS" "$TARGET_HOST" "$TARGET_PORT" "$LOGIN_PREFIX" \
                > pymysql/tests/databases.json &&
-             python -m pytest -p no:cacheprovider -q --junitxml=/out/junit.xml ${FILTER:+-k "$FILTER"} ${EXCLUDE_RE:+-k "not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))"} pymysql > /out/pytest.log 2>&1; true' ||
+             python -m pytest -p no:cacheprovider -q --junitxml=/out/junit.xml ${K:+-k "$K"} pymysql > /out/pytest.log 2>&1; true' ||
       true
     ;;
   mysqlclient)
@@ -184,12 +185,13 @@ case $SUITE in
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/pip"
     suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -- python:3.12-slim-bookworm \
-      sh -c 'mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
+      sh -c 'K=$FILTER; [ -n "$EXCLUDE_RE" ] && K="${K:+($K) and }not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))";
+             mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
              (apt-get update -q && apt-get install -y -q gcc pkg-config libmariadb-dev) > /out/apt.log 2>&1 &&
              pip install -q . -r requirements.txt "SQLAlchemy>=2,<3" > /out/pip.log 2>&1 &&
              printf "[MySQLdb-tests]\nhost = %s\nport = %s\nuser = %s\npassword = %s\ndatabase = mysqldb_test\ndefault-character-set = utf8mb4\n" \
                "$TARGET_HOST" "$TARGET_PORT" "$TARGET_USER" "$TARGET_PASS" > /tmp/target.cnf &&
-             TESTDB=/tmp/target.cnf python -m pytest -p no:cacheprovider -q --junitxml=/out/junit.xml ${FILTER:+-k "$FILTER"} ${EXCLUDE_RE:+-k "not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))"} tests > /out/pytest.log 2>&1; true' ||
+             TESTDB=/tmp/target.cnf python -m pytest -p no:cacheprovider -q --junitxml=/out/junit.xml ${K:+-k "$K"} tests > /out/pytest.log 2>&1; true' ||
       true
     ;;
   mariadb-connector-j)
@@ -198,11 +200,11 @@ case $SUITE in
     [[ $setup == 1 ]] && sql -e "DROP DATABASE IF EXISTS testj; CREATE DATABASE testj"
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/m2"
-    suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -e MAVEN_OPTS=-Xmx192m -e TEST_DB_DATABASE=testj -- maven:3.9-eclipse-temurin-21 \
+    suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -e MAVEN_OPTS="-Xmx160m -XX:+UseSerialGC" -e TEST_DB_DATABASE=testj -- maven:3.9-eclipse-temurin-21 \
       sh -c 'export TEST_DB_HOST=$TARGET_HOST TEST_DB_PORT=$TARGET_PORT TEST_DB_USER=$TARGET_USER TEST_DB_PASSWORD=$TARGET_PASS;
              mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
              sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" /out/excludes.txt > /tmp/excludes;
-             mvn -B test -Dsurefire.excludesFile=/tmp/excludes -Dmaven.test.failure.ignore=true -Dsurefire.timeout=1500 -DargLine=-Xmx320m \
+             mvn -B test -Dsurefire.excludesFile=/tmp/excludes -Dmaven.test.failure.ignore=true -Dsurefire.timeout=1500 -DargLine="-Xmx320m -XX:+UseSerialGC -XX:MaxMetaspaceSize=160m" \
                ${FILTER:+-Dtest="$FILTER" -Dsurefire.failIfNoSpecifiedTests=false} > /out/mvn.log 2>&1;
              mkdir -p /out/junit && cp target/surefire-reports/*.xml /out/junit/ 2>/dev/null; true' ||
       true
@@ -215,7 +217,8 @@ case $SUITE in
     [[ $setup == 1 ]] && sql -e "DROP DATABASE IF EXISTS cjtest; CREATE DATABASE cjtest"
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/m2"
-    suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -v "$HERE/mysql-connector-j/pom.xml:/pom.xml:ro" -e MAVEN_OPTS=-Xmx192m -- maven:3.9-eclipse-temurin-21 \
+    suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -v "$HERE/mysql-connector-j/pom.xml:/pom.xml:ro" \
+      -e MAVEN_OPTS="-Xmx448m -XX:+UseSerialGC -XX:MaxMetaspaceSize=192m -Xss512k -Dfile.encoding=UTF-8" -- maven:3.9-eclipse-temurin-21 \
       sh -c 'mkdir -p /work/src && cp /pom.xml /work/ && cp -r /src/src/test /work/src/ && cd /work &&
              url="jdbc:mysql://$TARGET_HOST:$TARGET_PORT/cjtest?user=$TARGET_USER&password=$TARGET_PASS&sslMode=DISABLED&allowPublicKeyRetrieval=true";
              sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" /out/excludes.txt > /tmp/excludes;

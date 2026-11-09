@@ -65,6 +65,7 @@ pub mod catalog_reconciler;
 pub mod catalogs;
 pub mod dc;
 pub mod dispatch;
+pub mod drain;
 pub mod failover;
 pub mod inherit_loop;
 pub mod latency;
@@ -388,22 +389,24 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     ));
     // Chapters 16 and 20 (R1): the advisor's first design and automatic
     // split, merge and move, per tenant homed here.
-    let sharding = Arc::new(sharding_runtime::ShardingRuntime::new(
-        dc.clone(),
-        Arc::clone(&stores.dc),
-        Arc::clone(&stores.global),
-        Arc::clone(&clock),
-        Arc::new(
-            RegistryPools::new(registry_for_sharding, Some(Arc::clone(&monitor)))
-                .budget("sharding", sharding_runtime::POOL_MAX),
-        ),
-        Arc::new(sprig_balancer::decisions::CatalogDecisionLog::new(
-            Arc::new(locator.clone()),
-        )),
-        Some(settings.live.clone()),
-        &format!("controller:{}", cfg.node.id()),
-    )
-    .with_publish(versioner.clone()));
+    let sharding = Arc::new(
+        sharding_runtime::ShardingRuntime::new(
+            dc.clone(),
+            Arc::clone(&stores.dc),
+            Arc::clone(&stores.global),
+            Arc::clone(&clock),
+            Arc::new(
+                RegistryPools::new(registry_for_sharding, Some(Arc::clone(&monitor)))
+                    .budget("sharding", sharding_runtime::POOL_MAX),
+            ),
+            Arc::new(sprig_balancer::decisions::CatalogDecisionLog::new(
+                Arc::new(locator.clone()),
+            )),
+            Some(settings.live.clone()),
+            &format!("controller:{}", cfg.node.id()),
+        )
+        .with_publish(versioner.clone()),
+    );
     // Chapter 20: load splits need placement's hot clusters.
     sharding
         .write_load()

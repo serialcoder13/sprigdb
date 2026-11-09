@@ -176,6 +176,9 @@ impl Provisioner for KubernetesProvisioner {
             ));
         };
         let name = v["metadata"]["name"].as_str().unwrap_or_default();
+        // The record first (r2opfix): only a drained cluster retires, and
+        // nothing is deleted while the controller refuses.
+        self.rec.registrar().retire(c.as_str()).await?;
         self.rec
             .kube()
             .delete(&SPRIG_CLUSTER, &ns, name)

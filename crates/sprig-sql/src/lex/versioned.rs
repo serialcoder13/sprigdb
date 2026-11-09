@@ -108,8 +108,11 @@ pub fn neutralize_edits(src: &[u8], tokens: &[Token], backend_version: u32) -> V
 /// `mysqldump` and `SHOW CREATE TABLE` on MySQL 8.4 write
 /// `/*!80000 INVISIBLE */` after an invisible index (MariaDB's `IGNORED`),
 /// `/*!80023 INVISIBLE */` after an invisible column (the same word on
-/// MariaDB) and `/*!80003 SRID n */` after a spatial column (MariaDB's
-/// `REF_SYSTEM_ID=n`).
+/// MariaDB) and `/*!80003 SRID n */` after a spatial column. The last
+/// becomes the plain `SRID n`: MariaDB takes its `REF_SYSTEM_ID=n` only right
+/// after the type, and the comment usually follows `NOT NULL`, so
+/// [`crate::compat::rewrite_srid_attribute`] (the next step of
+/// `mysql_text_rewrites`) moves it there.
 fn mariadb_body(version: u32, words: &[&[u8]]) -> Option<String> {
     let up: Vec<String> = words
         .iter()
@@ -119,7 +122,7 @@ fn mariadb_body(version: u32, words: &[&[u8]]) -> Option<String> {
         (80000..=80022, [w]) if w == "INVISIBLE" => Some("IGNORED".to_owned()),
         (80023.., [w]) if w == "INVISIBLE" => Some("INVISIBLE".to_owned()),
         (80003.., [srid, n]) if srid == "SRID" && n.bytes().all(|b| b.is_ascii_digit()) => {
-            Some(format!("REF_SYSTEM_ID={n}"))
+            Some(format!("SRID {n}"))
         }
         _ => None,
     }
@@ -216,7 +219,7 @@ mod tests {
         );
         assert_eq!(
             run("CREATE TABLE g (p point NOT NULL /*!80003 SRID 4326 */)").as_deref(),
-            Some("CREATE TABLE g (p point NOT NULL REF_SYSTEM_ID=4326)")
+            Some("CREATE TABLE g (p point NOT NULL SRID 4326)")
         );
         // Bodies MariaDB lacks stay comments (MariaDB skips them).
         assert_eq!(

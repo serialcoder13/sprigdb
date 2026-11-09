@@ -773,11 +773,21 @@ impl Reconciler for Arc<BalancerLoop> {
         Ok(vec![Dc(self.dc.clone())])
     }
 
-    async fn reconcile(&self, _cx: &LoopCx, _key: &Dc) -> Result<Outcome> {
+    async fn reconcile(&self, cx: &LoopCx, _key: &Dc) -> Result<Outcome> {
         let started = std::time::Instant::now();
         let interval = self.settings().interval;
         if let Err(e) = self.run_once().await {
             tracing::warn!(error = %e, "balancer run failed");
+        }
+        // Draining clusters whose shards have all moved away are drained
+        // (r2opfix; chapter 09's cluster states).
+        if let Ok(l) = cx.leader() {
+            let guard = vec![sprig_meta::Cmp::CreateRev(l.key().clone(), l.token)];
+            if let Err(e) =
+                crate::drain::finish_drains(&self.registry, &*cx.dc, &self.dc, guard).await
+            {
+                tracing::warn!(error = %e, "drains not finished");
+            }
         }
         metrics::histogram!("sprig_balancer_plan_duration_seconds")
             .record(started.elapsed().as_secs_f64());

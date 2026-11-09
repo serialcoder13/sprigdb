@@ -96,6 +96,13 @@ pub const LEASE: ApiResource = ApiResource {
     kind: "Lease",
     plural: "leases",
 };
+/// `v1` `Pod` (the failover watch reads the primary pod's readiness).
+pub const POD: ApiResource = ApiResource {
+    group: "",
+    version: "v1",
+    kind: "Pod",
+    plural: "pods",
+};
 /// `v1` `Event`.
 pub const EVENT: ApiResource = ApiResource {
     group: "",

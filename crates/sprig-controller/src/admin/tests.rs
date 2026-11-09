@@ -195,11 +195,12 @@ async fn cluster_calls_on_a_registered_record() {
         p.cluster.record.health.as_ref().unwrap().state,
         sprig_cluster::health::ClusterHealth::Unknown
     );
+    // No shard map names it: drained at once (r2opfix).
     let d = a.svc.drain_cluster(&id).await.unwrap();
-    assert_eq!(d.record.admin_state, AdminState::Draining);
+    assert_eq!(d.record.admin_state, AdminState::Drained);
     assert_eq!(
         a.svc.drain_cluster(&id).await.unwrap().record.admin_state,
-        AdminState::Draining
+        AdminState::Drained
     );
     let probing = reg
         .register(unreachable("u2", TopologyKind::SingleNode))
@@ -214,6 +215,124 @@ async fn cluster_calls_on_a_registered_record() {
     assert_eq!(
         e.message,
         "cluster adm-c-c2 is probing; only an active cluster can drain"
+    );
+}
+
+/// r2opfix: drain waits for the shard maps, retire needs drained, and
+/// `setNodes` replaces the nodes and forgets moved nodes' identities.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn drain_retire_and_set_nodes() {
+    use sprig_catalog::placement::ShardMap;
+    use sprig_cluster::record::NodeSpec;
+    use sprig_common::ids::{NodeId, TenantId};
+
+    let a = admin("adm-r", true).await;
+    make_leader(&a).await;
+    let reg = a.f.monitor.registry().clone();
+    let s = reg
+        .register(unreachable("busy", TopologyKind::SingleNode))
+        .await
+        .unwrap();
+    let busy = s.body().cluster_id.clone();
+    reg.set_admin_state(&busy, AdminState::Active, vec![])
+        .await
+        .unwrap();
+    // A tenant's catalog lives there.
+    let key = Tier::Dc(DcId::new("adm-r").unwrap())
+        .key(&format!("shardmaps/{}/0", 2_540_600_007_u64))
+        .unwrap();
+    let map = Record::new(ShardMap::catalog(TenantId(2_540_600_007), busy.clone(), 1));
+    a.f.dc
+        .txn(Txn {
+            when: vec![],
+            then: vec![Op::Put {
+                key: key.clone(),
+                value: map.encode().unwrap(),
+                lease: None,
+            }],
+            otherwise: vec![],
+        })
+        .await
+        .unwrap();
+    let d = a.svc.drain_cluster(busy.as_str()).await.unwrap();
+    assert_eq!(d.record.admin_state, AdminState::Draining);
+    // Retire refuses until drained.
+    let e = a.svc.retire_cluster(busy.as_str()).await.unwrap_err();
+    assert_eq!(code(&e), Some(SprigCode::ClusterStateInvalid));
+    assert!(
+        e.message.contains("only a drained cluster retires"),
+        "{}",
+        e.message
+    );
+    // The tenant moved away: the next check finishes the drain, and
+    // retire goes through (twice is fine).
+    a.f.dc
+        .txn(Txn {
+            when: vec![],
+            then: vec![Op::Delete(key)],
+            otherwise: vec![],
+        })
+        .await
+        .unwrap();
+    let r = a.svc.retire_cluster(busy.as_str()).await.unwrap();
+    assert_eq!(r.record.admin_state, AdminState::Retired);
+    assert_eq!(
+        a.svc
+            .retire_cluster(busy.as_str())
+            .await
+            .unwrap()
+            .record
+            .admin_state,
+        AdminState::Retired
+    );
+
+    // setNodes: n1 moves, n2 stays, n3 is new; n1's pin goes, n2's stays.
+    let s = reg
+        .register(unreachable("scaled", TopologyKind::PrimaryReplica))
+        .await
+        .unwrap();
+    let id = s.body().cluster_id.clone();
+    let old = s.body().nodes.clone();
+    reg.update(&id, |r| {
+        for n in &r.nodes.clone() {
+            r.node_uuids
+                .insert(n.node.clone(), format!("uuid-{}", n.node));
+        }
+        Ok(true)
+    })
+    .await
+    .unwrap();
+    let mut nodes = old.clone();
+    nodes[0].addr = "127.0.0.1:31377".into();
+    nodes.push(NodeSpec {
+        node: NodeId::new("n9").unwrap(),
+        addr: "127.0.0.1:31378".into(),
+        zone: None,
+    });
+    let v = a
+        .svc
+        .set_cluster_nodes(
+            id.as_str(),
+            SetClusterNodesRequest {
+                nodes: nodes.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(v.record.nodes, nodes);
+    assert!(!v.record.node_uuids.contains_key(&old[0].node));
+    if old.len() > 1 {
+        assert!(v.record.node_uuids.contains_key(&old[1].node));
+    }
+    assert_eq!(
+        code(
+            &a.svc
+                .set_cluster_nodes(id.as_str(), SetClusterNodesRequest { nodes: vec![] })
+                .await
+                .unwrap_err()
+        ),
+        Some(SprigCode::AdminRequestInvalid)
     );
 }
 

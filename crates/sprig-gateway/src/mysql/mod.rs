@@ -260,7 +260,11 @@ async fn connection(
     mut session: Session,
     conn: ClientConn,
 ) -> Result<()> {
-    let _registered = shared.cfg.hooks.register(session.handle(), &conn.listener);
+    let _registered = shared.cfg.hooks.register(
+        session.handle(),
+        &conn.listener,
+        Arc::clone(&conn.transport),
+    );
     let settings = shared.cfg.settings.current();
     let timeout = conn.listener.handshake_timeout;
     let phase = tokio::time::timeout(

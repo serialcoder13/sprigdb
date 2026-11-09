@@ -82,8 +82,8 @@ use types::{
     ClusterView, CreateTenantRequest, CreateTenantResponse, GetDcResponse, ListClustersResponse,
     ListDcsResponse, ListSettingKeysQuery, ListSettingKeysResponse, ListTenantsResponse,
     ProbeClusterRequest, ProbeClusterResponse, RegisterClusterRequest, RegisterClusterResponse,
-    RegisterDcRequest, RegisterDcResponse, ScopeRef, SettingContextQuery, SettingExplanation,
-    SettingWrite, SettingWriteResponse, TenantSettingsResponse, TenantView,
+    RegisterDcRequest, RegisterDcResponse, ScopeRef, SetClusterNodesRequest, SettingContextQuery,
+    SettingExplanation, SettingWrite, SettingWriteResponse, TenantSettingsResponse, TenantView,
 };
 
 /// 39792 `ER_SPRIG_ADMIN_REQUEST_INVALID`.
@@ -630,13 +630,13 @@ impl AdminService {
     pub async fn drain_cluster(&self, id: &str) -> Result<ClusterView> {
         let id = Self::parse_id(id)?;
         let guard = self.leader_guard().await?;
-        let registry = self.registry().clone().with_guard(guard);
+        let registry = self.registry().clone().with_guard(guard.clone());
         let Some(cur) = registry.get(&id).await? else {
             return Err(not_found(&id, self.dc()));
         };
         let state = cur.body().admin_state;
         let stored = match state {
-            AdminState::Draining => cur,
+            AdminState::Draining | AdminState::Drained => cur,
             AdminState::Active => {
                 let gaps = cur.body().gaps.clone();
                 registry
@@ -651,6 +651,105 @@ impl AdminService {
             }
         };
         tracing::info!(cluster = %id, "draining");
+        // An empty cluster is drained at once (r2kind: one stayed draining
+        // for 20 minutes); the balancer's pass finishes the others once
+        // their shards have moved.
+        let done = crate::drain::finish_drains(self.registry(), &*self.stores.dc, self.dc(), guard)
+            .await?;
+        let stored = if done.contains(&id) {
+            registry.get(&id).await?.unwrap_or(stored)
+        } else {
+            stored
+        };
+        Ok(self.view(stored).await)
+    }
+
+    /// `Clusters.RetireCluster` (r2opfix): a `drained` cluster's record
+    /// becomes `retired`, and the monitor stops probing it. A provisioner
+    /// calls it before it deletes the nodes (Kubernetes: `retire`).
+    ///
+    /// # Errors
+    /// 39504 off the leader; 39104 unknown; 39106 unless `drained` (or
+    /// already `retired`, returned as is).
+    pub async fn retire_cluster(&self, id: &str) -> Result<ClusterView> {
+        let id = Self::parse_id(id)?;
+        let guard = self.leader_guard().await?;
+        let registry = self.registry().clone().with_guard(guard.clone());
+        let Some(mut cur) = registry.get(&id).await? else {
+            return Err(not_found(&id, self.dc()));
+        };
+        if cur.body().admin_state == AdminState::Draining {
+            // Drained in the meantime?
+            crate::drain::finish_drains(self.registry(), &*self.stores.dc, self.dc(), guard)
+                .await?;
+            cur = registry.get(&id).await?.unwrap_or(cur);
+        }
+        let stored = match cur.body().admin_state {
+            AdminState::Retired => cur,
+            AdminState::Drained => {
+                let gaps = cur.body().gaps.clone();
+                registry
+                    .set_admin_state(&id, AdminState::Retired, gaps)
+                    .await?
+            }
+            other => {
+                return Err(SprigError::new(
+                    SprigCode::ClusterStateInvalid,
+                    format!(
+                        "cluster {id} is {other}; only a drained cluster retires \
+                         (sprigctl cluster drain {id}, and wait for drained)"
+                    ),
+                ));
+            }
+        };
+        tracing::info!(cluster = %id, "retired");
+        Ok(self.view(stored).await)
+    }
+
+    /// `Clusters.SetClusterNodes` (r2opfix): replaces the record's nodes
+    /// with the provisioner's current ones (a scale or a replacement). A
+    /// node whose address changed, and a removed node, lose their pinned
+    /// identity.
+    ///
+    /// # Errors
+    /// 39504 off the leader; 39104 unknown or retired; 39792 for an empty
+    /// list or a repeated node id.
+    pub async fn set_cluster_nodes(
+        &self,
+        id: &str,
+        req: SetClusterNodesRequest,
+    ) -> Result<ClusterView> {
+        let id = Self::parse_id(id)?;
+        if req.nodes.is_empty() {
+            return Err(invalid("a cluster needs at least one node"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(dup) = req.nodes.iter().find(|n| !seen.insert(n.node.clone())) {
+            return Err(invalid(format!("node {} is listed twice", dup.node)));
+        }
+        let guard = self.leader_guard().await?;
+        let registry = self.registry().clone().with_guard(guard);
+        match registry.get(&id).await? {
+            Some(s) if s.body().admin_state != AdminState::Retired => {}
+            _ => return Err(not_found(&id, self.dc())),
+        }
+        let nodes = req.nodes;
+        let stored = registry
+            .update(&id, |r| {
+                if r.nodes == nodes {
+                    return Ok(false);
+                }
+                let old = std::mem::replace(&mut r.nodes, nodes.clone());
+                r.node_uuids.retain(|n, _| {
+                    let before = old.iter().find(|s| &s.node == n).map(|s| &s.addr);
+                    let now = nodes.iter().find(|s| &s.node == n).map(|s| &s.addr);
+                    before.is_some() && before == now
+                });
+                Ok(true)
+            })
+            .await?;
+        tracing::info!(cluster = %id, nodes = stored.body().nodes.len(), "nodes updated");
+        self.monitor.forget(&id);
         Ok(self.view(stored).await)
     }
 

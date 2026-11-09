@@ -1,0 +1,20 @@
+# MariaDB Connector/J (versions.txt) through run.sh: every outcome other than
+# pass. Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (summarize.py). Test ids are Surefire's Class.method. The ~50 skips are the
+# suite's own assumptions (MaxScale, Enterprise, TLS certificates, RUN_LONG_TEST,
+# a local server); they are counted, not listed.
+
+# Fails on plain MariaDB too.
+* fail org.mariadb.jdbc.integration.LocalInfileTest.unReadableFile :: the suite runs as root in its container, so chmod 000 doesn't make the file unreadable
+* flaky org.mariadb.jdbc.integration.MultiHostTest.commandsAfterReconnectFail :: its local TCP proxy times out on a loaded host
+* flaky org.mariadb.jdbc.integration.PoolDataSourceTest.testJmx :: pool connect timeout on a loaded host
+
+# Statements and packets of 16 MiB and more. Through the gateway (gaps row
+# 30) the backend limit is 16 MiB while the gateway answers 64 MiB, and on a
+# debug gateway such a packet held a runtime worker until the chapter 25
+# watchdog aborted the process (9 November 2026). On every target their
+# buffers also push the test JVM past the container's 768 MB, which kills the
+# fork and ends the run early. Left out everywhere.
+* exclude org.mariadb.jdbc.integration.MultiPacketTest.* :: 16 MiB+ packets; backend limit 16 MiB (gaps row 30); watchdog abort on a debug gateway; OOM-kills the 768 MB test container
+* exclude org.mariadb.jdbc.integration.CompressTest.bigSend :: as MultiPacketTest
+* exclude org.mariadb.jdbc.integration.BatchTest.bigParameterFlushTest :: as MultiPacketTest

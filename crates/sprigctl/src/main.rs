@@ -343,6 +343,11 @@ fn cluster_group() -> Command {
                 .about("Stop placing on a cluster and move its shards away")
                 .arg(id()),
         )
+        .subcommand(
+            Command::new("retire")
+                .about("Retire a drained cluster's record; probes stop")
+                .arg(id()),
+        )
 }
 
 fn cli() -> Command {
@@ -781,6 +786,22 @@ async fn run_cluster(
             let r: ClusterView = c
                 .post(
                     &format!("/admin/v1/clusters/{id}:drain"),
+                    &serde_json::json!({}),
+                )
+                .await?;
+            print(out, &r, render::cluster_show);
+            Ok(ExitCode::SUCCESS)
+        }
+        "retire" => {
+            let id = id();
+            if m.get_flag("dry-run") {
+                println!("would retire {id}: its record becomes retired and probes stop");
+                return Ok(ExitCode::SUCCESS);
+            }
+            confirm(m, "retire", &id)?;
+            let r: ClusterView = c
+                .post(
+                    &format!("/admin/v1/clusters/{id}:retire"),
                     &serde_json::json!({}),
                 )
                 .await?;

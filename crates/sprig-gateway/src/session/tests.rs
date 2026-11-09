@@ -40,6 +40,7 @@ async fn client_conn() -> (TcpStream, ClientConn) {
         in_protocol_tls: InProtocolTls::NotOffered,
         retired: CancellationToken::new(),
         close_soon: CancellationToken::new(),
+        transport: Arc::default(),
         acceptor: None,
     };
     (client, conn)

@@ -43,6 +43,7 @@ fn record(kind: TopologyKind, nodes: &[&str]) -> ClusterRecord {
         health: None,
         tuning: None,
         gaps: Vec::new(),
+        node_uuids: std::collections::BTreeMap::new(),
     }
 }
 

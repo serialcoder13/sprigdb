@@ -755,7 +755,8 @@ const TICKETS_DDL: &str = "CREATE TABLE tickets (tid BIGINT NOT NULL AUTO_INCREM
      title VARCHAR(20) COLLATE utf8mb4_bin, qty INT) DEFAULT CHARSET utf8mb4";
 /// Keyed by `cid`; its `AUTO_INCREMENT` column only names rows.
 const EVENTS_DDL: &str = "CREATE TABLE events (eid INT NOT NULL AUTO_INCREMENT, cid INT NOT NULL, \
-     note VARCHAR(20) COLLATE utf8mb4_bin, PRIMARY KEY (cid, eid), KEY (eid)) DEFAULT CHARSET utf8mb4";
+     note VARCHAR(20) COLLATE utf8mb4_bin, PRIMARY KEY (cid, eid), KEY (eid), \
+     UNIQUE KEY cn (cid, note)) DEFAULT CHARSET utf8mb4";
 /// A parent member of `invoices` with its own `AUTO_INCREMENT` column.
 const NOTES_DDL: &str = "CREATE TABLE inv_notes (nid INT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
      iid INT NOT NULL, body VARCHAR(20) COLLATE utf8mb4_bin, KEY (iid), \
@@ -2728,10 +2729,14 @@ async fn kill_branch(e: &Env, sut: &mut Conn, tally: &mut Tally, shards: &[Sh]) 
 
 /// An INSERT's OK packet (affected rows, insert id), or its error; with
 /// `params`, through the binary protocol.
-async fn ok_of(c: &mut Conn, sql: &str, params: Option<Vec<Value>>) -> Result<(u64, u64), u16> {
-    fn server(sql: &str, e: mysql_async::Error) -> u16 {
+async fn ok_of(
+    c: &mut Conn,
+    sql: &str,
+    params: Option<Vec<Value>>,
+) -> Result<(u64, u64), (u16, String)> {
+    fn server(sql: &str, e: mysql_async::Error) -> (u16, String) {
         match e {
-            mysql_async::Error::Server(e) => e.code,
+            mysql_async::Error::Server(e) => (e.code, e.message),
             e => panic!("{sql}: {e}"),
         }
     }
@@ -2853,6 +2858,12 @@ async fn auto_ids(
         )),
         ev("INSERT INTO events SET cid = 33, note = '{p}g00'"),
         ev("INSERT INTO events VALUES (NULL, 34, '{p}g00'), (0, 35, '{p}g01')"),
+        // IGNORE skips the first row (statement 11 wrote it): the first
+        // value really inserted is reported (decision IB10).
+        ev(&format!(
+            "INSERT IGNORE INTO events (cid, note) VALUES (1, 'r{round}s11g00'), (2, '{{p}}g00'), \
+             (3, '{{p}}g01')"
+        )),
         nt(
             "INSERT INTO inv_notes (iid, body) VALUES (20, '{p}g00'), (21, '{p}g01'), (22, '{p}g02'), \
             (23, '{p}g03'), (24, '{p}g04')",
@@ -2928,7 +2939,7 @@ async fn auto_ids(
                     .await
                     .unwrap();
             }
-            seen.push(r);
+            seen.push(r.clone().map_err(|(c, _)| c));
             let Ok((affected, ok_id)) = r else { continue };
             if identity != lid || lid_var != lid {
                 tally.mismatches.push(format!(
@@ -3096,6 +3107,159 @@ async fn ids_unique(e: &Env, w: &World) -> Vec<String> {
     out
 }
 
+/// Chapter 19's leased blocks (decision IB8): one gateway writes explicit
+/// ids while sessions on the other keep inserting from their cached
+/// blocks. An explicit value inside a block the other gateway still holds
+/// is refused (39463); one past every block raises the sequence. Either
+/// way no id is held twice on any shard afterwards.
+async fn explicit_vs_blocks(e: &Env, w: &World, second: &str, tally: &mut Tally) {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut writers = Vec::new();
+    for k in 0..4usize {
+        let (addr, user, pass, db) = (
+            second.to_owned(),
+            e.user.clone(),
+            e.password.clone(),
+            e.db.clone(),
+        );
+        let stop = Arc::clone(&stop);
+        writers.push(tokio::spawn(async move {
+            let mut c = connect(&addr, &user, &pass, Some(&db)).await;
+            let mut errors = Vec::new();
+            let mut i = 0usize;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let sql = if i.is_multiple_of(2) {
+                    format!(
+                        "INSERT INTO events (cid, note) VALUES ({}, 'yk{k}i{i}a'), ({}, 'yk{k}i{i}b')",
+                        1 + (i * 7 + k) % 120,
+                        1 + (i * 11 + k + 3) % 120
+                    )
+                } else {
+                    format!("INSERT INTO tickets (title, qty) VALUES ('yk{k}i{i}', {i})")
+                };
+                if let Err((code, msg)) = ok_of(&mut c, &sql, None).await {
+                    errors.push(format!("{sql}: error {code} {msg}"));
+                }
+                i += 1;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            errors
+        }));
+    }
+    let mut c = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
+    let mut cat = root(e, 0, Some(&e.catalog())).await;
+    let seq_of = |t: &str| {
+        format!(
+            "SELECT object_id FROM objects WHERE db_id = {} AND name = '{t}' AND state = 'active'",
+            w.db_id.0
+        )
+    };
+    let (mut refused, mut accepted, mut raised) = (0usize, 0usize, 0usize);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for i in 0..40usize {
+        let (t, col, rest) = if i.is_multiple_of(2) {
+            ("events", "eid", format!("{}, 'xe{i}'", 1 + i % 120))
+        } else {
+            ("tickets", "tid", format!("'xt{i}', 0"))
+        };
+        let seq: u64 = cat.query_first(seq_of(t)).await.unwrap().unwrap();
+        // This gateway's own block: the one holding its last value.
+        ok_of(
+            &mut c,
+            &if t == "events" {
+                format!("INSERT INTO events (cid, note) VALUES (5, 'xo{i}')")
+            } else {
+                format!("INSERT INTO tickets (title, qty) VALUES ('xo{i}', 0)")
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let mine: u64 = c
+            .query_first("SELECT LAST_INSERT_ID()")
+            .await
+            .unwrap()
+            .unwrap();
+        let blocks: Vec<(String, String, String)> = cat
+            .exec(
+                "SELECT CAST(start_value AS CHAR), CAST(end_value AS CHAR), holder \
+                 FROM sequence_blocks WHERE seq_id = ? AND lease_until > UTC_TIMESTAMP(6)",
+                (seq,),
+            )
+            .await
+            .unwrap();
+        let blocks: Vec<(i64, i64, String)> = blocks
+            .into_iter()
+            .map(|(a, z, h)| (a.parse().unwrap(), z.parse().unwrap(), h))
+            .collect();
+        let me = blocks
+            .iter()
+            .find(|(a, z, _)| *a <= mine as i64 && (mine as i64) < *z)
+            .map(|(_, _, h)| h.clone());
+        let foreign = blocks
+            .iter()
+            .filter(|(_, _, h)| Some(h) != me.as_ref())
+            .max_by_key(|(a, _, _)| *a);
+        let top = blocks.iter().map(|(_, z, _)| *z).max().unwrap_or(0);
+        // Odd rounds of four: past every block; else inside the other
+        // gateway's newest block, at its last value (most likely unused).
+        let (v, inside) = match foreign {
+            Some((_, z, _)) if i % 4 != 3 => (*z - 1, true),
+            _ => (top + 1000, false),
+        };
+        let sql = format!(
+            "INSERT INTO {t} ({col}, {}) VALUES ({v}, {rest})",
+            if t == "events" {
+                "cid, note"
+            } else {
+                "title, qty"
+            }
+        );
+        match ok_of(&mut c, &sql, None).await {
+            Ok(_) if inside => {
+                accepted += 1;
+            }
+            Ok(_) => raised += 1,
+            Err((39463, _)) if inside => refused += 1,
+            Err((code, msg)) => tally
+                .mismatches
+                .push(format!("EXPLICIT VS BLOCKS {sql}: error {code} {msg}")),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for h in writers {
+        for m in h.await.unwrap() {
+            tally
+                .mismatches
+                .push(format!("EXPLICIT VS BLOCKS writer {m}"));
+        }
+    }
+    let dups = ids_unique(e, w).await;
+    tally.compared += 1;
+    for d in &dups {
+        tally
+            .mismatches
+            .push(format!("EXPLICIT VS BLOCKS DUPLICATE {d}"));
+    }
+    if refused == 0 {
+        tally
+            .mismatches
+            .push("EXPLICIT VS BLOCKS: no explicit value met another gateway's block".into());
+    }
+    println!(
+        "explicit vs blocks: {refused} refused inside the other gateway's blocks, {accepted} accepted there \
+         (lease ended or block passed), {raised} raised past every block, {} duplicate ids across shards",
+        dups.len()
+    );
+    c.query_drop("DELETE FROM events WHERE note LIKE 'x%' OR note LIKE 'y%'")
+        .await
+        .unwrap();
+    c.query_drop("DELETE FROM tickets WHERE title LIKE 'x%' OR title LIKE 'y%'")
+        .await
+        .unwrap();
+}
+
 /// Concurrent inserts through two gateways (chapter 19: unique across
 /// gateways, increasing per gateway): `tasks` sessions per gateway each
 /// run `n` multi-row inserts into `events` (rows on every shard) and
@@ -3162,7 +3326,7 @@ async fn two_gateways(e: &Env, w: &World, second: &str, tally: &mut Tally) {
                             }
                             *prev = id;
                         }
-                        Err(code) => errors.push(format!("{sql}: error {code}")),
+                        Err((code, msg)) => errors.push(format!("{sql}: error {code} {msg}")),
                     }
                 }
                 (rows, errors)
@@ -3377,6 +3541,7 @@ async fn differential_against_one_unsharded_mariadb() {
     auto_ids(&e, &w, &mut sut, &mut reference, &mut tally, 2).await;
     if let Some(second) = env("SPRIG_TEST_R1_GATEWAY2") {
         two_gateways(&e, &w, &second, &mut tally).await;
+        explicit_vs_blocks(&e, &w, &second, &mut tally).await;
     }
     compare_full(
         &mut sut,

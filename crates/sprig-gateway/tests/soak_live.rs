@@ -4,8 +4,10 @@
 //! gRPC while certificates rotate, TLS modes and minimum versions change
 //! and live settings flip, on a running gateway. It counts every request,
 //! every reconnect (a connection the gateway closed at a safe point, which
-//! a pool replaces) and every failure (a request that failed even after its
-//! one retry on a new connection), and samples latency and the gateway's
+//! a pool replaces; for gRPC also a request the gateway never processed
+//! because its connection was closing, see `grpc_retryable`) and every
+//! failure (a request that failed even after its one retry on a new
+//! connection), and samples latency and the gateway's
 //! memory once a minute, so a long run shows leaks or drift.
 //!
 //! ```sh
@@ -304,6 +306,33 @@ async fn rests_worker(s: Arc<Soak>, n: u64) {
     }
 }
 
+/// A gRPC failure a well-behaved client retries on a new connection:
+/// `Unavailable`, or a request the gateway never processed because its
+/// connection was closing (gwdrain). tonic reports a request still queued
+/// in hyper when the `GOAWAY` arrived as `Cancelled` (hyper's "connection
+/// closed", the request handed back unsent), and a stream above the
+/// `GOAWAY`'s last stream id as `Internal` (h2's remote `GOAWAY` with
+/// `NO_ERROR`); grpc-go and grpc-java retry both on their own.
+fn grpc_retryable(e: &tonic::Status) -> bool {
+    use std::error::Error as _;
+    if e.code() == tonic::Code::Unavailable {
+        return true;
+    }
+    let mut src = e.source();
+    while let Some(x) = src {
+        if let Some(h) = x.downcast_ref::<hyper::Error>()
+            && h.is_canceled()
+        {
+            return true;
+        }
+        if let Some(h) = x.downcast_ref::<h2::Error>() {
+            return h.is_go_away() && h.is_remote() && h.reason() == Some(h2::Reason::NO_ERROR);
+        }
+        src = x.source();
+    }
+    false
+}
+
 async fn grpc_worker(s: Arc<Soak>, n: u64, tls: bool) {
     let mut ep = Endpoint::from_shared(format!(
         "{}://{}",
@@ -342,7 +371,7 @@ async fn grpc_worker(s: Arc<Soak>, n: u64, tls: bool) {
                     s.grpc.record(started);
                     break;
                 }
-                Err(e) if tries == 1 && e.code() == tonic::Code::Unavailable => {
+                Err(e) if tries == 1 && grpc_retryable(&e) => {
                     s.grpc.reconnects.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {

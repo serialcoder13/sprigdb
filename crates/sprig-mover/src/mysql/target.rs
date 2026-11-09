@@ -277,7 +277,10 @@ impl TargetIo for MysqlTarget {
             let mut failed = Vec::new();
             let mut last_use = None;
             for q in pending {
-                if q.starts_with("USE ") || q.starts_with("SET SESSION") || q.starts_with("SET NAMES") {
+                if q.starts_with("USE ")
+                    || q.starts_with("SET SESSION")
+                    || q.starts_with("SET NAMES")
+                {
                     let _ = c.query_drop(q.as_str()).await;
                     if q.starts_with("USE ") {
                         last_use = Some(q);

@@ -425,6 +425,9 @@ pub struct ServerFacts {
     pub version_text: String,
     /// `@@server_id`.
     pub server_id: u32,
+    /// `@@server_uuid`: the identity the record pins (r2opfix).
+    #[serde(default)]
+    pub server_uuid: String,
     /// `lower_case_table_names`.
     pub lower_case_table_names: u8,
     /// `default_storage_engine`.
@@ -487,6 +490,7 @@ impl NodeFacts {
                 version: raw.var("version").and_then(ServerVersion::parse),
                 version_text: raw.var("version").unwrap_or_default().to_owned(),
                 server_id: num(raw.var("server_id")),
+                server_uuid: raw.var("server_uuid").unwrap_or_default().to_owned(),
                 lower_case_table_names: num(raw.var("lower_case_table_names")),
                 default_storage_engine: raw
                     .var("default_storage_engine")

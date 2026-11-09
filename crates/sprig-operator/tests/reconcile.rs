@@ -66,6 +66,8 @@ impl SystemAccounts for FakeAccounts {
 struct FakeRegistrar {
     calls: Mutex<Vec<ClusterRegistration>>,
     refuse: Mutex<bool>,
+    node_updates: Mutex<Vec<(String, usize)>>,
+    retired: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -83,6 +85,21 @@ impl ClusterRegistrar for FakeRegistrar {
             cluster_id: format!("fra1-c{}", c.len() + 6),
             cluster_number: u32::try_from(c.len()).unwrap() + 6,
         })
+    }
+    async fn set_nodes(
+        &self,
+        cluster_id: &str,
+        nodes: &[sprig_cluster::record::NodeSpec],
+    ) -> Result<()> {
+        self.node_updates
+            .lock()
+            .unwrap()
+            .push((cluster_id.to_owned(), nodes.len()));
+        Ok(())
+    }
+    async fn retire(&self, cluster_id: &str) -> Result<()> {
+        self.retired.lock().unwrap().push(cluster_id.to_owned());
+        Ok(())
     }
 }
 
@@ -459,6 +476,8 @@ async fn pools_keep_their_minimum_and_provision_up_to_the_maximum() {
     prov.retire(&sprig_common::ids::ClusterId::new(id).unwrap())
         .await
         .unwrap();
+    // The record was retired first (r2opfix).
+    assert_eq!(w.registrar.retired.lock().unwrap().len(), 1);
     assert!(w.api.get(SC, "default-1").is_none());
     assert!(w.api.get(MDB, "default-1").is_none());
     assert!(!w.api.names(SVC).iter().any(|n| n.starts_with("default-1-")));

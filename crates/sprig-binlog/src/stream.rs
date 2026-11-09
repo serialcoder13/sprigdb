@@ -414,10 +414,7 @@ mod tests {
             ("db", 3306, "")
         );
         let s = BinlogSource::from_url("mysql://u:p@h:1?tls=verify&ca_file=/ca.pem").unwrap();
-        assert_eq!(
-            s.tls,
-            Some(BinlogTls::verify(Some("/ca.pem".into())))
-        );
+        assert_eq!(s.tls, Some(BinlogTls::verify(Some("/ca.pem".into()))));
         let s = BinlogSource::from_url("mysql://u:p@h:1?tls=skip_verify").unwrap();
         assert_eq!(s.tls, Some(BinlogTls::skip_verify()));
         assert!(BinlogSource::from_url("mysql://u:p@h:1?tls=maybe").is_err());

@@ -23,7 +23,7 @@ use tokio::net::TcpListener;
 
 use super::types::{
     ErrorBody, LockSettingRequest, ProbeClusterRequest, ResetSettingRequest, ScopeRef,
-    SetBoundsRequest, SetSettingRequest, SettingOp, SettingWrite,
+    SetBoundsRequest, SetClusterNodesRequest, SetSettingRequest, SettingOp, SettingWrite,
 };
 use super::{AdminService, invalid};
 use crate::autoindex_admin::view::{Action as IndexAction, IndexActionRequest};
@@ -286,7 +286,7 @@ async fn get_cluster(
     respond(r.await)
 }
 
-/// `{cluster_id}:probe` and `{cluster_id}:drain`.
+/// `{cluster_id}:probe`, `:drain`, `:retire` and `:setNodes`.
 async fn cluster_method(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -305,8 +305,17 @@ async fn cluster_method(
             respond(r.await)
         }
         Some((id, "drain")) => respond(app.svc.drain_cluster(id).await),
+        Some((id, "retire")) => respond(app.svc.retire_cluster(id).await),
+        Some((id, "setNodes")) => {
+            let r = async {
+                let req: SetClusterNodesRequest = parse(&body, false)?;
+                app.svc.set_cluster_nodes(id, req).await
+            };
+            respond(r.await)
+        }
         _ => error_response(&invalid(format!(
-            "POST /admin/v1/clusters/{name}: expected {{cluster_id}}:probe or {{cluster_id}}:drain"
+            "POST /admin/v1/clusters/{name}: expected {{cluster_id}}:probe, :drain, :retire \
+             or :setNodes"
         ))),
     }
 }

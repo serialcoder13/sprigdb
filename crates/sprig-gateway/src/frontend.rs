@@ -11,6 +11,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
-use crate::listener::{ListenerSpec, TlsMode};
+use crate::listener::{ListenerSpec, TlsMode, TlsVersion};
 use crate::session::SessionTable;
 
 /// A client protocol, one per listener.
@@ -275,6 +276,41 @@ pub struct TlsInfo {
     pub client_cert: bool,
 }
 
+/// What a connection runs over now: plaintext or a TLS version. Set by the
+/// listener after its TLS handshake and by [`ClientConn::start_tls`] after
+/// an in-protocol one; read when a listener is made stricter, to keep the
+/// connections that already meet the new spec (chapter 04, "Live listener
+/// changes").
+#[derive(Debug, Default)]
+pub struct ConnTransport(AtomicU8);
+
+impl ConnTransport {
+    const PLAIN: u8 = 0;
+    const TLS_1_2: u8 = 2;
+    const TLS_1_3: u8 = 3;
+
+    /// Records the negotiated TLS parameters (`None`: plaintext). A
+    /// version rustls doesn't name counts as 1.2, the lower one.
+    pub fn set(&self, tls: Option<&TlsInfo>) {
+        let v = match tls {
+            None => Self::PLAIN,
+            Some(i) if i.version == "1.3" => Self::TLS_1_3,
+            Some(_) => Self::TLS_1_2,
+        };
+        self.0.store(v, Ordering::Release);
+    }
+
+    /// The TLS version, or `None` for plaintext.
+    #[must_use]
+    pub fn tls(&self) -> Option<TlsVersion> {
+        match self.0.load(Ordering::Acquire) {
+            Self::PLAIN => None,
+            Self::TLS_1_3 => Some(TlsVersion::V1_3),
+            _ => Some(TlsVersion::V1_2),
+        }
+    }
+}
+
 /// An accepted client connection, handed to a [`Frontend`].
 pub struct ClientConn {
     /// The client stream: TLS already established for client-speaks-first
@@ -288,18 +324,23 @@ pub struct ClientConn {
     pub generation: u64,
     /// TLS the front end should offer in its own protocol (MySQL family).
     pub in_protocol_tls: InProtocolTls,
-    /// Cancelled when the listener retires this connection: the listener
-    /// moved, was disabled or tightened, and `listener.drain_seconds` passed;
-    /// or the gateway's drain timed out. The listener then drops the front
-    /// end's future, which closes the connection. Closing at a safe point
-    /// with 39004 first is build step 8, with sessions.
+    /// Cancelled when the listener retires this connection by force: the
+    /// listener moved, was disabled or tightened so that this connection no
+    /// longer meets it, and twice `listener.drain_seconds` passed (once for
+    /// front ends without safe points); or the gateway's drain timed out.
+    /// The listener then drops the front end's future, which closes the
+    /// connection.
     pub retired: CancellationToken,
     /// Cancelled when the connection should close at its next safe point:
-    /// at `listener.drain_seconds` after a stricter listener change, or as
-    /// soon as the gateway drains. Front ends that can end gracefully (HTTP:
-    /// `GOAWAY` or `connection: close` after the requests in flight) watch
-    /// it; `retired` follows as the forced close.
+    /// at `listener.drain_seconds` after a listener change that this
+    /// connection no longer meets, or as soon as the gateway drains. Front
+    /// ends that can end gracefully (HTTP: `GOAWAY`, or `connection: close`
+    /// on the next response) watch it; `retired` follows as the forced
+    /// close.
     pub close_soon: CancellationToken,
+    /// What the connection runs over now; [`ClientConn::start_tls`] updates
+    /// it.
+    pub transport: Arc<ConnTransport>,
     pub(crate) acceptor: Option<TlsAcceptor>,
 }
 
@@ -339,6 +380,7 @@ impl ClientConn {
             in_protocol_tls,
             retired,
             close_soon,
+            transport,
             acceptor,
         } = self;
         let (
@@ -356,7 +398,9 @@ impl ClientConn {
             SprigError::internal("TLS handshake failed").with_source(e)
         })?;
         let stream = MaybeTls::Tls(Box::new(tls));
-        crate::listener::count_handshake(listener.name, stream.tls_info().as_ref(), "ok");
+        let info = stream.tls_info();
+        crate::listener::count_handshake(listener.name, info.as_ref(), "ok");
+        transport.set(info.as_ref());
         Ok(ClientConn {
             stream,
             peer,
@@ -365,6 +409,7 @@ impl ClientConn {
             in_protocol_tls: InProtocolTls::NotOffered,
             retired,
             close_soon,
+            transport,
             acceptor: None,
         })
     }

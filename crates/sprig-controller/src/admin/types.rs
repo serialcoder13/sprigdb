@@ -99,6 +99,16 @@ pub struct ProbeClusterRequest {
     pub full: bool,
 }
 
+/// `POST /admin/v1/clusters/{id}:setNodes`: `Clusters.SetClusterNodes`
+/// (r2opfix): the provisioner's current nodes, after a scale or a
+/// replacement. A node whose address changes, and a removed node, lose
+/// their pinned identity; the next probe pins the server now there.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetClusterNodesRequest {
+    /// Every node, in order.
+    pub nodes: Vec<NodeSpec>,
+}
+
 /// The answer to `ProbeCluster`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeClusterResponse {

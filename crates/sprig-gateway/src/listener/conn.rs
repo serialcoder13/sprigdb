@@ -65,11 +65,14 @@ pub(super) async fn run(
     let _permit = permit;
     let name = active.spec.name;
     let _open = OpenGuard::new(name);
-    let close = active.group.close.clone();
+    // This connection's place in its generation: its own close tokens, and
+    // its transport, which a stricter listener change checks.
+    let slot = active.group.join();
+    let close = slot.close.clone();
     let prepared = tokio::select! {
         biased;
         () = close.cancelled() => return,
-        r = tokio::time::timeout(active.spec.handshake_timeout, prepare(sock, peer, &active)) => r,
+        r = tokio::time::timeout(active.spec.handshake_timeout, prepare(sock, peer, &active, &slot)) => r,
     };
     let conn = match prepared {
         Ok(Ok(conn)) => conn,
@@ -101,6 +104,7 @@ async fn prepare(
     mut sock: TcpStream,
     peer: SocketAddr,
     active: &Active,
+    slot: &super::ConnSlot,
 ) -> Result<ClientConn, &'static str> {
     let spec = &active.spec;
     let speaks_first = spec.protocol.client_speaks_first();
@@ -141,6 +145,7 @@ async fn prepare(
             (MaybeTls::Plain(sock), InProtocolTls::NotOffered)
         }
     };
+    slot.transport.set(stream.tls_info().as_ref());
     let acceptor = match in_protocol_tls {
         InProtocolTls::NotOffered => None,
         InProtocolTls::Allowed | InProtocolTls::Required => active.acceptor.clone(),
@@ -151,8 +156,9 @@ async fn prepare(
         listener: spec.clone(),
         generation: active.generation,
         in_protocol_tls,
-        retired: active.group.close.clone(),
-        close_soon: active.group.soft.clone(),
+        retired: slot.close.clone(),
+        close_soon: slot.soft.clone(),
+        transport: Arc::clone(&slot.transport),
         acceptor,
     })
 }

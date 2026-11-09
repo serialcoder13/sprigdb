@@ -19,3 +19,11 @@ gateway-* exclude *.test_largedata :: 16 MiB statement; backend limit 16 MiB (ga
 * skip *.TestNewIssues.test_issue_35 :: upstream: requires manual intervention
 * skip *.TestOldIssues.test_issue_17 :: upstream: requires a legacy MySQL configuration
 * skip *.TestNextset.test_multi_cursor :: upstream: skipped unconditionally
+
+# A tenant has no `mysql` schema (chapter 29; decisions/r4-interim.md A5).
+gateway-* fail *.TestAuthentication.test_plugin :: reads mysql.user: a tenant has no mysql schema (1142)
+gateway-* fail *.TestOldIssues.test_issue_6 :: connects to database mysql: a tenant has no mysql schema (1044)
+# COM_PROCESS_KILL of the second login's session by the first: the tenant
+# admin holds ALL (CONNECTION_ADMIN), but the gateway's KILL still allows
+# only the user's own sessions (1095). Gaps row 33.
+gateway-* fail *.TestNewIssues.test_issue_36 :: KILL of another user's session in the tenant: CONNECTION_ADMIN not applied yet (1095; gaps row 33)

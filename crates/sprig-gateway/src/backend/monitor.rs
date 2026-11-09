@@ -35,6 +35,20 @@ const POLL_SQL_GALERA: &str = "SELECT @@read_only, @@gtid_slave_pos, @@gtid_binl
 const GALERA_SQL: &str =
     "SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_local_state', 'wsrep_ready')";
 
+/// A node's role from one poll: a writer only when it is writable and
+/// known to replicate from nobody. A replica can be writable
+/// (`read_only = 0`), so a node whose replication status couldn't be read
+/// is never taken for a writer (it is `Unknown`, unless `read_only`).
+fn role_of(topology: TopologyKind, read_only: bool, channels: Option<u64>) -> NodeRole {
+    match (topology, channels) {
+        (TopologyKind::Galera, _) => NodeRole::Galera,
+        (_, Some(n)) if n > 0 => NodeRole::Replica,
+        _ if read_only => NodeRole::Replica,
+        (_, Some(_)) => NodeRole::Writer,
+        (_, None) => NodeRole::Unknown,
+    }
+}
+
 struct Polled {
     obs: Observation,
     slave: Option<GtidSet>,
@@ -55,12 +69,17 @@ async fn poll(c: &mut MysqlClient, topology: TopologyKind, health: bool) -> Resu
     } else {
         POLL_SQL
     };
+    // Without the replication status (an account that may not read
+    // `SLAVE_STATUS`, an older server) the node's channels are unknown.
+    let mut channels_known = true;
     let row = match c.query_first(first).await {
         Ok(r) => r,
-        Err(e) if e.server_error().is_some() => c
-            .query_first(POLL_SQL_PLAIN)
-            .await
-            .map_err(|e| e.to_string())?,
+        Err(e) if e.server_error().is_some() => {
+            channels_known = false;
+            c.query_first(POLL_SQL_PLAIN)
+                .await
+                .map_err(|e| e.to_string())?
+        }
         Err(e) => return Err(e.to_string()),
     }
     .ok_or("no row")?;
@@ -72,11 +91,7 @@ async fn poll(c: &mut MysqlClient, topology: TopologyKind, health: bool) -> Resu
         .then(|| text(row.get(5)).parse().ok())
         .flatten();
     let mut obs = Observation {
-        role: match topology {
-            TopologyKind::Galera => NodeRole::Galera,
-            _ if channels > 0 || read_only => NodeRole::Replica,
-            _ => NodeRole::Writer,
-        },
+        role: role_of(topology, read_only, channels_known.then_some(channels)),
         read_only,
         galera_usable: None,
     };
@@ -227,5 +242,23 @@ pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
             () = b.shutdown.cancelled() => return,
             () = tokio::time::sleep(settings.position_poll) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    #[test]
+    fn a_node_is_a_writer_only_when_known_to_replicate_from_nobody() {
+        let p = TopologyKind::PrimaryReplica;
+        assert_eq!(role_of(p, false, Some(0)), NodeRole::Writer);
+        assert_eq!(role_of(p, false, Some(1)), NodeRole::Replica);
+        assert_eq!(role_of(p, true, Some(0)), NodeRole::Replica);
+        assert_eq!(role_of(p, true, None), NodeRole::Replica);
+        // The replication status couldn't be read (the plain poll): a
+        // writable replica must not look like a writer.
+        assert_eq!(role_of(p, false, None), NodeRole::Unknown);
+        assert_eq!(role_of(TopologyKind::Galera, false, None), NodeRole::Galera);
     }
 }

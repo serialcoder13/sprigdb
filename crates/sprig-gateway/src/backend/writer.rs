@@ -4,15 +4,20 @@
 //! | Topology | Writer for shard `S` |
 //! |---|---|
 //! | Galera | the usable node of the published writer set with the highest weighted rendezvous score for `S` (chapter 09's `choose_writer`) |
-//! | Primary and replicas | the node this gateway's checks see writable and replicating from nobody; the current one while it stays so |
+//! | Primary and replicas | the node the controller publishes (chapter 25): the holder of `leases/writer/<cluster_id>`, else the writer the last failover recorded, else the record's registered writer (its first node); the gateway's checks may only veto it |
 //! | Single node | the node |
 //! | External | the declared writer endpoint |
 //!
-//! Interim (M0.2): chapter 06 names the primary holding
-//! `leases/writer/<cluster_id>`; that lease arrives with failover
-//! (chapter 25, R2), so the gateway's own health checks decide. Before the
-//! first check the first node of the record (the writer by registration
-//! convention) is used.
+//! For primary + replicas the gateway never nominates a writer of its own:
+//! a replica may be writable (`read_only = 0` on the dev clusters), and a
+//! write there forks its history (the 9 November replica-1 incident: a
+//! gateway whose checks couldn't read the replication status took a
+//! replica that came back first for the writer). Writes are refused (39100,
+//! `ER_SPRIG_CLUSTER_UNAVAILABLE`) while the published writer is down or
+//! seen as a replica, while a failover hands the lease over, when the lease
+//! and the failover record disagree, and when the last read of them is
+//! older than the writer lease's TTL ([`PUBLISHED_MAX_AGE`]): the
+//! controller's failover moves the lease, and the gateway follows it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -22,7 +27,7 @@ use sprig_cluster::record::{TopologyKind, WriterWeight};
 use sprig_common::ids::{ClusterId, NodeId, ShardId};
 use sprig_common::{Result, SprigCode, SprigError};
 
-use super::cluster::{ClusterView, NodeRef};
+use super::cluster::{ClusterView, NodeRef, PublishedWriter};
 use super::health::{NodeRole, NodeTable};
 
 /// Chooses a shard's writer (chapter 06, "Interfaces").
@@ -67,14 +72,18 @@ impl TopologyWriters {
                 .increment(1);
         }
     }
+}
 
-    fn current(&self, view: &ClusterView, shard: ShardId) -> Option<NodeId> {
-        self.current
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&(view.id.clone(), shard))
-            .cloned()
-    }
+/// A published writer read longer ago than this isn't trusted
+/// (`failover.writer_lease_seconds`' default, chapter 25): a failover may
+/// have moved the lease since.
+pub const PUBLISHED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn refused(view: &ClusterView, why: &str) -> SprigError {
+    SprigError::new(
+        SprigCode::ClusterUnavailable,
+        format!("cluster {} has no usable writer: {why}", view.id),
+    )
 }
 
 fn no_writer(view: &ClusterView) -> SprigError {
@@ -98,36 +107,41 @@ impl WriterSelector for TopologyWriters {
                 choose_writer(shard, &set).and_then(|w| view.node(&w.node).cloned())
             }
             TopologyKind::PrimaryReplica => {
-                let seen_writers: Vec<&NodeRef> = view
-                    .nodes
-                    .iter()
-                    .filter(|n| {
-                        let s = self.nodes.status(&view.key(&n.node));
-                        s.usable() && s.role() == NodeRole::Writer
-                    })
-                    .collect();
-                let current = self.current(view, shard);
-                if let Some(c) = seen_writers
-                    .iter()
-                    .find(|n| Some(&n.node) == current.as_ref())
-                {
-                    Some((*c).clone())
-                } else if let Some(first) = seen_writers.first() {
-                    Some((*first).clone())
-                } else {
-                    // Nothing seen writable yet: the current writer, or the
-                    // first node not known to be a replica.
-                    view.nodes
-                        .iter()
-                        .find(|n| Some(&n.node) == current.as_ref() && usable(n))
-                        .or_else(|| {
-                            view.nodes.iter().find(|n| {
-                                let s = self.nodes.status(&view.key(&n.node));
-                                s.usable() && s.role() == NodeRole::Unknown
-                            })
-                        })
-                        .cloned()
+                let p = &view.published;
+                let named = match &p.writer {
+                    PublishedWriter::InTransit(why) => return Err(refused(view, why)),
+                    _ if !matches!(p.writer, PublishedWriter::Unread)
+                        && p.read_at.elapsed() > PUBLISHED_MAX_AGE =>
+                    {
+                        return Err(refused(
+                            view,
+                            "the published writer couldn't be read for longer than the writer \
+                             lease's TTL",
+                        ));
+                    }
+                    PublishedWriter::Node { node, .. } => view.node(node),
+                    // Nothing published, or a view without the store: the
+                    // registered writer.
+                    PublishedWriter::Registered | PublishedWriter::Unread => view.nodes.first(),
+                };
+                let Some(n) = named else {
+                    return Err(refused(
+                        view,
+                        "the published writer isn't in the cluster record",
+                    ));
+                };
+                // The checks may only veto it.
+                let s = self.nodes.status(&view.key(&n.node));
+                if !s.usable() {
+                    return Err(refused(view, &format!("its writer {} is down", n.node)));
                 }
+                if s.role() == NodeRole::Replica {
+                    return Err(refused(
+                        view,
+                        &format!("its writer {} is read-only or replicating", n.node),
+                    ));
+                }
+                Some(n.clone())
             }
             TopologyKind::SingleNode => view.nodes.first().filter(|n| usable(n)).cloned(),
             TopologyKind::External => view
@@ -148,6 +162,7 @@ impl WriterSelector for TopologyWriters {
 mod tests {
     use super::*;
     use crate::backend::health::Observation;
+    use std::time::Duration;
 
     fn view(t: TopologyKind) -> ClusterView {
         ClusterView::new(
@@ -173,21 +188,141 @@ mod tests {
         );
     }
 
+    fn published(v: &mut ClusterView, w: PublishedWriter, age: std::time::Duration) {
+        v.published = crate::backend::cluster::Published {
+            writer: w,
+            read_at: std::time::Instant::now()
+                .checked_sub(age)
+                .unwrap_or_else(std::time::Instant::now),
+        };
+    }
+
+    fn down(t: &NodeTable, v: &ClusterView, n: &str) {
+        let k = v.key(&NodeId::new(n).unwrap());
+        for _ in 0..3 {
+            t.record_failure(&k, 3);
+        }
+    }
+
+    fn up(t: &NodeTable, v: &ClusterView, n: &str, role: NodeRole) {
+        seen(t, v, n, role);
+        seen(t, v, n, role);
+    }
+
+    fn node(n: &str) -> NodeId {
+        NodeId::new(n).unwrap()
+    }
+
+    /// Before any lease is seen (no failover agents, or startup): the
+    /// registered writer only, whatever the checks say of the others.
     #[test]
-    fn primary_replica_follows_the_checks() {
+    fn before_a_lease_the_registered_writer_only() {
         let t = Arc::new(NodeTable::new());
         let w = TopologyWriters::new(Arc::clone(&t));
-        let v = view(TopologyKind::PrimaryReplica);
+        let mut v = view(TopologyKind::PrimaryReplica);
         assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n1");
-        seen(&t, &v, "n1", NodeRole::Replica);
-        seen(&t, &v, "n2", NodeRole::Writer);
-        seen(&t, &v, "n3", NodeRole::Replica);
-        assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n2");
-        let k2 = v.key(&NodeId::new("n2").unwrap());
-        for _ in 0..3 {
-            t.record_failure(&k2, 3);
+        published(&mut v, PublishedWriter::Registered, Duration::ZERO);
+        up(&t, &v, "n2", NodeRole::Writer);
+        up(&t, &v, "n3", NodeRole::Writer);
+        assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n1");
+    }
+
+    /// The 9 November replica-1 incident: every node down under load, then
+    /// n2 and n3 back before n1, all looking writable. No write may go
+    /// anywhere until n1, the registered writer, is back.
+    #[test]
+    fn the_incident_sequence_never_picks_a_replica() {
+        let t = Arc::new(NodeTable::new());
+        let w = TopologyWriters::new(Arc::clone(&t));
+        let mut v = view(TopologyKind::PrimaryReplica);
+        published(&mut v, PublishedWriter::Registered, Duration::ZERO);
+        for n in ["n1", "n2", "n3"] {
+            up(&t, &v, n, NodeRole::Unknown);
         }
-        assert!(w.writer(&v, ShardId(0)).is_err(), "only replicas left");
+        assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n1");
+        for n in ["n1", "n2", "n3"] {
+            down(&t, &v, n);
+        }
+        up(&t, &v, "n2", NodeRole::Writer);
+        up(&t, &v, "n3", NodeRole::Unknown);
+        let e = w.writer(&v, ShardId(0)).unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::ClusterUnavailable), "{e}");
+        up(&t, &v, "n1", NodeRole::Unknown);
+        assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n1");
+    }
+
+    /// A real failover moves the lease to n2: the gateway follows it, and
+    /// does not go back to n1 when n1 answers again (it is stale).
+    #[test]
+    fn the_lease_is_followed_and_the_old_primary_not_taken_back() {
+        let t = Arc::new(NodeTable::new());
+        let w = TopologyWriters::new(Arc::clone(&t));
+        let mut v = view(TopologyKind::PrimaryReplica);
+        published(
+            &mut v,
+            PublishedWriter::Node {
+                node: node("n1"),
+                epoch: 1,
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n1");
+        down(&t, &v, "n1");
+        assert!(
+            w.writer(&v, ShardId(0)).is_err(),
+            "the lease still names n1"
+        );
+        published(
+            &mut v,
+            PublishedWriter::InTransit("a failover is handing the writer to n2".into()),
+            Duration::ZERO,
+        );
+        assert!(
+            w.writer(&v, ShardId(0)).is_err(),
+            "no writes during the handover"
+        );
+        published(
+            &mut v,
+            PublishedWriter::Node {
+                node: node("n2"),
+                epoch: 2,
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n2");
+        up(&t, &v, "n1", NodeRole::Writer);
+        assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n2");
+    }
+
+    /// The checks only veto; an old reading of the lease isn't trusted.
+    #[test]
+    fn checks_veto_and_stale_readings_refuse() {
+        let t = Arc::new(NodeTable::new());
+        let w = TopologyWriters::new(Arc::clone(&t));
+        let mut v = view(TopologyKind::PrimaryReplica);
+        let n2 = PublishedWriter::Node {
+            node: node("n2"),
+            epoch: 4,
+        };
+        published(&mut v, n2.clone(), Duration::ZERO);
+        up(&t, &v, "n2", NodeRole::Replica);
+        assert!(
+            w.writer(&v, ShardId(0)).is_err(),
+            "published, but replicating"
+        );
+        up(&t, &v, "n2", NodeRole::Unknown);
+        assert_eq!(w.writer(&v, ShardId(0)).unwrap().node.as_str(), "n2");
+        published(&mut v, n2, PUBLISHED_MAX_AGE + Duration::from_secs(1));
+        assert!(w.writer(&v, ShardId(0)).is_err(), "read too long ago");
+        published(
+            &mut v,
+            PublishedWriter::Node {
+                node: node("n9"),
+                epoch: 5,
+            },
+            Duration::ZERO,
+        );
+        assert!(w.writer(&v, ShardId(0)).is_err(), "not in the record");
     }
 
     #[test]

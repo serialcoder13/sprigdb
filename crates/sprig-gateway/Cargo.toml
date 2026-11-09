@@ -68,6 +68,9 @@ twox-hash.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Classifying HTTP/2 errors in the listener-change tests (a stream the
+# server's GOAWAY refused).
+h2 = "0.4"
 rcgen.workspace = true
 # Trace assertions in observe's tests (chapter 47).
 tracing-subscriber.workspace = true

@@ -31,8 +31,9 @@
 //! and `#sprig_repl` (resolved at every connection, as for external
 //! clusters).
 
-use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -44,10 +45,11 @@ use sprig_common::{Result, SprigCode, SprigError};
 use crate::OperatorConfig;
 use crate::accounts::{self, BootstrapTarget, SystemAccounts};
 use crate::crd::{
-    self, NodeAddress, POOL_LABEL, Phase, SPRIG_CLUSTER, SprigCluster, SprigClusterPool,
-    SprigClusterStatus, Topology,
+    self, FailoverDriver, FailoverRecord, NodeAddress, POOL_LABEL, Phase, SPRIG_CLUSTER,
+    SprigCluster, SprigClusterPool, SprigClusterStatus, Topology,
 };
-use crate::kube::{self, ApiResource, EVENT, KubeApi, KubeError, SECRET, SERVICE};
+use crate::failover::{self, Repair, ReplView, ReplicationOps};
+use crate::kube::{self, ApiResource, EVENT, KubeApi, KubeError, POD, SECRET, SERVICE};
 use crate::mapping::{self, MARIADB};
 use crate::register::{ClusterRegistrar, ClusterRegistration};
 
@@ -67,6 +69,43 @@ pub struct Reconciler {
     registrar: Arc<dyn ClusterRegistrar>,
     cfg: OperatorConfig,
     clock: Arc<dyn Clock>,
+    /// The failover watch's SQL; `None`: no watch ([`Self::watch`]).
+    repl: Option<Arc<dyn ReplicationOps>>,
+    watches: Mutex<HashMap<String, ClusterWatch>>,
+}
+
+/// What the failover watch remembers about one cluster.
+#[derive(Debug, Default, Clone)]
+struct ClusterWatch {
+    /// Since when the primary hasn't answered.
+    down_since: Option<Instant>,
+    /// The last `FailoverBlocked` reason reported (reported once).
+    blocked: Option<String>,
+    /// Nodes marked for rebuild, by pod index.
+    rebuild: BTreeSet<u8>,
+    /// The last failover, for the status.
+    last: Option<FailoverRecord>,
+}
+
+/// What one watch pass did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchOutcome {
+    /// Not watched (not a registered `sprig`-driven replication cluster).
+    Skipped,
+    /// The primary answers; `repaired` replicas were repaired.
+    Healthy {
+        /// Replicas repaired in this pass.
+        repaired: Vec<u8>,
+    },
+    /// The primary doesn't answer, not yet for long enough (or its pod
+    /// still looks Ready).
+    Suspect,
+    /// mariadb-operator is switching the primary.
+    Switching,
+    /// SprigDB set `podIndex` to this pod.
+    FailedOver(u8),
+    /// No replica may be promoted (the reason is in an Event).
+    Blocked(String),
 }
 
 impl std::fmt::Debug for Reconciler {
@@ -114,7 +153,16 @@ impl Reconciler {
             registrar,
             cfg,
             clock,
+            repl: None,
+            watches: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// With the failover watch over `repl` ([`Self::watch`]).
+    #[must_use]
+    pub fn with_replication(mut self, repl: Arc<dyn ReplicationOps>) -> Self {
+        self.repl = Some(repl);
+        self
     }
 
     /// The configuration.
@@ -127,6 +175,12 @@ impl Reconciler {
     #[must_use]
     pub fn kube(&self) -> &Arc<dyn KubeApi> {
         &self.kube
+    }
+
+    /// The DC controller's registration calls.
+    #[must_use]
+    pub fn registrar(&self) -> &Arc<dyn ClusterRegistrar> {
+        &self.registrar
     }
 
     /// Creates `obj` if missing; else merge-patches `patch` (default: the
@@ -368,6 +422,16 @@ impl Reconciler {
                 Some(mapping::update_patch(&desired)),
             )
             .await?;
+        // The domain ConfigMap the pods mount (r2opfix), before the pods
+        // start; the domain once the cluster has a number.
+        let cm = mapping::domain_config_map(&sc, old.cluster_number.filter(|n| *n > 0));
+        self.ensure(
+            &mapping::CONFIG_MAP,
+            &ns,
+            &cm,
+            Some(json!({"data": cm["data"]})),
+        )
+        .await?;
         // 2. Backups and the binlog archive.
         for (r, obj) in mapping::backups(&sc) {
             self.ensure(&r, &ns, &obj, None).await?;
@@ -505,6 +569,16 @@ impl Reconciler {
                     status.cluster_id = Some(r.cluster_id);
                     status.cluster_number = Some(r.cluster_number);
                     status.nodes.clone_from(&nodes);
+                    if r.cluster_number > 0 {
+                        let cm = mapping::domain_config_map(&sc, Some(r.cluster_number));
+                        self.ensure(
+                            &mapping::CONFIG_MAP,
+                            &ns,
+                            &cm,
+                            Some(json!({"data": cm["data"]})),
+                        )
+                        .await?;
+                    }
                 }
                 Err(e) => {
                     status.phase = Phase::Bootstrapping;
@@ -517,16 +591,37 @@ impl Reconciler {
                 }
             }
         } else if status.nodes != nodes {
-            // The controller has no call to change a record's addresses
-            // yet: say so, and keep the registered ones.
-            status.message = Some(format!(
-                "node addresses changed to {}; the cluster record keeps the registered ones",
-                nodes
-                    .iter()
-                    .map(|n| n.addr.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            // A scale or a replaced Service: the record follows (r2opfix),
+            // so a freed address can't keep pointing at another cluster's
+            // node; the probes also refuse a node whose server_uuid isn't
+            // the pinned one.
+            let specs: Vec<NodeSpec> = nodes
+                .iter()
+                .filter_map(|n| {
+                    Some(NodeSpec {
+                        node: NodeId::new(n.node.clone()).ok()?,
+                        addr: n.addr.clone(),
+                        zone: None,
+                    })
+                })
+                .collect();
+            let id = status.cluster_id.clone().unwrap_or_default();
+            match self.registrar.set_nodes(&id, &specs).await {
+                Ok(()) => {
+                    tracing::info!(cluster = %name, nodes = specs.len(), "record's nodes updated");
+                    status.nodes.clone_from(&nodes);
+                }
+                Err(e) => {
+                    status.message = Some(format!(
+                        "node addresses changed to {}; updating the record failed: {e}",
+                        nodes
+                            .iter()
+                            .map(|n| n.addr.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
         }
         // The cluster number is the GTID domain, set live on every node.
         let mut requeue = Duration::from_secs(30);
@@ -540,6 +635,18 @@ impl Reconciler {
                     status.message = Some(format!("gtid_domain_id: {e}"));
                     requeue = Duration::from_secs(10);
                 }
+            }
+        }
+        // What the failover watch found.
+        if let Some(w) = self
+            .watches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&name)
+        {
+            status.rebuild = w.rebuild.iter().map(|i| format!("n{i}")).collect();
+            if w.last.is_some() {
+                status.last_failover.clone_from(&w.last);
             }
         }
         // 7 (the book's 6).
@@ -587,6 +694,290 @@ impl Reconciler {
                 tracing::debug!(cluster = %name, error = %e, "gtid_domain_id while not Ready");
             }
         }
+    }
+
+    fn pod_addr(&self, sc: &SprigCluster, ns: &str, i: u8) -> String {
+        let name = &sc.metadata.name;
+        format!(
+            "{name}-{i}.{name}-internal.{ns}.svc.{}:3306",
+            self.cfg.cluster_domain
+        )
+    }
+
+    fn note<T>(&self, cluster: &str, f: impl FnOnce(&mut ClusterWatch) -> T) -> T {
+        let mut w = self.watches.lock().unwrap_or_else(PoisonError::into_inner);
+        f(w.entry(cluster.to_owned()).or_default())
+    }
+
+    /// Whether the pod is gone, terminating, or not Ready: the second
+    /// source a failover needs (the first is the primary not answering).
+    async fn pod_down(&self, ns: &str, pod: &str) -> bool {
+        match self.kube.get(&POD, ns, pod).await {
+            Ok(None) => true,
+            Ok(Some(p)) => {
+                p["metadata"]["deletionTimestamp"].is_string()
+                    || !p["status"]["conditions"].as_array().is_some_and(|cs| {
+                        cs.iter()
+                            .any(|c| c["type"] == "Ready" && c["status"] == "True")
+                    })
+            }
+            // The API is unreachable: no second source.
+            Err(_) => false,
+        }
+    }
+
+    /// One pass of the failover watch over the `SprigCluster` `raw` (see
+    /// [`crate::failover`]): a registered primary + replica cluster with
+    /// `failoverDriver: sprig`. Run every second.
+    ///
+    /// # Errors
+    /// API failures; the next pass tries again.
+    #[allow(clippy::too_many_lines)] // the steps, in order
+    pub async fn watch(&self, raw: &Value) -> Result<WatchOutcome> {
+        let Some(repl) = self.repl.clone() else {
+            return Ok(WatchOutcome::Skipped);
+        };
+        let sc: SprigCluster = serde_json::from_value(raw.clone())
+            .map_err(|e| SprigError::internal(format!("bad SprigCluster: {e}")))?;
+        let registered = sc.status.as_ref().is_some_and(|s| s.cluster_id.is_some());
+        if sc.spec.topology != Topology::Replication
+            || sc.spec.failover_driver != FailoverDriver::Sprig
+            || !registered
+            || sc.metadata.deletion_timestamp.is_some()
+        {
+            return Ok(WatchOutcome::Skipped);
+        }
+        let ns = sc
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| self.cfg.namespace.clone());
+        let name = sc.metadata.name.clone();
+        let Some(mdb) = self
+            .kube
+            .get(&MARIADB, &ns, &name)
+            .await
+            .map_err(|e| kerr("get MariaDB", &e))?
+        else {
+            return Ok(WatchOutcome::Skipped);
+        };
+        let idx = |v: &Value| v.as_u64().and_then(|n| u8::try_from(n).ok());
+        let (Some(cur), want) = (
+            idx(&mdb["status"]["currentPrimaryPodIndex"]),
+            idx(&mdb["spec"]["replication"]["primary"]["podIndex"]),
+        ) else {
+            return Ok(WatchOutcome::Skipped);
+        };
+        if want.is_some_and(|w| w != cur) {
+            self.note(&name, |w| w.down_since = None);
+            return Ok(WatchOutcome::Switching);
+        }
+        let Some(root) = self
+            .secret_value(&ns, &format!("{name}-root"), "password")
+            .await?
+        else {
+            return Ok(WatchOutcome::Skipped);
+        };
+        let replicas = sc.spec.replicas();
+        let primary_addr = self.pod_addr(&sc, &ns, cur);
+        match repl.view(&primary_addr, &root, cur).await {
+            Ok(pv) => {
+                self.note(&name, |w| {
+                    w.down_since = None;
+                    w.blocked = None;
+                });
+                let repaired = self
+                    .repair_replicas(&sc, &ns, &root, cur, &pv, repl.as_ref())
+                    .await;
+                Ok(WatchOutcome::Healthy { repaired })
+            }
+            Err(e) => {
+                let now = Instant::now();
+                let since = self.note(&name, |w| *w.down_since.get_or_insert(now));
+                let detect = self.cfg.failover_detect;
+                let pod = format!("{name}-{cur}");
+                if now.duration_since(since) < detect || !self.pod_down(&ns, &pod).await {
+                    tracing::debug!(cluster = %name, error = %e, "primary not answering");
+                    return Ok(WatchOutcome::Suspect);
+                }
+                self.fail_over(&sc, &ns, &root, cur, replicas, since, repl.as_ref())
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fail_over(
+        &self,
+        sc: &SprigCluster,
+        ns: &str,
+        root: &str,
+        cur: u8,
+        replicas: u8,
+        since: Instant,
+        repl: &dyn ReplicationOps,
+    ) -> Result<WatchOutcome> {
+        let name = sc.metadata.name.clone();
+        let started = Instant::now();
+        // a. Every other pod applies what it received.
+        let mut views: Vec<ReplView> = Vec::new();
+        let mut drained = Vec::new();
+        for i in (0..replicas).filter(|i| *i != cur) {
+            let addr = self.pod_addr(sc, ns, i);
+            match repl.drain(&addr, root, i, failover::DRAIN_WAIT).await {
+                Ok(v) => {
+                    drained.push(addr);
+                    views.push(v);
+                }
+                Err(e) => {
+                    tracing::warn!(cluster = %name, pod = i, error = %e, "replica unreachable during failover");
+                }
+            }
+        }
+        let resume = |why: &'static str| async move {
+            for a in &drained {
+                if let Err(e) = repl.resume(a, root).await {
+                    tracing::warn!(addr = %a, error = %e, why, "replica not resumed");
+                }
+            }
+        };
+        // b. The most advanced replica.
+        let best = match failover::choose(&views) {
+            Ok(b) => b,
+            Err(why) => {
+                let first = self.note(&name, |w| {
+                    let first = w.blocked.as_deref() != Some(why.as_str());
+                    w.blocked = Some(why.clone());
+                    first
+                });
+                if first {
+                    self.event(sc, ns, "FailoverBlocked", &why).await;
+                }
+                metrics::counter!("sprig_operator_failovers_total", "result" => "blocked")
+                    .increment(1);
+                tracing::warn!(cluster = %name, %why, "failover blocked");
+                resume("blocked").await;
+                return Ok(WatchOutcome::Blocked(why));
+            }
+        };
+        // c. Still down? A primary back in the meantime keeps its role.
+        if repl
+            .view(&self.pod_addr(sc, ns, cur), root, cur)
+            .await
+            .is_ok()
+        {
+            tracing::info!(cluster = %name, "primary answered again; failover abandoned");
+            self.note(&name, |w| w.down_since = None);
+            resume("abandoned").await;
+            return Ok(WatchOutcome::Healthy { repaired: vec![] });
+        }
+        // The replicas receive again before the switch: if the old primary
+        // comes back while mariadb-operator switches, its planned switchover
+        // waits for every replica to reach the old primary's position, which
+        // a stopped IO thread never does (r2kind's 59 s wait). With the
+        // primary still down nothing arrives, so the chosen replica's relay
+        // log stays empty for mariadb-operator's "new primary synced" check.
+        resume("switching").await;
+        let chosen = views
+            .iter()
+            .find(|v| v.index == best)
+            .cloned()
+            .unwrap_or_default();
+        let others: Vec<String> = views
+            .iter()
+            .filter(|v| v.index != best)
+            .map(|v| format!("pod {} {}", v.index, v.received()))
+            .collect();
+        let reason = format!(
+            "pod {cur} unreachable for {:.1}s; pod {best} holds every replica's transactions \
+             ({}; others: {})",
+            since.elapsed().as_secs_f64(),
+            chosen.received(),
+            if others.is_empty() {
+                "none".to_owned()
+            } else {
+                others.join(", ")
+            }
+        );
+        self.kube
+            .merge_patch(
+                &MARIADB,
+                ns,
+                &name,
+                &json!({"spec": {"replication": {"primary": {"podIndex": best}}}}),
+            )
+            .await
+            .map_err(|e| kerr("patch podIndex", &e))?;
+        metrics::counter!("sprig_operator_failovers_total", "result" => "promoted").increment(1);
+        tracing::info!(cluster = %name, from = cur, to = best, took_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX), %reason, "failover: podIndex set");
+        self.event(sc, ns, "Failover", &reason).await;
+        let rec = FailoverRecord {
+            from: cur,
+            to: best,
+            time: sprig_cluster::record::rfc3339(self.clock.wall()),
+            reason,
+        };
+        self.note(&name, |w| {
+            w.down_since = None;
+            w.blocked = None;
+            w.last = Some(rec);
+        });
+        Ok(WatchOutcome::FailedOver(best))
+    }
+
+    /// Repairs, or marks for rebuild, replicas a failover left broken.
+    async fn repair_replicas(
+        &self,
+        sc: &SprigCluster,
+        ns: &str,
+        root: &str,
+        cur: u8,
+        primary: &ReplView,
+        repl: &dyn ReplicationOps,
+    ) -> Vec<u8> {
+        let name = sc.metadata.name.clone();
+        let primary_addr = self.pod_addr(sc, ns, cur);
+        let mut repaired = Vec::new();
+        for i in (0..sc.spec.replicas()).filter(|i| *i != cur) {
+            let addr = self.pod_addr(sc, ns, i);
+            let Ok(v) = repl.view(&addr, root, i).await else {
+                continue;
+            };
+            if !v.broken() {
+                if v.sql_running && v.io_running {
+                    self.note(&name, |w| w.rebuild.remove(&i));
+                }
+                continue;
+            }
+            if self.note(&name, |w| w.rebuild.contains(&i)) {
+                continue;
+            }
+            let history = repl.in_history(&primary_addr, root, &v.binlog_pos).await;
+            match failover::repair_plan(&v.binlog_pos, &primary.binlog_pos, history) {
+                Repair::Apply => match repl.repair(&addr, root).await {
+                    Ok(()) => {
+                        let msg = format!(
+                            "pod {i} stopped (SQL {}, IO {}) after a failover; its binlog {} is in \
+                             pod {cur}'s history ({}): gtid_slave_pos set to its gtid_binlog_pos",
+                            v.sql_errno, v.io_errno, v.binlog_pos, primary.binlog_pos
+                        );
+                        tracing::info!(cluster = %name, pod = i, "{msg}");
+                        self.event(sc, ns, "ReplicaRepaired", &msg).await;
+                        metrics::counter!("sprig_operator_replica_repairs_total", "result" => "repaired").increment(1);
+                        repaired.push(i);
+                    }
+                    Err(e) => tracing::warn!(cluster = %name, pod = i, error = %e, "repair failed"),
+                },
+                Repair::Rebuild(why) => {
+                    let msg = format!("pod {i} needs a rebuild: {why}");
+                    tracing::warn!(cluster = %name, pod = i, "{msg}");
+                    self.event(sc, ns, "NodeNeedsRebuild", &msg).await;
+                    metrics::counter!("sprig_operator_replica_repairs_total", "result" => "rebuild").increment(1);
+                    self.note(&name, |w| w.rebuild.insert(i));
+                }
+            }
+        }
+        repaired
     }
 
     /// The `SprigCluster`s of pool `pool`.

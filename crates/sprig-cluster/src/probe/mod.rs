@@ -38,6 +38,7 @@ use crate::sys;
 pub const VARIABLES: &[&str] = &[
     "version",
     "server_id",
+    "server_uuid",
     "lower_case_table_names",
     "default_storage_engine",
     "read_only",
@@ -96,6 +97,34 @@ pub const STATUS: &[&str] = &[
     "memory_used",
     "threads_running",
 ];
+
+/// Refuses the probes that reached another server than the record pinned
+/// for their node (a reused address: on kind, a freed node port went to
+/// another cluster's node), turning them into [`ProbeError::wrong_node`]
+/// failures, which make the node `broken`; returns the pins to record for
+/// nodes that answered without one (r2opfix).
+pub fn check_identity(
+    pinned: &std::collections::BTreeMap<NodeId, String>,
+    probes: &mut [NodeProbe],
+) -> Vec<(NodeId, String)> {
+    let mut new = Vec::new();
+    for p in probes.iter_mut() {
+        let Ok(f) = &p.result else { continue };
+        let found = f.server.server_uuid.clone();
+        if found.is_empty() {
+            continue;
+        }
+        match pinned.get(&p.node) {
+            Some(expected) if *expected != found => {
+                tracing::warn!(node = %p.node, %expected, %found, "probe reached another server");
+                p.result = Err(ProbeError::wrong_node(expected, &found));
+            }
+            Some(_) => {}
+            None => new.push((p.node.clone(), found)),
+        }
+    }
+    new
+}
 
 /// How much a probe reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

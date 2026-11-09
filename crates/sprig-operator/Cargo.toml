@@ -23,6 +23,8 @@ mysql_async.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The failover watch's history check reads the new primary's binlog.
+sprig-binlog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
 sprig-provision.workspace = true

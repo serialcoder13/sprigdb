@@ -299,6 +299,32 @@ fn mysql_only_set(text: &[u8], lex: LexOptions) -> bool {
     }
 }
 
+/// `FLUSH [NO_WRITE_TO_BINLOG | LOCAL] {TABLES | PRIVILEGES}` and nothing
+/// else (one trailing `;` allowed): no table list, no `WITH READ LOCK`.
+fn noop_flush(text: &[u8], lex: LexOptions) -> bool {
+    let Ok(tokens) = sprig_sql::lex::lex(text, &lex) else {
+        return false;
+    };
+    let mut w: Vec<String> = Vec::new();
+    for t in tokens.iter().filter(|t| !t.kind.is_trivia()) {
+        match t.kind {
+            TokenKind::Word => w.push(String::from_utf8_lossy(t.bytes(text)).to_ascii_uppercase()),
+            _ if t.bytes(text) == b";" => {}
+            _ => return false,
+        }
+    }
+    let w: Vec<&str> = w.iter().map(String::as_str).collect();
+    matches!(
+        w.as_slice(),
+        ["FLUSH", "TABLES" | "PRIVILEGES"]
+            | [
+                "FLUSH",
+                "NO_WRITE_TO_BINLOG" | "LOCAL",
+                "TABLES" | "PRIVILEGES"
+            ]
+    )
+}
+
 /// The column name MariaDB gives a literal: a string's value, or the
 /// literal itself (`NULL`).
 fn literal_name(lit: &str) -> String {
@@ -571,6 +597,20 @@ impl PassSession {
         // 8.4 sets them in executable comments): accepted and ignored on
         // the MySQL persona, until chapter 28's emulated variables.
         if self.persona == Persona::MySql84 && mysql_only_set(text, lex) {
+            let s = status(self.status());
+            out.ok(OkPacket::new(s)).await?;
+            return Ok(Step {
+                errored: false,
+                status: Some(s),
+            });
+        }
+
+        // A tenant's bare `FLUSH TABLES` and `FLUSH PRIVILEGES`: nothing to
+        // do (privileges apply at once; tables are the cluster's), so OK on
+        // both ports, as for a user holding RELOAD. Test suites and tools
+        // run them before their work (MariaDB Connector/J's suite in nearly
+        // every class); MariaDB would refuse the backend account with 1227.
+        if self.tenant.is_some() && noop_flush(text, lex) {
             let s = status(self.status());
             out.ok(OkPacket::new(s)).await?;
             return Ok(Step {
@@ -1017,21 +1057,19 @@ impl PassSession {
             .get(sp.info.range.clone())
             .map_or_else(|| text.to_vec(), <[u8]>::to_vec);
         let is_call = sp.info.kind == StmtKind::Call;
-        let route = self
-            .route(cx, sp, &original, more, format, charset, out)
-            .await?;
+        // Boxed (clippy's large_futures): the statement paths below are big.
+        let route = Box::pin(self.route(cx, sp, &original, more, format, charset, out)).await?;
         match route {
             Route::Done(step) => Ok(step),
             // Chapter 41 (R7): a CALL may reach an engine-tier wrapper,
             // which the gateway answers itself (`exec::logic`).
             Route::Forward(sql, mapper) if is_call => {
-                self.tenant_call(cx, sql, &original, more, format, mapper, &*map, out)
+                Box::pin(self.tenant_call(cx, sql, &original, more, format, mapper, &*map, out))
                     .await
             }
             // Chapter 17: through the router when the tenant has shards.
             Route::Forward(sql, mapper) => {
-                self.routed(cx, sql, &original, more, format, mapper, &*map, out)
-                    .await
+                Box::pin(self.routed(cx, sql, &original, more, format, mapper, &*map, out)).await
             }
         }
     }
@@ -1783,6 +1821,18 @@ impl PassSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noop_flushes_are_recognized() {
+        let lex = LexOptions::mysql84();
+        assert!(noop_flush(b"FLUSH TABLES", lex));
+        assert!(noop_flush(b"flush privileges;", lex));
+        assert!(noop_flush(b"FLUSH LOCAL TABLES", lex));
+        assert!(!noop_flush(b"FLUSH TABLES WITH READ LOCK", lex));
+        assert!(!noop_flush(b"FLUSH TABLES t1", lex));
+        assert!(!noop_flush(b"FLUSH LOGS", lex));
+        assert!(!noop_flush(b"FLUSH TABLES; DROP TABLE t", lex));
+    }
 
     #[test]
     fn mysql_only_variables_are_recognized() {

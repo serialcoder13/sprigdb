@@ -214,7 +214,11 @@ pub fn within(replica: &GtidPos, primary: &GtidPos) -> std::result::Result<(), S
 
 /// The repair decision from the two checks.
 #[must_use]
-pub fn repair_plan(replica_binlog_pos: &str, primary_binlog_pos: &str, in_history: Result<bool>) -> Repair {
+pub fn repair_plan(
+    replica_binlog_pos: &str,
+    primary_binlog_pos: &str,
+    in_history: Result<bool>,
+) -> Repair {
     let (Ok(r), Ok(p)) = (
         replica_binlog_pos.parse::<GtidPos>(),
         primary_binlog_pos.parse::<GtidPos>(),
@@ -357,7 +361,9 @@ impl MysqlReplication {
         let q = async {
             let status: Option<Row> = c.query_first("SHOW SLAVE STATUS").await?;
             let vars: Option<(String, String, i64)> = c
-                .query_first("SELECT @@GLOBAL.gtid_slave_pos, @@GLOBAL.gtid_binlog_pos, @@GLOBAL.read_only")
+                .query_first(
+                    "SELECT @@GLOBAL.gtid_slave_pos, @@GLOBAL.gtid_binlog_pos, @@GLOBAL.read_only",
+                )
                 .await?;
             Ok::<_, mysql_async::Error>((status, vars))
         };
@@ -473,7 +479,9 @@ impl ReplicationOps for MysqlReplication {
             match tokio::time::timeout(STATEMENT_TIMEOUT, s.next()).await {
                 Ok(Ok(Event::FormatDescription { .. } | Event::DumpEnd)) => return Ok(true),
                 Ok(Ok(_)) => {}
-                Ok(Err(e)) if matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1236, .. }) => {
+                Ok(Err(e))
+                    if matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1236, .. }) =>
+                {
                     tracing::info!(addr, pos, error = %e, "position not in the primary's history");
                     return Ok(false);
                 }
@@ -558,12 +566,15 @@ mod tests {
         assert!(r.broken());
         let mut r = v(2, "", "");
         r.io_errno = 1236;
+        r.io_running = true;
         assert!(!r.broken(), "a running IO thread retries");
         r.io_running = false;
         assert!(r.broken());
         // Not a replica at all: nothing to repair.
-        let mut p = ReplView::default();
-        p.sql_errno = 1950;
+        let p = ReplView {
+            sql_errno: 1950,
+            ..ReplView::default()
+        };
         assert!(!p.broken());
     }
 
@@ -596,6 +607,9 @@ mod tests {
             repair_plan("7-11-250", "7-12-300", Err(SprigError::internal("x"))),
             Repair::Rebuild(_)
         ));
-        assert!(matches!(repair_plan("junk", "7-1-1", Ok(true)), Repair::Rebuild(_)));
+        assert!(matches!(
+            repair_plan("junk", "7-1-1", Ok(true)),
+            Repair::Rebuild(_)
+        ));
     }
 }

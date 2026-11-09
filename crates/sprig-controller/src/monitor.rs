@@ -414,6 +414,26 @@ impl ClusterMonitor {
         for (i, p) in failed {
             probes.insert(i.min(probes.len()), p);
         }
+        // A node must be the server the record pinned at its address; the
+        // first probe that reaches one pins it (r2opfix).
+        let pins = sprig_cluster::probe::check_identity(&rec.node_uuids, &mut probes);
+        if !pins.is_empty() {
+            let r = registry
+                .update(id, |r| {
+                    let mut changed = false;
+                    for (n, u) in &pins {
+                        if r.nodes.iter().any(|s| &s.node == n) && !r.node_uuids.contains_key(n) {
+                            r.node_uuids.insert(n.clone(), u.clone());
+                            changed = true;
+                        }
+                    }
+                    Ok(changed)
+                })
+                .await;
+            if let Err(e) = r {
+                tracing::warn!(cluster = %id, error = %e, "node identities not pinned");
+            }
+        }
         let labels = [
             ("dc", self.registry.dc().to_string()),
             ("cluster", id.to_string()),

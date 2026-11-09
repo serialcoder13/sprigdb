@@ -29,6 +29,14 @@ rules:
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [list, delete]
+  # The failover watch reads the primary pod's readiness (r2opfix).
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+  # Each cluster's domain ConfigMap, mounted into its pods (r2opfix).
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, patch, delete]
   - apiGroups: [""]
     resources: [events]
     verbs: [create]

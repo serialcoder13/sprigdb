@@ -23,6 +23,8 @@
 //! without `replication.primary.podIndex` (only a failover moves it: the
 //! failover watch, or mariadb-operator with `failoverDriver: operator`).
 
+use std::fmt::Write as _;
+
 use serde_json::{Value, json};
 
 use crate::OperatorConfig;
@@ -122,7 +124,11 @@ pub fn memory_of(spec: &SprigClusterSpec) -> u64 {
 
 /// The baseline `myCnf` (what mariadb-operator owns left out). The
 /// cluster number isn't known before registration, so `gtid_domain_id` is
-/// left out too and the reconciler sets it live ([`crate::accounts`]).
+/// left out too: the reconciler sets it live ([`crate::accounts`]) and
+/// writes it into the domain `ConfigMap` ([`domain_config_map`]), which the
+/// last line includes, so a restarted pod boots in the cluster's domain
+/// (r2opfix: a pod booting in domain 0 logged mariadb-operator's
+/// replication-user DDL there).
 #[must_use]
 pub fn my_cnf(spec: &SprigClusterSpec) -> String {
     let role = match spec.topology {
@@ -131,7 +137,52 @@ pub fn my_cnf(spec: &SprigClusterSpec) -> String {
         Topology::Single => NodeRole::Single,
     };
     let n = NodeSettings::new(Platform::Kubernetes, role, 0, 1, memory_of(spec));
-    mycnf::render(&n)
+    let mut s = mycnf::render(&n);
+    s.push_str("!includedir ");
+    s.push_str(DOMAIN_DIR);
+    s.push('\n');
+    s
+}
+
+/// Where the domain `ConfigMap` is mounted in the `MariaDB` container.
+pub const DOMAIN_DIR: &str = "/etc/mysql/sprigdb.d";
+
+/// The domain `ConfigMap`'s name.
+#[must_use]
+pub fn domain_config_map_name(cluster: &str) -> String {
+    format!("{cluster}-sprigdb-domain")
+}
+
+/// `v1` `ConfigMap`.
+pub const CONFIG_MAP: ApiResource = ApiResource {
+    group: "",
+    version: "v1",
+    kind: "ConfigMap",
+    plural: "configmaps",
+};
+
+/// The domain `ConfigMap`: `domain.cnf` with `gtid_domain_id` (and Galera's
+/// `wsrep_gtid_domain_id`) once the cluster number is known, empty
+/// before. It isn't labelled `k8s.mariadb.com/watch`, so mariadb-operator
+/// doesn't roll the pods when it changes; the kubelet refreshes the
+/// mounted file, and each pod reads it when it next starts.
+#[must_use]
+pub fn domain_config_map(sc: &SprigCluster, domain: Option<u32>) -> Value {
+    let mut cnf = String::from(
+        "# Written by the SprigDB operator: the cluster number is the GTID domain (chapter 27).\n[mariadb]\n",
+    );
+    if let Some(d) = domain {
+        let _ = writeln!(cnf, "gtid_domain_id = {d}");
+        if sc.spec.topology == Topology::Galera {
+            let _ = writeln!(cnf, "wsrep_gtid_domain_id = {d}");
+        }
+    }
+    json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": meta(sc, &domain_config_map_name(&sc.metadata.name)),
+        "data": {"domain.cnf": cnf},
+    })
 }
 
 /// The `MariaDB` resource for `sc`.
@@ -148,6 +199,8 @@ pub fn mariadb(sc: &SprigCluster, cfg: &OperatorConfig) -> Value {
         "rootPasswordSecretKeyRef": {"name": format!("{name}-root"), "key": "password", "generate": true},
         "storage": {"size": spec.storage.size},
         "myCnf": my_cnf(spec),
+        "volumes": [{"name": "sprigdb-domain", "configMap": {"name": domain_config_map_name(name)}}],
+        "volumeMounts": [{"name": "sprigdb-domain", "mountPath": DOMAIN_DIR, "readOnly": true}],
         "tls": {"enabled": true, "required": true},
         "podDisruptionBudget": {"maxUnavailable": 1},
         "topologySpreadConstraints": [{
@@ -228,10 +281,12 @@ pub fn mariadb(sc: &SprigCluster, cfg: &OperatorConfig) -> Value {
             ],
             "volumeMounts": [{"name": "sprigdb-agent-config", "mountPath": "/etc/sprigdb"}],
         }]);
-        s["volumes"] = json!([{
-            "name": "sprigdb-agent-config",
-            "configMap": {"name": cfg.agent_config_map},
-        }]);
+        if let Some(v) = s["volumes"].as_array_mut() {
+            v.push(json!({
+                "name": "sprigdb-agent-config",
+                "configMap": {"name": cfg.agent_config_map},
+            }));
+        }
     }
     json!({
         "apiVersion": MARIADB.api_version(),
@@ -252,6 +307,10 @@ pub fn update_patch(desired: &Value) -> Value {
     if let Some(spec) = p["spec"].as_object_mut() {
         spec.remove("myCnf");
         spec.remove("rootPasswordSecretKeyRef");
+        // A changed pod template rolls every pod: clusters made before the
+        // domain ConfigMap keep their volumes (and set the domain live).
+        spec.remove("volumes");
+        spec.remove("volumeMounts");
     }
     if let Some(primary) = p["spec"]["replication"]["primary"].as_object_mut() {
         primary.remove("podIndex");

@@ -107,7 +107,7 @@ services:
     <<: *mariadb
     profiles: [replication, all]
     hostname: replica-1
-    command: [--server-id=202, --gtid-domain-id=2]
+    command: [--server-id=202, --gtid-domain-id=2, --read-only=ON]
     environment: &replica-env
       <<: *mariadb-env
       MARIADB_MASTER_HOST: primary
@@ -125,7 +125,7 @@ services:
   replica-2:
     <<: *replica
     hostname: replica-2
-    command: [--server-id=203, --gtid-domain-id=2]
+    command: [--server-id=203, --gtid-domain-id=2, --read-only=ON]
     ports: ["127.0.0.1:13313:3306"]
 
   # --- 3-node Galera: cluster 3 -------------------------------------------

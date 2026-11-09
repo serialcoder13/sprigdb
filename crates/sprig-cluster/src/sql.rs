@@ -74,7 +74,7 @@ impl NodeEndpoint {
     }
 }
 
-/// mysql_async's TLS options as the binlog reader's: the CA files are read
+/// `mysql_async`'s TLS options as the binlog reader's: the CA files are read
 /// now (a CA that can't be read is logged and left out, so verification
 /// fails rather than passing). A check that skips only the host name (not
 /// something credentials produce) verifies fully.
@@ -97,6 +97,9 @@ async fn binlog_tls(ssl: &mysql_async::SslOpts) -> sprig_binlog::BinlogTls {
     tls.server_name = ssl.tls_hostname_override().map(str::to_owned);
     tls
 }
+
+/// How a [`ProbeError::wrong_node`] message starts.
+pub const WRONG_NODE: &str = "wrong node:";
 
 /// Why a probe statement or connection failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,10 +128,21 @@ impl ProbeError {
         self.errno.is_some()
     }
 
-    /// Authentication failed (1045): the node is `broken`, not unreachable.
+    /// Authentication failed (1045), or the address answers as another
+    /// server than the record pinned ([`WRONG_NODE`]): the node is
+    /// `broken`, not unreachable.
     #[must_use]
     pub fn is_auth_failure(&self) -> bool {
-        self.errno == Some(1045)
+        self.errno == Some(1045) || self.message.starts_with(WRONG_NODE)
+    }
+
+    /// The probe reached another server than the one the record pinned.
+    #[must_use]
+    pub fn wrong_node(expected: &str, found: &str) -> Self {
+        Self::other(format!(
+            "{WRONG_NODE} the address answers as server_uuid {found}, not the pinned {expected} \
+             (a reused address? update the record's nodes)"
+        ))
     }
 }
 

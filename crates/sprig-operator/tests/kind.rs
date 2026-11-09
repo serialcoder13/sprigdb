@@ -13,7 +13,9 @@
 //! - `SPRIG_KIND_NS`: the namespace (default `sprigdb`);
 //! - `SPRIG_KIND_CREATE`: `<pool>,<pool>,...`: one `create` per pool, each
 //!   a `ClusterSpec` naming that `SprigClusterPool`;
-//! - `SPRIG_KIND_RETIRE`: `<cluster_id>,...`: one `retire` each.
+//! - `SPRIG_KIND_RETIRE`: `<cluster_id>,...`: one `retire` each;
+//! - `SPRIG_KIND_ADMIN`: the controller's Admin API (`http://host:port`),
+//!   which `retire` asks to retire the drained record first (r2opfix).
 //!
 //! The operator itself runs in the cluster; this test only drives the
 //! provisioner's two operations and prints what they did.
@@ -57,7 +59,15 @@ fn provisioner() -> Option<(KubernetesProvisioner, Arc<dyn KubeApi>, String)> {
     let rec = Reconciler::new(
         Arc::clone(&kube),
         Arc::new(MysqlAccounts::new(None)),
-        Arc::new(AdminRegistrar::new("http://127.0.0.1:1", None).unwrap()),
+        // `retire` retires the record first (r2opfix): SPRIG_KIND_ADMIN is
+        // the controller's Admin API.
+        Arc::new(
+            AdminRegistrar::new(
+                &env("SPRIG_KIND_ADMIN").unwrap_or_else(|| "http://127.0.0.1:1".into()),
+                None,
+            )
+            .unwrap(),
+        ),
         OperatorConfig::new(&ns),
         Arc::new(SystemClock),
     );

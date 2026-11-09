@@ -11,7 +11,7 @@
 //!   nodes: 3
 //!   mariadb: { image: "mariadb:12.3" }
 //!   storage: { size: 500Gi, storageClassName: fast-ssd }
-//!   failoverDriver: operator                # operator | sprig
+//!   failoverDriver: sprig                   # sprig (default) | operator
 //!   backup: { schedule: "0 2 * * *", target: "s3://sprig-fra1-backups" }
 //! status: { clusterId: fra1-c7, phase: Active }
 //! ```
@@ -73,11 +73,16 @@ pub enum Topology {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailoverDriver {
-    /// mariadb-operator (`replication.primary.autoFailover: true`); chapter
-    /// 25's cluster failover loop leaves the cluster alone.
-    #[default]
+    /// mariadb-operator alone (`replication.primary.autoFailover: true`):
+    /// it promotes the replica with the highest applied position, skipping
+    /// any with relay log left, so zero loss isn't guaranteed (r2kind).
     Operator,
-    /// SprigDB's controller (chapter 25).
+    /// SprigDB chooses (the default): `autoFailover: false`, and the SprigDB
+    /// operator picks the most advanced replica and sets
+    /// `replication.primary.podIndex`, so mariadb-operator's switchover
+    /// promotes it ([`crate::failover`]). Chapter 25's controller loop
+    /// leaves Kubernetes clusters alone either way.
+    #[default]
     Sprig,
 }
 
@@ -236,6 +241,27 @@ pub struct SprigClusterStatus {
     /// `metadata.generation` the status describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+    /// Nodes (`n<i>`) a failover left broken whose repair isn't provably
+    /// safe: they need a rebuild ([`crate::failover`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rebuild: Vec<String>,
+    /// The last failover SprigDB drove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failover: Option<FailoverRecord>,
+}
+
+/// `status.lastFailover`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailoverRecord {
+    /// The pod index that failed.
+    pub from: u8,
+    /// The pod index promoted.
+    pub to: u8,
+    /// When, RFC 3339.
+    pub time: String,
+    /// Why that replica.
+    pub reason: String,
 }
 
 /// `SprigClusterPool.spec`.
@@ -377,7 +403,7 @@ pub fn cluster_spec_schema() -> Value {
                     "storageClassName": {"type": "string"},
                 },
             },
-            "failoverDriver": {"type": "string", "enum": ["operator", "sprig"], "default": "operator"},
+            "failoverDriver": {"type": "string", "enum": ["operator", "sprig"], "default": "sprig"},
             "backup": {
                 "type": "object",
                 "required": ["schedule", "target"],
@@ -414,6 +440,16 @@ fn cluster_status_schema() -> Value {
             "startedUnix": {"type": "integer"},
             "lastTransitionTime": {"type": "string", "format": "date-time"},
             "observedGeneration": {"type": "integer"},
+            "rebuild": {"type": "array", "items": {"type": "string"}},
+            "lastFailover": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "integer"},
+                    "to": {"type": "integer"},
+                    "time": {"type": "string", "format": "date-time"},
+                    "reason": {"type": "string"},
+                },
+            },
         },
     })
 }

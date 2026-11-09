@@ -476,13 +476,13 @@ async fn safe_point_close_after_a_stricter_listener() {
         gw.hooks
             .listener_changed("mysql", Strictness::of(&stricter), Duration::ZERO),
         3,
-        "every session accepted under the optional spec is scheduled"
+        "every session accepted under the optional spec is a candidate"
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
     let e = idle.query_drop("SELECT 1").await.unwrap_err();
     assert_eq!(server_code(&e), Some(39004), "{e}");
-    let e = tls.query_drop("SELECT 1").await.unwrap_err();
-    assert_eq!(server_code(&e), Some(39004));
+    // A TLS session already meets `required`: it stays open (gwdrain).
+    tls.query_drop("SELECT 1").await.unwrap();
     // Inside a transaction: served until it ends.
     trx.query_drop("SELECT 1").await.unwrap();
     trx.query_drop("COMMIT").await.unwrap();

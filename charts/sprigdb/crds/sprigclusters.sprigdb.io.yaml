@@ -65,7 +65,7 @@ spec:
                 - target
                 type: object
               failoverDriver:
-                default: operator
+                default: sprig
                 enum:
                 - operator
                 - sprig
@@ -117,6 +117,18 @@ spec:
                 type: string
               clusterNumber:
                 type: integer
+              lastFailover:
+                properties:
+                  from:
+                    type: integer
+                  reason:
+                    type: string
+                  time:
+                    format: date-time
+                    type: string
+                  to:
+                    type: integer
+                type: object
               lastTransitionTime:
                 format: date-time
                 type: string
@@ -145,6 +157,10 @@ spec:
                 - Active
                 - Failed
                 type: string
+              rebuild:
+                items:
+                  type: string
+                type: array
               startedUnix:
                 type: integer
             type: object

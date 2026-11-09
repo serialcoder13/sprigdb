@@ -52,6 +52,31 @@ pub trait ClusterRegistrar: Send + Sync + 'static {
     /// The controller's refusal (39511 for failed prechecks, 39510 when it
     /// doesn't take Kubernetes clusters), or a transport error.
     async fn register(&self, r: &ClusterRegistration) -> Result<Registered>;
+
+    /// Replaces the record's nodes after a scale or a replacement
+    /// (`:setNodes`, r2opfix). The default refuses (registrars that can't).
+    ///
+    /// # Errors
+    /// The controller's refusal or a transport error.
+    async fn set_nodes(&self, cluster_id: &str, nodes: &[NodeSpec]) -> Result<()> {
+        let _ = (cluster_id, nodes);
+        Err(SprigError::new(
+            SprigCode::ProvisionerUnsupported,
+            "this registrar can't update a record's nodes",
+        ))
+    }
+
+    /// Retires a drained cluster's record (`:retire`, r2opfix).
+    ///
+    /// # Errors
+    /// 39106 unless the cluster is drained; a transport error.
+    async fn retire(&self, cluster_id: &str) -> Result<()> {
+        let _ = cluster_id;
+        Err(SprigError::new(
+            SprigCode::ProvisionerUnsupported,
+            "this registrar can't retire a record",
+        ))
+    }
 }
 
 /// The request body of `POST /admin/v1/clusters`.
@@ -63,10 +88,13 @@ pub fn request_body(r: &ClusterRegistration) -> Value {
         "provisioner": "kubernetes",
         "nodes": r.nodes,
         "secrets": r.secrets,
+        // The record's `declared.failover` is `provider` or `none`: on
+        // Kubernetes the provider side fails over, whether mariadb-operator
+        // alone (`operator`) or with the SprigDB operator choosing the
+        // replica (`sprig`; r2opfix: `sprig` was refused before).
         "declared": {
             "failover": match r.failover_driver {
-                FailoverDriver::Operator => "provider",
-                FailoverDriver::Sprig => "sprig",
+                FailoverDriver::Operator | FailoverDriver::Sprig => "provider",
             },
         },
     })
@@ -186,6 +214,40 @@ impl ClusterRegistrar for AdminRegistrar {
         let (status, v) = self.post("/admin/v1/clusters", &request_body(r)).await?;
         parse_response(status, &v)
     }
+
+    async fn set_nodes(&self, cluster_id: &str, nodes: &[NodeSpec]) -> Result<()> {
+        let (status, v) = self
+            .post(
+                &format!("/admin/v1/clusters/{cluster_id}:setNodes"),
+                &json!({"nodes": nodes}),
+            )
+            .await?;
+        api_result(status, &v)
+    }
+
+    async fn retire(&self, cluster_id: &str) -> Result<()> {
+        let (status, v) = self
+            .post(
+                &format!("/admin/v1/clusters/{cluster_id}:retire"),
+                &json!({}),
+            )
+            .await?;
+        api_result(status, &v)
+    }
+}
+
+/// `Ok` for a 2xx answer; the API's error otherwise.
+fn api_result(status: u16, v: &Value) -> Result<()> {
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    let msg = v["message"].as_str().unwrap_or("refused").to_owned();
+    let code = v["code"]
+        .as_u64()
+        .and_then(|c| u16::try_from(c).ok())
+        .and_then(|n| SprigCode::ALL.iter().copied().find(|c| c.number() == n))
+        .unwrap_or(SprigCode::Internal);
+    Err(SprigError::new(code, msg))
 }
 
 #[cfg(test)]

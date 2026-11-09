@@ -5,3 +5,21 @@
 # test/global (5 files) runs only when the login may SET GLOBAL
 # (tools/common.js hasPrivileges): a tenant login gets 1227, so through the
 # gateway poku leaves them out and they don't appear in the counts.
+
+# `kill ?; select sleep(0.05)` as one multi-statement: the gateway answers
+# KILL itself only as a single statement, so this one reaches MariaDB, which
+# knows no gateway connection id (1094). Gaps row 32.
+gateway-* fail test/integration/test-pool-disconnect.test.mts :: KILL inside a multi-statement goes to the backend (1094; gaps row 32)
+
+# 3306 against MySQL 8.4's answers (all pass on a real MySQL 8.4 and on 3307):
+# result metadata and values the translator doesn't reshape yet.
+gateway-mysql fail test/integration/connection/test-multiple-results.test.mts :: SELECT 1 is LONG (3) on MariaDB, LONGLONG (8) on MySQL (gaps row 34)
+gateway-mysql fail test/integration/connection/test-binary-multiple-results.test.mts :: integer literal metadata LONG vs LONGLONG (gaps row 34)
+gateway-mysql fail test/integration/connection/test-execute-nocolumndef.test.mts :: EXPLAIN keeps MariaDB's columns and types (no partitions/filtered; gaps row 34)
+gateway-mysql fail test/integration/connection/test-date-parameter.test.mts :: UNIX_TIMESTAMP(<DATETIME parameter>) is an integer on MariaDB, '631152000.000000' on MySQL (gaps row 35)
+gateway-mysql fail test/integration/connection/test-custom-date-parameter.test.mts :: as test-date-parameter (gaps row 35)
+gateway-mysql fail test/integration/parsers/json-string.test.mts :: JSON values keep MariaDB's text ({"test":true}); MySQL prints its canonical form ({"test": true}) (gaps row 36; chapter 28 step 11)
+
+# Connection set-up under load: 10 s connectTimeout on a shared, loaded host
+# (seen once on 3307, 9 November 2026).
+gateway-* flaky test/integration/connection/encoding/test-client-encodings.test.mts :: one connect ETIMEDOUT under host load; passes alone

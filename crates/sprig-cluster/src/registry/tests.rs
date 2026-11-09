@@ -389,6 +389,7 @@ fn events_between_records() {
         health: None,
         tuning: None,
         gaps: vec![],
+        node_uuids: std::collections::BTreeMap::new(),
     };
     assert!(matches!(
         events_between(None, &base)[..],

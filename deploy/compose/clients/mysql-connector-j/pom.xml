@@ -71,7 +71,9 @@
             <exclude>testsuite/perf/**</exclude>
             <exclude>com/mysql/cj/xdevapi/**</exclude>
           </excludes>
-          <argLine>-Dfile.encoding=UTF-8 -Xmx384m</argLine>
+          <!-- One JVM (Maven's own): two JVMs don't fit run.sh's 768 MB
+               container next to each other. -->
+          <forkCount>0</forkCount>
           <systemPropertyVariables>
             <com.mysql.cj.testsuite.url>${testsuite.url}</com.mysql.cj.testsuite.url>
           </systemPropertyVariables>
