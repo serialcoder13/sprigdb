@@ -76,8 +76,8 @@ pub use accounts::{Account, AccountStore, BackendTarget, FileAccounts, StaticAcc
 pub use cache::{AuthExtension, AuthUser, TenantAuth};
 pub use fast_cache::{FastCache, FastKey};
 pub use mysql::{
-    AuthCatalogs, BackendResolver, BackendSpec, CatalogLogins, LoginMode, LoginRequest,
-    LoginService, LoginSource, MysqlLogin, PolicySettings, Principal, SettingsPolicy,
+    AuthCatalogs, BackendResolver, BackendSpec, CatalogLogins, LOGIN_DELAY_MS, LoginMode,
+    LoginRequest, LoginService, LoginSource, MysqlLogin, PolicySettings, Principal, SettingsPolicy,
     StaticBackends,
 };
 pub use store::{AUTH_MODULE, AuthStore, UserRow, VerifierRow};

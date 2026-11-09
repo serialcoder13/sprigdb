@@ -157,6 +157,10 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         listeners: std::collections::BTreeMap::new(),
         state: registry::GatewayState::Starting,
         catalog_formats: Vec::new(),
+        authorizers: sprig_auth::authz::authorizer::KNOWN
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
         load: registry::Load::default(),
     });
     let lease_live = live.clone();

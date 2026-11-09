@@ -130,6 +130,7 @@ cases! {
     tightened_bounds_warn_and_clamp,
     a_deposed_leader_cannot_write,
     guarded_writes_and_bound_patches,
+    value_guard_checks_every_set,
 }
 
 fn run_mem(case: Case) {
@@ -851,4 +852,53 @@ async fn guarded_writes_and_bound_patches(env: Env) {
     );
     let (rec, _) = w.read(&dc, key).await.unwrap().unwrap();
     assert_eq!(rec.body.value, Some(Value::Int(4000)));
+}
+
+/// Refuses `test.mode = off`; counts its calls.
+#[derive(Debug, Default)]
+struct NoOff(AtomicUsize);
+
+impl ValueGuard for NoOff {
+    fn check<'a>(&'a self, key: &'a str, value: &'a Value) -> GuardFuture<'a> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            if key == "test.mode" && *value == Value::Str("off".into()) {
+                return Err(SprigError::new(SprigCode::SettingBadValue, "off is refused"));
+            }
+            Ok(())
+        })
+    }
+}
+
+/// A writer with a [`ValueGuard`] asks it for every `Set` on both paths
+/// (leader and guarded) and writes nothing it refuses; resets and bounds
+/// don't ask.
+async fn value_guard_checks_every_set(env: Env) {
+    let g = Arc::new(NoOff::default());
+    let w = env.writer().with_guard(Arc::clone(&g) as Arc<dyn ValueGuard>);
+    let dl = env.lead(&env.stores.dc).await;
+    let fence = vec![Cmp::CreateRev(dl.key().clone(), dl.token)];
+    let dc = env.dc();
+    let set = |v: &str| SettingChange::Set(Value::Str(v.into()));
+    w.set(&dl, &dc, "test.mode", set("recommend"), "op", "")
+        .await
+        .unwrap();
+    let e = w
+        .set(&dl, &dc, "test.mode", set("off"), "op", "")
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::SettingBadValue));
+    let e = w
+        .set_guarded(&fence, &dc, "test.mode", SettingEdit::Change(set("off")), "op", "")
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::SettingBadValue));
+    let (rec, _) = w.read(&dc, "test.mode").await.unwrap().unwrap();
+    assert_eq!(rec.body.value, Some(Value::Str("recommend".into())));
+    assert_eq!(g.0.load(Ordering::SeqCst), 3);
+    w.set(&dl, &dc, "test.mode", SettingChange::Reset, "op", "")
+        .await
+        .unwrap();
+    assert_eq!(g.0.load(Ordering::SeqCst), 3, "a reset isn't checked");
+    dl.resign().await.unwrap();
 }

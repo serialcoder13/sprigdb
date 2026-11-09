@@ -649,11 +649,18 @@ async fn raw_commands() {
     gw.stop().await;
 }
 
-/// One login with the response libmysqlclient sends for the empty
-/// password (`caching_sha2_password` and a single NUL byte), answering an
-/// AuthSwitchRequest to `mysql_native_password` with an empty packet as its
-/// native plugin does. Returns the final packet and how many switches came.
-async fn raw_empty_login(addr: SocketAddr, user: &str) -> (Packet, usize) {
+/// One plaintext login the way libmysqlclient makes it: `plugin` and
+/// `first` in the handshake response, then each `AuthSwitchRequest` answered
+/// for `pw` as its plugins answer it (`caching_sha2_password`: one NUL for
+/// the empty password; `mysql_native_password`: an empty packet for it).
+/// Returns the final packet and the plugins the server switched to.
+async fn raw_cli_login(
+    addr: SocketAddr,
+    user: &str,
+    plugin: &str,
+    first: &'static [u8],
+    pw: &str,
+) -> (Packet, Vec<String>) {
     let mut raw = Framed::new(
         TcpStream::connect(addr).await.unwrap(),
         PacketCodec::default(),
@@ -664,29 +671,72 @@ async fn raw_empty_login(addr: SocketAddr, user: &str) -> (Packet, usize) {
         max_packet: 1 << 24,
         collation: 255,
         user: user.as_bytes().to_vec(),
-        auth_response: Bytes::from_static(&[0]),
-        plugin: Some("caching_sha2_password".to_owned()),
+        auth_response: Bytes::from_static(first),
+        plugin: Some(plugin.to_owned()),
         ..HandshakeResponse::default()
     };
     raw.send(Packet::new(1, resp.encode())).await.unwrap();
-    let mut switches = 0;
+    let mut switches = Vec::new();
     loop {
         let p = tokio::time::timeout(Duration::from_secs(5), raw.next())
             .await
             .expect("reply in time")
             .expect("open")
             .expect("valid packet");
-        if p.payload.first() == Some(&0xFE) && switches == 0 {
-            switches += 1;
-            let sw = sprig_proto_mysql::packets::AuthSwitchRequest::decode(&p.payload).unwrap();
-            assert_eq!(sw.plugin, "mysql_native_password", "{user}");
-            raw.send(Packet::new(p.seq.wrapping_add(1), Bytes::new()))
-                .await
-                .unwrap();
-            continue;
+        if p.payload.first() != Some(&0xFE) || p.payload.len() == 1 || switches.len() > 1 {
+            return (p, switches);
         }
-        return (p, switches);
+        let sw = sprig_proto_mysql::packets::AuthSwitchRequest::decode(&p.payload).unwrap();
+        let nonce = sw.data.strip_suffix(&[0]).unwrap_or(&sw.data);
+        let reply: Vec<u8> = match (sw.plugin.as_str(), pw.is_empty()) {
+            ("mysql_native_password", true) => Vec::new(),
+            ("mysql_native_password", false) => native_scramble(pw.as_bytes(), nonce),
+            (_, true) => vec![0],
+            (_, false) => {
+                sprig_auth::verifier::caching_sha2_scramble(pw.as_bytes(), nonce).to_vec()
+            }
+        };
+        switches.push(sw.plugin);
+        raw.send(Packet::new(p.seq.wrapping_add(1), Bytes::from(reply)))
+            .await
+            .unwrap();
     }
+}
+
+/// [`raw_cli_login`] with the empty password: `caching_sha2_password` and
+/// one NUL byte.
+async fn raw_empty_login(addr: SocketAddr, user: &str) -> (Packet, usize) {
+    let (p, sw) = raw_cli_login(addr, user, "caching_sha2_password", &[0], "").await;
+    (p, sw.len())
+}
+
+/// `mysql --default-auth=mysql_native_password` sends an empty placeholder
+/// naming `mysql_native_password` and waits for a nonce. The gateway took
+/// it for the empty password: the right password was refused, and any
+/// password logged in to an account with the empty one. Now it switches
+/// with a fresh nonce, as MySQL 8.4 does.
+#[tokio::test]
+async fn raw_native_placeholder_gets_a_nonce() {
+    let gw = Gateway::start(TlsMode::Off).await;
+    for persona in [Persona::MySql84, Persona::MariaDb] {
+        let addr = gw.addr(persona);
+        let native = "mysql_native_password";
+        let (ok, sw) = raw_cli_login(addr, "app", native, b"", PW).await;
+        assert_eq!(sw, [native], "{persona:?}");
+        assert_eq!((ok.seq, ok.payload[0]), (4, 0), "{persona:?} app");
+        let (p, sw) = raw_cli_login(addr, "nopw", native, b"", "wrong").await;
+        assert_eq!(sw, [native], "{persona:?}");
+        assert_eq!(err_code(&p.payload), Some(1045), "{persona:?} nopw wrong");
+        let (ok, _) = raw_cli_login(addr, "nopw", native, b"", "").await;
+        assert_eq!(ok.payload[0], 0, "{persona:?} nopw empty");
+        let (p, _) = raw_cli_login(addr, "app", native, b"", "wrong").await;
+        let e = ErrPacket::decode(&p.payload).unwrap();
+        assert_eq!(
+            e.message,
+            "Access denied for user 'app'@'127.0.0.1' (using password: YES)"
+        );
+    }
+    gw.stop().await;
 }
 
 /// The loginerr bug: the `mysql` 8.x/9.x client sends one NUL byte for the
@@ -717,6 +767,35 @@ async fn raw_empty_password_is_one_nul() {
         assert_eq!((p.seq, sw), (4, 1), "{persona:?} nat");
         assert_eq!(err_code(&p.payload), Some(1045));
     }
+    gw.stop().await;
+}
+
+/// A failure delay (chapter 14) that runs past `gateway.handshake_timeout_ms`
+/// still ends with the ERR packet: the deadline moves back by the delay.
+/// Before, the gateway dropped the connection and clients reported "2013
+/// Lost connection" once a name's delays grew past the timeout.
+#[tokio::test]
+async fn delayed_refusals_outlast_the_handshake_timeout() {
+    let gw = Gateway::start(TlsMode::Off).await;
+    let mut specs = gw.specs.clone();
+    for s in &mut specs {
+        s.handshake_timeout = Duration::from_millis(1500);
+    }
+    let report = gw
+        .mgr
+        .apply(resolution(specs, Duration::from_secs(60)))
+        .await;
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    let addr = gw.mgr.local_addr("mysql").await.unwrap();
+    // The default rule: no delay for three failures, then 1 s, then 2 s.
+    let mut took = Duration::ZERO;
+    for attempt in 1..=5 {
+        let t = Instant::now();
+        let (p, _) = raw_empty_login(addr, "ghost").await;
+        took = t.elapsed();
+        assert_eq!(err_code(&p.payload), Some(1045), "attempt {attempt}");
+    }
+    assert!(took >= Duration::from_millis(1900), "{took:?}");
     gw.stop().await;
 }
 
@@ -759,6 +838,80 @@ async fn raw_handshake_refusals() {
     raw.send(Packet::new(1, resp.encode())).await.unwrap();
     assert_eq!(err_code(&next(&mut raw).await), Some(1251));
     gw.stop().await;
+}
+
+/// The failed-login matrix with `mysql_async` against a running catalog-mode
+/// gateway (the loginerr bug): every failed login, on both personas, with
+/// and without TLS, gets the same ERR 1045 (no 2027, no hang); the empty
+/// password works like the real servers'.
+///
+/// `SPRIG_TEST_LOGIN_MATRIX=127.0.0.1:24356,127.0.0.1:24357` (the two
+/// personas' listeners; `gateway-dev.sh` tenants acme and globex), and
+/// optionally `SPRIG_TEST_LOGIN_NOPW` naming a login whose password is
+/// empty. Each case uses its own connection and the failures stay under
+/// `auth.ip_failures_per_minute` per run of one listener.
+/// `cargo test -p sprig-gateway --lib mysql::tests::live_failed_login_matrix -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs a running gateway: SPRIG_TEST_LOGIN_MATRIX"]
+async fn live_failed_login_matrix() {
+    let Ok(addrs) = std::env::var("SPRIG_TEST_LOGIN_MATRIX") else {
+        eprintln!("SPRIG_TEST_LOGIN_MATRIX not set");
+        return;
+    };
+    let nopw = std::env::var("SPRIG_TEST_LOGIN_NOPW").ok();
+    let mut cases: Vec<(String, &str, Option<bool>)> = vec![
+        ("root".into(), "", Some(false)),
+        ("root".into(), "foo", Some(true)),
+        ("nobody.app".into(), "foo", Some(true)),
+        ("acme.nobody".into(), "foo", Some(true)),
+        ("acme.app".into(), "", Some(false)),
+        ("acme.app".into(), "wrong", Some(true)),
+        ("acme.app".into(), "sprig-dev-app", None),
+    ];
+    if let Some(n) = &nopw {
+        cases.push((n.clone(), "", None));
+        cases.push((n.clone(), "wrong", Some(true)));
+    }
+    let mut failed = 0;
+    for addr in addrs.split(',') {
+        let addr: SocketAddr = addr.parse().unwrap();
+        for tls in [true, false] {
+            for (user, pw, want) in &cases {
+                // Failure delays (chapter 14) grow to 10 s per name.
+                let r = tokio::time::timeout(
+                    Duration::from_secs(60),
+                    Conn::new(opts(addr, user, pw, tls)),
+                )
+                .await
+                .expect("connect timed out");
+                let got = match &r {
+                    Ok(_) => "logged in".to_owned(),
+                    Err(mysql_async::Error::Server(e)) => format!("{} {}", e.code, e.message),
+                    Err(e) => format!("client error: {e}"),
+                };
+                let ok = match (want, &r) {
+                    (None, Ok(_)) => true,
+                    (Some(used), Err(mysql_async::Error::Server(e))) => {
+                        let yes_no = if *used { "YES" } else { "NO" };
+                        e.code == 1045 && e.message.contains(&format!("(using password: {yes_no})"))
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    failed += 1;
+                }
+                eprintln!(
+                    "LOGINS {addr} tls={tls} {user} pw={:?}: {got}{}",
+                    pw,
+                    if ok { "" } else { "  <-- unexpected" }
+                );
+                if let Ok(c) = r {
+                    c.disconnect().await.unwrap();
+                }
+            }
+        }
+    }
+    assert_eq!(failed, 0, "unexpected outcomes above");
 }
 
 // ----- real command-line clients ---------------------------------------------

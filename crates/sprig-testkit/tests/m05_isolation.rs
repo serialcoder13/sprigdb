@@ -44,6 +44,16 @@
 //! at the tenant without a database value) the `CREATE TABLE`, and any
 //! access to a table the administrator re-creates, get 1142.
 //!
+//! **Renamed tables** (chapter 29, P6): in tenant A, on both personas,
+//! `m05_rn` holds `SELECT, INSERT` and `UPDATE (note)` on
+//! `m05_shop.rn_live`. After a `pt-online-schema-change` swap (`RENAME
+//! TABLE rn_live TO rn_old, rn_new TO rn_live`) it reaches the new
+//! `rn_live` and not `rn_old`, as on MySQL; a three-way swap moves the
+//! table grants with the names; `ALTER TABLE ... RENAME` away leaves it
+//! nothing on the renamed table, and renaming back gives the access back.
+//! With the backend, MariaDB's `tables_priv` rows of the tenant's accounts
+//! follow the names the same way.
+//!
 //! **Propagation.** With `SPRIG_TEST_M05_SECOND` (a second gateway's
 //! MariaDB-persona `host:port`), a session on the second gateway reads a
 //! table, the administrator revokes the grant on the first, and the
@@ -176,7 +186,7 @@ async fn admin(c: &mut Conn, sql: &str) {
 /// Builds one tenant's objects and users (idempotent: drops first).
 async fn setup(c: &mut Conn, marker: &str) {
     for s in [
-        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep, m05_dump",
+        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep, m05_dump, m05_rn",
         "DROP ROLE IF EXISTS m05_r",
         "DROP DATABASE IF EXISTS m05_shop",
         "DROP DATABASE IF EXISTS m05_crm",
@@ -221,7 +231,7 @@ async fn setup(c: &mut Conn, marker: &str) {
 
 async fn teardown(c: &mut Conn) {
     for s in [
-        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep, m05_dump",
+        "DROP USER IF EXISTS m05_reader, m05_writer, m05_col, m05_none, m05_roleu, m05_prop, m05_prep, m05_dump, m05_rn",
         "DROP ROLE IF EXISTS m05_r",
         "DROP DATABASE IF EXISTS m05_shop",
         "DROP DATABASE IF EXISTS m05_crm",
@@ -977,6 +987,218 @@ async fn m05_isolation_suite() {
         let _ = run(&mut adm, "DROP USER m05_dump").await;
         let _ = adm.disconnect().await;
         let _ = probe.disconnect().await;
+    }
+
+    // RENAME TABLE leaves grants with the old name, as MySQL 8.4 and
+    // MariaDB 11.8 do (chapter 29, P6): a pt-online-schema-change / gh-ost
+    // swap, a three-way swap, and ALTER TABLE ... RENAME (tenant A, both
+    // personas), with MariaDB's grant tables checked when the backend is
+    // given.
+    {
+        let prefix = tenant_prefix(&a_url);
+        let login = format!("{prefix}m05_rn");
+        let mut adm = Conn::new(opts(&a_url, None, None)).await.unwrap();
+        admin(&mut adm, &format!("CREATE USER m05_rn IDENTIFIED BY '{PW}'")).await;
+        let mut backend = match skip::var(BACKEND) {
+            Some(u) => Some(Conn::new(Opts::from_url(&u).unwrap()).await.unwrap()),
+            None => None,
+        };
+        // Tenant A's id, from the schema holding its marker.
+        let tid = match backend.as_mut() {
+            Some(b) => schema_with(b, "orders", markers[0]).await.and_then(|s| {
+                s.strip_prefix('t')
+                    .and_then(|s| s.split('_').next())
+                    .map(str::to_owned)
+            }),
+            None => None,
+        };
+        let mut step = |persona: Persona, what: &str, got: Option<u16>, want: Option<u16>, msg: &str| {
+            checks += 1;
+            let ok = got == want;
+            report.line(&serde_json::json!({
+                "tenant": "A", "persona": format!("{persona:?}"), "user": "m05_rn",
+                "sql": what, "expected": want, "got": got, "message": msg, "pass": ok,
+            }));
+            if !ok {
+                failures.push(format!(
+                    "rename {persona:?}: {what}: expected {want:?}, got {got:?} {msg}"
+                ));
+            }
+        };
+        for (persona, hp) in &endpoints {
+            let persona = *persona;
+            for s in [
+                "DROP TABLE IF EXISTS m05_shop.rn_live, m05_shop.rn_new, m05_shop.rn_old, m05_shop.rn_b, m05_shop.rn_other, m05_shop.rn_tmp",
+                "CREATE TABLE m05_shop.rn_live (id INT PRIMARY KEY, note VARCHAR(40))",
+                "INSERT INTO m05_shop.rn_live VALUES (1, 'old copy')",
+                "GRANT SELECT, INSERT ON m05_shop.rn_live TO m05_rn",
+                "GRANT UPDATE (note) ON m05_shop.rn_live TO m05_rn",
+                // pt-online-schema-change: a new copy, swapped in.
+                "CREATE TABLE m05_shop.rn_new (id INT PRIMARY KEY, note VARCHAR(40))",
+                "INSERT INTO m05_shop.rn_new VALUES (1, 'new copy')",
+                "RENAME TABLE m05_shop.rn_live TO m05_shop.rn_old, m05_shop.rn_new TO m05_shop.rn_live",
+            ] {
+                admin(&mut adm, s).await;
+            }
+            let mut c = Conn::new(opts(&a_url, Some(hp), Some((&login, PW))))
+                .await
+                .unwrap();
+            let (got, text, msg) = run(&mut c, "SELECT note FROM m05_shop.rn_live").await;
+            step(
+                persona,
+                "swap: SELECT the new live table",
+                got.or((!text.contains("new copy")).then_some(0)),
+                None,
+                &format!("{msg}{text}"),
+            );
+            for (sql, want) in [
+                ("INSERT INTO m05_shop.rn_live VALUES (2, 'x')", None),
+                ("UPDATE m05_shop.rn_live SET note = 'y' WHERE id = 2", None),
+                ("DELETE FROM m05_shop.rn_live", Some(1142)),
+                ("SELECT * FROM m05_shop.rn_old", Some(1142)),
+                ("INSERT INTO m05_shop.rn_old VALUES (3, 'z')", Some(1142)),
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(persona, &format!("swap: {sql}"), got, want, &msg);
+            }
+            let (got, text, msg) = run(&mut c, "SHOW GRANTS").await;
+            let ok = text.contains("`rn_live`") && !text.contains("`rn_old`");
+            step(
+                persona,
+                "swap: SHOW GRANTS lists rn_live, not rn_old",
+                got.or((!ok).then_some(0)),
+                None,
+                &format!("{msg}{text}"),
+            );
+            // MariaDB's grants follow the catalog: on rn_live, none on
+            // rn_old (polled: the gateway reconciles before the session's
+            // statements, a few milliseconds after the catalog moves).
+            let backend_rows = |table: &'static str| {
+                let like = tid.as_ref().map(|t| format!("t{t}\\_u%"));
+                let dbl = tid.as_ref().map(|t| format!("t{t}\\_d%"));
+                (like, dbl, table)
+            };
+            let mut audit = async |table: &'static str, want_rows: bool| -> Option<bool> {
+                let b = backend.as_mut()?;
+                let (Some(like), Some(dbl), t) = backend_rows(table) else {
+                    return None;
+                };
+                let t0 = Instant::now();
+                loop {
+                    let n: Option<u64> = b
+                        .exec_first(
+                            "SELECT COUNT(*) FROM mysql.tables_priv \
+                             WHERE User LIKE ? AND Db LIKE ? AND Table_name = ?",
+                            (&like, &dbl, t),
+                        )
+                        .await
+                        .unwrap();
+                    let has = n.unwrap_or(0) > 0;
+                    if has == want_rows || t0.elapsed() > Duration::from_secs(5) {
+                        return Some(has == want_rows);
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            for (table, want_rows) in [("rn_live", true), ("rn_old", false)] {
+                if let Some(ok) = audit(table, want_rows).await {
+                    step(
+                        persona,
+                        &format!("swap: backend grant rows on {table}: {want_rows}"),
+                        (!ok).then_some(0),
+                        None,
+                        "",
+                    );
+                }
+            }
+            // The tool drops the old copy: nothing changes for the app.
+            admin(&mut adm, "DROP TABLE m05_shop.rn_old").await;
+            let (got, _, msg) = run(&mut c, "SELECT COUNT(*) FROM m05_shop.rn_live").await;
+            step(persona, "swap, old copy dropped: SELECT rn_live", got, None, &msg);
+
+            // Three-way swap: rn_live <-> rn_other through rn_tmp.
+            for s in [
+                "CREATE TABLE m05_shop.rn_other (id INT PRIMARY KEY, note VARCHAR(40))",
+                "GRANT DELETE ON m05_shop.rn_other TO m05_rn",
+                "RENAME TABLE m05_shop.rn_live TO m05_shop.rn_tmp, m05_shop.rn_other TO m05_shop.rn_live, m05_shop.rn_tmp TO m05_shop.rn_other",
+            ] {
+                admin(&mut adm, s).await;
+            }
+            for (sql, want) in [
+                ("SELECT COUNT(*) FROM m05_shop.rn_live", None),
+                ("INSERT INTO m05_shop.rn_live VALUES (5, 'w')", None),
+                ("DELETE FROM m05_shop.rn_live", Some(1142)),
+                ("DELETE FROM m05_shop.rn_other", None),
+                ("SELECT COUNT(*) FROM m05_shop.rn_other", Some(1142)),
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(persona, &format!("three-way swap: {sql}"), got, want, &msg);
+            }
+
+            // ALTER TABLE ... RENAME: away (no access), then back with
+            // another change in the same statement (access again).
+            admin(&mut adm, "ALTER TABLE m05_shop.rn_live RENAME TO m05_shop.rn_b").await;
+            for (sql, want) in [
+                ("SELECT COUNT(*) FROM m05_shop.rn_b", Some(1142)),
+                ("SELECT COUNT(*) FROM m05_shop.rn_live", Some(1146)),
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(persona, &format!("ALTER RENAME away: {sql}"), got, want, &msg);
+            }
+            let (got, text, msg) = run(&mut c, "SHOW GRANTS").await;
+            let ok = text.contains("`rn_live`") && !text.contains("`rn_b`");
+            step(
+                persona,
+                "ALTER RENAME away: SHOW GRANTS keeps rn_live",
+                got.or((!ok).then_some(0)),
+                None,
+                &format!("{msg}{text}"),
+            );
+            for (table, want_rows) in [("rn_b", false), ("rn_live", false)] {
+                if let Some(ok) = audit(table, want_rows).await {
+                    step(
+                        persona,
+                        &format!("ALTER RENAME away: backend grant rows on {table}: {want_rows}"),
+                        (!ok).then_some(0),
+                        None,
+                        "",
+                    );
+                }
+            }
+            admin(
+                &mut adm,
+                "ALTER TABLE m05_shop.rn_b ADD COLUMN z INT, RENAME TO m05_shop.rn_live",
+            )
+            .await;
+            for sql in [
+                "SELECT COUNT(*) FROM m05_shop.rn_live",
+                "INSERT INTO m05_shop.rn_live (id, note) VALUES (6, 'v')",
+            ] {
+                let (got, _, msg) = run(&mut c, sql).await;
+                step(persona, &format!("ALTER RENAME back: {sql}"), got, None, &msg);
+            }
+            if let Some(ok) = audit("rn_live", true).await {
+                step(
+                    persona,
+                    "ALTER RENAME back: backend grant rows on rn_live: true",
+                    (!ok).then_some(0),
+                    None,
+                    "",
+                );
+            }
+            let _ = c.disconnect().await;
+            for s in [
+                "REVOKE ALL PRIVILEGES, GRANT OPTION FROM m05_rn",
+                "DROP TABLE IF EXISTS m05_shop.rn_live, m05_shop.rn_other",
+            ] {
+                admin(&mut adm, s).await;
+            }
+        }
+        let _ = run(&mut adm, "DROP USER m05_rn").await;
+        let _ = adm.disconnect().await;
+        if let Some(b) = backend {
+            let _ = b.disconnect().await;
+        }
     }
 
     // Propagation to a second gateway.

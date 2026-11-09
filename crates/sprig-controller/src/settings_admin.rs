@@ -52,7 +52,8 @@
 //! type, 39080 outside the bounds in force, 39083 locked by a wider scope,
 //! 1049 or 1146 for a database or object that doesn't exist, 39072 for an
 //! unknown or inactive tenant, 39504 off the leader (etcd scopes), 39792
-//! for a malformed request.
+//! for a malformed request, 39368 for an `auth.authorizer` engine some
+//! live gateway doesn't know (chapter 29).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -650,7 +651,15 @@ where
         clock: Arc<dyn Clock>,
     ) -> Self {
         let registry = live.registry();
-        let etcd = SettingsWriter::new(registry, live.stores().clone(), Arc::clone(&clock));
+        // Chapter 29: auth.authorizer only names an engine every live
+        // gateway knows.
+        let guard: Arc<dyn sprig_settings::ValueGuard> =
+            Arc::new(sprig_auth::authz::engine_guard::EngineGuard::new(
+                Arc::clone(&live.stores().global),
+                Arc::clone(&live.stores().dc),
+            ));
+        let etcd = SettingsWriter::new(registry, live.stores().clone(), Arc::clone(&clock))
+            .with_guard(Arc::clone(&guard));
         let catalog = TenantSettingsWriter::new(
             versioner,
             registry,
@@ -658,7 +667,8 @@ where
             Arc::new(AllowAll),
             Arc::new(LogDecisions),
             Arc::clone(&clock),
-        );
+        )
+        .with_guard(guard);
         Self {
             live,
             etcd,

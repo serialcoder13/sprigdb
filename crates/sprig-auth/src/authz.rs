@@ -29,6 +29,7 @@ pub mod authorizer;
 pub mod backend;
 pub mod compile;
 pub mod definers;
+pub mod engine_guard;
 pub mod privilege;
 pub mod settings;
 pub mod show;

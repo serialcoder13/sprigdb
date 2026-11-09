@@ -1252,6 +1252,12 @@ impl PassSession {
             .as_deref()
             .map(|ts| crate::tenant::authz::dropped_objects(ts, &stmt, current.as_deref()))
             .unwrap_or_default();
+        // Chapter 29: a rename leaves table grants with the old names, as
+        // MySQL does; the engine records that before the statement runs.
+        if let Some(ts) = self.tenant.as_deref() {
+            let renamed = crate::tenant::authz::renamed_objects(ts, &stmt, current.as_deref());
+            crate::tenant::authz::objects_renamed(ts, &renamed).await;
+        }
         // Chapter 21: a statement on a sharded table group runs on every
         // shard (the layout comes from the router's topology in R1).
         let layout = self.tenant.as_deref().and_then(super::router::ddl_layout);

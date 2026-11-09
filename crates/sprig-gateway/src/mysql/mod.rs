@@ -33,8 +33,8 @@ pub(crate) mod watch;
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -266,18 +266,36 @@ async fn connection(
         Arc::clone(&conn.transport),
     );
     let settings = shared.cfg.settings.current();
-    let timeout = conn.listener.handshake_timeout;
-    let phase = tokio::time::timeout(
-        timeout,
-        login_phase(&shared, &ctx, &settings, &mut session, conn),
-    )
-    .await;
+    // gateway.handshake_timeout_ms, moved back by the failure delays
+    // (chapter 14) the login waits out: a delayed refusal still ends with
+    // its ERR packet, not a dropped connection.
+    let conn_timeout = conn.listener.handshake_timeout;
+    let delayed = Arc::new(AtomicU64::new(0));
+    let phase = {
+        let phase = sprig_auth::LOGIN_DELAY_MS.scope(
+            Arc::clone(&delayed),
+            login_phase(&shared, &ctx, &settings, &mut session, conn),
+        );
+        tokio::pin!(phase);
+        let mut deadline = tokio::time::Instant::now() + conn_timeout;
+        loop {
+            tokio::select! {
+                r = &mut phase => break Some(r),
+                () = tokio::time::sleep_until(deadline) => {
+                    match delayed.swap(0, Ordering::Relaxed) {
+                        0 => break None,
+                        ms => deadline += Duration::from_millis(ms),
+                    }
+                }
+            }
+        }
+    };
     let mut logged_in = match phase {
-        Err(_) => {
+        None => {
             tracing::debug!(session = %session.id, "connection phase timed out");
             return Ok(());
         }
-        Ok(r) => match r? {
+        Some(r) => match r? {
             Some(l) => l,
             None => return Ok(()),
         },

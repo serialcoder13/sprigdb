@@ -178,6 +178,8 @@ impl TenantServices {
         // under the catalog lock (decision I7).
         let ddl = DdlEngine::new(catalog.clone(), Arc::clone(&clock))
             .with_check(sprig_inherit::guard::SharedCheck::shared());
+        // Chapter 29: SPRIG SET auth.authorizer only names an engine every
+        // live gateway knows.
         let writer = TenantSettingsWriter::new(
             catalog.clone(),
             registry,
@@ -185,7 +187,11 @@ impl TenantServices {
             Arc::new(AllowAll),
             Arc::new(LogDecisions),
             Arc::clone(&clock),
-        );
+        )
+        .with_guard(Arc::new(sprig_auth::authz::engine_guard::EngineGuard::new(
+            Arc::clone(&live.stores().global),
+            Arc::clone(&live.stores().dc),
+        )));
         Ok(Arc::new(Self {
             cache,
             settings,

@@ -143,6 +143,7 @@ pub(crate) struct World {
 /// 8 alice@10.% "office"
 /// 9 nat@% native only "npw"
 /// 10 svc@% "pw", `api_key` only
+/// 11 dual@% "pw", `caching_sha2_password` and native verifiers
 /// and tenant `susp` (43, suspended) with 1 carol@% "pw".
 pub(crate) fn world(policy: FixedPolicy) -> World {
     world_at(policy, None)
@@ -191,9 +192,11 @@ pub(crate) fn world_at(
     add(10, "svc", "%", b"pw", &|r| {
         r.auth_methods = AuthMethods::API_KEY;
     });
+    add(11, "dual", "%", b"pw", &|_| {});
     vs.push(sha2(11, 1, Slot::Secondary, b"old-pw"));
     vs.push(sha2(12, 1, Slot::History, b"ancient"));
     vs.push(native(91, 9, b"npw"));
+    vs.push(native(111, 11, b"pw"));
     let lock = TempLock {
         user_id: UserId(7),
         locked_until: now + Duration::from_secs(3600),
@@ -297,15 +300,28 @@ pub(crate) async fn run_with(
     plugin: &str,
     password: &[u8],
 ) -> Run {
-    let t0 = Instant::now();
-    let tls = r.tls;
-    let persona = r.persona;
-    let (mut c, s) = tokio::io::duplex(1 << 16);
     let first = if plugin == Method::Native.plugin_name() {
         native_scramble(password, &NONCE)
     } else {
         caching_sha2_scramble(password, &NONCE).to_vec()
     };
+    run_first(svc, r, plugin, first, password).await
+}
+
+/// [`run_with`] with the client's first response given: libmysqlclient's
+/// placeholder (empty, under a plugin other than the greeting's) or its
+/// single NUL for the empty password.
+pub(crate) async fn run_first(
+    svc: &Arc<LoginService>,
+    r: LoginRequest,
+    plugin: &str,
+    first: Vec<u8>,
+    password: &[u8],
+) -> Run {
+    let t0 = Instant::now();
+    let tls = r.tls;
+    let persona = r.persona;
+    let (mut c, s) = tokio::io::duplex(1 << 16);
     let plugin = plugin.to_owned();
     let svc = Arc::clone(svc);
     let server = async move {
@@ -704,6 +720,56 @@ async fn native_password_only_when_the_tenant_enables_it() {
         err(&run(&w.svc, req("acme.nat"), b"bad").await.verdict).code,
         1045
     );
+}
+
+/// The packets a client sees, without the nonces: (first byte, length).
+fn shape(seen: &[Vec<u8>]) -> Vec<(u8, usize)> {
+    seen.iter().map(|p| (p[0], p.len())).collect()
+}
+
+/// Unknown users of a tenant look like its accounts on every plugin path
+/// (loginerr): with `auth.mysql_native_password` on, a client asking for
+/// native gets native from an unknown user, as from an account whose
+/// password was set with both verifiers; with it off, both get
+/// `caching_sha2_password`. Also for libmysqlclient's empty placeholder
+/// (`--default-auth=mysql_native_password`), and the empty password.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_users_follow_the_tenants_native_policy() {
+    for on in [false, true] {
+        let w = world(FixedPolicy(HashMap::from([(
+            "auth.mysql_native_password",
+            Value::Bool(on),
+        )])));
+        let native = "mysql_native_password";
+        let firsts: [(&str, Vec<u8>, &[u8]); 4] = [
+            ("scramble", native_scramble(b"wrong", &NONCE), b"wrong"),
+            ("placeholder", Vec::new(), b"wrong"),
+            ("placeholder, empty password", Vec::new(), b""),
+            ("NUL under caching_sha2", vec![0], b""),
+        ];
+        for (what, first, pw) in firsts {
+            let plugin = if first == [0] {
+                "caching_sha2_password"
+            } else {
+                native
+            };
+            let real = run_first(&w.svc, req("acme.dual"), plugin, first.clone(), pw).await;
+            let ghost = run_first(&w.svc, req("acme.ghost"), plugin, first, pw).await;
+            let what = format!("native on={on}, {what}");
+            assert_eq!(shape(&real.seen), shape(&ghost.seen), "{what}");
+            let (r, g) = (err(&real.verdict), err(&ghost.verdict));
+            assert_eq!((r.code, g.code), (1045, 1045), "{what}");
+            assert_eq!(
+                r.message.replace("acme.dual", "acme.ghost"),
+                g.message,
+                "{what}"
+            );
+        }
+        // The placeholder gets a nonce, and the right password then logs in.
+        let ok = run_first(&w.svc, req("acme.dual"), native, Vec::new(), b"pw").await;
+        assert_eq!(ok.verdict, AuthVerdict::Accept, "native on={on}");
+        assert_eq!(ok.seen[0][0], 0xFE, "native on={on}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

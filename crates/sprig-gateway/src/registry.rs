@@ -13,7 +13,8 @@
 //! hands out ([`SessionTable::set_slot`]), so `KILL` of an id on another
 //! gateway finds its owner through `gateway-slots/<slot>`. The record
 //! carries the listeners' ports, the state (`starting`, `ready`,
-//! `draining`) and a load report, rewritten every [`LOAD_PERIOD`] and on
+//! `draining`), the authorization engines the build knows and a load
+//! report, rewritten every [`LOAD_PERIOD`] and on
 //! every state change. A re-registration after a lost lease tries the same
 //! slot first; sessions opened under the old slot keep their ids.
 
@@ -92,6 +93,12 @@ pub struct GatewayRecord {
     /// Catalog formats this build reads (chapter 08's migration gate).
     #[serde(default)]
     pub catalog_formats: Vec<u32>,
+    /// Authorization engines this build knows (`auth.authorizer` values,
+    /// [`sprig_auth::authz::authorizer::KNOWN`]): a change of
+    /// `auth.authorizer` is refused unless every live gateway lists the
+    /// engine (chapter 29, `sprig_auth::authz::engine_guard`).
+    #[serde(default)]
+    pub authorizers: Vec<String>,
     /// Its load.
     #[serde(default)]
     pub load: Load,

@@ -273,6 +273,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     tracing::info!(%role, %identity, "ready");
     let mut due = HashMap::new();
     let mut tick = tokio::time::interval(WATCH);
+    // A failover can take 20 s; don't replay the missed ticks in a burst.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_pass: Option<Instant> = None;
     let mut leading = false;
     loop {

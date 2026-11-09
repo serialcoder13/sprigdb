@@ -1,0 +1,21 @@
+# MySQL Connector/J (versions.txt) through run.sh: every outcome other than
+# pass. Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (summarize.py). Test ids are Surefire's Class.method.
+#
+# Status on 9 November 2026: wired (mysql-connector-j/pom.xml), not yet run to
+# the end. Against a MySQL 8.4 container capped at 768 MB the suite's blob
+# tests OOM-killed the server (1,144 of 1,427 tests then failed with
+# "Communications link failure"); in a forked JVM it OOM-killed the test
+# container. It was not run through the gateway: the same tests would send
+# 16 to 64 MiB statements to the shared development clusters (gaps row 30;
+# decisions/r4-interim.md C1). Run it on a server with 2 GB or more and
+# max_allowed_packet of at least 64 MiB, with the excludes below for gateways
+# on shared clusters.
+
+* exclude testsuite.regression.BlobRegressionTest.* :: blobs of 16 MiB and more: OOM risk on 768 MB servers; gaps row 30 through a gateway
+* exclude testsuite.simple.BlobTest.* :: as BlobRegressionTest
+* exclude testsuite.regression.StressRegressionTest.* :: many concurrent connections; a stress test, not a compatibility test
+* exclude testsuite.regression.MicroPerformanceRegressionTest.* :: timing thresholds on a shared, loaded host
+
+# JDK 21 differs from the suite's expected Unicode tables.
+* fail testsuite.simple.SaslPrepTest.unassignedCodePoints :: JDK 21's Unicode data (fails on plain MySQL 8.4 too)

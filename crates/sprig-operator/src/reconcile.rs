@@ -484,6 +484,24 @@ impl Reconciler {
                     Phase::Provisioning
                 };
                 status.message = Some(why);
+                // The record follows the nodes even while not Ready (a
+                // broken replica can keep the MariaDB from being Ready).
+                if old.cluster_id.is_some() && addrs.iter().all(Option::is_some) {
+                    let nodes: Vec<NodeAddress> = addrs
+                        .iter()
+                        .flatten()
+                        .enumerate()
+                        .map(|(i, a)| NodeAddress {
+                            node: format!("n{i}"),
+                            addr: a.clone(),
+                        })
+                        .collect();
+                    if status.nodes != nodes {
+                        let msg = status.message.take();
+                        self.sync_nodes(&name, &mut status, &nodes).await;
+                        status.message = status.message.take().or(msg);
+                    }
+                }
                 // A pod restarted after a failover boots in domain 0, and the
                 // cluster may stay not Ready for long (a broken replica):
                 // keep the domain on every node that answers (kind, r2kind).
@@ -591,37 +609,7 @@ impl Reconciler {
                 }
             }
         } else if status.nodes != nodes {
-            // A scale or a replaced Service: the record follows (r2opfix),
-            // so a freed address can't keep pointing at another cluster's
-            // node; the probes also refuse a node whose identity isn't
-            // the pinned one.
-            let specs: Vec<NodeSpec> = nodes
-                .iter()
-                .filter_map(|n| {
-                    Some(NodeSpec {
-                        node: NodeId::new(n.node.clone()).ok()?,
-                        addr: n.addr.clone(),
-                        zone: None,
-                    })
-                })
-                .collect();
-            let id = status.cluster_id.clone().unwrap_or_default();
-            match self.registrar.set_nodes(&id, &specs).await {
-                Ok(()) => {
-                    tracing::info!(cluster = %name, nodes = specs.len(), "record's nodes updated");
-                    status.nodes.clone_from(&nodes);
-                }
-                Err(e) => {
-                    status.message = Some(format!(
-                        "node addresses changed to {}; updating the record failed: {e}",
-                        nodes
-                            .iter()
-                            .map(|n| n.addr.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-            }
+            self.sync_nodes(&name, &mut status, &nodes).await;
         }
         // The cluster number is the GTID domain, set live on every node.
         let mut requeue = Duration::from_secs(30);
@@ -692,6 +680,39 @@ impl Reconciler {
             Ok(_) => {}
             Err(e) => {
                 tracing::debug!(cluster = %name, error = %e, "gtid_domain_id while not Ready");
+            }
+        }
+    }
+
+    /// A scale or a replaced Service: the record follows (r2opfix), so a
+    /// freed address can't keep pointing at another cluster's node; the
+    /// probes also refuse a node whose identity isn't the pinned one.
+    async fn sync_nodes(&self, name: &str, status: &mut SprigClusterStatus, nodes: &[NodeAddress]) {
+        let specs: Vec<NodeSpec> = nodes
+            .iter()
+            .filter_map(|n| {
+                Some(NodeSpec {
+                    node: NodeId::new(n.node.clone()).ok()?,
+                    addr: n.addr.clone(),
+                    zone: None,
+                })
+            })
+            .collect();
+        let id = status.cluster_id.clone().unwrap_or_default();
+        match self.registrar.set_nodes(&id, &specs).await {
+            Ok(()) => {
+                tracing::info!(cluster = %name, nodes = specs.len(), "record's nodes updated");
+                status.nodes = nodes.to_vec();
+            }
+            Err(e) => {
+                status.message = Some(format!(
+                    "node addresses changed to {}; updating the record failed: {e}",
+                    nodes
+                        .iter()
+                        .map(|n| n.addr.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
         }
     }

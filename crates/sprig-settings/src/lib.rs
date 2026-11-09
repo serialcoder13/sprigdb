@@ -31,6 +31,9 @@
 //!   [`SettingsWriter::set_guarded`] and [`BoundsPatch`]: the Admin API's
 //!   writes under the serving leader's fencing compare, with bounds
 //!   patched inside the guarded write.
+//! - [`guard`]: [`ValueGuard`], checks of a value against the running
+//!   system before either writer stores it (chapter 29's
+//!   `auth.authorizer`).
 //!
 //! The tenant-scope side lives elsewhere: the ancestor-copy loop that
 //! fills ancestor rows is `sprig-controller::tree_settings` (chapter 08
@@ -40,6 +43,7 @@
 
 pub mod etcd;
 pub mod explain;
+pub mod guard;
 pub mod ops;
 pub mod registry;
 pub mod resolve;
@@ -51,6 +55,7 @@ pub use etcd::{
     BoundsPatch, RecordOutcome, SettingChange, SettingEdit, SettingRecord, SettingsStores,
     SettingsWriter, Warning, normalize_change, show_bounds, show_value,
 };
+pub use guard::{GuardFuture, ValueGuard};
 pub use explain::{ExplainStep, Explanation, StepOutcome, explain_layered};
 #[doc(hidden)]
 pub use linkme;

@@ -16,6 +16,7 @@ fn record(id: &str) -> GatewayRecord {
         listeners: BTreeMap::from([("mysql".to_owned(), 3306)]),
         state: GatewayState::Starting,
         catalog_formats: vec![],
+        authorizers: vec![],
         load: Load::default(),
     }
 }

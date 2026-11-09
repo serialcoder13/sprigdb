@@ -398,6 +398,7 @@ where
     auth: Arc<dyn SettingAuthorizer>,
     decisions: Arc<dyn DecisionSink>,
     clock: Arc<dyn Clock>,
+    guard: Option<Arc<dyn sprig_settings::ValueGuard>>,
 }
 
 impl<B: SettingsBackend> std::fmt::Debug for TenantSettingsWriter<B>
@@ -457,7 +458,16 @@ where
             auth,
             decisions,
             clock,
+            guard: None,
         }
+    }
+
+    /// Checks every `Set` with `guard` before writing it
+    /// (`sprig_settings::guard`; chapter 29's `auth.authorizer`).
+    #[must_use]
+    pub fn with_guard(mut self, guard: Arc<dyn sprig_settings::ValueGuard>) -> Self {
+        self.guard = Some(guard);
+        self
     }
 
     /// The versioner.
@@ -477,6 +487,7 @@ where
     /// - 39083 `ER_SPRIG_SETTING_LOCKED`, 39080
     ///   `ER_SPRIG_SETTING_OUT_OF_BOUNDS`;
     /// - 1049 or 1146 for a database or object that doesn't exist;
+    /// - the guard's refusal ([`with_guard`](Self::with_guard));
     /// - [`Versioner::change`]'s errors (39070, 39071, 39072, 39504).
     pub async fn set(&self, req: &SetRequest) -> Result<SetOutcome> {
         let key = req.key.as_str();
@@ -638,7 +649,11 @@ where
         self.auth
             .authorize(req.tenant, &req.principal, need)
             .await?;
-        Ok((def, normalize_change(def, req.change.clone())?))
+        let change = normalize_change(def, req.change.clone())?;
+        if let (Some(g), SettingChange::Set(v)) = (&self.guard, &change) {
+            g.check(key, v).await?;
+        }
+        Ok((def, change))
     }
 
     /// Steps 5 and the target's existence, under the version row's lock.

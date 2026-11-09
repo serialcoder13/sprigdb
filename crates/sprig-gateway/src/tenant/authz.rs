@@ -40,6 +40,10 @@
 //! object's database, to the engine ([`objects_dropped`]), then waits for
 //! the change like an account statement does.
 //!
+//! **Renamed tables.** Before a `RENAME TABLE` or `ALTER TABLE ... RENAME`
+//! runs, the tables it moves go to the engine ([`objects_renamed`]): their
+//! grants stay with their old names, as MySQL's do.
+//!
 //! **Migration.** A tenant whose catalog predates the `authz` module is
 //! migrated by the first session that reads it (every existing user keeps
 //! `ALL` and `SPRIG_TENANT_ADMIN`; see `sprig_auth::authz::store`).
@@ -55,7 +59,7 @@ use sprig_auth::authz::account_sql::{
     self, AccountCtx, Outcome, db_denied, routine_denied, table_denied,
 };
 use sprig_auth::authz::authorizer::{
-    self as engines, Dropped, SettingsDenied, SettingsOp, Subject, row_filter_unsupported,
+    self as engines, Dropped, Renamed, SettingsDenied, SettingsOp, Subject, row_filter_unsupported,
 };
 use sprig_auth::authz::backend::{self, BackendKey};
 use sprig_auth::authz::definers;
@@ -1018,6 +1022,123 @@ pub async fn objects_dropped(ts: &TenantSession, dropped: &[Dropped]) {
         Ok(None) => {}
         Err(e) => {
             tracing::warn!(tenant = %ts.tenant, error = %e, "grants of dropped objects not updated");
+        }
+    }
+}
+
+/// The live tables and views a `RENAME TABLE` or `ALTER TABLE ...
+/// RENAME` moves away from their names, read from the session's snapshot
+/// before the statement runs (chapter 29, "Renamed tables"): each once,
+/// under the name it has now. The moves are followed in order, as MariaDB
+/// applies them, so `RENAME TABLE a TO tmp, b TO a, tmp TO b` lists `a`
+/// and `b`. Sources that don't exist and temporary tables aren't listed.
+#[must_use]
+pub fn renamed_objects(
+    ts: &TenantSession,
+    stmt: &sprig_catalog::ddl::DdlStatement,
+    current: Option<&str>,
+) -> Vec<Renamed> {
+    use sprig_catalog::ddl::{DdlStatement, ObjectName};
+    let Some(cat) = ts.catalog().cloned() else {
+        return Vec::new();
+    };
+    let lctn = ts.lower_case_table_names();
+    // RENAME TABLE resolves an unqualified new name in the current
+    // database; ALTER TABLE ... RENAME in the table's own.
+    let (pairs, alter): (Vec<(&ObjectName, &ObjectName)>, bool) = match stmt {
+        DdlStatement::RenameTables { pairs, .. } => {
+            (pairs.iter().map(|(a, b)| (a, b)).collect(), false)
+        }
+        DdlStatement::AlterObject {
+            kind,
+            name,
+            rename_to: Some(to),
+            ..
+        } if kind.namespace() == Namespace::Relation => (vec![(name, to)], true),
+        _ => return Vec::new(),
+    };
+    let live_db = |name: &str| {
+        cat.database(&database_key(name, lctn))
+            .filter(|d| d.state == DbState::Active)
+            .cloned()
+    };
+    // Names the earlier moves took (Some(object)) or freed (None).
+    let mut overlay: HashMap<(String, String), Option<sprig_common::ids::ObjectId>> =
+        HashMap::new();
+    let mut out: Vec<Renamed> = Vec::new();
+    for (from, to) in pairs {
+        let Some(fdb) = from.db.as_deref().or(current) else {
+            continue;
+        };
+        let tdb_name = to.db.as_deref().or(if alter { Some(fdb) } else { current });
+        let fkey = (
+            database_key(fdb, lctn),
+            object_key(ObjectKind::Table, &from.name, lctn),
+        );
+        let source = match overlay.get(&fkey) {
+            Some(id) => *id,
+            None if ts.is_temp(Some(fdb), &from.name) => None,
+            None => {
+                let found = live_db(fdb).and_then(|d| {
+                    cat.object(d.db_id, Namespace::Relation, &fkey.1)
+                        .filter(|o| o.state == ObjectState::Active)
+                        .map(|o| (d, o.clone()))
+                });
+                found.map(|(d, o)| {
+                    if !out.iter().any(|r| r.object == o.object_id) {
+                        out.push(Renamed {
+                            db: d.db_id,
+                            db_key: d.name_key.clone(),
+                            object: o.object_id,
+                            name_key: o.name_key.clone(),
+                        });
+                    }
+                    o.object_id
+                })
+            }
+        };
+        let Some(id) = source else {
+            continue;
+        };
+        overlay.insert(fkey, None);
+        if let Some(t) = tdb_name {
+            overlay.insert(
+                (
+                    database_key(t, lctn),
+                    object_key(ObjectKind::Table, &to.name, lctn),
+                ),
+                Some(id),
+            );
+        }
+    }
+    out
+}
+
+/// Hands the tables and views a rename is about to move (see
+/// [`renamed_objects`]) to the tenant's engine before the statement runs:
+/// with `mysql_grants` their grants become grants held by their current
+/// names, which give the same rights until the rename and stay with the
+/// names after it, as MySQL's do. Failures are logged and the rename goes
+/// ahead (its grants then follow the table, the behaviour before).
+pub async fn objects_renamed(ts: &TenantSession, renamed: &[Renamed]) {
+    if renamed.is_empty() {
+        return;
+    }
+    let Some(cat) = ts.catalog().cloned() else {
+        return;
+    };
+    let Some(engine) = session_engine(ts, &cat) else {
+        return;
+    };
+    let svc = Arc::clone(ts.services());
+    match engine.objects_renamed(&svc.catalog, &cat, renamed).await {
+        Ok(Some(v)) => {
+            // This gateway's snapshot has it before the rename commits.
+            let _ = await_auth(&svc, ts.tenant, v).await;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(tenant = %ts.tenant, error = %e, "grants of renamed tables not moved to their names");
         }
     }
 }

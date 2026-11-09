@@ -263,6 +263,7 @@ pub struct SettingsWriter {
     registry: &'static Registry,
     stores: SettingsStores,
     clock: Arc<dyn Clock>,
+    guard: Option<Arc<dyn crate::ValueGuard>>,
 }
 
 impl std::fmt::Debug for SettingsWriter {
@@ -281,6 +282,23 @@ impl SettingsWriter {
             registry,
             stores,
             clock,
+            guard: None,
+        }
+    }
+
+    /// Checks every `Set` with `guard` before writing it
+    /// ([`crate::guard`]).
+    #[must_use]
+    pub fn with_guard(mut self, guard: Arc<dyn crate::ValueGuard>) -> Self {
+        self.guard = Some(guard);
+        self
+    }
+
+    /// Runs the guard on `change`, if it is a `Set`.
+    async fn guarded(&self, key: &str, change: &SettingChange) -> Result<()> {
+        match (&self.guard, change) {
+            (Some(g), SettingChange::Set(v)) => g.check(key, v).await,
+            _ => Ok(()),
         }
     }
 
@@ -322,7 +340,8 @@ impl SettingsWriter {
     /// locked by a wider scope, 39080 outside the wider bounds; internal for
     /// the wrong leader or a scope this process doesn't keep; the leader's
     /// error when it no longer leads; 39500 (retryable) when the record kept
-    /// changing under the write, or the store's errors.
+    /// changing under the write, or the store's errors; the guard's refusal
+    /// ([`with_guard`](Self::with_guard)).
     pub async fn set(
         &self,
         leader: &Leadership,
@@ -341,7 +360,9 @@ impl SettingsWriter {
                 leader.key()
             )));
         }
-        let edit = SettingEdit::Change(check_change(def, change)?);
+        let change = check_change(def, change)?;
+        self.guarded(key, &change).await?;
+        let edit = SettingEdit::Change(change);
         Ok(self
             .apply(Commit::Leader(leader), def, scope, &edit, who, reason)
             .await?
@@ -373,7 +394,11 @@ impl SettingsWriter {
     ) -> Result<RecordOutcome> {
         let def = self.target(scope, key)?;
         let edit = match edit {
-            SettingEdit::Change(c) => SettingEdit::Change(check_change(def, c)?),
+            SettingEdit::Change(c) => {
+                let c = check_change(def, c)?;
+                self.guarded(key, &c).await?;
+                SettingEdit::Change(c)
+            }
             p @ SettingEdit::PatchBounds(_) => p,
         };
         self.apply(Commit::Guard(guard), def, scope, &edit, who, reason)

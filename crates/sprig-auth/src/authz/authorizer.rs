@@ -19,11 +19,14 @@
 //! | MariaDB grants of the per-user backend accounts | [`Authorizer::backend_grants`] |
 //! | Account statements (`GRANT`, `CREATE ROLE`, `SHOW GRANTS`, ...) | [`Authorizer::account_statement`] |
 //! | `DROP TABLE`, `DROP DATABASE`, ... | [`Authorizer::objects_dropped`] |
+//! | `RENAME TABLE`, `ALTER TABLE ... RENAME` (before it runs) | [`Authorizer::objects_renamed`] |
 //!
 //! **Adding an engine.** Implement [`Authorizer`] and [`SessionGrants`]
 //! (the latter for whatever the engine compiles per session), add the
-//! name to [`by_name`] and to `auth.authorizer`'s allowed values
-//! ([`super::settings::AUTHORIZER`]). An engine with its own catalog
+//! name to [`by_name`], [`KNOWN`] and `auth.authorizer`'s allowed values
+//! ([`super::settings::AUTHORIZER`]). Gateways advertise [`KNOWN`] in
+//! their registration record, and a change of `auth.authorizer` is refused
+//! unless every live gateway knows the engine ([`super::engine_guard`]). An engine with its own catalog
 //! tables registers a catalog extension like
 //! [`super::AuthzExtension`], so its rows arrive in every snapshot at the
 //! auth version. Engines that refine rather than replace MySQL grants
@@ -51,6 +54,10 @@ use crate::cache::TenantAuth;
 
 /// `auth.authorizer`'s value for [`MysqlGrants`].
 pub const MYSQL_GRANTS: &str = "mysql_grants";
+
+/// Every engine this build knows, as `auth.authorizer` names them: what a
+/// gateway advertises in its registration record (`authorizers`).
+pub const KNOWN: &[&str] = &[MYSQL_GRANTS];
 
 /// The engine named `name` (an `auth.authorizer` value); `None` for a name
 /// this build doesn't know, which the gateway treats as "allow nothing".
@@ -157,6 +164,21 @@ pub enum Dropped {
     },
 }
 
+/// A live table or view a `RENAME TABLE` (or `ALTER TABLE ... RENAME`) is
+/// about to move away from its name, as [`Authorizer::objects_renamed`]
+/// gets it: where it is before the statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renamed {
+    /// Its database before the rename.
+    pub db: DbId,
+    /// That database's name key.
+    pub db_key: String,
+    /// The object.
+    pub object: ObjectId,
+    /// Its name key before the rename.
+    pub name_key: String,
+}
+
 /// One session's rights at one catalog snapshot, as an engine compiled
 /// them. The gateway asks it about every statement.
 pub trait SessionGrants: Send + Sync + std::fmt::Debug {
@@ -237,6 +259,21 @@ pub trait Authorizer: Send + Sync + std::fmt::Debug {
         catalog: &MariaCatalog,
         cat: &TenantCatalog,
         dropped: &[Dropped],
+    ) -> Result<Option<u64>>;
+
+    /// `renamed` are about to be renamed; `cat` is the snapshot before the
+    /// statement. Called before the statement runs, so whatever the engine
+    /// writes must be right both before and after the rename (the
+    /// statement may still fail). Returns the auth version the engine's
+    /// change committed at, if it wrote one.
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn objects_renamed(
+        &self,
+        catalog: &MariaCatalog,
+        cat: &TenantCatalog,
+        renamed: &[Renamed],
     ) -> Result<Option<u64>>;
 }
 
@@ -376,54 +413,103 @@ impl Authorizer for MysqlGrants {
         cat: &TenantCatalog,
         dropped: &[Dropped],
     ) -> Result<Option<u64>> {
-        let ops = drop_plan(state_of(cat), cat, dropped);
-        if ops.is_empty() {
-            return Ok(None);
-        }
-        let mut c = catalog
-            .change_with(cat.tenant, VersionKind::Auth, ChangeOpts::default())
-            .await?;
-        let r: Result<()> = async {
-            let (core, q) = c.tx().parts();
-            let store = AuthzStore::new(core.schema());
-            for op in &ops {
-                match op {
-                    DropOp::KeepByName {
-                        db,
-                        object,
-                        db_key,
-                        name_key,
-                    } => {
-                        store
-                            .keep_by_name(q, *db, *object, db_key, name_key)
-                            .await?;
-                    }
-                    DropOp::ForgetObject { db, object } => {
-                        store.forget_object(q, *db, *object).await?;
-                    }
-                    DropOp::ForgetNamed { db_key, name_key } => {
-                        store.forget_named(q, db_key, name_key.as_deref()).await?;
-                    }
-                    DropOp::ForgetDatabase { db, db_key } => {
-                        store.forget_database(q, *db, db_key).await?;
-                    }
+        apply_ops(catalog, cat, &drop_plan(state_of(cat), cat, dropped)).await
+    }
+
+    async fn objects_renamed(
+        &self,
+        catalog: &MariaCatalog,
+        cat: &TenantCatalog,
+        renamed: &[Renamed],
+    ) -> Result<Option<u64>> {
+        apply_ops(catalog, cat, &rename_plan(state_of(cat), renamed)).await
+    }
+}
+
+/// Writes `ops` as one auth change of `cat`'s tenant; `None` when there is
+/// nothing to write.
+async fn apply_ops(
+    catalog: &MariaCatalog,
+    cat: &TenantCatalog,
+    ops: &[DropOp],
+) -> Result<Option<u64>> {
+    if ops.is_empty() {
+        return Ok(None);
+    }
+    let mut c = catalog
+        .change_with(cat.tenant, VersionKind::Auth, ChangeOpts::default())
+        .await?;
+    let r: Result<()> = async {
+        let (core, q) = c.tx().parts();
+        let store = AuthzStore::new(core.schema());
+        for op in ops {
+            match op {
+                DropOp::KeepByName {
+                    db,
+                    object,
+                    db_key,
+                    name_key,
+                } => {
+                    store
+                        .keep_by_name(q, *db, *object, db_key, name_key)
+                        .await?;
+                }
+                DropOp::ForgetObject { db, object } => {
+                    store.forget_object(q, *db, *object).await?;
+                }
+                DropOp::ForgetNamed { db_key, name_key } => {
+                    store.forget_named(q, db_key, name_key.as_deref()).await?;
+                }
+                DropOp::ForgetDatabase { db, db_key } => {
+                    store.forget_database(q, *db, db_key).await?;
                 }
             }
-            Ok(())
         }
-        .await;
-        match r {
-            Ok(()) => Ok(Some(c.commit().await?)),
-            Err(e) => {
-                let _ = c.rollback().await;
-                let _ = catalog.settle(cat.tenant, VersionKind::Auth).await;
-                Err(e)
-            }
+        Ok(())
+    }
+    .await;
+    match r {
+        Ok(()) => Ok(Some(c.commit().await?)),
+        Err(e) => {
+            let _ = c.rollback().await;
+            let _ = catalog.settle(cat.tenant, VersionKind::Auth).await;
+            Err(e)
         }
     }
 }
 
-/// A catalog write [`MysqlGrants::objects_dropped`] plans.
+/// What renaming `renamed` does to the rows of `state` (chapter 29 P6,
+/// MySQL's rule): a renamed table's or view's grants stay with its old
+/// name, so its object and column rows become grants held by that name
+/// ([`DropOp::KeepByName`]). Done before the statement runs: a row held by
+/// name applies to whatever relation has the name, so before the rename it
+/// still applies to the same table, and after it to whatever table took the
+/// name (the new copy in a `pt-online-schema-change` or `gh-ost` swap).
+/// Grants already held by the new name apply to the renamed table without
+/// a write. Independent of `auth.grants_on_drop`: nothing is dropped.
+#[must_use]
+pub fn rename_plan(state: &AuthzState, renamed: &[Renamed]) -> Vec<DropOp> {
+    let rows = &state.rows().privileges;
+    let mut seen = BTreeSet::new();
+    renamed
+        .iter()
+        .filter(|r| seen.insert(r.object))
+        .filter(|r| {
+            rows.iter().any(|p| {
+                matches!(p.target, PrivTarget::Object { object: o, .. } | PrivTarget::Column { object: o, .. } if o == r.object)
+            })
+        })
+        .map(|r| DropOp::KeepByName {
+            db: r.db,
+            object: r.object,
+            db_key: r.db_key.clone(),
+            name_key: r.name_key.clone(),
+        })
+        .collect()
+}
+
+/// A catalog write [`MysqlGrants::objects_dropped`] or
+/// [`MysqlGrants::objects_renamed`] plans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropOp {
     /// The object's rows become grants held by name.
@@ -948,6 +1034,191 @@ mod tests {
         );
     }
 
+    /// What [`AuthzStore::keep_by_name`] does to `rows` for each op of
+    /// `plan`, in memory.
+    fn keep_in_memory(rows: Vec<PrivRow>, plan: &[DropOp]) -> Vec<PrivRow> {
+        rows.into_iter()
+            .map(|mut p| {
+                for op in plan {
+                    let DropOp::KeepByName {
+                        object,
+                        db_key,
+                        name_key,
+                        ..
+                    } = op
+                    else {
+                        continue;
+                    };
+                    let column = match &p.target {
+                        PrivTarget::Object { object: o, .. } if o == object => None,
+                        PrivTarget::Column {
+                            object: o, column, ..
+                        } if o == object => Some(column.clone()),
+                        _ => continue,
+                    };
+                    p.target = PrivTarget::Named {
+                        db_key: db_key.clone(),
+                        name_key: name_key.clone(),
+                        column,
+                    };
+                }
+                p
+            })
+            .collect()
+    }
+
+    fn renamed(object: u64, name: &str) -> Renamed {
+        Renamed {
+            db: DbId(1),
+            db_key: "shop".into(),
+            object: ObjectId(object),
+            name_key: name.into(),
+        }
+    }
+
+    #[test]
+    fn rename_plan_keeps_grants_with_the_old_name() {
+        let cat = catalog(shop_objects(), orders_grants());
+        let state = state_of(&cat);
+        let keep = DropOp::KeepByName {
+            db: DbId(1),
+            object: ObjectId(10),
+            db_key: "shop".into(),
+            name_key: "orders".into(),
+        };
+        assert_eq!(
+            rename_plan(state, &[renamed(10, "orders")]),
+            vec![keep.clone()]
+        );
+        // `RENAME TABLE orders TO tmp, x TO orders, tmp TO x` lists each
+        // moved table once, under the name it leaves.
+        assert_eq!(
+            rename_plan(
+                state,
+                &[
+                    renamed(10, "orders"),
+                    renamed(30, "x"),
+                    renamed(10, "tmp")
+                ]
+            ),
+            vec![keep]
+        );
+        // A table nobody holds grants on: nothing written.
+        assert!(rename_plan(state, &[renamed(30, "x")]).is_empty());
+    }
+
+    #[test]
+    fn swap_leaves_grants_with_the_name_as_mysql_does() {
+        // `orders` (10): SELECT, INSERT and UPDATE (note) for the app;
+        // `orders_new` (12): DELETE.
+        let rows = vec![
+            grant(
+                PrivTarget::Object {
+                    db: DbId(1),
+                    object: ObjectId(10),
+                },
+                &[Action::Select, Action::Insert],
+            ),
+            grant(
+                PrivTarget::Column {
+                    db: DbId(1),
+                    object: ObjectId(10),
+                    column: "note".into(),
+                },
+                &[Action::Update],
+            ),
+            grant(
+                PrivTarget::Object {
+                    db: DbId(1),
+                    object: ObjectId(12),
+                },
+                &[Action::Delete],
+            ),
+        ];
+        let before = vec![
+            obj(10, 1, "orders", ObjectKind::Table),
+            obj(12, 1, "orders_new", ObjectKind::Table),
+        ];
+        let cat = catalog(before.clone(), rows.clone());
+        // RENAME TABLE orders TO orders_old, orders_new TO orders
+        let plan = rename_plan(
+            state_of(&cat),
+            &[renamed(10, "orders"), renamed(12, "orders_new")],
+        );
+        assert_eq!(plan.len(), 2);
+        let kept = keep_in_memory(rows, &plan);
+        let subject = Subject {
+            user: APP,
+            roles: &[],
+        };
+        let on = |object| Target::Object {
+            db_key: "shop",
+            db: DbId(1),
+            object: ObjectId(object),
+        };
+        let actions = [
+            Action::Select,
+            Action::Insert,
+            Action::Update,
+            Action::Delete,
+            Action::Drop,
+        ];
+        let auth = TenantAuth::build(
+            vec![crate::cache::tests::row(APP.0, "app", "%", 1)],
+            &[],
+            Vec::new(),
+        );
+        // Written before the statement runs, the rows held by name give
+        // exactly what the id rows gave, also to MariaDB.
+        let held = catalog(before, kept.clone());
+        let (a, b) = (
+            MysqlGrants.session(&cat, &subject),
+            MysqlGrants.session(&held, &subject),
+        );
+        for o in [10, 12] {
+            for act in actions {
+                assert_eq!(a.allows(act, on(o)), b.allows(act, on(o)), "{act:?} on {o}");
+            }
+        }
+        assert_eq!(
+            MysqlGrants.backend_grants(&cat, &auth),
+            MysqlGrants.backend_grants(&held, &auth)
+        );
+        // After the swap: the new live `orders` (12) has the grants of the
+        // name `orders`; `orders_old` (10) has none; DELETE stays with the
+        // name `orders_new`, which no table has now.
+        let after = catalog(
+            vec![
+                obj(10, 1, "orders_old", ObjectKind::Table),
+                obj(12, 1, "orders", ObjectKind::Table),
+            ],
+            kept,
+        );
+        let g = MysqlGrants.session(&after, &subject);
+        assert!(g.allows(Action::Select, on(12)));
+        assert!(g.allows(Action::Insert, on(12)));
+        assert!(g.allows(Action::Update, on(12)), "the column grant");
+        assert!(!g.allows(Action::Delete, on(12)));
+        for act in actions {
+            assert!(!g.allows(act, on(10)), "{act:?} on orders_old");
+        }
+        // MariaDB: grants on `orders` only (the name the new table has).
+        let acct = backend::account(TenantId(42), APP);
+        let backend = MysqlGrants.backend_grants(&after, &auth);
+        let names: BTreeSet<String> = backend
+            .get(&acct)
+            .unwrap()
+            .iter()
+            .filter_map(|(t, _)| match t {
+                backend::BackendTarget::Table(_, n) | backend::BackendTarget::Column(_, n, _) => {
+                    Some(n.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, BTreeSet::from(["orders".to_owned()]));
+    }
+
     #[test]
     fn settings_privileges_map_as_before() {
         let cat = catalog(shop_objects(), orders_grants());
@@ -984,5 +1255,6 @@ mod tests {
         assert_eq!(MysqlGrants.name(), MYSQL_GRANTS);
         assert!(by_name(MYSQL_GRANTS).is_some());
         assert!(by_name("supabase").is_none());
+        assert!(KNOWN.iter().all(|n| by_name(n).is_some()));
     }
 }

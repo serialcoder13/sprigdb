@@ -727,6 +727,7 @@ mod tests {
             listeners: [("peer".to_owned(), addr.port())].into(),
             state: registry::GatewayState::Ready,
             catalog_formats: Vec::new(),
+            authorizers: Vec::new(),
             load: registry::Load::default(),
         };
         let put = |r: &GatewayRecord| {

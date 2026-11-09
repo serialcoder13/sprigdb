@@ -34,9 +34,17 @@
 #   SPRIG_CLIENTS_FILTER      run only matching tests (go -run, pytest -k,
 #                             Maven -Dtest, a poku path)
 #   SPRIG_CLIENTS_VERBOSE=1   also list unexpected skips
+#   SPRIG_CLIENTS_PREFIX      container name prefix (default sprig-clients)
 #
-# Examples (the gateway's tenant user, then a plain MariaDB as root):
-#   deploy/compose/clients/run.sh go-sql-driver 127.0.0.1 13306 mysql
+# Expected files can `exclude` tests per target. They keep statements of
+# 16 MiB and more away from gateways: the development clusters keep MariaDB's
+# 16 MiB max_allowed_packet and a 1 GiB memory cap (gaps row 30;
+# decisions/r4-interim.md, "Client test suites"). Use your own gateway and
+# tenant, take the heavy-job lock, and expect runs of 1 to 10 minutes each.
+#
+# Examples (a gateway's tenant user, then a plain MariaDB as root):
+#   SPRIG_CLIENTS_USER=acme.app SPRIG_CLIENTS_PASSWORD=sprig-dev-app \
+#     deploy/compose/clients/run.sh go-sql-driver 127.0.0.1 13306 mysql
 #   SPRIG_CLIENTS_MODE=baseline SPRIG_CLIENTS_USER=root \
 #     deploy/compose/clients/run.sh go-sql-driver 127.0.0.1 13301 mariadb
 set -euo pipefail
@@ -56,7 +64,7 @@ SRC_ROOT=${SPRIG_CLIENTS_SRC:-$HERE/.src}
 RESULTS=${SPRIG_CLIENTS_RESULTS:-$HERE/results}/$SUITE/$TARGET_LABEL
 FILTER=${SPRIG_CLIENTS_FILTER:-}
 MEM=768m
-PREFIX=sprig-clients
+PREFIX=${SPRIG_CLIENTS_PREFIX:-sprig-clients}
 
 # A tenant login is <tenant>.<user>: logins the suite creates get the same
 # prefix (on a plain server, none).

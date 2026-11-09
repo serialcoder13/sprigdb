@@ -52,6 +52,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
@@ -480,7 +481,8 @@ impl CatalogLogins {
             can_log_in: true,
             suspended: false,
         };
-        self.backends.backend_for(&info, user_id, &p.backend.cluster)
+        self.backends
+            .backend_for(&info, user_id, &p.backend.cluster)
     }
 
     pub(crate) async fn residency_of(
@@ -526,9 +528,19 @@ impl CatalogLogins {
                 tenant,
                 catalog,
             })),
-            None => Target::Decoy,
+            None => Target::DecoyIn(catalog),
         }
     }
+}
+
+tokio::task_local! {
+    /// Milliseconds of failure delay (chapter 14, "Rate limits") the logins
+    /// run in this scope have waited or are waiting. A front end whose
+    /// connection phase has a deadline (the gateway's
+    /// `gateway.handshake_timeout_ms`) runs the login in this scope and
+    /// moves its deadline back by this much, so a delayed refusal still
+    /// reaches the client as its ERR packet instead of a dropped connection.
+    pub static LOGIN_DELAY_MS: Arc<AtomicU64>;
 }
 
 /// Where accounts come from: the switch between the tenant catalog and the
@@ -727,12 +739,16 @@ impl LoginService {
         }
     }
 
-    /// Counts a failure of `key` and waits out its delay (a timer).
+    /// Counts a failure of `key` and waits out its delay (a timer). Inside
+    /// [`LOGIN_DELAY_MS`]'s scope the delay is added to it first, so the
+    /// front end can push its own deadline back by as much.
     pub(crate) async fn failure_delay(&self, key: DelayKey, catalog: Option<&TenantCatalog>) {
         let rule = self.delay_rule(catalog);
         let d = self.delays.on_failure(key, rule);
         if !d.is_zero() {
             metrics::counter!("sprig_auth_rate_limited_total", "scope" => "account").increment(1);
+            let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+            let _ = LOGIN_DELAY_MS.try_with(|t| t.fetch_add(ms, Ordering::Relaxed));
             tokio::time::sleep(d).await;
         }
     }
@@ -935,8 +951,14 @@ struct CatalogTarget {
 }
 
 enum Target {
-    /// No tenant, no account: the decoy.
+    /// No tenant that takes logins: the decoy.
     Decoy,
+    /// A tenant that takes logins but no such account: the decoy, shaped
+    /// like an account of this tenant whose password was set under its
+    /// current policy (a `caching_sha2_password` verifier, plus a native one
+    /// when `auth.mysql_native_password` is on), with the tenant's delay
+    /// rule.
+    DecoyIn(Arc<TenantCatalog>),
     /// The tenant's credentials can't be read: 39301 after the exchange.
     Unavailable(SprigError),
     /// An interim file account.
@@ -948,7 +970,7 @@ enum Target {
 impl Target {
     fn label(&self) -> &'static str {
         match self {
-            Target::Decoy => "decoy",
+            Target::Decoy | Target::DecoyIn(_) => "decoy",
             Target::Unavailable(_) => "unavailable",
             Target::File(_) => "file",
             Target::Catalog(_) => "catalog",
@@ -1193,6 +1215,22 @@ impl LoginFlow for MysqlLogin {
                 c.user.row.plugin == Method::Native.plugin_name(),
             ),
             Target::File(a) => (a.caching_sha2.is_some(), false),
+            // An unknown user picks what an account with both verifiers
+            // would: native only when the tenant allows it and the client
+            // asks for it.
+            Target::DecoyIn(catalog) => {
+                let allowed = match &self.svc.source {
+                    LoginSource::Catalog(cl) => {
+                        policy_bool(&*cl.policy, &MYSQL_NATIVE_PASSWORD, catalog)
+                    }
+                    LoginSource::File(_) => false,
+                };
+                return if allowed && client_plugin == Some(Method::Native.plugin_name()) {
+                    Method::Native
+                } else {
+                    Method::CachingSha2
+                };
+            }
             _ => return Method::CachingSha2,
         };
         if native
@@ -1361,7 +1399,9 @@ impl MysqlLogin {
                 e.user_id = Some(c.user.row.user_id);
             }
             Target::File(a) => e.user = Some(a.user.clone()),
-            Target::Decoy | Target::Unavailable(_) => e.user = Some(self.shown.clone()),
+            Target::Decoy | Target::DecoyIn(_) | Target::Unavailable(_) => {
+                e.user = Some(self.shown.clone());
+            }
         }
         if *verdict == AuthVerdict::Accept {
             if let Target::Catalog(c) = &self.target {
@@ -1396,6 +1436,7 @@ impl MysqlLogin {
         svc.ip_failure(self.req.client_ip, protocol);
         let catalog = match &self.target {
             Target::Catalog(c) => Some(Arc::clone(&c.catalog)),
+            Target::DecoyIn(catalog) => Some(Arc::clone(catalog)),
             _ => None,
         };
         svc.failure_delay(self.delay_key(), catalog.as_deref())
@@ -1412,7 +1453,7 @@ impl MysqlLogin {
             return self.refuse("rate_limited", path, e);
         }
         match &self.target {
-            Target::Decoy => {
+            Target::Decoy | Target::DecoyIn(_) => {
                 let mut e = self.denied();
                 if outcome == Outcome::NeedsTls {
                     e = needs_tls_hint(&e);

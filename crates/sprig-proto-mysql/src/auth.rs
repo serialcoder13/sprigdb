@@ -29,7 +29,7 @@ use bytes::Bytes;
 use zeroize::Zeroizing;
 
 use crate::error::{ErrPacket, StdErr};
-use crate::handshake::{NONCE_LEN, PacketIo, new_nonce};
+use crate::handshake::{GREETING_PLUGIN, NONCE_LEN, PacketIo, new_nonce};
 use crate::packets::{AuthMoreData, AuthSwitchRequest, Persona};
 use crate::proto_error::ProtoResult;
 
@@ -348,8 +348,18 @@ fn verified(ok: bool) -> Outcome {
 
 /// Runs a whole exchange: picks the method ([`LoginFlow::method`]),
 /// switches the client to it with a fresh nonce when it started with
-/// another plugin or when `force_switch` is set (`COM_CHANGE_USER`), then
-/// runs the plugin.
+/// another plugin, when `force_switch` is set (`COM_CHANGE_USER`), or when
+/// the client's empty response is libmysqlclient's placeholder (below),
+/// then runs the plugin.
+///
+/// libmysqlclient hides the greeting's nonce from a plugin other than the
+/// greeting's (`--default-auth=mysql_native_password`, since the greeting
+/// names `caching_sha2_password`): it sends an empty response naming its
+/// plugin and waits for a nonce, which MySQL 8.4 sends in an
+/// `AuthSwitchRequest`. So an empty response under a plugin other than the
+/// greeting's is answered with a switch, not taken as the empty password;
+/// a client that really has the empty password answers the switch with an
+/// empty response again.
 ///
 /// `client_plugin` and `first` are the plugin name and auth response from
 /// the handshake response (or `COM_CHANGE_USER`); `io.nonce` is the nonce
@@ -362,8 +372,10 @@ pub async fn authenticate(
     flow: &mut dyn LoginFlow,
 ) -> ProtoResult<AuthVerdict> {
     let method = flow.method(client_plugin);
+    let placeholder =
+        first.is_empty() && client_plugin != Some(GREETING_PLUGIN) && method != Method::ClearText;
     let mut first = first;
-    if force_switch || client_plugin != Some(method.plugin_name()) {
+    if force_switch || placeholder || client_plugin != Some(method.plugin_name()) {
         let data = if method == Method::ClearText {
             Bytes::new()
         } else {

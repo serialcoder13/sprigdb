@@ -282,6 +282,43 @@ async fn native_reads_a_single_nul_as_empty() {
     assert_eq!(flow.decided, [(Outcome::Verified, AuthPath::Empty)]);
 }
 
+/// `mysql --default-auth=mysql_native_password` (libmysqlclient) sends an
+/// empty placeholder naming `mysql_native_password`, since the greeting's
+/// nonce belongs to `caching_sha2_password`, and waits for a nonce. MySQL
+/// 8.4 answers with an `AuthSwitchRequest`; taking the placeholder as the
+/// empty password refused right passwords and let wrong ones into
+/// empty-password accounts.
+#[tokio::test]
+async fn an_empty_native_placeholder_gets_a_nonce() {
+    let mut flow = Mock {
+        method: Some(Method::Native),
+        native_ok: true,
+        ..Mock::default()
+    };
+    let (v, nonce) = exchange(
+        &mut flow,
+        false,
+        Some(MYSQL_NATIVE_PASSWORD),
+        b"",
+        false,
+        |mut d| async move {
+            let mut c = RawIo::new(&mut d, 2);
+            let p = c.read_packet().await.expect("switch");
+            let sw = AuthSwitchRequest::decode(&p).expect("decode");
+            assert_eq!(sw.plugin, MYSQL_NATIVE_PASSWORD);
+            assert_eq!(sw.data.len(), NONCE_LEN + 1);
+            c.write_packet(Bytes::from_static(&[7; 20]))
+                .await
+                .expect("write");
+        },
+    )
+    .await;
+    assert_eq!(v, AuthVerdict::Accept);
+    assert_ne!(nonce, NONCE);
+    assert_eq!(flow.native_scrambles, [vec![7u8; 20]]);
+    assert_eq!(flow.decided, [(Outcome::Verified, AuthPath::Native)]);
+}
+
 #[tokio::test]
 async fn another_client_plugin_gets_a_switch_with_a_fresh_nonce() {
     let mut flow = Mock {

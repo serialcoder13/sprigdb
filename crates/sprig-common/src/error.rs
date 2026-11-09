@@ -360,6 +360,10 @@ sprig_codes! {
     /// as its definer; the gateway dropped it again (chapter 29, "Definers
     /// of stored code").
     DefinerRefused = 39367, "ER_SPRIG_DEFINER_REFUSED", "SprigDefinerRefused", SQLSTATE_GENERAL, false;
+    /// A change of `auth.authorizer` names an engine that some live
+    /// gateway doesn't report knowing; upgrade those gateways first
+    /// (chapter 29, "Choosing the engine").
+    AuthorizerUnknownToGateways = 39368, "ER_SPRIG_AUTHORIZER_UNKNOWN_TO_GATEWAYS", "SprigAuthorizerUnknownToGateways", SQLSTATE_GENERAL, false;
     /// The control plane's store is unreachable (chapter 23).
     MetaUnavailable = 39500, "ER_SPRIG_META_UNAVAILABLE", "SprigMetaUnavailable", SQLSTATE_CONNECTION, true;
     /// This controller no longer leads (or never did): its session was lost
@@ -830,7 +834,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ShareNotResharable
         | SprigCode::InheritStatementUnsupported
         | SprigCode::InheritSchemaMismatch
-        | SprigCode::InheritedObjectInUse => (Code::FailedPrecondition, 409),
+        | SprigCode::InheritedObjectInUse
+        | SprigCode::AuthorizerUnknownToGateways => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
         | SprigCode::DefinerRefused

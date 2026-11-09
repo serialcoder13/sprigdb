@@ -57,6 +57,7 @@ pub const DRAIN_WAIT: Duration = Duration::from_secs(20);
 /// One node's replication state, as `SHOW SLAVE STATUS` and the GTID
 /// variables show it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // the server's thread flags, as reported
 pub struct ReplView {
     /// The pod index.
     pub index: u8,
@@ -64,6 +65,10 @@ pub struct ReplView {
     pub master_host: String,
     /// `Slave_IO_Running = Yes`.
     pub io_running: bool,
+    /// `Slave_IO_Running = Connecting`: the IO thread is alive, retrying
+    /// its (failed) primary.
+    #[serde(default)]
+    pub io_connecting: bool,
     /// `Slave_SQL_Running = Yes`.
     pub sql_running: bool,
     /// `Gtid_IO_Pos`: what the IO thread received (and, under semi-sync,
@@ -377,7 +382,9 @@ impl MysqlReplication {
         };
         if let Some(r) = status {
             v.master_host = text(&r, "Master_Host");
-            v.io_running = text(&r, "Slave_IO_Running") == "Yes";
+            let io = text(&r, "Slave_IO_Running");
+            v.io_running = io == "Yes";
+            v.io_connecting = io == "Connecting";
             v.sql_running = text(&r, "Slave_SQL_Running") == "Yes";
             v.io_pos = text(&r, "Gtid_IO_Pos");
             v.sql_errno = text(&r, "Last_SQL_Errno").parse().unwrap_or(0);
@@ -405,7 +412,10 @@ impl ReplicationOps for MysqlReplication {
         // SQL thread while the IO thread is stopped discards the relay log
         // and resets Gtid_IO_Pos to gtid_slave_pos, losing exactly the
         // received, acknowledged, unapplied transactions (found on kind).
-        match (before.io_running, before.sql_running) {
+        match (
+            before.io_running || before.io_connecting,
+            before.sql_running,
+        ) {
             (_, true) => {}
             (true, false) => {
                 tokio::time::timeout(STATEMENT_TIMEOUT, c.query_drop("START SLAVE SQL_THREAD"))
@@ -413,8 +423,9 @@ impl ReplicationOps for MysqlReplication {
                     .map_err(|_| unavailable(addr, "timed out"))?
                     .map_err(|e| unavailable(addr, e))?;
             }
-            // Both stopped: starting the SQL thread would discard the relay
-            // log, so it stays as it is; choose() sees it undrained.
+            // Both stopped ("Connecting" counts as running): starting the
+            // SQL thread would discard the relay log, so it stays as it is;
+            // choose() sees it undrained.
             (false, false) => return Ok(before),
         }
         let target = before.received().to_string();
