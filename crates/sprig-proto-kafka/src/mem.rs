@@ -490,7 +490,7 @@ impl MemData {
             .get(p, name)
             .await?
             .ok_or_else(|| MemTopics::unknown(name))?;
-        Ok(Self::data_topic(&t, access)?)
+        Self::data_topic(&t, access)
     }
 
     fn data_topic(
@@ -500,7 +500,10 @@ impl MemData {
         if access == crate::broker::data::Access::Write && t.kind == TopicKind::Changes {
             return Err(TopicError::new(
                 err::INVALID_TOPIC_EXCEPTION,
-                format!("39941 ER_SPRIG_STREAM_APPEND_ONLY: {} is a change topic", t.name),
+                format!(
+                    "39941 ER_SPRIG_STREAM_APPEND_ONLY: {} is a change topic",
+                    t.name
+                ),
             ));
         }
         let eff = t.configs.cleanup.unwrap_or(t.defaults.cleanup);
@@ -670,21 +673,18 @@ impl crate::broker::data::StreamData for MemData {
         partition: i32,
     ) -> Result<crate::broker::data::Bounds, TopicError> {
         let st = lock(&self.state);
-        Ok(st
-            .logs
-            .get(&(p.tenant_id, t.stream_id, partition))
-            .map_or(
-                crate::broker::data::Bounds {
-                    log_start: 0,
-                    high_watermark: 0,
-                    leader_epoch: 0,
-                },
-                |part| crate::broker::data::Bounds {
-                    log_start: part.log_start,
-                    high_watermark: Self::hw(part),
-                    leader_epoch: part.epoch,
-                },
-            ))
+        Ok(st.logs.get(&(p.tenant_id, t.stream_id, partition)).map_or(
+            crate::broker::data::Bounds {
+                log_start: 0,
+                high_watermark: 0,
+                leader_epoch: 0,
+            },
+            |part| crate::broker::data::Bounds {
+                log_start: part.log_start,
+                high_watermark: Self::hw(part),
+                leader_epoch: part.epoch,
+            },
+        ))
     }
 
     async fn read(
@@ -727,7 +727,12 @@ impl crate::broker::data::StreamData for MemData {
         Ok((b, out))
     }
 
-    async fn wait(&self, p: &Principal, beyond: &[(u64, i32, i64)], deadline: tokio::time::Instant) {
+    async fn wait(
+        &self,
+        p: &Principal,
+        beyond: &[(u64, i32, i64)],
+        deadline: tokio::time::Instant,
+    ) {
         loop {
             let notified = self.changed.notified();
             {

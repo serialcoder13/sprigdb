@@ -360,6 +360,7 @@ async fn writes_sum_and_roll_back_on_error() {
         claims: Vec::new(),
         releases: Vec::new(),
         fk: None,
+        limited: None,
     });
     let out = execute(&plan, &mut f, &mut Budget::mb(1)).await.unwrap();
     match out {
@@ -379,6 +380,7 @@ async fn writes_sum_and_roll_back_on_error() {
         claims: Vec::new(),
         releases: Vec::new(),
         fk: None,
+        limited: None,
     });
     assert!(execute(&plan, &mut f, &mut Budget::mb(1)).await.is_err());
     assert_eq!(f.log, ["BEGIN", "u1", "missing", "ROLLBACK"]);

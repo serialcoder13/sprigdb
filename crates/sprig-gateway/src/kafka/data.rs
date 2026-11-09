@@ -21,6 +21,9 @@
 //!   per gateway follows ([`Marks`]), and reads the checkpoint again at
 //!   least every 250 ms in case a mark was skipped.
 
+// The trait's names (p: principal, t: topic) and Kafka API names.
+#![allow(clippy::many_single_char_names, clippy::doc_markdown)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -45,7 +48,9 @@ use sprig_proto_kafka::topics::{Principal, TopicError, TopicKind};
 use sprig_streams::publish::{self, AppendOutcome, Located, SequenceVerdict};
 use sprig_streams::read::{LogReader, ReadLimits};
 use sprig_streams::runtime::WatermarkRecord;
-use sprig_streams::{LeaderEpoch, Offset, PartitionNo, StreamDef, StreamId, StreamKind, StreamState, StreamsState};
+use sprig_streams::{
+    LeaderEpoch, Offset, PartitionNo, StreamDef, StreamId, StreamKind, StreamState, StreamsState,
+};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -73,7 +78,11 @@ impl Marks {
     }
 
     /// Follows `streams/` of the DC tier until `stop`.
-    async fn follow(self: Arc<Self>, dc: Arc<dyn MetaStore>, stop: sprig_common::CancellationToken) {
+    async fn follow(
+        self: Arc<Self>,
+        dc: Arc<dyn MetaStore>,
+        stop: sprig_common::CancellationToken,
+    ) {
         let Ok(prefix) = dc.tier().key("streams/") else {
             return;
         };
@@ -124,9 +133,10 @@ impl Marks {
     fn beyond(&self, tenant: u64, wants: &[(u64, i32, i64)]) -> bool {
         let m = lock(&self.map);
         wants.iter().any(|(s, p, o)| {
-            u32::try_from(*p).ok().and_then(|p| m.get(&(tenant, *s, p))).is_some_and(|hw| {
-                i64::try_from(*hw).is_ok_and(|hw| hw > *o)
-            })
+            u32::try_from(*p)
+                .ok()
+                .and_then(|p| m.get(&(tenant, *s, p)))
+                .is_some_and(|hw| i64::try_from(*hw).is_ok_and(|hw| hw > *o))
         })
     }
 
@@ -154,12 +164,18 @@ fn limits_of(svc: &TenantServices, cat: &TenantCatalog) -> Limits {
     }
 }
 
+/// Compiled privileges by (tenant, user), with the catalog and auth
+/// versions they were compiled at.
+type GrantCache = HashMap<(u64, Option<u64>), (u64, u64, Arc<dyn SessionGrants>)>;
+/// Leader epochs by (tenant, stream), with when they were read.
+type EpochCache = HashMap<(u64, u64), (Instant, HashMap<u32, u32>)>;
+
 /// The data plane over the tenant's streams.
 pub struct GatewayData {
     svc: Arc<TenantServices>,
     marks: Arc<Marks>,
-    grants: Mutex<HashMap<(u64, Option<u64>), (u64, u64, Arc<dyn SessionGrants>)>>,
-    epochs: Mutex<HashMap<(u64, u64), (Instant, HashMap<u32, u32>)>>,
+    grants: Mutex<GrantCache>,
+    epochs: Mutex<EpochCache>,
     expired: Mutex<HashMap<(u64, u64), Instant>>,
 }
 
@@ -246,13 +262,7 @@ impl GatewayData {
 
     /// Whether `p` may `action` stream `def` (by name or on its database);
     /// for a change topic read, `SELECT` on its table.
-    fn allowed(
-        &self,
-        p: &Principal,
-        cat: &TenantCatalog,
-        def: &StreamDef,
-        action: Action,
-    ) -> bool {
+    fn allowed(&self, p: &Principal, cat: &TenantCatalog, def: &StreamDef, action: Action) -> bool {
         let g = self.grants(p, cat);
         if g.unrestricted() {
             return true;
@@ -262,7 +272,8 @@ impl GatewayData {
         };
         let lctn = self.lctn(cat);
         let db_key = database_key(&db.name, lctn);
-        if let (StreamKind::Changes, Some(o), Action::Select) = (def.kind, def.source_object, action)
+        if let (StreamKind::Changes, Some(o), Action::Select) =
+            (def.kind, def.source_object, action)
         {
             return g.allows(
                 action,
@@ -307,7 +318,11 @@ impl GatewayData {
     }
 
     fn data_topic(&self, cat: &TenantCatalog, def: &StreamDef, name: String) -> DataTopic {
-        let ctx = cat.object_ctx(&self.svc.dc, ObjectId(def.source_object.map_or(def.id.0, |o| o.0)))
+        let ctx = cat
+            .object_ctx(
+                &self.svc.dc,
+                ObjectId(def.source_object.map_or(def.id.0, |o| o.0)),
+            )
             .with_db(def.db);
         let max = self.svc.settings.get(
             &sprig_streams::settings::MAX_MESSAGE_BYTES,
@@ -350,7 +365,11 @@ impl GatewayData {
                 err::TOPIC_AUTHORIZATION_FAILED,
                 format!(
                     "1142 {} command denied to user '{}' for topic '{name}'",
-                    if access == Access::Read { "SELECT" } else { "INSERT" },
+                    if access == Access::Read {
+                        "SELECT"
+                    } else {
+                        "INSERT"
+                    },
                     p.user
                 ),
             ));
@@ -377,7 +396,12 @@ impl GatewayData {
         }
     }
 
-    async fn resolve(&self, p: &Principal, name: &str, access: Access) -> Result<Resolved, TopicError> {
+    async fn resolve(
+        &self,
+        p: &Principal,
+        name: &str,
+        access: Access,
+    ) -> Result<Resolved, TopicError> {
         let (db, stream) = sprig_proto_kafka::mem::split_topic(name)?;
         let cat = self.catalog(p).await?;
         let state = cat
@@ -540,8 +564,13 @@ impl StreamData for GatewayData {
             .ok_or_else(no)?;
         let db = cat.databases.get(def.db).ok_or_else(no)?;
         let name = format!("{}.{}", db.name, def.name);
-        self.check(p, &cat, &def, &name, access)
-            .map_err(|e| if e.code == err::UNKNOWN_TOPIC_OR_PARTITION { no() } else { e })?;
+        self.check(p, &cat, &def, &name, access).map_err(|e| {
+            if e.code == err::UNKNOWN_TOPIC_OR_PARTITION {
+                no()
+            } else {
+                e
+            }
+        })?;
         Ok(self.data_topic(&cat, &def, name))
     }
 
@@ -609,10 +638,12 @@ impl StreamData for GatewayData {
                     duplicate: true,
                 })
             }
-            AppendOutcome::Refused(SequenceVerdict::StaleEpoch { current }) => Err(TopicError::new(
-                err::INVALID_PRODUCER_EPOCH,
-                format!("the producer's epoch is older than its current epoch {current}"),
-            )),
+            AppendOutcome::Refused(SequenceVerdict::StaleEpoch { current }) => {
+                Err(TopicError::new(
+                    err::INVALID_PRODUCER_EPOCH,
+                    format!("the producer's epoch is older than its current epoch {current}"),
+                ))
+            }
             AppendOutcome::Refused(SequenceVerdict::OutOfOrder { expected }) => {
                 Err(TopicError::new(
                     err::OUT_OF_ORDER_SEQUENCE_NUMBER,

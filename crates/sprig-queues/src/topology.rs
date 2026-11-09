@@ -506,7 +506,8 @@ impl QueueCfg {
             .iter()
             .find(|p| p.operator && p.apply_to.queues(q.qtype) && p.pattern.is_match(&q.name));
         let pol_i = |p: Option<&PolicyDef>, k: &str| {
-            p.and_then(|p| p.definition.get(k)).and_then(serde_json::Value::as_i64)
+            p.and_then(|p| p.definition.get(k))
+                .and_then(serde_json::Value::as_i64)
         };
         let pol_s = |p: Option<&PolicyDef>, k: &str| {
             p.and_then(|p| p.definition.get(k))
@@ -532,9 +533,8 @@ impl QueueCfg {
             .or_else(|| pol_s(user, "overflow"))
             .as_deref()
         {
-            Some("reject-publish") => Overflow::RejectPublish,
             Some("reject-publish-dlx") if !quorum => Overflow::RejectPublishDlx,
-            Some("reject-publish-dlx") => Overflow::RejectPublish,
+            Some("reject-publish" | "reject-publish-dlx") => Overflow::RejectPublish,
             _ => Overflow::DropHead,
         };
         let delivery_limit = arg_i64(a, "x-delivery-limit")
@@ -648,7 +648,8 @@ mod tests {
         let mut t = Topology::new();
         t.queues.insert("a".into(), q("a", 1));
         t.queues.insert("b".into(), q("b", 2));
-        t.exchanges.insert("t".into(), x("t", ExKind::Topic, FieldTable::new()));
+        t.exchanges
+            .insert("t".into(), x("t", ExKind::Topic, FieldTable::new()));
         t.exchanges.insert(
             "f".into(),
             x(
@@ -704,7 +705,10 @@ mod tests {
         let c = QueueCfg::of(
             &qd,
             &[
-                pol(false, serde_json::json!({"max-length": 50, "message-ttl": 7})),
+                pol(
+                    false,
+                    serde_json::json!({"max-length": 50, "message-ttl": 7}),
+                ),
                 pol(true, serde_json::json!({"max-length": 5})),
             ],
             20,
@@ -714,6 +718,9 @@ mod tests {
         assert_eq!(c.pclass(Some(3)), 0);
         qd.arguments.insert("x-max-priority", FieldValue::I32(5));
         let c = QueueCfg::of(&qd, &[], 20);
-        assert_eq!((c.pclass(Some(5)), c.pclass(Some(0)), c.pclass(None)), (0, 5, 5));
+        assert_eq!(
+            (c.pclass(Some(5)), c.pclass(Some(0)), c.pclass(None)),
+            (0, 5, 5)
+        );
     }
 }

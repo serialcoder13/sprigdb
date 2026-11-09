@@ -300,11 +300,7 @@ unsafe impl Allocator for Counting {
     }
 
     fn calloc(&mut self, count: usize, size: usize) -> *mut u8 {
-        if self
-            .used
-            .saturating_add(count.saturating_mul(size))
-            > self.limit
-        {
+        if self.used.saturating_add(count.saturating_mul(size)) > self.limit {
             return self.refuse();
         }
         let p = RustAllocator.calloc(count, size);
@@ -395,9 +391,7 @@ fn value_text<'js>(ctx: &Ctx<'js>, v: &JsValue<'js>) -> String {
 /// result holding `NaN`, an infinity or a `BigInt`; 39871 when the engine
 /// is busy.
 pub async fn run(p: &JsProgram, args: Vec<Value>, host: Host, limits: Limits) -> Result<Outcome> {
-    if args.len() != p.sig.params.len() {
-        return Err(p.sig.coerce(&p.name, args).unwrap_err());
-    }
+    p.sig.check_arity(&p.name, args.len())?;
     let st = Arc::new(RunState::new(limits));
     let sync = Arc::new(SyncHost::new(
         host,
@@ -463,7 +457,17 @@ fn internal(e: &rquickjs::Error) -> SprigError {
 /// The one host function the prelude wraps: `op` and a JSON payload in,
 /// `{"ok": value}` or `{"err": {...}}` out.
 fn host_op(sync: &SyncHost, op: &str, payload: &str) -> Value {
-    let r = (|| -> Result<Value> {
+    match host_inner(sync, op, payload) {
+        Ok(v) => serde_json::json!({ "ok": v }),
+        Err(e) => {
+            let id = sync.keep(crate::budget::copy(&e));
+            serde_json::json!({ "err": engine::error_json(&e, id) })
+        }
+    }
+}
+
+fn host_inner(sync: &SyncHost, op: &str, payload: &str) -> Result<Value> {
+    {
         let v: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
         let arg = |i: usize| v.get(i).cloned().unwrap_or(Value::Null);
         let text = |i: usize| match arg(i) {
@@ -501,13 +505,6 @@ fn host_op(sync: &SyncHost, op: &str, payload: &str) -> Value {
                 format!("unknown host operation {other}"),
             )),
         }
-    })();
-    match r {
-        Ok(v) => serde_json::json!({ "ok": v }),
-        Err(e) => {
-            let id = sync.keep(crate::budget::copy(&e));
-            serde_json::json!({ "err": engine::error_json(&e, id) })
-        }
     }
 }
 
@@ -524,7 +521,9 @@ fn invoke(
         host_op(&h, &op, &payload).to_string()
     })
     .map_err(|e| internal(&e))?;
-    globals.set("__sprig_host", host).map_err(|e| internal(&e))?;
+    globals
+        .set("__sprig_host", host)
+        .map_err(|e| internal(&e))?;
     ctx.eval::<(), _>(PRELUDE)
         .map_err(|e| failure(ctx, &e, sync, st))?;
     let take = |name: &str| -> Result<Function<'_>> {
@@ -565,9 +564,7 @@ fn invoke(
             .map_err(|e| failure(ctx, &e, sync, st))?,
         None => r,
     };
-    let text: Option<String> = out_fn
-        .call((r,))
-        .map_err(|e| failure(ctx, &e, sync, st))?;
+    let text: Option<String> = out_fn.call((r,)).map_err(|e| failure(ctx, &e, sync, st))?;
     let v = match text.as_deref() {
         None => Value::Null,
         Some("\u{0}nonfinite") => {

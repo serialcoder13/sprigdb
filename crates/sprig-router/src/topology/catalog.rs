@@ -398,6 +398,8 @@ pub fn build_with_fks(
         let mut parent = None;
         let mut unique_keys = Vec::new();
         let mut auto_inc = None;
+        let mut primary = Vec::new();
+        let mut primary_classes = Vec::new();
         let (kind, group) = match &t.member {
             Membership::Sharded {
                 group,
@@ -420,6 +422,22 @@ pub fn build_with_fks(
                 if let Some(s) = &shape {
                     columns.clone_from(&s.visible);
                     unique_keys.clone_from(&s.unique_keys);
+                    let classes: Option<Vec<crate::fk::ValClass>> = s
+                        .primary
+                        .iter()
+                        .map(|c| {
+                            s.column_class(c).map(|(_, k)| match k {
+                                sprig_shard::KeyClass::Numeric => crate::fk::ValClass::Num,
+                                sprig_shard::KeyClass::String { .. } => crate::fk::ValClass::Str,
+                                sprig_shard::KeyClass::Binary => crate::fk::ValClass::Bin,
+                                _ => crate::fk::ValClass::Text,
+                            })
+                        })
+                        .collect();
+                    if let Some(c) = classes {
+                        primary.clone_from(&s.primary);
+                        primary_classes = c;
+                    }
                 }
                 fill = *fill_rk;
                 // Chapter 19: a sharded member's AUTO_INCREMENT column
@@ -492,6 +510,8 @@ pub fn build_with_fks(
                 fill_rk: fill,
                 parent,
                 auto_inc,
+                primary,
+                primary_classes,
             },
         ));
     }
@@ -591,23 +611,24 @@ fn fk_graphs(
                     .unwrap_or(ValClass::Text)
             })
             .collect();
-        let g = match graphs.iter().position(|(s, _)| s == cs) {
-            Some(i) => &mut graphs[i].1,
-            None => {
-                graphs.push((
-                    cs.clone(),
-                    FkGraph {
-                        default_schema: cs.clone(),
-                        tables: Vec::new(),
-                        fks: Vec::new(),
-                    },
-                ));
-                &mut graphs.last_mut().expect("just pushed").1
-            }
+        let at = graphs.iter().position(|(s, _)| s == cs);
+        let g = if let Some(i) = at {
+            &mut graphs[i].1
+        } else {
+            graphs.push((
+                cs.clone(),
+                FkGraph {
+                    default_schema: cs.clone(),
+                    tables: Vec::new(),
+                    fks: Vec::new(),
+                },
+            ));
+            &mut graphs.last_mut().expect("just pushed").1
         };
-        let mut index = |e: &TableEntry| match g.tables.iter().position(|t| t.name == e.name) {
-            Some(i) => i,
-            None => {
+        let mut index = |e: &TableEntry| {
+            if let Some(i) = g.tables.iter().position(|t| t.name == e.name) {
+                i
+            } else {
                 g.tables.push(e.clone());
                 g.tables.len() - 1
             }
@@ -625,12 +646,10 @@ fn fk_graphs(
                 .child_columns
                 .iter()
                 .map(|col| {
-                    child_shape
-                        .and_then(|s| s.types.get(col))
-                        .is_none_or(|d| {
-                            let u = d.to_ascii_uppercase();
-                            !u.contains(" DEFAULT ") || u.contains(" DEFAULT NULL")
-                        })
+                    child_shape.and_then(|s| s.types.get(col)).is_none_or(|d| {
+                        let u = d.to_ascii_uppercase();
+                        !u.contains(" DEFAULT ") || u.contains(" DEFAULT NULL")
+                    })
                 })
                 .collect(),
             child_columns: f.child_columns.clone(),

@@ -31,7 +31,7 @@ use crate::plan::{Plan, ShardAt, Target};
 use crate::planner::{IdMode, PlanCtx};
 use crate::topology::{KeyClass, KeyValue, TableEntry, TableKind, Topology};
 
-/// InnoDB's limit on cascading actions.
+/// MariaDB's limit on cascading actions (15 levels).
 pub const MAX_DEPTH: usize = 15;
 
 /// How a key value is read back from MariaDB and written into SQL.
@@ -87,7 +87,7 @@ impl ValClass {
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -185,12 +185,18 @@ impl FkGraph {
 
     /// The keys whose child is table `t`.
     pub fn as_child(&self, t: usize) -> impl Iterator<Item = (usize, &FkRef)> {
-        self.fks.iter().enumerate().filter(move |(_, f)| f.child == t)
+        self.fks
+            .iter()
+            .enumerate()
+            .filter(move |(_, f)| f.child == t)
     }
 
     /// The keys whose parent is table `t`.
     pub fn as_parent(&self, t: usize) -> impl Iterator<Item = (usize, &FkRef)> {
-        self.fks.iter().enumerate().filter(move |(_, f)| f.parent == t)
+        self.fks
+            .iter()
+            .enumerate()
+            .filter(move |(_, f)| f.parent == t)
     }
 }
 
@@ -309,7 +315,12 @@ fn tuple_cond(cols: &[String], t: &[FkVal]) -> String {
 /// The probe of `tuples` (indexes into the caller's list) in `schema`.`table`:
 /// one row per tuple found, its index.
 #[must_use]
-pub fn probe_sql(schema: &str, table: &str, cols: &[String], tuples: &[(usize, &[FkVal])]) -> String {
+pub fn probe_sql(
+    schema: &str,
+    table: &str,
+    cols: &[String],
+    tuples: &[(usize, &[FkVal])],
+) -> String {
     let mut out = String::new();
     for (i, t) in tuples {
         if !out.is_empty() {
@@ -329,7 +340,12 @@ pub fn probe_sql(schema: &str, table: &str, cols: &[String], tuples: &[(usize, &
 /// The shards of `entry` that may hold `tuple` in `cols`: its key's
 /// shard when the key is among them, else every shard (a reference table:
 /// the copy on `near`, else its first).
-fn shards_for(entry: &TableEntry, cols: &[String], tuple: &[FkVal], near: Option<&str>) -> Vec<usize> {
+fn shards_for(
+    entry: &TableEntry,
+    cols: &[String],
+    tuple: &[FkVal],
+    near: Option<&str>,
+) -> Vec<usize> {
     let g = &entry.group;
     if let TableKind::Reference { .. } = entry.kind {
         let i = near
@@ -384,7 +400,8 @@ async fn present(
     budget: &mut Budget,
 ) -> Result<Vec<bool>> {
     let mut found = vec![false; tuples.len()];
-    let mut by_shard: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+    let mut by_shard: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for (i, t) in tuples.iter().enumerate() {
         for s in shards_for(entry, cols, t, near) {
             by_shard.entry(s).or_default().push(i);
@@ -526,9 +543,8 @@ async fn parent_side(
     depth: usize,
 ) -> Result<()> {
     let g = &*work.graph;
-    let rows = match crate::exec::execute(&p.read, be, budget).await? {
-        Output::Rows { rows, .. } => rows,
-        _ => return Err(SprigError::internal("a parent read answered no rows")),
+    let Output::Rows { rows, .. } = crate::exec::execute(&p.read, be, budget).await? else {
+        return Err(SprigError::internal("a parent read answered no rows"));
     };
     let n_old = p.cols.len();
     let changed: Vec<Changed> = rows
@@ -559,7 +575,9 @@ async fn parent_side(
             .filter_map(|c| p.cols.iter().position(|x| x == c))
             .collect();
         if pos.len() != f.parent_columns.len() {
-            return Err(SprigError::internal("a parent read without a referenced column"));
+            return Err(SprigError::internal(
+                "a parent read without a referenced column",
+            ));
         }
         let tuples: Vec<Vec<FkVal>> = changed
             .iter()
@@ -575,7 +593,16 @@ async fn parent_side(
             continue;
         }
         let child = &g.tables[f.child];
-        let found = present(child, &f.child_columns, tuples, None, work.batch, be, budget).await?;
+        let found = present(
+            child,
+            &f.child_columns,
+            tuples,
+            None,
+            work.batch,
+            be,
+            budget,
+        )
+        .await?;
         let hit = found.iter().any(|x| *x);
         metrics::counter!("sprig_fk_checks_total", "side" => "parent", "result" => if hit { "violation" } else { "ok" })
             .increment(1);
@@ -685,7 +712,10 @@ fn action_sql(
             if sets.is_empty() {
                 return Ok(String::new());
             }
-            Ok(format!("UPDATE {child} SET {} WHERE {any}", sets.join(", ")))
+            Ok(format!(
+                "UPDATE {child} SET {} WHERE {any}",
+                sets.join(", ")
+            ))
         }
         _ => Err(not_distributed(format!(
             "ON {} {} of {}",
@@ -745,12 +775,12 @@ mod tests {
         assert_eq!(v.key, Some(KeyValue::Bytes(b"abc".to_vec())));
         let v = ValClass::Num.value(Some(b"-17")).unwrap();
         assert_eq!((v.sql.as_str(), v.key), ("-17", Some(KeyValue::Int(-17))));
-        assert_eq!(
-            ValClass::Text.value(Some(b"it's")).unwrap().sql,
-            "'it''s'"
-        );
+        assert_eq!(ValClass::Text.value(Some(b"it's")).unwrap().sql, "'it''s'");
         assert!(ValClass::Num.value(None).is_none());
-        assert_eq!(ValClass::Str.read_expr("`c`"), "HEX(CONVERT(`c` USING utf8mb4))");
+        assert_eq!(
+            ValClass::Str.read_expr("`c`"),
+            "HEX(CONVERT(`c` USING utf8mb4))"
+        );
     }
 
     #[test]
@@ -763,7 +793,12 @@ mod tests {
             sql: "_utf8mb4 X'41'".into(),
             key: None,
         }];
-        let s = probe_sql("t1_d1_g2_s1", "p", &["id".into()], &[(0, &a[..]), (3, &b[..])]);
+        let s = probe_sql(
+            "t1_d1_g2_s1",
+            "p",
+            &["id".into()],
+            &[(0, &a[..]), (3, &b[..])],
+        );
         assert_eq!(
             s,
             "(SELECT 0 FROM `t1_d1_g2_s1`.`p` WHERE `id` = 1 LIMIT 1 LOCK IN SHARE MODE) \

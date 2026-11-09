@@ -98,7 +98,12 @@ fn assigned<'a>(assignments: &[&'a Assignment], col: &str) -> Option<&'a Expr> {
         .map(|a| &a.value)
 }
 
-fn work(g: Arc<FkGraph>, checks: Vec<FkCheck>, parent: Option<FkParent>, cx: &PlanCtx<'_>) -> Option<Box<FkWork>> {
+fn work(
+    g: Arc<FkGraph>,
+    checks: Vec<FkCheck>,
+    parent: Option<FkParent>,
+    cx: &PlanCtx<'_>,
+) -> Option<Box<FkWork>> {
     let w = FkWork {
         graph: g,
         checks,
@@ -134,7 +139,10 @@ pub(super) fn insert_work(
                 "REPLACE into a table other groups' foreign keys reference",
             );
         }
-        if f.parent_columns.iter().any(|c| assigned(&odku, c).is_some()) {
+        if f.parent_columns
+            .iter()
+            .any(|c| assigned(&odku, c).is_some())
+        {
             return reject(
                 Reason::ForeignKey,
                 "ON DUPLICATE KEY UPDATE of a column other groups' foreign keys reference",
@@ -313,7 +321,13 @@ pub(super) fn update_delete_work(
     Ok(work(g, checks, parent, cx))
 }
 
-fn parent_read(g: &FkGraph, t: usize, fks: Vec<usize>, d: &Dml<'_>, cx: &PlanCtx<'_>) -> R<FkParent> {
+fn parent_read(
+    g: &FkGraph,
+    t: usize,
+    fks: Vec<usize>,
+    d: &Dml<'_>,
+    cx: &PlanCtx<'_>,
+) -> R<FkParent> {
     let q = |s: &str| format!("`{}`", s.replace('`', "``"));
     let mut cols: Vec<String> = Vec::new();
     let mut classes: Vec<ValClass> = Vec::new();

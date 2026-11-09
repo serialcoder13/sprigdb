@@ -2,8 +2,8 @@
 //! transaction"): every delivery carries `x-sprig-delivery`, which a
 //! consumer passes to `sprig.mq_ack` inside its own transaction.
 //!
-//! A token is `q1.` and base64url of `(tenant, queue, lane, class, seq,
-//! msg_id, owner epoch)` with the first 16 bytes of an HMAC-SHA256 under the
+//! A token is `q1.` and base64url of `(tenant, database, queue, lane,
+//! class, seq, msg_id, owner epoch)` with the first 16 bytes of an HMAC-SHA256 under the
 //! tenant's queue key (`mq_keys` in the tenant catalog, so every gateway
 //! checks every other gateway's tokens). A forged or altered token is
 //! 39259.
@@ -17,7 +17,7 @@ use subtle::ConstantTimeEq;
 use crate::store::MsgId;
 
 const PREFIX: &str = "q1.";
-const BODY: usize = 8 + 8 + 2 + 1 + 8 + 16 + 8;
+const BODY: usize = 8 + 4 + 8 + 2 + 1 + 8 + 16 + 8;
 const MAC: usize = 16;
 
 /// What a token names.
@@ -25,6 +25,8 @@ const MAC: usize = 16;
 pub struct TokenData {
     /// The tenant.
     pub tenant: u64,
+    /// The vhost's database.
+    pub db: u32,
     /// The delivery.
     pub id: DeliveryId,
     /// The message id (the delete checks it).
@@ -55,9 +57,17 @@ impl TokenKey {
 
     /// A token for a delivery.
     #[must_use]
-    pub fn mint(&self, tenant: u64, id: &DeliveryId, msg_id: &MsgId, epoch: u64) -> String {
+    pub fn mint(
+        &self,
+        tenant: u64,
+        db: u32,
+        id: &DeliveryId,
+        msg_id: &MsgId,
+        epoch: u64,
+    ) -> String {
         let mut raw = Vec::with_capacity(BODY + MAC);
         raw.extend_from_slice(&tenant.to_be_bytes());
+        raw.extend_from_slice(&db.to_be_bytes());
         raw.extend_from_slice(&id.queue.to_be_bytes());
         raw.extend_from_slice(&id.lane.to_be_bytes());
         raw.push(id.pclass);
@@ -89,17 +99,18 @@ impl TokenKey {
             u64::from_be_bytes(a)
         };
         let mut msg_id = [0u8; 16];
-        msg_id.copy_from_slice(&body[27..43]);
+        msg_id.copy_from_slice(&body[31..47]);
         Some(TokenData {
             tenant: u64_at(0),
+            db: u32::from_be_bytes([body[8], body[9], body[10], body[11]]),
             id: DeliveryId {
-                queue: u64_at(8),
-                lane: u16::from_be_bytes([body[16], body[17]]),
-                pclass: body[18],
-                seq: u64_at(19),
+                queue: u64_at(12),
+                lane: u16::from_be_bytes([body[20], body[21]]),
+                pclass: body[22],
+                seq: u64_at(23),
             },
             msg_id,
-            epoch: u64_at(43),
+            epoch: u64_at(47),
         })
     }
 }
@@ -128,14 +139,20 @@ mod tests {
             pclass: 3,
             seq: 88_412,
         };
-        let t = k.mint(42, &id, &[7; 16], 5);
+        let t = k.mint(42, 3, &id, &[7; 16], 5);
         let d = k.verify(&t).unwrap_or_else(|| unreachable!());
-        assert_eq!((d.tenant, d.id, d.msg_id, d.epoch), (42, id, [7; 16], 5));
+        assert_eq!(
+            (d.tenant, d.db, d.id, d.msg_id, d.epoch),
+            (42, 3, id, [7; 16], 5)
+        );
         assert_eq!(tenant_of(&t), Some(42));
         assert!(TokenKey::new(b"other").verify(&t).is_none());
         let mut bad = t.into_bytes();
         let i = bad.len() - 5;
         bad[i] = if bad[i] == b'A' { b'B' } else { b'A' };
-        assert!(k.verify(&String::from_utf8(bad).unwrap_or_default()).is_none());
+        assert!(
+            k.verify(&String::from_utf8(bad).unwrap_or_default())
+                .is_none()
+        );
     }
 }

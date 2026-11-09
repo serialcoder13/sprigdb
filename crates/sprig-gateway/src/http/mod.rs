@@ -33,6 +33,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod functions;
 pub mod grpc;
 pub mod rest;
 pub mod settings;

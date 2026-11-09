@@ -286,7 +286,7 @@ fn writes_compile() {
     assert!(p.procedure.contains("v_take_affected := ROW_COUNT();"));
     assert!(
         p.procedure
-            .contains("FOR r_list_rows IN (SELECT id, qty, note FROM orders")
+            .contains("CURSOR c_list_rows IS SELECT id, qty, note FROM orders")
     );
     golden("orders", &c);
 }

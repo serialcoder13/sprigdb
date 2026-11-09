@@ -433,7 +433,12 @@ impl LogicStore {
     ///
     /// # Errors
     /// 39070 or a backend error.
-    pub async fn set_exposure(&self, c: &mut Conn, module_id: u64, exposure: &[String]) -> Result<()> {
+    pub async fn set_exposure(
+        &self,
+        c: &mut Conn,
+        module_id: u64,
+        exposure: &[String],
+    ) -> Result<()> {
         let mut list: Vec<&str> = vec!["sql"];
         for e in exposure {
             if !list.contains(&e.as_str()) {
@@ -441,7 +446,10 @@ impl LogicStore {
             }
         }
         c.exec_drop(
-            format!("UPDATE {} SET exposure = ? WHERE module_id = ?", self.modules),
+            format!(
+                "UPDATE {} SET exposure = ? WHERE module_id = ?",
+                self.modules
+            ),
             (list.join(","), module_id),
         )
         .await

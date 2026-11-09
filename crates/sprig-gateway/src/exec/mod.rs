@@ -45,6 +45,8 @@ pub(crate) mod inherit;
 pub(crate) mod types;
 // Chapter 45: event streams (R9).
 mod streams;
+// Chapter 50: `sprig.mq_*` calls (R9).
+mod queues;
 
 use std::sync::Arc;
 use std::time::Duration;

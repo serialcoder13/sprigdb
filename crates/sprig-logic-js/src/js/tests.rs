@@ -60,13 +60,16 @@ async fn the_chapter_example_as_a_module() {
         ["SELECT price, stock FROM products WHERE id = 7"]
     );
     let db = Arc::new(Script::rows(&[("400.00", "1")]));
-    let r = go(QUOTE, two(), vec![json!(7), json!(3)], db, Limits::default())
-        .await
-        .unwrap();
-    assert_eq!(
-        r,
-        ("error".into(), json!({"message": "not enough stock"}))
-    );
+    let r = go(
+        QUOTE,
+        two(),
+        vec![json!(7), json!(3)],
+        db,
+        Limits::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r, ("error".into(), json!({"message": "not enough stock"})));
 }
 
 #[tokio::test]
@@ -232,7 +235,14 @@ async fn budgets_cant_be_caught() {
         "for (;;) { try { while (true) {} } catch (e) {} finally { } }",
         "const f = () => { try { for(;;){} } catch (e) { return f(); } }; f();",
     ] {
-        let r = go(src, sig(&[], false), vec![], Arc::new(Script::default()), quick()).await;
+        let r = go(
+            src,
+            sig(&[], false),
+            vec![],
+            Arc::new(Script::default()),
+            quick(),
+        )
+        .await;
         assert_eq!(class(&r), Some(39864), "{src}");
         assert!(r.unwrap_err().message.contains("wall time"));
     }

@@ -486,7 +486,7 @@ impl StreamsStore {
         .map_err(map_err)
     }
 
-    /// Every committed offset of a group (OffsetFetch without topics),
+    /// Every committed offset of a group (`OffsetFetch` without topics),
     /// by stream and partition.
     ///
     /// # Errors

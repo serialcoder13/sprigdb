@@ -389,6 +389,18 @@ impl ScriptSig {
             .map(|(v, (_, t))| coerce(v, *t))
             .collect())
     }
+
+    /// 39874 unless `n` arguments fit.
+    ///
+    /// # Errors
+    /// 39874.
+    pub fn check_arity(&self, name: &str, n: usize) -> Result<()> {
+        if n == self.params.len() {
+            Ok(())
+        } else {
+            self.coerce(name, vec![Value::Null; n]).map(|_| ())
+        }
+    }
 }
 
 fn coerce(v: Value, t: ParamTy) -> Value {
@@ -472,11 +484,15 @@ pub fn error_json(e: &SprigError, id: usize) -> Value {
 /// it carries, or 39865 with its text.
 #[must_use]
 pub fn user_error(text: &str) -> SprigError {
-    let mut t: String = text.chars().take(1000).collect();
-    if t.is_empty() {
-        t = "the code threw an error".to_owned();
-    }
-    SprigError::new(SprigCode::LogicUserError, t)
+    let t: String = text.chars().take(1000).collect();
+    SprigError::new(
+        SprigCode::LogicUserError,
+        if t.is_empty() {
+            "the code threw an error".to_owned()
+        } else {
+            t
+        },
+    )
 }
 
 #[cfg(test)]

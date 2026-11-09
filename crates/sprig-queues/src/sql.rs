@@ -1,0 +1,695 @@
+//! Queues from SQL (chapter 50, "SQL, logic, MongoDB and HTTP";
+//! build steps 9 and 10): `CALL sprig.mq_publish(...)`, `mq_get`,
+//! `mq_ack` and `mq_nack`.
+//!
+//! The gateway evaluates the arguments in the session (so any expression
+//! works) and calls the engine here:
+//!
+//! - **Publishing outside a transaction** routes and enqueues at once and
+//!   returns the number of queues reached, after the owners committed.
+//! - **Publishing inside a transaction** routes at once (so `mandatory` and
+//!   the count are known) and gives the gateway an outbox row
+//!   (`__sprig_qo`, kind `publish`) to insert in the client's own
+//!   transaction: the message exists only if the transaction commits. The
+//!   forwarder enqueues committed rows with the row's id as the message
+//!   id, so a replay is a no-op (`uk_msg`). A delayed exchange's message
+//!   becomes a `__sprig_qd` row the same way.
+//! - **Acknowledging** takes a delivery token (`x-sprig-delivery`, or the
+//!   first column of `mq_get`): the owner holds the delivery (no timeout,
+//!   no redelivery), the gateway deletes the message row in the client's
+//!   transaction, and the owner learns the outcome when the client says
+//!   (outside a transaction: at once) or, at the latest, by reading the row
+//!   under a lock after `hold_check_ms`. MariaDB's row lock decides, never
+//!   timing: a delete that finds no row is 39258 and the transaction rolls
+//!   back.
+
+use std::sync::Arc;
+
+use bytes::{Bytes, BytesMut};
+use serde_json::{Value, json};
+use sprig_proto_amqp::auth::Principal;
+use sprig_proto_amqp::backend::{ConnKey, OpCtx, Settlement, Vhost};
+use sprig_proto_amqp::convert;
+use sprig_proto_amqp::error::{MqCode, MqError};
+use sprig_proto_amqp::mem::Perm;
+use sprig_proto_amqp::message::{Delivery, Message};
+use sprig_proto_amqp::v091::props::BasicProperties;
+use tokio::sync::oneshot;
+
+use crate::catalog::{json_table, table_json};
+use crate::engine::{QueueEngine, VShared, VhostRef};
+use crate::msg;
+use crate::owner::{ANY_HOLDER, Cmd, Holder};
+use crate::store::{DelayedRow, OutDest, OutKind, OutboxRow, new_msg_id};
+use crate::token::{self, TokenData};
+use crate::topology::ExKind;
+use crate::vhost::ConnVhost;
+
+/// Which call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MqCall {
+    /// `sprig.mq_publish(exchange, routing_key, body, properties [, mandatory])`.
+    Publish,
+    /// `sprig.mq_get(queue, max, lease_ms)`.
+    Get,
+    /// `sprig.mq_ack(token)`.
+    Ack,
+    /// `sprig.mq_nack(token, requeue)`.
+    Nack,
+}
+
+/// A parsed `CALL sprig.mq_*(...)`: the call and its argument texts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    /// Which.
+    pub call: MqCall,
+    /// Each argument's SQL text, as written.
+    pub args: Vec<String>,
+}
+
+/// Parses `CALL sprig.mq_<name>(<args>)`; `None` for anything else.
+#[must_use]
+pub fn parse_call(sql: &str) -> Option<Call> {
+    let s = sql.trim().trim_end_matches(';').trim();
+    let rest = strip_word(s, "call")?;
+    let rest = rest.trim_start();
+    let rest = rest
+        .strip_prefix("`sprig`")
+        .or_else(|| strip_word(rest, "sprig"))?;
+    let rest = rest.trim_start().strip_prefix('.')?.trim_start();
+    let (name, rest) = rest.split_at(rest.find(|c: char| c == '(' || c.is_whitespace())?);
+    let call = match name.trim_matches('`').to_ascii_lowercase().as_str() {
+        "mq_publish" => MqCall::Publish,
+        "mq_get" => MqCall::Get,
+        "mq_ack" => MqCall::Ack,
+        "mq_nack" => MqCall::Nack,
+        _ => return None,
+    };
+    let inner = rest.trim().strip_prefix('(')?.strip_suffix(')')?;
+    Some(Call {
+        call,
+        args: split_args(inner)?,
+    })
+}
+
+fn strip_word<'a>(s: &'a str, w: &str) -> Option<&'a str> {
+    let head = s.get(..w.len())?;
+    if !head.eq_ignore_ascii_case(w) {
+        return None;
+    }
+    let rest = &s[w.len()..];
+    if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(rest)
+}
+
+/// Splits arguments at top-level commas (outside quotes and parentheses).
+fn split_args(s: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            cur.push(c);
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            } else if c == q {
+                if chars.peek() == Some(&q) {
+                    cur.push(chars.next()?);
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            '(' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ',' if depth == 0 => out.push(std::mem::take(&mut cur).trim().to_owned()),
+            _ => cur.push(c),
+        }
+    }
+    if quote.is_some() || depth != 0 {
+        return None;
+    }
+    if !cur.trim().is_empty() || !out.is_empty() {
+        out.push(cur.trim().to_owned());
+    }
+    Some(out)
+}
+
+/// A message published from SQL: a 0-9-1 message whose properties come
+/// from a JSON object (`content_type`, `content_encoding`, `headers`,
+/// `delivery_mode`, `priority`, `correlation_id`, `reply_to`,
+/// `expiration`, `message_id`, `timestamp`, `type`, `user_id`, `app_id`).
+/// Messages are persistent unless `delivery_mode` says 1.
+///
+/// # Errors
+/// 406 for a malformed properties object.
+pub fn message(
+    exchange: &str,
+    routing_key: &str,
+    body: Vec<u8>,
+    props: Option<&str>,
+) -> Result<Message, MqError> {
+    let v: Value = match props {
+        None => Value::Null,
+        Some(s) if s.trim().is_empty() => Value::Null,
+        Some(s) => serde_json::from_str(s)
+            .map_err(|e| MqError::precondition(format!("properties are not a JSON object: {e}")))?,
+    };
+    if !v.is_null() && !v.is_object() {
+        return Err(MqError::precondition("properties are not a JSON object"));
+    }
+    let s = |k: &str| {
+        v.get(k).and_then(|x| match x {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+    };
+    let n = |k: &str| v.get(k).and_then(Value::as_u64);
+    let p = BasicProperties {
+        content_type: s("content_type"),
+        content_encoding: s("content_encoding"),
+        headers: v.get("headers").filter(|h| h.is_object()).map(json_table),
+        delivery_mode: Some(
+            n("delivery_mode")
+                .and_then(|d| u8::try_from(d).ok())
+                .unwrap_or(2),
+        ),
+        priority: n("priority").and_then(|d| u8::try_from(d).ok()),
+        correlation_id: s("correlation_id"),
+        reply_to: s("reply_to"),
+        expiration: s("expiration"),
+        message_id: s("message_id"),
+        timestamp: n("timestamp"),
+        kind: s("type"),
+        user_id: s("user_id"),
+        app_id: s("app_id"),
+        cluster_id: None,
+    };
+    let mut raw = BytesMut::new();
+    p.encode(&mut raw);
+    convert::from_091(
+        exchange.to_owned(),
+        routing_key.to_owned(),
+        raw.freeze(),
+        &p,
+        Bytes::from(body),
+    )
+}
+
+/// A delivery's properties as the JSON `mq_get` returns.
+#[must_use]
+pub fn properties_json(d: &Delivery) -> String {
+    let Ok((raw, _)) = convert::to_091(d) else {
+        return "{}".into();
+    };
+    let Ok(p) = BasicProperties::decode(&raw) else {
+        return "{}".into();
+    };
+    let mut o = serde_json::Map::new();
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            o.insert(k.to_owned(), v);
+        }
+    };
+    put("content_type", p.content_type.map(Value::String));
+    put("content_encoding", p.content_encoding.map(Value::String));
+    put("headers", p.headers.as_ref().map(table_json));
+    put("delivery_mode", p.delivery_mode.map(|d| json!(d)));
+    put("priority", p.priority.map(|d| json!(d)));
+    put("correlation_id", p.correlation_id.map(Value::String));
+    put("reply_to", p.reply_to.map(Value::String));
+    put("expiration", p.expiration.map(Value::String));
+    put("message_id", p.message_id.map(Value::String));
+    put("timestamp", p.timestamp.map(|d| json!(d)));
+    put("type", p.kind.map(Value::String));
+    put("user_id", p.user_id.map(Value::String));
+    put("app_id", p.app_id.map(Value::String));
+    Value::Object(o).to_string()
+}
+
+/// The body of a delivery as `mq_get` returns it (0-9-1 body bytes).
+#[must_use]
+pub fn body_bytes(d: &Delivery) -> Bytes {
+    convert::to_091(d).map(|(_, b)| b).unwrap_or_default()
+}
+
+/// What a publish inside a transaction writes in the client's
+/// transaction.
+#[derive(Debug, Clone)]
+pub enum TxnWrite {
+    /// An outbox row, and how many queues it reaches.
+    Outbox(OutboxRow, u32),
+    /// A delayed message.
+    Delayed(DelayedRow),
+    /// Nothing: no queue (and not mandatory).
+    Nothing,
+}
+
+/// A SQL session's use of one vhost.
+pub struct SqlVhost {
+    v: Arc<VShared>,
+    cv: ConnVhost,
+    cx: OpCtx,
+}
+
+impl std::fmt::Debug for SqlVhost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlVhost")
+            .field("vhost", &self.v.r)
+            .finish_non_exhaustive()
+    }
+}
+
+/// SQL sessions' connection keys: this bit and the session id, apart from
+/// AMQP connections' process counter.
+pub const SQL_CONN_BIT: u64 = 1 << 62;
+
+fn unroutable(exchange: &str, key: &str) -> MqError {
+    MqError::new(
+        MqCode::Unroutable,
+        format!("message to exchange '{exchange}' with routing key '{key}' reached no queue"),
+    )
+    .with_reply(312)
+}
+
+impl QueueEngine {
+    /// Opens database `db` as a vhost for a SQL session (`session` is its
+    /// connection id), checking the user may use it.
+    ///
+    /// # Errors
+    /// 39250, 39253, or the catalog's.
+    pub async fn sql_vhost(
+        &self,
+        principal: Arc<Principal>,
+        db: &str,
+        session: u64,
+    ) -> Result<SqlVhost, MqError> {
+        let r = self.inner.deps.catalog.open(&principal, db).await?;
+        self.inner.deps.catalog.refresh(&r).await?;
+        let v = self.vshared(&r);
+        let conn = ConnKey(SQL_CONN_BIT | session);
+        Ok(SqlVhost {
+            cv: ConnVhost::new(Arc::clone(&v), conn),
+            v,
+            cx: OpCtx {
+                principal,
+                conn,
+                channel: 0,
+            },
+        })
+    }
+
+    /// Checks a delivery token.
+    ///
+    /// # Errors
+    /// 39259 for a malformed or forged token.
+    pub fn verify_token(&self, t: &str) -> Result<TokenData, MqError> {
+        let bad = || {
+            MqError::new(
+                MqCode::DeliveryTokenInvalid,
+                "malformed or forged delivery token",
+            )
+        };
+        let tenant = token::tenant_of(t).ok_or_else(bad)?;
+        let key = self.inner.deps.catalog.token_key(tenant).ok_or_else(bad)?;
+        key.verify(t).ok_or_else(bad)
+    }
+}
+
+impl SqlVhost {
+    /// The vhost.
+    #[must_use]
+    pub fn vhost(&self) -> &VhostRef {
+        &self.v.r
+    }
+
+    /// Makes sure the vhost's shard tables exist (before the session
+    /// writes them).
+    ///
+    /// # Errors
+    /// The store's.
+    pub async fn ensure_store(&self) -> Result<(), MqError> {
+        let e = self
+            .v
+            .engine
+            .upgrade()
+            .ok_or_else(|| MqError::new(MqCode::OwnerMoved, "engine stopped"))?;
+        e.deps.catalog.store(&self.v.r).await.map(|_| ())
+    }
+
+    /// Publishes now (outside a transaction): the number of queues
+    /// reached, after every one committed.
+    ///
+    /// # Errors
+    /// 39250 (no exchange), 39253, 39255 (mandatory, no queue), 39256
+    /// (full), 39261.
+    pub async fn publish_now(&self, m: Message, mandatory: bool) -> Result<u32, MqError> {
+        let (exchange, key) = (m.exchange.clone(), m.routing_key.clone());
+        let p = self.cv.publish(&self.cx, m, mandatory)?;
+        if p.routed == 0 && mandatory {
+            return Err(unroutable(&exchange, &key));
+        }
+        p.confirm.await?;
+        Ok(p.routed)
+    }
+
+    /// Routes a publish inside a transaction: what the session writes.
+    ///
+    /// # Errors
+    /// 39250, 39253, 39255, 39264.
+    pub async fn publish_in_txn(&self, m: Message, mandatory: bool) -> Result<TxnWrite, MqError> {
+        let e = self
+            .v
+            .engine
+            .upgrade()
+            .ok_or_else(|| MqError::new(MqCode::OwnerMoved, "engine stopped"))?;
+        if !e.deps.catalog.allowed(
+            &self.cx.principal,
+            &self.v.r,
+            Perm::Write,
+            "exchange",
+            &m.exchange,
+        ) {
+            return Err(MqError::access_refused(format!(
+                "access to exchange '{}' in vhost '{}' refused for user '{}' (write)",
+                m.exchange, self.v.r.name, self.cx.principal.user
+            )));
+        }
+        let topo = e.deps.catalog.refresh(&self.v.r).await?;
+        let Some(x) = topo.exchanges.get(&m.exchange).cloned() else {
+            return Err(MqError::not_found(format!(
+                "no exchange '{}' in vhost '{}'",
+                m.exchange, self.v.r.name
+            )));
+        };
+        if x.internal {
+            return Err(MqError::access_refused(format!(
+                "cannot publish to internal exchange '{}'",
+                m.exchange
+            )));
+        }
+        let fmt = msg::fmt_code(m.format);
+        if x.kind == ExKind::Delayed
+            && let Some(d) = msg::delay_ms(&m)
+        {
+            let s = e.deps.catalog.settings(&self.v.r);
+            if u64::try_from(d).unwrap_or(u64::MAX) > s.delay_max_ms {
+                return Err(MqError::new(
+                    MqCode::DelayOutOfRange,
+                    format!(
+                        "x-delay {d} is above queue.delay_max_ms ({})",
+                        s.delay_max_ms
+                    ),
+                ));
+            }
+            return Ok(TxnWrite::Delayed(DelayedRow {
+                exchange_id: x.id,
+                exchange: x.name.clone(),
+                due_ms: e.deps.clock.now_ms().saturating_add(d),
+                msg_id: new_msg_id(),
+                routing_key: m.routing_key.clone(),
+                fmt,
+                props: m.props.clone(),
+                body: m.body.clone(),
+            }));
+        }
+        let targets = self
+            .v
+            .with_view(|v| v.route(&m.exchange, &m.routing_key, &m.info.headers))
+            .unwrap_or_default();
+        if targets.is_empty() {
+            if mandatory {
+                return Err(unroutable(&m.exchange, &m.routing_key));
+            }
+            return Ok(TxnWrite::Nothing);
+        }
+        let n = u32::try_from(targets.len()).unwrap_or(u32::MAX);
+        metrics::counter!("sprig_queue_published_total", "path" => "outbox").increment(1);
+        Ok(TxnWrite::Outbox(
+            OutboxRow {
+                out_id: new_msg_id(),
+                kind: OutKind::Publish,
+                dest: OutDest::Queues(targets.iter().map(|q| q.id).collect()),
+                msg_id: new_msg_id(),
+                fmt,
+                exchange: m.exchange.clone(),
+                routing_key: m.routing_key.clone(),
+                props: m.props.clone(),
+                body: m.body.clone(),
+                deaths: None,
+            },
+            n,
+        ))
+    }
+
+    /// The transaction that wrote outbox rows committed: forward them now.
+    pub fn committed(&self) {
+        self.v.wake.notify_one();
+    }
+
+    /// `mq_get`: up to `max` messages, each held for `lease_ms` unless
+    /// acknowledged.
+    ///
+    /// # Errors
+    /// 39250, 39253, 39252.
+    pub async fn get(
+        &self,
+        queue: &str,
+        max: u32,
+        lease_ms: u64,
+    ) -> Result<Vec<Delivery>, MqError> {
+        // Through the vhost first, for the checks; then the owner with the
+        // lease.
+        let q = self.v.queue(queue).ok_or_else(|| {
+            MqError::not_found(format!("no queue '{queue}' in vhost '{}'", self.v.r.name))
+        })?;
+        let e = self
+            .v
+            .engine
+            .upgrade()
+            .ok_or_else(|| MqError::new(MqCode::OwnerMoved, "engine stopped"))?;
+        if !e
+            .deps
+            .catalog
+            .allowed(&self.cx.principal, &self.v.r, Perm::Read, "queue", queue)
+        {
+            return Err(MqError::access_refused(format!(
+                "access to queue '{queue}' in vhost '{}' refused for user '{}' (read)",
+                self.v.r.name, self.cx.principal.user
+            )));
+        }
+        let h = self.v.slot(&q);
+        let mut out = Vec::new();
+        for _ in 0..max.max(1) {
+            let (tx, rx) = oneshot::channel();
+            if !h.send(Cmd::Get {
+                holder: Holder {
+                    origin: 0,
+                    conn: self.cx.conn,
+                },
+                no_ack: false,
+                lease_ms: Some(lease_ms.max(1)),
+                reply: tx,
+            }) {
+                break;
+            }
+            match rx
+                .await
+                .map_err(|_| MqError::new(MqCode::OwnerMoved, "owner stopped"))??
+            {
+                Some((d, _)) => out.push(d),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Starts an acknowledgement inside a transaction: the owner holds the
+    /// delivery.
+    ///
+    /// # Errors
+    /// 39258 when it is no longer delivered.
+    pub async fn hold(&self, t: &TokenData) -> Result<(), MqError> {
+        let Some(q) = self.v.queue_by_id(t.id.queue) else {
+            return Err(MqError::new(
+                MqCode::AlreadySettled,
+                "the queue no longer exists",
+            ));
+        };
+        let (tx, rx) = oneshot::channel();
+        if !self.v.slot(&q).send(Cmd::Hold {
+            id: t.id,
+            msg_id: t.msg_id,
+            reply: tx,
+        }) {
+            return Err(MqError::new(MqCode::OwnerMoved, "owner stopped"));
+        }
+        rx.await
+            .map_err(|_| MqError::new(MqCode::OwnerMoved, "owner stopped"))?
+    }
+
+    /// The transaction holding `t` ended.
+    pub fn release(&self, t: &TokenData, committed: bool) {
+        if let Some(h) = self.v.slot_of(t.id.queue) {
+            let _ = h.send(Cmd::Release {
+                id: t.id,
+                committed,
+            });
+        }
+    }
+
+    /// `mq_nack(token, requeue)`.
+    pub fn nack(&self, t: &TokenData, requeue: bool) {
+        if let Some(h) = self.v.slot_of(t.id.queue) {
+            let how = if requeue {
+                Settlement::Requeue { failed: false }
+            } else {
+                Settlement::DeadLetter(sprig_proto_amqp::backend::DeadLetterReason::Rejected)
+            };
+            let _ = h.send(Cmd::Settle(
+                Holder {
+                    origin: ANY_HOLDER,
+                    conn: self.cx.conn,
+                },
+                vec![(t.id, how)],
+            ));
+        }
+    }
+
+    /// The vhost's database name (for the session's statements).
+    #[must_use]
+    pub fn db(&self) -> &str {
+        &self.v.r.db
+    }
+
+    /// The vhost (for `Vhost` calls).
+    #[must_use]
+    pub fn conn_vhost(&self) -> &dyn Vhost {
+        &self.cv
+    }
+}
+
+/// `X'...'` of bytes.
+#[must_use]
+pub fn hex_literal(b: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(3 + b.len() * 2);
+    s.push_str("X'");
+    for x in b {
+        let _ = write!(s, "{x:02x}");
+    }
+    s.push('\'');
+    s
+}
+
+/// The insert of an outbox row into `db`'s `__sprig_qo`, as a statement
+/// of the client's session (logical names, internal mode).
+#[must_use]
+pub fn outbox_sql(db: &str, r: &OutboxRow) -> String {
+    let dest = serde_json::to_string(&r.dest).unwrap_or_default();
+    format!(
+        "INSERT INTO `{}`.`__sprig_qo` (out_id, kind, dest, msg_id, fmt, exchange, routing_key, props, body, deaths) \
+         VALUES ({}, '{}', {}, {}, {}, {}, {}, {}, {}, NULL)",
+        db.replace('`', "``"),
+        hex_literal(&r.out_id),
+        r.kind.as_str(),
+        hex_literal(dest.as_bytes()),
+        hex_literal(&r.msg_id),
+        r.fmt,
+        hex_literal(r.exchange.as_bytes()),
+        hex_literal(r.routing_key.as_bytes()),
+        hex_literal(&r.props),
+        hex_literal(&r.body),
+    )
+}
+
+/// The insert of a delayed message into `db`'s `__sprig_qd`.
+#[must_use]
+pub fn delayed_sql(db: &str, r: &DelayedRow) -> String {
+    format!(
+        "INSERT INTO `{}`.`__sprig_qd` (exchange_id, exchange, due_ms, msg_id, routing_key, fmt, props, body) \
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+        db.replace('`', "``"),
+        r.exchange_id,
+        hex_literal(r.exchange.as_bytes()),
+        r.due_ms,
+        hex_literal(&r.msg_id),
+        hex_literal(r.routing_key.as_bytes()),
+        r.fmt,
+        hex_literal(&r.props),
+        hex_literal(&r.body),
+    )
+}
+
+/// The delete an acknowledgement makes in the client's transaction.
+#[must_use]
+pub fn ack_sql(db: &str, t: &TokenData) -> String {
+    format!(
+        "DELETE FROM `{}`.`__sprig_qm` WHERE queue_id = {} AND lane = {} AND pclass = {} AND seq = {} AND msg_id = {}",
+        db.replace('`', "``"),
+        t.id.queue,
+        t.id.lane,
+        t.id.pclass,
+        t.id.seq,
+        hex_literal(&t.msg_id)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_calls() {
+        let c = parse_call(
+            "CALL sprig.mq_publish('orders', 'order.paid.eu', JSON_OBJECT('id', 7, 'x', 'a,b'), JSON_OBJECT('message_id','m1'));",
+        )
+        .unwrap_or_else(|| unreachable!());
+        assert_eq!(c.call, MqCall::Publish);
+        assert_eq!(c.args.len(), 4);
+        assert_eq!(c.args[2], "JSON_OBJECT('id', 7, 'x', 'a,b')");
+        let c = parse_call("call `sprig`.mq_ack('q1.AA')").unwrap_or_else(|| unreachable!());
+        assert_eq!((c.call, c.args), (MqCall::Ack, vec!["'q1.AA'".to_owned()]));
+        assert!(parse_call("CALL sprig.other(1)").is_none());
+        assert!(parse_call("CALL sprigx.mq_ack(1)").is_none());
+        assert!(parse_call("SELECT 1").is_none());
+        let c = parse_call("CALL sprig.mq_get('q', 10, 30000)").unwrap_or_else(|| unreachable!());
+        assert_eq!(c.args, ["'q'", "10", "30000"]);
+    }
+
+    #[test]
+    fn sql_messages() {
+        let m = message(
+            "x",
+            "k",
+            b"{\"a\":1}".to_vec(),
+            Some(r#"{"content_type":"application/json","message_id":"o1","priority":3,"headers":{"source":"checkout"}}"#),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(m.info.message_id.as_deref(), Some("o1"));
+        assert_eq!(m.info.priority, Some(3));
+        assert!(m.info.durable);
+        assert!(m.info.headers.get("source").is_some());
+        assert!(message("x", "k", vec![], Some("[1]")).is_err());
+        assert_eq!(hex_literal(&[0, 255]), "X'00ff'");
+    }
+}

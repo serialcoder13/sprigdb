@@ -529,7 +529,7 @@ impl PassSession {
         let (user, host) = (ts.principal.user.clone(), ts.principal.host.clone());
 
         // Chapter 37: `Functions.Call` over HTTP and gRPC (R7 order 6).
-        if !sandbox && let Some(req) = super::logic::function_call_request(text) {
+        if !sandbox && let Some(req) = sprig_logic::invoke::FunctionCall::parse(text) {
             return self.tenant_function_call(cx, req, more, format, out).await;
         }
         // Chapter 41: `CREATE FUNCTION | PROCEDURE ... LANGUAGE kirun |
@@ -874,6 +874,10 @@ impl PassSession {
             .tenant_streams(cx, text, attrs, more, format, &cat, out)
             .await?
         {
+            return Ok(step);
+        }
+        // Chapter 50: `CALL sprig.mq_publish | mq_get | mq_ack | mq_nack` (R9).
+        if let Some(step) = self.tenant_queues(cx, text, more, format, out).await? {
             return Ok(step);
         }
         // Chapter 42: spaces, shares and merged views of inheritable

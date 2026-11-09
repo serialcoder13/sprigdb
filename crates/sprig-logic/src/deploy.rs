@@ -209,9 +209,16 @@ pub fn wrapper(w: &WrapperSpec<'_>, schema: &str, entry: &str) -> String {
         select.push(format!("{v} AS {}", bq(n)));
     }
     let secs = w.budget_ms.max(1) as f64 / 1000.0;
+    // Chapter 41, "Privileges and transactions": a call in autocommit runs
+    // in its own transaction, rolled back on an error, as the engine tier
+    // and `Functions.Call` run theirs.
     format!(
         "{}BEGIN\n  DECLARE v__event VARCHAR(64);\n  DECLARE v__result LONGTEXT;\n  \
+         DECLARE v__own INT DEFAULT 0;\n  \
+         DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN IF v__own = 1 THEN ROLLBACK; END IF; RESIGNAL; END;\n  \
+         IF @@in_transaction = 0 AND @@autocommit = 1 THEN START TRANSACTION; SET v__own = 1; END IF;\n  \
          SET STATEMENT max_statement_time = {secs} FOR CALL {}({call_args}v__event, v__result);\n  \
+         IF v__own = 1 THEN COMMIT; END IF;\n  \
          SELECT {};\nEND",
         header(w, schema, "mariadb"),
         bq(entry),
@@ -327,7 +334,11 @@ pub fn select_function(
         .iter()
         .map(|(n, t)| format!("{n} {}", sql_type(*t)))
         .collect();
-    let out = w.func.event("output").map(|e| e.fields.clone()).unwrap_or_default();
+    let out = w
+        .func
+        .event("output")
+        .map(|e| e.fields.clone())
+        .unwrap_or_default();
     let (ret_ty, ret_expr) = match out.as_slice() {
         [(n, t)] => {
             let path = quote(&format!(
@@ -363,8 +374,16 @@ pub fn select_function(
         bq(schema),
         bq(w.name),
         decl.join(", "),
-        if entry.is_some() { "READS SQL DATA" } else { "NO SQL" },
-        if w.definer_security { "DEFINER" } else { "INVOKER" },
+        if entry.is_some() {
+            "READS SQL DATA"
+        } else {
+            "NO SQL"
+        },
+        if w.definer_security {
+            "DEFINER"
+        } else {
+            "INVOKER"
+        },
         quote(&format!(
             "sprig logic module {} version {} ({}, {}) for SELECT",
             w.module_id,
@@ -373,36 +392,33 @@ pub fn select_function(
             w.func.name
         ))
     );
-    let body = match entry {
-        Some(entry) => {
-            let mut call_args: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
-            call_args.push("v__event".to_owned());
-            call_args.push("v__result".to_owned());
-            format!(
-                "BEGIN\n  DECLARE v__event VARCHAR(64);\n  DECLARE v__result LONGTEXT;\n  \
+    let body = if let Some(entry) = entry {
+        let mut call_args: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+        call_args.push("v__event".to_owned());
+        call_args.push("v__result".to_owned());
+        format!(
+            "BEGIN\n  DECLARE v__event VARCHAR(64);\n  DECLARE v__result LONGTEXT;\n  \
                  DECLARE v__msg VARCHAR(128);\n  \
                  CALL {}({});\n  \
                  IF v__event <> 'output' THEN\n    \
                  SET v__msg = LEFT(CONCAT(v__event, ': ', COALESCE(JSON_VALUE(v__result, '$.message'), v__result)), 128);\n    \
                  SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = {}, MESSAGE_TEXT = v__msg;\n  \
                  END IF;\n  RETURN {ret_expr};\nEND",
-                bq(entry),
-                call_args.join(", "),
-                SprigCode::LogicUserError.number(),
-            )
-        }
-        None => {
-            let tail = format!("{SELECT_MARK}{}.{}]", w.module_id, w.version);
-            let name: String = w.name.chars().take(40).collect();
-            let msg = format!(
-                "{name} runs in the engine tier; SQL calls it as CALL or SELECT with constant arguments {tail}"
-            );
-            format!(
-                "BEGIN\n  SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = {}, MESSAGE_TEXT = {};\nEND",
-                SprigCode::LogicEngineUnavailable.number(),
-                quote(&msg)
-            )
-        }
+            bq(entry),
+            call_args.join(", "),
+            SprigCode::LogicUserError.number(),
+        )
+    } else {
+        let tail = format!("{SELECT_MARK}{}.{}]", w.module_id, w.version);
+        let name: String = w.name.chars().take(40).collect();
+        let msg = format!(
+            "{name} runs in the engine tier; SQL calls it as CALL or SELECT with constant arguments {tail}"
+        );
+        format!(
+            "BEGIN\n  SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = {}, MESSAGE_TEXT = {};\n  RETURN NULL;\nEND",
+            SprigCode::LogicEngineUnavailable.number(),
+            quote(&msg)
+        )
     };
     Some(format!("{head}{body}"))
 }

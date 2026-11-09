@@ -398,7 +398,11 @@ impl ScramServer {
         if B64.decode(cb).ok().as_deref() != Some(self.gs2_header.as_bytes()) {
             return Err(SaslError::bad("channel binding"));
         }
-        if nonce != self.nonce {
+        // Kafka's broker accepts a final nonce that ends with its own:
+        // librdkafka (up to at least 1.8) sends the client nonce followed
+        // by the whole server nonce, which already starts with it. The
+        // proof covers the message as sent either way.
+        if nonce != self.nonce && !nonce.ends_with(&self.nonce) {
             return Err(SaslError::bad("nonce"));
         }
         let proof = B64.decode(proof).map_err(|_| SaslError::bad("proof"))?;
@@ -583,6 +587,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// librdkafka's final message repeats the client nonce before the
+    /// server's whole nonce; Kafka accepts it (the nonce ends with the
+    /// server's), and so does SprigDB. Anything else is still refused.
+    #[test]
+    fn librdkafka_final_nonce_is_accepted() {
+        let mech = ScramMechanism::Sha256;
+        let pw = b"sprig-dev-app";
+        let salt = b"0123456789abcdef";
+        let cred = ScramCredential::derive(mech, pw, salt, 4096);
+        let final_msg = |nonce: &str, s: &ScramServer| {
+            let mut salted = vec![0u8; mech.len()];
+            pbkdf2::derive(
+                mech.pbkdf2_alg(),
+                std::num::NonZeroU32::new(4096).unwrap(),
+                salt,
+                pw,
+                &mut salted,
+            );
+            let key = hmac::Key::new(mech.hmac_alg(), &salted);
+            let ck = hmac::sign(&key, b"Client Key");
+            let sk = digest::digest(mech.digest_alg(), ck.as_ref());
+            let wo = format!("c=biws,r={nonce}");
+            let auth = format!("{},{},{wo}", s.client_first_bare, s.server_first);
+            let sig = hmac::sign(&hmac::Key::new(mech.hmac_alg(), sk.as_ref()), auth.as_bytes());
+            let p: Vec<u8> = ck.as_ref().iter().zip(sig.as_ref()).map(|(a, b)| a ^ b).collect();
+            format!("{wo},p={}", B64.encode(p)).into_bytes()
+        };
+        let cnonce = "Kd^wepcSBU43;b{K~R-Zt<6aQ2f-w9JS";
+        let mut s = ScramServer::new(mech);
+        s.client_first(format!("n,,n=acme.app,r={cnonce}").as_bytes())
+            .unwrap();
+        s.server_first(cred.clone());
+        let doubled = format!("{cnonce}{}", s.nonce);
+        let m = final_msg(&doubled, &s);
+        assert!(s.client_final(&m).is_ok());
+        // A nonce that doesn't end with the server's is refused.
+        let mut s = ScramServer::new(mech);
+        s.client_first(format!("n,,n=acme.app,r={cnonce}").as_bytes())
+            .unwrap();
+        s.server_first(cred);
+        let wrong = format!("{}x", s.nonce);
+        let m = final_msg(&wrong, &s);
+        assert!(s.client_final(&m).is_err());
     }
 
     /// Chapter 14's dual passwords: the new password's verifier shares the

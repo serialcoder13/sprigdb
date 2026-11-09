@@ -216,7 +216,9 @@ mod tests {
             })
         );
         assert_eq!(
-            stream_setting("stream.max_message_bytes", None).unwrap().value,
+            stream_setting("stream.max_message_bytes", None)
+                .unwrap()
+                .value,
             None
         );
         assert!(stream_setting("stream.max_message_bytes", Some("0")).is_err());

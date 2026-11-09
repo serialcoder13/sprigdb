@@ -14,7 +14,16 @@
 //!   deliveries (at most one delivery with `redelivered = false`);
 //! - a fenced owner never wrote after the takeover (the store's epoch).
 
-#![allow(clippy::unwrap_used, clippy::too_many_lines, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::similar_names,
+    clippy::many_single_char_names,
+    clippy::doc_markdown,
+    clippy::match_same_arms,
+    clippy::cast_possible_truncation,
+    missing_docs
+)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -100,10 +109,11 @@ struct Owner {
 
 fn start(store: &MemStore, cache_bytes: u64) -> Owner {
     let q = queue();
-    let (ev, _evrx) = mpsc::unbounded_channel();
-    std::mem::forget(_evrx);
+    let (ev, evrx) = mpsc::unbounded_channel();
+    std::mem::forget(evrx);
     let p = OwnerParams {
         tenant: 1,
+        db: 1,
         cfg: QueueCfg::of(&q, &[], 20),
         queue: q,
         batch_rows: 50,
@@ -133,7 +143,13 @@ struct Run {
     store_faults: u32,
 }
 
-async fn attach(o: &Owner, id: ConsumerId, holder: Holder, sink: &mpsc::UnboundedSender<Seen>, credit: u32) {
+async fn attach(
+    o: &Owner,
+    id: ConsumerId,
+    holder: Holder,
+    sink: &mpsc::UnboundedSender<Seen>,
+    credit: u32,
+) {
     let (tx, rx) = oneshot::channel();
     let _ = o.tx.send(Cmd::Attach(
         ConsumerSpec {
@@ -157,7 +173,7 @@ async fn attach(o: &Owner, id: ConsumerId, holder: Holder, sink: &mpsc::Unbounde
 async fn simulate(seed: u64, steps: u32) -> Run {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let store = MemStore::new();
-    let cache = if seed % 3 == 0 { 300 } else { 1 << 20 };
+    let cache = if seed.is_multiple_of(3) { 300 } else { 1 << 20 };
     let mut owner = start(&store, cache);
     let mut stale: Vec<Owner> = Vec::new();
     let (stx, mut srx) = mpsc::unbounded_channel::<Seen>();
@@ -278,7 +294,10 @@ async fn simulate(seed: u64, steps: u32) -> Run {
         while let Ok(s) = srx.try_recv() {
             match s {
                 Seen::Deliver(c, d) => {
-                    let n: u64 = std::str::from_utf8(&d.message.body).unwrap().parse().unwrap();
+                    let n: u64 = std::str::from_utf8(&d.message.body)
+                        .unwrap()
+                        .parse()
+                        .unwrap();
                     run.deliveries += 1;
                     if d.redelivered {
                         run.redelivered += 1;
@@ -364,7 +383,10 @@ async fn simulate(seed: u64, steps: u32) -> Run {
     loop {
         match tokio::time::timeout(Duration::from_millis(300), drx.recv()).await {
             Ok(Some(Seen::Deliver(_, d))) => {
-                let n: u64 = std::str::from_utf8(&d.message.body).unwrap().parse().unwrap();
+                let n: u64 = std::str::from_utf8(&d.message.body)
+                    .unwrap()
+                    .parse()
+                    .unwrap();
                 run.deliveries += 1;
                 if d.redelivered {
                     run.redelivered += 1;
@@ -389,7 +411,10 @@ async fn simulate(seed: u64, steps: u32) -> Run {
     // drained at the end.
     let consumed: HashSet<u64> = run.acked.union(&final_acked).copied().collect();
     let lost: Vec<u64> = run.confirmed.difference(&consumed).copied().collect();
-    assert!(lost.is_empty(), "seed {seed}: confirmed messages lost: {lost:?}");
+    assert!(
+        lost.is_empty(),
+        "seed {seed}: confirmed messages lost: {lost:?}"
+    );
     for (n, fresh) in &run.fresh_deliveries {
         assert!(
             *fresh <= 1,

@@ -72,9 +72,13 @@ BEGIN
       WHEN TOO_MANY_ROWS THEN __sprig_l44_v1_lib.fail(39866, 'Sprig.Db.QueryOne at step left returned more than one row');
     END;
     v_list_rows := JSON_ARRAY();
-    FOR r_list_rows IN (SELECT id, qty, note FROM orders WHERE product_id = (p_productid) ORDER BY id) LOOP
-      v_list_rows := JSON_ARRAY_APPEND(v_list_rows, '$', JSON_OBJECT('id', (r_list_rows.`id` + 0), 'qty', (r_list_rows.`qty` + 0), 'note', r_list_rows.`note`));
-    END LOOP;
+    DECLARE
+      CURSOR c_list_rows IS SELECT id, qty, note FROM orders WHERE product_id = (p_productid) ORDER BY id;
+    BEGIN
+      FOR r_list_rows IN c_list_rows LOOP
+        v_list_rows := JSON_ARRAY_APPEND(v_list_rows, '$', JSON_OBJECT('id', (r_list_rows.`id` + 0), 'qty', (r_list_rows.`qty` + 0), 'note', r_list_rows.`note`));
+      END LOOP;
+    END;
     IF (COALESCE((NOT (COALESCE(v_left_found, 0) <> 0)), 0) <> 0) THEN
       __sprig_l44_v1_lib.fail(39866, 'step done: result left reads a column of a row that wasn''t found');
     END IF;

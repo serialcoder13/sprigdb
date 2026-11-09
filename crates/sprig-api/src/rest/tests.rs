@@ -5,7 +5,11 @@ use super::*;
 fn annotated() -> Vec<(String, String, String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("proto");
     let mut out = Vec::new();
-    for file in ["sprig/v1/sql.proto", "sprig/admin/v1/admin.proto"] {
+    for file in [
+        "sprig/v1/sql.proto",
+        "sprig/v1/functions.proto",
+        "sprig/admin/v1/admin.proto",
+    ] {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
         let package = text
             .lines()

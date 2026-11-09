@@ -777,7 +777,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::PinNeedsRekey
         | SprigCode::IdValueReserved
         | SprigCode::DdlUnsupported
-        | SprigCode::DdlShardDrift => (Code::FailedPrecondition, 400),
+        | SprigCode::DdlShardDrift
+        | SprigCode::FkActionNotDistributed
+        | SprigCode::HeldBranchStatement => (Code::FailedPrecondition, 400),
         SprigCode::GatewayDraining
         | SprigCode::ListenerRetired
         | SprigCode::MetaUnavailable
@@ -823,10 +825,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::MoveCutoverAborted
         | SprigCode::ShardMapChanged
         | SprigCode::DdlFailed => (Code::Aborted, 409),
-        SprigCode::CrossClusterWriteRejected
-        | SprigCode::TooManyBranches
-        | SprigCode::FkActionNotDistributed
-        | SprigCode::HeldBranchStatement => (Code::FailedPrecondition, 400),
+        SprigCode::CrossClusterWriteRejected | SprigCode::TooManyBranches => {
+            (Code::FailedPrecondition, 400)
+        }
         SprigCode::CommitOutcomeUnknown | SprigCode::DtxRolledBack | SprigCode::PartialCommit => {
             (Code::Aborted, 409)
         }

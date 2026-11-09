@@ -132,8 +132,19 @@ impl Script {
 fn probe_hits(sql: &str, have: &HashSet<i64>) -> Vec<Vec<Option<bytes::Bytes>>> {
     sql.split(" UNION ALL ")
         .filter_map(|part| {
-            let i: usize = part.strip_prefix("(SELECT ")?.split(' ').next()?.parse().ok()?;
-            let v: i64 = part.split("`sid` = ").nth(1)?.split(' ').next()?.parse().ok()?;
+            let i: usize = part
+                .strip_prefix("(SELECT ")?
+                .split(' ')
+                .next()?
+                .parse()
+                .ok()?;
+            let v: i64 = part
+                .split("`sid` = ")
+                .nth(1)?
+                .split(' ')
+                .next()?
+                .parse()
+                .ok()?;
             have.contains(&v)
                 .then(|| vec![Some(bytes::Bytes::from(i.to_string()))])
         })
@@ -259,14 +270,18 @@ async fn a_missing_parent_fails_before_the_rows() {
 
     let mut be = Script::new();
     be.suppliers.insert(7);
-    run("INSERT INTO parts VALUES (1, 1, 7)", &mut be).await.unwrap();
+    run("INSERT INTO parts VALUES (1, 1, 7)", &mut be)
+        .await
+        .unwrap();
     assert!(sqls(&be).iter().any(|s| s.starts_with("INSERT")));
     assert_eq!(sqls(&be).last(), Some(&"COMMIT"));
 
     // foreign_key_checks = 0: no probe.
     let mut be = Script::new();
     be.checks = false;
-    run("INSERT INTO parts VALUES (1, 1, 7)", &mut be).await.unwrap();
+    run("INSERT INTO parts VALUES (1, 1, 7)", &mut be)
+        .await
+        .unwrap();
     assert!(!sqls(&be).iter().any(|s| s.starts_with("(SELECT")));
 }
 

@@ -2,8 +2,8 @@
 //!
 //! Not built yet: it needs `oxc_parser` and `oxc_semantic`, which are not
 //! in the workspace. Until then every JavaScript function is placed in
-//! the engine tier with the reason `js.front_end`, so it deploys and is
-//! recorded, and runs once the fallback runtime exists.
+//! the engine tier with the reason `js.front_end`, and runs there on
+//! QuickJS (`sprig-logic-js::js`).
 
 use crate::check::Analysis;
 use crate::{Compiled, Reason};
@@ -16,7 +16,7 @@ pub fn compile(_source: &str) -> Compiled {
         analysis: Analysis::refused(Reason::new(
             "js.front_end",
             "source",
-            "the JavaScript front end isn't built yet",
+            "no compiler front end for JavaScript yet: it runs in the engine tier (QuickJS)",
         )),
         plsql: None,
     }

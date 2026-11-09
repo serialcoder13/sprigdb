@@ -180,8 +180,12 @@ pub trait StreamData: Send + Sync + 'static {
     /// A topic by name, checked for `access` (`TOPIC_AUTHORIZATION_FAILED`,
     /// `UNKNOWN_TOPIC_OR_PARTITION`; a change topic's rows filtered by
     /// row-level security refuse reads).
-    async fn topic(&self, p: &Principal, name: &str, access: Access)
-    -> Result<DataTopic, TopicError>;
+    async fn topic(
+        &self,
+        p: &Principal,
+        name: &str,
+        access: Access,
+    ) -> Result<DataTopic, TopicError>;
     /// A topic by id (Fetch v13; `UNKNOWN_TOPIC_ID`).
     async fn topic_by_id(
         &self,
@@ -209,8 +213,12 @@ pub trait StreamData: Send + Sync + 'static {
         deadline: Instant,
     ) -> Result<i64, TopicError>;
     /// A partition's bounds and leader epoch.
-    async fn bounds(&self, p: &Principal, t: &DataTopic, partition: i32)
-    -> Result<Bounds, TopicError>;
+    async fn bounds(
+        &self,
+        p: &Principal,
+        t: &DataTopic,
+        partition: i32,
+    ) -> Result<Bounds, TopicError>;
     /// Records from `offset`, at most `max_bytes` (the first record
     /// whatever its size). `OFFSET_OUT_OF_RANGE` outside `[log start, high
     /// watermark]`.
@@ -282,6 +290,7 @@ fn topic_err(code: i16, message: impl Into<String>) -> TopicError {
 ///
 /// # Errors
 /// The Kafka code and message for the partition.
+#[allow(clippy::too_many_lines)] // one check after another, in Kafka's order
 pub fn check_batch(
     t: &DataTopic,
     records: Option<&[u8]>,
@@ -294,7 +303,10 @@ pub fn check_batch(
                 err::UNSUPPORTED_COMPRESSION_TYPE,
                 format!("compression codec {c} is not supported"),
             ),
-            other => topic_err(err::CORRUPT_MESSAGE, format!("corrupt record batch: {other}")),
+            other => topic_err(
+                err::CORRUPT_MESSAGE,
+                format!("corrupt record batch: {other}"),
+            ),
         })?;
     let [batch] = batches.as_slice() else {
         return Err(topic_err(
@@ -420,7 +432,8 @@ pub fn encode_batches(records: &[StoredRecord]) -> Result<Vec<u8>, CodecError> {
         let base = run[0].offset;
         let base_ts = run.iter().map(|r| r.timestamp_ms).min().unwrap_or(0);
         let max_ts = run.iter().map(|r| r.timestamp_ms).max().unwrap_or(0);
-        let delta = |o: i64| i32::try_from(o - base).map_err(|_| CodecError::Invalid("offset delta"));
+        let delta =
+            |o: i64| i32::try_from(o - base).map_err(|_| CodecError::Invalid("offset delta"));
         let batch = RecordBatch {
             base_offset: base,
             partition_leader_epoch: epoch,
@@ -487,7 +500,10 @@ impl DataPlane for DataService {
     ) -> Result<DataReply, CodecError> {
         let v = h.api_version;
         match h.api_key {
-            api::PRODUCE => self.produce(s, ProduceRequest::from_bytes(body, v)?, v).await,
+            api::PRODUCE => {
+                self.produce(s, ProduceRequest::from_bytes(body, v)?, v)
+                    .await
+            }
             api::FETCH => self
                 .fetch(s, FetchRequest::from_bytes(body, v)?, v)
                 .await
@@ -526,6 +542,7 @@ fn produce_error(index: i32, e: &TopicError) -> produce_response::PartitionProdu
 }
 
 impl DataService {
+    #[allow(clippy::too_many_lines)] // phase one, then phase two's future
     async fn produce(
         &self,
         s: &Session,
@@ -570,9 +587,7 @@ impl DataService {
                     Ok(t) => match check_batch(t, pd.records.as_deref()) {
                         Err(e) => Err(e),
                         Ok((records, producer)) => {
-                            self.store
-                                .append(p, t, pd.index, records, producer)
-                                .await
+                            self.store.append(p, t, pd.index, records, producer).await
                         }
                     },
                 };
@@ -588,9 +603,9 @@ impl DataService {
         }
         let limits = self.store.limits(p).await;
         let wait = if q.timeout_ms > 0 {
-            limits
-                .produce_wait
-                .min(Duration::from_millis(u64::try_from(q.timeout_ms).unwrap_or(0)))
+            limits.produce_wait.min(Duration::from_millis(
+                u64::try_from(q.timeout_ms).unwrap_or(0),
+            ))
         } else {
             limits.produce_wait
         };
@@ -644,8 +659,10 @@ impl DataService {
         let max_bytes = usize::try_from(q.max_bytes.max(1)).unwrap_or(usize::MAX);
         let min_bytes = usize::try_from(q.min_bytes.max(0)).unwrap_or(0);
         // Resolve topics once.
-        let mut topics: Vec<(Result<DataTopic, TopicError>, &crate::messages::fetch_request::FetchTopic)> =
-            Vec::with_capacity(q.topics.len());
+        let mut topics: Vec<(
+            Result<DataTopic, TopicError>,
+            &crate::messages::fetch_request::FetchTopic,
+        )> = Vec::with_capacity(q.topics.len());
         for ft in &q.topics {
             let t = if v >= 13 {
                 self.store.topic_by_id(p, ft.topic_id, Access::Read).await
@@ -683,7 +700,8 @@ impl DataService {
                     };
                     let t = match t {
                         Err(e) => {
-                            pr.error_code = if v >= 13 && e.code == err::UNKNOWN_TOPIC_OR_PARTITION {
+                            pr.error_code = if v >= 13 && e.code == err::UNKNOWN_TOPIC_OR_PARTITION
+                            {
                                 err::UNKNOWN_TOPIC_ID
                             } else {
                                 e.code
@@ -707,7 +725,10 @@ impl DataService {
                     // bounds (one more read would answer them; skip).
                     let budget = if total == 0 { room.max(1) } else { room };
                     let r = if budget == 0 {
-                        self.store.bounds(p, t, fp.partition).await.map(|b| (b, Vec::new()))
+                        self.store
+                            .bounds(p, t, fp.partition)
+                            .await
+                            .map(|b| (b, Vec::new()))
                     } else {
                         self.store
                             .read(p, t, fp.partition, fp.fetch_offset, budget)
@@ -730,14 +751,14 @@ impl DataService {
                             pr.high_watermark = b.high_watermark;
                             pr.last_stable_offset = b.high_watermark;
                             pr.log_start_offset = b.log_start;
-                            if code != err::NONE {
-                                pr.error_code = code;
-                                errors = true;
-                            } else {
+                            if code == err::NONE {
                                 total += records.iter().map(record_bytes).sum::<usize>();
                                 let next = records.last().map_or(fp.fetch_offset, |r| r.offset + 1);
                                 beyond.push((t.stream_id, fp.partition, next));
                                 pr.records = Some(encode_batches(&records)?);
+                            } else {
+                                pr.error_code = code;
+                                errors = true;
                             }
                         }
                     }
@@ -745,7 +766,11 @@ impl DataService {
                 }
                 resp.responses.push(out);
             }
-            if errors || total >= min_bytes.max(1) || beyond.is_empty() || Instant::now() >= deadline {
+            if errors
+                || total >= min_bytes.max(1)
+                || beyond.is_empty()
+                || Instant::now() >= deadline
+            {
                 if total > 0 {
                     metrics::counter!("sprig_kafka_fetch_bytes_total")
                         .increment(u64::try_from(total).unwrap_or(0));
@@ -781,7 +806,10 @@ impl DataService {
                 let r: Result<(), TopicError> = async {
                     let t = t.as_ref().map_err(Clone::clone)?;
                     if lp.partition_index < 0 || lp.partition_index >= t.partitions {
-                        return Err(topic_err(err::UNKNOWN_TOPIC_OR_PARTITION, "no such partition"));
+                        return Err(topic_err(
+                            err::UNKNOWN_TOPIC_OR_PARTITION,
+                            "no such partition",
+                        ));
                     }
                     let b = self.store.bounds(p, t, lp.partition_index).await?;
                     let code = epoch_check(lp.current_leader_epoch, &b);
@@ -793,8 +821,10 @@ impl DataService {
                         -2 => pr.offset = b.log_start,
                         -1 => pr.offset = b.high_watermark,
                         ts if ts >= 0 || ts == -3 => {
-                            if let Some((o, at)) =
-                                self.store.offset_for_time(p, t, lp.partition_index, ts).await?
+                            if let Some((o, at)) = self
+                                .store
+                                .offset_for_time(p, t, lp.partition_index, ts)
+                                .await?
                             {
                                 pr.offset = o;
                                 pr.timestamp = at;
@@ -948,18 +978,26 @@ mod tests {
         // Two batches.
         let one = batch(&[Some(b"a")], 0).to_bytes().unwrap();
         let two = [one.clone(), one.clone()].concat();
-        assert_eq!(check_batch(&t, Some(&two)).unwrap_err().code, err::INVALID_RECORD);
+        assert_eq!(
+            check_batch(&t, Some(&two)).unwrap_err().code,
+            err::INVALID_RECORD
+        );
         // A broken CRC.
         let mut bad = one.clone();
         let n = bad.len();
         bad[n - 1] ^= 1;
-        assert_eq!(check_batch(&t, Some(&bad)).unwrap_err().code, err::CORRUPT_MESSAGE);
+        assert_eq!(
+            check_batch(&t, Some(&bad)).unwrap_err().code,
+            err::CORRUPT_MESSAGE
+        );
         // Gaps in offset deltas.
         let mut g = batch(&[Some(b"a"), Some(b"b")], 0);
         g.records[1].offset_delta = 2;
         g.last_offset_delta = 2;
         assert_eq!(
-            check_batch(&t, Some(&g.to_bytes().unwrap())).unwrap_err().code,
+            check_batch(&t, Some(&g.to_bytes().unwrap()))
+                .unwrap_err()
+                .code,
             err::INVALID_RECORD
         );
         // Too large, keyless on a compacted stream, transactional.
@@ -968,13 +1006,17 @@ mod tests {
         let e = check_batch(&t, Some(&big.to_bytes().unwrap())).unwrap_err();
         assert_eq!(e.code, err::MESSAGE_TOO_LARGE);
         assert!(e.message.starts_with("39944"));
-        let e = check_batch(&topic(true), Some(&batch(&[None], 0).to_bytes().unwrap()))
-            .unwrap_err();
+        let e =
+            check_batch(&topic(true), Some(&batch(&[None], 0).to_bytes().unwrap())).unwrap_err();
         assert_eq!(e.code, err::INVALID_RECORD);
         assert!(e.message.starts_with("39955"));
         let e = check_batch(
             &t,
-            Some(&batch(&[Some(b"a")], crate::records::ATTR_TRANSACTIONAL).to_bytes().unwrap()),
+            Some(
+                &batch(&[Some(b"a")], crate::records::ATTR_TRANSACTIONAL)
+                    .to_bytes()
+                    .unwrap(),
+            ),
         )
         .unwrap_err();
         assert_eq!(e.code, err::INVALID_TXN_STATE);
@@ -983,7 +1025,10 @@ mod tests {
         plain.producer_id = -1;
         plain.producer_epoch = -1;
         plain.base_sequence = -1;
-        assert_eq!(check_batch(&t, Some(&plain.to_bytes().unwrap())).unwrap().1, None);
+        assert_eq!(
+            check_batch(&t, Some(&plain.to_bytes().unwrap())).unwrap().1,
+            None
+        );
     }
 
     #[test]
@@ -1008,7 +1053,11 @@ mod tests {
         assert_eq!(back[0].last_offset_delta, 3);
         assert_eq!(back[0].partition_leader_epoch, 4);
         assert_eq!(
-            back[0].records.iter().map(|r| r.offset_delta).collect::<Vec<_>>(),
+            back[0]
+                .records
+                .iter()
+                .map(|r| r.offset_delta)
+                .collect::<Vec<_>>(),
             vec![0, 1, 3]
         );
         assert_eq!(back[0].base_timestamp, 1996);

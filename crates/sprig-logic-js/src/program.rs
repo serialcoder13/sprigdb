@@ -14,7 +14,7 @@ use crate::lua::{self, LuaProgram};
 #[derive(Debug, Clone)]
 pub enum Program {
     /// A KIRun definition.
-    Kirun(Prepared),
+    Kirun(Box<Prepared>),
     /// A JavaScript function.
     Js(JsProgram),
     /// A Lua function.
@@ -31,7 +31,7 @@ impl Program {
     /// engine tier doesn't have (`sql`).
     pub fn new(runtime: &str, name: &str, source: &str, sig: ScriptSig) -> Result<Self> {
         Ok(match runtime {
-            "kirun" => Program::Kirun(Prepared::new(source)?),
+            "kirun" => Program::Kirun(Box::new(Prepared::new(source)?)),
             "javascript" | "js" => Program::Js(JsProgram::new(name, source, sig)?),
             "lua" => Program::Lua(LuaProgram::new(name, source, sig)?),
             other => {

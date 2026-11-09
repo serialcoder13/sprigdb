@@ -184,6 +184,12 @@ pub struct TableEntry {
     /// Its `AUTO_INCREMENT` column, which takes chapter 19's ID blocks
     /// (every member of a sharded group with one).
     pub auto_inc: Option<AutoInc>,
+    /// Its primary key's columns, lowercase (empty when unknown): limited
+    /// `UPDATE` and `DELETE` (R3) name the rows they change by it.
+    pub primary: Vec<String>,
+    /// How each primary-key column's values read back
+    /// ([`crate::fk::ValClass`]), matching `primary`.
+    pub primary_classes: Vec<crate::fk::ValClass>,
 }
 
 /// A sharded table's `AUTO_INCREMENT` column (chapter 19, "ID blocks"):
@@ -598,6 +604,8 @@ impl TenantFile {
                     lookups: Vec::new(),
                     lookup_gap: false,
                     columns: Vec::new(),
+                    primary: Vec::new(),
+                    primary_classes: Vec::new(),
                     fill_rk: false,
                     parent: None,
                     auto_inc: None,

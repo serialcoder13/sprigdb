@@ -139,6 +139,13 @@ pub static ROUTES: &[Route] = &[
         "EndTransactionRequest"
     ),
     r!(
+        "sprig.v1.Functions",
+        "Call",
+        "POST",
+        "/v1/databases/{database}/functions/{name}:call",
+        "CallRequest"
+    ),
+    r!(
         "sprig.admin.v1.Clusters",
         "RegisterCluster",
         "POST",
@@ -602,6 +609,7 @@ fn reply(r: &Route) -> &'static str {
         (_, "Execute") => "ExecuteResponse",
         (_, "Begin") => "Transaction",
         ("sprig.v1.Transactions", _) => "EndTransactionResponse",
+        ("sprig.v1.Functions", "Call") => "CallResponse",
         _ => "JsonReply",
     }
 }
@@ -658,6 +666,10 @@ fn schemas() -> Value {
             "deadline_ms": {"type": "string", "format": "int64"}})),
         "EndTransactionRequest": s(json!({"transaction": string})),
         "EndTransactionResponse": s(json!({})),
+        "CallRequest": s(json!({"database": string, "name": string,
+            "args": {"description": "A list (by position), an object (by parameter name) or one value"},
+            "transaction": string})),
+        "CallResponse": s(json!({"event": string, "result": {"type": "object"}})),
         "ListRequest": s(json!({})),
         "BodyRequest": {"type": "object", "description": "The call's JSON body (see the route's documentation)"},
         "NameRequest": {"type": "object", "description": "The call's JSON body (see the route's documentation)"},

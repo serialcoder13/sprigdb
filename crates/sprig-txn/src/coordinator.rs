@@ -1056,10 +1056,12 @@ impl<B: TxnBackend> TxnCoordinator<B> {
                 .filter(|(i, _)| prepared.contains(i))
                 .map(|(_, b)| {
                     let admin = admin.clone();
-                    let gtrid = gtrid.clone();
                     async move {
-                        let r = match tokio::time::timeout(deadline, prepare_one(&*admin, b, dtid, &gtrid))
-                            .await
+                        let r = match tokio::time::timeout(
+                            deadline,
+                            prepare_one(&*admin, b, dtid, &gtrid),
+                        )
+                        .await
                         {
                             Ok(r) => r,
                             Err(_) => Err(DbError::lost("prepare timed out")),
@@ -1250,7 +1252,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
     fn gtrid(&self, dtid: Dtid) -> Gtrid {
         self.branches
             .iter()
-            .find_map(|b| b.xid.as_ref().map(|x| x.gtrid.clone()))
+            .find_map(|b| b.xid.as_ref().map(|x| x.gtrid))
             .unwrap_or_else(|| Gtrid {
                 tenant: self.tenant,
                 dtid,
@@ -1336,7 +1338,6 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             .map(|(_, b)| {
                 let admin = admin.clone();
                 let hooks = hooks.clone();
-                let gtrid = gtrid.clone();
                 async move {
                     let ok = finish_prepared(&*admin, b, true, dtid, &gtrid).await;
                     if ok && let Some(h) = &hooks {
@@ -1511,7 +1512,9 @@ async fn prepare_one<C: BranchConn>(
             .await;
     }
     let x = b.xid.clone().expect("prepared branches are XA or held");
-    b.conn.control(&[Ctl::XaEnd(x.clone()), Ctl::XaPrepare(x)]).await
+    b.conn
+        .control(&[Ctl::XaEnd(x.clone()), Ctl::XaPrepare(x)])
+        .await
 }
 
 /// Finishes a prepared held branch: on commit, its `done` marker goes in
@@ -1537,7 +1540,7 @@ async fn finish_held<C: BranchConn>(
             Ctl::RedoDone {
                 schema: b.anchor.schema.clone(),
                 dtid,
-                gtrid: gtrid.clone(),
+                gtrid: *gtrid,
             },
             Ctl::Commit,
             Ctl::SetTimestamp(None),
@@ -1551,13 +1554,19 @@ async fn finish_held<C: BranchConn>(
             }
             Err(e) => {
                 if !e.is_lost() {
-                    let _ = b.conn.control(&[Ctl::Rollback, Ctl::SetTimestamp(None)]).await;
+                    let _ = b
+                        .conn
+                        .control(&[Ctl::Rollback, Ctl::SetTimestamp(None)])
+                        .await;
                 }
                 false
             }
         }
     } else {
-        let _ = b.conn.control(&[Ctl::Rollback, Ctl::SetTimestamp(None)]).await;
+        let _ = b
+            .conn
+            .control(&[Ctl::Rollback, Ctl::SetTimestamp(None)])
+            .await;
         admin
             .delete_redo(&b.cluster, &b.anchor.schema, dtid)
             .await

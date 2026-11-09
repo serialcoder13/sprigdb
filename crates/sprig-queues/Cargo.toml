@@ -33,6 +33,10 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# Independent AMQP clients for the client tests (rule 14; test-only):
+# lapin (MIT) for 0-9-1, fe2o3-amqp (MIT/Apache-2.0) for 1.0. No TLS.
+lapin = { version = "=4.12.3", default-features = false, features = ["default-runtime"] }
+fe2o3-amqp = { version = "=0.18.4", default-features = false }
 proptest.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "test-util", "rt-multi-thread"] }
 rustls.workspace = true

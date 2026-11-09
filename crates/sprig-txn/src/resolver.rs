@@ -485,17 +485,12 @@ impl Resolver {
                         .filter(|p| p.kind == ParticipantKind::Held)
                     {
                         if !redo.contains_key(&p.cluster) {
-                            let l = self
-                                .admin
-                                .redo_branches(&p.cluster)
-                                .await
-                                .ok()
-                                .map(|v| {
-                                    v.into_iter()
-                                        .filter(|b| b.statements > 0)
-                                        .map(|b| b.dtid)
-                                        .collect()
-                                });
+                            let l = self.admin.redo_branches(&p.cluster).await.ok().map(|v| {
+                                v.into_iter()
+                                    .filter(|b| b.statements > 0)
+                                    .map(|b| b.dtid)
+                                    .collect()
+                            });
                             redo.insert(p.cluster.clone(), l);
                         }
                         match redo.get(&p.cluster) {

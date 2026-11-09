@@ -283,6 +283,9 @@ pub struct BackendSession {
     /// generated (chapter 19's ID blocks): its OK packet's insert id is
     /// an explicit value, not the connection's `LAST_INSERT_ID()`.
     explicit_ids_next: bool,
+    /// Sprig 2PC (R3): a held branch's record of its writes
+    /// (`sprig_txn::BranchConn::start_redo`, in `backend::txn`).
+    pub(super) redo: Option<super::txn::Recording>,
 }
 
 impl std::fmt::Debug for BackendSession {
@@ -349,6 +352,7 @@ impl BackendSession {
             deferred: None,
             probe_next: false,
             explicit_ids_next: false,
+            redo: None,
         }
     }
 
@@ -501,6 +505,9 @@ impl BackendSession {
     /// writer.
     pub async fn query(&mut self, info: &StmtInfo, sql: &[u8]) -> Result<()> {
         self.check_packet(sql.len() + 1)?;
+        if let Some(r) = self.redo.as_mut() {
+            r.before(info, sql);
+        }
         self.run(info, Req::Text(sql)).await
     }
 
@@ -528,6 +535,9 @@ impl BackendSession {
         sql: &[u8],
         build: &mut (dyn FnMut(&BackendStmt) -> ProtoResult<Bytes> + Send + Sync),
     ) -> Result<()> {
+        if let Some(r) = self.redo.as_mut() {
+            r.before_binary(info, sql);
+        }
         self.run(info, Req::Binary { sql, build }).await
     }
 
@@ -635,8 +645,22 @@ impl BackendSession {
     /// # Errors
     /// Lost-connection errors while draining; `Internal` without a
     /// statement.
-    #[allow(clippy::too_many_lines)]
     pub async fn finish(&mut self) -> Result<StmtOutcome> {
+        let pending = self.redo.as_mut().and_then(|r| r.pending.take());
+        let r = self.finish_statement().await;
+        if let (Some(sql), Ok(o)) = (pending, &r)
+            && o.error.is_none()
+        {
+            let vars = self.vars.clone();
+            if let Some(rec) = self.redo.as_mut() {
+                rec.record(sql, o.affected_rows, o.last_insert_id, &vars);
+            }
+        }
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn finish_statement(&mut self) -> Result<StmtOutcome> {
         let Some(mut cur) = self.cur.take() else {
             return Err(SprigError::internal("finish without a statement"));
         };

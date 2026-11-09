@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 const PROTOS: &[&str] = &[
     "sprig/v1/sql.proto",
+    "sprig/v1/functions.proto",
     "sprig/admin/v1/admin.proto",
     "sprig/internal/v1/peer.proto",
     "grpc/health/v1/health.proto",

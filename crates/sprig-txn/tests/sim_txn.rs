@@ -44,7 +44,8 @@
 #![allow(
     clippy::unwrap_used,
     clippy::too_many_lines,
-    clippy::missing_panics_doc
+    clippy::missing_panics_doc,
+    clippy::many_single_char_names
 )]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -155,7 +156,7 @@ fn shard_ref(i: usize) -> ShardRef {
         db: DbId(1),
         group: GroupId(1),
         shard: ShardId(u32::try_from(i).unwrap() + 1),
-        hash_point: (i as u64) << 62,
+        hash_point: (i as u64) << 60,
         schema: CLUSTERS[i].schema.to_owned(),
     }
 }
@@ -242,8 +243,16 @@ fn stmt_of(r: &str) -> Option<Stmt> {
     let (op, t, k, v) = (p.next()?, p.next()?, p.next()?.parse().ok()?, p.next()?);
     let t = t.to_owned();
     Some(match op {
-        "I" => Stmt::Insert { t, k, v: v.to_owned() },
-        "U" => Stmt::Update { t, k, v: v.to_owned() },
+        "I" => Stmt::Insert {
+            t,
+            k,
+            v: v.to_owned(),
+        },
+        "U" => Stmt::Update {
+            t,
+            k,
+            v: v.to_owned(),
+        },
         "D" => Stmt::Delete { t, k },
         _ => return None,
     })
@@ -568,7 +577,10 @@ impl ClusterAdmin for SimAdmin {
             .collect();
         // Markers without statements (a replay's, kept for the retention).
         for r in &marks {
-            let Some(k) = r.first().and_then(|x| x.as_deref()).and_then(|x| x.parse::<i64>().ok())
+            let Some(k) = r
+                .first()
+                .and_then(|x| x.as_deref())
+                .and_then(|x| x.parse::<i64>().ok())
             else {
                 continue;
             };

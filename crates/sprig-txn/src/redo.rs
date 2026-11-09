@@ -136,7 +136,10 @@ impl RedoStmt {
         }
         for (k, v) in &self.vars {
             if k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                set.push(format!("{k}='{}'", v.replace('\\', "\\\\").replace('\'', "''")));
+                set.push(format!(
+                    "{k}='{}'",
+                    v.replace('\\', "\\\\").replace('\'', "''")
+                ));
             }
         }
         if set.is_empty() {
@@ -180,7 +183,7 @@ pub enum Replay {
 /// `INSERT INTO schema.__sprig_redo …` of a branch's statements.
 #[must_use]
 pub fn insert_sql(schema: &str, dtid: Dtid, gtrid: &Gtrid, stmts: &[RedoStmt]) -> String {
-    let d = hex(&dtid.0.to_be_bytes());
+    let d = hex(&dtid.to_bytes());
     let g = hex(&gtrid.to_bytes());
     let rows: Vec<String> = stmts
         .iter()
@@ -207,7 +210,7 @@ pub fn mark_sql(schema: &str, dtid: Dtid, gtrid: &Gtrid, mark: RedoMark) -> Stri
         "INSERT INTO `{}`.`{REDO_TABLE}` (dtid, seq, gtrid, ctx, stmt) VALUES \
          (X'{}', {MARK_SEQ}, X'{}', '{}', '')",
         schema.replace('`', "``"),
-        hex(&dtid.0.to_be_bytes()),
+        hex(&dtid.to_bytes()),
         hex(&gtrid.to_bytes()),
         match mark {
             RedoMark::Done => "done",
@@ -222,7 +225,7 @@ pub fn delete_sql(schema: &str, dtid: Dtid) -> String {
     format!(
         "DELETE FROM `{}`.`{REDO_TABLE}` WHERE dtid = X'{}'",
         schema.replace('`', "``"),
-        hex(&dtid.0.to_be_bytes())
+        hex(&dtid.to_bytes())
     )
 }
 
@@ -352,13 +355,19 @@ mod tests {
 
     #[test]
     fn unsafe_statements_are_named() {
-        assert_eq!(unsafe_reason("INSERT INTO t VALUES (UUID())"), Some("UUID()"));
+        assert_eq!(
+            unsafe_reason("INSERT INTO t VALUES (UUID())"),
+            Some("UUID()")
+        );
         assert_eq!(
             unsafe_reason("insert into t values (rand ( ))"),
             Some("RAND() without a seed")
         );
         assert_eq!(unsafe_reason("INSERT INTO t VALUES (RAND(7))"), None);
-        assert_eq!(unsafe_reason("INSERT INTO t VALUES ('UUID()', NOW())"), None);
+        assert_eq!(
+            unsafe_reason("INSERT INTO t VALUES ('UUID()', NOW())"),
+            None
+        );
         assert_eq!(
             unsafe_reason("UPDATE t SET a = @x"),
             Some("a user or system variable")

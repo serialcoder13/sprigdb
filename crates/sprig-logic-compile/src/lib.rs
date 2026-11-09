@@ -212,12 +212,21 @@ pub fn compile(
             Ok(finish(lowered.func, lowered.reasons, lowered.lints, opts))
         }
         Runtime::Javascript => Ok(js::compile(source)),
-        Runtime::Sql | Runtime::Lua => Ok(Compiled {
+        Runtime::Lua => Ok(Compiled {
             ir: None,
             analysis: Analysis::refused(Reason::new(
-                &format!("{}.front_end", runtime.as_str()),
+                "lua.front_end",
                 "source",
-                format!("{} bodies have no compiler yet", runtime.as_str()),
+                "no compiler front end for Lua yet: it runs in the engine tier (Lua 5.1)",
+            )),
+            plsql: None,
+        }),
+        Runtime::Sql => Ok(Compiled {
+            ir: None,
+            analysis: Analysis::refused(Reason::new(
+                "sql.front_end",
+                "source",
+                "sql bodies have no compiler yet",
             )),
             plsql: None,
         }),

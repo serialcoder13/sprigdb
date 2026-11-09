@@ -564,7 +564,11 @@ impl MqStore {
     ) -> Result<()> {
         match change {
             TopoChange::AddExchange(x) => {
-                if self.id_of(q, db, &x.name, DestKind::Exchange).await?.is_some() {
+                if self
+                    .id_of(q, db, &x.name, DestKind::Exchange)
+                    .await?
+                    .is_some()
+                {
                     return Ok(());
                 }
                 let delayed = (x.kind == ExKind::Delayed).then(|| x.route_kind().as_str());
@@ -610,7 +614,11 @@ impl MqStore {
                 .map_err(map_err)
             }
             TopoChange::AddQueue(qd) => {
-                if self.id_of(q, db, &qd.name, DestKind::Queue).await?.is_some() {
+                if self
+                    .id_of(q, db, &qd.name, DestKind::Queue)
+                    .await?
+                    .is_some()
+                {
                     return Ok(());
                 }
                 q.exec_drop(
@@ -777,8 +785,14 @@ mod tests {
             ("x-match", FieldValue::str("any")),
             ("n", FieldValue::I32(7)),
             ("b", FieldValue::Bool(true)),
-            ("raw", FieldValue::Bytes(bytes::Bytes::from_static(&[0, 1, 255]))),
-            ("nested", FieldValue::Table(FieldTable::from([("k", FieldValue::I64(1))]))),
+            (
+                "raw",
+                FieldValue::Bytes(bytes::Bytes::from_static(&[0, 1, 255])),
+            ),
+            (
+                "nested",
+                FieldValue::Table(FieldTable::from([("k", FieldValue::I64(1))])),
+            ),
         ]);
         let back = json_table(&table_json(&t));
         assert_eq!(back.get("x-match"), Some(&FieldValue::str("any")));

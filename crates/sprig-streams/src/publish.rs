@@ -471,18 +471,26 @@ pub async fn append(
     if records.is_empty() {
         return Err(SprigError::internal("an empty append"));
     }
-    match append_once(conn, schema, def, partition, records, producer).await {
-        Err(e) if producer.is_some() && missing_table(&e) => {
-            // A stream created before producer tables existed.
-            conn.query_drop(producer_table_sql(schema, def.id))
-                .await
-                .map_err(map_err)?;
-            append_once(conn, schema, def, partition, records, producer).await
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        match append_once(conn, schema, def, partition, records, producer).await {
+            Err(e) if producer.is_some() && missing_table(&e) && tries == 1 => {
+                // A stream created before producer tables existed.
+                conn.query_drop(producer_table_sql(schema, def.id))
+                    .await
+                    .map_err(map_err)?;
+            }
+            // A deadlock or lock wait rolled the transaction back: again.
+            Err(e) if matches!(e.protocol().mysql_errno, 1213 | 1205) && tries < 4 => {
+                tokio::time::sleep(std::time::Duration::from_millis(5 * tries)).await;
+            }
+            r => return r,
         }
-        r => r,
     }
 }
 
+#[allow(clippy::too_many_lines)] // the check, the rows, the state, in one transaction
 async fn append_once(
     conn: &mut mysql_async::Conn,
     schema: &str,
@@ -498,6 +506,19 @@ async fn append_once(
     let pid_table = format!("{}.{}", quote(schema), quote(&producer_table(def.id)));
     let mut state = None;
     if let Some(b) = producer {
+        // The row first, so the locking read below never takes a gap lock
+        // (two first appends of one producer on two partitions would
+        // deadlock on the gap); `last_seq = -2` marks a new row.
+        tx.exec_drop(
+            format!(
+                "INSERT INTO {pid_table} (producer_id, partition_no, producer_epoch, last_seq, \
+                 recent, updated_at) VALUES (?, ?, ?, -2, '', UTC_TIMESTAMP(3)) \
+                 ON DUPLICATE KEY UPDATE producer_id = producer_id"
+            ),
+            (b.producer_id, partition, b.epoch),
+        )
+        .await
+        .map_err(map_err)?;
         let row: Option<(u16, i32, Vec<u8>)> = tx
             .exec_first(
                 format!(
@@ -508,7 +529,7 @@ async fn append_once(
             )
             .await
             .map_err(map_err)?;
-        state = row.map(|(e, l, r)| ProducerState {
+        state = row.filter(|(_, l, _)| *l != -2).map(|(e, l, r)| ProducerState {
             epoch: i16::try_from(e).unwrap_or(i16::MAX),
             last_seq: l,
             recent: ProducerState::parse_recent(&r),
@@ -554,19 +575,16 @@ async fn append_once(
             params.push(datetime_value(
                 r.ts_ms.unwrap_or_else(crate::maria::wall_ms),
             ));
-            match producer {
-                Some(b) => {
-                    params.push(Value::Int(b.producer_id));
-                    params.push(Value::Int(i64::from(b.epoch)));
-                    let seq = (i64::from(b.base_sequence) + i64::try_from(at).unwrap_or(0))
-                        % (i64::from(i32::MAX) + 1);
-                    params.push(Value::Int(seq));
-                }
-                None => {
-                    params.push(Value::NULL);
-                    params.push(Value::NULL);
-                    params.push(Value::NULL);
-                }
+            if let Some(b) = producer {
+                params.push(Value::Int(b.producer_id));
+                params.push(Value::Int(i64::from(b.epoch)));
+                let seq = (i64::from(b.base_sequence) + i64::try_from(at).unwrap_or(0))
+                    % (i64::from(i32::MAX) + 1);
+                params.push(Value::Int(seq));
+            } else {
+                params.push(Value::NULL);
+                params.push(Value::NULL);
+                params.push(Value::NULL);
             }
             at += 1;
         }
@@ -735,9 +753,16 @@ mod tests {
             }],
         )
         .unwrap();
-        assert!(sql.ends_with("(NULL, NULL, NULL, NULL, '2025-11-07 09:35:00.123')"), "{sql}");
+        assert!(
+            sql.ends_with("(NULL, NULL, NULL, NULL, '2025-11-07 09:35:00.123')"),
+            "{sql}"
+        );
         assert_eq!(
-            outbox_insert(&def(Cleanup::Delete, StreamKind::Changes), None, &[Publish::default()]),
+            outbox_insert(
+                &def(Cleanup::Delete, StreamKind::Changes),
+                None,
+                &[Publish::default()]
+            ),
             None
         );
     }
@@ -751,7 +776,9 @@ mod tests {
             Some(SprigCode::StreamCompactNeedsKey)
         );
         assert_eq!(
-            check_record(&d, Some(b"k"), 100, 0, 100).unwrap_err().code(),
+            check_record(&d, Some(b"k"), 100, 0, 100)
+                .unwrap_err()
+                .code(),
             Some(SprigCode::StreamRecordTooLarge)
         );
         assert_eq!(
@@ -806,7 +833,10 @@ mod tests {
     #[test]
     fn kafka_sequence_rules() {
         // Unknown producers start anywhere.
-        assert_eq!(check_sequence(None, &batch(0, 17, 3)), SequenceVerdict::Append);
+        assert_eq!(
+            check_sequence(None, &batch(0, 17, 3)),
+            SequenceVerdict::Append
+        );
         let mut s = None;
         let mut ids = Vec::new();
         for (i, base) in [0, 3, 6, 9, 12, 15].into_iter().enumerate() {
@@ -857,7 +887,10 @@ mod tests {
         // Wrapping at i32::MAX.
         let w = ProducerState::after(None, &batch(0, i32::MAX - 1, 2), [1; 16]);
         assert_eq!(w.last_seq, i32::MAX);
-        assert_eq!(check_sequence(Some(&w), &batch(0, 0, 1)), SequenceVerdict::Append);
+        assert_eq!(
+            check_sequence(Some(&w), &batch(0, 0, 1)),
+            SequenceVerdict::Append
+        );
         assert_eq!(batch(0, i32::MAX, 3).last_sequence(), 1);
         // The column round-trips.
         assert_eq!(ProducerState::parse_recent(&st.recent_bytes()), st.recent);

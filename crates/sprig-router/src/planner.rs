@@ -2953,15 +2953,30 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
         };
         let shard = route_value(&a.value, entry, class)?;
         let near = entry.group.shards.get(shard).map(|s| s.cluster.as_str());
-        if let Some(fkw) = fk::insert_work(ins, entry, &[] as &[Box<Vec<Expr>>], &default_schema, near, cx)? {
+        if let Some(fkw) = fk::insert_work(
+            ins,
+            entry,
+            &[] as &[Box<Vec<Expr>>],
+            &default_schema,
+            near,
+            cx,
+        )? {
             let ts = if src_in.template { None } else { text_src };
             return Ok(Plan::Write(WritePlan {
                 kind: WriteKind::Insert,
-                targets: vec![one_shard_insert(stmt, ts, entry, shard, loc, &default_schema)],
+                targets: vec![one_shard_insert(
+                    stmt,
+                    ts,
+                    entry,
+                    shard,
+                    loc,
+                    &default_schema,
+                )],
                 rows: 1,
                 claims: Vec::new(),
                 releases: Vec::new(),
                 fk: Some(fkw),
+                limited: None,
             }));
         }
         return Ok(Plan::Pass(one_shard_insert(
@@ -3011,6 +3026,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
             claims,
             releases: Vec::new(),
             fk: fkw,
+            limited: None,
         }));
     }
     if ins.returning.is_some() {
@@ -3043,6 +3059,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
         claims,
         releases: Vec::new(),
         fk: fkw,
+        limited: None,
     }))
 }
 
@@ -3293,11 +3310,17 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     let tail = {
         let (ob, lim) = match stmt {
             Statement::Update(u) => (
-                u.order_by.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                u.order_by
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
                 u.limit.as_ref().map(ToString::to_string),
             ),
             Statement::Delete(d) => (
-                d.order_by.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                d.order_by
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
                 d.limit.as_ref().map(ToString::to_string),
             ),
             _ => (Vec::new(), None),
@@ -3310,7 +3333,7 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
             if !t.is_empty() {
                 t.push(' ');
             }
-            t.push_str(&format!("LIMIT {l}"));
+            let _ = write!(t, "LIMIT {l}");
         }
         t
     };
@@ -3392,6 +3415,7 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
             claims: Vec::new(),
             releases,
             fk: fkw,
+            limited: None,
         }));
     }
     if shards.len() == 1 {
@@ -3402,14 +3426,22 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
         // Contradictory key predicates: no row matches; any shard says so.
         return Ok(Plan::Pass(make(0, Some(src))));
     }
-    if order_by || limit {
-        return reject(
-            Reason::LimitedDml,
-            "ORDER BY or LIMIT in a multi-shard write",
-        );
-    }
     if src.text.contains(":=") {
         return reject(Reason::Variables, "a variable assignment across shards");
+    }
+    if order_by || limit {
+        // R3: a locked two-step (chapter 17's step 17).
+        let lw = limited_write(stmt, entry, &rel, &dml, &shards, cx, &releases, fkw.as_ref())?;
+        let targets = lw.0;
+        return Ok(Plan::Write(WritePlan {
+            kind,
+            targets,
+            rows: 0,
+            claims: Vec::new(),
+            releases: Vec::new(),
+            fk: None,
+            limited: Some(Box::new(lw.1)),
+        }));
     }
     Ok(Plan::Write(WritePlan {
         kind,
@@ -3421,7 +3453,150 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
         claims: Vec::new(),
         releases,
         fk: fkw,
+        limited: None,
     }))
+}
+
+/// R3's limited DML over several shards (`UPDATE` or `DELETE … ORDER BY
+/// … LIMIT n`): the per-shard statements without the order and limit, each
+/// with [`crate::plan::LIMITED_ROWS`] in its `WHERE`, and the read that
+/// finds the rows. Exact only when the order is total (it names every
+/// primary-key column) and the table keeps no lookup or foreign key.
+#[allow(clippy::too_many_arguments)]
+fn limited_write(
+    stmt: &Statement,
+    entry: &TableEntry,
+    rel: &Rel<'_>,
+    dml: &fk::Dml<'_>,
+    shards: &BTreeSet<usize>,
+    cx: &PlanCtx<'_>,
+    releases: &[crate::plan::Release],
+    fkw: Option<&Box<crate::fk::FkWork>>,
+) -> R<(Vec<Target>, crate::plan::Limited)> {
+    use crate::fk::ValClass;
+    let refuse = |why: &str| Rejection::new(Reason::LimitedDml, why.to_owned());
+    let (order, limit) = match stmt {
+        Statement::Update(u) => (&u.order_by, &u.limit),
+        Statement::Delete(d) => (&d.order_by, &d.limit),
+        _ => return Err(refuse("not a write")),
+    };
+    if limit.is_none() {
+        return Err(refuse("ORDER BY without LIMIT in a multi-shard write"));
+    }
+    if !releases.is_empty() || !entry.lookups.is_empty() || fkw.is_some() {
+        return Err(refuse(
+            "a limited write on a table with a unique lookup or a foreign key",
+        ));
+    }
+    let Some(key) = entry.key() else {
+        return Err(refuse("a limited write on a table without a key column"));
+    };
+    if entry.primary.is_empty() || entry.primary.len() != entry.primary_classes.len() {
+        return Err(refuse("a limited write on a table whose primary key is unknown"));
+    }
+    let named: Vec<String> = order
+        .iter()
+        .filter_map(|o| match &o.expr {
+            Expr::Identifier(i) => Some(i.value.to_ascii_lowercase()),
+            Expr::CompoundIdentifier(v) => v.last().map(|i| i.value.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+    if !entry.primary.iter().all(|c| named.contains(c)) {
+        return Err(refuse(
+            "ORDER BY … LIMIT in a multi-shard write whose order isn't total (it must name every primary-key column)",
+        ));
+    }
+    let key_class = match entry.group.key_class {
+        KeyClass::Int => ValClass::Num,
+        KeyClass::Str { .. } => ValClass::Str,
+        KeyClass::Binary => ValClass::Bin,
+    };
+    let q = |c: &str| format!("`{}`", c.replace('`', "``"));
+    let mut classes = vec![key_class];
+    classes.extend(entry.primary_classes.iter().copied());
+    let mut items = vec![key_class.read_expr(&q(key))];
+    items.extend(
+        entry
+            .primary
+            .iter()
+            .zip(&entry.primary_classes)
+            .map(|(c, k)| k.read_expr(&q(c))),
+    );
+    let mut sql = format!("SELECT {} FROM {}", items.join(", "), dml.relation);
+    if let Some(w) = dml.selection {
+        let _ = write!(sql, " WHERE {w}");
+    }
+    let _ = write!(sql, " {} FOR UPDATE", dml.tail);
+    let read = match plan_text(&sql, cx)? {
+        p @ (Plan::Pass(_) | Plan::Read(_) | Plan::ViaLookup(_)) => p,
+        Plan::Reject(r) => return Err(r),
+        other => {
+            return Err(refuse(&format!(
+                "the rows of a limited write can't be read in order ({})",
+                other.kind()
+            )));
+        }
+    };
+    // The statement without its order and limit, naming its rows.
+    let mut w = stmt.clone();
+    let mark = Expr::Identifier(Ident::new(crate::plan::LIMITED_ROWS));
+    let with_mark = |sel: &mut Option<Expr>| {
+        *sel = Some(match sel.take() {
+            Some(e) => Expr::BinaryOp {
+                left: Box::new(Expr::Nested(Box::new(e))),
+                op: BinaryOperator::And,
+                right: Box::new(mark.clone()),
+            },
+            None => mark.clone(),
+        });
+    };
+    match &mut w {
+        Statement::Update(u) => {
+            u.order_by.clear();
+            u.limit = None;
+            with_mark(&mut u.selection);
+        }
+        Statement::Delete(d) => {
+            d.order_by.clear();
+            d.limit = None;
+            with_mark(&mut d.selection);
+        }
+        _ => {}
+    }
+    let all: Vec<usize> = if shards.is_empty() {
+        (0..entry.group.shards.len()).collect()
+    } else {
+        shards.iter().copied().collect()
+    };
+    let targets = all
+        .into_iter()
+        .map(|s| {
+            let loc = &entry.group.shards[s];
+            let mut m = HashMap::new();
+            m.insert(rel.loc, loc.schema.clone());
+            let mut by = HashMap::new();
+            by.insert(
+                (rel.default_schema.clone(), rel.table.clone()),
+                loc.schema.clone(),
+            );
+            Target {
+                cluster: loc.cluster.clone(),
+                shard: loc.shard,
+                sql: pass_sql(&w, None, &m, &by),
+                at: entry.group.at(s),
+            }
+        })
+        .collect();
+    Ok((
+        targets,
+        crate::plan::Limited {
+            read: Box::new(read),
+            pk: entry.primary.clone(),
+            classes,
+            group: std::sync::Arc::clone(&entry.group),
+        },
+    ))
 }
 
 /// A write the planner doesn't split: exact only on one shard.

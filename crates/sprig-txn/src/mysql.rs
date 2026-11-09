@@ -34,6 +34,29 @@ pub fn db_error(e: &mysql_async::Error) -> DbError {
 pub struct MyConn {
     conn: Option<Conn>,
     thread: u64,
+    /// Sprig 2PC: the held branch's record (writes, savepoints, the first
+    /// statement that can't replay).
+    redo: Option<Recording>,
+}
+
+/// A held branch's record on a `mysql_async` connection.
+#[derive(Debug, Default)]
+struct Recording {
+    timestamp_us: u64,
+    stmts: Vec<crate::redo::RedoStmt>,
+    savepoints: Vec<(String, usize)>,
+    unsafe_why: Option<String>,
+}
+
+/// Whether `sql` writes (what a held branch records).
+fn writes(sql: &str) -> bool {
+    let w = sql
+        .trim_start()
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    matches!(w.as_str(), "INSERT" | "UPDATE" | "DELETE" | "REPLACE")
 }
 
 impl MyConn {
@@ -47,6 +70,7 @@ impl MyConn {
         Ok(Self {
             conn: Some(conn),
             thread,
+            redo: None,
         })
     }
 
@@ -66,7 +90,34 @@ impl MyConn {
     /// The server's error, or a lost connection.
     pub async fn exec(&mut self, sql: &str) -> DbResult<()> {
         let r = self.raw()?.query_drop(sql).await;
-        self.check(r)
+        self.check(r)?;
+        self.record(sql);
+        Ok(())
+    }
+
+    /// A held branch records a write that succeeded.
+    fn record(&mut self, sql: &str) {
+        let (Some(rec), Some(c)) = (self.redo.as_mut(), self.conn.as_ref()) else {
+            return;
+        };
+        if !writes(sql) {
+            return;
+        }
+        if rec.unsafe_why.is_none()
+            && let Some(why) = crate::redo::unsafe_reason(sql)
+        {
+            rec.unsafe_why = Some(why.to_owned());
+        }
+        let update = sql.trim_start().to_ascii_uppercase().starts_with("UPDATE");
+        rec.stmts.push(crate::redo::RedoStmt {
+            sql: sql.to_owned(),
+            // UPDATE counts depend on CLIENT_FOUND_ROWS: not checked.
+            affected: if update { u64::MAX } else { c.affected_rows() },
+            insert_id: c.last_insert_id().unwrap_or(0),
+            vars: Vec::new(),
+            charset: None,
+            timestamp_us: Some(rec.timestamp_us),
+        });
     }
 
     /// Runs a query of the caller's.
@@ -115,7 +166,42 @@ impl BranchConn for MyConn {
         // One round trip: MariaDB stops at the first failing statement.
         let sql: Vec<String> = ctl.iter().map(Ctl::sql).collect();
         let r = self.raw()?.query_drop(sql.join("; ")).await;
-        self.check(r)
+        self.check(r)?;
+        if let Some(rec) = self.redo.as_mut() {
+            for c in ctl {
+                match c {
+                    Ctl::Savepoint(n) => {
+                        rec.savepoints.retain(|(x, _)| x != n);
+                        rec.savepoints.push((n.clone(), rec.stmts.len()));
+                    }
+                    Ctl::RollbackTo(n) => {
+                        if let Some(&(_, at)) = rec.savepoints.iter().find(|(x, _)| x == n) {
+                            rec.stmts.truncate(at);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn start_redo(&mut self, timestamp_us: u64) -> bool {
+        self.redo = Some(Recording {
+            timestamp_us,
+            ..Recording::default()
+        });
+        true
+    }
+
+    fn take_redo(&mut self) -> Result<Vec<crate::redo::RedoStmt>, String> {
+        let Some(rec) = self.redo.take() else {
+            return Ok(Vec::new());
+        };
+        match rec.unsafe_why {
+            Some(why) => Err(why),
+            None => Ok(rec.stmts),
+        }
     }
 }
 
@@ -417,6 +503,166 @@ impl ClusterAdmin for MyAdmin {
         ))
         .await
         .map_err(|e| db_error(&e))
+    }
+
+    async fn insert_redo(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+        gtrid: &crate::xid::Gtrid,
+        stmts: &[crate::redo::RedoStmt],
+    ) -> DbResult<()> {
+        let mut c = self.conn(cluster).await?;
+        let sql = crate::redo::insert_sql(schema, dtid, gtrid, stmts);
+        match c.query_drop(&sql).await {
+            Err(mysql_async::Error::Server(e)) if e.code == 1146 => {
+                c.query_drop(crate::redo::redo_table_sql(schema))
+                    .await
+                    .map_err(|e| db_error(&e))?;
+                c.query_drop(&sql).await.map_err(|e| db_error(&e))
+            }
+            r => r.map_err(|e| db_error(&e)),
+        }
+    }
+
+    async fn redo_branches(&self, cluster: &ClusterId) -> DbResult<Vec<crate::redo::RedoBranch>> {
+        use crate::redo::{MARK_SEQ, REDO_TABLE, RedoBranch, RedoMark};
+        let mut c = self.conn(cluster).await?;
+        let schemas: Vec<String> = c
+            .query(format!(
+                "SELECT TABLE_SCHEMA FROM information_schema.TABLES WHERE TABLE_NAME = '{REDO_TABLE}'"
+            ))
+            .await
+            .map_err(|e| db_error(&e))?;
+        let mut out = Vec::new();
+        for s in schemas {
+            let rows: Vec<(Vec<u8>, Vec<u8>, i64, Option<String>, Option<i64>)> = c
+                .query(format!(
+                    "SELECT dtid, MIN(gtrid), SUM(seq < {MARK_SEQ}),                      MAX(IF(seq = {MARK_SEQ}, CAST(ctx AS CHAR), NULL)),                      TIMESTAMPDIFF(SECOND, MIN(created_at), NOW(6))                      FROM `{}`.`{REDO_TABLE}` GROUP BY dtid",
+                    q(&s)
+                ))
+                .await
+                .map_err(|e| db_error(&e))?;
+            for (d, g, n, mark, age) in rows {
+                let (Ok(d), Some(gtrid)) = (
+                    <[u8; 16]>::try_from(d.as_slice()),
+                    crate::xid::Gtrid::from_bytes(&g),
+                ) else {
+                    continue;
+                };
+                out.push(RedoBranch {
+                    schema: s.clone(),
+                    dtid: Dtid::from_bytes(d),
+                    gtrid,
+                    age_seconds: age.and_then(|a| u64::try_from(a).ok()).unwrap_or(0),
+                    statements: usize::try_from(n).unwrap_or(0),
+                    mark: match mark.as_deref() {
+                        Some("done") => Some(RedoMark::Done),
+                        Some(_) => Some(RedoMark::Replayed),
+                        None => None,
+                    },
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::many_single_char_names)] // the book's names: c, d, g, n, r
+    async fn replay_redo(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+    ) -> DbResult<crate::redo::Replay> {
+        use crate::redo::{MARK_SEQ, REDO_TABLE, RedoMark, RedoStmt, Replay};
+        let mut c = self.conn(cluster).await?;
+        let d = hex(&dtid.to_bytes());
+        let r = async {
+            c.query_drop(format!(
+                "SET SESSION innodb_lock_wait_timeout = {ADMIN_LOCK_WAIT_S}"
+            ))
+            .await?;
+            c.query_drop("START TRANSACTION").await?;
+            // The marker first: a holder still finishing holds it (this
+            // waits, then finds it), or committed it (a duplicate).
+            let rows: Vec<Vec<u8>> = c
+                .query(format!(
+                    "SELECT gtrid FROM `{}`.`{REDO_TABLE}` WHERE dtid = X'{d}' LIMIT 1",
+                    q(schema)
+                ))
+                .await?;
+            let Some(g) = rows.first().and_then(|g| crate::xid::Gtrid::from_bytes(g)) else {
+                c.query_drop("ROLLBACK").await?;
+                return Ok(Replay::Gone);
+            };
+            match c
+                .query_drop(crate::redo::mark_sql(schema, dtid, &g, RedoMark::Replayed))
+                .await
+            {
+                Err(mysql_async::Error::Server(e)) if e.code == 1062 => {
+                    c.query_drop("ROLLBACK").await?;
+                    return Ok(Replay::Gone);
+                }
+                r => r?,
+            }
+            let stmts: Vec<(u64, Vec<u8>, Vec<u8>)> = c
+                .query(format!(
+                    "SELECT seq, ctx, stmt FROM `{}`.`{REDO_TABLE}` WHERE dtid = X'{d}'                      AND seq < {MARK_SEQ} ORDER BY seq FOR UPDATE",
+                    q(schema)
+                ))
+                .await?;
+            if stmts.is_empty() {
+                c.query_drop("ROLLBACK").await?;
+                return Ok(Replay::Gone);
+            }
+            for (seq, ctx, stmt) in stmts {
+                let r = RedoStmt::from_ctx(
+                    String::from_utf8_lossy(&stmt).into_owned(),
+                    &String::from_utf8_lossy(&ctx),
+                );
+                if let Some(cs) = &r.charset
+                    && cs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    c.query_drop(format!("SET NAMES {cs}")).await?;
+                }
+                c.query_drop(r.replay_sql()).await?;
+                let n = c.affected_rows();
+                if r.affected != u64::MAX && n != r.affected {
+                    c.query_drop("ROLLBACK").await?;
+                    return Ok(Replay::Hazard(format!(
+                        "statement {seq} changed {n} rows on replay, {} when it ran",
+                        r.affected
+                    )));
+                }
+            }
+            c.query_drop(format!(
+                "DELETE FROM `{}`.`{REDO_TABLE}` WHERE dtid = X'{d}' AND seq < {MARK_SEQ}",
+                q(schema)
+            ))
+            .await?;
+            c.query_drop("COMMIT").await?;
+            Ok::<Replay, mysql_async::Error>(Replay::Applied)
+        }
+        .await;
+        match r {
+            Ok(x) => {
+                let _ = c.query_drop("SET NAMES utf8mb4").await;
+                Ok(x)
+            }
+            Err(e) => {
+                let _ = c.query_drop("ROLLBACK").await;
+                Err(db_error(&e))
+            }
+        }
+    }
+
+    async fn delete_redo(&self, cluster: &ClusterId, schema: &str, dtid: Dtid) -> DbResult<()> {
+        let mut c = self.conn(cluster).await?;
+        match c.query_drop(crate::redo::delete_sql(schema, dtid)).await {
+            Err(mysql_async::Error::Server(e)) if e.code == 1146 => Ok(()),
+            r => r.map_err(|e| db_error(&e)),
+        }
     }
 }
 

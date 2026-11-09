@@ -184,6 +184,34 @@ impl ClusterAdmin for GwAdmin {
     async fn xa_recover(&self, c: &ClusterId) -> DbResult<Vec<Xid>> {
         self.of(c).await?.xa_recover(c).await
     }
+    // Sprig 2PC (R3): held branches' redo rows, through `sprig_ctl`.
+    async fn insert_redo(
+        &self,
+        c: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+        gtrid: &sprig_txn::Gtrid,
+        stmts: &[sprig_txn::RedoStmt],
+    ) -> DbResult<()> {
+        self.of(c)
+            .await?
+            .insert_redo(c, schema, dtid, gtrid, stmts)
+            .await
+    }
+    async fn redo_branches(&self, c: &ClusterId) -> DbResult<Vec<sprig_txn::RedoBranch>> {
+        self.of(c).await?.redo_branches(c).await
+    }
+    async fn replay_redo(
+        &self,
+        c: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+    ) -> DbResult<sprig_txn::Replay> {
+        self.of(c).await?.replay_redo(c, schema, dtid).await
+    }
+    async fn delete_redo(&self, c: &ClusterId, schema: &str, dtid: Dtid) -> DbResult<()> {
+        self.of(c).await?.delete_redo(c, schema, dtid).await
+    }
     async fn xa_finish(&self, c: &ClusterId, xid: &Xid, commit: bool) -> DbResult<()> {
         self.of(c).await?.xa_finish(c, xid, commit).await
     }

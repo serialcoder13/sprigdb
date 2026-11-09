@@ -484,7 +484,10 @@ mod tests {
         assert_eq!(response_header_version(api::FETCH, 12), 1);
         assert_eq!(response_header_version(api::LIST_OFFSETS, 6), 1);
         assert_eq!(response_header_version(api::LIST_OFFSETS, 5), 0);
-        assert_eq!(RequestHeader::version_for(api::OFFSET_FOR_LEADER_EPOCH, 4), 2);
+        assert_eq!(
+            RequestHeader::version_for(api::OFFSET_FOR_LEADER_EPOCH, 4),
+            2
+        );
         // An API SprigDB doesn't know reads as header v1.
         assert_eq!(RequestHeader::version_for(57, 9), 1);
     }

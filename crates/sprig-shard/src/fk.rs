@@ -19,7 +19,7 @@ use crate::lookup::LookupId;
 pub enum FkAction {
     /// `RESTRICT`.
     Restrict,
-    /// `NO ACTION` (InnoDB checks it at once, like `RESTRICT`).
+    /// `NO ACTION` (MariaDB checks it at once, like `RESTRICT`).
     NoAction,
     /// `CASCADE`.
     Cascade,
@@ -269,7 +269,7 @@ pub fn from_tuple(t: FkTuple) -> Option<ForeignKey> {
 pub struct FkLine {
     /// The constraint's name.
     pub name: String,
-    /// `ON DELETE` (`RESTRICT` when absent, as InnoDB reads it).
+    /// `ON DELETE` (`RESTRICT` when absent, as MariaDB reads it).
     pub on_delete: FkAction,
     /// `ON UPDATE`.
     pub on_update: FkAction,

@@ -485,9 +485,8 @@ fn param(toks: Vec<Tok>) -> Result<Param> {
             _ => {}
         }
     }
-    let name = match it.next() {
-        Some(Tok::Word(w) | Tok::Name(w)) => w,
-        _ => return Err(syntax("expected a parameter name")),
+    let Some(Tok::Word(name) | Tok::Name(name)) = it.next() else {
+        return Err(syntax("expected a parameter name"));
     };
     let mut ty = String::new();
     for t in it {
@@ -842,9 +841,17 @@ mod tests {
                 ("e", "tinyint(1)")
             ]
         );
-        use sprig_logic_compile::ir::Ty;
-        let irs: Vec<Ty> = d.params.iter().map(|p| Param::ir_ty(&p.ty)).collect();
-        assert_eq!(irs, [Ty::Float, Ty::Str, Ty::Json, Ty::Bool]);
+        let irs: Vec<sprig_logic_compile::ir::Ty> =
+            d.params.iter().map(|p| Param::ir_ty(&p.ty)).collect();
+        assert_eq!(
+            irs,
+            [
+                sprig_logic_compile::ir::Ty::Float,
+                sprig_logic_compile::ir::Ty::Str,
+                sprig_logic_compile::ir::Ty::Json,
+                sprig_logic_compile::ir::Ty::Bool
+            ]
+        );
         assert!(parse("CREATE PROCEDURE q(OUT a INT) LANGUAGE js AS $$ $$").is_err());
     }
 

@@ -89,7 +89,9 @@ pub const DDL: [&str; 4] = [
 /// The statements that create the tables in `schema`.
 #[must_use]
 pub fn ddl(schema: &str) -> Vec<String> {
-    DDL.iter().map(|d| d.replace("{s}", &quote(schema))).collect()
+    DDL.iter()
+        .map(|d| d.replace("{s}", &quote(schema)))
+        .collect()
 }
 
 /// The insert of one outbox row into `schema` (a transactional publish
@@ -125,7 +127,7 @@ fn fail(e: &mysql_async::Error) -> StoreError {
     StoreError::Failed(e.to_string())
 }
 
-fn id16(v: Vec<u8>) -> MsgId {
+fn id16(v: &[u8]) -> MsgId {
     let mut a = [0u8; 16];
     let n = v.len().min(16);
     a[..n].copy_from_slice(&v[..n]);
@@ -206,7 +208,7 @@ fn msg_of(r: mysql_async::Row) -> Option<StoredMsg> {
         lane: 0,
         pclass,
         seq,
-        msg_id: id16(msg_id),
+        msg_id: id16(&msg_id),
         fmt,
         exchange: String::from_utf8_lossy(&exchange).into_owned(),
         routing_key: String::from_utf8_lossy(&routing_key).into_owned(),
@@ -232,10 +234,10 @@ fn outbox_of(r: mysql_async::Row) -> Option<OutboxRow> {
         Option<Vec<u8>>,
     ) = mysql_async::from_row_opt(r).ok()?;
     Some(OutboxRow {
-        out_id: id16(out_id),
+        out_id: id16(&out_id),
         kind: OutKind::parse(&kind)?,
         dest: serde_json::from_str(&dest).ok()?,
-        msg_id: id16(msg_id),
+        msg_id: id16(&msg_id),
         fmt,
         exchange: String::from_utf8_lossy(&exchange).into_owned(),
         routing_key: String::from_utf8_lossy(&routing_key).into_owned(),
@@ -373,7 +375,7 @@ impl MsgStore for MariaStore {
                 )
                 .await
                 .map_err(|e| fail(&e))?;
-            out.extend(rows.into_iter().map(id16));
+            out.extend(rows.iter().map(|r| id16(r)));
         }
         Ok(out)
     }
@@ -421,7 +423,8 @@ impl MsgStore for MariaStore {
                 n += 1;
             }
             let rows = &b.inserts[i..i + n];
-            let marks = vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))"; n].join(", ");
+            let marks =
+                vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))"; n].join(", ");
             let mut params: Vec<Value> = Vec::with_capacity(n * 14);
             for m in rows {
                 params.extend([
@@ -570,7 +573,10 @@ impl MsgStore for MariaStore {
         for chunk in ids.chunks(CHUNK) {
             let marks = vec!["?"; chunk.len()].join(", ");
             c.exec_drop(
-                format!("DELETE FROM {} WHERE out_id IN ({marks})", self.t("__sprig_qo")),
+                format!(
+                    "DELETE FROM {} WHERE out_id IN ({marks})",
+                    self.t("__sprig_qo")
+                ),
                 Params::Positional(chunk.iter().map(|i| Value::from(i.to_vec())).collect()),
             )
             .await
@@ -630,7 +636,7 @@ impl MsgStore for MariaStore {
                     name: exchange.clone(),
                     key: rk.clone(),
                 },
-                msg_id: id16(msg_id.clone()),
+                msg_id: id16(&msg_id),
                 fmt,
                 exchange,
                 routing_key: rk,

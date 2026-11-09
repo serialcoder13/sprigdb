@@ -94,6 +94,9 @@ pub struct TenantServices {
     pub auth_changes: Arc<AuthChanges>,
     /// Chapter 29: per-user backend accounts and their reconcile state.
     pub authz: authz::AuthzServices,
+    /// Chapter 50: the queue engine, set when the AMQP front end starts
+    /// (`sprig.mq_*` calls in SQL use it).
+    pub mq: std::sync::OnceLock<Arc<sprig_queues::QueueEngine>>,
     _follow: Registration,
 }
 
@@ -210,6 +213,7 @@ impl TenantServices {
             clock,
             auth_changes,
             authz: authz::AuthzServices::default(),
+            mq: std::sync::OnceLock::new(),
             _follow: follow,
         }))
     }

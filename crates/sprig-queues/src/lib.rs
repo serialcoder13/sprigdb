@@ -28,7 +28,9 @@
     clippy::too_many_lines,
     clippy::module_name_repetitions,
     clippy::cast_precision_loss,
-    clippy::struct_excessive_bools
+    clippy::struct_excessive_bools,
+    clippy::many_single_char_names,
+    clippy::type_complexity
 )]
 
 pub mod catalog;
@@ -39,6 +41,7 @@ pub mod memstore;
 pub mod msg;
 pub mod owner;
 pub mod settings;
+pub mod sql;
 pub mod store;
 pub mod token;
 pub mod topology;

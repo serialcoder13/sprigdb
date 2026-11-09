@@ -76,7 +76,10 @@ impl ConnVhost {
 
     fn check(&self, cx: &OpCtx, p: Perm, kind: &str, name: &str) -> Result<(), MqError> {
         let e = self.engine()?;
-        if e.deps.catalog.allowed(&cx.principal, &self.v.r, p, kind, name) {
+        if e.deps
+            .catalog
+            .allowed(&cx.principal, &self.v.r, p, kind, name)
+        {
             return Ok(());
         }
         let what = match p {
@@ -109,8 +112,7 @@ impl ConnVhost {
         match &q.exclusive {
             None => true,
             Some(o) => {
-                self.engine()
-                    .is_ok_and(|e| e.deps.leases.me() == o.gateway)
+                self.engine().is_ok_and(|e| e.deps.leases.me() == o.gateway)
                     && o.conn == self.conn.0
             }
         }
@@ -119,12 +121,11 @@ impl ConnVhost {
     /// The queue, refreshed from the catalog when missing, checked for
     /// exclusive ownership.
     async fn queue_for(&self, name: &str) -> Result<Arc<QueueDef>, MqError> {
-        let q = match self.v.queue(name) {
-            Some(q) => q,
-            None => {
-                self.engine()?.deps.catalog.refresh(&self.v.r).await?;
-                self.v.queue(name).ok_or_else(|| self.no_queue(name))?
-            }
+        let q = if let Some(q) = self.v.queue(name) {
+            q
+        } else {
+            self.engine()?.deps.catalog.refresh(&self.v.r).await?;
+            self.v.queue(name).ok_or_else(|| self.no_queue(name))?
         };
         if !self.mine(&q) {
             return Err(self.locked(name));
@@ -183,7 +184,10 @@ impl ConnVhost {
             if u64::try_from(d).unwrap_or(u64::MAX) > s.delay_max_ms {
                 return Err(MqError::new(
                     MqCode::DelayOutOfRange,
-                    format!("x-delay {d} is above queue.delay_max_ms ({})", s.delay_max_ms),
+                    format!(
+                        "x-delay {d} is above queue.delay_max_ms ({})",
+                        s.delay_max_ms
+                    ),
                 )
                 .with_reply(406));
             }
@@ -226,7 +230,7 @@ impl ConnVhost {
         for q in &targets {
             let (tx, rx) = oneshot::channel();
             let h = self.v.slot(q);
-            h.send(Cmd::Enqueue(vec![(
+            let _ = h.send(Cmd::Enqueue(vec![(
                 Incoming {
                     msg: Arc::clone(&msg),
                     msg_id: new_msg_id(),
@@ -439,8 +443,9 @@ impl Vhost for ConnVhost {
         }
         {
             let mut t = lock(&self.v.temp);
-            t.bindings
-                .retain(|b| b.source != name && !(b.dest_kind == DestKind::Exchange && b.dest == name));
+            t.bindings.retain(|b| {
+                b.source != name && !(b.dest_kind == DestKind::Exchange && b.dest == name)
+            });
         }
         self.publish_temp();
         self.engine()?
@@ -470,12 +475,11 @@ impl Vhost for ConnVhost {
         if server_named {
             spec.name = server_name();
         }
-        let existing = match self.v.queue(&spec.name) {
-            Some(q) => Some(q),
-            None => {
-                self.engine()?.deps.catalog.refresh(&self.v.r).await?;
-                self.v.queue(&spec.name)
-            }
+        let existing = if let Some(q) = self.v.queue(&spec.name) {
+            Some(q)
+        } else {
+            self.engine()?.deps.catalog.refresh(&self.v.r).await?;
+            self.v.queue(&spec.name)
         };
         if !server_named && spec.name.starts_with("amq.") && existing.is_none() {
             return Err(MqError::access_refused(format!(
@@ -718,7 +722,10 @@ impl Vhost for ConnVhost {
         {
             return Ok(());
         }
-        e.deps.catalog.change(&self.v.r, TopoChange::Bind(def)).await?;
+        e.deps
+            .catalog
+            .change(&self.v.r, TopoChange::Bind(def))
+            .await?;
         Ok(())
     }
 
@@ -759,7 +766,10 @@ impl Vhost for ConnVhost {
             .iter()
             .any(|x| x.same(&def))
         {
-            e.deps.catalog.change(&self.v.r, TopoChange::Unbind(def)).await?;
+            e.deps
+                .catalog
+                .change(&self.v.r, TopoChange::Unbind(def))
+                .await?;
         }
         // An auto-delete exchange goes with its last binding.
         let auto = e
@@ -864,6 +874,7 @@ impl Vhost for ConnVhost {
         if !self.v.slot(&q).send(Cmd::Get {
             holder: self.holder(),
             no_ack,
+            lease_ms: None,
             reply: tx,
         }) {
             return Err(MqError::new(MqCode::OwnerMoved, "owner stopped"));
@@ -926,7 +937,10 @@ impl Vhost for ConnVhost {
         for h in owners {
             let _ = h.send(Cmd::ConnLost(holder));
         }
-        let me = self.engine().map(|e| e.deps.leases.me().to_owned()).unwrap_or_default();
+        let me = self
+            .engine()
+            .map(|e| e.deps.leases.me().to_owned())
+            .unwrap_or_default();
         let exclusive: Vec<Arc<QueueDef>> = lock(&self.v.temp)
             .queues
             .values()

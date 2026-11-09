@@ -393,14 +393,23 @@ impl Gen<'_> {
                                 format!("{}, {}", quote(c), embed_raw(&field, *t))
                             })
                             .collect();
+                        // A named cursor in its own block, not `FOR r IN
+                        // (SELECT ...)`: MariaDB 11.8 re-parses an inline
+                        // cursor's query wrongly after a table it reads is
+                        // re-created (1064 near ''), a named one correctly.
+                        let cur = format!("c_{}", &v[2..]);
                         let _ = writeln!(out, "{ind}{v} := JSON_ARRAY();");
-                        let _ = writeln!(out, "{ind}FOR {rec} IN ({text}) LOOP");
+                        let _ = writeln!(out, "{ind}DECLARE");
+                        let _ = writeln!(out, "{ind}  CURSOR {cur} IS {text};");
+                        let _ = writeln!(out, "{ind}BEGIN");
+                        let _ = writeln!(out, "{ind}  FOR {rec} IN {cur} LOOP");
                         let _ = writeln!(
                             out,
-                            "{ind}  {v} := JSON_ARRAY_APPEND({v}, '$', JSON_OBJECT({}));",
+                            "{ind}    {v} := JSON_ARRAY_APPEND({v}, '$', JSON_OBJECT({}));",
                             members.join(", ")
                         );
-                        let _ = writeln!(out, "{ind}END LOOP;");
+                        let _ = writeln!(out, "{ind}  END LOOP;");
+                        let _ = writeln!(out, "{ind}END;");
                     }
                     SqlShape::Exec { affected } => {
                         let _ = writeln!(out, "{ind}{text};");

@@ -90,6 +90,10 @@ pub struct Holder {
     pub conn: ConnKey,
 }
 
+/// [`Holder::origin`] of a settlement by delivery token (SQL's
+/// `mq_nack`): it settles whoever holds the delivery.
+pub const ANY_HOLDER: u64 = u64::MAX;
+
 /// A message to enqueue.
 #[derive(Debug, Clone)]
 pub struct Incoming {
@@ -156,6 +160,8 @@ pub enum Cmd {
         holder: Holder,
         /// Settle at once.
         no_ack: bool,
+        /// Back to the queue unless settled within this (SQL's `mq_get`).
+        lease_ms: Option<u64>,
         /// The answer.
         reply: Reply<Option<(Delivery, u32)>>,
     },
@@ -224,6 +230,8 @@ pub enum OwnerEvent {
 pub struct OwnerParams {
     /// The tenant (delivery tokens).
     pub tenant: u64,
+    /// The vhost's database (delivery tokens).
+    pub db: u32,
     /// The queue.
     pub queue: Arc<QueueDef>,
     /// Its behaviour.
@@ -326,6 +334,7 @@ impl std::fmt::Debug for OwnerHandle {
 
 impl OwnerHandle {
     /// Sends a command; `false` if the owner stopped.
+    #[must_use = "a stopped owner drops the command"]
     pub fn send(&self, c: Cmd) -> bool {
         self.tx.send(c).is_ok()
     }
@@ -415,7 +424,10 @@ pub async fn run(p: OwnerParams, store: Arc<dyn MsgStore>, mut rx: mpsc::Unbound
         p,
     };
     if let Err(e) = core.page_in().await {
-        let err = MqError::new(MqCode::OwnerMoved, format!("queue '{}': {e}", core.p.queue.name));
+        let err = MqError::new(
+            MqCode::OwnerMoved,
+            format!("queue '{}': {e}", core.p.queue.name),
+        );
         fail_all(&mut rx, &err);
         let _ = core.p.events.send(OwnerEvent::Stopped {
             queue: core.p.queue.id,
@@ -486,7 +498,7 @@ impl Core {
         }
     }
 
-    fn stored(&self, e: &Entry) -> StoredMsg {
+    fn stored(e: &Entry) -> StoredMsg {
         StoredMsg {
             lane: 0,
             pclass: e.pclass,
@@ -563,9 +575,7 @@ impl Core {
         if !self.complete && self.loaded_upto.is_some_and(|u| k > u) {
             return; // stays on disk; read by a later page-in
         }
-        if self.complete
-            && self.cache_bytes + e.size > self.p.cache_bytes
-            && !self.ready.is_empty()
+        if self.complete && self.cache_bytes + e.size > self.p.cache_bytes && !self.ready.is_empty()
         {
             // The cache is full: the rest waits on disk.
             self.complete = false;
@@ -603,10 +613,15 @@ impl Core {
     }
 
     fn token(&self, e: &Entry) -> Option<String> {
-        self.p
-            .tokens
-            .as_ref()
-            .map(|k| k.mint(self.p.tenant, &self.id_of(e), &e.msg_id, self.epoch))
+        self.p.tokens.as_ref().map(|k| {
+            k.mint(
+                self.p.tenant,
+                self.p.db,
+                &self.id_of(e),
+                &e.msg_id,
+                self.epoch,
+            )
+        })
     }
 
     fn delivery(&self, e: &Entry) -> Delivery {
@@ -756,12 +771,12 @@ impl Core {
     /// Drops the oldest ready message (drop-head): from the cache, else
     /// the oldest one not yet committed.
     fn drop_head(&mut self) -> bool {
-        if let Some((&k, _)) = self.ready.iter().next() {
-            if let Some(e) = self.cache_take(k) {
-                self.dec_ready(e.size);
-                self.dead_letter(e, DeadLetterReason::Maxlen, true);
-                return true;
-            }
+        if let Some((&k, _)) = self.ready.iter().next()
+            && let Some(e) = self.cache_take(k)
+        {
+            self.dec_ready(e.size);
+            self.dead_letter(e, DeadLetterReason::Maxlen, true);
+            return true;
         }
         if self.inserts.is_empty() {
             return false;
@@ -807,9 +822,12 @@ impl Core {
         let mut count = 1i64;
         deaths.retain(|d| {
             let FieldValue::Table(t) = d else { return true };
-            let s = |k: &str| t.get(k).and_then(|v| v.as_str().map(std::borrow::Cow::into_owned));
-            let same =
-                s("queue").as_deref() == Some(&qname) && s("reason").as_deref() == Some(reason.as_str());
+            let s = |k: &str| {
+                t.get(k)
+                    .and_then(|v| v.as_str().map(std::borrow::Cow::into_owned))
+            };
+            let same = s("queue").as_deref() == Some(&qname)
+                && s("reason").as_deref() == Some(reason.as_str());
             if same {
                 count += t.get("count").and_then(FieldValue::as_i64).unwrap_or(0);
             }
@@ -893,7 +911,7 @@ impl Core {
         let mut rows = Vec::with_capacity(inserts.len());
         let mut ready_after = (self.ready_count, self.ready_bytes);
         for (e, _) in &inserts {
-            rows.push(self.stored(e));
+            rows.push(Self::stored(e));
             ready_after.0 += 1;
             ready_after.1 += e.size;
         }
@@ -1126,7 +1144,11 @@ impl Core {
             }
             // A stale settlement (the delivery went back and out again)
             // is ignored.
-            if !self.unacked.get(&id.seq).is_some_and(|u| u.holder == holder) {
+            if !self
+                .unacked
+                .get(&id.seq)
+                .is_some_and(|u| u.holder == holder || holder.origin == ANY_HOLDER)
+            {
                 continue;
             }
             match how {
@@ -1229,7 +1251,7 @@ impl Core {
         let now = self.now();
         // TTL at the head, also without consumers.
         while let Some(e) = self.ready.values().next() {
-            if !e.expires_at_ms.is_some_and(|t| t <= now) {
+            if e.expires_at_ms.is_none_or(|t| t > now) {
                 break;
             }
             let k = e.key();
@@ -1272,7 +1294,10 @@ impl Core {
         let stale: Vec<(u64, MsgId)> = self
             .unacked
             .iter()
-            .filter(|(_, u)| u.held_since.is_some_and(|h| h + self.p.hold_check_ms <= now))
+            .filter(|(_, u)| {
+                u.held_since
+                    .is_some_and(|h| h + self.p.hold_check_ms <= now)
+            })
             .map(|(s, u)| (*s, u.e.msg_id))
             .collect();
         for (seq, id) in stale {
@@ -1358,9 +1383,15 @@ impl Core {
             Cmd::Get {
                 holder,
                 no_ack,
+                lease_ms,
                 reply,
             } => {
                 self.last_used_ms = self.now();
+                // A publish earlier on the channel is in this batch: commit
+                // it first, as RabbitMQ's get sees it.
+                if !self.inserts.is_empty() {
+                    self.flush().await?;
+                }
                 if self.ready.is_empty() && !self.complete {
                     self.flush().await?;
                     self.page_in().await?;
@@ -1390,7 +1421,9 @@ impl Core {
                                     e,
                                     holder,
                                     consumer: None,
-                                    deadline_ms: None,
+                                    deadline_ms: lease_ms.map(|l| {
+                                        now.saturating_add(i64::try_from(l).unwrap_or(i64::MAX))
+                                    }),
                                     held_since: None,
                                     requeue_after: false,
                                     gone: false,
@@ -1426,7 +1459,7 @@ impl Core {
                         "queue '{}' in use",
                         self.p.queue.name
                     ))));
-                } else if if_empty && self.ready_count > 0 {
+                } else if if_empty && self.ready_count + self.inserts.len() as u64 > 0 {
                     let _ = reply.send(Err(MqError::precondition(format!(
                         "queue '{}' is not empty",
                         self.p.queue.name
@@ -1457,7 +1490,7 @@ impl Core {
             }
             Cmd::Info(reply) => {
                 let _ = reply.send((
-                    u32::try_from(self.ready_count).unwrap_or(u32::MAX),
+                    u32::try_from(self.ready_count + self.inserts.len() as u64).unwrap_or(u32::MAX),
                     u32::try_from(self.consumers.len()).unwrap_or(u32::MAX),
                 ));
             }

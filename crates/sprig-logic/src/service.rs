@@ -222,13 +222,30 @@ pub fn script_check(d: &Declaration) -> Result<()> {
     Ok(())
 }
 
-/// Deploys `d` (see the module docs).
+/// Who creates a version's routines when it isn't the deploying session:
+/// a `sprig_ctl` connection to the shard, and the deploying user's backend
+/// account as `DEFINER` (checked afterwards, 39367).
+pub struct Creator<'a> {
+    /// The connection.
+    pub session: &'a mut dyn Session,
+    /// `` `t1_u7`@`%` ``.
+    pub definer: String,
+}
+
+/// Deploys `d` (see the module docs). `session` is the deploying user's
+/// (columns are read as the user sees them); `creator`, when given,
+/// creates the routines instead of it.
 ///
 /// # Errors
 /// 39861 or 39874 from the compiler; 39868 from placement; 1304 for an
 /// existing name without `OR REPLACE`; 39869 for a concurrent deploy;
 /// catalog errors; the server's error from creating a routine; 39367.
-pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -> Result<Outcome> {
+pub async fn deploy(
+    d: &Declaration,
+    t: Target<'_>,
+    session: &mut dyn Session,
+    creator: Option<Creator<'_>>,
+) -> Result<Outcome> {
     Migrator::new(&[LOGIC_MODULE])?
         .run(t.catalog, t.catalog_schema, &MigrateOpts::default())
         .await?;
@@ -376,8 +393,19 @@ pub async fn deploy(d: &Declaration, t: Target<'_>, session: &mut dyn Session) -
         }
         (None, _, _) => None,
     };
+    let plan = match (plan, &creator) {
+        (Some(mut p), Some(c)) => {
+            p.definer = Some(c.definer.clone());
+            Some(p)
+        }
+        (p, _) => p,
+    };
+    let target: &mut dyn Session = match creator {
+        Some(c) => c.session,
+        None => session,
+    };
     let definer = match &plan {
-        Some(plan) => match deploy::deploy(session, plan).await {
+        Some(plan) => match deploy::deploy(target, plan).await {
             Ok(d) => d,
             Err(e) => {
                 let _ = store

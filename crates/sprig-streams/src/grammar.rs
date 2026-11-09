@@ -541,9 +541,7 @@ fn alter(c: &mut Cur<'_>) -> Result<AlterStream> {
             settings(c, false, &mut a.settings)?;
         } else if c.eat("RESET") {
             settings(c, true, &mut a.settings)?;
-        } else if sprig
-            || !options(c, &mut a.partitions, &mut a.retention_hours, &mut a.cleanup)?
-        {
+        } else if sprig || !options(c, &mut a.partitions, &mut a.retention_hours, &mut a.cleanup)? {
             return Err(syntax(&c.near()));
         }
         any = true;

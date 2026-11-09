@@ -188,8 +188,7 @@ impl MsgStore for MemStore {
             l.msgs.insert((m.pclass, m.seq), m.clone());
         }
         for d in &b.deletes {
-            if l
-                .msgs
+            if l.msgs
                 .get(&(d.pclass, d.seq))
                 .is_some_and(|m| m.msg_id == d.msg_id)
             {

@@ -121,7 +121,11 @@ fn check<M: Message + PartialEq + std::fmt::Debug>(name: &str, v: i16, m: &M, wa
 }
 
 fn range(key: i16) -> &'static ApiRange {
-    SERVED.iter().chain(DATA_PLANE).find(|r| r.key == key).unwrap()
+    SERVED
+        .iter()
+        .chain(DATA_PLANE)
+        .find(|r| r.key == key)
+        .unwrap()
 }
 
 fn versions(key: i16) -> std::ops::RangeInclusive<i16> {
@@ -1718,17 +1722,19 @@ fn offset_for_leader_epoch() {
         b.tags();
         let p = OffsetForLeaderEpochResponse {
             throttle_time_ms: 0,
-            topics: vec![offset_for_leader_epoch_response::OffsetForLeaderTopicResult {
-                topic: "shop.order_events".into(),
-                partitions: vec![offset_for_leader_epoch_response::EpochEndOffset {
-                    error_code: 0,
-                    partition: 5,
-                    leader_epoch: 3,
-                    end_offset: 1180,
+            topics: vec![
+                offset_for_leader_epoch_response::OffsetForLeaderTopicResult {
+                    topic: "shop.order_events".into(),
+                    partitions: vec![offset_for_leader_epoch_response::EpochEndOffset {
+                        error_code: 0,
+                        partition: 5,
+                        leader_epoch: 3,
+                        end_offset: 1180,
+                        ..Default::default()
+                    }],
                     ..Default::default()
-                }],
-                ..Default::default()
-            }],
+                },
+            ],
             ..Default::default()
         };
         check("OffsetForLeaderEpochResponse", v, &p, &b.out);
@@ -1764,6 +1770,9 @@ fn fetch_tagged_fields_of_newer_versions_are_kept() {
     b.tags();
     let m = FetchResponse::from_bytes(&b.out, 12).unwrap();
     let p = &m.responses[0].partitions[0];
-    assert_eq!((p.current_leader.leader_id, p.current_leader.leader_epoch), (2, 7));
+    assert_eq!(
+        (p.current_leader.leader_id, p.current_leader.leader_epoch),
+        (2, 7)
+    );
     assert_eq!(m.to_bytes(12).unwrap(), b.out);
 }

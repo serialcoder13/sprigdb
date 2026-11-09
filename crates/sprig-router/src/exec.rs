@@ -1816,6 +1816,63 @@ pub(crate) async fn run_nested(
     }
 }
 
+/// R3's limited DML: the rows the write changes, read in order and
+/// locked, then each shard's statement naming its rows by primary key
+/// (shards without rows run nothing).
+async fn limited_targets(
+    l: &crate::plan::Limited,
+    templates: &[Target],
+    be: &mut dyn ShardBackend,
+    budget: &mut Budget,
+) -> Result<Option<Vec<Target>>> {
+    let Output::Rows { rows, .. } = Box::pin(execute(&l.read, be, budget)).await? else {
+        return Err(SprigError::internal("a limited write's read answered no rows"));
+    };
+    let q = |c: &str| format!("`{}`", c.replace('`', "``"));
+    let mut conds: HashMap<u32, Vec<String>> = HashMap::new();
+    for r in &rows {
+        let val = |i: usize| {
+            l.classes
+                .get(i)
+                .and_then(|c| c.value(r.get(i).and_then(|v| v.as_deref())))
+        };
+        let key = val(0).and_then(|v| v.key);
+        let Some(shard) = key
+            .as_ref()
+            .and_then(|k| l.group.shard_of(k))
+            .and_then(|i| l.group.shards.get(i))
+            .map(|s| s.shard)
+        else {
+            return Err(SprigError::internal("a limited write's row without a routable key"));
+        };
+        let mut parts = Vec::new();
+        for (j, c) in l.pk.iter().enumerate() {
+            match val(j + 1) {
+                Some(v) => parts.push(format!("{} = {}", q(c), v.sql)),
+                None => parts.push(format!("{} IS NULL", q(c))),
+            }
+        }
+        conds
+            .entry(shard)
+            .or_default()
+            .push(format!("({})", parts.join(" AND ")));
+    }
+    Ok(Some(
+        templates
+            .iter()
+            .filter_map(|t| {
+                let c = conds.get(&t.shard)?;
+                Some(Target {
+                    sql: t
+                        .sql
+                        .replace(crate::plan::LIMITED_ROWS, &format!("({})", c.join(" OR "))),
+                    ..t.clone()
+                })
+            })
+            .collect(),
+    ))
+}
+
 async fn write(w: &WritePlan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Result<Output> {
     metrics::histogram!("sprig_router_fanout_shards")
         .record(u32::try_from(w.targets.len()).map_or(f64::MAX, f64::from));
@@ -1829,17 +1886,23 @@ async fn write(w: &WritePlan, be: &mut dyn ShardBackend, budget: &mut Budget) ->
         if let Some(f) = &w.fk {
             crate::fk::before_write(f, be, budget, 0).await?;
         }
-        Ok::<(), SprigError>(())
-    };
-    if let Err(e) = before.await {
-        if let Err(u) = be.end_write(&w.targets, false, budget).await {
-            tracing::warn!(error = %u, "undoing a failed write's lookups");
+        match &w.limited {
+            Some(l) => limited_targets(l, &w.targets, be, budget).await,
+            None => Ok::<Option<Vec<Target>>, SprigError>(None),
         }
-        return Err(e);
-    }
+    };
+    let limited = match before.await {
+        Ok(t) => t,
+        Err(e) => {
+            if let Err(u) = be.end_write(&w.targets, false, budget).await {
+                tracing::warn!(error = %u, "undoing a failed write's lookups");
+            }
+            return Err(e);
+        }
+    };
     let mut total = ShardOk::default();
     let (mut a, mut b, mut warn_info) = (0u64, 0u64, 0u64);
-    for t in &w.targets {
+    for t in limited.as_ref().unwrap_or(&w.targets) {
         match be.run(t, &t.sql, budget).await {
             Ok(ShardOutcome::Ok(ok)) => {
                 total.affected += ok.affected;

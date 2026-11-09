@@ -292,7 +292,7 @@ fn shard_ddl_of(table: &str) -> String {
             let rest = &out[i + 2..];
             let end = rest
                 .find(", CONSTRAINT ")
-                .map_or_else(|| rest.rfind(')').unwrap_or(rest.len()), |j| j);
+                .unwrap_or_else(|| rest.rfind(')').unwrap_or(rest.len()));
             out = format!("{}{}", &out[..i], &rest[end..]);
         }
     }
@@ -2423,7 +2423,11 @@ async fn foreign_keys(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -
             (1 + r.below(8)).to_string()
         };
         let cc = ["'us'", "'de'", "NULL", "'in'"][r.below(4) as usize];
-        parts.push(format!("({}, {pno}, {sid}, {cc}, {})", key(&mut r), r.below(9)));
+        parts.push(format!(
+            "({}, {pno}, {sid}, {cc}, {})",
+            key(&mut r),
+            r.below(9)
+        ));
     }
     stmts.push(format!("INSERT INTO parts VALUES {}", parts.join(", ")));
     let mut ships = Vec::new();
@@ -2437,16 +2441,26 @@ async fn foreign_keys(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -
     }
     stmts.push(format!("INSERT INTO shipments VALUES {}", ships.join(", ")));
     if !items.is_empty() {
-        stmts.push(format!("INSERT INTO ship_items VALUES {}", items.join(", ")));
+        stmts.push(format!(
+            "INSERT INTO ship_items VALUES {}",
+            items.join(", ")
+        ));
     }
     let contacts: Vec<String> = (1..=30)
         .map(|ct| format!("({}, {ct}, {})", key(&mut r), 15 + r.below(4)))
         .collect();
-    stmts.push(format!("INSERT INTO contacts VALUES {}", contacts.join(", ")));
+    stmts.push(format!(
+        "INSERT INTO contacts VALUES {}",
+        contacts.join(", ")
+    ));
     let links: Vec<String> = (1..=24)
         .map(|l| {
             let n = r.pick(&NAMES[1..]);
-            let t = if l % 3 == 0 { n.to_uppercase() } else { n.to_owned() };
+            let t = if l % 3 == 0 {
+                n.to_uppercase()
+            } else {
+                n.to_owned()
+            };
             format!("({}, {l}, {})", key(&mut r), lit(&t))
         })
         .collect();
@@ -2610,7 +2624,10 @@ async fn fk_race(e: &Env, tally: &mut Tally) -> (usize, usize, usize) {
             .await
             .unwrap();
         let cid = 1 + (k as i64 * 7) % 100;
-        let ins = format!("INSERT INTO parts VALUES ({cid}, {}, {sid}, NULL, 1)", 5000 + k);
+        let ins = format!(
+            "INSERT INTO parts VALUES ({cid}, {}, {sid}, NULL, 1)",
+            5000 + k
+        );
         let del = format!("DELETE FROM suppliers WHERE sid = {sid}");
         let (x, y) = tokio::join!(run(&mut a, &ins), run(&mut b, &del));
         match (&x, &y) {
@@ -2618,7 +2635,8 @@ async fn fk_race(e: &Env, tally: &mut Tally) -> (usize, usize, usize) {
             (Outcome::Err(1452, _), Outcome::Ok(1)) => del_won += 1,
             // A cross-cluster lock wait broken by the shorter distributed
             // lock-wait timeout or a deadlock: one side retries later.
-            (Outcome::Err(1205 | 1213 | 39443, _), _) | (_, Outcome::Err(1205 | 1213 | 39443, _)) => {}
+            (Outcome::Err(1205 | 1213 | 39443, _), _)
+            | (_, Outcome::Err(1205 | 1213 | 39443, _)) => {}
             other => tally
                 .mismatches
                 .push(format!("fk race round {k}: unexpected {other:?}")),

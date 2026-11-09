@@ -304,6 +304,29 @@ pub struct WritePlan {
     /// child rows are written, children probed (or their actions applied)
     /// before parent rows change.
     pub fk: Option<Box<crate::fk::FkWork>>,
+    /// R3's limited DML (`ORDER BY … LIMIT n` over several shards): the
+    /// rows are read in order and locked first, then `targets` (one per
+    /// shard, with [`LIMITED_ROWS`] where the rows' condition goes) run on
+    /// the shards that hold them.
+    pub limited: Option<Box<Limited>>,
+}
+
+/// Where a limited write's per-shard statement takes the condition naming
+/// its rows.
+pub const LIMITED_ROWS: &str = "__sprig_limited_rows__";
+
+/// The read of a limited write: `SELECT <key>, <primary key> FROM … WHERE
+/// … ORDER BY … LIMIT n FOR UPDATE`, planned as a merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Limited {
+    /// The read.
+    pub read: Box<Plan>,
+    /// The primary-key columns, lowercase.
+    pub pk: Vec<String>,
+    /// How the key and then each primary-key column read back.
+    pub classes: Vec<crate::fk::ValClass>,
+    /// The table's group (rows go to their key's shard).
+    pub group: Arc<Group>,
 }
 
 /// One value an inserted row claims in a unique lookup.

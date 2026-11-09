@@ -199,7 +199,8 @@ pub fn rewrite_select(
 
 /// A `DATETIME(3)` column `ts` as ms since the Unix epoch, whatever the
 /// session's time zone.
-const TS_MS: &str = "CAST(TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', ts) DIV 1000 AS SIGNED)";
+const TS_MS: &str =
+    "CAST(TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', ts) DIV 1000 AS SIGNED)";
 
 /// Limits of one read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,10 +264,7 @@ impl LogReader {
             )
             .await
             .map_err(crate::maria::map_err)?;
-        let shard_epoch = rows
-            .iter()
-            .find(|r| r.0 == SHARD_ROW)
-            .map_or(0, |r| r.3);
+        let shard_epoch = rows.iter().find(|r| r.0 == SHARD_ROW).map_or(0, |r| r.3);
         let (_, start, hw, epoch) = rows
             .iter()
             .find(|r| r.0 == p.0 && p.0 != SHARD_ROW)
@@ -305,10 +303,7 @@ impl LogReader {
             )
             .await
             .map_err(crate::maria::map_err)?;
-        let shard = rows
-            .iter()
-            .find(|r| r.0 == SHARD_ROW)
-            .map_or(0, |r| r.1);
+        let shard = rows.iter().find(|r| r.0 == SHARD_ROW).map_or(0, |r| r.1);
         Ok(rows
             .into_iter()
             .filter(|r| r.0 != SHARD_ROW)
@@ -317,7 +312,7 @@ impl LogReader {
     }
 
     /// The first record of partition `p` with a timestamp at or after
-    /// `ts_ms`: its offset and timestamp (Kafka's ListOffsets by time).
+    /// `ts_ms`: its offset and timestamp (Kafka's `ListOffsets` by time).
     /// With `ts_ms = None`, the record with the largest timestamp (the
     /// earliest of equals).
     ///
@@ -331,6 +326,10 @@ impl LogReader {
         ts_ms: Option<i64>,
     ) -> Result<Option<(Offset, i64)>> {
         let table = format!("{}.{}", quote(&self.schema), quote(&log_table(s)));
+        // Past year 9999 (DATETIME's end): nothing is that late.
+        if ts_ms.is_some_and(|ts| ts > 253_402_300_799_999) {
+            return Ok(None);
+        }
         let row: Option<(u64, i64)> = match ts_ms {
             Some(ts) => {
                 let day = crate::ddl::day_literal(crate::ddl::day_of_ms(ts));
@@ -359,7 +358,7 @@ impl LogReader {
     }
 
     /// Where epoch `epoch`'s records end in partition `p` (Kafka's
-    /// OffsetForLeaderEpoch): the largest epoch at most `epoch` that
+    /// `OffsetForLeaderEpoch`): the largest epoch at most `epoch` that
     /// appended records still in the log (or `epoch` itself), and the
     /// first offset appended by a later epoch, or the high watermark.
     ///

@@ -306,6 +306,30 @@ async fn run_local(
             }
             Ok((200, Local::Json(results::execute_json(&reply))))
         }
+        "Functions.Call" => {
+            // Forwarded gRPC calls say so; anything else is REST.
+            let protocol = if s(body, "protocol") == "grpc" {
+                "grpc"
+            } else {
+                "http"
+            };
+            let name = m
+                .vars
+                .get("name")
+                .cloned()
+                .unwrap_or_else(|| s(body, "name"));
+            let v = super::functions::call(
+                engine,
+                caller,
+                protocol,
+                database,
+                &name,
+                body.get("args").cloned().unwrap_or(Value::Null),
+                &transaction,
+            )
+            .await?;
+            Ok((200, Local::Json(v)))
+        }
         "Transactions.Begin" => {
             let t = engine
                 .begin(caller, &database, b(body, "read_only"))

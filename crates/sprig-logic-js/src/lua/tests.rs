@@ -66,10 +66,7 @@ async fn the_chapter_example_in_lua() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        r,
-        ("error".into(), json!({"message": "not enough stock"}))
-    );
+    assert_eq!(r, ("error".into(), json!({"message": "not enough stock"})));
     // A body that returns a function has it called.
     let r = go(
         "return function (a, b) return a * b end",
@@ -123,7 +120,11 @@ async fn writes_nulls_and_libraries() {
 #[tokio::test]
 async fn errors_keep_their_codes() {
     let db = Arc::new(Script {
-        fail: Some(SprigError::backend(1142, *b"42000", "SELECT command denied")),
+        fail: Some(SprigError::backend(
+            1142,
+            *b"42000",
+            "SELECT command denied",
+        )),
         ..Script::default()
     });
     let r = go(
@@ -199,7 +200,14 @@ async fn budgets_cant_be_caught() {
         "local f = coroutine.wrap(function () while true do end end) while true do pcall(f) end",
         "local function f() local ok = pcall(f) while true do end end f()",
     ] {
-        let r = go(src, sig(&[], false), vec![], Arc::new(Script::default()), quick()).await;
+        let r = go(
+            src,
+            sig(&[], false),
+            vec![],
+            Arc::new(Script::default()),
+            quick(),
+        )
+        .await;
         assert_eq!(class(&r), Some(39864), "{src}: {r:?}");
         assert!(r.unwrap_err().message.contains("wall time"));
     }

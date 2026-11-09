@@ -24,12 +24,14 @@ use sprig_api::proto::health::health_check_response::ServingStatus;
 use sprig_api::proto::health::health_server::{Health, HealthServer};
 use sprig_api::proto::health::{HealthCheckRequest, HealthCheckResponse};
 use sprig_api::proto::internal::ForwardRequest;
+use sprig_api::proto::v1::functions_server::{Functions, FunctionsServer};
 use sprig_api::proto::v1::sql_server::{Sql, SqlServer};
 use sprig_api::proto::v1::transactions_server::{Transactions, TransactionsServer};
 use sprig_api::proto::v1::{
     BeginRequest, EndTransactionRequest, EndTransactionResponse, ExecuteResponse, QueryRequest,
     QueryResponse, Transaction,
 };
+use sprig_api::proto::v1::{CallRequest, CallResponse};
 use sprig_api::rest::{by_name, percent_encode};
 use sprig_api::status::{ErrorBody, from_rest, to_status};
 use sprig_common::{SprigCode, SprigError};
@@ -201,6 +203,38 @@ impl Sql for SqlSvc {
             .await
             .map(Response::new)
             .map_err(|e| st(&e))
+    }
+}
+
+#[derive(Clone)]
+struct FunctionsSvc(Arc<Core>);
+
+#[tonic::async_trait]
+impl Functions for FunctionsSvc {
+    async fn call(&self, req: Request<CallRequest>) -> GrpcResult<CallResponse> {
+        metrics::counter!("sprig_api_requests_total", "service" => "sprig.v1.Functions", "method" => "Call", "protocol" => "grpc").increment(1);
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let body = super::functions::request_json(&r);
+        if let Some(v) = forward(&self.0, &c, "Functions.Call", &r.transaction, body).await? {
+            return Ok(Response::new(super::functions::response(&v)));
+        }
+        let args = r
+            .args
+            .as_ref()
+            .map_or(serde_json::Value::Null, super::functions::from_proto);
+        super::functions::call(
+            &self.0.engine,
+            &c,
+            "grpc",
+            r.database,
+            &r.name,
+            args,
+            &r.transaction,
+        )
+        .await
+        .map(|v| Response::new(super::functions::response(&v)))
+        .map_err(|e| st(&e))
     }
 }
 
@@ -496,6 +530,7 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
     let c = || Arc::clone(core);
     tonic::service::Routes::new(SqlServer::new(SqlSvc(c())).max_decoding_message_size(max))
         .add_service(TransactionsServer::new(TxnSvc(c())))
+        .add_service(FunctionsServer::new(FunctionsSvc(c())).max_decoding_message_size(max))
         .add_service(HealthServer::new(HealthSvc(c())))
         .add_service(ClustersServer::new(ClustersSvc(c())))
         .add_service(DataCentersServer::new(DcsSvc(c())))

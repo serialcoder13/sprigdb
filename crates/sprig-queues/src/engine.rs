@@ -45,9 +45,7 @@ use crate::owner::{
 use crate::settings::QueueSettings;
 use crate::store::{MsgStore, OutDest, OutKind, OutboxRow};
 use crate::token::TokenKey;
-use crate::topology::{
-    BindingDef, ExchangeDef, QueueCfg, QueueDef, TempSet, Topology, View,
-};
+use crate::topology::{BindingDef, ExchangeDef, QueueCfg, QueueDef, TempSet, Topology, View};
 
 /// A virtual host as the engine knows it: a logical database of a
 /// tenant.
@@ -287,6 +285,7 @@ impl VShared {
         let cfg = QueueCfg::of(&q, &topo.policies, s.delivery_limit_default);
         let params = OwnerParams {
             tenant: self.r.tenant,
+            db: self.r.db_id,
             queue: Arc::clone(&q),
             cfg,
             batch_rows: s.batch_rows,
@@ -344,6 +343,7 @@ impl VShared {
                 tokio::select! {
                     () = lost.cancelled() => { let _ = h.send(Cmd::Stop); }
                     () = stop.cancelled() => { let _ = h.send(Cmd::Stop); }
+                    () = h.tx.closed() => {}
                 }
             });
         }
@@ -361,7 +361,10 @@ impl VShared {
                     return;
                 }
                 let Some(q) = v.queue(&rec.queue) else {
-                    v.consumer_gone(id, MqError::not_found(format!("queue '{}' was deleted", rec.queue)));
+                    v.consumer_gone(
+                        id,
+                        MqError::not_found(format!("queue '{}' was deleted", rec.queue)),
+                    );
                     return;
                 };
                 let Some(sender) = lock(&v.conns).get(&rec.conn).cloned() else {
@@ -407,7 +410,10 @@ impl VShared {
             }
             v.consumer_gone(
                 id,
-                MqError::new(MqCode::OwnerMoved, format!("queue '{}' has no owner", rec.queue)),
+                MqError::new(
+                    MqCode::OwnerMoved,
+                    format!("queue '{}' has no owner", rec.queue),
+                ),
             );
         });
     }
@@ -583,7 +589,8 @@ impl VShared {
             }
             if lease.is_none() && now >= next_try {
                 next_try = now + 2_000;
-                if let Ok(Acquired::Mine(t)) = deps.leases.acquire(self.r.tenant, fwd_object).await {
+                if let Ok(Acquired::Mine(t)) = deps.leases.acquire(self.r.tenant, fwd_object).await
+                {
                     lease = Some(t);
                 }
             }
@@ -642,7 +649,9 @@ impl DeliverySink for LocalSink {
         let _ = self
             .rec
             .credit_out
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(1)));
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                Some(c.saturating_sub(1))
+            });
         self.events.deliver(consumer, d)
     }
 
@@ -661,7 +670,9 @@ impl DeliverySink for LocalSink {
         let _ = self
             .rec
             .credit_out
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(credit)));
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                Some(c.saturating_sub(credit))
+            });
         self.events.drained(consumer, credit);
     }
 }
@@ -677,7 +688,9 @@ impl Inner {
     /// A new temporary queue id: the top bit, this gateway's slot, a
     /// counter.
     pub(crate) fn temp_id(&self) -> u64 {
-        (1 << 63) | (u64::from(self.deps.slot & 0x7ffff) << 44) | self.temp_ids.fetch_add(1, Ordering::Relaxed)
+        (1 << 63)
+            | (u64::from(self.deps.slot & 0x7ffff) << 44)
+            | self.temp_ids.fetch_add(1, Ordering::Relaxed)
     }
 }
 

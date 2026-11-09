@@ -107,8 +107,16 @@ fn digest_of(t: &TableMeta, r: MyRow) -> RowDigest {
 
 /// Internal tables that move with their shard: chapter 41's
 /// exactly-once markers of after-commit triggers (`__sprig_ldone`), which
-/// must stay in the same schema as the writes they commit with.
-pub const MOVED_INTERNAL: &[&str] = &["__sprig_ldone"];
+/// must stay in the same schema as the writes they commit with, and
+/// chapter 50's queue tables (messages, owner state, delayed messages and
+/// the queue outbox), whose rows commit with the shard's writes.
+pub const MOVED_INTERNAL: &[&str] = &[
+    "__sprig_ldone",
+    "__sprig_qm",
+    "__sprig_qs",
+    "__sprig_qd",
+    "__sprig_qo",
+];
 
 /// Prefixes of internal tables that move with their shard like user
 /// tables: chapter 45's stream outboxes (`__sprig_eo_<stream>`), stream

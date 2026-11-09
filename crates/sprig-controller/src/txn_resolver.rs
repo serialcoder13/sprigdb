@@ -236,6 +236,14 @@ impl Reconciler for ResolverLoop {
         } else if scan.listed > 0 {
             tracing::debug!(cluster = %key, ?scan, "resolver scan");
         }
+        // Sprig 2PC (R3): held branches whose transaction was lost.
+        match self.resolver.scan_redo(key).await {
+            Ok(r) if r.replayed + r.dropped + r.hazards + r.unresolved > 0 => {
+                tracing::info!(cluster = %key, ?r, "resolver redo scan");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(cluster = %key, error = %e, "resolver redo scan failed"),
+        }
         match self.resolver.sweep(key).await {
             Ok(s) if s != sprig_txn::SweepReport::default() => {
                 tracing::debug!(cluster = %key, ?s, "decision rows swept");

@@ -154,6 +154,7 @@ impl PassSession {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // the deploy, then the SELECT function
     async fn logic_deploy(&mut self, cx: &mut ExecCtx<'_>, text: &Bytes) -> Result<Vec<String>> {
         let decl = sprig_logic::declare::parse(&String::from_utf8_lossy(text))?;
         if matches!(
@@ -197,12 +198,46 @@ impl PassSession {
             .principal
             .user_id
             .ok_or_else(|| SprigError::internal("a logic deploy without a user"))?;
+        // Chapter 29's `CREATE ROUTINE` on the database: the routines are
+        // created through `sprig_ctl` (below), so MariaDB doesn't check it.
+        {
+            let grants = crate::tenant::authz::privileges(ts, &catalog);
+            let db_key = sprig_catalog::ddl::database_key(&db, ts.lower_case_table_names());
+            if !grants.unrestricted()
+                && !grants.allows(
+                    sprig_auth::authz::Action::CreateRoutine,
+                    sprig_auth::authz::Target::Database { db_key: &db_key },
+                )
+            {
+                return Err(SprigError::standard(
+                    1044,
+                    *b"42000",
+                    format!(
+                        "Access denied for user '{}' to database '{db}'",
+                        ts.principal.user
+                    ),
+                ));
+            }
+        }
         let svc = Arc::clone(ts.services());
         let tenant = ts.tenant;
         let ep = svc.locator.writer(tenant).await?;
         let mut conn = ep.pool.get_conn().await.map_err(|e| {
             SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
         })?;
+        // The routines are created as `sprig_ctl` with the user as
+        // `DEFINER`, as chapter 21 creates stored programs: the session's
+        // own connection can't hold `sql_mode=ORACLE` between statements on
+        // the MySQL persona (chapter 28's `sql_mode` tracking resets it).
+        let account = sprig_auth::authz::backend::account(tenant, user);
+        let definer = format!("`{}`@`%`", account.replace('`', "``"));
+        let ctl_pool = svc.locator.ctl_pool(&self.target.cluster).await?;
+        let mut ctl = sprig_logic::deploy::ConnSession(
+            ctl_pool
+                .get_conn()
+                .await
+                .map_err(sprig_logic::deploy::conn_err)?,
+        );
         let _ = self.bs(cx);
         let Some(bs) = self.bs.as_mut() else {
             return Err(SprigError::internal("no backend session"));
@@ -223,6 +258,10 @@ impl PassSession {
                 compile_max_cost: COMPILE_MAX_COST,
             },
             &mut session,
+            Some(service::Creator {
+                session: &mut ctl,
+                definer: definer.clone(),
+            }),
         )
         .await?;
         let mut notes = outcome.notes();
@@ -231,19 +270,8 @@ impl PassSession {
         // with the deploying user as `DEFINER` (checked afterwards). A
         // failure leaves `CALL` working and says why.
         if let Some(sql) = outcome.select_fn {
-            let account = sprig_auth::authz::backend::account(tenant, user);
-            let definer = format!("`{}`@`%`", account.replace('`', "``"));
             let plan = sprig_logic::deploy::plan_select(&schema, &decl.name, sql, &definer);
-            let r = async {
-                let pool = svc.locator.ctl_pool(&self.target.cluster).await?;
-                let conn = pool
-                    .get_conn()
-                    .await
-                    .map_err(sprig_logic::deploy::conn_err)?;
-                let mut ctl = sprig_logic::deploy::ConnSession(conn);
-                sprig_logic::deploy::deploy(&mut ctl, &plan).await
-            }
-            .await;
+            let r = sprig_logic::deploy::deploy(&mut ctl, &plan).await;
             match r {
                 Ok(_) => notes.push(format!("SELECT {}(...) is available", decl.name)),
                 Err(e) => {
@@ -257,12 +285,7 @@ impl PassSession {
         } else if decl.kind == sprig_logic::declare::Kind::Function {
             // An earlier version's SELECT function would call old code.
             let plan = sprig_logic::deploy::plan_select(&schema, &decl.name, String::new(), "");
-            if let Ok(pool) = svc.locator.ctl_pool(&self.target.cluster).await
-                && let Ok(conn) = pool.get_conn().await
-            {
-                let mut ctl = sprig_logic::deploy::ConnSession(conn);
-                sprig_logic::deploy::undo(&mut ctl, &plan).await;
-            }
+            sprig_logic::deploy::undo(&mut ctl, &plan).await;
             notes.push(format!(
                 "SELECT {}(...) isn't available: the function writes data; use CALL",
                 decl.name
@@ -819,16 +842,42 @@ impl PassSession {
         };
         let run = program.run(args, host, limits);
         tokio::pin!(run);
+        // Chapter 41, "Privileges and transactions": in autocommit, a call
+        // that writes runs in its own transaction, opened before its first
+        // write and committed at the end (rolled back on an error).
+        let mut opened = false;
         let outcome = loop {
             tokio::select! {
                 biased;
                 r = &mut run => break r,
                 Some((op, reply)) = rx.recv() => {
+                    if !opened && matches!(op.shape, eb::Shape::Exec | eb::Shape::Call) {
+                        let st = self.status();
+                        if st.contains(StatusFlags::AUTOCOMMIT) && !st.contains(StatusFlags::IN_TRANS) {
+                            if let Err(e) = self.session_stmt(cx, "START TRANSACTION", wire).await {
+                                let _ = reply.send(Err(e));
+                                continue;
+                            }
+                            opened = true;
+                        }
+                    }
                     let r = self.engine_db(cx, op, wire).await;
                     let _ = reply.send(r);
                 }
             }
-        }?;
+        };
+        if opened {
+            let end = if outcome.is_ok() {
+                "COMMIT"
+            } else {
+                "ROLLBACK"
+            };
+            let e = self.session_stmt(cx, end, wire).await;
+            if outcome.is_ok() {
+                e?;
+            }
+        }
+        let outcome = outcome?;
         Ok((Arc::clone(&v), outcome.event, outcome.result))
     }
 
@@ -1094,16 +1143,6 @@ impl PassSession {
 
 // ---- logic functions as HTTP and gRPC endpoints (R7 order 6) --------------
 
-/// The text an HTTP or gRPC `Functions.Call` sends through the session:
-/// this prefix, then `{"protocol", "name", "args"}` as JSON.
-pub const FUNCTION_CALL_PREFIX: &str = "/* sprig function call */ ";
-
-/// The request in a [`FUNCTION_CALL_PREFIX`] text.
-pub(super) fn function_call_request(text: &[u8]) -> Option<serde_json::Value> {
-    let rest = text.strip_prefix(FUNCTION_CALL_PREFIX.as_bytes())?;
-    serde_json::from_slice(rest).ok()
-}
-
 /// The result row's columns: `event`, then `result` (the event's fields
 /// as a JSON object).
 fn call_columns(charset: u16) -> Vec<ColumnDef> {
@@ -1140,7 +1179,7 @@ impl PassSession {
     pub(super) async fn tenant_function_call(
         &mut self,
         cx: &mut ExecCtx<'_>,
-        req: serde_json::Value,
+        req: invoke::FunctionCall,
         more: bool,
         format: RowFormat,
         out: &mut dyn ResultSink,
@@ -1189,13 +1228,14 @@ impl PassSession {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // lookup, arguments, the call, its row
     async fn function_call(
         &mut self,
         cx: &mut ExecCtx<'_>,
-        req: &serde_json::Value,
+        req: &invoke::FunctionCall,
     ) -> Result<(String, serde_json::Value)> {
-        let protocol = req["protocol"].as_str().unwrap_or("http").to_owned();
-        let name = req["name"].as_str().unwrap_or_default().to_owned();
+        let protocol = req.protocol.clone();
+        let name = req.name.clone();
         let db = self
             .current_logical()
             .ok_or_else(|| SprigError::standard(1046, *b"3D000", "No database selected"))?;
@@ -1217,8 +1257,7 @@ impl PassSession {
         let ep = svc.locator.writer(ts.tenant).await?;
         let callable = {
             let mut conn = ep.pool.get_conn().await.map_err(|e| {
-                SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable")
-                    .with_source(e)
+                SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
             })?;
             sprig_logic::LogicStore::new(ep.store.schema())
                 .callable(&mut conn, row.db_id.0, &name)
@@ -1239,14 +1278,17 @@ impl PassSession {
             ));
         }
         let params = f.params();
-        let args: Vec<serde_json::Value> = match &req["args"] {
+        let args: Vec<serde_json::Value> = match &req.args {
             serde_json::Value::Null => Vec::new(),
             serde_json::Value::Array(a) => a.clone(),
             serde_json::Value::Object(o) => {
                 if let Some(k) = o.keys().find(|k| !params.contains(k)) {
                     return Err(SprigError::new(
                         SprigCode::LogicSignatureMismatch,
-                        format!("{name} has no parameter {k} (it takes {})", params.join(", ")),
+                        format!(
+                            "{name} has no parameter {k} (it takes {})",
+                            params.join(", ")
+                        ),
                     ));
                 }
                 params

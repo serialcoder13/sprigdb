@@ -410,7 +410,8 @@ pub fn call_op(name: &str, args: &[Value]) -> Result<DbOp> {
         && parts.iter().all(|p| {
             !p.is_empty()
                 && p.chars().count() <= 64
-                && p.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                && p.chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
         });
     if !ok {
         return Err(SprigError::new(

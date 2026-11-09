@@ -274,8 +274,7 @@ impl Leases for GatewayLeases {
 
     async fn release(&self, tenant: u64, object: u64) {
         let mut t = lock(&self.table);
-        if t
-            .holders
+        if t.holders
             .get(&(tenant, object))
             .is_some_and(|(g, _)| *g == self.me)
         {

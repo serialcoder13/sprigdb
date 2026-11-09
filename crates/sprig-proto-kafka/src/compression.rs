@@ -139,10 +139,7 @@ impl Compression {
                 bounded(Box::new(d), "zstd")
             }
             Self::Snappy => unsnappy(data, limit),
-            Self::Lz4 => bounded(
-                Box::new(lz4_flex::frame::FrameDecoder::new(data)),
-                "lz4",
-            ),
+            Self::Lz4 => bounded(Box::new(lz4_flex::frame::FrameDecoder::new(data)), "lz4"),
         }
     }
 }
@@ -171,7 +168,12 @@ fn snappy_xerial(data: &[u8]) -> Result<Vec<u8>> {
 
 /// One raw snappy block into `out`, checking its stated length against
 /// what is left of `limit` before allocating.
-fn unsnappy_block(dec: &mut snap::raw::Decoder, block: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<()> {
+fn unsnappy_block(
+    dec: &mut snap::raw::Decoder,
+    block: &[u8],
+    out: &mut Vec<u8>,
+    limit: usize,
+) -> Result<()> {
     let n = snap::raw::decompress_len(block).map_err(|_| CodecError::CorruptRecord("snappy"))?;
     if out.len() + n > limit {
         return Err(CodecError::CorruptRecord("decompressed batch too large"));
@@ -190,9 +192,7 @@ fn unsnappy(data: &[u8], limit: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     if data.len() >= 8 && data[..8] == XERIAL_HEADER[..8] {
         // Xerial: the header (16 bytes), then [length][block] pairs.
-        let mut rest = data
-            .get(16..)
-            .ok_or(CodecError::CorruptRecord("snappy"))?;
+        let mut rest = data.get(16..).ok_or(CodecError::CorruptRecord("snappy"))?;
         while !rest.is_empty() {
             let len: [u8; 4] = rest
                 .get(..4)
@@ -261,7 +261,11 @@ mod tests {
             Compression::Snappy.decompress(&raw, data.len()).unwrap(),
             data
         );
-        assert!(Compression::Snappy.decompress(&raw, data.len() - 1).is_err());
+        assert!(
+            Compression::Snappy
+                .decompress(&raw, data.len() - 1)
+                .is_err()
+        );
         // A truncated xerial block is corrupt, not a panic.
         assert!(
             Compression::Snappy

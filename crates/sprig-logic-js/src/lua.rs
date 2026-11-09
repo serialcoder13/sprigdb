@@ -52,8 +52,8 @@ use crate::kirun::{Host, Outcome};
 
 /// Lua's reserved words.
 const RESERVED: &[&str] = &[
-    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
-    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local",
+    "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
 ];
 
 /// Lua's out-of-memory message (`LUA_ERRMEM`), as `pcall` sees it.
@@ -168,9 +168,7 @@ impl Sandbox {
                 move |_, _| {
                     st.count_steps(u64::from(every));
                     if st.interrupted() {
-                        let e = st
-                            .tripped()
-                            .unwrap_or_else(|| st.error(Budget::Cancelled));
+                        let e = st.tripped().unwrap_or_else(|| st.error(Budget::Cancelled));
                         return Err(lua_err(e));
                     }
                     Ok(VmState::Continue)
@@ -450,9 +448,7 @@ impl LuaProgram {
 /// # Errors
 /// As [`crate::js::run`].
 pub async fn run(p: &LuaProgram, args: Vec<Value>, host: Host, limits: Limits) -> Result<Outcome> {
-    if args.len() != p.sig.params.len() {
-        return Err(p.sig.coerce(&p.name, args).unwrap_err());
-    }
+    p.sig.check_arity(&p.name, args.len())?;
     let st = Arc::new(RunState::new(limits));
     let sync = Arc::new(SyncHost::new(
         host,
@@ -486,7 +482,7 @@ fn run_here(
     let sb = Sandbox::new(&cfg, Arc::clone(st))?;
     install_logic(sb.lua(), sync).map_err(|e| internal(&e))?;
     sb.seal()?;
-    let out = (|| -> mlua::Result<Value> {
+    let run = || -> mlua::Result<Value> {
         let lua = sb.lua();
         let f = lua
             .load(p.chunk.as_str())
@@ -507,7 +503,8 @@ fn run_here(
             other => other,
         };
         to_json(lua, first)
-    })();
+    };
+    let out = run();
     st.heap(sb.lua().used_memory() as u64);
     if let Some(t) = st.tripped() {
         return Err(t);
@@ -535,7 +532,7 @@ fn text_of(v: &LuaValue) -> String {
                 n.to_string()
             }
         }
-        other => format!("{}", other.type_name()),
+        other => other.type_name().to_owned(),
     }
 }
 

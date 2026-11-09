@@ -1,0 +1,45 @@
+// sprig.v1: logic functions as endpoints (chapter 37, "Logic functions as
+// endpoints"; chapter 41, "Calling code"). A function deployed with
+// `EXPOSE (http)` is callable over REST, one with `EXPOSE (grpc)` over
+// gRPC. The call runs as a SQL `CALL` of the function in the caller's
+// session: `EXECUTE` is checked, the version's tier is chosen, the budgets
+// apply, and with `transaction` it runs in that transaction (otherwise in
+// its own).
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/struct.proto";
+
+// Calls logic functions.
+service Functions {
+  // Calls the function `name` of `database` with `args`, and returns the
+  // event it raised with the event's fields.
+  rpc Call(CallRequest) returns (CallResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/functions/{name}:call"
+      body: "*"
+    };
+  }
+}
+
+message CallRequest {
+  // The logical database.
+  string database = 1;
+  // The function's name.
+  string name = 2;
+  // The arguments: a list (by position), an object (by parameter name), or
+  // one value (a function of one parameter).
+  google.protobuf.Value args = 3;
+  // A handle from `Transactions.Begin`; empty runs the call in its own
+  // transaction.
+  string transaction = 4;
+}
+
+message CallResponse {
+  // The event the call raised: `output`, or another such as `error`.
+  string event = 1;
+  // The event's fields. A function declared `RETURNS t` has one, `value`.
+  google.protobuf.Struct result = 2;
+}

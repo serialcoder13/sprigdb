@@ -187,6 +187,7 @@ impl GatewayQueues {
             });
         }
         tokio::spawn(leases.keep(stop));
+        let _ = tenants.mq.set(Arc::clone(&engine));
         let mut g = Self::new(Some(tenants), live, dc);
         g.engine = Some(engine);
         g

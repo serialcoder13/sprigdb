@@ -250,9 +250,12 @@ fn records_of(p: &fetch_response::PartitionData) -> Vec<(i64, Vec<u8>)> {
         .into_iter()
         .flat_map(|b| {
             let base = b.base_offset;
-            b.records
-                .into_iter()
-                .map(move |r| (base + i64::from(r.offset_delta), r.value.unwrap_or_default()))
+            b.records.into_iter().map(move |r| {
+                (
+                    base + i64::from(r.offset_delta),
+                    r.value.unwrap_or_default(),
+                )
+            })
         })
         .collect()
 }
@@ -261,10 +264,7 @@ fn records_of(p: &fetch_response::PartitionData) -> Vec<(i64, Vec<u8>)> {
 async fn data_plane_apis_are_advertised() {
     let e = env().await;
     let mut c = client(&e.broker).await;
-    let r: ApiVersionsResponse = c
-        .call(3, &ApiVersionsRequest::default())
-        .await
-        .unwrap();
+    let r: ApiVersionsResponse = c.call(3, &ApiVersionsRequest::default()).await.unwrap();
     let range = |k: i16| {
         r.api_keys
             .iter()
@@ -294,7 +294,9 @@ async fn produce_every_codec_and_version_then_fetch_every_version() {
             Compression::Lz4,
             Compression::Zstd,
         ] {
-            let vals: Vec<String> = (0..3).map(|i| format!("v{v}-{}-{i}", codec.name())).collect();
+            let vals: Vec<String> = (0..3)
+                .map(|i| format!("v{v}-{}-{i}", codec.name()))
+                .collect();
             let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
             let r = produce(&mut c, v, "shop.events", 1, batch(&refs, codec, None)).await;
             assert_eq!(r.error_code, 0, "v{v} {codec:?}: {:?}", r.error_message);
@@ -327,9 +329,16 @@ async fn produce_every_codec_and_version_then_fetch_every_version() {
         }
     }
     // Headers and timestamps come back.
-    let r: FetchResponse = c.call(11, &fetch_req("shop.events", 1, 4, 0)).await.unwrap();
-    let b = RecordBatch::decode_all(r.responses[0].partitions[0].records.as_ref().unwrap(), 1 << 20, true)
+    let r: FetchResponse = c
+        .call(11, &fetch_req("shop.events", 1, 4, 0))
+        .await
         .unwrap();
+    let b = RecordBatch::decode_all(
+        r.responses[0].partitions[0].records.as_ref().unwrap(),
+        1 << 20,
+        true,
+    )
+    .unwrap();
     assert_eq!(b[0].base_offset, 4);
     assert_eq!(b[0].records[0].headers[0].key, "h");
     assert_eq!(
@@ -344,16 +353,38 @@ async fn produce_refusals() {
     let mut c = client(&e.broker).await;
     // A change topic, an unknown topic and partition, a compacted stream
     // without keys, a transactional id.
-    let r = produce(&mut c, 9, "shop.orders.changes", 0, batch(&["a"], Compression::None, None)).await;
+    let r = produce(
+        &mut c,
+        9,
+        "shop.orders.changes",
+        0,
+        batch(&["a"], Compression::None, None),
+    )
+    .await;
     assert_eq!(r.error_code, err::INVALID_TOPIC_EXCEPTION);
     assert!(r.error_message.unwrap().starts_with("39941"));
-    let r = produce(&mut c, 9, "shop.nope", 0, batch(&["a"], Compression::None, None)).await;
+    let r = produce(
+        &mut c,
+        9,
+        "shop.nope",
+        0,
+        batch(&["a"], Compression::None, None),
+    )
+    .await;
     assert_eq!(r.error_code, err::UNKNOWN_TOPIC_OR_PARTITION);
-    let r = produce(&mut c, 9, "shop.events", 2, batch(&["a"], Compression::None, None)).await;
+    let r = produce(
+        &mut c,
+        9,
+        "shop.events",
+        2,
+        batch(&["a"], Compression::None, None),
+    )
+    .await;
     assert_eq!(r.error_code, err::UNKNOWN_TOPIC_OR_PARTITION);
-    let mut keyless = RecordBatch::decode_all(&batch(&["a"], Compression::None, None), 1 << 20, false)
-        .unwrap()
-        .remove(0);
+    let mut keyless =
+        RecordBatch::decode_all(&batch(&["a"], Compression::None, None), 1 << 20, false)
+            .unwrap()
+            .remove(0);
     keyless.records[0].key = None;
     let r = produce(&mut c, 9, "shop.latest", 0, keyless.to_bytes().unwrap()).await;
     assert_eq!(r.error_code, err::INVALID_RECORD);
@@ -361,7 +392,10 @@ async fn produce_refusals() {
     let mut q = produce_req("shop.events", 0, batch(&["a"], Compression::None, None), -1);
     q.transactional_id = Some("tx".into());
     let r: ProduceResponse = c.call(9, &q).await.unwrap();
-    assert_eq!(part0(&r).error_code, err::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+    assert_eq!(
+        part0(&r).error_code,
+        err::TRANSACTIONAL_ID_AUTHORIZATION_FAILED
+    );
     let q = produce_req("shop.events", 0, batch(&["a"], Compression::None, None), 2);
     let r: ProduceResponse = c.call(9, &q).await.unwrap();
     assert_eq!(part0(&r).error_code, err::INVALID_REQUIRED_ACKS);
@@ -371,7 +405,10 @@ async fn produce_refusals() {
     assert!(r.is_err());
     // Nothing was appended by any of them.
     let mut c = client(&e.broker).await;
-    let r: FetchResponse = c.call(12, &fetch_req("shop.events", 0, 0, 0)).await.unwrap();
+    let r: FetchResponse = c
+        .call(12, &fetch_req("shop.events", 0, 0, 0))
+        .await
+        .unwrap();
     assert_eq!(r.responses[0].partitions[0].high_watermark, 0);
 }
 
@@ -394,28 +431,69 @@ async fn idempotent_producer_retries_and_sequence_checks() {
     let pid = r.producer_id;
     let b0 = batch(&["a", "b"], Compression::Lz4, Some((pid, 0, 0)));
     let b1 = batch(&["c"], Compression::Snappy, Some((pid, 0, 2)));
-    assert_eq!(produce(&mut c, 9, "shop.events", 0, b0.clone()).await.base_offset, 0);
-    assert_eq!(produce(&mut c, 9, "shop.events", 0, b1.clone()).await.base_offset, 2);
+    assert_eq!(
+        produce(&mut c, 9, "shop.events", 0, b0.clone())
+            .await
+            .base_offset,
+        0
+    );
+    assert_eq!(
+        produce(&mut c, 9, "shop.events", 0, b1.clone())
+            .await
+            .base_offset,
+        2
+    );
     // Retries: the original offsets, nothing appended twice.
     let r = produce(&mut c, 9, "shop.events", 0, b0.clone()).await;
     assert_eq!((r.error_code, r.base_offset), (0, 0));
     let r = produce(&mut c, 7, "shop.events", 0, b1.clone()).await;
     assert_eq!((r.error_code, r.base_offset), (0, 2));
-    let f: FetchResponse = c.call(11, &fetch_req("shop.events", 0, 0, 0)).await.unwrap();
+    let f: FetchResponse = c
+        .call(11, &fetch_req("shop.events", 0, 0, 0))
+        .await
+        .unwrap();
     let got: Vec<Vec<u8>> = records_of(&f.responses[0].partitions[0])
         .into_iter()
         .map(|(_, v)| v)
         .collect();
     assert_eq!(got, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     // A gap and an older epoch.
-    let r = produce(&mut c, 9, "shop.events", 0, batch(&["x"], Compression::None, Some((pid, 0, 5)))).await;
+    let r = produce(
+        &mut c,
+        9,
+        "shop.events",
+        0,
+        batch(&["x"], Compression::None, Some((pid, 0, 5))),
+    )
+    .await;
     assert_eq!(r.error_code, err::OUT_OF_ORDER_SEQUENCE_NUMBER);
-    let r = produce(&mut c, 9, "shop.events", 0, batch(&["y"], Compression::None, Some((pid, 1, 0)))).await;
+    let r = produce(
+        &mut c,
+        9,
+        "shop.events",
+        0,
+        batch(&["y"], Compression::None, Some((pid, 1, 0))),
+    )
+    .await;
     assert_eq!((r.error_code, r.base_offset), (0, 3));
-    let r = produce(&mut c, 9, "shop.events", 0, batch(&["z"], Compression::None, Some((pid, 0, 3)))).await;
+    let r = produce(
+        &mut c,
+        9,
+        "shop.events",
+        0,
+        batch(&["z"], Compression::None, Some((pid, 0, 3))),
+    )
+    .await;
     assert_eq!(r.error_code, err::INVALID_PRODUCER_EPOCH);
     // Sequences are per partition.
-    let r = produce(&mut c, 9, "shop.events", 1, batch(&["p1"], Compression::None, Some((pid, 1, 0)))).await;
+    let r = produce(
+        &mut c,
+        9,
+        "shop.events",
+        1,
+        batch(&["p1"], Compression::None, Some((pid, 1, 0))),
+    )
+    .await;
     assert_eq!((r.error_code, r.base_offset), (0, 0));
 }
 
@@ -427,7 +505,11 @@ async fn pipelined_produces_wait_together_and_answer_in_order() {
     let mut ids = Vec::new();
     for i in 0..5 {
         let b = batch(&[&format!("p{i}")], Compression::None, Some((99, 0, i)));
-        ids.push(c.send(9, &produce_req("shop.events", 0, b, -1)).await.unwrap());
+        ids.push(
+            c.send(9, &produce_req("shop.events", 0, b, -1))
+                .await
+                .unwrap(),
+        );
     }
     // A metadata request behind them waits its turn.
     let meta = c.send(12, &MetadataRequest::default()).await.unwrap();
@@ -455,7 +537,10 @@ async fn a_sequencing_timeout_is_retryable_and_the_retry_gets_the_offsets() {
     e.data.hold(false);
     let r = produce(&mut c, 9, "shop.events", 1, b).await;
     assert_eq!((r.error_code, r.base_offset), (0, 0));
-    let f: FetchResponse = c.call(12, &fetch_req("shop.events", 1, 0, 0)).await.unwrap();
+    let f: FetchResponse = c
+        .call(12, &fetch_req("shop.events", 1, 0, 0))
+        .await
+        .unwrap();
     assert_eq!(f.responses[0].partitions[0].high_watermark, 1);
 }
 
@@ -466,35 +551,72 @@ async fn fetch_long_polls_until_records_arrive() {
     let mut p = client(&e.broker).await;
     // Nothing: the full wait (capped by the limit, 500 ms here).
     let t0 = Instant::now();
-    let r: FetchResponse = c.call(12, &fetch_req("shop.events", 0, 0, 2000)).await.unwrap();
-    assert!(t0.elapsed() >= Duration::from_millis(450), "{:?}", t0.elapsed());
+    let r: FetchResponse = c
+        .call(12, &fetch_req("shop.events", 0, 0, 2000))
+        .await
+        .unwrap();
+    assert!(
+        t0.elapsed() >= Duration::from_millis(450),
+        "{:?}",
+        t0.elapsed()
+    );
     assert!(records_of(&r.responses[0].partitions[0]).is_empty());
     // A record produced meanwhile ends the wait early.
-    let id = c.send(12, &fetch_req("shop.events", 0, 0, 2000)).await.unwrap();
+    let id = c
+        .send(12, &fetch_req("shop.events", 0, 0, 2000))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let t0 = Instant::now();
-    produce(&mut p, 9, "shop.events", 0, batch(&["wake"], Compression::None, None)).await;
+    produce(
+        &mut p,
+        9,
+        "shop.events",
+        0,
+        batch(&["wake"], Compression::None, None),
+    )
+    .await;
     let r: FetchResponse = c.recv(12, id).await.unwrap();
-    assert!(t0.elapsed() < Duration::from_millis(300), "{:?}", t0.elapsed());
-    assert_eq!(records_of(&r.responses[0].partitions[0]), vec![(0, b"wake".to_vec())]);
+    assert!(
+        t0.elapsed() < Duration::from_millis(300),
+        "{:?}",
+        t0.elapsed()
+    );
+    assert_eq!(
+        records_of(&r.responses[0].partitions[0]),
+        vec![(0, b"wake".to_vec())]
+    );
     // Out of range.
-    let r: FetchResponse = c.call(12, &fetch_req("shop.events", 0, 5, 0)).await.unwrap();
-    assert_eq!(r.responses[0].partitions[0].error_code, err::OFFSET_OUT_OF_RANGE);
+    let r: FetchResponse = c
+        .call(12, &fetch_req("shop.events", 0, 5, 0))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.responses[0].partitions[0].error_code,
+        err::OFFSET_OUT_OF_RANGE
+    );
     assert_eq!(r.responses[0].partitions[0].high_watermark, 1);
     // An unknown topic id (v13).
     let mut q = fetch_req("", 0, 0, 0);
     q.topics[0].topic_id = uuid::Uuid::from_u64_pair(1, 2);
     let r: FetchResponse = c.call(13, &q).await.unwrap();
-    assert_eq!(r.responses[0].partitions[0].error_code, err::UNKNOWN_TOPIC_ID);
+    assert_eq!(
+        r.responses[0].partitions[0].error_code,
+        err::UNKNOWN_TOPIC_ID
+    );
 }
 
 #[tokio::test]
 async fn list_offsets_and_leader_epochs() {
     let e = env().await;
     let mut c = client(&e.broker).await;
-    let mut b = RecordBatch::decode_all(&batch(&["a", "b", "c"], Compression::None, None), 1 << 20, false)
-        .unwrap()
-        .remove(0);
+    let mut b = RecordBatch::decode_all(
+        &batch(&["a", "b", "c"], Compression::None, None),
+        1 << 20,
+        false,
+    )
+    .unwrap()
+    .remove(0);
     for (i, r) in b.records.iter_mut().enumerate() {
         r.timestamp_delta = i64::try_from(i).unwrap() * 1000;
     }
@@ -521,7 +643,11 @@ async fn list_offsets_and_leader_epochs() {
         let r: ListOffsetsResponse = c.call(v, &lo(-1, -1)).await.unwrap();
         assert_eq!(one(&r).offset, 3, "latest v{v}");
         let r: ListOffsetsResponse = c.call(v, &lo(1_762_000_001_500, -1)).await.unwrap();
-        assert_eq!((one(&r).offset, one(&r).timestamp), (2, 1_762_000_002_000), "by time v{v}");
+        assert_eq!(
+            (one(&r).offset, one(&r).timestamp),
+            (2, 1_762_000_002_000),
+            "by time v{v}"
+        );
         let r: ListOffsetsResponse = c.call(v, &lo(1_900_000_000_000, -1)).await.unwrap();
         assert_eq!(one(&r).offset, -1, "after the last v{v}");
     }
@@ -534,7 +660,14 @@ async fn list_offsets_and_leader_epochs() {
     assert_eq!(one(&r).error_code, err::FENCED_LEADER_EPOCH);
     let r: ListOffsetsResponse = c.call(7, &lo(-1, 5)).await.unwrap();
     assert_eq!(one(&r).error_code, err::UNKNOWN_LEADER_EPOCH);
-    produce(&mut c, 9, "shop.events", 0, batch(&["new"], Compression::None, None)).await;
+    produce(
+        &mut c,
+        9,
+        "shop.events",
+        0,
+        batch(&["new"], Compression::None, None),
+    )
+    .await;
     let ofle = |epoch: i32| OffsetForLeaderEpochRequest {
         replica_id: -1,
         topics: vec![offset_for_leader_epoch_request::OffsetForLeaderTopic {
@@ -554,7 +687,11 @@ async fn list_offsets_and_leader_epochs() {
         // 0 ends at 2: its offsets 2.. were truncated.
         let r: OffsetForLeaderEpochResponse = c.call(v, &ofle(0)).await.unwrap();
         let p = &r.topics[0].partitions[0];
-        assert_eq!((p.error_code, p.leader_epoch, p.end_offset), (0, 0, 2), "v{v}");
+        assert_eq!(
+            (p.error_code, p.leader_epoch, p.end_offset),
+            (0, 0, 2),
+            "v{v}"
+        );
         let r: OffsetForLeaderEpochResponse = c.call(v, &ofle(1)).await.unwrap();
         let p = &r.topics[0].partitions[0];
         assert_eq!((p.leader_epoch, p.end_offset), (1, 3), "v{v}");
@@ -563,7 +700,10 @@ async fn list_offsets_and_leader_epochs() {
     let mut q = fetch_req("shop.events", 0, 2, 0);
     q.topics[0].partitions[0].current_leader_epoch = 0;
     let r: FetchResponse = c.call(12, &q).await.unwrap();
-    assert_eq!(r.responses[0].partitions[0].error_code, err::FENCED_LEADER_EPOCH);
+    assert_eq!(
+        r.responses[0].partitions[0].error_code,
+        err::FENCED_LEADER_EPOCH
+    );
     q.topics[0].partitions[0].current_leader_epoch = 1;
     let r: FetchResponse = c.call(12, &q).await.unwrap();
     let p = &r.responses[0].partitions[0];
@@ -580,7 +720,15 @@ async fn list_offsets_and_leader_epochs() {
         )
         .await
         .unwrap();
-    let t = m.topics.iter().find(|t| t.name.as_deref() == Some("shop.events")).unwrap();
-    let p0 = t.partitions.iter().find(|p| p.partition_index == 0).unwrap();
+    let t = m
+        .topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some("shop.events"))
+        .unwrap();
+    let p0 = t
+        .partitions
+        .iter()
+        .find(|p| p.partition_index == 0)
+        .unwrap();
     assert_eq!(p0.leader_epoch, 1);
 }

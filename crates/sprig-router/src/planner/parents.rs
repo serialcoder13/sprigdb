@@ -350,6 +350,7 @@ impl ViaParent {
             claims: Vec::new(),
             releases: Vec::new(),
             fk: None,
+            limited: None,
         }))
     }
 }

@@ -290,7 +290,12 @@ impl MqCatalog for GatewayMq {
         }
         let version = ch.commit().await.map_err(unavailable)?;
         let cat = self
-            .catalog(v.tenant, Freshness::Cached { min_version: version })
+            .catalog(
+                v.tenant,
+                Freshness::Cached {
+                    min_version: version,
+                },
+            )
             .await?;
         Ok(Self::state(&cat).topology(v.db_id, cat.version))
     }
@@ -309,10 +314,13 @@ impl MqCatalog for GatewayMq {
         let schema = sprig_catalog::ddl::shard_schemas(tenant, row)
             .first()
             .map(ToString::to_string)
-            .ok_or_else(|| {
-                MqError::not_found(format!("database '{}' has no shard", row.name))
-            })?;
-        let cluster = self.svc.locator.cluster(tenant).await.map_err(unavailable)?;
+            .ok_or_else(|| MqError::not_found(format!("database '{}' has no shard", row.name)))?;
+        let cluster = self
+            .svc
+            .locator
+            .cluster(tenant)
+            .await
+            .map_err(unavailable)?;
         let pool = self
             .svc
             .locator
@@ -386,7 +394,14 @@ impl GatewayMq {
             .any(|r| r.user_id == user)
     }
 
-    fn rule_allows(&self, p: &Principal, cat: &TenantCatalog, v: &VhostRef, perm: Perm, name: &str) -> bool {
+    fn rule_allows(
+        &self,
+        p: &Principal,
+        cat: &TenantCatalog,
+        v: &VhostRef,
+        perm: Perm,
+        name: &str,
+    ) -> bool {
         let Some(user) = p.user_id else { return false };
         Self::state(cat)
             .topology(v.db_id, cat.version)
@@ -500,7 +515,11 @@ impl Leases for EtcdLeases {
         let lease = match h.lease {
             Some(l) => l,
             None => {
-                let l = self.store.grant_lease(LEASE_TTL).await.map_err(unavailable)?;
+                let l = self
+                    .store
+                    .grant_lease(LEASE_TTL)
+                    .await
+                    .map_err(unavailable)?;
                 h.lease = Some(l);
                 h.lost = CancellationToken::new();
                 l
@@ -536,15 +555,52 @@ impl Leases for EtcdLeases {
             h.keys.insert((tenant, object), rev);
             return Ok(Acquired::Mine(h.lost.clone()));
         }
-        let holder = kv
-            .and_then(|k| serde_json::from_slice::<LeaseValue>(&k.value).ok())
-            .map_or_else(|| "another gateway".to_owned(), |v| v.gateway_id);
-        if holder == self.me {
-            // Ours from an earlier lease of this process that etcd still
-            // holds: it expires with that lease.
-            return Ok(Acquired::Held(format!("{holder} (an expiring lease)")));
+        let Some(kv) = kv else {
+            return Ok(Acquired::Held("another gateway".into()));
+        };
+        let holder = serde_json::from_slice::<LeaseValue>(&kv.value)
+            .map_or_else(|_| "another gateway".to_owned(), |v| v.gateway_id);
+        if holder != self.me {
+            return Ok(Acquired::Held(holder));
         }
-        Ok(Acquired::Held(holder))
+        // An earlier process of this gateway (the id is stable across
+        // restarts) left the key on a lease that hasn't expired yet: that
+        // process is gone, so take the key over. The owner epoch in MariaDB
+        // fences anything it might still write.
+        let value = serde_json::to_vec(&LeaseValue {
+            v: 1,
+            gateway_id: self.me.clone(),
+        })
+        .unwrap_or_default();
+        let r = self
+            .store
+            .txn(Txn {
+                when: vec![Cmp::ModRev(key.clone(), kv.mod_revision)],
+                then: vec![
+                    Op::Put {
+                        key: key.clone(),
+                        value,
+                        lease: Some(lease),
+                    },
+                    Op::Get(key.clone()),
+                ],
+                otherwise: vec![],
+            })
+            .await
+            .map_err(unavailable)?;
+        if !r.succeeded {
+            return Ok(Acquired::Held(format!("{holder} (an earlier process)")));
+        }
+        let rev = r
+            .results
+            .iter()
+            .find_map(|o| match o {
+                OpResult::Get(Some(k)) => Some(k.create_revision),
+                _ => None,
+            })
+            .unwrap_or(kv.create_revision);
+        h.keys.insert((tenant, object), rev);
+        Ok(Acquired::Mine(h.lost.clone()))
     }
 
     async fn release(&self, tenant: u64, object: u64) {

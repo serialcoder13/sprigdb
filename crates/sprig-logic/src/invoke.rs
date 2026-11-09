@@ -336,7 +336,7 @@ pub fn scalar(event: &str, result: &Value) -> Result<Value> {
             .map_or_else(|| mariadb_json(result), str::to_owned);
         return Err(SprigError::new(
             SprigCode::LogicUserError,
-            format!("the function raised {event}: {msg}"),
+            format!("{event}: {msg}"),
         ));
     }
     Ok(match result {
@@ -344,6 +344,95 @@ pub fn scalar(event: &str, result: &Value) -> Result<Value> {
         Value::Object(o) if o.is_empty() => Value::Null,
         other => other.clone(),
     })
+}
+
+// ---- calls from other protocols (R7 order 6) -------------------------------
+
+/// The statement text of a call from outside SQL starts with this; the
+/// rest is the [`FunctionCall`] as JSON. Each front end sends it through
+/// a tenant session, which finds the function, checks its exposure, and
+/// runs `CALL db.name(...)` (chapter 41, "Calling code").
+pub const CALL_PREFIX: &str = "/* sprig function call */ ";
+
+/// A call of a logic function from HTTP, gRPC, MongoDB or Redis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionCall {
+    /// `http`, `grpc`, `mongo` or `redis`: the exposure it needs.
+    pub protocol: String,
+    /// The function's name, in the session's database.
+    pub name: String,
+    /// A list (by position), an object (by parameter name), one value,
+    /// or `null` for none.
+    pub args: Value,
+}
+
+impl FunctionCall {
+    /// The statement a front end sends for this call.
+    #[must_use]
+    pub fn statement(&self) -> String {
+        format!(
+            "{CALL_PREFIX}{}",
+            serde_json::json!({"protocol": self.protocol, "name": self.name, "args": self.args})
+        )
+    }
+
+    /// The call in a statement text, if it is one.
+    #[must_use]
+    pub fn parse(text: &[u8]) -> Option<Self> {
+        let rest = text.strip_prefix(CALL_PREFIX.as_bytes())?;
+        let v: Value = serde_json::from_slice(rest).ok()?;
+        Some(Self {
+            protocol: v["protocol"].as_str().unwrap_or("http").to_owned(),
+            name: v["name"].as_str().unwrap_or_default().to_owned(),
+            args: v["args"].clone(),
+        })
+    }
+
+    /// MongoDB's `db.runCommand({sprigCall: "quote", args: [7, 3]})`
+    /// (chapter 30's front end calls this; not wired yet).
+    ///
+    /// # Errors
+    /// 39860 when the command has no `sprigCall` name.
+    pub fn from_mongo(command: &Value) -> Result<Self> {
+        let name = command["sprigCall"].as_str().ok_or_else(|| {
+            SprigError::new(SprigCode::LogicNotFound, "sprigCall takes a function name")
+        })?;
+        Ok(Self {
+            protocol: "mongo".to_owned(),
+            name: name.to_owned(),
+            args: command.get("args").cloned().unwrap_or(Value::Null),
+        })
+    }
+
+    /// Redis's `FCALL name numkeys key... arg...` of a logic function
+    /// exposed to `redis` (chapter 40's front end calls this after its own
+    /// Lua libraries miss; not wired yet): the keys bind the leading
+    /// parameters, then the arguments, all as text.
+    ///
+    /// # Errors
+    /// 39874 for a bad `numkeys`.
+    pub fn from_redis_fcall(argv: &[Vec<u8>]) -> Result<Self> {
+        let bad = || SprigError::new(SprigCode::LogicSignatureMismatch, "FCALL: bad numkeys");
+        let name = argv.first().ok_or_else(bad)?;
+        let numkeys: usize = argv
+            .get(1)
+            .and_then(|n| std::str::from_utf8(n).ok())
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(bad)?;
+        if numkeys > argv.len().saturating_sub(2) {
+            return Err(bad());
+        }
+        Ok(Self {
+            protocol: "redis".to_owned(),
+            name: String::from_utf8_lossy(name).into_owned(),
+            args: Value::Array(
+                argv[2..]
+                    .iter()
+                    .map(|a| Value::String(String::from_utf8_lossy(a).into_owned()))
+                    .collect(),
+            ),
+        })
+    }
 }
 
 // ---- SELECT f(constants) of engine-tier functions (R7 order 6) -------------
@@ -386,8 +475,11 @@ pub fn select_candidate(text: &[u8]) -> bool {
             }
             b'(' => paren = true,
             b'f' | b'F' => {
-                let word = text.get(i..i + 4).is_some_and(|w| w.eq_ignore_ascii_case(b"from"));
-                let before = i == 0 || !(text[i - 1].is_ascii_alphanumeric() || text[i - 1] == b'_');
+                let word = text
+                    .get(i..i + 4)
+                    .is_some_and(|w| w.eq_ignore_ascii_case(b"from"));
+                let before =
+                    i == 0 || !(text[i - 1].is_ascii_alphanumeric() || text[i - 1] == b'_');
                 let after = text
                     .get(i + 4)
                     .is_none_or(|b| !(b.is_ascii_alphanumeric() || *b == b'_'));
@@ -493,20 +585,9 @@ fn const_value(e: &sqlparser::ast::Expr) -> Option<Value> {
 #[must_use]
 pub fn select_calls(text: &str) -> Option<Vec<SelectCall>> {
     use sqlparser::ast::{
-        Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectNamePart, SelectItem,
-        SetExpr, Spanned, Statement, Visit, Visitor,
+        Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectNamePart, SelectItem, SetExpr,
+        Spanned, Statement, Visit, Visitor,
     };
-    let stmts =
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, text).ok()?;
-    let [Statement::Query(q)] = stmts.as_slice() else {
-        return None;
-    };
-    let SetExpr::Select(sel) = q.body.as_ref() else {
-        return None;
-    };
-    if !sel.from.is_empty() || sel.selection.is_some() {
-        return None;
-    }
     struct Calls<'a> {
         text: &'a str,
         whole: Option<usize>,
@@ -528,14 +609,17 @@ pub fn select_calls(text: &str) -> Option<Vec<SelectCall>> {
                 })
                 .collect();
             let args = match &f.args {
-                FunctionArguments::List(l) if l.duplicate_treatment.is_none() && l.clauses.is_empty() => l
-                    .args
-                    .iter()
-                    .map(|a| match a {
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(x)) => const_value(x),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<Value>>>(),
+                FunctionArguments::List(l)
+                    if l.duplicate_treatment.is_none() && l.clauses.is_empty() =>
+                {
+                    l.args
+                        .iter()
+                        .map(|a| match a {
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(x)) => const_value(x),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<Value>>>()
+                }
                 _ => None,
             };
             let start = f
@@ -562,6 +646,17 @@ pub fn select_calls(text: &str) -> Option<Vec<SelectCall>> {
             }
             std::ops::ControlFlow::Continue(())
         }
+    }
+    let stmts =
+        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, text).ok()?;
+    let [Statement::Query(q)] = stmts.as_slice() else {
+        return None;
+    };
+    let SetExpr::Select(sel) = q.body.as_ref() else {
+        return None;
+    };
+    if !sel.from.is_empty() || sel.selection.is_some() {
+        return None;
     }
     let mut calls = Calls {
         text,
@@ -679,12 +774,9 @@ pub async fn load(
     }
     let sig: Value = serde_json::from_str(&signature).unwrap_or_default();
     let program = match runtime.as_str() {
-        "kirun" | "javascript" | "lua" => Some(Program::new(
-            &runtime,
-            &name,
-            &source,
-            script_sig(&sig),
-        )?),
+        "kirun" | "javascript" | "lua" => {
+            Some(Program::new(&runtime, &name, &source, script_sig(&sig))?)
+        }
         _ => None,
     };
     let v = Arc::new(EngineVersion {
@@ -767,6 +859,31 @@ mod tests {
     }
 
     #[test]
+    fn calls_from_other_protocols() {
+        let c = FunctionCall {
+            protocol: "http".into(),
+            name: "quote".into(),
+            args: json!({"qty": 3, "productId": 7}),
+        };
+        assert_eq!(FunctionCall::parse(c.statement().as_bytes()).unwrap(), c);
+        assert!(FunctionCall::parse(b"SELECT 1").is_none());
+        let m = FunctionCall::from_mongo(&json!({"sprigCall": "quote", "args": [7, 3]})).unwrap();
+        assert_eq!(
+            (m.protocol.as_str(), m.args.clone()),
+            ("mongo", json!([7, 3]))
+        );
+        let r = FunctionCall::from_redis_fcall(&[
+            b"quote".to_vec(),
+            b"1".to_vec(),
+            b"7".to_vec(),
+            b"3".to_vec(),
+        ])
+        .unwrap();
+        assert_eq!((r.name.as_str(), r.args), ("quote", json!(["7", "3"])));
+        assert!(FunctionCall::from_redis_fcall(&[b"q".to_vec(), b"5".to_vec()]).is_err());
+    }
+
+    #[test]
     fn select_calls_with_constants() {
         assert!(select_candidate(b"SELECT shop.quote(7, 3)"));
         assert!(!select_candidate(b"SELECT f(1) FROM t"));
@@ -776,15 +893,32 @@ mod tests {
         let c = select_calls(t).unwrap();
         let got: Vec<(Option<&str>, &str, &str, Option<&str>)> = c
             .iter()
-            .map(|c| (c.db.as_deref(), c.name.as_str(), &t[c.range.clone()], c.alias.as_deref()))
+            .map(|c| {
+                (
+                    c.db.as_deref(),
+                    c.name.as_str(),
+                    &t[c.range.clone()],
+                    c.alias.as_deref(),
+                )
+            })
             .collect();
         assert_eq!(
             got,
             [
-                (Some("shop"), "quote", "shop.quote(7, -3)", Some("shop.quote(7, -3)")),
+                (
+                    Some("shop"),
+                    "quote",
+                    "shop.quote(7, -3)",
+                    Some("shop.quote(7, -3)")
+                ),
                 (None, "total", "total(2.5)", None),
                 (None, "x", "x(1)", None),
-                (None, "g", "g('it''s', NULL, TRUE)", Some("g('it''s', NULL, TRUE)")),
+                (
+                    None,
+                    "g",
+                    "g('it''s', NULL, TRUE)",
+                    Some("g('it''s', NULL, TRUE)")
+                ),
             ]
         );
         assert_eq!(c[0].args, vec![json!(7), json!(-3)]);
@@ -798,13 +932,19 @@ mod tests {
         let c = select_calls("SELECT\n  é(1), f(2)").unwrap();
         assert_eq!(c[0].range, 9..14);
         assert_eq!(c[1].range, 16..20);
-        assert_eq!(scalar("output", &json!({"total": 1240})).unwrap(), json!(1240));
-        assert_eq!(scalar("output", &json!({"a": 1, "b": 2})).unwrap(), json!({"a": 1, "b": 2}));
+        assert_eq!(
+            scalar("output", &json!({"total": 1240})).unwrap(),
+            json!(1240)
+        );
+        assert_eq!(
+            scalar("output", &json!({"a": 1, "b": 2})).unwrap(),
+            json!({"a": 1, "b": 2})
+        );
         assert_eq!(
             scalar("error", &json!({"message": "not enough stock"}))
                 .unwrap_err()
                 .message,
-            "the function raised error: not enough stock"
+            "error: not enough stock"
         );
     }
 }
