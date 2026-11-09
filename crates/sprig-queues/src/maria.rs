@@ -568,6 +568,18 @@ impl MsgStore for MariaStore {
         Ok(rows.into_iter().filter_map(outbox_of).collect())
     }
 
+    async fn outbox_head(&self) -> Result<Option<MsgId>, StoreError> {
+        let mut c = self.conn().await?;
+        let id: Option<Vec<u8>> = c
+            .query_first(format!(
+                "SELECT out_id FROM {} ORDER BY out_id LIMIT 1",
+                self.t("__sprig_qo")
+            ))
+            .await
+            .map_err(|e| fail(&e))?;
+        Ok(id.and_then(|v| <[u8; 16]>::try_from(v.as_slice()).ok()))
+    }
+
     async fn outbox_done(&self, ids: &[MsgId]) -> Result<(), StoreError> {
         let mut c = self.conn().await?;
         for chunk in ids.chunks(CHUNK) {

@@ -20,6 +20,7 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::too_many_lines,
+    clippy::many_single_char_names,
     missing_docs
 )]
 
@@ -69,7 +70,9 @@ async fn conn(addr: &str, user: &str, password: &str, db: Option<&str>) -> Conn 
         .user(Some(user))
         .pass(Some(password))
         .db_name(db)
-        .ssl_opts(Some(SslOpts::default().with_danger_accept_invalid_certs(true)));
+        .ssl_opts(Some(
+            SslOpts::default().with_danger_accept_invalid_certs(true),
+        ));
     Conn::new(opts).await.unwrap()
 }
 
@@ -344,7 +347,11 @@ async fn functions_through_sql_rest_and_grpc() {
             (Err(s), false) => s.code() == tonic::Code::NotFound && s.message().contains("grpc"),
             _ => false,
         };
-        check(&format!("gRPC {f}"), ok, format!("{r:?}").chars().take(200).collect());
+        check(
+            &format!("gRPC {f}"),
+            ok,
+            format!("{r:?}").chars().take(200).collect(),
+        );
     }
 
     // Transactions: a handle's rollback undoes the call; without one the
@@ -357,10 +364,24 @@ async fn functions_through_sql_rest_and_grpc() {
     )
     .await;
     let handle = t["name"].as_str().unwrap_or_default().to_owned();
-    check("REST begin", st == 200 && !handle.is_empty(), format!("{st} {t}"));
+    check(
+        "REST begin",
+        st == 200 && !handle.is_empty(),
+        format!("{st} {t}"),
+    );
     let (st, v) = call_rest(&e, &auth, "order_js", json!([1, 7, 2]), &handle).await;
-    check("REST order_js in the transaction", st == 200 && v["result"]["left"] == 8, format!("{st} {v}"));
-    let (st, _) = rest(&e.http, &auth, &format!("/v1/{handle}:rollback"), &json!({})).await;
+    check(
+        "REST order_js in the transaction",
+        st == 200 && v["result"]["left"] == 8,
+        format!("{st} {v}"),
+    );
+    let (st, _) = rest(
+        &e.http,
+        &auth,
+        &format!("/v1/{handle}:rollback"),
+        &json!({}),
+    )
+    .await;
     let r = sql(&mut c, "SELECT COUNT(*) FROM orders").await;
     check(
         "after rollback",
@@ -407,10 +428,17 @@ async fn functions_through_sql_rest_and_grpc() {
         );
     }
     let (st, v) = call_rest(&e, &xauth, "quote_js", json!([7, 3]), "").await;
-    check("EXECUTE only: REST quote_js", v["code"] == 1142, format!("{st} {v}"));
-    sql(&mut c, &format!("GRANT SELECT ON {DB}.products TO 'r7rexec'@'%'"))
-        .await
-        .unwrap();
+    check(
+        "EXECUTE only: REST quote_js",
+        v["code"] == 1142,
+        format!("{st} {v}"),
+    );
+    sql(
+        &mut c,
+        &format!("GRANT SELECT ON {DB}.products TO 'r7rexec'@'%'"),
+    )
+    .await
+    .unwrap();
     drop(x);
     let mut x = conn(&e.mysql, &xuser, "Sprig-dev-exec-1A", Some(DB)).await;
     for f in ["quote_k", "quote_js", "quote_lua"] {

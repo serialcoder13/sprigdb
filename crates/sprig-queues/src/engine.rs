@@ -12,10 +12,20 @@
 //!
 //! **Owner slots.** Every queue the gateway uses has a slot: a command
 //! channel created at once (so `basic.publish`, which must not wait,
-//! keeps per-channel order) and a task that takes the lease, takes the
-//! queue over and then serves the channel. If another gateway holds the
-//! lease, the commands are answered with 39260 (`OWNER_MOVED`); the relay
-//! to that gateway is the peer service's (see the crate docs).
+//! keeps per-channel order) and a task that finds the queue's owner and
+//! then serves the channel:
+//!
+//! - the lease holder, if any (etcd);
+//! - else the gateway a move chose, if it is live;
+//! - else the rendezvous choice among the tenant's home-DC gateways
+//!   ([`crate::relay::Placement`]).
+//!
+//! If that is this gateway, it takes the lease and runs the owner; else
+//! the slot relays to the owner over the peer service
+//! ([`crate::relay`]). When the owner moves, the slot looks again with the
+//! commands that wait, so clients see no difference; 39260
+//! (`OWNER_MOVED`) is left for an owner that can't be reached. Without a
+//! peer transport (one gateway, tests) a queue held elsewhere is 39260.
 //!
 //! **The forwarder** of each vhost store moves its outbox: dead letters,
 //! due delayed messages and transactional publishes, enqueued with the
@@ -34,14 +44,15 @@ use sprig_proto_amqp::backend::{ConnKey, ConsumerId, EventSender, QueueBackend, 
 use sprig_proto_amqp::error::{MqCode, MqError};
 use sprig_proto_amqp::mem::Perm;
 use sprig_proto_amqp::message::Delivery;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::memstore::MemStore;
 use crate::msg;
 use crate::owner::{
-    self, Clock, Cmd, ConsumerSpec, DeliverySink, Holder, Incoming, OwnerEvent, OwnerHandle,
-    OwnerParams,
+    self, Clock, Cmd, ConsumerSpec, DeliverySink, Exit, Holder, Incoming, OwnerEvent, OwnerHandle,
+    OwnerParams, SlotKind,
 };
+use crate::relay::{PeerTransport, Placement, QueueRef, RemoteEnd};
 use crate::settings::QueueSettings;
 use crate::store::{MsgStore, OutDest, OutKind, OutboxRow};
 use crate::token::TokenKey;
@@ -127,12 +138,16 @@ pub trait Leases: Send + Sync + 'static {
     async fn acquire(&self, tenant: u64, object: u64) -> Result<Acquired, MqError>;
     /// Gives it back.
     async fn release(&self, tenant: u64, object: u64);
+    /// Who holds the lease of `object` now, if anyone.
+    async fn holder(&self, tenant: u64, object: u64) -> Result<Option<String>, MqError>;
 }
 
 /// Temporary queues of other gateways (and publishing this gateway's).
+#[async_trait]
 pub trait TempRegistry: Send + Sync + 'static {
-    /// Publishes this gateway's temporary queues of a vhost.
-    fn publish(&self, v: &VhostRef, set: &TempSet);
+    /// Publishes this gateway's temporary queues of a vhost (a declare
+    /// answers after it, so other gateways can route to the queue).
+    async fn publish(&self, v: &VhostRef, set: &TempSet);
     /// Other gateways' temporary queues of a vhost.
     fn others(&self, v: &VhostRef) -> Option<Arc<TempSet>>;
 }
@@ -141,8 +156,9 @@ pub trait TempRegistry: Send + Sync + 'static {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoTemps;
 
+#[async_trait]
 impl TempRegistry for NoTemps {
-    fn publish(&self, _v: &VhostRef, _set: &TempSet) {}
+    async fn publish(&self, _v: &VhostRef, _set: &TempSet) {}
     fn others(&self, _v: &VhostRef) -> Option<Arc<TempSet>> {
         None
     }
@@ -161,6 +177,11 @@ pub struct EngineDeps {
     pub clock: Arc<dyn Clock>,
     /// This gateway's slot (temporary queue ids).
     pub slot: u32,
+    /// The relay to other gateways' owners (`None`: one gateway).
+    pub peers: Option<Arc<dyn PeerTransport>>,
+    /// Owner placement (`None`: the first gateway that needs a queue owns
+    /// it).
+    pub placement: Option<Arc<dyn Placement>>,
 }
 
 impl std::fmt::Debug for EngineDeps {
@@ -185,6 +206,8 @@ pub(crate) struct ConsumerRec {
     pub(crate) exclusive: bool,
     pub(crate) priority: i32,
     pub(crate) credit_out: AtomicU32,
+    /// Deliveries not settled yet (reported on re-attachment).
+    pub(crate) held: Mutex<std::collections::BTreeSet<sprig_proto_amqp::message::DeliveryId>>,
 }
 
 /// One vhost on this gateway: shared by its connections.

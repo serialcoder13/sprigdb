@@ -689,9 +689,9 @@ impl PassSession {
                 inner: &mut *out,
                 state: TapState::Idle,
             };
-            let step = self
-                .routed(cx, sql, original, more, format, mapper, map, &mut tap)
-                .await?;
+            let step =
+                Box::pin(self.routed(cx, sql, original, more, format, mapper, map, &mut tap))
+                    .await?;
             if !tap.captured() {
                 return Ok(step);
             }
@@ -1043,9 +1043,9 @@ impl PassSession {
                 held: None,
                 caught: None,
             };
-            let step = self
-                .routed(cx, sql, original, more, format, mapper, map, &mut tap)
-                .await?;
+            let step =
+                Box::pin(self.routed(cx, sql, original, more, format, mapper, map, &mut tap))
+                    .await?;
             match tap.caught.take() {
                 None => {
                     tap.release().await?;

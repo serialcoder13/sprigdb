@@ -235,6 +235,7 @@ impl PassSession {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // one arm per call, each short
     async fn mq_call(&mut self, cx: &mut ExecCtx<'_>, call: mq::Call) -> Result<Reply> {
         let (engine, principal, default_db) = {
             let ts = self

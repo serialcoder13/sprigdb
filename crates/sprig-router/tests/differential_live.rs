@@ -1713,6 +1713,33 @@ fn dml(r: &mut Rng) -> Vec<(String, &'static str)> {
         "UPDATE customers SET name = 'x' ORDER BY cid LIMIT 2".into(),
         "customers",
     ));
+    // R3's limited DML over shards: a locked two-step when the order is
+    // total (it names every primary-key column); refused otherwise.
+    for (sql, t) in [
+        (
+            "UPDATE customers SET flag = 9 ORDER BY score DESC, cid LIMIT 5",
+            "customers",
+        ),
+        (
+            "UPDATE orders SET qty = 0 WHERE note IS NULL ORDER BY amount DESC, cid, oid LIMIT 4",
+            "orders",
+        ),
+        (
+            "DELETE FROM orders WHERE qty > 15 ORDER BY cid DESC, oid LIMIT 3",
+            "orders",
+        ),
+        (
+            "DELETE FROM orders WHERE amount > 990 ORDER BY oid, cid LIMIT 100",
+            "orders",
+        ),
+        (
+            "UPDATE orders SET qty = 1 WHERE cid = 999999 ORDER BY cid, oid LIMIT 2",
+            "orders",
+        ),
+        ("DELETE FROM orders ORDER BY oid LIMIT 2", "orders"),
+    ] {
+        v.push((sql.into(), t));
+    }
     v.push((
         "UPDATE customers SET cid = cid + 1000 WHERE cid = 3".into(),
         "customers",

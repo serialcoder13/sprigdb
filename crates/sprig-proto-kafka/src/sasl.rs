@@ -612,8 +612,16 @@ mod tests {
             let sk = digest::digest(mech.digest_alg(), ck.as_ref());
             let wo = format!("c=biws,r={nonce}");
             let auth = format!("{},{},{wo}", s.client_first_bare, s.server_first);
-            let sig = hmac::sign(&hmac::Key::new(mech.hmac_alg(), sk.as_ref()), auth.as_bytes());
-            let p: Vec<u8> = ck.as_ref().iter().zip(sig.as_ref()).map(|(a, b)| a ^ b).collect();
+            let sig = hmac::sign(
+                &hmac::Key::new(mech.hmac_alg(), sk.as_ref()),
+                auth.as_bytes(),
+            );
+            let p: Vec<u8> = ck
+                .as_ref()
+                .iter()
+                .zip(sig.as_ref())
+                .map(|(a, b)| a ^ b)
+                .collect();
             format!("{wo},p={}", B64.encode(p)).into_bytes()
         };
         let cnonce = "Kd^wepcSBU43;b{K~R-Zt<6aQ2f-w9JS";

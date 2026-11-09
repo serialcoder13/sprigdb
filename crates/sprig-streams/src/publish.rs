@@ -529,11 +529,13 @@ async fn append_once(
             )
             .await
             .map_err(map_err)?;
-        state = row.filter(|(_, l, _)| *l != -2).map(|(e, l, r)| ProducerState {
-            epoch: i16::try_from(e).unwrap_or(i16::MAX),
-            last_seq: l,
-            recent: ProducerState::parse_recent(&r),
-        });
+        state = row
+            .filter(|(_, l, _)| *l != -2)
+            .map(|(e, l, r)| ProducerState {
+                epoch: i16::try_from(e).unwrap_or(i16::MAX),
+                last_seq: l,
+                recent: ProducerState::parse_recent(&r),
+            });
         match check_sequence(state.as_ref(), &b) {
             SequenceVerdict::Append => {}
             SequenceVerdict::Duplicate(id) => {

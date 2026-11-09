@@ -3431,7 +3431,16 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     }
     if order_by || limit {
         // R3: a locked two-step (chapter 17's step 17).
-        let lw = limited_write(stmt, entry, &rel, &dml, &shards, cx, &releases, fkw.as_ref())?;
+        let lw = limited_write(
+            stmt,
+            entry,
+            &rel,
+            &dml,
+            &shards,
+            cx,
+            &releases,
+            fkw.as_deref(),
+        )?;
         let targets = lw.0;
         return Ok(Plan::Write(WritePlan {
             kind,
@@ -3471,7 +3480,7 @@ fn limited_write(
     shards: &BTreeSet<usize>,
     cx: &PlanCtx<'_>,
     releases: &[crate::plan::Release],
-    fkw: Option<&Box<crate::fk::FkWork>>,
+    fkw: Option<&crate::fk::FkWork>,
 ) -> R<(Vec<Target>, crate::plan::Limited)> {
     use crate::fk::ValClass;
     let refuse = |why: &str| Rejection::new(Reason::LimitedDml, why.to_owned());
@@ -3492,7 +3501,9 @@ fn limited_write(
         return Err(refuse("a limited write on a table without a key column"));
     };
     if entry.primary.is_empty() || entry.primary.len() != entry.primary_classes.len() {
-        return Err(refuse("a limited write on a table whose primary key is unknown"));
+        return Err(refuse(
+            "a limited write on a table whose primary key is unknown",
+        ));
     }
     let named: Vec<String> = order
         .iter()

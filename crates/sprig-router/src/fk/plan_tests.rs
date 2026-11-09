@@ -380,3 +380,86 @@ fn prepared_child_inserts_render_their_values() {
     assert!(!w.targets[0].sql.contains('?'), "{}", w.targets[0].sql);
     assert_eq!(w.fk.as_ref().unwrap().checks[0].tuples[0][0].sql, "7");
 }
+
+#[test]
+fn limited_writes_are_a_locked_two_step_when_the_order_is_total() {
+    let t = topo();
+    // A child's own rows need no foreign-key work: deleting them in order
+    // is a limited write too.
+    let Plan::Write(w) = p(&t, "DELETE FROM ships ORDER BY cid, shid LIMIT 2") else {
+        panic!()
+    };
+    assert!(w.limited.is_some() && w.fk.is_none());
+    // A parent's are refused (its children would need probing per row).
+    match p(&t, "DELETE FROM suppliers ORDER BY sid LIMIT 2") {
+        Plan::Reject(r) => assert_eq!(r.reason, Reason::LimitedDml),
+        other => panic!("{other:?}"),
+    }
+    let plain = build_with_fks(
+        7,
+        &[CatalogGroup {
+            id: 3,
+            spec: KeySpec::new(vec![sprig_shard::KeyClass::Numeric]).unwrap(),
+            map: Arc::new(
+                ShardMap::presplit(
+                    TenantId(7),
+                    GroupId(3),
+                    KeySpec::new(vec![sprig_shard::KeyClass::Numeric])
+                        .unwrap()
+                        .digest,
+                    4,
+                    &[ClusterId::new("c1").unwrap(), ClusterId::new("c2").unwrap()],
+                )
+                .unwrap(),
+            ),
+        }],
+        &[CatalogTable {
+            object: 42,
+            db: 1,
+            default_schema: DEF.into(),
+            name: "ships".into(),
+            member: Membership::Sharded {
+                group: 3,
+                key_columns: Some(vec!["cid".into()]),
+                create_sql: Some(SHIPS.into()),
+                lookups: Vec::new(),
+                fill_rk: false,
+                parent_fk: None,
+            },
+        }],
+        &[],
+    );
+    let Plan::Write(w) = p(
+        &plain,
+        "DELETE FROM ships WHERE sid > 3 ORDER BY sid DESC, cid, shid LIMIT 2",
+    ) else {
+        panic!()
+    };
+    let l = w.limited.unwrap();
+    assert_eq!(w.targets.len(), 4);
+    assert!(
+        w.targets[0].sql.contains(crate::plan::LIMITED_ROWS),
+        "{}",
+        w.targets[0].sql
+    );
+    assert!(!w.targets[0].sql.contains("LIMIT"));
+    assert!(
+        w.targets[0].sql.contains("(sid > 3) AND"),
+        "{}",
+        w.targets[0].sql
+    );
+    let Plan::Read(r) = &*l.read else { panic!() };
+    assert!(
+        r.targets[0]
+            .sql
+            .contains("WHERE sid > 3 ORDER BY sid DESC, cid, shid LIMIT 2 FOR UPDATE"),
+        "{}",
+        r.targets[0].sql
+    );
+    assert_eq!(l.pk, ["cid", "shid"]);
+    // Not total: refused.
+    match p(&plain, "UPDATE ships SET sid = 1 ORDER BY sid LIMIT 2") {
+        Plan::Reject(r) => assert_eq!(r.reason, Reason::LimitedDml),
+        other => panic!("{other:?}"),
+    }
+}

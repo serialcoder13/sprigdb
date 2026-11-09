@@ -122,6 +122,12 @@ pub struct ConsumerSpec {
     pub exclusive: bool,
     /// `x-priority`.
     pub priority: i32,
+    /// Deliveries the consumer still holds from an earlier owner (a
+    /// re-attachment): kept delivered to it during the takeover grace.
+    pub held: Vec<DeliveryId>,
+    /// The gateway the consumer is on when it came over the relay (`None`:
+    /// this gateway). The owner follows its consumers by it.
+    pub from: Option<Arc<str>>,
 }
 
 impl std::fmt::Debug for ConsumerSpec {
@@ -197,8 +203,18 @@ pub enum Cmd {
         /// Whether the transaction committed.
         committed: bool,
     },
+    /// The transaction holding a delivery ended without telling how:
+    /// check the row now (the session's commit hook).
+    Verify {
+        /// The delivery.
+        id: DeliveryId,
+    },
     /// The queue's definition changed (policies, arguments).
     Reconfigure(Box<QueueCfg>),
+    /// Hand the queue to another gateway (the owner follows its
+    /// consumers): write what is in flight, then stop without failing the
+    /// commands that wait; the slot passes them on.
+    HandOff(String),
     /// Stop (lease lost, gateway stopping).
     Stop,
 }
@@ -221,8 +237,40 @@ pub enum OwnerEvent {
         /// Why.
         reason: String,
     },
-    /// Dead letters were written to this store's outbox.
+    /// Dead letters were written to this store's outbox (also: wake the
+    /// forwarder for a takeover's outbox barrier).
     Outbox,
+    /// Most consumers have been on gateway `to` for
+    /// `queue.owner_move_after_seconds`: the engine may hand the queue
+    /// there.
+    MoveWanted {
+        /// The queue.
+        queue: u64,
+        /// The gateway.
+        to: String,
+    },
+}
+
+/// How an owner ended.
+pub enum Exit {
+    /// Stopped (fenced, store failure, deleted, lease lost, stopping).
+    Stopped,
+    /// Handed off to a gateway; the commands that wait are still in `rx`.
+    HandedOff {
+        /// The new owner.
+        to: String,
+        /// The commands.
+        rx: mpsc::UnboundedReceiver<Cmd>,
+    },
+}
+
+impl std::fmt::Debug for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Exit::Stopped => f.write_str("Stopped"),
+            Exit::HandedOff { to, .. } => write!(f, "HandedOff({to})"),
+        }
+    }
 }
 
 /// Fixed parameters of an owner.
@@ -255,6 +303,25 @@ pub struct OwnerParams {
     pub clock: Arc<dyn Clock>,
     /// Where events go.
     pub events: mpsc::UnboundedSender<OwnerEvent>,
+    /// `queue.takeover_grace_ms`: after a takeover, nothing is dispatched
+    /// for this long while consumers re-attach and report what they hold.
+    pub grace_ms: i64,
+    /// `queue.owner_move_after_seconds` in ms (0: never move).
+    pub move_after_ms: i64,
+    /// No move before this time (the last move plus
+    /// `queue.owner_move_cooldown_seconds`).
+    pub no_move_before_ms: i64,
+}
+
+impl OwnerParams {
+    /// Parameters with the round-2 extras off (no grace, no moves): the
+    /// simulation and tests that drive an owner directly.
+    #[must_use]
+    pub fn without_extras(mut self) -> Self {
+        self.grace_ms = 0;
+        self.move_after_ms = 0;
+        self
+    }
 }
 
 impl std::fmt::Debug for OwnerParams {
@@ -374,13 +441,36 @@ struct Core {
     hwm_dirty: bool,
     deleted: bool,
     verify_tx: mpsc::UnboundedSender<(u64, MsgId, bool)>,
+    /// Nothing is dispatched before this (takeover grace and outbox
+    /// barrier).
+    live_at: i64,
+    /// The outbox barrier passed (or timed out).
+    barrier_done: bool,
+    /// `basic.get`s that arrived before `live_at`.
+    deferred_gets: Vec<Cmd>,
+    /// The gateway most consumers are on, and since when.
+    follow: Option<(Arc<str>, i64)>,
+    /// A move was asked for (once until the picture changes).
+    move_asked: bool,
+    /// Set by `HandOff`.
+    handoff: Option<String>,
 }
 
 /// Runs the owner of `p.queue` over `store` on commands from `rx`: takes
 /// the lane over (epoch + 1), loads the head, and serves until stopped.
 /// Commands sent before the takeover finished wait in `rx`; if the
 /// takeover fails they are answered with the error.
-pub async fn run(p: OwnerParams, store: Arc<dyn MsgStore>, mut rx: mpsc::UnboundedReceiver<Cmd>) {
+pub async fn run(p: OwnerParams, store: Arc<dyn MsgStore>, rx: mpsc::UnboundedReceiver<Cmd>) {
+    let _ = run_owned(p, store, rx).await;
+}
+
+/// [`run`], telling how the owner ended: a hand-off gives the waiting
+/// commands back.
+pub async fn run_owned(
+    p: OwnerParams,
+    store: Arc<dyn MsgStore>,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+) -> Exit {
     let claim = match store.claim(p.queue.id, 0).await {
         Ok(c) => c,
         Err(e) => {
@@ -391,11 +481,44 @@ pub async fn run(p: OwnerParams, store: Arc<dyn MsgStore>, mut rx: mpsc::Unbound
                 epoch: 0,
                 reason: e.to_string(),
             });
-            return;
+            return Exit::Stopped;
         }
     };
     let (verify_tx, verify_rx) = mpsc::unbounded_channel();
     let now = p.clock.now_ms();
+    // A takeover (not the first owner): consumers that held deliveries of
+    // the last owner re-attach during the grace, and the outbox barrier
+    // lets committed transactional publishes and dead letters in first.
+    let takeover = claim.epoch > 1;
+    let grace = if takeover && claim.state.delivered_hwm > 0 {
+        p.grace_ms.max(0)
+    } else {
+        0
+    };
+    let barrier = (takeover && p.grace_ms > 0).then(|| {
+        let (tx, rx) = oneshot::channel::<()>();
+        let store = Arc::clone(&store);
+        let deadline = now + (2 * p.grace_ms).max(1000);
+        let clock = Arc::clone(&p.clock);
+        let events = p.events.clone();
+        tokio::spawn(async move {
+            let _ = events.send(OwnerEvent::Outbox);
+            loop {
+                match store.outbox_head().await {
+                    Ok(None) => break,
+                    Ok(Some(id)) if crate::store::msg_id_ms(&id) > now => break,
+                    _ => {}
+                }
+                if clock.now_ms() >= deadline {
+                    tracing::debug!("outbox barrier timed out");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let _ = tx.send(());
+        });
+        rx
+    });
     let mut core = Core {
         epoch: claim.epoch,
         next_seq: claim.state.next_seq.max(1),
@@ -420,6 +543,12 @@ pub async fn run(p: OwnerParams, store: Arc<dyn MsgStore>, mut rx: mpsc::Unbound
         hwm_dirty: false,
         deleted: false,
         verify_tx,
+        live_at: now + grace,
+        barrier_done: barrier.is_none(),
+        deferred_gets: Vec::new(),
+        follow: None,
+        move_asked: false,
+        handoff: None,
         store,
         p,
     };
@@ -434,10 +563,10 @@ pub async fn run(p: OwnerParams, store: Arc<dyn MsgStore>, mut rx: mpsc::Unbound
             epoch: core.epoch,
             reason: e.to_string(),
         });
-        return;
+        return Exit::Stopped;
     }
     metrics::counter!("sprig_queue_owner_takeovers_total", "reason" => "lease").increment(1);
-    core.run(rx, verify_rx).await;
+    core.run(rx, verify_rx, barrier).await
 }
 
 /// Answers every waiting command with `err`.
@@ -475,7 +604,9 @@ pub fn fail(c: Cmd, err: &MqError) {
         | Cmd::Settle(..)
         | Cmd::ConnLost(_)
         | Cmd::Release { .. }
+        | Cmd::Verify { .. }
         | Cmd::Reconfigure(_)
+        | Cmd::HandOff(_)
         | Cmd::Stop => {}
     }
 }
@@ -487,6 +618,12 @@ fn already_settled(what: &str) -> MqError {
 impl Core {
     fn now(&self) -> i64 {
         self.p.clock.now_ms()
+    }
+
+    /// Past the takeover grace and the outbox barrier: deliveries may
+    /// leave.
+    fn is_live(&self) -> bool {
+        self.barrier_done && self.now() >= self.live_at
     }
 
     fn id_of(&self, e: &Entry) -> DeliveryId {
@@ -1036,6 +1173,9 @@ impl Core {
     }
 
     fn dispatch(&mut self) {
+        if !self.is_live() {
+            return;
+        }
         let now = self.now();
         loop {
             if self.ready.is_empty() {
@@ -1231,6 +1371,9 @@ impl Core {
     fn next_timer(&self) -> Duration {
         let now = self.now();
         let mut next = now + 1000;
+        if self.live_at > now {
+            next = next.min(self.live_at);
+        }
         if let Some(e) = self.ready.values().next()
             && let Some(t) = e.expires_at_ms
         {
@@ -1291,29 +1434,19 @@ impl Core {
             self.remove_consumer(c);
         }
         // Holds of transactions that never reported back: check the row.
-        let stale: Vec<(u64, MsgId)> = self
+        let stale: Vec<u64> = self
             .unacked
             .iter()
             .filter(|(_, u)| {
                 u.held_since
                     .is_some_and(|h| h + self.p.hold_check_ms <= now)
             })
-            .map(|(s, u)| (*s, u.e.msg_id))
+            .map(|(s, _)| *s)
             .collect();
-        for (seq, id) in stale {
-            if let Some(u) = self.unacked.get_mut(&seq) {
-                u.held_since = Some(now + 3_600_000); // one check at a time
-            }
-            let store = Arc::clone(&self.store);
-            let q = self.p.queue.id;
-            let tx = self.verify_tx.clone();
-            tokio::spawn(async move {
-                // A locking read waits for an open transaction to end.
-                if let Ok(v) = store.existing(q, &[id]).await {
-                    let _ = tx.send((seq, id, v.is_empty()));
-                }
-            });
+        for seq in stale {
+            self.check_hold(seq);
         }
+        self.check_follow(now);
         // x-expires.
         if let Some(x) = self.p.cfg.expires_ms
             && self.consumers.is_empty()
@@ -1323,6 +1456,74 @@ impl Core {
             let _ = self.p.events.send(OwnerEvent::AutoDelete {
                 queue: self.p.queue.id,
             });
+        }
+    }
+
+    /// Reads a held delivery's row under a lock (waits for its
+    /// transaction): gone means the transaction committed the ack.
+    fn check_hold(&mut self, seq: u64) {
+        let far = self.now() + 3_600_000;
+        let Some(u) = self.unacked.get_mut(&seq) else {
+            return;
+        };
+        if u.held_since.is_none() {
+            return;
+        }
+        let id = u.e.msg_id;
+        u.held_since = Some(far); // one check at a time
+        let store = Arc::clone(&self.store);
+        let q = self.p.queue.id;
+        let tx = self.verify_tx.clone();
+        tokio::spawn(async move {
+            // A locking read waits for an open transaction to end.
+            if let Ok(v) = store.existing(q, &[id]).await {
+                let _ = tx.send((seq, id, v.is_empty()));
+            }
+        });
+    }
+
+    /// The owner follows its consumers (chapter 50, "The queue owner"):
+    /// when more than half of them have been on one other gateway for
+    /// `move_after_ms`, and the last move is older than the cooldown, ask
+    /// the engine to hand the queue there. Damped: the picture must hold
+    /// the whole time, and one ask until it changes.
+    fn check_follow(&mut self, now: i64) {
+        if self.p.move_after_ms <= 0 || self.consumers.is_empty() || now < self.p.no_move_before_ms
+        {
+            self.follow = None;
+            return;
+        }
+        let mut by: HashMap<&str, usize> = HashMap::new();
+        for c in &self.consumers {
+            if let Some(g) = c.spec.from.as_deref() {
+                *by.entry(g).or_default() += 1;
+            }
+        }
+        let total = self.consumers.len();
+        let top = by
+            .into_iter()
+            .filter(|(_, n)| n * 2 > total)
+            .map(|(g, _)| g)
+            .next()
+            .map(Arc::<str>::from);
+        match (top, &self.follow) {
+            (None, _) => {
+                self.follow = None;
+                self.move_asked = false;
+            }
+            (Some(g), Some((f, since))) if *f == g => {
+                if !self.move_asked && now - since >= self.p.move_after_ms {
+                    self.move_asked = true;
+                    let _ = self.p.events.send(OwnerEvent::MoveWanted {
+                        queue: self.p.queue.id,
+                        to: g.to_string(),
+                    });
+                }
+            }
+            (Some(g), _) => {
+                self.follow = Some((g, now));
+                self.move_asked = false;
+            }
         }
     }
 
@@ -1357,6 +1558,32 @@ impl Core {
                         self.p.queue.name
                     ))));
                 } else {
+                    let now = self.now();
+                    if now < self.live_at {
+                        // Takeover grace: what the consumer still holds
+                        // from the last owner stays delivered to it.
+                        for id in &spec.held {
+                            if id.queue != self.p.queue.id || id.seq > self.hwm {
+                                continue;
+                            }
+                            if let Some(e) = self.cache_take((id.pclass, id.seq)) {
+                                self.dec_ready(e.size);
+                                let seq = e.seq;
+                                self.unacked.insert(
+                                    seq,
+                                    Unacked {
+                                        e,
+                                        holder: spec.holder,
+                                        consumer: Some(spec.id),
+                                        deadline_ms: self.deadline(now),
+                                        held_since: None,
+                                        requeue_after: false,
+                                        gone: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
                     self.consumers.push(Consumer {
                         spec,
                         credit: 0,
@@ -1380,6 +1607,20 @@ impl Core {
             }
             Cmd::Cancel(id) => self.remove_consumer(id),
             Cmd::Settle(h, items) => self.settle(h, items),
+            Cmd::Get {
+                holder,
+                no_ack,
+                lease_ms,
+                reply,
+            } if !self.is_live() => {
+                // Answered once the takeover grace is over.
+                self.deferred_gets.push(Cmd::Get {
+                    holder,
+                    no_ack,
+                    lease_ms,
+                    reply,
+                });
+            }
             Cmd::Get {
                 holder,
                 no_ack,
@@ -1510,7 +1751,9 @@ impl Core {
                 }
             }
             Cmd::Release { id, committed } => self.release(id.seq, committed),
+            Cmd::Verify { id } => self.check_hold(id.seq),
             Cmd::Reconfigure(cfg) => self.p.cfg = *cfg,
+            Cmd::HandOff(to) => self.handoff = Some(to),
             Cmd::Stop => self.deleted = true,
         }
         Ok(())
@@ -1520,9 +1763,18 @@ impl Core {
         mut self,
         mut rx: mpsc::UnboundedReceiver<Cmd>,
         mut verify: mpsc::UnboundedReceiver<(u64, MsgId, bool)>,
-    ) {
+        mut barrier: Option<oneshot::Receiver<()>>,
+    ) -> Exit {
         let reason = loop {
             let wait = self.next_timer();
+            let barrier_wait = async {
+                match barrier.as_mut() {
+                    Some(b) => {
+                        let _ = b.await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 c = rx.recv() => match c {
                     None => break "engine gone".to_owned(),
@@ -1539,10 +1791,15 @@ impl Core {
                         self.release(seq, gone);
                     }
                 }
+                () = barrier_wait => {
+                    barrier = None;
+                    self.barrier_done = true;
+                }
                 () = tokio::time::sleep(wait) => {}
             }
             let mut failed = None;
-            while self.batch_rows() < self.p.batch_rows && !self.deleted {
+            while self.batch_rows() < self.p.batch_rows && !self.deleted && self.handoff.is_none()
+            {
                 match rx.try_recv() {
                     Ok(c) => {
                         if let Err(e) = self.apply(c).await {
@@ -1559,15 +1816,41 @@ impl Core {
             if self.deleted {
                 break "stopped".to_owned();
             }
+            if self.handoff.is_some() {
+                // Drain what is in flight, so nothing is redelivered.
+                match self.flush().await {
+                    Ok(()) => break "handed off".to_owned(),
+                    Err(e) => {
+                        self.handoff = None;
+                        break e.to_string();
+                    }
+                }
+            }
             self.timers();
+            if self.is_live() && !self.deferred_gets.is_empty() {
+                let mut failed = None;
+                for c in std::mem::take(&mut self.deferred_gets) {
+                    if let Err(e) = self.apply(c).await {
+                        failed = Some(e.to_string());
+                        break;
+                    }
+                }
+                if let Some(f) = failed {
+                    break f;
+                }
+            }
             if let Err(e) = self.settle_loop().await {
                 break e.to_string();
             }
         };
+        let moved = MqError::new(MqCode::OwnerMoved, reason.clone());
         for (_, r) in self.inserts.drain(..) {
             if let Some(r) = r {
-                let _ = r.send(Err(MqError::new(MqCode::OwnerMoved, reason.clone())));
+                let _ = r.send(Err(moved.clone()));
             }
+        }
+        for c in std::mem::take(&mut self.deferred_gets) {
+            fail(c, &moved);
         }
         if !self.deleted {
             // The consumers re-attach to the next owner; tell them their
@@ -1588,6 +1871,14 @@ impl Core {
             epoch: self.epoch,
             reason,
         });
+        match self.handoff.take() {
+            Some(to) if !self.deleted => {
+                metrics::counter!("sprig_queue_owner_takeovers_total", "reason" => "follow")
+                    .increment(1);
+                Exit::HandedOff { to, rx }
+            }
+            _ => Exit::Stopped,
+        }
     }
 
     /// Writes, dispatches and pages in until nothing is left to do.

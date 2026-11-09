@@ -10,7 +10,7 @@
 //!   own change at once.
 //! - **Messages** live in the vhost database's first shard schema, on the
 //!   tenant's cluster, written through the cluster's `sprig_ctl` pool.
-//! - **Privileges** (step 18): RabbitMQ's configure, write and read map to
+//! - **Privileges** (step 18): `RabbitMQ`'s configure, write and read map to
 //!   grants on the database or on the object's name (`CREATE`/`DROP`/
 //!   `ALTER`; `INSERT`; `SELECT`, and `DELETE` for queues), or a rule in
 //!   `mq_permissions`. A user with none of them on the vhost's database
@@ -222,7 +222,7 @@ impl MqCatalog for GatewayMq {
             .into_iter()
             .any(|a| self.allows(&*g, &cat, &row.name, a, None))
                 || g.unrestricted()
-                || self.has_rule(p, &cat, &r)
+                || Self::has_rule(p, &cat, &r)
                 || cat.objects.iter().any(|o| {
                     o.db_id == row.db_id
                         && g.allows(
@@ -342,7 +342,7 @@ impl MqCatalog for GatewayMq {
         let Some(cat) = self.svc.cache.cached(TenantId(v.tenant)) else {
             return false;
         };
-        if self.rule_allows(p, &cat, v, perm, name) {
+        if Self::rule_allows(p, &cat, v, perm, name) {
             return true;
         }
         let Some(g) = self.grants(p, &cat) else {
@@ -385,7 +385,7 @@ impl MqCatalog for GatewayMq {
 }
 
 impl GatewayMq {
-    fn has_rule(&self, p: &Principal, cat: &TenantCatalog, v: &VhostRef) -> bool {
+    fn has_rule(p: &Principal, cat: &TenantCatalog, v: &VhostRef) -> bool {
         let Some(user) = p.user_id else { return false };
         Self::state(cat)
             .topology(v.db_id, cat.version)
@@ -395,7 +395,6 @@ impl GatewayMq {
     }
 
     fn rule_allows(
-        &self,
         p: &Principal,
         cat: &TenantCatalog,
         v: &VhostRef,
@@ -512,18 +511,17 @@ impl Leases for EtcdLeases {
         if h.keys.contains_key(&(tenant, object)) {
             return Ok(Acquired::Mine(h.lost.clone()));
         }
-        let lease = match h.lease {
-            Some(l) => l,
-            None => {
-                let l = self
-                    .store
-                    .grant_lease(LEASE_TTL)
-                    .await
-                    .map_err(unavailable)?;
-                h.lease = Some(l);
-                h.lost = CancellationToken::new();
-                l
-            }
+        let lease = if let Some(l) = h.lease {
+            l
+        } else {
+            let l = self
+                .store
+                .grant_lease(LEASE_TTL)
+                .await
+                .map_err(unavailable)?;
+            h.lease = Some(l);
+            h.lost = CancellationToken::new();
+            l
         };
         let value = serde_json::to_vec(&LeaseValue {
             v: 1,

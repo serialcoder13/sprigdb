@@ -1826,7 +1826,9 @@ async fn limited_targets(
     budget: &mut Budget,
 ) -> Result<Option<Vec<Target>>> {
     let Output::Rows { rows, .. } = Box::pin(execute(&l.read, be, budget)).await? else {
-        return Err(SprigError::internal("a limited write's read answered no rows"));
+        return Err(SprigError::internal(
+            "a limited write's read answered no rows",
+        ));
     };
     let q = |c: &str| format!("`{}`", c.replace('`', "``"));
     let mut conds: HashMap<u32, Vec<String>> = HashMap::new();
@@ -1843,7 +1845,9 @@ async fn limited_targets(
             .and_then(|i| l.group.shards.get(i))
             .map(|s| s.shard)
         else {
-            return Err(SprigError::internal("a limited write's row without a routable key"));
+            return Err(SprigError::internal(
+                "a limited write's row without a routable key",
+            ));
         };
         let mut parts = Vec::new();
         for (j, c) in l.pk.iter().enumerate() {

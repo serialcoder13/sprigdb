@@ -21,6 +21,14 @@ pub fn new_msg_id() -> MsgId {
     *uuid::Uuid::now_v7().as_bytes()
 }
 
+/// The milliseconds a UUIDv7 message id was made at.
+#[must_use]
+pub fn msg_id_ms(id: &MsgId) -> i64 {
+    let mut b = [0u8; 8];
+    b[2..].copy_from_slice(&id[..6]);
+    i64::try_from(u64::from_be_bytes(b)).unwrap_or(i64::MAX)
+}
+
 /// Why a store call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -278,6 +286,11 @@ pub trait MsgStore: Send + Sync + 'static {
 
     /// Up to `limit` outbox rows, oldest first.
     async fn outbox(&self, limit: usize) -> Result<Vec<OutboxRow>, StoreError>;
+
+    /// The oldest outbox row's id, if any (a takeover's outbox barrier).
+    async fn outbox_head(&self) -> Result<Option<MsgId>, StoreError> {
+        Ok(self.outbox(1).await?.first().map(|r| r.out_id))
+    }
 
     /// Deletes forwarded outbox rows.
     async fn outbox_done(&self, ids: &[MsgId]) -> Result<(), StoreError>;

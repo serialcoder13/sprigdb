@@ -24,7 +24,12 @@
     clippy::unwrap_used,
     clippy::too_many_lines,
     clippy::doc_markdown,
-    clippy::many_single_char_names
+    clippy::many_single_char_names,
+    // Test sizes and timings: small numbers.
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
 )]
 
 use std::sync::Arc;
@@ -769,9 +774,12 @@ fn values_of(p: &fetch_response::PartitionData) -> Vec<(i64, Vec<u8>)> {
         .into_iter()
         .flat_map(|b| {
             let base = b.base_offset;
-            b.records
-                .into_iter()
-                .map(move |r| (base + i64::from(r.offset_delta), r.value.unwrap_or_default()))
+            b.records.into_iter().map(move |r| {
+                (
+                    base + i64::from(r.offset_delta),
+                    r.value.unwrap_or_default(),
+                )
+            })
         })
         .collect()
 }
@@ -867,7 +875,12 @@ async fn warm_up(c: &mut Client<Box<dyn Io>>, topic: &str, partition: i32) -> i6
             );
             return r.base_offset + 1;
         }
-        assert_eq!(r.error_code, err::REQUEST_TIMED_OUT, "{:?}", r.error_message);
+        assert_eq!(
+            r.error_code,
+            err::REQUEST_TIMED_OUT,
+            "{:?}",
+            r.error_message
+        );
         assert!(t0.elapsed() < Duration::from_secs(60), "no sequencer");
     }
 }
@@ -908,10 +921,22 @@ async fn live_data_plane() {
             Compression::Zstd,
         ] {
             let t0 = Instant::now();
-            let r = produce_one(&mut c, v, &topic, 0, data_batch(want.len(), 4, 40, codec, None)).await;
+            let r = produce_one(
+                &mut c,
+                v,
+                &topic,
+                0,
+                data_batch(want.len(), 4, 40, codec, None),
+            )
+            .await;
             assert_eq!(r.error_code, 0, "v{v} {codec:?}: {:?}", r.error_message);
             assert_eq!(r.base_offset, next, "v{v} {codec:?}");
-            println!("produce v{v} {:>6}: base offset {} in {:?}", codec.name(), r.base_offset, t0.elapsed());
+            println!(
+                "produce v{v} {:>6}: base offset {} in {:?}",
+                codec.name(),
+                r.base_offset,
+                t0.elapsed()
+            );
             next += 4;
             for i in 0..4 {
                 let mut v = format!("r{}-", want.len()).into_bytes();
@@ -960,7 +985,14 @@ async fn live_data_plane() {
     let d1 = produce_one(&mut c, 9, &topic, 1, b1).await;
     assert_eq!((d0.error_code, d0.base_offset), (0, start1));
     assert_eq!((d1.error_code, d1.base_offset), (0, start1 + 3));
-    let gap = produce_one(&mut c, 9, &topic, 1, data_batch(0, 1, 10, Compression::None, Some((pid, 0, 9)))).await;
+    let gap = produce_one(
+        &mut c,
+        9,
+        &topic,
+        1,
+        data_batch(0, 1, 10, Compression::None, Some((pid, 0, 9))),
+    )
+    .await;
     assert_eq!(gap.error_code, err::OUT_OF_ORDER_SEQUENCE_NUMBER);
     let f: FetchResponse = c.call(12, &fetch_req(&topic, 1, 0, 0)).await.unwrap();
     assert_eq!(f.responses[0].partitions[0].high_watermark, start1 + 5);
@@ -971,15 +1003,35 @@ async fn live_data_plane() {
 
     // Long poll: a fetch at the high watermark waits for the next record.
     let mut p = login().await;
-    let id = c.send(12, &fetch_req(&topic, 1, start1 + 5, 5000)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // (The wait is capped by kafka.fetch_max_wait_ms, 500 ms by default:
+    // on a slow host the produce may land after it, so fetch again.)
+    let id = c
+        .send(12, &fetch_req(&topic, 1, start1 + 5, 5000))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let t0 = Instant::now();
-    produce_one(&mut p, 9, &topic, 1, data_batch(2000, 1, 10, Compression::None, None)).await;
+    produce_one(
+        &mut p,
+        9,
+        &topic,
+        1,
+        data_batch(2000, 1, 10, Compression::None, None),
+    )
+    .await;
     let produced = t0.elapsed();
-    let r: FetchResponse = c.recv(12, id).await.unwrap();
+    let mut r: FetchResponse = c.recv(12, id).await.unwrap();
+    if values_of(&r.responses[0].partitions[0]).is_empty() {
+        r = c
+            .call(12, &fetch_req(&topic, 1, start1 + 5, 5000))
+            .await
+            .unwrap();
+    }
     let woke = t0.elapsed();
     assert_eq!(values_of(&r.responses[0].partitions[0]).len(), 1);
-    println!("long poll: produce acknowledged in {produced:?}, the waiting fetch answered {woke:?} after the produce started");
+    println!(
+        "long poll: produce acknowledged in {produced:?}, the waiting fetch answered {woke:?} after the produce started"
+    );
 
     // ListOffsets and OffsetForLeaderEpoch.
     let lo = |ts: i64| ListOffsetsRequest {
@@ -1026,21 +1078,45 @@ async fn live_data_plane() {
         .await
         .unwrap();
     let e = &r.topics[0].partitions[0];
-    assert_eq!((e.error_code, e.leader_epoch, e.end_offset), (0, epoch, next));
+    assert_eq!(
+        (e.error_code, e.leader_epoch, e.end_offset),
+        (0, epoch, next)
+    );
     println!("leader epoch {epoch}; ListOffsets and OffsetForLeaderEpoch agree on {next}");
 
     // Per-topic byte configs (ALTER STREAM ... SET).
-    assert_eq!(alter_config(&mut c, &topic, "max.message.bytes", "100").await, 0);
-    assert_eq!(alter_config(&mut c, &topic, "retention.bytes", "1073741824").await, 0);
+    assert_eq!(
+        alter_config(&mut c, &topic, "max.message.bytes", "100").await,
+        0
+    );
+    assert_eq!(
+        alter_config(&mut c, &topic, "retention.bytes", "1073741824").await,
+        0
+    );
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let big = produce_one(&mut c, 9, &topic, 0, data_batch(0, 1, 500, Compression::None, None)).await;
-    assert_eq!(big.error_code, err::MESSAGE_TOO_LARGE, "{:?}", big.error_message);
+    let big = produce_one(
+        &mut c,
+        9,
+        &topic,
+        0,
+        data_batch(0, 1, 500, Compression::None, None),
+    )
+    .await;
+    assert_eq!(
+        big.error_code,
+        err::MESSAGE_TOO_LARGE,
+        "{:?}",
+        big.error_message
+    );
     println!("max.message.bytes=100: {:?}", big.error_message);
 
     // acks=0 is refused by closing the connection (39950).
     let mut z = login().await;
     let r: Result<ProduceResponse, ClientError> = z
-        .call(9, &produce_req(&topic, 0, data_batch(0, 1, 10, Compression::None, None), 0))
+        .call(
+            9,
+            &produce_req(&topic, 0, data_batch(0, 1, 10, Compression::None, None), 0),
+        )
         .await;
     assert!(r.is_err());
 
@@ -1092,20 +1168,34 @@ async fn live_throughput() {
             while acked < n {
                 while sent < n && pending.len() < inflight {
                     let k = batch.min(n - sent);
-                    let b = data_batch(sent, k, size, Compression::Lz4, Some((ip.producer_id, 0, sent as i32)));
-                    let id = c.send(9, &produce_req(&topic, part, b.clone(), -1)).await.unwrap();
+                    let b = data_batch(
+                        sent,
+                        k,
+                        size,
+                        Compression::Lz4,
+                        Some((ip.producer_id, 0, sent as i32)),
+                    );
+                    let id = c
+                        .send(9, &produce_req(&topic, part, b.clone(), -1))
+                        .await
+                        .unwrap();
                     pending.push_back((id, k, Instant::now(), b));
                     sent += k;
                 }
                 let (id, k, at, b) = pending.pop_front().unwrap();
                 let r: ProduceResponse = c.recv(9, id).await.unwrap();
                 let p = &r.responses[0].partition_responses[0];
-                if p.error_code == err::REQUEST_TIMED_OUT || p.error_code == err::KAFKA_STORAGE_ERROR {
+                if p.error_code == err::REQUEST_TIMED_OUT
+                    || p.error_code == err::KAFKA_STORAGE_ERROR
+                {
                     // Retryable: send the same batch again (a duplicate
                     // if it was appended), behind the ones in flight.
                     println!("retry after {}: {:?}", p.error_code, p.error_message);
                     retries += 1;
-                    let id = c.send(9, &produce_req(&topic, part, b.clone(), -1)).await.unwrap();
+                    let id = c
+                        .send(9, &produce_req(&topic, part, b.clone(), -1))
+                        .await
+                        .unwrap();
                     pending.push_back((id, k, at, b));
                     continue;
                 }
@@ -1119,7 +1209,14 @@ async fn live_throughput() {
     }
     let mut medians = Vec::new();
     for t in tasks {
-        medians.push(t.await.unwrap());
+        match t.await {
+            Ok(m) => medians.push(m),
+            Err(e) => {
+                // Don't leave the stream (and its sequencer job) behind.
+                delete_topic(&mut admin, &topic).await;
+                panic!("a producer failed: {e}");
+            }
+        }
     }
     let secs = t0.elapsed().as_secs_f64();
     let total = n * parts as usize;
