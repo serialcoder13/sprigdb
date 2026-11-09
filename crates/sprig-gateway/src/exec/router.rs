@@ -30,6 +30,7 @@
 
 mod backend;
 mod binary;
+mod ids;
 pub(crate) mod layout;
 mod txn;
 
@@ -81,6 +82,34 @@ struct Services {
     /// Bumped when a `router.*` or `txn.*` row changes at any scope:
     /// sessions resolve their [`Configs`] again.
     settings_gen: tokio::sync::watch::Receiver<u64>,
+    /// Chapter 19's ID blocks, per tenant.
+    ids: Mutex<HashMap<sprig_common::ids::TenantId, Arc<ids::TenantIds>>>,
+}
+
+impl Services {
+    /// Tenant `tenant`'s ID blocks in this gateway.
+    fn ids_of(
+        &self,
+        tenant: sprig_common::ids::TenantId,
+        locator: &Arc<crate::tenant::locator::GatewayLocator>,
+    ) -> Arc<ids::TenantIds> {
+        let mut m = self.ids.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(
+            m.entry(tenant)
+                .or_insert_with(|| Arc::new(ids::TenantIds::new(Arc::clone(locator), tenant))),
+        )
+    }
+}
+
+/// One statement's values from chapter 19's ID blocks.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IdsTaken {
+    /// The first generated value (`LAST_INSERT_ID()` after it).
+    first: i128,
+    /// `auto_increment_increment`.
+    step: i128,
+    /// Some row took a generated value (else only explicit values).
+    generated: bool,
 }
 
 /// Chapters 17's and 18's settings as one session resolved them, with
@@ -110,6 +139,7 @@ fn services(svc: &TenantServices) -> &'static Services {
             coordinator_id: format!("gw-{incarnation:016x}"),
             templates: Mutex::new(HashMap::new()),
             settings_gen: svc.settings.subscribe(&["router.*", "txn.*"]),
+            ids: Mutex::new(HashMap::new()),
         }
     })
 }
@@ -156,6 +186,8 @@ pub(crate) struct RouterState {
     /// range epochs then (chapter 17: a shard that moves under a
     /// transaction rolls it back with 39424).
     touched: HashMap<String, u64>,
+    /// The ID-block values the statement being run took (chapter 19).
+    ids: Option<IdsTaken>,
 }
 
 impl std::fmt::Debug for RouterState {
@@ -959,32 +991,9 @@ impl PassSession {
                     layout = l;
                 }
             }
-            let plan = {
-                let default_schema = self
-                    .bs
-                    .as_ref()
-                    .and_then(|bs| bs.vars().schema.clone())
-                    .or_else(|| {
-                        self.tenant
-                            .as_deref()
-                            .and_then(|ts| ts.schema_of(ts.current.as_deref()))
-                    });
-                let cluster = self.main_cluster().to_string();
-                let pcx = PlanCtx {
-                    topo: &layout.topo,
-                    default_schema: default_schema.as_deref(),
-                    session_cluster: &cluster,
-                    max_route_values: cfg.max_route_values,
-                    lookup_batch: cfg.lookup_batch,
-                };
-                // Chapter 20: writes count into the gateway's sketches.
-                crate::write_load::observe(
-                    self.tenant.as_deref().map(|t| t.tenant),
-                    &text,
-                    &cluster,
-                    || sprig_router::plan(&text, &pcx),
-                    |p| p,
-                )
+            let plan = match Box::pin(self.plan_routed(&layout, &text, &cfg)).await {
+                Ok(p) => p,
+                Err(e) => return self.fail(out, &e).await,
             };
             self.note_targets(&plan, &layout);
             let ran = self
@@ -1000,6 +1009,7 @@ impl PassSession {
                     out,
                 )
                 .await?;
+            self.router.ids = None;
             match ran {
                 Ran::Done(step) => return Ok(step),
                 Ran::Stale(err) => {
@@ -1087,9 +1097,163 @@ impl PassSession {
                 }
                 Plan::ViaLookup(v) => stack.push(&v.plan),
                 Plan::ViaParent(v) => v.group.shards.iter().for_each(|s| note(&s.schema)),
+                Plan::NeedIds(f) => f.group.shards.iter().for_each(|s| note(&s.schema)),
                 Plan::Explain(_) | Plan::NotRouted | Plan::Reject(_) => {}
             }
         }
+    }
+
+    /// Plans a text statement of the router path. An INSERT that takes
+    /// chapter 19's ID blocks gets its values first; they are kept in
+    /// `self.router.ids` for its OK packet.
+    ///
+    /// # Errors
+    /// The ID blocks' errors (39460, 1467).
+    async fn plan_routed(
+        &mut self,
+        layout: &TenantLayout,
+        text: &str,
+        cfg: &sprig_router::RouterConfig,
+    ) -> Result<Plan> {
+        let default_schema = self
+            .bs
+            .as_ref()
+            .and_then(|bs| bs.vars().schema.clone())
+            .or_else(|| {
+                self.tenant
+                    .as_deref()
+                    .and_then(|ts| ts.schema_of(ts.current.as_deref()))
+            });
+        let cluster = self.main_cluster().to_string();
+        let pcx = PlanCtx {
+            topo: &layout.topo,
+            default_schema: default_schema.as_deref(),
+            session_cluster: &cluster,
+            max_route_values: cfg.max_route_values,
+            lookup_batch: cfg.lookup_batch,
+            ids: self.id_mode(),
+        };
+        let tenant = self.tenant.as_deref().map(|t| t.tenant);
+        // Chapter 20: writes count into the gateway's sketches.
+        let plan = crate::write_load::observe(
+            tenant,
+            text,
+            &cluster,
+            || sprig_router::plan(text, &pcx),
+            |p| p,
+        );
+        self.router.ids = None;
+        let Plan::NeedIds(f) = &plan else {
+            return Ok(plan);
+        };
+        let taken = self.take_ids(f).await?;
+        let next = crate::write_load::observe(
+            tenant,
+            text,
+            &cluster,
+            || f.finish(taken.first, taken.step, &pcx),
+            |p| p,
+        );
+        self.router.ids = Some(taken);
+        Ok(next)
+    }
+
+    /// [`Self::plan_routed`] for one execution of a prepared statement.
+    ///
+    /// # Errors
+    /// The ID blocks' errors (39460, 1467).
+    async fn plan_prepared_routed(
+        &mut self,
+        layout: &TenantLayout,
+        text: &str,
+        template: &Template,
+        params: &[sprig_router::ParamLit],
+        cfg: &sprig_router::RouterConfig,
+    ) -> Result<sprig_router::PreparedPlan> {
+        let default_schema = self.bs.as_ref().and_then(|bs| bs.vars().schema.clone());
+        let cluster = self.main_cluster().to_string();
+        let pcx = PlanCtx {
+            topo: &layout.topo,
+            default_schema: default_schema.as_deref(),
+            session_cluster: &cluster,
+            max_route_values: cfg.max_route_values,
+            lookup_batch: cfg.lookup_batch,
+            ids: self.id_mode(),
+        };
+        let tenant = self.tenant.as_deref().map(|t| t.tenant);
+        // Chapter 20: writes count into the gateway's sketches.
+        let mut pp = crate::write_load::observe(
+            tenant,
+            text,
+            &cluster,
+            || sprig_router::plan_prepared(template, params, &pcx),
+            |p| &p.plan,
+        );
+        self.router.ids = None;
+        let Plan::NeedIds(f) = &pp.plan else {
+            return Ok(pp);
+        };
+        let taken = self.take_ids(f).await?;
+        let next = crate::write_load::observe(
+            tenant,
+            text,
+            &cluster,
+            || f.finish(taken.first, taken.step, &pcx),
+            |p| p,
+        );
+        pp.plan = next;
+        pp.placeholders = false;
+        self.router.ids = Some(taken);
+        Ok(pp)
+    }
+
+    /// The session's `NO_AUTO_VALUE_ON_ZERO` (chapter 19).
+    fn id_mode(&self) -> sprig_router::planner::IdMode {
+        let zero = self
+            .bs
+            .as_ref()
+            .and_then(|b| b.vars().vars.get("sql_mode").cloned())
+            .is_some_and(|m| m.to_ascii_uppercase().contains("NO_AUTO_VALUE_ON_ZERO"));
+        sprig_router::planner::IdMode {
+            no_auto_value_on_zero: zero,
+            filled: false,
+        }
+    }
+
+    /// Takes an INSERT's `AUTO_INCREMENT` values from the tenant's ID
+    /// blocks, in the session's `auto_increment_increment` and
+    /// `auto_increment_offset` series, and raises the sequence past its
+    /// explicit values (chapter 19).
+    async fn take_ids(&self, f: &sprig_router::plan::IdFill) -> Result<IdsTaken> {
+        let ts = self
+            .tenant
+            .as_deref()
+            .ok_or_else(|| SprigError::internal("no tenant"))?;
+        let tids = services(ts.services()).ids_of(ts.tenant, &ts.services().locator);
+        let var = |k: &str| {
+            self.bs
+                .as_ref()
+                .and_then(|b| b.vars().vars.get(k).and_then(|v| v.parse::<u64>().ok()))
+                .unwrap_or(1)
+                .clamp(1, 65_535)
+        };
+        let s = sprig_shard::ids::AutoIncSession {
+            increment: var("auto_increment_increment"),
+            offset: var("auto_increment_offset"),
+        };
+        let run = tids.take(f, &s).await?;
+        Ok(match run {
+            Some(r) => IdsTaken {
+                first: r.first,
+                step: r.step,
+                generated: true,
+            },
+            None => IdsTaken {
+                first: 0,
+                step: 1,
+                generated: false,
+            },
+        })
     }
 
     /// Whether the session runs with `autocommit = 0`.
@@ -1235,7 +1399,9 @@ impl PassSession {
                 )
                 .await
             }
-            Plan::Pass(t) => {
+            // An INSERT with ID-block values runs through the executor, so
+            // its OK packet carries the first value (chapter 19).
+            Plan::Pass(t) if self.router.ids.is_none() => {
                 metrics::counter!("sprig_router_statements_total", "plan" => "pass").increment(1);
                 let cluster = ClusterId::new(&t.cluster)
                     .map_err(|e| SprigError::internal(format!("cluster id: {e}")))?;
@@ -1293,6 +1459,7 @@ impl PassSession {
         let cfg = self.router_cfg();
         let main_cluster = self.main_cluster();
         let legacy_txn = self.legacy_txn();
+        let ids = self.router.ids.take();
         let accounts = Accounts(self.tenant.as_deref().and_then(|t| t.auth()));
         let ctx = OutputCtx {
             map,
@@ -1328,6 +1495,7 @@ impl PassSession {
                 parallel: cfg.max_parallel_shards,
                 implicit: false,
                 mark: None,
+                explicit_ids: ids.is_some(),
             };
             let mut budget = Budget::mb(cfg.max_statement_memory_mb);
             sprig_router::execute_to(plan, &mut be, &mut budget, &mut sink).await
@@ -1347,10 +1515,13 @@ impl PassSession {
                 // Outside a transaction only reads retry (a write may have
                 // run on some shards); inside one, any statement becomes
                 // 39424 when the maps moved (`routed`).
+                // An ID-block INSERT on one shard failed before writing.
                 let stale = !started
                     && stale_code
                     && !legacy_txn
-                    && (in_txn || matches!(plan, Plan::Read(_) | Plan::LookupJoin(_)));
+                    && (in_txn
+                        || matches!(plan, Plan::Read(_) | Plan::LookupJoin(_))
+                        || (ids.is_some() && matches!(plan, Plan::Pass(_))));
                 if stale {
                     return Ok(Ran::Stale(e));
                 }
@@ -1373,6 +1544,21 @@ impl PassSession {
                 let mut p = OkPacket::new(status);
                 p.affected_rows = ok.affected;
                 p.last_insert_id = ok.last_insert_id;
+                // Chapter 19: the first generated value, as MariaDB reports
+                // a multi-row INSERT; it becomes the session's
+                // LAST_INSERT_ID(), which reaches a connection before a
+                // statement reads it.
+                if let Some(t) = ids
+                    && t.generated
+                {
+                    let first = u64::try_from(t.first).unwrap_or(0);
+                    p.last_insert_id = if ok.affected > 0 { first } else { 0 };
+                    if ok.affected > 0
+                        && let Some(bs) = self.bs.as_mut()
+                    {
+                        bs.vars_mut().last_insert_id = first;
+                    }
+                }
                 p.warnings = ok.warnings;
                 p.info = Bytes::from(ok.info);
                 out.ok(p).await?;
@@ -1487,24 +1673,14 @@ impl PassSession {
             .filter(|p| p.name.is_empty())
             .map(|p| binary::param_lit(p, &charset))
             .collect();
-        let pp = {
-            let default_schema = self.bs.as_ref().and_then(|bs| bs.vars().schema.clone());
-            let cluster = self.main_cluster().to_string();
-            let pcx = PlanCtx {
-                topo: &layout.topo,
-                default_schema: default_schema.as_deref(),
-                session_cluster: &cluster,
-                max_route_values: cfg.max_route_values,
-                lookup_batch: cfg.lookup_batch,
-            };
-            // Chapter 20: writes count into the gateway's sketches.
-            crate::write_load::observe(
-                self.tenant.as_deref().map(|t| t.tenant),
-                text,
-                &cluster,
-                || sprig_router::plan_prepared(&template, &params, &pcx),
-                |p| &p.plan,
-            )
+        let pp = match Box::pin(self.plan_prepared_routed(&layout, text, &template, &params, &cfg))
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                out.error(&e).await?;
+                return Ok(ExecRoute::Answered);
+            }
         };
         self.note_targets(&pp.plan, &layout);
         let main = self.main_cluster();

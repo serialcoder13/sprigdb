@@ -457,6 +457,36 @@ impl ViaParent {
     }
 }
 
+/// An `INSERT` into a table whose `AUTO_INCREMENT` column takes chapter
+/// 19's ID blocks: the gateway takes `rows.len()` values from its block for
+/// the sequence (and raises it past `explicit_max`), then
+/// [`IdFill::finish`] writes them into the rows and plans the statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdFill {
+    /// The `INSERT`, its column list (or `SET` list) holding the column,
+    /// added with `NULL` values when the client left it out.
+    pub stmt: sqlparser::ast::Statement,
+    /// The `sequences` row (`seq_id`, the table's object id).
+    pub seq: u64,
+    /// The table, as the statement names it.
+    pub table: String,
+    /// The `AUTO_INCREMENT` column, lowercase.
+    pub column: String,
+    /// The table's group: where `MAX(column)` is read when the sequence
+    /// is created.
+    pub group: Arc<Group>,
+    /// The rows that take a generated value, in statement order (`[0]`
+    /// for `INSERT … SET`).
+    pub rows: Vec<usize>,
+    /// The column's position in each row of `VALUES` (`None`: `SET`).
+    pub pos: Option<usize>,
+    /// The highest explicit value the statement writes, if positive.
+    pub explicit_max: Option<i128>,
+}
+
+// Expressions hold no NaN: the statement as parsed.
+impl Eq for IdFill {}
+
 /// A plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
@@ -475,6 +505,9 @@ pub enum Plan {
     ViaLookup(Box<ViaLookup>),
     /// An `INSERT` into a parent member over several shards.
     ViaParent(Box<ViaParent>),
+    /// An `INSERT` that needs `AUTO_INCREMENT` values from the gateway's
+    /// ID blocks before it can be planned (chapter 19).
+    NeedIds(Box<IdFill>),
     /// `EXPLAIN FORMAT=SPRIG`: the plan of the statement.
     Explain(Box<Plan>),
     /// No exact plan.
@@ -493,6 +526,7 @@ impl Plan {
             Self::Write(_) => "write",
             Self::ViaLookup(_) => "via_lookup",
             Self::ViaParent(_) => "via_parent",
+            Self::NeedIds(_) => "need_ids",
             Self::Explain(_) => "explain",
             Self::Reject(_) => "reject",
         }

@@ -27,8 +27,8 @@ use sprig_shard::lookup::{
 };
 
 use super::{
-    Group, KeyClass, LookupRef, ParentLink, ShardLoc, StaticTopology, TableEntry, TableKind,
-    even_ranges,
+    AutoInc, Group, KeyClass, LookupRef, ParentLink, ShardLoc, StaticTopology, TableEntry,
+    TableKind, even_ranges,
 };
 
 /// A `lookup_indexes` row of a table (chapter 19), with its lookup group's
@@ -95,6 +95,9 @@ pub enum Membership {
 /// One table of the layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogTable {
+    /// Its object id (`objects.object_id`): an `AUTO_INCREMENT` column's
+    /// `sequences` row has it as `seq_id` (chapter 19). 0 when unknown.
+    pub object: u64,
     /// Its logical database.
     pub db: u32,
     /// The schema chapter 07's rewrite names the database by (its default
@@ -262,6 +265,23 @@ impl TableShape {
         Some((sql_type.trim().to_owned(), class))
     }
 
+    /// The `AUTO_INCREMENT` column, lowercase, if the table has one.
+    #[must_use]
+    pub fn auto_increment(&self) -> Option<String> {
+        self.visible
+            .iter()
+            .chain(self.types.keys().filter(|k| !self.visible.contains(k)))
+            .find(|c| {
+                self.types.get(*c).is_some_and(|d| {
+                    let def = d.to_ascii_uppercase();
+                    // The attribute, not a word inside a COMMENT or DEFAULT.
+                    let head = def.split(" COMMENT '").next().unwrap_or("");
+                    head.split_whitespace().any(|w| w == "AUTO_INCREMENT")
+                })
+            })
+            .cloned()
+    }
+
     /// Whether every unique key holds `col`.
     #[must_use]
     pub fn unique_keys_hold(&self, col: &str) -> bool {
@@ -360,6 +380,7 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
         let mut fill = false;
         let mut parent = None;
         let mut unique_keys = Vec::new();
+        let mut auto_inc = None;
         let (kind, group) = match &t.member {
             Membership::Sharded {
                 group,
@@ -383,6 +404,18 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                     unique_keys.clone_from(&s.unique_keys);
                 }
                 fill = *fill_rk;
+                // Chapter 19: a sharded member's AUTO_INCREMENT column
+                // takes ID blocks, whatever the group's shard count.
+                if t.object != 0 {
+                    auto_inc = shape.as_ref().and_then(|s| {
+                        let column = s.auto_increment()?;
+                        Some(AutoInc {
+                            ordinal: s.ordinal(&column),
+                            column,
+                            seq: t.object,
+                        })
+                    });
+                }
                 let key_ordinal = shape
                     .as_ref()
                     .and_then(|s| (!key.is_empty()).then(|| s.ordinal(&key)).flatten());
@@ -439,6 +472,7 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
                 columns,
                 fill_rk: fill,
                 parent,
+                auto_inc,
             },
         ));
     }
@@ -671,6 +705,7 @@ mod tests {
         };
         let tables = vec![
             CatalogTable {
+                object: 0,
                 db: 1,
                 default_schema: "t7_d1_g1_s1".into(),
                 name: "Orders".into(),
@@ -684,6 +719,7 @@ mod tests {
                 },
             },
             CatalogTable {
+                object: 0,
                 db: 2,
                 default_schema: "t7_d2_g2_s1".into(),
                 name: "items".into(),
@@ -697,6 +733,7 @@ mod tests {
                 },
             },
             CatalogTable {
+                object: 0,
                 db: 1,
                 default_schema: "t7_d1_g1_s1".into(),
                 name: "countries".into(),

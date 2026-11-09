@@ -35,6 +35,7 @@ fn p(sql: &str) -> Plan {
         session_cluster: "c1",
         max_route_values: 1024,
         lookup_batch: 256,
+        ids: crate::planner::IdMode::default(),
     };
     plan(sql, &cx)
 }
@@ -429,6 +430,7 @@ fn prepared_templates_keep_placeholders_on_one_shard() {
         session_cluster: "c1",
         max_route_values: 1024,
         lookup_batch: 256,
+        ids: crate::planner::IdMode::default(),
     };
     let tpl = parse_template("SELECT * FROM orders WHERE cid = ? AND note = ?", &t)
         .unwrap()
@@ -510,6 +512,7 @@ fn single_shard_planning_cost() {
         session_cluster: "c1",
         max_route_values: 1024,
         lookup_batch: 256,
+        ids: crate::planner::IdMode::default(),
     };
     let sql = "SELECT * FROM orders WHERE cid = 4242";
     let n = 50_000u32;

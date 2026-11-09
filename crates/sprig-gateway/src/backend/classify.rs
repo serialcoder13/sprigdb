@@ -232,6 +232,13 @@ impl StmtInfo {
         // Functions with session effects, anywhere.
         let mut side_effects = false;
         for (i, t) in toks.iter().enumerate() {
+            // `@@identity` and `@@last_insert_id` read `LAST_INSERT_ID()`.
+            if let Tok::SysVar(scope, name) = t
+                && matches!(name.as_str(), "identity" | "last_insert_id")
+                && scope.as_deref() != Some("GLOBAL")
+            {
+                info.uses_last_insert_id = true;
+            }
             let Some(w) = t.word() else { continue };
             let call = matches!(toks.get(i + 1), Some(Tok::Punct(p)) if p == "(");
             match w {
@@ -706,6 +713,10 @@ mod tests {
         let r = c("SELECT @a, LAST_INSERT_ID()");
         assert_eq!(r.reads_user_vars, vec!["a"]);
         assert!(r.uses_last_insert_id);
+        for s in ["SELECT @@identity", "SELECT @@SESSION.last_insert_id"] {
+            assert!(c(s).uses_last_insert_id, "{s}");
+        }
+        assert!(!c("SELECT @@GLOBAL.identity").uses_last_insert_id);
     }
 
     #[test]

@@ -187,6 +187,9 @@ struct Current {
     /// schema differs from the session's, so a failed one leaves that
     /// connection dirty.
     sets_schema: bool,
+    /// It writes generated `AUTO_INCREMENT` values explicitly
+    /// ([`BackendSession::explicit_ids_next_statement`]).
+    explicit_ids: bool,
     /// The statement's `backend.query` trace span (chapter 47): open from
     /// `run` until `finish` drops the statement.
     span: Option<tracing::Span>,
@@ -276,6 +279,10 @@ pub struct BackendSession {
     deferred: Option<SprigError>,
     /// Probe the next statement's rows examined.
     probe_next: bool,
+    /// The next statement writes `AUTO_INCREMENT` values the gateway
+    /// generated (chapter 19's ID blocks): its OK packet's insert id is
+    /// an explicit value, not the connection's `LAST_INSERT_ID()`.
+    explicit_ids_next: bool,
 }
 
 impl std::fmt::Debug for BackendSession {
@@ -341,6 +348,7 @@ impl BackendSession {
             inflight: None,
             deferred: None,
             probe_next: false,
+            explicit_ids_next: false,
         }
     }
 
@@ -473,6 +481,15 @@ impl BackendSession {
     /// dropped; the statement's result is never affected.
     pub fn probe_next_statement(&mut self) {
         self.probe_next = true;
+    }
+
+    /// Marks the next statement as one that writes `AUTO_INCREMENT`
+    /// values the gateway generated (chapter 19): its OK packet's insert
+    /// id then changes neither the session's `LAST_INSERT_ID()` nor what
+    /// the connection is known to hold (MariaDB keeps the old value after
+    /// explicit values). The router sets the session's value itself.
+    pub fn explicit_ids_next_statement(&mut self) {
+        self.explicit_ids_next = true;
     }
 
     /// Runs one text statement (`COM_QUERY`). On success the statement's
@@ -731,7 +748,7 @@ impl BackendSession {
                 .advance(&self.target.cluster, &self.target.user, &g);
         }
         if let Some(ok) = &cur.last_ok {
-            if ok.last_insert_id != 0 {
+            if ok.last_insert_id != 0 && !cur.explicit_ids {
                 self.vars.last_insert_id = ok.last_insert_id;
                 cur.lease.conn().applied.last_insert_id = ok.last_insert_id;
             }
@@ -1292,6 +1309,7 @@ impl BackendSession {
         // Running it twice changes nothing: a lost connection retries it
         // (chapter 06, "Failure handling").
         let harmless = info.class == StmtClass::Read || matches!(req, Req::Prepare { .. });
+        let explicit_ids = std::mem::take(&mut self.explicit_ids_next);
         let probe = std::mem::take(&mut self.probe_next)
             && matches!(req, Req::Text(_) | Req::Binary { .. });
         loop {
@@ -1598,6 +1616,7 @@ impl BackendSession {
                 resultset: false,
                 probe: probe_before,
                 sets_schema,
+                explicit_ids,
                 span: None,
             };
             let first = match outgoing {

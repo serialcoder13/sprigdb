@@ -55,10 +55,11 @@
       "properties": {
         "replicas": {"type": "integer", "minimum": 1},
         "agentSidecar": {"type": "boolean"},
-        "readyTimeoutSeconds": {"type": "integer", "minimum": 60}
+        "readyTimeoutSeconds": {"type": "integer", "minimum": 60},
+        "controllerAdmin": {"type": "string"}
       }
     },
-    "nodeServices": {"type": "object", "properties": {"type": {"enum": ["LoadBalancer", "ClusterIP", "NodePort"]}}},
+    "nodeServices": {"type": "object", "properties": {"type": {"enum": ["LoadBalancer", "ClusterIP", "NodePort"]}, "nodePortHost": {"type": "string"}}},
     "tls": {
       "type": "object",
       "required": ["issuerRef"],

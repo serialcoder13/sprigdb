@@ -1,0 +1,8 @@
+# The upstream driver test suites, pinned to a release tag.
+# suite                repository                                              tag
+go-sql-driver          https://github.com/go-sql-driver/mysql.git              v1.10.1
+mysql2                 https://github.com/sidorares/node-mysql2.git            v3.24.6
+pymysql                https://github.com/PyMySQL/PyMySQL.git                  v1.2.3
+mysqlclient            https://github.com/PyMySQL/mysqlclient.git              v2.3.0
+mariadb-connector-j    https://github.com/mariadb-corporation/mariadb-connector-j.git  3.5.11
+mysql-connector-j      https://github.com/mysql/mysql-connector-j.git          9.7.0

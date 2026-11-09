@@ -49,8 +49,12 @@ pub struct PlanCtx<'a> {
     /// Which databases the user may see (chapter 29); all without it.
     pub visible: Option<&'a (dyn Fn(&LogicalDb) -> bool + Sync)>,
     /// The session's cluster has chapter 07's name lookup (step 12): see
-    /// [`InfoSchemaCtx::stored_names`].
+    /// [`InfoSchemaCtx::stored_names`]. Also maps caught error text in the
+    /// client's own statements ([`super::stored::top_level`]).
     pub stored_names: bool,
+    /// The session's `sql_mode` has `ORACLE`, where `SQLERRM` is the
+    /// caught error's text.
+    pub oracle: bool,
 }
 
 impl std::fmt::Debug for PlanCtx<'_> {
@@ -74,7 +78,15 @@ impl<'a> PlanCtx<'a> {
             sessions: None,
             visible: None,
             stored_names: false,
+            oracle: false,
         }
+    }
+
+    /// With `sql_mode=ORACLE` on or off.
+    #[must_use]
+    pub fn oracle(mut self, on: bool) -> Self {
+        self.oracle = on;
+        self
     }
 
     /// With chapter 07's name lookup on the session's cluster.
@@ -209,8 +221,15 @@ pub fn plan(sql: &[u8], ctx: &PlanCtx<'_>) -> Result<Plan, NameError> {
             ..map_offset(&rewritten.edits, info.range.end);
         let text = rewritten.sql.get(r).unwrap_or_default().to_vec();
         let (show, mut action) = plan_statement(text, info, current.as_deref(), ctx)?;
-        if let Action::Forward { mapper, .. } = &mut action {
+        if let Action::Forward { mapper, sql } = &mut action {
             mapper.set_persona(ctx.rewrite.lex.persona);
+            // Chapter 07 step 12: caught error text, where the cluster has
+            // the mapping function.
+            if ctx.stored_names
+                && let Some(t) = super::stored::top_level(sql, &ctx.rewrite.lex, ctx.oracle)
+            {
+                *sql = t;
+            }
         }
         match &info.use_target {
             Some(UseTarget::Database { logical, .. }) => current = Some(logical.clone()),

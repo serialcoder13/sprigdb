@@ -66,8 +66,11 @@ spec:
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: SPRIGDB_NODE_DC, value: {{ .Values.dc.id | quote }}}
-            - {name: SPRIG_OPERATOR_CONTROLLER_ADMIN, value: "http://sprigdb-controller.{{ .Release.Namespace }}.svc:7480"}
+            - {name: SPRIG_OPERATOR_CONTROLLER_ADMIN, value: {{ .Values.operator.controllerAdmin | default (printf "http://sprigdb-controller.%s.svc:7480" .Release.Namespace) | quote }}}
             - {name: SPRIG_OPERATOR_NODE_SERVICE_TYPE, value: {{ .Values.nodeServices.type | quote }}}
+            {{- with .Values.nodeServices.nodePortHost }}
+            - {name: SPRIG_OPERATOR_NODE_PORT_HOST, value: {{ . | quote }}}
+            {{- end }}
             - {name: SPRIG_OPERATOR_SERVER_CERT_ISSUER, value: {{ .Values.tls.issuerRef.name | quote }}}
             - {name: SPRIG_OPERATOR_CLIENT_CERT_ISSUER, value: {{ .Values.tls.issuerRef.name | quote }}}
             - {name: SPRIG_OPERATOR_MARIADB_CA_FILE, value: /etc/sprigdb/ca/ca.crt}

@@ -177,6 +177,12 @@ fn layout() -> Vec<Grp> {
                 ("accounts", "aid"),
                 ("invoices", "cid"),
                 ("invoice_lines", ""),
+                // Chapter 19's ID blocks: an AUTO_INCREMENT key, an
+                // AUTO_INCREMENT column beside the key, and a parent
+                // member with one.
+                ("tickets", "tid"),
+                ("events", "cid"),
+                ("inv_notes", ""),
             ],
             // Uneven ranges over both clusters.
             shards: [
@@ -252,6 +258,9 @@ fn ddl_of(table: &str) -> &'static str {
         "accounts" => ACCOUNTS_DDL,
         "invoices" => INVOICES_DDL,
         "invoice_lines" => LINES_DDL,
+        "tickets" => TICKETS_DDL,
+        "events" => EVENTS_DDL,
+        "inv_notes" => NOTES_DDL,
         _ => REF_DDL,
     }
 }
@@ -389,6 +398,13 @@ async fn clear_layout(e: &Env, store: &ShardMapStore) {
         .query_drop(
             "DELETE r FROM reference_tables r JOIN objects o ON o.object_id = r.object_id \
              WHERE o.name = 'countries'",
+        )
+        .await;
+    // Chapter 19's sequences of the suite's ID-block tables.
+    let _ = c
+        .query_drop(
+            "DELETE s FROM sequences s JOIN objects o ON o.object_id = s.object_id \
+             WHERE o.name IN ('tickets', 'events', 'inv_notes')",
         )
         .await;
 }
@@ -539,7 +555,11 @@ async fn setup(e: &Env, sut: &mut Conn) -> World {
                     routing: if k.is_empty() {
                         MemberRouting::Parent {
                             parent: object("invoices"),
-                            fk: "fk_il_inv".into(),
+                            fk: if *t == "inv_notes" {
+                                "fk_in_inv".into()
+                            } else {
+                                "fk_il_inv".into()
+                            },
                         }
                     } else {
                         MemberRouting::Columns(vec![(*k).to_owned()])
@@ -717,7 +737,7 @@ const DDL: &[&str] = &[
 const ACCOUNTS_DDL: &str = "CREATE TABLE accounts (aid INT NOT NULL PRIMARY KEY, \
      email VARCHAR(40) COLLATE utf8mb4_general_ci, cid INT, UNIQUE KEY email (email)) DEFAULT CHARSET utf8mb4";
 /// The suite's tables, parents before children (drops go in reverse).
-const TABLES: [&str; 8] = [
+const TABLES: [&str; 11] = [
     "customers",
     "orders",
     "products",
@@ -726,7 +746,21 @@ const TABLES: [&str; 8] = [
     "accounts",
     "invoices",
     "invoice_lines",
+    "tickets",
+    "events",
+    "inv_notes",
 ];
+/// Chapter 19's ID blocks: keyed by its AUTO_INCREMENT column.
+const TICKETS_DDL: &str = "CREATE TABLE tickets (tid BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
+     title VARCHAR(20) COLLATE utf8mb4_bin, qty INT) DEFAULT CHARSET utf8mb4";
+/// Keyed by `cid`; its AUTO_INCREMENT column only names rows.
+const EVENTS_DDL: &str = "CREATE TABLE events (eid INT NOT NULL AUTO_INCREMENT, cid INT NOT NULL, \
+     note VARCHAR(20) COLLATE utf8mb4_bin, PRIMARY KEY (cid, eid), KEY (eid)) DEFAULT CHARSET utf8mb4";
+/// A parent member of `invoices` with its own AUTO_INCREMENT column.
+const NOTES_DDL: &str = "CREATE TABLE inv_notes (nid INT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
+     iid INT NOT NULL, body VARCHAR(20) COLLATE utf8mb4_bin, KEY (iid), \
+     CONSTRAINT fk_in_inv FOREIGN KEY (iid) REFERENCES invoices (iid) ON DELETE CASCADE) \
+     DEFAULT CHARSET utf8mb4";
 const INVOICES_DDL: &str = "CREATE TABLE invoices (iid INT NOT NULL PRIMARY KEY, cid INT NOT NULL, \
      total DECIMAL(10,2), memo VARCHAR(20) COLLATE utf8mb4_general_ci) DEFAULT CHARSET utf8mb4";
 const LINES_DDL: &str = "CREATE TABLE invoice_lines (iid INT NOT NULL, line_no INT NOT NULL, \
@@ -2482,7 +2516,15 @@ async fn split(
                 5,
                 Some("iid, line_no, sku, qty, _sprig_rk"),
             ),
-            "orders" => (format!("SELECT * FROM {f}"), 1, None),
+            "inv_notes" => (
+                format!(
+                    "SELECT n.nid, n.iid, n.body, i.cid FROM {f} n \
+                     JOIN `{src_schema}`.`__fenced_invoices` i ON i.iid = n.iid"
+                ),
+                3,
+                Some("nid, iid, body"),
+            ),
+            "orders" | "events" => (format!("SELECT * FROM {f}"), 1, None),
             _ => (format!("SELECT * FROM {f}"), 0, None),
         };
         let rows: Vec<Row> = sc.query(select).await.unwrap();
@@ -2495,6 +2537,9 @@ async fn split(
             let mut vals = row.unwrap();
             if *t == "invoice_lines" {
                 vals.truncate(5);
+            }
+            if *t == "inv_notes" {
+                vals.truncate(3);
             }
             width = vals.len();
             halves[usize::from(h.0 >= mid)].extend(vals);

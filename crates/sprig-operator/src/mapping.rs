@@ -358,8 +358,28 @@ pub fn node_services(sc: &SprigCluster, cfg: &OperatorConfig) -> Vec<Value> {
         .collect()
 }
 
+/// The address a node Service advertises under `cfg`: for a `NodePort`
+/// Service with [`OperatorConfig::node_port_host`] set, that host and the
+/// Service's node port (a single-host cluster such as kind, whose node
+/// ports are published on the host); otherwise [`advertised`].
+#[must_use]
+pub fn advertised_for(svc: &Value, cfg: &OperatorConfig) -> Option<String> {
+    if svc["spec"]["type"] == "NodePort"
+        && let Some(host) = &cfg.node_port_host
+    {
+        let port = svc["spec"]["ports"]
+            .as_array()?
+            .iter()
+            .find(|p| p["port"] == 3306)?["nodePort"]
+            .as_u64()?;
+        return Some(format!("{host}:{port}"));
+    }
+    advertised(svc)
+}
+
 /// The address a node Service advertises: the load balancer's ingress, or
-/// the cluster IP for `ClusterIP` Services. `None` until assigned.
+/// the cluster IP for `ClusterIP` (and `NodePort`) Services. `None` until
+/// assigned.
 #[must_use]
 pub fn advertised(svc: &Value) -> Option<String> {
     let host = if svc["spec"]["type"] == "LoadBalancer" {

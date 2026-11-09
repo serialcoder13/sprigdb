@@ -45,7 +45,7 @@ const RK: &str = sprig_shard::rk::RK_COLUMN;
 /// Plans an `INSERT` into the parent member `entry`, linked by `link`.
 pub(super) fn plan_insert(
     stmt: &Statement,
-    text_src: &Src<'_>,
+    text_src: Option<&Src<'_>>,
     entry: &TableEntry,
     link: &ParentLink,
     default_schema: &str,
@@ -112,7 +112,7 @@ pub(super) fn plan_insert(
                 // shard.
                 return Ok(Plan::Pass(one_shard_insert(
                     stmt,
-                    Some(text_src),
+                    text_src,
                     entry,
                     0,
                     loc,
@@ -171,7 +171,7 @@ pub(super) fn plan_insert(
         if !entry.fill_rk || names_rk(ins) {
             return Ok(Plan::Pass(one_shard_insert(
                 stmt,
-                Some(text_src),
+                text_src,
                 entry,
                 0,
                 loc,
@@ -509,6 +509,7 @@ mod tests {
         };
         let table =
             |name: &str, group: u32, key: Option<&str>, sql: &str, fk: Option<&str>| CatalogTable {
+                object: 0,
                 db: 1,
                 default_schema: DEF.into(),
                 name: name.into(),
@@ -538,6 +539,7 @@ mod tests {
             session_cluster: "c1",
             max_route_values: 1024,
             lookup_batch: 2,
+            ids: crate::planner::IdMode::default(),
         };
         plan(sql, &cx)
     }
@@ -903,6 +905,7 @@ mod tests {
             &[g],
             &[
                 CatalogTable {
+                    object: 0,
                     db: 1,
                     default_schema: DEF.into(),
                     name: "invoices".into(),
@@ -916,6 +919,7 @@ mod tests {
                     },
                 },
                 CatalogTable {
+                    object: 0,
                     db: 1,
                     default_schema: DEF.into(),
                     name: "invoice_lines".into(),

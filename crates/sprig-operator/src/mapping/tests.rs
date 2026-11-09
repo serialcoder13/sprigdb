@@ -178,6 +178,14 @@ fn one_service_per_pod_and_their_addresses() {
     assert_eq!(advertised(&live).as_deref(), Some("a.elb.example:3306"));
     let cip = json!({"spec": {"type": "ClusterIP", "clusterIP": "10.96.4.4"}});
     assert_eq!(advertised(&cip).as_deref(), Some("10.96.4.4:3306"));
+    // NodePort: the node-port host when one is configured (kind).
+    let np = json!({"spec": {"type": "NodePort", "clusterIP": "10.96.4.5",
+        "ports": [{"port": 3306, "nodePort": 31104}]}});
+    assert_eq!(advertised_for(&np, &cfg()).as_deref(), Some("10.96.4.5:3306"));
+    let mut c = cfg();
+    c.node_port_host = Some("127.0.0.1".into());
+    assert_eq!(advertised_for(&np, &c).as_deref(), Some("127.0.0.1:31104"));
+    assert_eq!(advertised_for(&cip, &c).as_deref(), Some("10.96.4.4:3306"));
 }
 
 #[test]

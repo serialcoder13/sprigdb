@@ -49,14 +49,17 @@
 //!
 //! ```text
 //! GET DIAGNOSTICS CONDITION 1 m = MESSAGE_TEXT
-//! BEGIN /*__sprig_names*/ GET DIAGNOSTICS CONDITION 1 m = MESSAGE_TEXT;
-//!   /*__sprig_names*/ SET m = `__sprig_sys`.`__sprig_names_map`(m); END /*__sprig_names*/
+//! BEGIN GET DIAGNOSTICS CONDITION 1 m = MESSAGE_TEXT; SET m = `__sprig_sys`.`__sprig_names_map`(m); END
 //! ```
 //!
 //! The block makes one statement of the pair wherever a statement stands
-//! (a handler's body, a branch). Neither the block nor the `SET` clears
-//! the diagnostics area (measured on MariaDB 11.8: a later `GET
-//! DIAGNOSTICS`, `RESIGNAL` and `SHOW WARNINGS` see the same conditions).
+//! (a handler's body, a branch). It carries no comment, so it also works
+//! inside an executable comment (`mysqldump` writes triggers in
+//! `/*!50003 ... */`); [`restore`] recognizes it by the `SET`s after the
+//! statement, which no client can write (`__sprig_sys` is reserved).
+//! Neither the block nor the `SET` clears the diagnostics area (measured
+//! on MariaDB 11.8: a later `GET DIAGNOSTICS`, `RESIGNAL` and `SHOW
+//! WARNINGS` see the same conditions).
 //! MariaDB's `SQLERRM` (`sql_mode=ORACLE`) becomes
 //! `` `__sprig_sys`.`__sprig_names_map`(SQLERRM) ``. [`top_level`] does
 //! the same for a client's own `GET DIAGNOSTICS`, compound statements and
@@ -83,11 +86,11 @@ const MAP_REF: &str = "`__sprig_sys`.`__sprig_names_map`";
 const MARKER: &[u8] = b"__sprig_names_v";
 /// What every piece of SprigDB's text in a body contains.
 const ANY_MARKER: &[u8] = b"__sprig_names";
-/// The block around a `GET DIAGNOSTICS` in a body, and the start of the
-/// mapping after it.
-const GD_OPEN: &str = "BEGIN /*__sprig_names*/ ";
-const GD_SETS: &str = "; /*__sprig_names*/ SET ";
-const GD_CLOSE: &str = "; END /*__sprig_names*/";
+/// The block around a `GET DIAGNOSTICS` in a body: its start, each
+/// mapping after the statement, and its end.
+const GD_OPEN: &str = "BEGIN ";
+const GD_SET: &str = "; SET ";
+const GD_CLOSE: &str = "; END";
 
 /// [`MAP_FUNCTION`]'s definition. It maps each identifier run of `s`
 /// (`[A-Za-z0-9_$]` and non-ASCII) the way [`super::output::map_message`]
@@ -429,8 +432,6 @@ const NUMERIC_ITEMS: &[&[u8]] = &[
 
 /// One `GET DIAGNOSTICS` statement found in a token list.
 struct Diagnostics {
-    /// The index of its `GET`.
-    first: usize,
     /// The index of its last token.
     last: usize,
     /// The targets of text items, as written (`m`, `@m`, `` `m` ``).
@@ -461,7 +462,9 @@ fn diagnostics_at(src: &[u8], toks: &[Token], i: usize) -> Option<Diagnostics> {
         return None;
     }
     j += 1;
-    let end = (j..toks.len()).find(|&k| punct(k, b";")).unwrap_or(toks.len());
+    let end = (j..toks.len())
+        .find(|&k| punct(k, b";"))
+        .unwrap_or(toks.len());
     if end == j {
         return None;
     }
@@ -480,11 +483,17 @@ fn diagnostics_at(src: &[u8], toks: &[Token], i: usize) -> Option<Diagnostics> {
         }
         let mut from = eq - 1;
         // `@ name`: a bare `@` before the name.
-        if from > seg && toks[from - 1].kind == TokenKind::UserVar && toks[from - 1].bytes(src) == b"@" {
+        if from > seg
+            && toks[from - 1].kind == TokenKind::UserVar
+            && toks[from - 1].bytes(src) == b"@"
+        {
             from -= 1;
         }
         let target = &src[toks[from].start as usize..toks[eq - 1].end as usize];
-        if !NUMERIC_ITEMS.iter().any(|n| item.bytes(src).eq_ignore_ascii_case(n)) {
+        if !NUMERIC_ITEMS
+            .iter()
+            .any(|n| item.bytes(src).eq_ignore_ascii_case(n))
+        {
             targets.push(String::from_utf8_lossy(target).into_owned());
         }
         seg = stop + 1;
@@ -493,18 +502,17 @@ fn diagnostics_at(src: &[u8], toks: &[Token], i: usize) -> Option<Diagnostics> {
         return None;
     }
     Some(Diagnostics {
-        first: i,
         last: end - 1,
         targets,
     })
 }
 
 /// The mapping statements after a `GET DIAGNOSTICS`: `; SET t =
-/// <map>(t)` for each target, joined by `sep`.
-fn mapping_sets(targets: &[String], first_sep: &str) -> String {
+/// <map>(t)` for each target.
+fn mapping_sets(targets: &[String]) -> String {
     let mut out = String::new();
-    for (k, t) in targets.iter().enumerate() {
-        out.push_str(if k == 0 { first_sep } else { "; SET " });
+    for t in targets {
+        out.push_str(GD_SET);
         out.push_str(t);
         out.push_str(" = ");
         out.push_str(MAP_REF);
@@ -513,6 +521,38 @@ fn mapping_sets(targets: &[String], first_sep: &str) -> String {
         out.push(')');
     }
     out
+}
+
+/// The length of the mappings and block end [`substitute_with`] puts
+/// after a `GET DIAGNOSTICS` ending at byte `at` (`; SET t =
+/// <map>(t)` one or more times, then `; END`), if `text` has them there.
+fn mapping_len(text: &[u8], at: usize) -> Option<usize> {
+    let call = format!(" = {MAP_REF}(");
+    let mut k = at;
+    let mut sets = 0;
+    loop {
+        let rest = text.get(k..)?;
+        if sets > 0 && rest.starts_with(GD_CLOSE.as_bytes()) {
+            return Some(k + GD_CLOSE.len() - at);
+        }
+        if !rest.starts_with(GD_SET.as_bytes()) {
+            return None;
+        }
+        k += GD_SET.len();
+        let m = k + text[k..]
+            .windows(call.len())
+            .position(|w| w == call.as_bytes())?;
+        let target = &text[k..m];
+        k = m + call.len();
+        if target.is_empty()
+            || !text[k..].starts_with(target)
+            || text.get(k + target.len()) != Some(&b')')
+        {
+            return None;
+        }
+        k += target.len() + 1;
+        sets += 1;
+    }
 }
 
 /// The edits that map caught error text in a body: a block around each
@@ -528,20 +568,20 @@ fn diagnostics_edits(src: &[u8], toks: &[Token], oracle: bool) -> Vec<(Range<usi
             continue;
         }
         let b = t.bytes(src);
-        if b.eq_ignore_ascii_case(b"GET") {
+        if b.eq_ignore_ascii_case(b"GET")
+            && let Some(d) = diagnostics_at(src, toks, i)
+        {
             let start = t.start as usize;
-            let wrapped = src[..start]
-                .trim_ascii_end()
-                .ends_with(GD_OPEN.trim_end().as_bytes());
-            if !wrapped && let Some(d) = diagnostics_at(src, toks, i) {
+            let end = toks[d.last].end as usize;
+            // Already mapped (a re-creation from physical text).
+            if mapping_len(src, end).is_none() {
                 edits.push((start..start, GD_OPEN.to_owned()));
-                let end = toks[d.last].end as usize;
-                let mut tail = mapping_sets(&d.targets, GD_SETS);
+                let mut tail = mapping_sets(&d.targets);
                 tail.push_str(GD_CLOSE);
                 edits.push((end..end, tail));
-                i = d.last + 1;
-                continue;
             }
+            i = d.last + 1;
+            continue;
         }
         if oracle && b.eq_ignore_ascii_case(b"SQLERRM") {
             let p = |j: usize, c: &[u8]| {
@@ -587,7 +627,7 @@ fn diagnostics_edits(src: &[u8], toks: &[Token], oracle: bool) -> Vec<(Range<usi
 #[must_use]
 pub fn top_level(sql: &[u8], lex_opts: &LexOptions, oracle: bool) -> Option<Vec<u8>> {
     let has = |w: &[u8]| sql.windows(w.len()).any(|x| x.eq_ignore_ascii_case(w));
-    if !has(b"DIAGNOSTICS") && !(oracle && has(b"SQLERRM")) {
+    if !(has(b"DIAGNOSTICS") || (oracle && has(b"SQLERRM"))) {
         return None;
     }
     let opts = lex_opts.version(999_999);
@@ -606,7 +646,7 @@ pub fn top_level(sql: &[u8], lex_opts: &LexOptions, oracle: bool) -> Option<Vec<
         let end = toks[d.last].end as usize;
         let mut out = b"BEGIN NOT ATOMIC ".to_vec();
         out.extend_from_slice(&sql[first.start as usize..end]);
-        out.extend_from_slice(mapping_sets(&d.targets, "; SET ").as_bytes());
+        out.extend_from_slice(mapping_sets(&d.targets).as_bytes());
         out.extend_from_slice(b"; END");
         out.extend_from_slice(&sql[end..]);
         let mut whole = sql[..first.start as usize].to_vec();
@@ -743,21 +783,27 @@ fn call_in(group: &[u8]) -> Option<String> {
 /// `text` with every lookup [`substitute`] made turned back into its call.
 /// An alias it added stays (`` CURRENT_USER() AS `CURRENT_USER()` ``), as
 /// MySQL prints a view's generated column names. Text without lookups is
-/// returned as it is.
-/// The blocks and `SQLERRM` mappings of caught error text are removed too.
+/// returned as it is. The blocks and `SQLERRM` mappings of caught error
+/// text ([`substitute_with`]) are removed too.
 #[must_use]
 pub fn restore(text: &[u8]) -> Cow<'_, [u8]> {
     if !has_lookup(text) {
         return Cow::Borrowed(text);
     }
-    let text = match unwrap_diagnostics(text) {
-        Some(t) => t,
-        None => text.to_vec(),
+    let unwrapped = unwrap_diagnostics(text);
+    let base: &[u8] = unwrapped.as_deref().unwrap_or(text);
+    let calls: Option<Vec<u8>> = match restore_groups(base) {
+        Cow::Owned(o) => Some(o),
+        Cow::Borrowed(_) => None,
     };
-    match restore_groups(&text) {
-        Cow::Borrowed(_) => Cow::Owned(text),
-        Cow::Owned(o) => Cow::Owned(o),
+    match (calls, unwrapped) {
+        (Some(o), _) | (None, Some(o)) => Cow::Owned(o),
+        (None, None) => Cow::Borrowed(text),
     }
+}
+
+fn is_ident_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
 }
 
 /// The position of `pat` in `text` at or after `from`, outside quotes and
@@ -808,17 +854,26 @@ fn unwrap_diagnostics(text: &[u8]) -> Option<Vec<u8>> {
     let mut copied = 0;
     let mut pos = 0;
     let mut changed = false;
+    // `BEGIN GET ...; SET t = <map>(t)...; END`: the statement holds no
+    // `;` outside quotes and comments, so its end is the first one.
     while let Some(open) = find_outside(text, pos, GD_OPEN.as_bytes()) {
         let body = open + GD_OPEN.len();
-        let Some(sets) = find_outside(text, body, GD_SETS.as_bytes()) else {
+        pos = open + 1;
+        let starts_get = text
+            .get(body..body + 4)
+            .is_some_and(|w| w[..3].eq_ignore_ascii_case(b"GET") && !is_ident_byte(w[3]));
+        if !starts_get || (open > 0 && is_ident_byte(text[open - 1])) {
+            continue;
+        }
+        let Some(end) = find_outside(text, body, b";") else {
             break;
         };
-        let Some(close) = find_outside(text, sets, GD_CLOSE.as_bytes()) else {
-            break;
+        let Some(len) = mapping_len(text, end) else {
+            continue;
         };
         out.extend_from_slice(&text[copied..open]);
-        out.extend_from_slice(&text[body..sets]);
-        copied = close + GD_CLOSE.len();
+        out.extend_from_slice(&text[body..end]);
+        copied = end + len;
         pos = copied;
         changed = true;
     }
@@ -830,7 +885,9 @@ fn unwrap_diagnostics(text: &[u8]) -> Option<Vec<u8>> {
     let mut copied = 0;
     while let Some(at) = find_outside(&out, pos, call.as_bytes()) {
         let arg = at + call.len();
-        let word = out.get(arg..arg + 7).filter(|w| w.eq_ignore_ascii_case(b"SQLERRM"));
+        let word = out
+            .get(arg..arg + 7)
+            .filter(|w| w.eq_ignore_ascii_case(b"SQLERRM"));
         if let Some(w) = word
             && out.get(arg + 7) == Some(&b')')
         {

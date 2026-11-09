@@ -181,6 +181,23 @@ pub struct TableEntry {
     /// A parent member (chapter 15): no key column of its own; its rows
     /// go where their parent row is, through this foreign key.
     pub parent: Option<ParentLink>,
+    /// Its `AUTO_INCREMENT` column, which takes chapter 19's ID blocks
+    /// (every member of a sharded group with one).
+    pub auto_inc: Option<AutoInc>,
+}
+
+/// A sharded table's `AUTO_INCREMENT` column (chapter 19, "ID blocks"):
+/// inserts take its values from the gateway's block of the table's
+/// `sequences` row, never from a shard's own counter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoInc {
+    /// The column, lowercase.
+    pub column: String,
+    /// Its position among the visible columns (`INSERT` without a column
+    /// list).
+    pub ordinal: Option<usize>,
+    /// The `sequences` row: `seq_id` is the table's object id.
+    pub seq: u64,
 }
 
 /// How a parent member's row finds its shard (chapter 15, "Table groups";
@@ -563,6 +580,7 @@ impl TenantFile {
                     columns: Vec::new(),
                     fill_rk: false,
                     parent: None,
+                    auto_inc: None,
                 },
             );
         }

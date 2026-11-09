@@ -1,0 +1,223 @@
+"""Summarizes one upstream driver test suite run and compares it with
+expected/<suite>.txt.
+
+    summarize.py <suite> <target> <format> <results-dir> <expected-file>
+
+<format> is gojson (go test -json), junit (JUnit XML files anywhere under
+<results-dir>/raw: pytest, Maven Surefire) or poku (the mysql2 runner's
+output, one result per test file).
+
+Writes <results-dir>/tests.tsv (test, status, first line of the failure) and
+<results-dir>/summary.txt, prints the counts and every difference from the
+expected file, and exits 1 when a test fails unexpectedly or an expected
+failure passes. Skips are compared too but only reported.
+
+The expected file has one line per outcome other than pass:
+
+    <target-glob> <fail|skip|flaky> <test-glob> :: <reason>
+
+<target-glob> matches the target label (baseline-mariadb, baseline-mysql,
+gateway-mariadb, gateway-mysql); <test-glob> matches the test id. The first
+matching line wins. `flaky` accepts any outcome.
+"""
+
+import fnmatch
+import json
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+
+def first_line(text):
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:240]
+    return ""
+
+
+def parse_gojson(raw):
+    tests, output = {}, {}
+    path = os.path.join(raw, "go-test.json")
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            name = ev.get("Test")
+            if not name:
+                continue
+            action = ev.get("Action")
+            if action == "output":
+                output.setdefault(name, []).append(ev.get("Output", ""))
+            elif action in ("pass", "fail", "skip"):
+                tests[name] = action
+    # A test whose subtests all report on their own is counted once per
+    # subtest: drop parents that have children.
+    parents = {n.rsplit("/", 1)[0] for n in tests if "/" in n}
+    result = {}
+    for name, status in tests.items():
+        if name in parents and status != "fail":
+            continue
+        if name in parents and status == "fail":
+            # Keep a failing parent only when no child failed (a failure in
+            # the parent's own body).
+            if any(
+                tests[c] == "fail" for c in tests if c.startswith(name + "/")
+            ):
+                continue
+        msg = ""
+        if status != "pass":
+            lines = [
+                l.strip()
+                for l in output.get(name, [])
+                if l.strip() and not l.lstrip().startswith(("=== ", "--- "))
+            ]
+            best = [l for l in lines if "_test.go:" in l and not l.startswith("[mysql]")]
+            msg = (best or lines or [""])[0][:240]
+        result[name] = (status, msg)
+    return result
+
+
+def parse_junit(raw):
+    result = {}
+    for root, _, files in os.walk(raw):
+        for fn in sorted(files):
+            if not fn.endswith(".xml"):
+                continue
+            try:
+                tree = ET.parse(os.path.join(root, fn))
+            except ET.ParseError:
+                continue
+            for case in tree.iter("testcase"):
+                cls = case.get("classname") or ""
+                name = case.get("name") or ""
+                tid = f"{cls}.{name}" if cls else name
+                status, msg = "pass", ""
+                for child in case:
+                    if child.tag in ("failure", "error"):
+                        status = "fail"
+                        msg = first_line(child.get("message")) or first_line(child.text)
+                        break
+                    if child.tag == "skipped":
+                        status = "skip"
+                        msg = first_line(child.get("message")) or first_line(child.text)
+                result[tid] = (status, msg)
+    return result
+
+
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def parse_poku(raw):
+    """poku's compact reporter prints one line per test file:
+    `✔ <path> ›` / `✘ <path> ›` (and skipped files with a ⏭/◯ mark)."""
+    result = {}
+    path = os.path.join(raw, "poku.log")
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = [ANSI.sub("", l.rstrip("\n")) for l in f]
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*([✔✘✗◯⏭])\s+(\S+\.(?:test\.)?[cm]?[jt]s)\b", line)
+        if not m:
+            continue
+        mark, name = m.groups()
+        status = {"✔": "pass", "✘": "fail", "✗": "fail"}.get(mark, "skip")
+        msg = ""
+        if status == "fail":
+            for nxt in lines[i + 1 : i + 40]:
+                s = nxt.strip()
+                if s and ("Error" in s or "assert" in s.lower() or "expected" in s.lower()):
+                    msg = s[:240]
+                    break
+        result[name] = (status, msg)
+    return result
+
+
+def load_expected(path, target):
+    rules = []
+    if not os.path.exists(path):
+        return rules
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            line = line.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            head, _, reason = line.partition(" :: ")
+            parts = head.split(None, 2)
+            if len(parts) != 3 or parts[1] not in ("fail", "skip", "flaky"):
+                sys.exit(f"{path}:{n}: bad line: {line}")
+            tglob, status, test = parts
+            if not reason.strip():
+                sys.exit(f"{path}:{n}: every line needs a reason after ' :: '")
+            if fnmatch.fnmatchcase(target, tglob):
+                rules.append((test.strip(), status, reason.strip(), n))
+    return rules
+
+
+def expected_for(rules, test):
+    for pattern, status, reason, n in rules:
+        if fnmatch.fnmatchcase(test, pattern):
+            return status, reason, n
+    return "pass", "", 0
+
+
+def main():
+    suite, target, fmt, results, expected = sys.argv[1:6]
+    raw = os.path.join(results, "raw")
+    parser = {"gojson": parse_gojson, "junit": parse_junit, "poku": parse_poku}[fmt]
+    tests = parser(raw)
+    rules = load_expected(expected, target)
+
+    counts = {"pass": 0, "fail": 0, "skip": 0}
+    bad, info = [], []
+    used = set()
+    for name in sorted(tests):
+        status, msg = tests[name]
+        counts[status] += 1
+        want, reason, n = expected_for(rules, name)
+        if n:
+            used.add(n)
+        if want == "flaky":
+            continue
+        if status == "fail" and want != "fail":
+            bad.append(f"UNEXPECTED FAIL  {name}: {msg}")
+        elif want == "fail" and status != "fail":
+            bad.append(f"UNEXPECTED {status.upper():5}  {name} (expected fail: {reason})")
+        elif status == "skip" and want != "skip":
+            info.append(f"skip  {name}: {msg}")
+        elif want == "skip" and status != "skip":
+            info.append(f"ran (expected skip)  {name}")
+
+    with open(os.path.join(results, "tests.tsv"), "w", encoding="utf-8") as f:
+        for name in sorted(tests):
+            status, msg = tests[name]
+            f.write(f"{name}\t{status}\t{msg}\n")
+    total = sum(counts.values())
+    head = (
+        f"{suite} {target}: {total} tests, {counts['pass']} pass, "
+        f"{counts['fail']} fail, {counts['skip']} skip; "
+        f"{len(bad)} unexpected"
+    )
+    with open(os.path.join(results, "summary.txt"), "w", encoding="utf-8") as f:
+        f.write(head + "\n")
+        for line in bad + info:
+            f.write(line + "\n")
+    print(head)
+    for line in bad:
+        print("  " + line)
+    if os.environ.get("SPRIG_CLIENTS_VERBOSE") == "1":
+        for line in info:
+            print("  " + line)
+    if total == 0:
+        print("  no test results found", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(1 if bad else 0)
+
+
+if __name__ == "__main__":
+    main()

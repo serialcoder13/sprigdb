@@ -480,6 +480,7 @@ mod tests {
             7,
             &[g],
             &[CatalogTable {
+                object: 0,
                 db: 1,
                 default_schema: DEF.into(),
                 name: "accounts".into(),
@@ -502,6 +503,7 @@ mod tests {
             session_cluster: "c1",
             max_route_values: 1024,
             lookup_batch: 256,
+            ids: crate::planner::IdMode::default(),
         };
         plan(sql, &cx)
     }
@@ -714,6 +716,7 @@ mod tests {
             map: Arc::new(map),
         };
         let table = |fill_rk| CatalogTable {
+            object: 0,
             db: 1,
             default_schema: DEF.into(),
             name: "accounts".into(),

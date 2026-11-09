@@ -50,8 +50,13 @@ pub const RESYNC: Duration = Duration::from_secs(5);
 pub struct OperatorConfig {
     /// The namespace it works in.
     pub namespace: String,
-    /// `values.nodeServices.type`: `LoadBalancer` (default) or `ClusterIP`.
+    /// `values.nodeServices.type`: `LoadBalancer` (default), `NodePort` or
+    /// `ClusterIP`.
     pub node_service_type: String,
+    /// For `NodePort` node Services: the host every node port is reached
+    /// at (`SPRIG_OPERATOR_NODE_PORT_HOST`), advertised as
+    /// `<host>:<nodePort>`. Unset: the cluster IP, as for `ClusterIP`.
+    pub node_port_host: Option<String>,
     /// cert-manager `ClusterIssuer` for MariaDB server certificates.
     pub server_cert_issuer: Option<String>,
     /// cert-manager `ClusterIssuer` for client certificates.
@@ -82,6 +87,7 @@ impl OperatorConfig {
         Self {
             namespace: ns.to_owned(),
             node_service_type: "LoadBalancer".into(),
+            node_port_host: None,
             server_cert_issuer: None,
             client_cert_issuer: None,
             agent_image: None,
@@ -117,6 +123,7 @@ impl OperatorConfig {
         c.client_cert_issuer = opt("SPRIG_OPERATOR_CLIENT_CERT_ISSUER");
         c.agent_image = opt("SPRIG_OPERATOR_AGENT_IMAGE");
         c.mariadb_ca_file = opt("SPRIG_OPERATOR_MARIADB_CA_FILE");
+        c.node_port_host = opt("SPRIG_OPERATOR_NODE_PORT_HOST");
         c.controller_admin = opt("SPRIG_OPERATOR_CONTROLLER_ADMIN");
         if let Some(s) = opt("SPRIG_OPERATOR_READY_TIMEOUT_SECONDS").and_then(|s| s.parse().ok()) {
             c.ready_timeout = Duration::from_secs(s);

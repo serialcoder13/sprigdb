@@ -54,6 +54,20 @@ pub struct PlanCtx<'a> {
     pub max_route_values: usize,
     /// `router.lookup_batch_size`.
     pub lookup_batch: usize,
+    /// How `INSERT`s treat `AUTO_INCREMENT` columns that take ID blocks.
+    pub ids: IdMode,
+}
+
+/// How `INSERT`s treat an `AUTO_INCREMENT` column that takes chapter 19's
+/// ID blocks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdMode {
+    /// The session's `sql_mode` holds `NO_AUTO_VALUE_ON_ZERO`: `0` is a
+    /// value, not a request for one.
+    pub no_auto_value_on_zero: bool,
+    /// The values were written in ([`crate::plan::IdFill::finish`]): plan
+    /// the statement as it is.
+    pub filled: bool,
 }
 
 impl std::fmt::Debug for PlanCtx<'_> {
@@ -296,7 +310,11 @@ fn add_suffix(p: &mut Plan, lock: &str) {
         }
         Plan::Explain(inner) => add_suffix(inner, lock),
         Plan::ViaLookup(v) => add_suffix(&mut v.plan, lock),
-        Plan::NotRouted | Plan::Write(_) | Plan::ViaParent(_) | Plan::Reject(_) => {}
+        Plan::NotRouted
+        | Plan::Write(_)
+        | Plan::ViaParent(_)
+        | Plan::NeedIds(_)
+        | Plan::Reject(_) => {}
     }
 }
 
@@ -393,6 +411,20 @@ fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
                     Reason::Unsupported,
                     "EXPLAIN of an INSERT whose rows follow their parents",
                 ),
+                // The values aren't taken for an EXPLAIN: the plan with
+                // the first rows' placeholder values 1, 2, …
+                Plan::NeedIds(f) => match f.finish(1, 1, cx) {
+                    Plan::Pass(t) => Ok(Plan::Pass(Target {
+                        sql: format!("EXPLAIN {}", t.sql),
+                        ..t
+                    })),
+                    Plan::Write(w) => first_explain(&w.targets),
+                    p @ Plan::Reject(_) => Ok(p),
+                    _ => reject(
+                        Reason::Unsupported,
+                        "EXPLAIN of an INSERT whose rows follow their parents",
+                    ),
+                },
                 p @ (Plan::Reject(_) | Plan::Explain(_)) => Ok(p),
             }
         }
@@ -2693,7 +2725,10 @@ fn insert_before_from(sql: &str, items: &str) -> R<String> {
 // ---------------------------------------------------------------------------
 // Writes
 
-fn plan_insert(stmt: &Statement, text_src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
+fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
+    // A statement whose ID-block values were written in is no longer the
+    // text it was parsed from: render it, never splice.
+    let text_src: Option<&Src<'_>> = (!cx.ids.filled).then_some(src_in);
     let Statement::Insert(ins) = stmt else {
         return reject(Reason::Unsupported, "not an INSERT");
     };
@@ -2740,7 +2775,7 @@ fn plan_insert(stmt: &Statement, text_src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan
             return Ok(Plan::Pass(Target {
                 cluster: only.cluster.clone(),
                 shard: 0,
-                sql: pass_sql(stmt, Some(text_src), &m, &by),
+                sql: pass_sql(stmt, text_src, &m, &by),
                 at: crate::plan::ShardAt {
                     db: entry.group.db,
                     schema: schema.clone(),
@@ -2754,6 +2789,13 @@ fn plan_insert(stmt: &Statement, text_src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan
             upsert_safe,
         } => (key.clone(), *key_ordinal, *upsert_safe),
     };
+    // Chapter 19: the AUTO_INCREMENT column's values come from the
+    // gateway's ID blocks, never from a shard's own counter.
+    if !cx.ids.filled
+        && let Some(ai) = &entry.auto_inc
+    {
+        return ids::plan(stmt, src_in, entry, ai, cx);
+    }
     if key.is_empty()
         && let Some(link) = &entry.parent
     {
@@ -2784,7 +2826,7 @@ fn plan_insert(stmt: &Statement, text_src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan
     let filled = fill_rk(ins, entry, &key, key_ordinal, class);
     let (stmt, text_src): (&Statement, Option<&Src<'_>>) = match &filled {
         Some(f) => (f, None),
-        None => (stmt, Some(text_src)),
+        None => (stmt, text_src),
     };
     let Statement::Insert(ins) = stmt else {
         return reject(Reason::Unsupported, "not an INSERT");
@@ -3309,6 +3351,7 @@ fn empty_select(
     })
 }
 
+mod ids;
 mod lookups;
 mod parents;
 

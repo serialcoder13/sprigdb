@@ -378,6 +378,30 @@ const SETUP: &[&str] = &[
      SET NEW.name = IF(NEW.name = 'who', CONCAT_WS('|', CURRENT_USER(), SESSION_USER(), DATABASE()), NEW.name)",
     "CREATE EVENT {db}.ev_who ON SCHEDULE EVERY 1 DAY DISABLE \
      DO INSERT INTO {db}.audit (msg) VALUES (CONCAT_WS('|', CURRENT_USER(), USER(), DATABASE()))",
+    // Caught error text inside stored code (chapter 07 step 12, R4): the
+    // diagnostics area holds MariaDB's physical names.
+    "CREATE TABLE {db}.diag (id INT PRIMARY KEY, v VARCHAR(400))",
+    "CREATE FUNCTION {db}.f_diag() RETURNS VARCHAR(600) DETERMINISTIC BEGIN \
+     DECLARE m, s, t TEXT DEFAULT ''; \
+     DECLARE CONTINUE HANDLER FOR SQLEXCEPTION \
+     GET DIAGNOSTICS CONDITION 1 m = MESSAGE_TEXT, s = SCHEMA_NAME, t = TABLE_NAME; \
+     SELECT 1 INTO @x FROM {db}.nosuch_f; RETURN CONCAT_WS('|', m, s, t); END",
+    "CREATE FUNCTION {db}.f_diag_fk() RETURNS VARCHAR(600) DETERMINISTIC BEGIN \
+     DECLARE m TEXT DEFAULT ''; \
+     DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN GET DIAGNOSTICS CONDITION 1 m = MESSAGE_TEXT; RETURN m; END; \
+     INSERT INTO {db}.child (parent_id) VALUES (999); RETURN m; END",
+    "CREATE PROCEDURE {db}.p_diag() BEGIN \
+     DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN \
+     GET CURRENT DIAGNOSTICS CONDITION 1 @pd = MESSAGE_TEXT, @pe = MYSQL_ERRNO; \
+     INSERT INTO {db}.audit (msg) VALUES (LEFT(@pd, 80)); END; \
+     DROP TABLE {db}.nosuch_p; END",
+    "CREATE TRIGGER {db}.trg_diag BEFORE INSERT ON {db}.diag FOR EACH ROW BEGIN \
+     DECLARE m TEXT DEFAULT ''; \
+     DECLARE CONTINUE HANDLER FOR SQLEXCEPTION GET DIAGNOSTICS CONDITION 1 m = MESSAGE_TEXT; \
+     IF NEW.v = 'err' THEN SELECT 1 INTO @x FROM {db}.nosuch_t; SET NEW.v = LEFT(m, 400); END IF; END",
+    "CREATE EVENT {db}.ev_diag ON SCHEDULE EVERY 1 DAY DISABLE DO BEGIN \
+     DECLARE CONTINUE HANDLER FOR SQLEXCEPTION GET DIAGNOSTICS CONDITION 1 @ev = MESSAGE_TEXT; \
+     DROP TABLE {db}.nosuch_e; END",
 ];
 
 /// The corpus: label, statement, expectation.
@@ -636,6 +660,128 @@ const CORPUS: &[(&str, &str, Expect)] = &[
         "SELECT CONCAT('$', u, '$', d) FROM {db}.t_dflt",
         Expect::Any,
     ),
+    // Caught error text (chapter 07 step 12, R4): `GET DIAGNOSTICS` in
+    // stored code and in the client's own statements, and `SQLERRM` under
+    // `sql_mode=ORACLE`. `$` keeps the output scrub off, as above.
+    (
+        "function: caught error text",
+        "SELECT CONCAT('$', {db}.f_diag())",
+        Expect::Ok,
+    ),
+    (
+        "function: caught foreign key error",
+        "SELECT CONCAT('$', {db}.f_diag_fk())",
+        Expect::Ok,
+    ),
+    (
+        "procedure: caught error text",
+        "CALL {db}.p_diag()",
+        Expect::Ok,
+    ),
+    (
+        "procedure: caught text in a variable and a row",
+        "SELECT CONCAT('$', @pd), @pe UNION ALL SELECT CONCAT('$', msg), 0 FROM {db}.audit",
+        Expect::Ok,
+    ),
+    (
+        "trigger: caught error text",
+        "INSERT INTO {db}.diag VALUES (1, 'err')",
+        Expect::Ok,
+    ),
+    (
+        "trigger: stored caught text",
+        "SELECT CONCAT('$', v) FROM {db}.diag",
+        Expect::Ok,
+    ),
+    (
+        "show create function: caught error text",
+        "SHOW CREATE FUNCTION {db}.f_diag",
+        Expect::Ok,
+    ),
+    (
+        "show create trigger: caught error text",
+        "SHOW CREATE TRIGGER {db}.trg_diag",
+        Expect::Ok,
+    ),
+    (
+        "show create event: caught error text",
+        "SHOW CREATE EVENT {db}.ev_diag",
+        Expect::Ok,
+    ),
+    (
+        "every routine",
+        "SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_DEFINITION FROM information_schema.ROUTINES",
+        Expect::Ok,
+    ),
+    ("every function", "SHOW FUNCTION STATUS", Expect::Ok),
+    (
+        "error before get diagnostics",
+        "SELECT * FROM {db}.nosuch_top",
+        Expect::Err,
+    ),
+    (
+        "get diagnostics",
+        "GET DIAGNOSTICS CONDITION 1 @tg = MESSAGE_TEXT, @tn = MYSQL_ERRNO",
+        Expect::Ok,
+    ),
+    (
+        "get diagnostics: text",
+        "SELECT CONCAT('$', @tg), @tn",
+        Expect::Ok,
+    ),
+    (
+        "prepare get diagnostics",
+        "PREPARE s_diag FROM 'GET DIAGNOSTICS CONDITION 1 @tp = MESSAGE_TEXT'",
+        Expect::Ok,
+    ),
+    (
+        "error before execute",
+        "SELECT * FROM {db}.nosuch_ps",
+        Expect::Err,
+    ),
+    ("execute get diagnostics", "EXECUTE s_diag", Expect::Ok),
+    (
+        "prepared get diagnostics: text",
+        "SELECT CONCAT('$', @tp)",
+        Expect::Ok,
+    ),
+    (
+        "error before execute immediate",
+        "SELECT * FROM {db}.nosuch_ei",
+        Expect::Err,
+    ),
+    (
+        "execute immediate get diagnostics",
+        "EXECUTE IMMEDIATE 'GET DIAGNOSTICS CONDITION 1 @ti = MESSAGE_TEXT'",
+        Expect::Any,
+    ),
+    (
+        "execute immediate: text",
+        "SELECT CONCAT('$', @ti)",
+        Expect::Ok,
+    ),
+    (
+        "compound statement get diagnostics",
+        "BEGIN NOT ATOMIC DECLARE CONTINUE HANDLER FOR SQLEXCEPTION \
+         GET DIAGNOSTICS CONDITION 1 @tc = MESSAGE_TEXT; SELECT 1 INTO @x FROM {db}.nosuch_c; END",
+        Expect::Ok,
+    ),
+    (
+        "compound statement: text",
+        "SELECT CONCAT('$', @tc)",
+        Expect::Ok,
+    ),
+    // MariaDB only: 3306 refuses ORACLE (1231), so these fail there.
+    ("oracle mode", "SET sql_mode = 'ORACLE'", Expect::Any),
+    (
+        "oracle procedure: SQLERRM",
+        "CREATE PROCEDURE {db}.p_ora AS BEGIN SELECT 1 INTO @x FROM {db}.nosuch_o; \
+         EXCEPTION WHEN OTHERS THEN SET @to = SQLERRM; END",
+        Expect::Any,
+    ),
+    ("oracle call", "CALL {db}.p_ora", Expect::Any),
+    ("oracle mode off", "SET sql_mode = DEFAULT", Expect::Ok),
+    ("oracle: text", "SELECT CONCAT('$', @to)", Expect::Ok),
     // Account statements (chapter 29, M0.5): grantees, grant targets and
     // errors name logical databases and tenant users only.
     (
@@ -1105,6 +1251,41 @@ async fn leak_suite() {
                 _ => None,
             },
         });
+        // A prepared `GET DIAGNOSTICS` through the binary protocol
+        // (chapter 07 step 12): the caught text it stores.
+        t.wire.take();
+        let diag = async {
+            let st = t
+                .conn
+                .prep("GET DIAGNOSTICS CONDITION 1 @tb = MESSAGE_TEXT")
+                .await?;
+            let _ = t
+                .conn
+                .query_drop(format!("SELECT * FROM {db}.nosuch_bin"))
+                .await;
+            t.conn.exec_drop(&st, ()).await?;
+            t.conn.close(st).await?;
+            let v: Option<String> = t.conn.query_first("SELECT CONCAT('$', @tb)").await?;
+            mysql_async::Result::Ok(v)
+        }
+        .await;
+        let mut leaks: Vec<String> = t
+            .wire
+            .take()
+            .iter()
+            .flat_map(|c| physical_name_leaks(c))
+            .collect();
+        leaks.dedup();
+        lines.push(Line {
+            tenant: t.tag.clone(),
+            label: "prepared get diagnostics (binary protocol)".into(),
+            expect: Expect::Any,
+            errno: None,
+            rows: usize::from(matches!(diag, Ok(Some(_)))),
+            leaks,
+            foreign_secret: false,
+            problem: None,
+        });
         for p in &probes {
             for s in [
                 format!("USE {p}"),
@@ -1401,6 +1582,8 @@ fn needs_super_in_baseline(sql: &str) -> bool {
         || sql.contains("f_who")
         || sql.contains("f_up")
         || sql.contains("trg_parent_bi")
+        || sql.contains("f_diag")
+        || sql.contains("trg_diag")
 }
 
 /// The tenant at `i` mutably and the other one.

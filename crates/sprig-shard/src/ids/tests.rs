@@ -159,3 +159,30 @@ async fn increment_offset_strict_raise_and_outage() {
         last = v.last();
     }
 }
+
+#[tokio::test]
+async fn explicit_values_keep_later_values_above_them() {
+    let src = Arc::new(MemSource::default());
+    let a = BlockAllocator::new(Arc::clone(&src), BlockConfig::default());
+    let s = AutoIncSession::default();
+    let first = a.take(SeqId(1), 1, &s).await.unwrap().first;
+    assert_eq!(first, 1);
+    let held_end = *src.next.lock().unwrap();
+    // Inside the block this gateway holds: no catalog raise, but the next
+    // value is above it, as MariaDB's counter would be.
+    a.explicit(SeqId(1), 5).await.unwrap();
+    assert_eq!(*src.next.lock().unwrap(), held_end);
+    assert_eq!(a.take(SeqId(1), 1, &s).await.unwrap().first, 6);
+    // Past every block: the catalog is raised, once per new maximum.
+    a.explicit(SeqId(1), 1_000_000).await.unwrap();
+    assert_eq!(*src.next.lock().unwrap(), 1_000_001);
+    *src.next.lock().unwrap() = 1_000_001; // unchanged by a lower value
+    a.explicit(SeqId(1), 999_999).await.unwrap();
+    assert_eq!(*src.next.lock().unwrap(), 1_000_001);
+    let run = a.take(SeqId(1), 2, &s).await.unwrap();
+    assert_eq!(run.first, 1_000_001);
+    assert_eq!(run.last(), 1_000_002);
+    // Another gateway's later block starts past the raise too.
+    let b = BlockAllocator::new(Arc::clone(&src), BlockConfig::default());
+    assert!(b.take(SeqId(1), 1, &s).await.unwrap().first > 1_000_002);
+}

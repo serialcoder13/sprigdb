@@ -342,9 +342,9 @@ pub async fn execute(
             ShardOutcome::Ok(ok) => Ok(Output::Ok(ok)),
         },
         Plan::Reject(r) => Err(r.error()),
-        Plan::NotRouted | Plan::ViaLookup(_) | Plan::ViaParent(_) => Err(SprigError::internal(
-            "execute of a statement the router doesn't route",
-        )),
+        Plan::NotRouted | Plan::ViaLookup(_) | Plan::ViaParent(_) | Plan::NeedIds(_) => Err(
+            SprigError::internal("execute of a statement the router doesn't route"),
+        ),
     }
 }
 
@@ -1927,6 +1927,22 @@ async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Re
             );
             &v.plan
         }
+        Plan::NeedIds(f) => {
+            rows.push(
+                None,
+                "IdBlocks",
+                format!("{}.{}", f.table, f.column),
+                format!(
+                    "{} row(s) take values from the gateway's ID block (sequence {}){}",
+                    f.rows.len(),
+                    f.seq,
+                    f.explicit_max
+                        .map(|m| format!(", explicit values raise it past {m}"))
+                        .unwrap_or_default()
+                ),
+            );
+            p
+        }
         Plan::ViaParent(v) => {
             let top = rows.push(
                 None,
@@ -2025,7 +2041,11 @@ async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Re
                 format!("{}: {}", r.reason.as_str(), r.detail),
             );
         }
-        Plan::Explain(_) | Plan::NotRouted | Plan::ViaLookup(_) | Plan::ViaParent(_) => {}
+        Plan::Explain(_)
+        | Plan::NotRouted
+        | Plan::ViaLookup(_)
+        | Plan::ViaParent(_)
+        | Plan::NeedIds(_) => {}
     }
     // One representative shard's MariaDB plan.
     for t in shard_sql {

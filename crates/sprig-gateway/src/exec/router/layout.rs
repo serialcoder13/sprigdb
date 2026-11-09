@@ -536,6 +536,7 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
             held.insert(obj.name.to_ascii_lowercase(), *u);
         }
         tables.push(CatalogTable {
+            object: m.object,
             db: m.db,
             default_schema,
             name: obj.name.clone(),

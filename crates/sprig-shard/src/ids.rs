@@ -171,8 +171,12 @@ struct BlockState {
     prefetching: bool,
     /// When the current block was installed.
     since: Option<Instant>,
-    /// Cached values below this are dropped (`ALTER TABLE ... AUTO_INCREMENT`).
+    /// Cached values below this are dropped (`ALTER TABLE ... AUTO_INCREMENT`,
+    /// explicit values).
     floor: i128,
+    /// The catalog's `next_value` is known to be above this: the highest
+    /// value this gateway raised it past.
+    raised: i128,
     ordering: Option<Ordering>,
 }
 
@@ -237,6 +241,33 @@ impl<S: SequenceSource> BlockAllocator<S> {
         let st = self.state(seq);
         let mut b = st.lock().await;
         b.floor = b.floor.max(n);
+    }
+
+    /// An explicit value `v` was written (chapter 19, "Explicit values"):
+    /// this gateway's later values are above it, and the catalog's
+    /// `next_value` is raised past it unless a block this gateway holds
+    /// already ends above it (the catalog is then past it too). Raises go
+    /// to the catalog once per new maximum.
+    ///
+    /// # Errors
+    /// 39460 when the catalog can't be raised.
+    pub async fn explicit(&self, seq: SeqId, v: i128) -> Result<()> {
+        let st = self.state(seq);
+        let mut b = st.lock().await;
+        b.floor = b.floor.max(v.saturating_add(1));
+        let held = b
+            .cur
+            .map(|(_, end)| end)
+            .into_iter()
+            .chain(b.spare.map(|(_, end)| end))
+            .max()
+            .unwrap_or(i128::MIN);
+        if v < held || v < b.raised {
+            return Ok(());
+        }
+        self.inner.src.raise(seq, v).await?;
+        b.raised = b.raised.max(v.saturating_add(1));
+        Ok(())
     }
 
     fn state(&self, seq: SeqId) -> Arc<Mutex<BlockState>> {
@@ -456,6 +487,25 @@ impl CatalogSequences {
         )
         .await
         .map_err(db_err)
+    }
+
+    /// Whether sequence `seq` has its row.
+    ///
+    /// # Errors
+    /// 39460 when the catalog can't be reached; MariaDB's errors.
+    pub async fn exists(&self, seq: SeqId) -> Result<bool> {
+        let mut c = self.pool.get_conn().await.map_err(unavailable)?;
+        let n: Option<u64> = c
+            .exec_first(
+                format!(
+                    "SELECT COUNT(*) FROM {}.sequences WHERE seq_id = ?",
+                    quote(&self.schema)
+                ),
+                (seq.0,),
+            )
+            .await
+            .map_err(db_err)?;
+        Ok(n.unwrap_or(0) > 0)
     }
 
     async fn fetch_once(&self, seq: SeqId, size: u128) -> Result<(i128, i128)> {

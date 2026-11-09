@@ -148,6 +148,9 @@ pub(super) struct GwBackend<'a> {
     pub implicit: bool,
     /// A multi-shard write's statement savepoint.
     pub mark: Option<StmtMark>,
+    /// The plan's INSERTs write values from chapter 19's ID blocks: their
+    /// OK packets' insert ids aren't `LAST_INSERT_ID()`.
+    pub explicit_ids: bool,
 }
 
 impl GwBackend<'_> {
@@ -201,6 +204,9 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
                 Intent::Write
             };
             let branch = self.coord.branch(&cluster, &shard_ref(t), intent).await?;
+            if self.explicit_ids {
+                branch.conn_mut().explicit_ids_next_statement();
+            }
             let r = run_on(branch.conn_mut(), sql, budget).await;
             if let Err(e) = &r
                 && let Some(db) = db_error(e)
@@ -210,6 +216,9 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
             return r;
         }
         if cluster == self.main_cluster {
+            if self.explicit_ids {
+                self.main.explicit_ids_next_statement();
+            }
             return run_on(self.main, sql, budget).await;
         }
         if self.legacy_txn {
@@ -221,7 +230,11 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
             )
             .error());
         }
+        let explicit_ids = self.explicit_ids;
         let bs = self.other(&cluster).await?;
+        if explicit_ids {
+            bs.explicit_ids_next_statement();
+        }
         run_on(bs, sql, budget).await
     }
 

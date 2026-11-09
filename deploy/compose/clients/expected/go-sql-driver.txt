@@ -1,0 +1,10 @@
+# go-sql-driver/mysql (versions.txt) through run.sh: every outcome other than
+# pass. Format: <target-glob> <fail|skip|flaky> <test-glob> :: <reason>
+# (summarize.py). Targets: baseline-mariadb, gateway-mariadb, gateway-mysql.
+
+# MariaDB 11.8's default max_allowed_packet is 16 MiB; upstream CI sets 48 MiB.
+# The compressed leg sends a packet just under the limit plus compression
+# framing, which the server refuses with 1153. Same on plain MariaDB.
+* fail TestLongData/compress :: max_allowed_packet 16 MiB (MariaDB's default; upstream CI uses 48 MiB): 1153 on plain MariaDB too
+* skip TestConnectionAttributes :: performance_schema is off on MariaDB (connector matrix D7)
+* skip FuzzFormatDSN/* :: the fuzz seeds skip themselves on purpose

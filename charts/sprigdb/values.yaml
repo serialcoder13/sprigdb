@@ -23,8 +23,13 @@ operator:
   # The agent sidecar in every MariaDB pod (fence-only, chapter 25).
   agentSidecar: true
   readyTimeoutSeconds: 1800
+  # The DC controller's Admin API; empty: the controller Service in this
+  # namespace (http://sprigdb-controller.<namespace>.svc:7480).
+  controllerAdmin: ""
 # One Service per MariaDB pod, so other DCs reach every node.
-nodeServices: {type: LoadBalancer}
+# nodePortHost: with type NodePort, the host every node port is reached at
+# (a single-host cluster such as kind); nodes are advertised as host:nodePort.
+nodeServices: {type: LoadBalancer, nodePortHost: ""}
 tls:
   issuerRef: {kind: ClusterIssuer, name: sprig-fra1-ca}
   # trust-manager Bundle with every DC's CA, mounted as ca.crt.

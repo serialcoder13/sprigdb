@@ -348,6 +348,18 @@ impl PassSession {
         (lex, ignore_space)
     }
 
+    /// The session's `sql_mode` has MariaDB's `ORACLE` (chapter 07 step
+    /// 12: `SQLERRM` is caught error text there).
+    pub(super) fn oracle_mode(&self) -> bool {
+        self.bs
+            .as_ref()
+            .and_then(|b| b.vars().vars.get("sql_mode"))
+            .is_some_and(|m| {
+                m.split(',')
+                    .any(|i| i.trim().eq_ignore_ascii_case("ORACLE"))
+            })
+    }
+
     /// The session's current logical database: the backend session's
     /// tracked schema, mapped (a system schema keeps its name).
     pub(super) fn current_logical(&self) -> Option<String> {
@@ -861,7 +873,8 @@ impl PassSession {
                     .sessions(&sessions)
                     .visible(&visible)
                     // Chapter 07 step 12: account columns mapped inside MariaDB.
-                    .stored_names(crate::tenant::stored_names::ready(&ts.principal.backend.cluster));
+                    .stored_names(crate::tenant::stored_names::ready(&ts.principal.backend.cluster))
+                    .oracle(self.oracle_mode());
                 plan(text, &pctx)
             };
             match r {
@@ -1670,7 +1683,8 @@ impl PassSession {
             .sessions(&sessions)
             .visible(&visible)
             // Chapter 07 step 12: account columns mapped inside MariaDB.
-            .stored_names(crate::tenant::stored_names::ready(&ts.principal.backend.cluster));
+            .stored_names(crate::tenant::stored_names::ready(&ts.principal.backend.cluster))
+            .oracle(self.oracle_mode());
         let p = plan(&sql, &pctx)?;
         let [sp] = p.statements.as_slice() else {
             return Err(SprigError::standard(

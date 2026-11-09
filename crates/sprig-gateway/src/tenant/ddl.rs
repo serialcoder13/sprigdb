@@ -411,7 +411,9 @@ fn in_mode(sql: &str, mode: Option<&str>) -> String {
 /// or event with its account functions and `DATABASE()` turned into
 /// lookups of logical names ([`sprig_sql::names::stored::substitute`]);
 /// `None` when there is nothing to change.
-fn names_in_body(stmt: &PhysicalDdl, lex: LexOptions) -> Option<PhysicalDdl> {
+/// `mode` is the `sql_mode` the body is created under: with `ORACLE`,
+/// `SQLERRM` is mapped too.
+fn names_in_body(stmt: &PhysicalDdl, lex: LexOptions, mode: Option<&str>) -> Option<PhysicalDdl> {
     let kind = match &stmt.effect {
         Effect::Create { kind, .. } | Effect::Alter { kind, .. } => *kind,
         _ => return None,
@@ -426,7 +428,11 @@ fn names_in_body(stmt: &PhysicalDdl, lex: LexOptions) -> Option<PhysicalDdl> {
     ) {
         return None;
     }
-    let sql = sprig_sql::names::stored::substitute(&stmt.sql, &lex)?;
+    let oracle = mode.is_some_and(|m| {
+        m.split(',')
+            .any(|i| i.trim().eq_ignore_ascii_case("ORACLE"))
+    });
+    let sql = sprig_sql::names::stored::substitute_with(&stmt.sql, &lex, oracle)?;
     Some(PhysicalDdl {
         sql,
         ..stmt.clone()
@@ -483,7 +489,7 @@ fn not_sent(e: SprigError) -> SprigError {
 impl DdlExecutor for GatewayDdl<'_> {
     async fn execute(&self, stmt: &PhysicalDdl) -> Result<()> {
         let (mode, lex) = self.session_modes().await;
-        let sub = names_in_body(stmt, lex);
+        let sub = names_in_body(stmt, lex, mode.as_deref());
         let stmt = sub.as_ref().unwrap_or(stmt);
         if stored_program(&stmt.effect) {
             return self.stored_program(stmt, mode.as_deref()).await;
@@ -789,7 +795,7 @@ impl DdlExecutor for ShardedDdl<'_> {
             return self.inner.execute(stmt).await;
         };
         let (mode, lex) = self.inner.session_modes().await;
-        let sub = names_in_body(stmt, lex);
+        let sub = names_in_body(stmt, lex, mode.as_deref());
         let stmt = sub.as_ref().unwrap_or(stmt);
         if stored_program(&stmt.effect) && !matches!(stmt.effect, Effect::Drop { .. }) {
             return self.stored_program_on(&pool, stmt, mode.as_deref()).await;
@@ -923,6 +929,7 @@ mod tests {
                 create(ObjectKind::View),
             ),
             lex,
+            None,
         )
         .unwrap();
         assert!(
@@ -936,6 +943,7 @@ mod tests {
                 create(ObjectKind::Procedure),
             ),
             lex,
+            None,
         )
         .unwrap();
         assert!(p.sql.contains("WHERE `name` = DATABASE())"), "{}", p.sql);
@@ -946,7 +954,8 @@ mod tests {
                     "CREATE TABLE t (u VARCHAR(80) DEFAULT (CURRENT_USER()))",
                     create(ObjectKind::Table)
                 ),
-                lex
+                lex,
+                None
             )
             .is_none()
         );
@@ -959,10 +968,42 @@ mod tests {
                         names: vec!["v".into()]
                     }
                 ),
-                lex
+                lex,
+                None
             )
             .is_none()
         );
+        // Caught error text (`GET DIAGNOSTICS`, and `SQLERRM` under ORACLE).
+        let f = names_in_body(
+            &stmt(
+                "CREATE FUNCTION f() RETURNS TEXT BEGIN DECLARE m TEXT; DECLARE CONTINUE HANDLER \
+                 FOR SQLEXCEPTION GET DIAGNOSTICS CONDITION 1 m = MESSAGE_TEXT; RETURN m; END",
+                create(ObjectKind::Function),
+            ),
+            lex,
+            None,
+        )
+        .unwrap();
+        assert!(
+            f.sql
+                .contains("SET m = `__sprig_sys`.`__sprig_names_map`(m); END"),
+            "{}",
+            f.sql
+        );
+        let body = "CREATE PROCEDURE p AS BEGIN SELECT 1; EXCEPTION WHEN OTHERS THEN SET @e = SQLERRM; END";
+        let o = names_in_body(
+            &stmt(body, create(ObjectKind::Procedure)),
+            lex,
+            Some("PIPES_AS_CONCAT,ANSI_QUOTES,ORACLE"),
+        )
+        .unwrap();
+        assert!(
+            o.sql
+                .contains("SET @e = `__sprig_sys`.`__sprig_names_map`(SQLERRM)"),
+            "{}",
+            o.sql
+        );
+        assert!(names_in_body(&stmt(body, create(ObjectKind::Procedure)), lex, None).is_none());
     }
 
     #[test]

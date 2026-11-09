@@ -376,7 +376,7 @@ impl Reconciler {
         let mut addrs = Vec::new();
         for svc in mapping::node_services(&sc, &self.cfg) {
             let live = self.ensure(&SERVICE, &ns, &svc, None).await?;
-            addrs.push(mapping::advertised(&live));
+            addrs.push(mapping::advertised_for(&live, &self.cfg));
         }
         let keep: Vec<String> = (0..sc.spec.replicas())
             .map(|i| mapping::node_service_name(&name, i))
