@@ -22,6 +22,9 @@
 //! h2c). Connections are pooled per target: one shared HTTP/2 connection,
 //! or up to [`MAX_IDLE_H1`] idle HTTP/1.1 connections.
 
+// Product and protocol names (CloudEvents, OAuth2) read better bare.
+#![allow(clippy::doc_markdown)]
+
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -76,7 +79,9 @@ impl Format {
             other => {
                 return Err(err(
                     SprigCode::SinkFormatUnsupported,
-                    format!("webhook format '{other}': json, ndjson, cloudevents or cloudevents_binary"),
+                    format!(
+                        "webhook format '{other}': json, ndjson, cloudevents or cloudevents_binary"
+                    ),
                 ));
             }
         })
@@ -383,9 +388,9 @@ impl Endpoint {
         }
         .parse()
         .map_err(|e| bad_option(format!("webhook path '{path}': {e}")))?;
-        let mut req = Request::post(uri).body(Full::new(body)).map_err(|e| {
-            bad_option(format!("webhook request: {e}"))
-        })?;
+        let mut req = Request::post(uri)
+            .body(Full::new(body))
+            .map_err(|e| bad_option(format!("webhook request: {e}")))?;
         let h = req.headers_mut();
         if let Sender::H1(_) = sender {
             h.insert(
@@ -484,6 +489,7 @@ impl WebhookTarget {
     ///
     /// # Errors
     /// See [`build`].
+    #[allow(clippy::too_many_lines)] // every option, checked in turn
     pub fn new(ctx: &TargetCtx) -> Result<Self> {
         let conn = ctx.conn()?.clone();
         let url = conn.need("url")?;
@@ -630,10 +636,10 @@ impl WebhookTarget {
     /// The body of a request for `recs`.
     fn body(&self, recs: &[SinkRecord]) -> Vec<u8> {
         match self.format {
-            Format::Json => {
-                serde_json::to_vec(&Value::Array(recs.iter().map(SinkRecord::to_json).collect()))
-                    .unwrap_or_default()
-            }
+            Format::Json => serde_json::to_vec(&Value::Array(
+                recs.iter().map(SinkRecord::to_json).collect(),
+            ))
+            .unwrap_or_default(),
             Format::Ndjson => {
                 let mut out = Vec::new();
                 for r in recs {
@@ -736,7 +742,10 @@ impl WebhookTarget {
                 let p = c.secret("password")?;
                 vec![(
                     "authorization".into(),
-                    format!("Basic {}", B64.encode(format!("{}:{}", u.as_str(), p.as_str()))),
+                    format!(
+                        "Basic {}",
+                        B64.encode(format!("{}:{}", u.as_str(), p.as_str()))
+                    ),
                 )]
             }
             Auth::Header(name) => vec![(name.clone(), c.secret("header_value")?.to_string())],
@@ -799,15 +808,16 @@ impl WebhookTarget {
         loop {
             let mut h = headers.clone();
             h.extend(self.auth_headers(refreshed).await?);
-            let sent = tokio::time::timeout(self.timeout, self.ep.send(&self.path, &h, body.clone()))
-                .await
-                .map_err(|_| {
-                    delivery_failed(format!(
-                        "{}: no answer within sink.http_timeout_ms = {} ms",
-                        self.ep.authority,
-                        self.timeout.as_millis()
-                    ))
-                })??;
+            let sent =
+                tokio::time::timeout(self.timeout, self.ep.send(&self.path, &h, body.clone()))
+                    .await
+                    .map_err(|_| {
+                        delivery_failed(format!(
+                            "{}: no answer within sink.http_timeout_ms = {} ms",
+                            self.ep.authority,
+                            self.timeout.as_millis()
+                        ))
+                    })??;
             let (status, rh, rbody) = sent;
             if status == StatusCode::UNAUTHORIZED
                 && matches!(self.auth, Auth::OAuth2 { .. })
@@ -842,13 +852,11 @@ impl WebhookTarget {
             }
             return BatchOutcome::All(Outcome::Ok);
         }
-        let reason = format!(
-            "{}: HTTP {code}{}",
-            self.ep.authority,
-            snippet(body)
-        );
+        let reason = format!("{}: HTTP {code}{}", self.ep.authority, snippet(body));
         match code {
-            408 | 429 | 401 | 403 | 500..=599 => BatchOutcome::All(Outcome::Retry { after, reason }),
+            408 | 429 | 401 | 403 | 500..=599 => {
+                BatchOutcome::All(Outcome::Retry { after, reason })
+            }
             413 => BatchOutcome::TooLarge,
             300..=399 => BatchOutcome::All(Outcome::Fail {
                 reason: format!("{reason} (redirects are not followed)"),
@@ -1024,7 +1032,8 @@ mod tests {
 
     #[test]
     fn partial_result_bodies() {
-        let b = br#"{"results":[{"status":"ok"},{"status":"retry"},{"status":"fail","reason":"bad"}]}"#;
+        let b =
+            br#"{"results":[{"status":"ok"},{"status":"retry"},{"status":"fail","reason":"bad"}]}"#;
         let v = partial_results(b, 3).unwrap();
         assert_eq!(v[0], Outcome::Ok);
         assert!(matches!(v[1], Outcome::Retry { .. }));

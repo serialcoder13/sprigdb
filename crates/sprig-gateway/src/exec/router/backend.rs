@@ -153,6 +153,8 @@ pub(super) struct GwBackend<'a> {
     pub explicit_ids: bool,
     /// `router.gather.*` (chapter 17, "Gathered reads (R3)").
     pub gather: sprig_router::GatherLimits,
+    /// `fk.lock_wait_seconds` (chapter 19, R3).
+    pub fk_lock_wait: u64,
 }
 
 impl GwBackend<'_> {
@@ -242,6 +244,10 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
 
     fn in_transaction(&self) -> bool {
         self.coord.in_txn() || self.legacy_txn
+    }
+
+    fn fk_lock_wait(&self) -> Option<u64> {
+        Some(self.fk_lock_wait)
     }
 
     fn foreign_key_checks(&self) -> bool {

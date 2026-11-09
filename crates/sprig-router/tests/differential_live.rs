@@ -1823,6 +1823,86 @@ fn dml(r: &mut Rng) -> Vec<(String, &'static str)> {
     v
 }
 
+/// Chapter 19's DDL path (R3): `ALTER TABLE … ADD FOREIGN KEY` between
+/// tables of two groups through the gateway becomes a `foreign_keys` row
+/// the gateway keeps (the reference MariaDB keeps it natively); child and
+/// parent writes are then checked alike; an orphan refuses the key; `DROP
+/// FOREIGN KEY` ends the checks.
+async fn fk_ddl(e: &Env, sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -> String {
+    let before = tally.compared;
+    let refused_before = tally.skipped;
+    let steps: Vec<(&str, Option<&str>)> = vec![
+        // An orphan: refused on both sides (1452), nothing changes.
+        (
+            "ALTER TABLE orders ADD CONSTRAINT fk_o_bad FOREIGN KEY (oid) REFERENCES products (pid)",
+            None,
+        ),
+        // Across groups and clusters: kept by the gateway.
+        (
+            "ALTER TABLE orders ADD CONSTRAINT fk_o_p FOREIGN KEY (pid) REFERENCES products (pid)",
+            None,
+        ),
+        (
+            "INSERT INTO orders (oid, cid, pid, amount, qty, note) VALUES (9100, 1, 999999, 1, 1, 'x')",
+            Some("orders"),
+        ),
+        (
+            "INSERT INTO orders (oid, cid, pid, amount, qty, note) VALUES (9101, 2, 5, 1, 1, 'x')",
+            Some("orders"),
+        ),
+        ("UPDATE orders SET pid = 888888 WHERE oid = 9101", Some("orders")),
+        ("DELETE FROM products WHERE pid = 5", Some("products")),
+        ("DELETE FROM orders WHERE oid = 9101", Some("orders")),
+        ("DELETE FROM products WHERE pid = 5", Some("products")),
+        // The same name twice.
+        (
+            "ALTER TABLE orders ADD CONSTRAINT fk_o_p FOREIGN KEY (pid) REFERENCES products (pid)",
+            None,
+        ),
+        ("ALTER TABLE orders DROP FOREIGN KEY fk_o_p", None),
+        (
+            "INSERT INTO orders (oid, cid, pid, amount, qty, note) VALUES (9102, 3, 777777, 1, 1, 'x')",
+            Some("orders"),
+        ),
+    ];
+    for (q, t) in &steps {
+        let a = run(sut, q).await;
+        let b = run(reference, q).await;
+        if matches!(a, Outcome::Err(39420, _)) {
+            tally.mismatches.push(format!("R3 FK DDL REFUSED {q}: {a:?}"));
+        }
+        tally.check(q, Cmp::Bag, &a, &b);
+        if let Some(t) = t {
+            compare_full(sut, reference, tally, "after a key's DDL", t).await;
+        }
+    }
+    // The row the DDL path wrote while the key existed is gone again.
+    let mut c = root(e, 0, None).await;
+    let left: Option<u64> = c
+        .query_first(format!(
+            "SELECT COUNT(*) FROM `{}`.foreign_keys WHERE name = 'fk_o_p'",
+            e.catalog()
+        ))
+        .await
+        .unwrap();
+    tally.compared += 1;
+    if left != Some(0) {
+        tally
+            .mismatches
+            .push(format!("foreign_keys still has fk_o_p after DROP: {left:?}"));
+    }
+    for q in ["DELETE FROM orders WHERE oid IN (9100, 9101, 9102)"] {
+        for c in [&mut *sut, &mut *reference] {
+            let _ = run(c, q).await;
+        }
+    }
+    format!(
+        "fk ddl: {} statements and comparisons, {} refused",
+        tally.compared - before,
+        tally.skipped - refused_before
+    )
+}
+
 /// `LOAD DATA LOCAL INFILE` on `c`, the client sending `data`.
 async fn load(c: &mut Conn, sql: &str, data: &[u8]) -> Outcome {
     use futures::StreamExt as _;
@@ -4427,6 +4507,8 @@ async fn differential_against_one_unsharded_mariadb() {
     println!("{wf_line}");
     lookups(&e, &w, &mut sut, &mut reference, &mut tally).await;
     let fk_line = foreign_keys(&mut sut, &mut reference, &mut tally).await;
+    let fk_ddl_line = fk_ddl(&e, &mut sut, &mut reference, &mut tally).await;
+    println!("{fk_ddl_line}");
     let (race_n, race_ins, race_del) = fk_race(&e, &mut tally).await;
     println!("{fk_line}");
     println!(

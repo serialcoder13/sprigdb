@@ -692,6 +692,43 @@ sprig_codes! {
     /// coordinate, with the tenant catalog on another cluster than the
     /// transaction's (chapter 45, R9).
     StreamOffsetTxnUnsupported = 39958, "ER_SPRIG_STREAM_OFFSET_TXN_UNSUPPORTED", "SprigStreamOffsetTxnUnsupported", SQLSTATE_GENERAL, false;
+    /// A Cypher, GQL or graph DDL text that doesn't parse (chapter 43);
+    /// Bolt `Neo.ClientError.Statement.SyntaxError`.
+    GraphSyntax = 39900, "ER_SPRIG_GRAPH_SYNTAX", "SprigGraphSyntax", SQLSTATE_SYNTAX_ACCESS, false;
+    /// A graph feature this build doesn't have; the message names it
+    /// (chapter 43).
+    GraphUnsupported = 39901, "ER_SPRIG_GRAPH_UNSUPPORTED", "SprigGraphUnsupported", SQLSTATE_GENERAL, false;
+    /// No graph by that name (chapter 43); Bolt
+    /// `Neo.ClientError.Database.DatabaseNotFound`.
+    GraphNotFound = 39902, "ER_SPRIG_GRAPH_NOT_FOUND", "SprigGraphNotFound", SQLSTATE_GENERAL, false;
+    /// A traversal went past a budget: hops, frontier, rows, time or memory;
+    /// the message names it (chapter 43).
+    GraphBudgetExceeded = 39903, "ER_SPRIG_GRAPH_BUDGET_EXCEEDED", "SprigGraphBudgetExceeded", SQLSTATE_GENERAL, false;
+    /// `DELETE` of a node that still has relationships, checked at commit
+    /// (chapter 43); Bolt `Neo.ClientError.Schema.ConstraintValidationFailed`.
+    GraphNodeHasRelationships = 39906, "ER_SPRIG_GRAPH_NODE_HAS_RELATIONSHIPS", "SprigGraphNodeHasRelationships", SQLSTATE_GENERAL, false;
+    /// `DETACH DELETE` past `graph.max_detach_edges` (chapter 43).
+    GraphDetachTooLarge = 39907, "ER_SPRIG_GRAPH_DETACH_TOO_LARGE", "SprigGraphDetachTooLarge", SQLSTATE_GENERAL, false;
+    /// A graph definition with a bad name, key or reference (chapter 43).
+    GraphDefinitionInvalid = 39908, "ER_SPRIG_GRAPH_DEFINITION_INVALID", "SprigGraphDefinitionInvalid", SQLSTATE_GENERAL, false;
+    /// A value that isn't a Neo4j property type, such as a map (chapter
+    /// 43); Bolt `Neo.ClientError.Statement.TypeError`.
+    GraphPropertyType = 39909, "ER_SPRIG_GRAPH_PROPERTY_TYPE", "SprigGraphPropertyType", SQLSTATE_GENERAL, false;
+    /// No Bolt version in common with the client: the handshake answers
+    /// `00 00 00 00` (chapter 43; logged only).
+    BoltVersionUnsupported = 39912, "ER_SPRIG_BOLT_VERSION_UNSUPPORTED", "SprigBoltVersionUnsupported", SQLSTATE_CONNECTION, false;
+    /// A Bolt message out of order or malformed (chapter 43); Bolt
+    /// `Neo.ClientError.Request.Invalid`.
+    BoltProtocol = 39914, "ER_SPRIG_BOLT_PROTOCOL", "SprigBoltProtocol", SQLSTATE_CONNECTION, false;
+    /// A Bolt authentication scheme other than `basic` and `bearer`, or bad
+    /// credentials (chapter 43); Bolt `Neo.ClientError.Security.Unauthorized`.
+    BoltAuthScheme = 39915, "ER_SPRIG_BOLT_AUTH_SCHEME", "SprigBoltAuthScheme", SQLSTATE_SYNTAX_ACCESS, false;
+    /// `imp_user` (impersonation) is refused (chapter 43); Bolt
+    /// `Neo.ClientError.Security.Forbidden`.
+    BoltImpersonation = 39916, "ER_SPRIG_BOLT_IMPERSONATION", "SprigBoltImpersonation", SQLSTATE_SYNTAX_ACCESS, false;
+    /// A Bolt result kept unconsumed past `bolt.max_buffered_result_mb`
+    /// (chapter 43).
+    BoltResultBufferLimit = 39918, "ER_SPRIG_BOLT_RESULT_BUFFER_LIMIT", "SprigBoltResultBufferLimit", SQLSTATE_GENERAL, false;
     /// The audit spool is full (`audit.spool_max_mb`): admin API mutations
     /// and account statements fail closed (chapter 47).
     AuditUnavailable = 39970, "ER_SPRIG_AUDIT_UNAVAILABLE", "SprigAuditUnavailable", SQLSTATE_GENERAL, true;
@@ -804,6 +841,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SettingBadValue
         | SprigCode::AdminRequestInvalid
         | SprigCode::LogicSyntax
+        | SprigCode::GraphSyntax
+        | SprigCode::GraphDefinitionInvalid
+        | SprigCode::GraphPropertyType
+        | SprigCode::BoltProtocol
         | SprigCode::LogicSignatureMismatch
         | SprigCode::LogicScheduleInvalid
         | SprigCode::LogicValidationFailed
@@ -908,6 +949,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::UnknownDc
         | SprigCode::AutoIndexNotFound
         | SprigCode::FeedSubscriptionNotFound
+        | SprigCode::GraphNotFound
         | SprigCode::LogicNotFound
         | SprigCode::FunctionNotExposed
         | SprigCode::JobNotFound
@@ -944,6 +986,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::LogicUnsupported
         | SprigCode::LogicTierUnavailable
         | SprigCode::LogicEngineUnavailable
+        | SprigCode::GraphUnsupported
+        | SprigCode::GraphNodeHasRelationships
+        | SprigCode::GraphDetachTooLarge
+        | SprigCode::BoltVersionUnsupported
         | SprigCode::JobStateInvalid
         | SprigCode::SpaceHasChildren
         | SprigCode::SpaceDepthExceeded
@@ -968,6 +1014,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::RemoteAccessDenied
         | SprigCode::DefinerRefused
         | SprigCode::LogicOutboundDenied
+        | SprigCode::BoltImpersonation
         | SprigCode::RlsUnsupported
         | SprigCode::TxnHandleForbidden
         | SprigCode::SpaceAccessDenied
@@ -983,6 +1030,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::AdmissionTimeout
         | SprigCode::MemoryLimit
         | SprigCode::LogicBudgetExceeded
+        | SprigCode::GraphBudgetExceeded
+        | SprigCode::BoltResultBufferLimit
         | SprigCode::RouterMemoryLimit
         | SprigCode::PlanLimitExceeded
         | SprigCode::SinkQuota => (Code::ResourceExhausted, 429),
@@ -995,6 +1044,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::StreamOffsetOutOfRange => (Code::OutOfRange, 416),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
         SprigCode::AdminUnauthenticated
+        | SprigCode::BoltAuthScheme
         | SprigCode::SessionRevoked
         | SprigCode::TenantAmbiguous => (Code::Unauthenticated, 401),
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),

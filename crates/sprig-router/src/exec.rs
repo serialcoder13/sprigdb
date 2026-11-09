@@ -127,6 +127,13 @@ pub trait ShardBackend: Send {
     /// statement savepoint instead of their own transaction).
     fn in_transaction(&self) -> bool;
 
+    /// `fk.lock_wait_seconds` (chapter 19): how long a foreign-key probe
+    /// waits for a row lock (`… LOCK IN SHARE MODE WAIT n`); `None` waits
+    /// as the connection's `innodb_lock_wait_timeout` says.
+    fn fk_lock_wait(&self) -> Option<u64> {
+        None
+    }
+
     /// Before a multi-shard write on `targets`: chapter 18's write rule,
     /// then an implicit transaction (autocommit) or a statement savepoint.
     /// The default runs `BEGIN` or `SAVEPOINT __sprig_stmt` on the first

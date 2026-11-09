@@ -8,5 +8,29 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+# BSON documents (MIT): raw documents on the wire, owned ones in handlers.
+bson = "=2.15.0"
+# SCRAM: base64 attributes; HMAC, PBKDF2 and SHA-256 from ring; nonces from
+# the OS generator.
+base64.workspace = true
+getrandom.workspace = true
+ring.workspace = true
+subtle.workspace = true
+# OP_COMPRESSED: snappy (raw), zlib (pure-Rust backend) and zstd.
+flate2.workspace = true
+snap.workspace = true
+zstd.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+hex = "0.4"
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "macros"] }
+# Live tests through a real driver (Apache-2.0), without TLS or DNS
+# resolution, so no certificate-bundle crates come along.
+mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0"] }
+futures-util = "0.3"
+
 [lints]
 workspace = true

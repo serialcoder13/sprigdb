@@ -54,7 +54,7 @@ const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 /// backticked name, or one punctuation character, with its byte range and
 /// parenthesis depth.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Tok {
+pub(super) enum Tok {
     Word(String),
     Str(Vec<u8>),
     Ident(String),
@@ -62,11 +62,11 @@ enum Tok {
 }
 
 #[derive(Debug, Clone)]
-struct Token {
-    tok: Tok,
-    start: usize,
-    end: usize,
-    depth: u32,
+pub(super) struct Token {
+    pub tok: Tok,
+    pub start: usize,
+    pub end: usize,
+    pub depth: u32,
 }
 
 /// The content of a quoted literal starting at `q` (the quote), with
@@ -104,7 +104,7 @@ fn quoted(b: &[u8], q: usize) -> (Vec<u8>, usize) {
     (out, i)
 }
 
-fn scan(text: &str) -> Vec<Token> {
+pub(super) fn scan(text: &str) -> Vec<Token> {
     let b = text.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -177,7 +177,7 @@ fn scan(text: &str) -> Vec<Token> {
     out
 }
 
-fn is_word(t: &Token, w: &str) -> bool {
+pub(super) fn is_word(t: &Token, w: &str) -> bool {
     matches!(&t.tok, Tok::Word(x) if x == w)
 }
 
@@ -674,12 +674,12 @@ pub(super) fn literal(c: &ColumnDef, v: Option<&[u8]>) -> String {
 // ---- a sink that keeps one statement's answer -----------------------------
 
 /// One internal statement's answer.
-struct Capture {
+pub(super) struct Capture {
     wire: Wire,
-    columns: Vec<ColumnDef>,
-    rows: Vec<Vec<Option<Vec<u8>>>>,
-    ok: Option<OkPacket>,
-    error: Option<SprigError>,
+    pub columns: Vec<ColumnDef>,
+    pub rows: Vec<Vec<Option<Vec<u8>>>>,
+    pub ok: Option<OkPacket>,
+    pub error: Option<SprigError>,
     done: bool,
 }
 
@@ -785,7 +785,7 @@ struct Totals {
 
 impl PassSession {
     /// Runs `sql` through the router into a capture.
-    async fn capture(
+    pub(super) async fn capture(
         &mut self,
         cx: &mut ExecCtx<'_>,
         sql: &str,
@@ -1053,6 +1053,43 @@ impl PassSession {
         }
         let rows = split_rows(&data, &ld);
         let width = ld.columns.as_ref().map(Vec::len);
+        // A row with more or fewer fields than columns: an error under a
+        // strict sql_mode unless duplicates are ignored (LOCAL without
+        // REPLACE), as MariaDB does (1262, 1261); else the missing columns
+        // take their defaults and the extra fields go.
+        // A session that never set sql_mode has its persona's, strict on
+        // both personas.
+        let strict = self
+            .bs
+            .as_ref()
+            .and_then(|bs| bs.vars().vars.get("sql_mode").cloned())
+            .is_none_or(|m| {
+                let m = m.to_ascii_uppercase();
+                m.contains("STRICT_TRANS_TABLES") || m.contains("STRICT_ALL_TABLES")
+            });
+        if strict
+            && ld.dup != Dup::Ignore
+            && let Some(want) = width
+            && let Some((i, r)) = rows.iter().enumerate().find(|(_, r)| r.len() != want)
+        {
+            let n = i + 1;
+            let e = if r.len() > want {
+                SprigError::standard(
+                    1262,
+                    *b"01000",
+                    format!(
+                        "Row {n} was truncated; it contained more data than there were input columns"
+                    ),
+                )
+            } else {
+                SprigError::standard(
+                    1261,
+                    *b"01000",
+                    format!("Row {n} doesn't contain data for all columns"),
+                )
+            };
+            return self.fail(out, &e).await;
+        }
         let tuples: Vec<String> = rows
             .iter()
             .map(|r| {

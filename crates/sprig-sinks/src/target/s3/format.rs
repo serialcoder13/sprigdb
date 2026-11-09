@@ -113,7 +113,8 @@ impl Compress {
         match self {
             Compress::None => Ok(b),
             Compress::Gzip => {
-                let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                let mut e =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 e.write_all(&b)
                     .and_then(|()| e.finish())
                     .map_err(|e| sprig_common::SprigError::internal(format!("gzip: {e}")))
@@ -185,7 +186,10 @@ pub fn parse_columns(spec: &str) -> Result<Vec<Column>> {
         let path = match path {
             None => vec![name.to_owned()],
             Some(p) => {
-                let p = p.strip_prefix("$.").or_else(|| p.strip_prefix('$')).unwrap_or(p);
+                let p = p
+                    .strip_prefix("$.")
+                    .or_else(|| p.strip_prefix('$'))
+                    .unwrap_or(p);
                 let parts: Vec<String> = p
                     .split('.')
                     .filter(|s| !s.is_empty())
@@ -249,9 +253,8 @@ pub fn infer_columns(recs: &[&SinkRecord]) -> Vec<Column> {
                         && t != c.ty
                     {
                         c.ty = match (c.ty, t) {
-                            (ColType::Int64, ColType::Double) | (ColType::Double, ColType::Int64) => {
-                                ColType::Double
-                            }
+                            (ColType::Int64, ColType::Double)
+                            | (ColType::Double, ColType::Int64) => ColType::Double,
                             _ => ColType::String,
                         };
                     }
@@ -344,10 +347,7 @@ pub fn jsonl_line(r: &SinkRecord) -> Value {
     };
     let mut s = Map::new();
     s.insert("key".into(), json!(r.idem_key));
-    s.insert(
-        "op".into(),
-        r.op.map_or(Value::Null, |o| json!(o.letter())),
-    );
+    s.insert("op".into(), r.op.map_or(Value::Null, |o| json!(o.letter())));
     s.insert("ts".into(), json!(r.ts_ms));
     if let Some(k) = &r.key {
         s.insert("record_key".into(), crate::model::bytes_json_text(k));
@@ -464,6 +464,7 @@ fn need_columns(f: &str) -> sprig_common::SprigError {
     )
 }
 
+#[allow(clippy::needless_pass_by_value)] // for map_err
 fn pq(e: parquet::errors::ParquetError) -> sprig_common::SprigError {
     sprig_common::SprigError::internal(format!("parquet: {e}"))
 }
@@ -483,8 +484,18 @@ pub fn parquet_schema(cols: &[Column]) -> Result<Type> {
             .map_err(pq)
     };
     let mut fields = vec![
-        prim("_sprig_key", Phys::BYTE_ARRAY, ConvertedType::UTF8, Repetition::REQUIRED)?,
-        prim("_sprig_op", Phys::BYTE_ARRAY, ConvertedType::UTF8, Repetition::OPTIONAL)?,
+        prim(
+            "_sprig_key",
+            Phys::BYTE_ARRAY,
+            ConvertedType::UTF8,
+            Repetition::REQUIRED,
+        )?,
+        prim(
+            "_sprig_op",
+            Phys::BYTE_ARRAY,
+            ConvertedType::UTF8,
+            Repetition::OPTIONAL,
+        )?,
         prim(
             "_sprig_ts",
             Phys::INT64,
@@ -510,16 +521,21 @@ pub fn parquet_schema(cols: &[Column]) -> Result<Type> {
         .map_err(pq)
 }
 
-fn parquet_bytes(
-    cols: &[Column],
-    recs: &[&SinkRecord],
-) -> Result<(Vec<u8>, Vec<(usize, String)>)> {
+/// Indexes of records left out, with why.
+type Failed = Vec<(usize, String)>;
+
+#[allow(clippy::too_many_lines)] // one arm per column type
+fn parquet_bytes(cols: &[Column], recs: &[&SinkRecord]) -> Result<(Vec<u8>, Failed)> {
     // Convert every row first, so a bad record is left out of every column.
     let mut failed = Vec::new();
     let mut good: Vec<(&SinkRecord, Vec<Option<Cell>>)> = Vec::new();
     for (i, r) in recs.iter().enumerate() {
         let row = row_of(r);
-        match cols.iter().map(|c| cell(c, &row)).collect::<std::result::Result<Vec<_>, _>>() {
+        match cols
+            .iter()
+            .map(|c| cell(c, &row))
+            .collect::<std::result::Result<Vec<_>, _>>()
+        {
             Ok(cells) => good.push((r, cells)),
             Err(e) => failed.push((i, e)),
         }
@@ -548,7 +564,10 @@ fn parquet_bytes(
                         .map_err(pq)?;
                 }
                 1 => {
-                    let def: Vec<i16> = good.iter().map(|(r, _)| i16::from(r.op.is_some())).collect();
+                    let def: Vec<i16> = good
+                        .iter()
+                        .map(|(r, _)| i16::from(r.op.is_some()))
+                        .collect();
                     let v: Vec<ByteArray> = good
                         .iter()
                         .filter_map(|(r, _)| r.op.map(|o| ByteArray::from(o.letter())))
@@ -565,7 +584,10 @@ fn parquet_bytes(
                 }
                 n => {
                     let k = n - 3;
-                    let def: Vec<i16> = good.iter().map(|(_, c)| i16::from(c[k].is_some())).collect();
+                    let def: Vec<i16> = good
+                        .iter()
+                        .map(|(_, c)| i16::from(c[k].is_some()))
+                        .collect();
                     let cells = good.iter().filter_map(|(_, c)| c[k].clone());
                     match cols[k].ty {
                         ColType::String | ColType::Json => {
@@ -604,9 +626,8 @@ fn parquet_bytes(
                                 .map_err(pq)?;
                         }
                         ColType::Bool => {
-                            let v: Vec<bool> = cells
-                                .map(|c| matches!(c, Cell::Bool(true)))
-                                .collect();
+                            let v: Vec<bool> =
+                                cells.map(|c| matches!(c, Cell::Bool(true))).collect();
                             col.typed::<BoolType>()
                                 .write_batch(&v, Some(&def), None)
                                 .map_err(pq)?;

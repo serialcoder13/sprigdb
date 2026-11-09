@@ -31,6 +31,7 @@
 mod backend;
 mod binary;
 mod ids;
+mod fk_ddl;
 pub(crate) mod layout;
 mod txn;
 mod write_forms;
@@ -65,6 +66,7 @@ use crate::pipeline::{EndOfRows, ExecCtx, ResultSink, RowFormat, RowValues};
 use crate::tenant::TenantServices;
 use crate::tenant::names::Accounts;
 
+pub(super) use self::fk_ddl::FkDdl;
 pub(crate) use self::layout::ShardingExtension;
 
 /// The longest a statement waits for a mover's hold.
@@ -1713,6 +1715,7 @@ impl PassSession {
                     max_rows: cfg.gather_max_rows,
                     max_concurrent: cfg.gather_max_concurrent,
                 },
+                fk_lock_wait: cfg.fk_lock_wait_seconds,
             };
             let mut budget = Budget::mb(cfg.max_statement_memory_mb);
             let r = sprig_router::execute_to(plan, &mut be, &mut budget, &mut sink).await;

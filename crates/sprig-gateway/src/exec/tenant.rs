@@ -1268,6 +1268,31 @@ impl PassSession {
             Ok(p) => p,
             Err(e) => return Ok(Route::Done(self.fail(out, &e).await?)),
         };
+        // Chapter 19 (R3): a foreign key the gateway keeps leaves the
+        // shards' statement and becomes a `foreign_keys` row.
+        let mut fk_change = None;
+        let wire = out.wire();
+        let physical = match self
+            .fk_ddl_plan(cx, &physical, &ResultMapper::relay(), &*map, wire)
+            .await
+        {
+            super::router::FkDdl::Keep => physical,
+            super::router::FkDdl::Run(sql, change) => {
+                fk_change = Some(change);
+                sql
+            }
+            super::router::FkDdl::Skip(change) => {
+                if let Err(e) = self.fk_ddl_commit(&change).await {
+                    return Ok(Route::Done(self.fail(out, &e).await?));
+                }
+                out.ok(OkPacket::new(status)).await?;
+                return Ok(Route::Done(Step {
+                    errored: false,
+                    status: Some(status),
+                }));
+            }
+            super::router::FkDdl::Fail(e) => return Ok(Route::Done(self.fail(out, &e).await?)),
+        };
         // Chapter 13's 64-index rule: room for the user's indexes.
         let (lex, _) = self.lex_opts();
         if let Some(ts) = self.tenant.as_deref() {
@@ -1359,6 +1384,12 @@ impl PassSession {
             && let Some(ts) = self.tenant.as_deref()
         {
             crate::tenant::authz::after_rename(ts, v).await;
+        }
+        if result.is_ok()
+            && let Some(change) = &fk_change
+            && let Err(e) = self.fk_ddl_commit(change).await
+        {
+            return Ok(Route::Done(self.fail(out, &e).await?));
         }
         match result {
             Ok(outcome) => {

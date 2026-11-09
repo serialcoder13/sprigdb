@@ -38,7 +38,7 @@ serde.workspace = true
 serde_json.workspace = true
 sprig-catalog.workspace = true
 sprig-common.workspace = true
-# sprig-logic-js.workspace = true
+sprig-logic-js.workspace = true
 sprig-meta.workspace = true
 sprig-proto-kafka = { path = "../sprig-proto-kafka" }
 sprig-settings.workspace = true

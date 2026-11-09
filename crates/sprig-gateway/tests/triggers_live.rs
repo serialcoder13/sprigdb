@@ -375,7 +375,8 @@ $$",
         let q = format!(
             "SELECT COUNT(*), MAX(attempts), MAX(error_code) FROM t{t}_sprig.logic_dead_letters d \
              JOIN t{t}_sprig.logic_message_sources s ON s.binding_id = d.binding_id \
-             WHERE s.name = 'jobs' AND d.event_key LIKE 'm%'"
+             WHERE s.binding_id = (SELECT MAX(binding_id) FROM t{t}_sprig.logic_message_sources \
+             WHERE name = 'jobs') AND d.event_key LIKE 'm%'"
         );
         let end = Instant::now() + Duration::from_secs(60);
         let row = loop {
@@ -408,15 +409,12 @@ async fn publishing_from_logic_follows_the_transaction() {
     let mut c = conn(&e.mysql).await;
     // The stream of the first test, or a fresh one.
     let _ = sql(&mut c, "CREATE DATABASE IF NOT EXISTS r9t_sec").await;
-    let _ = sql(
-        &mut c,
-        "CREATE STREAM r9t_sec.user_events KEY (user_id) PARTITIONS 4",
-    )
-    .await;
+    let _ = sql(&mut c, "DROP STREAM r9t_sec.rb_events").await;
+    ok(&mut c, "CREATE STREAM r9t_sec.rb_events PARTITIONS 2").await;
     ok(
         &mut c,
         r"CREATE OR REPLACE PROCEDURE r9t_sec.pub_evt(n BIGINT) LANGUAGE javascript AS $$
-db.publish('r9t_sec.user_events', n, {type: 'rb.test', user_id: n});
+db.publish('r9t_sec.rb_events', n, {type: 'rb.test', user_id: n});
 $$",
     )
     .await;
@@ -430,7 +428,7 @@ $$",
     ok(&mut c, "COMMIT").await;
     let got = wait_count(
         &mut c,
-        "SELECT COUNT(*) FROM r9t_sec.user_events WHERE `key` = '900002'",
+        "SELECT COUNT(*) FROM r9t_sec.rb_events WHERE `key` = '900002'",
         1,
         30,
     )
@@ -440,7 +438,7 @@ $$",
     assert_eq!(
         count(
             &mut c,
-            "SELECT COUNT(*) FROM r9t_sec.user_events WHERE `key` = '900001'"
+            "SELECT COUNT(*) FROM r9t_sec.rb_events WHERE `key` = '900001'"
         )
         .await,
         0,
@@ -452,19 +450,20 @@ $$",
         let mut r = Conn::from_url(root).await.unwrap();
         let read = |t: u64| {
             format!(
-                "SELECT offset_no FROM t{t}_sprig.stream_offsets WHERE group_name = 'r9t_billing' AND partition_no = 2"
+                "SELECT offset_no FROM t{t}_sprig.stream_offsets WHERE group_name = 'r9t_billing' AND partition_no = 1"
             )
         };
         let _ = r.query_drop(format!(
             "DELETE FROM t{t}_sprig.stream_offsets WHERE group_name = 'r9t_billing'"
         ))
         .await;
-        ok(&mut c, "CREATE TABLE IF NOT EXISTS r9t_sec.invoices (id INT PRIMARY KEY)").await;
+        ok(&mut c, "DROP TABLE IF EXISTS r9t_sec.invoices").await;
+        ok(&mut c, "CREATE TABLE r9t_sec.invoices (id INT PRIMARY KEY)").await;
         ok(&mut c, "START TRANSACTION").await;
         ok(&mut c, "INSERT INTO r9t_sec.invoices VALUES (1)").await;
         ok(
             &mut c,
-            "CALL sprig.commit_offset('r9t_billing', 'r9t_sec.user_events', 2, 17)",
+            "CALL sprig.commit_offset('r9t_billing', 'r9t_sec.rb_events', 1, 17)",
         )
         .await;
         ok(&mut c, "ROLLBACK").await;
@@ -474,7 +473,7 @@ $$",
         ok(&mut c, "INSERT INTO r9t_sec.invoices VALUES (2)").await;
         ok(
             &mut c,
-            "CALL sprig.commit_offset('r9t_billing', 'r9t_sec.user_events', 2, 18)",
+            "CALL sprig.commit_offset('r9t_billing', 'r9t_sec.rb_events', 1, 18)",
         )
         .await;
         ok(&mut c, "COMMIT").await;
@@ -483,7 +482,7 @@ $$",
         // Outside a transaction: at once.
         ok(
             &mut c,
-            "CALL sprig.commit_offset('r9t_billing', 'r9t_sec.user_events', 2, 19)",
+            "CALL sprig.commit_offset('r9t_billing', 'r9t_sec.rb_events', 1, 19)",
         )
         .await;
         let now: Option<u64> = r.query_first(read(t)).await.unwrap();
@@ -494,35 +493,63 @@ $$",
         );
     }
 
-    // db.mq.publish inside a rolled-back transaction: nothing delivered.
-    if e.amqp.is_some() && sql(&mut c, "SELECT 1 FROM r9t_q.done LIMIT 1").await.is_ok() {
+    // db.mq.publish inside a rolled-back transaction delivers nothing;
+    // db.mq.get and db.mq.ack consume inside the caller's transaction.
+    // The SQL and logic calls use vhost `/`, the database `mq` (here the
+    // private tenant's own).
+    if let Some(amqp) = &e.amqp {
+        ok(&mut c, "CREATE DATABASE IF NOT EXISTS mq").await;
+        let a = Connection::connect(
+            &format!("amqp://{USER}:{PASSWORD}@{amqp}/%2f"),
+            ConnectionProperties::default(),
+        )
+        .await
+        .unwrap();
+        let ch = a.create_channel().await.unwrap();
+        ch.queue_declare(
+            "r9t_rb".into(),
+            QueueDeclareOptions {
+                durable: true,
+                ..QueueDeclareOptions::default()
+            },
+            FieldTable::default(),
+        )
+        .await
+        .unwrap();
+        ok(&mut c, "CREATE DATABASE IF NOT EXISTS r9t_q").await;
         ok(
             &mut c,
             r"CREATE OR REPLACE PROCEDURE r9t_q.enqueue(n BIGINT) LANGUAGE lua AS $$
-db.mq.publish('', 'jobs', cjson.encode({n = n}))
+db.mq.publish('', 'r9t_rb', cjson.encode({n = n}))
 $$",
         )
         .await;
-        let base = count(&mut c, "SELECT COUNT(*) FROM r9t_q.done").await;
-        // vhost `/` is the database `mq`; the procedure's vhost is the
-        // session's default, so publish from r9t_q's session.
-        ok(&mut c, "USE r9t_q").await;
+        ok(
+            &mut c,
+            r"CREATE OR REPLACE PROCEDURE r9t_q.take() LANGUAGE javascript AS $$
+const m = db.mq.get('r9t_rb', {max: 5, leaseMs: 5000});
+for (const x of m) db.mq.ack(x.deliveryToken);
+return { got: m.map((x) => JSON.parse(x.body).n).join(',') };
+$$",
+        )
+        .await;
         ok(&mut c, "START TRANSACTION").await;
-        let r = sql(&mut c, "CALL r9t_q.enqueue(5001)").await;
+        ok(&mut c, "CALL r9t_q.enqueue(5001)").await;
         ok(&mut c, "ROLLBACK").await;
-        if let Err(err) = r {
-            eprintln!("db.mq.publish from SQL's vhost: {err:?} (the SQL calls use vhost /)");
-        } else {
-            ok(&mut c, "START TRANSACTION").await;
-            ok(&mut c, "CALL r9t_q.enqueue(5002)").await;
-            ok(&mut c, "COMMIT").await;
-            let got = wait_count(&mut c, "SELECT COUNT(*) FROM r9t_q.done", base + 1, 30).await;
-            assert_eq!(got, base + 1);
-            assert_eq!(
-                count(&mut c, "SELECT COUNT(*) FROM r9t_q.done WHERE n = 5001").await,
-                0
-            );
-        }
+        ok(&mut c, "START TRANSACTION").await;
+        ok(&mut c, "CALL r9t_q.enqueue(5002)").await;
+        ok(&mut c, "COMMIT").await;
+        // The forwarder moves committed outbox rows within ~200 ms.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        ok(&mut c, "START TRANSACTION").await;
+        let got = ok(&mut c, "CALL r9t_q.take()").await;
+        ok(&mut c, "COMMIT").await;
+        let got = got[0].iter().flatten().cloned().collect::<Vec<_>>().join("|");
+        assert!(got.ends_with("5002"), "only the committed publish arrived: {got}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let left = ok(&mut c, "CALL sprig.mq_get('r9t_rb', 10, 1000)").await;
+        assert!(left.is_empty(), "db.mq.ack committed: nothing left ({left:?})");
+        a.close(200, "done".into()).await.unwrap();
     }
 }
 

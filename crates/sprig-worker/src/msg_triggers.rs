@@ -334,6 +334,21 @@ impl MsgEnv {
         let Some(version) = m.active_version else {
             return Ok(None);
         };
+        // The source's database (a dropped database's streams and queues
+        // are gone, even when a new one has its name).
+        let db_state: Option<String> = c
+            .exec_first(
+                format!("SELECT state FROM {}.`databases` WHERE db_id = ?", quote(&schema)),
+                (source.db_id,),
+            )
+            .await
+            .map_err(|e| {
+                SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable")
+                    .with_source(e)
+            })?;
+        if db_state.as_deref() != Some("active") {
+            return Ok(None);
+        }
         // The source itself.
         let alive = match source.kind {
             SourceKind::Stream => StreamsStore::new(schema.clone())
@@ -344,10 +359,11 @@ impl MsgEnv {
                 let r: std::result::Result<Option<u64>, _> = c
                     .exec_first(
                         format!(
-                            "SELECT object_id FROM {}.mq_queues WHERE object_id = ? AND state = 'active'",
+                            "SELECT object_id FROM {}.mq_queues WHERE object_id = ? AND db_id = ? \
+                             AND state = 'active'",
                             quote(&schema)
                         ),
-                        (source.object_id,),
+                        (source.object_id, source.db_id),
                     )
                     .await;
                 matches!(r, Ok(Some(_)))

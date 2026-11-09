@@ -359,6 +359,9 @@ pub(crate) struct TenantLayout {
     /// move): a transaction that used a shard whose epoch moved is
     /// rolled back with 39424.
     pub epochs: HashMap<String, u64>,
+    /// The catalog object of each table the router knows, by its default
+    /// schema and name, lowercase (chapter 19's DDL path, R3).
+    pub objects: HashMap<(String, String), u64>,
 }
 
 impl TenantLayout {
@@ -529,6 +532,7 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
         .collect();
     let mut tables = Vec::new();
     let mut held = HashMap::new();
+    let mut objects = HashMap::new();
     let mut seen = HashSet::new();
     for m in &state.members {
         let Some(obj) = cat.objects.get(ObjectId(m.object)) else {
@@ -609,6 +613,13 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
         if let Some(u) = held_groups.get(&m.group) {
             held.insert(obj.name.to_ascii_lowercase(), *u);
         }
+        objects.insert(
+            (
+                default_schema.to_ascii_lowercase(),
+                obj.name.to_ascii_lowercase(),
+            ),
+            m.object,
+        );
         tables.push(CatalogTable {
             object: m.object,
             db: m.db,
@@ -635,6 +646,7 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
         clusters,
         missing,
         epochs,
+        objects,
     }
 }
 

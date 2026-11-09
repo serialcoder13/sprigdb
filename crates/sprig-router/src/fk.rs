@@ -320,7 +320,9 @@ pub fn probe_sql(
     table: &str,
     cols: &[String],
     tuples: &[(usize, &[FkVal])],
+    wait: Option<u64>,
 ) -> String {
+    let wait = wait.map_or_else(String::new, |n| format!(" WAIT {n}"));
     let mut out = String::new();
     for (i, t) in tuples {
         if !out.is_empty() {
@@ -328,7 +330,7 @@ pub fn probe_sql(
         }
         let _ = write!(
             out,
-            "(SELECT {i} FROM {}.{} WHERE {} LIMIT 1 LOCK IN SHARE MODE)",
+            "(SELECT {i} FROM {}.{} WHERE {} LIMIT 1 LOCK IN SHARE MODE{wait})",
             q(schema),
             q(table),
             tuple_cond(cols, t)
@@ -421,7 +423,12 @@ async fn present(
             if want.is_empty() {
                 continue;
             }
-            let t = target_of(entry, s, probe_sql(&schema, &entry.name, cols, &want));
+            let wait = be.fk_lock_wait();
+            let t = target_of(
+                entry,
+                s,
+                probe_sql(&schema, &entry.name, cols, &want, wait),
+            );
             let ShardOutcome::Rows(rows) = be.run(&t, &t.sql, budget).await? else {
                 return Err(SprigError::internal("a foreign-key probe answered no rows"));
             };
@@ -798,6 +805,7 @@ mod tests {
             "p",
             &["id".into()],
             &[(0, &a[..]), (3, &b[..])],
+            None,
         );
         assert_eq!(
             s,
@@ -805,5 +813,8 @@ mod tests {
              UNION ALL (SELECT 3 FROM `t1_d1_g2_s1`.`p` WHERE `id` = _utf8mb4 X'41' LIMIT 1 \
              LOCK IN SHARE MODE)"
         );
+        // `fk.lock_wait_seconds` on every part.
+        let s = probe_sql("s", "p", &["id".into()], &[(0, &a[..])], Some(5));
+        assert!(s.ends_with("LIMIT 1 LOCK IN SHARE MODE WAIT 5)"), "{s}");
     }
 }

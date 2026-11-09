@@ -170,6 +170,7 @@ fn unescape(s: &str) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&#34;", "\"")
+        .replace("&#39;", "'")
         .replace("&amp;", "&")
 }
 
@@ -352,6 +353,7 @@ impl S3Client {
     /// # Errors
     /// 39221 (retryable) when the connection fails or times out; the
     /// answer otherwise, whatever its status.
+    #[allow(clippy::too_many_lines)] // signing, pooling, one retry
     pub async fn request(
         &self,
         method: &str,
@@ -389,7 +391,11 @@ impl S3Client {
             &self.creds,
         ));
         let q = sigv4::canonical_query(query);
-        let uri = if q.is_empty() { path } else { format!("{path}?{q}") };
+        let uri = if q.is_empty() {
+            path
+        } else {
+            format!("{path}?{q}")
+        };
         let build = || {
             let mut b = hyper::Request::builder().method(method).uri(uri.as_str());
             for (k, v) in &headers {
@@ -629,7 +635,9 @@ impl S3Client {
     /// # Errors
     /// As [`S3Client::put_object`].
     pub async fn head_object(&self, key: &str) -> Result<Option<u64>> {
-        let r = self.request("HEAD", Some(key), &[], &[], Bytes::new()).await?;
+        let r = self
+            .request("HEAD", Some(key), &[], &[], Bytes::new())
+            .await?;
         if r.status == 404 {
             return Ok(None);
         }
@@ -648,7 +656,9 @@ impl S3Client {
     /// # Errors
     /// As [`S3Client::put_object`].
     pub async fn get_object(&self, key: &str) -> Result<Option<Bytes>> {
-        let r = self.request("GET", Some(key), &[], &[], Bytes::new()).await?;
+        let r = self
+            .request("GET", Some(key), &[], &[], Bytes::new())
+            .await?;
         if r.status == 404 {
             return Ok(None);
         }

@@ -76,6 +76,20 @@ key! {
     "Gathered reads per gateway at once"
 }
 
+/// `fk.lock_wait_seconds` (chapter 19, R3): how long a foreign-key probe
+/// waits for a row lock (`LOCK IN SHARE MODE WAIT n`) before 1205.
+pub static FK_LOCK_WAIT_SECONDS: Setting<u64> = Setting {
+    key: "fk.lock_wait_seconds",
+    default: 5,
+    scopes: Scopes::DATA,
+    hard: HardBounds::range(0, 31_536_000),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 19,
+    doc: "Lock wait for foreign-key checks",
+};
+sprig_settings::register!(FK_LOCK_WAIT_SECONDS);
+
 /// What the router reads for one tenant: chapter 17's keys, resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouterConfig {
@@ -95,6 +109,8 @@ pub struct RouterConfig {
     pub gather_max_rows: u64,
     /// `router.gather.max_concurrent`.
     pub gather_max_concurrent: usize,
+    /// `fk.lock_wait_seconds` (chapter 19).
+    pub fk_lock_wait_seconds: u64,
 }
 
 impl Default for RouterConfig {
@@ -108,6 +124,7 @@ impl Default for RouterConfig {
             plan_cache_entries: to_usize(PLAN_CACHE_ENTRIES.default),
             gather_max_rows: GATHER_MAX_ROWS.default,
             gather_max_concurrent: to_usize(GATHER_MAX_CONCURRENT.default),
+            fk_lock_wait_seconds: FK_LOCK_WAIT_SECONDS.default,
         }
     }
 }
@@ -133,6 +150,7 @@ impl RouterConfig {
             plan_cache_entries: to_usize(get(&PLAN_CACHE_ENTRIES, ctx)),
             gather_max_rows: get(&GATHER_MAX_ROWS, ctx),
             gather_max_concurrent: to_usize(get(&GATHER_MAX_CONCURRENT, ctx)).max(1),
+            fk_lock_wait_seconds: get(&FK_LOCK_WAIT_SECONDS, ctx),
         }
     }
 }
@@ -158,6 +176,7 @@ mod tests {
             ("router.plan_cache_entries", 10_000),
             ("router.gather.max_rows", 100_000),
             ("router.gather.max_concurrent", 4),
+            ("fk.lock_wait_seconds", 5),
         ] {
             let def = reg
                 .get(k)

@@ -3,7 +3,7 @@
 //! aws-smithy stack and a second `http` version for about 150 lines.
 //! Checked against AWS's signing test suite (`get-vanilla`,
 //! `post-vanilla`, `get-vanilla-query-order-key-case`,
-//! `post-x-www-form-urlencoded`) and live against MinIO, which checks
+//! `post-x-www-form-urlencoded`) and live against `MinIO`, which checks
 //! signatures strictly.
 //!
 //! ```text
@@ -49,7 +49,7 @@ fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
     hmac::sign(&k, data).as_ref().to_vec()
 }
 
-/// RFC 3986 encoding as SigV4 wants it: every byte but `A-Za-z0-9-_.~`
+/// RFC 3986 encoding as `SigV4` wants it: every byte but `A-Za-z0-9-_.~`
 /// is `%XX`; `/` too unless `keep_slash`.
 #[must_use]
 pub fn uri_encode(s: &str, keep_slash: bool) -> String {
@@ -186,7 +186,11 @@ mod tests {
             ("Host".into(), "example.amazonaws.com".into()),
             ("X-Amz-Date".into(), "20150830T123600Z".into()),
         ];
-        h.extend(extra.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())));
+        h.extend(
+            extra
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
         let ph = sha256_hex(body);
         authorization(
             &Signing {
@@ -213,7 +217,13 @@ mod tests {
             "Signature=5da7c1a2acd57cee7505fc6676e4e544621c30862966e37dddb68e92efbe5d6b"
         ));
         assert!(
-            sign("GET", &[("Param2", "value2"), ("Param1", "value1")], &[], b"").ends_with(
+            sign(
+                "GET",
+                &[("Param2", "value2"), ("Param1", "value1")],
+                &[],
+                b""
+            )
+            .ends_with(
                 "Signature=b97d918cfa904a5beff61c982a1b6f458b799221646efd99d3219ec94cdf2500"
             )
         );
@@ -246,7 +256,10 @@ mod tests {
         assert_eq!(uri_encode("a b/c~d+é", true), "a%20b/c~d%2B%C3%A9");
         assert_eq!(uri_encode("a/b", false), "a%2Fb");
         assert_eq!(
-            canonical_query(&[("uploads".into(), String::new()), ("a".into(), "x y".into())]),
+            canonical_query(&[
+                ("uploads".into(), String::new()),
+                ("a".into(), "x y".into())
+            ]),
             "a=x%20y&uploads="
         );
         assert_eq!(amz_date(1_440_938_160_000), "20150830T123600Z");

@@ -536,7 +536,10 @@ async fn throughput_through_the_gateway_without_the_owner() {
         let _ = c.close(200, "bye".into()).await;
     }
     let owner = newest_owner().unwrap();
-    let here = if owner == "gw-1" { b } else { a };
+    // `SPRIG_THROUGHPUT_ON_OWNER=1`: through the owner's gateway instead,
+    // for comparison.
+    let on_owner = var("SPRIG_THROUGHPUT_ON_OWNER").is_some();
+    let here = if (owner == "gw-1") != on_owner { b } else { a };
     eprintln!("owner {owner}; publishing and consuming through {here}");
     let c = connect(&here).await;
     let ch = c.create_channel().await.unwrap();
@@ -593,12 +596,110 @@ async fn throughput_through_the_gateway_without_the_owner() {
     }
     let con_rate = f64::from(n) / t0.elapsed().as_secs_f64();
     eprintln!(
-        "through the non-owner gateway, {n} messages of 128 bytes: {pub_rate:.0} publishes/s with confirms, {con_rate:.0} deliveries/s with acks"
+        "through the {} gateway, {n} messages of 128 bytes: {pub_rate:.0} publishes/s with confirms, {con_rate:.0} deliveries/s with acks",
+        if on_owner { "owner's" } else { "non-owner" }
     );
     let _ = cch.close(200, "bye".into()).await;
     let ch2 = c.create_channel().await.unwrap();
     let _ = ch2
         .queue_delete(q.as_str().into(), QueueDeleteOptions::default())
         .await;
+    let _ = c.close(200, "bye".into()).await;
+}
+
+/// `sprig.mq_*` in another vhost (the optional last argument), and the
+/// session's commit hook: an `mq_ack` committed in a transaction is
+/// settled at its owner at once (`sprig_queue_acked_total{in_txn="yes"}`
+/// on either gateway), not after the owner's 5-second check.
+/// `SPRIG_MYSQL_URL` (gateway 1), `SPRIG_METRICS` (both gateways'
+/// telemetry addresses, comma-separated); the vhost `mq2` must exist as a
+/// database.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sql_vhost_argument_and_the_commit_hook() {
+    use mysql_async::prelude::Queryable;
+    let (Some([_, b]), Some(url), Some(metrics)) =
+        (addrs(), var("SPRIG_MYSQL_URL"), var("SPRIG_METRICS"))
+    else {
+        return;
+    };
+    let acked = || -> f64 {
+        metrics
+            .split(',')
+            .filter_map(|m| {
+                let out = std::process::Command::new("curl")
+                    .args(["-fsS", &format!("http://{m}/metrics")])
+                    .output()
+                    .ok()?;
+                let text = String::from_utf8_lossy(&out.stdout).into_owned();
+                text.lines()
+                    .find(|l| l.starts_with("sprig_queue_acked_total{in_txn=\"yes\"}"))
+                    .and_then(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+            })
+            .sum()
+    };
+    let (u, p) = (
+        var("SPRIG_AMQP_USER").unwrap(),
+        var("SPRIG_AMQP_PASSWORD").unwrap(),
+    );
+    let c = Connection::connect(
+        &format!("amqp://{u}:{p}@{b}/mq2"),
+        ConnectionProperties::default(),
+    )
+    .await
+    .unwrap();
+    let ch = c.create_channel().await.unwrap();
+    let q = uniq("sqlvh");
+    declare(&ch, &q).await;
+    let mut s = mysql_async::Conn::new(mysql_async::Opts::from_url(&url).unwrap())
+        .await
+        .unwrap();
+    let routed: Option<String> = s
+        .query_first(format!(
+            "CALL sprig.mq_publish('', '{q}', 'hello', '{{}}', 1, 'mq2')"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(routed.as_deref(), Some("1"));
+    // Not in vhost `/`: mandatory and unroutable there.
+    let e = s
+        .query_drop(format!("CALL sprig.mq_publish('', '{q}', 'x', '{{}}', 1)"))
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("39255"), "{e}");
+    let before = acked();
+    s.query_drop("START TRANSACTION").await.unwrap();
+    let row: Option<(String, String)> = s
+        .query_first(format!("CALL sprig.mq_get('{q}', 1, 60000, 'mq2')"))
+        .await
+        .unwrap()
+        .map(|r: mysql_async::Row| {
+            (
+                r.get::<String, _>(0).unwrap(),
+                r.get::<String, _>(1).unwrap(),
+            )
+        });
+    let (token, body) = row.unwrap();
+    assert_eq!(body, "hello");
+    s.query_drop(format!("CALL sprig.mq_ack('{token}')"))
+        .await
+        .unwrap();
+    s.query_drop("COMMIT").await.unwrap();
+    let t0 = Instant::now();
+    while acked() < before + 1.0 {
+        assert!(
+            t0.elapsed() < Duration::from_secs(4),
+            "the owner wasn't told before its own 5 s check"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    eprintln!(
+        "commit hook: the owner settled the acknowledgement {} ms after COMMIT",
+        t0.elapsed().as_millis()
+    );
+    let n = ch
+        .queue_delete(q.as_str().into(), QueueDeleteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
     let _ = c.close(200, "bye".into()).await;
 }

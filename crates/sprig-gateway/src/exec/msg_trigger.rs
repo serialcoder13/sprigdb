@@ -575,6 +575,11 @@ impl PassSession {
             Ok(v) => v,
             Err(e) => return RunReply::failed(&mq_err(&e)),
         };
+        // The trigger reads the queue of its own database: one with the
+        // name in a database made since is another queue.
+        if v.vhost().db_id != req.source.db_id {
+            return RunReply::of(RunOutcome::Empty);
+        }
         let ds = match v.get(&req.source.name, 1, req.lease_ms.max(1000)).await {
             Ok(d) => d,
             Err(e) => return RunReply::failed(&mq_err(&e)),
