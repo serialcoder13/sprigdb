@@ -100,7 +100,13 @@ struct ClusterState {
     probing_since: Option<Instant>,
     last_pass: Option<Instant>,
     heartbeat: Option<(sprig_common::ids::NodeId, HeartbeatWriter)>,
+    /// The `sprig_ctl` reference `sprig_gw` was last made sure of with,
+    /// when, and whether that worked.
+    gw_checked: Option<(String, Instant, bool)>,
 }
+
+/// A failed `sprig_gw` check is tried again after this long.
+const GW_RECHECK: Duration = Duration::from_secs(3600);
 
 /// What one pass did.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -448,6 +454,21 @@ impl ClusterMonitor {
             .increment(1);
         }
 
+        // Chapter 09: the gateways' monitoring account, at the first pass
+        // after the controller starts, when the secret changes, then daily
+        // (hourly after a failure).
+        let due = st.gw_checked.as_ref().is_none_or(|(sec, at, ok)| {
+            let every = if *ok { DEEP_PROBE_PERIOD } else { GW_RECHECK };
+            *sec != rec.secrets.ctl || at.elapsed() >= every
+        });
+        if due
+            && let Some(i) = sprig_cluster::probe::active_target(rec.topology, &probes)
+            && let Some(node) = nodes.get(i)
+        {
+            let ok = ensure_gw(id, node, &rec.secrets, settings.probe_timeout).await;
+            st.gw_checked = Some((rec.secrets.ctl.clone(), Instant::now(), ok));
+        }
+
         let deep_next = full_probe_triggers(&st.last_probes, &probes);
         if !deep_next.is_empty() {
             tracing::info!(cluster = %id, triggers = ?deep_next, "a deep probe follows");
@@ -573,6 +594,35 @@ fn repl_endpoints(
             tracing::warn!(cluster = %cluster, error = %e.message,
                 "sprig_repl credential doesn't resolve; the binlog dump probe is skipped");
             None
+        }
+    }
+}
+
+/// Makes sure `sprig_gw` exists on `node` (the writer); whether it does.
+async fn ensure_gw(
+    id: &ClusterId,
+    node: &NodeSpec,
+    secrets: &SecretRefs,
+    timeout: Duration,
+) -> bool {
+    use sprig_provision::gw_account::{self, Ensured};
+    let r = async {
+        let gw = gw_account::gw_credential(&secrets.ctl)?;
+        let ctl = CredentialConnector::ctl(secrets).endpoint(node)?;
+        gw_account::ensure(node, &ctl, &gw, timeout).await
+    }
+    .await;
+    match r {
+        Ok(Ensured::Present) => true,
+        Ok(Ensured::Created) => {
+            tracing::info!(event = "cluster.monitor_account_created", cluster = %id, node = %node.node,
+                "created the gateways' monitoring account sprig_gw");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(event = "cluster.monitor_account_missing", cluster = %id, error = %e,
+                "the gateways' monitoring account sprig_gw is missing");
+            false
         }
     }
 }

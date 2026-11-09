@@ -51,10 +51,13 @@
 //!
 //! **Deletion** (chapter 23's `delete_tenant`): only a leaf that is
 //! `active` or `failed`; the entry becomes `deleting` and the parent's
-//! child count drops in one transaction. Cleanup then drops the catalog
-//! schema (refused while the catalog lists live databases; left alone if
-//! it carries another tenant's mark), runs the hooks' `dropping`, removes
-//! the shard map, and finally the entry and its name.
+//! child count drops in one transaction. Cleanup ([`cleanup`]'s steps)
+//! then ends the tenant's mover jobs, runs the hooks' `dropping`, waits
+//! while the catalog lists live databases, removes the tenant's schemas,
+//! accounts and name rows on every cluster of the DC by exact names
+//! (`sprig_cluster::purge`), drops the catalog schema (left alone if it
+//! carries another tenant's mark), deletes its finished job records and
+//! its keys in the DC tier, and finally the entry and its name.
 //!
 //! **Ids are never reused** (chapter 23). Besides the directory's counter,
 //! a new tenant's id is raised past every schema shaped like a tenant's
@@ -76,13 +79,14 @@ use std::time::{Duration, Instant};
 
 use sprig_catalog::bootstrap::{
     BootstrapProgress, BootstrapStep, CatalogClaim, catalog_owner, claim_catalog, create_catalog,
-    drop_catalog, read_progress, tenant_schema_ids, write_progress,
+    drop_catalog, live_databases, read_progress, tenant_schema_ids, write_progress,
 };
 use sprig_catalog::migrate::MigrateOpts;
 use sprig_catalog::placement::ShardMap;
 use sprig_catalog::settings::BOOTSTRAP_TIMEOUT_MINUTES;
 use sprig_catalog::{CatalogEndpoint, Migrator, Module, SettingsBackend, SettingsTx, Store};
-use sprig_common::ids::{ClusterId, DcId, TenantId};
+use sprig_common::ids::{ClusterId, DcId, JobId, TenantId};
+use sprig_common::names::SchemaName;
 use sprig_common::time::Clock;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_meta::{Cmp, Consistency, ListOpts, MetaStore, Op, Record, Txn};
@@ -729,11 +733,13 @@ where
         Ok(view)
     }
 
-    /// Cleans up a `deleting` tenant; see the module docs.
+    /// Cleans up a `deleting` tenant; see the module docs and
+    /// [`cleanup`]'s steps.
     ///
     /// # Errors
-    /// 39072 while the catalog lists live databases; the store's and
-    /// catalog's errors.
+    /// 39072 while the catalog lists live databases or the tenant's mover
+    /// jobs are still ending; 39504 when `guard` fails; the store's,
+    /// catalog's and clusters' errors.
     pub async fn cleanup(&self, id: TenantId, guard: &[Cmp]) -> Result<()> {
         let Some(e) = self.directory.get(id).await? else {
             return Ok(());
@@ -741,45 +747,105 @@ where
         if e.body().state != TenantState::Deleting {
             return Ok(());
         }
-        let key = ShardMap::catalog_key(self.dc_store.tier(), id)?;
-        match self.locator.cluster_of(id).await? {
+        // 1. Mover jobs end first: their copies and retained sources are
+        //    dropped by the jobs themselves.
+        let jobs = sprig_mover::JobStore::new(Arc::clone(&self.dc_store), Arc::clone(&self.clock));
+        let settled = cleanup::settle_jobs(&jobs, id).await?;
+        if !settled.open.is_empty() {
+            return Err(SprigError::new(
+                SprigCode::TenantNotReady,
+                format!(
+                    "waiting for {} mover jobs of the deleted tenant to end",
+                    settled.open.len()
+                ),
+            ));
+        }
+        // 2. The catalog: hooks, the live-database guard, its database ids.
+        let mark = owner_mark(e.body());
+        let catalog_cluster = self.locator.cluster_of(id).await?;
+        let mut catalog: Option<CatalogEndpoint> = None;
+        let mut db_ids = std::collections::BTreeSet::new();
+        match &catalog_cluster {
             Some(c) => {
                 let ep = CatalogEndpoint {
-                    pool: self.locator.pools().writer(&c).await?,
+                    pool: self.locator.pools().writer(c).await?,
                     store: Store::new(self.locator.schema(id)),
                 };
                 self.hooks.dropping(e.body(), Some(&ep)).await?;
                 match catalog_owner(&ep.pool, ep.store.schema()).await? {
                     // Another tenant's mark: never this tenant's to drop.
-                    Some(found) if !found.is_empty() && found != owner_mark(e.body()) => {
+                    Some(found) if !found.is_empty() && found != mark => {
                         tracing::warn!(tenant = %id, schema = ep.store.schema(), mark = found,
                             "the catalog schema carries another tenant's mark; left in place");
                     }
                     // Ours, unmarked (made before marks existed), or gone.
-                    _ => drop_catalog(&ep.pool, &ep.store).await?,
-                }
-                let kv = self.dc_store.get(&key, Consistency::Linearizable).await?;
-                if let Some(kv) = kv {
-                    let mut when = vec![Cmp::ModRev(key.clone(), kv.mod_revision)];
-                    when.extend_from_slice(guard);
-                    let r = self
-                        .dc_store
-                        .txn(Txn {
-                            when,
-                            then: vec![Op::Delete(key)],
-                            otherwise: Vec::new(),
-                        })
-                        .await?;
-                    if !r.succeeded {
-                        return Err(SprigError::new(
-                            SprigCode::NotLeader,
-                            "this controller no longer leads the DC",
-                        ));
+                    _ => {
+                        let live = live_databases(&ep.pool, &ep.store).await?;
+                        if live > 0 {
+                            return Err(SprigError::new(
+                                SprigCode::TenantNotReady,
+                                format!("the tenant still has {live} databases; drop them first"),
+                            ));
+                        }
+                        db_ids = cleanup::catalog_db_ids(&ep.pool, ep.store.schema()).await?;
+                        catalog = Some(ep);
                     }
                 }
             }
             None => self.hooks.dropping(e.body(), None).await?,
         }
+        // 3. Every cluster of the DC, by exact names. Only under the real
+        //    naming: a test's catalog naming says nothing about who owns
+        //    `t<id>_` names on a shared server.
+        if self.locator.schema(id) == SchemaName::catalog(id).to_string() {
+            let finished: Vec<JobId> = settled.finished.iter().map(|(r, _)| r.job_id).collect();
+            for c in self.locator.pools().sweepable().await? {
+                let pool = self.locator.pools().writer(&c).await?;
+                let mut conn = crate::catalogs::acquire(&pool, "tenant cleanup").await?;
+                let known = sprig_cluster::purge::Known {
+                    owner_mark: Some(mark.clone()),
+                    drop_schemas: true,
+                    db_ids: db_ids.clone(),
+                    keep_catalog: catalog_cluster.as_ref() == Some(&c),
+                    jobs: finished.clone(),
+                };
+                let p = sprig_cluster::purge::purge(&mut conn, id, &known).await?;
+                drop(conn);
+                if let Some(found) = &p.foreign {
+                    tracing::warn!(alert = "TenantCleanupForeignCatalog", tenant = %id, cluster = %c, mark = found,
+                        "another tenant with this id has a catalog here; its names were left alone");
+                    continue;
+                }
+                for (schema, why) in &p.left {
+                    tracing::warn!(tenant = %id, cluster = %c, schema, why, "a schema of the deleted tenant was left in place");
+                }
+                if !p.is_empty() {
+                    tracing::info!(event = "tenant.cleanup", tenant = %id, cluster = %c,
+                        schemas = ?p.drop_schemas,
+                        accounts = ?p.drop_accounts.iter().map(|a| a.user.as_str()).collect::<Vec<_>>(),
+                        names = p.delete_names.len(), jobs = p.jobs.len(),
+                        "deleted tenant's objects removed");
+                }
+            }
+        }
+        // 4. The catalog itself.
+        if let Some(ep) = &catalog {
+            drop_catalog(&ep.pool, &ep.store).await?;
+        }
+        // 5. Finished job records, then the tenant's keys in the DC tier
+        //    (the catalog's shard map among them).
+        for (rec, rev) in &settled.finished {
+            if !jobs.remove_finished(rec, *rev, guard).await? {
+                return Err(SprigError::new(
+                    SprigCode::NotLeader,
+                    "a job record changed, or this controller no longer leads the DC",
+                ));
+            }
+        }
+        let n = cleanup::purge_meta(&*self.dc_store, id, guard).await?;
+        tracing::info!(event = "tenant.cleanup", tenant = %id, keys = n,
+            jobs = settled.finished.len(), "deleted tenant's records removed");
+        // 6. The entry and its name.
         self.directory.remove(&e).await
     }
 
@@ -1002,7 +1068,7 @@ where
                 Err(err) if err.code() == Some(SprigCode::TenantNotReady) => {
                     tracing::warn!(tenant = %key, error = %err, "tenant cleanup waits");
                     Ok(Outcome::Blocked {
-                        reason: "the deleted tenant still has databases",
+                        reason: "the deleted tenant still has databases or open mover jobs",
                     })
                 }
                 Err(err) => Err(err),
@@ -1011,6 +1077,8 @@ where
         }
     }
 }
+
+mod cleanup;
 
 #[cfg(test)]
 mod tests;

@@ -187,7 +187,9 @@ impl RecordBatch {
         let partition_leader_epoch = b.i32()?;
         let magic = b.i8()?;
         if magic != 2 {
-            return Err(CodecError::CorruptRecord("magic (only v2 batches are served)"));
+            return Err(CodecError::CorruptRecord(
+                "magic (only v2 batches are served)",
+            ));
         }
         let crc = b.u32()?;
         if crc32c::crc32c(&whole[CRC_END..LOG_OVERHEAD + len]) != crc {
@@ -201,7 +203,8 @@ impl RecordBatch {
         let producer_epoch = b.i16()?;
         let base_sequence = b.i32()?;
         let count = b.i32()?;
-        let count = usize::try_from(count).map_err(|_| CodecError::CorruptRecord("record count"))?;
+        let count =
+            usize::try_from(count).map_err(|_| CodecError::CorruptRecord("record count"))?;
         let codec = Compression::from_attributes(attributes)?;
         let raw = codec.decompress(b.rest(), max_uncompressed)?;
         let mut rr = Reader::new(&raw);
@@ -236,7 +239,11 @@ impl RecordBatch {
     ///
     /// # Errors
     /// As [`RecordBatch::decode`].
-    pub fn decode_all(buf: &[u8], max_uncompressed: usize, allow_partial: bool) -> Result<Vec<Self>> {
+    pub fn decode_all(
+        buf: &[u8],
+        max_uncompressed: usize,
+        allow_partial: bool,
+    ) -> Result<Vec<Self>> {
         let mut r = Reader::new(buf);
         let mut out = Vec::new();
         while !r.is_empty() {
@@ -303,13 +310,19 @@ fn varbytes(r: &mut Reader<'_>) -> Result<Option<Vec<u8>>> {
         return Ok(None);
     }
     let n = usize::try_from(n).map_err(|_| CodecError::CorruptRecord("record field length"))?;
-    Ok(Some(r.take(n).map_err(|_| CodecError::CorruptRecord("record field length"))?.to_vec()))
+    Ok(Some(
+        r.take(n)
+            .map_err(|_| CodecError::CorruptRecord("record field length"))?
+            .to_vec(),
+    ))
 }
 
 fn decode_record(r: &mut Reader<'_>) -> Result<Record> {
     let len = r.varint()?;
     let len = usize::try_from(len).map_err(|_| CodecError::CorruptRecord("record length"))?;
-    let body = r.take(len).map_err(|_| CodecError::CorruptRecord("record length"))?;
+    let body = r
+        .take(len)
+        .map_err(|_| CodecError::CorruptRecord("record length"))?;
     let mut b = Reader::new(body);
     let attributes = b.i8()?;
     let timestamp_delta = b.varlong()?;
@@ -398,7 +411,7 @@ mod tests {
         };
         let bytes = b.to_bytes().unwrap();
         let record: &[u8] = &[
-            0x0e, // length 7 (zig-zag)
+            0x10, // length 8 (zig-zag)
             0x00, // attributes
             0x00, // timestamp delta 0
             0x00, // offset delta 0
@@ -408,7 +421,7 @@ mod tests {
         ];
         let mut want = vec![];
         want.extend_from_slice(&0i64.to_be_bytes());
-        want.extend_from_slice(&((49 + record.len()) as i32).to_be_bytes());
+        want.extend_from_slice(&i32::try_from(49 + record.len()).unwrap().to_be_bytes());
         want.extend_from_slice(&(-1i32).to_be_bytes()); // leader epoch
         want.push(2); // magic
         let crc_at = want.len();
@@ -475,9 +488,15 @@ mod tests {
         let a = sample(0).to_bytes().unwrap();
         let b = sample(4).to_bytes().unwrap();
         let mut all = [a.clone(), b].concat();
-        assert_eq!(RecordBatch::decode_all(&all, 1 << 20, false).unwrap().len(), 2);
+        assert_eq!(
+            RecordBatch::decode_all(&all, 1 << 20, false).unwrap().len(),
+            2
+        );
         all.extend_from_slice(&a[..30]);
-        assert_eq!(RecordBatch::decode_all(&all, 1 << 20, true).unwrap().len(), 2);
+        assert_eq!(
+            RecordBatch::decode_all(&all, 1 << 20, true).unwrap().len(),
+            2
+        );
         assert!(RecordBatch::decode_all(&all, 1 << 20, false).is_err());
     }
 }

@@ -43,6 +43,8 @@ mod tenant;
 // Chapter 32: typed tables and record hierarchies.
 pub(crate) mod inherit;
 pub(crate) mod types;
+// Chapter 45: event streams (R9).
+mod streams;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -130,6 +132,7 @@ impl Executor for PassThrough {
             wl: None,
             wl_multi: false,
             router: router::RouterState::default(),
+            packet_limit: None,
         })
     }
 }
@@ -155,6 +158,9 @@ pub struct PassSession {
     /// Chapter 17's router: the session's connections to other clusters
     /// and chapter 18's coordinator, for tenants with sharded tables.
     router: router::RouterState,
+    /// The session's packet limit (chapter 05, "Packet limit"), answered
+    /// for `max_allowed_packet` in mixed selects and `SHOW VARIABLES`.
+    packet_limit: Option<u64>,
 }
 
 impl std::fmt::Debug for PassSession {
@@ -932,6 +938,7 @@ impl SessionExec for PassSession {
         req: Request,
         out: &mut dyn ResultSink,
     ) -> Result<ExecSummary> {
+        self.packet_limit = u64::try_from(cx.proto.max_packet).ok();
         // Chapter 24: `SET @sprig_dc` is the gateway's, never MariaDB's.
         if let Some(r) = self.sprig_dc_set(cx, &req, out).await {
             return r;
@@ -1038,6 +1045,7 @@ impl PassSession {
             vars.and_then(|v| v.client_sql_mode.as_deref()),
             vars.and_then(|v| v.vars.get("max_statement_time").map(String::as_str)),
         )
+        .with_max_allowed_packet(self.packet_limit)
     }
 
     /// The rows of `SHOW [SESSION] STATUS` (the client's TLS and

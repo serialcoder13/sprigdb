@@ -505,13 +505,22 @@ async fn login_phase(
         None => None,
     };
 
+    // The packet limit tells the truth (chapter 05, "Packet limit"): no
+    // more than the login's cluster accepts, less the gateway's headroom.
+    let max_packet = match ctx.backends.as_ref() {
+        Some(b) => {
+            b.client_packet_limit(&principal.backend, negotiated.max_packet)
+                .await
+        }
+        None => negotiated.max_packet,
+    };
     let proto = ProtoState {
         persona,
         caps,
         collation: negotiated.collation,
         multi_statements: negotiated.multi_statements,
         framing: negotiated.framing,
-        max_packet: negotiated.max_packet,
+        max_packet,
         tls: proto_tls(session.tls.as_ref()),
         nonce,
     };

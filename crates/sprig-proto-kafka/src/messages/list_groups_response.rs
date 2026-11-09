@@ -49,7 +49,9 @@ impl Message for ListGroupsResponse {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 1 { w.i32(*&self.throttle_time_ms); }
+        if v >= 1 {
+            w.i32(*&self.throttle_time_ms);
+        }
         w.i16(*&self.error_code);
         w.array(&self.groups, flex, |w, e| e.encode(w, v))?;
         if flex {
@@ -61,7 +63,9 @@ impl Message for ListGroupsResponse {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 1 { s.throttle_time_ms = r.i32()?; }
+        if v >= 1 {
+            s.throttle_time_ms = r.i32()?;
+        }
         s.error_code = r.i16()?;
         s.groups = r.array(flex, |r| ListedGroup::decode(r, v))?;
         if flex {
@@ -107,8 +111,12 @@ impl ListedGroup {
         let flex = v >= FLEXIBLE_MIN;
         w.string(&self.group_id, flex)?;
         w.string(&self.protocol_type, flex)?;
-        if v >= 4 { w.string(&self.group_state, flex)?; }
-        if v >= 5 { w.string(&self.group_type, flex)?; }
+        if v >= 4 {
+            w.string(&self.group_state, flex)?;
+        }
+        if v >= 5 {
+            w.string(&self.group_type, flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -124,12 +132,15 @@ impl ListedGroup {
         let mut s = Self::default();
         s.group_id = r.string(flex)?;
         s.protocol_type = r.string(flex)?;
-        if v >= 4 { s.group_state = r.string(flex)?; }
-        if v >= 5 { s.group_type = r.string(flex)?; }
+        if v >= 4 {
+            s.group_state = r.string(flex)?;
+        }
+        if v >= 5 {
+            s.group_type = r.string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

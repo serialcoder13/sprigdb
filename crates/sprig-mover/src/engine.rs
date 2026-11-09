@@ -1699,6 +1699,11 @@ impl Engine {
         // A move drops the retained source schemas; a copy-and-swap the
         // swapped-out table.
         self.env.source.drop_schemas().await?;
+        // A deleted tenant: its accounts and name rows on the source go
+        // too (chapter 08, "Deleting a tenant").
+        if self.claim.rec.purge_tenant {
+            self.env.source.purge_tenant().await?;
+        }
         self.env.target.forget(self.job).await?;
         self.claim.finish(JobState::Done, None).await?;
         tracing::info!(job = %self.job.0, "job done");

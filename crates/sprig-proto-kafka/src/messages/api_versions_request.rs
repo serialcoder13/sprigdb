@@ -46,8 +46,12 @@ impl Message for ApiVersionsRequest {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 3 { w.string(&self.client_software_name, flex)?; }
-        if v >= 3 { w.string(&self.client_software_version, flex)?; }
+        if v >= 3 {
+            w.string(&self.client_software_name, flex)?;
+        }
+        if v >= 3 {
+            w.string(&self.client_software_version, flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -57,12 +61,15 @@ impl Message for ApiVersionsRequest {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 3 { s.client_software_name = r.string(flex)?; }
-        if v >= 3 { s.client_software_version = r.string(flex)?; }
+        if v >= 3 {
+            s.client_software_name = r.string(flex)?;
+        }
+        if v >= 3 {
+            s.client_software_version = r.string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

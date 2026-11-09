@@ -67,13 +67,28 @@ impl Message for JoinGroupResponse {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 2 { w.i32(*&self.throttle_time_ms); }
+        if v >= 2 {
+            w.i32(*&self.throttle_time_ms);
+        }
         w.i16(*&self.error_code);
         w.i32(*&self.generation_id);
-        if v >= 7 { w.nullable_string(self.protocol_type.as_deref(), flex)?; }
-        if v >= 7 { w.nullable_string(self.protocol_name.as_deref(), flex)?; } else { w.string(self.protocol_name.as_ref().ok_or(CodecError::NullNotAllowed("ProtocolName"))?, flex)?; }
+        if v >= 7 {
+            w.nullable_string(self.protocol_type.as_deref(), flex)?;
+        }
+        if v >= 7 {
+            w.nullable_string(self.protocol_name.as_deref(), flex)?;
+        } else {
+            w.string(
+                self.protocol_name
+                    .as_ref()
+                    .ok_or(CodecError::NullNotAllowed("ProtocolName"))?,
+                flex,
+            )?;
+        }
         w.string(&self.leader, flex)?;
-        if v >= 9 { w.bool(*&self.skip_assignment); }
+        if v >= 9 {
+            w.bool(*&self.skip_assignment);
+        }
         w.string(&self.member_id, flex)?;
         w.array(&self.members, flex, |w, e| e.encode(w, v))?;
         if flex {
@@ -85,13 +100,23 @@ impl Message for JoinGroupResponse {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 2 { s.throttle_time_ms = r.i32()?; }
+        if v >= 2 {
+            s.throttle_time_ms = r.i32()?;
+        }
         s.error_code = r.i16()?;
         s.generation_id = r.i32()?;
-        if v >= 7 { s.protocol_type = r.nullable_string(flex)?; }
-        s.protocol_name = if v >= 7 { r.nullable_string(flex)? } else { Some(r.string(flex)?) };
+        if v >= 7 {
+            s.protocol_type = r.nullable_string(flex)?;
+        }
+        s.protocol_name = if v >= 7 {
+            r.nullable_string(flex)?
+        } else {
+            Some(r.string(flex)?)
+        };
         s.leader = r.string(flex)?;
-        if v >= 9 { s.skip_assignment = r.bool()?; }
+        if v >= 9 {
+            s.skip_assignment = r.bool()?;
+        }
         s.member_id = r.string(flex)?;
         s.members = r.array(flex, |r| JoinGroupResponseMember::decode(r, v))?;
         if flex {
@@ -133,7 +158,9 @@ impl JoinGroupResponseMember {
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.string(&self.member_id, flex)?;
-        if v >= 5 { w.nullable_string(self.group_instance_id.as_deref(), flex)?; }
+        if v >= 5 {
+            w.nullable_string(self.group_instance_id.as_deref(), flex)?;
+        }
         w.bytes(&self.metadata, flex)?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
@@ -149,7 +176,9 @@ impl JoinGroupResponseMember {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
         s.member_id = r.string(flex)?;
-        if v >= 5 { s.group_instance_id = r.nullable_string(flex)?; }
+        if v >= 5 {
+            s.group_instance_id = r.nullable_string(flex)?;
+        }
         s.metadata = r.bytes(flex)?;
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
@@ -157,4 +186,3 @@ impl JoinGroupResponseMember {
         Ok(s)
     }
 }
-

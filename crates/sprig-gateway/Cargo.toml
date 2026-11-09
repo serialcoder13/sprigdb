@@ -55,6 +55,11 @@ sprig-txn.workspace = true
 sprig-sql.workspace = true
 # Typed tables and record hierarchies (chapter 32, R6).
 sprig-types = { path = "../sprig-types" }
+# Chapter 45: event streams in tenant sessions (R9).
+sprig-streams = { path = "../sprig-streams" }
+# Chapter 45: the Kafka codec and broker on 9092 (R9).
+sprig-proto-kafka = { path = "../sprig-proto-kafka" }
+uuid.workspace = true
 # Hierarchical data inheritance (chapter 42, R6).
 sprig-inherit = { path = "../sprig-inherit" }
 # Chapter 12: fingerprints, the recorder, the flusher and samples.

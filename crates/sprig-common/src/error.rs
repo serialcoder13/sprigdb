@@ -861,7 +861,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::InheritStatementUnsupported
         | SprigCode::InheritSchemaMismatch
         | SprigCode::InheritedObjectInUse
-        | SprigCode::AuthorizerUnknownToGateways => (Code::FailedPrecondition, 409),
+        | SprigCode::AuthorizerUnknownToGateways
+        | SprigCode::StreamAppendOnly => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
         | SprigCode::DefinerRefused
@@ -881,7 +882,6 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::RequestTooLarge | SprigCode::StreamRecordTooLarge => {
             (Code::InvalidArgument, 413)
         }
-        SprigCode::StreamAppendOnly => (Code::FailedPrecondition, 409),
         SprigCode::StreamOffsetOutOfRange => (Code::OutOfRange, 416),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
         SprigCode::AdminUnauthenticated

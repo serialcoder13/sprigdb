@@ -55,7 +55,9 @@ impl Message for SaslAuthenticateResponse {
         w.i16(*&self.error_code);
         w.nullable_string(self.error_message.as_deref(), flex)?;
         w.bytes(&self.auth_bytes, flex)?;
-        if v >= 1 { w.i64(*&self.session_lifetime_ms); }
+        if v >= 1 {
+            w.i64(*&self.session_lifetime_ms);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -68,11 +70,12 @@ impl Message for SaslAuthenticateResponse {
         s.error_code = r.i16()?;
         s.error_message = r.nullable_string(flex)?;
         s.auth_bytes = r.bytes(flex)?;
-        if v >= 1 { s.session_lifetime_ms = r.i64()?; }
+        if v >= 1 {
+            s.session_lifetime_ms = r.i64()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

@@ -66,12 +66,18 @@ impl Message for JoinGroupRequest {
         let flex = v >= FLEXIBLE_MIN;
         w.string(&self.group_id, flex)?;
         w.i32(*&self.session_timeout_ms);
-        if v >= 1 { w.i32(*&self.rebalance_timeout_ms); }
+        if v >= 1 {
+            w.i32(*&self.rebalance_timeout_ms);
+        }
         w.string(&self.member_id, flex)?;
-        if v >= 5 { w.nullable_string(self.group_instance_id.as_deref(), flex)?; }
+        if v >= 5 {
+            w.nullable_string(self.group_instance_id.as_deref(), flex)?;
+        }
         w.string(&self.protocol_type, flex)?;
         w.array(&self.protocols, flex, |w, e| e.encode(w, v))?;
-        if v >= 8 { w.nullable_string(self.reason.as_deref(), flex)?; }
+        if v >= 8 {
+            w.nullable_string(self.reason.as_deref(), flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -83,12 +89,18 @@ impl Message for JoinGroupRequest {
         let mut s = Self::default();
         s.group_id = r.string(flex)?;
         s.session_timeout_ms = r.i32()?;
-        if v >= 1 { s.rebalance_timeout_ms = r.i32()?; }
+        if v >= 1 {
+            s.rebalance_timeout_ms = r.i32()?;
+        }
         s.member_id = r.string(flex)?;
-        if v >= 5 { s.group_instance_id = r.nullable_string(flex)?; }
+        if v >= 5 {
+            s.group_instance_id = r.nullable_string(flex)?;
+        }
         s.protocol_type = r.string(flex)?;
         s.protocols = r.array(flex, |r| JoinGroupRequestProtocol::decode(r, v))?;
-        if v >= 8 { s.reason = r.nullable_string(flex)?; }
+        if v >= 8 {
+            s.reason = r.nullable_string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -147,4 +159,3 @@ impl JoinGroupRequestProtocol {
         Ok(s)
     }
 }
-

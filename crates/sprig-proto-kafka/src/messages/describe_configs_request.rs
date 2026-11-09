@@ -50,8 +50,12 @@ impl Message for DescribeConfigsRequest {
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.array(&self.resources, flex, |w, e| e.encode(w, v))?;
-        if v >= 1 { w.bool(*&self.include_synonyms); }
-        if v >= 3 { w.bool(*&self.include_documentation); }
+        if v >= 1 {
+            w.bool(*&self.include_synonyms);
+        }
+        if v >= 3 {
+            w.bool(*&self.include_documentation);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -62,8 +66,12 @@ impl Message for DescribeConfigsRequest {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
         s.resources = r.array(flex, |r| DescribeConfigsResource::decode(r, v))?;
-        if v >= 1 { s.include_synonyms = r.bool()?; }
-        if v >= 3 { s.include_documentation = r.bool()?; }
+        if v >= 1 {
+            s.include_synonyms = r.bool()?;
+        }
+        if v >= 3 {
+            s.include_documentation = r.bool()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -104,7 +112,10 @@ impl DescribeConfigsResource {
         let flex = v >= FLEXIBLE_MIN;
         w.i8(*&self.resource_type);
         w.string(&self.resource_name, flex)?;
-        w.nullable_array(self.configuration_keys.as_deref(), flex, |w, e| { w.string(e, flex)?; Ok(()) })?;
+        w.nullable_array(self.configuration_keys.as_deref(), flex, |w, e| {
+            w.string(e, flex)?;
+            Ok(())
+        })?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -127,4 +138,3 @@ impl DescribeConfigsResource {
         Ok(s)
     }
 }
-

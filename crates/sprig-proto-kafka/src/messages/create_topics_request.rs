@@ -51,7 +51,9 @@ impl Message for CreateTopicsRequest {
         let flex = v >= FLEXIBLE_MIN;
         w.array(&self.topics, flex, |w, e| e.encode(w, v))?;
         w.i32(*&self.timeout_ms);
-        if v >= 1 { w.bool(*&self.validate_only); }
+        if v >= 1 {
+            w.bool(*&self.validate_only);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -63,7 +65,9 @@ impl Message for CreateTopicsRequest {
         let mut s = Self::default();
         s.topics = r.array(flex, |r| CreatableTopic::decode(r, v))?;
         s.timeout_ms = r.i32()?;
-        if v >= 1 { s.validate_only = r.bool()?; }
+        if v >= 1 {
+            s.validate_only = r.bool()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -167,7 +171,10 @@ impl CreatableReplicaAssignment {
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.i32(*&self.partition_index);
-        w.array(&self.broker_ids, flex, |w, e| { w.i32(*e); Ok(()) })?;
+        w.array(&self.broker_ids, flex, |w, e| {
+            w.i32(*e);
+            Ok(())
+        })?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -241,4 +248,3 @@ impl CreatableTopicConfig {
         Ok(s)
     }
 }
-

@@ -30,6 +30,14 @@
 //! key-value, Redis and graphs, log groups with more than one shard, and
 //! outboxes in groups with more than one shard (39945).
 
+// Statements read best as text built with format!, and the chapter's
+// pseudocode names (s, p, o, q) are kept.
+#![allow(
+    clippy::many_single_char_names,
+    clippy::format_push_string,
+    clippy::type_complexity
+)]
+
 pub mod ddl;
 pub mod envelope;
 pub mod grammar;
@@ -37,8 +45,10 @@ pub mod maria;
 pub mod memlog;
 pub mod model;
 pub mod partition;
+pub mod publish;
 pub mod read;
 pub mod retention;
+pub mod runtime;
 pub mod sequencer;
 pub mod settings;
 pub mod sql;

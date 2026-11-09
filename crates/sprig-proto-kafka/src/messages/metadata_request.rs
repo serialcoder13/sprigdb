@@ -52,10 +52,26 @@ impl Message for MetadataRequest {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 1 { w.nullable_array(self.topics.as_deref(), flex, |w, e| e.encode(w, v))?; } else { w.array(self.topics.as_ref().ok_or(CodecError::NullNotAllowed("Topics"))?, flex, |w, e| e.encode(w, v))?; }
-        if v >= 4 { w.bool(*&self.allow_auto_topic_creation); }
-        if v >= 8 && v <= 10 { w.bool(*&self.include_cluster_authorized_operations); }
-        if v >= 8 { w.bool(*&self.include_topic_authorized_operations); }
+        if v >= 1 {
+            w.nullable_array(self.topics.as_deref(), flex, |w, e| e.encode(w, v))?;
+        } else {
+            w.array(
+                self.topics
+                    .as_ref()
+                    .ok_or(CodecError::NullNotAllowed("Topics"))?,
+                flex,
+                |w, e| e.encode(w, v),
+            )?;
+        }
+        if v >= 4 {
+            w.bool(*&self.allow_auto_topic_creation);
+        }
+        if v >= 8 && v <= 10 {
+            w.bool(*&self.include_cluster_authorized_operations);
+        }
+        if v >= 8 {
+            w.bool(*&self.include_topic_authorized_operations);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -65,10 +81,20 @@ impl Message for MetadataRequest {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        s.topics = if v >= 1 { r.nullable_array(flex, |r| MetadataRequestTopic::decode(r, v))? } else { Some(r.array(flex, |r| MetadataRequestTopic::decode(r, v))?) };
-        if v >= 4 { s.allow_auto_topic_creation = r.bool()?; }
-        if v >= 8 && v <= 10 { s.include_cluster_authorized_operations = r.bool()?; }
-        if v >= 8 { s.include_topic_authorized_operations = r.bool()?; }
+        s.topics = if v >= 1 {
+            r.nullable_array(flex, |r| MetadataRequestTopic::decode(r, v))?
+        } else {
+            Some(r.array(flex, |r| MetadataRequestTopic::decode(r, v))?)
+        };
+        if v >= 4 {
+            s.allow_auto_topic_creation = r.bool()?;
+        }
+        if v >= 8 && v <= 10 {
+            s.include_cluster_authorized_operations = r.bool()?;
+        }
+        if v >= 8 {
+            s.include_topic_authorized_operations = r.bool()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -104,8 +130,19 @@ impl MetadataRequestTopic {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 10 { w.uuid(&self.topic_id); }
-        if v >= 10 { w.nullable_string(self.name.as_deref(), flex)?; } else { w.string(self.name.as_ref().ok_or(CodecError::NullNotAllowed("Name"))?, flex)?; }
+        if v >= 10 {
+            w.uuid(&self.topic_id);
+        }
+        if v >= 10 {
+            w.nullable_string(self.name.as_deref(), flex)?;
+        } else {
+            w.string(
+                self.name
+                    .as_ref()
+                    .ok_or(CodecError::NullNotAllowed("Name"))?,
+                flex,
+            )?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -119,12 +156,17 @@ impl MetadataRequestTopic {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 10 { s.topic_id = r.uuid()?; }
-        s.name = if v >= 10 { r.nullable_string(flex)? } else { Some(r.string(flex)?) };
+        if v >= 10 {
+            s.topic_id = r.uuid()?;
+        }
+        s.name = if v >= 10 {
+            r.nullable_string(flex)?
+        } else {
+            Some(r.string(flex)?)
+        };
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

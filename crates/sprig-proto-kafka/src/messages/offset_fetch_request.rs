@@ -52,10 +52,28 @@ impl Message for OffsetFetchRequest {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v <= 7 { w.string(&self.group_id, flex)?; }
-        if v <= 7 { if v >= 2 && v <= 7 { w.nullable_array(self.topics.as_deref(), flex, |w, e| e.encode(w, v))?; } else { w.array(self.topics.as_ref().ok_or(CodecError::NullNotAllowed("Topics"))?, flex, |w, e| e.encode(w, v))?; } }
-        if v >= 8 { w.array(&self.groups, flex, |w, e| e.encode(w, v))?; }
-        if v >= 7 { w.bool(*&self.require_stable); }
+        if v <= 7 {
+            w.string(&self.group_id, flex)?;
+        }
+        if v <= 7 {
+            if v >= 2 && v <= 7 {
+                w.nullable_array(self.topics.as_deref(), flex, |w, e| e.encode(w, v))?;
+            } else {
+                w.array(
+                    self.topics
+                        .as_ref()
+                        .ok_or(CodecError::NullNotAllowed("Topics"))?,
+                    flex,
+                    |w, e| e.encode(w, v),
+                )?;
+            }
+        }
+        if v >= 8 {
+            w.array(&self.groups, flex, |w, e| e.encode(w, v))?;
+        }
+        if v >= 7 {
+            w.bool(*&self.require_stable);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -65,10 +83,22 @@ impl Message for OffsetFetchRequest {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v <= 7 { s.group_id = r.string(flex)?; }
-        if v <= 7 { s.topics = if v >= 2 && v <= 7 { r.nullable_array(flex, |r| OffsetFetchRequestTopic::decode(r, v))? } else { Some(r.array(flex, |r| OffsetFetchRequestTopic::decode(r, v))?) }; }
-        if v >= 8 { s.groups = r.array(flex, |r| OffsetFetchRequestGroup::decode(r, v))?; }
-        if v >= 7 { s.require_stable = r.bool()?; }
+        if v <= 7 {
+            s.group_id = r.string(flex)?;
+        }
+        if v <= 7 {
+            s.topics = if v >= 2 && v <= 7 {
+                r.nullable_array(flex, |r| OffsetFetchRequestTopic::decode(r, v))?
+            } else {
+                Some(r.array(flex, |r| OffsetFetchRequestTopic::decode(r, v))?)
+            };
+        }
+        if v >= 8 {
+            s.groups = r.array(flex, |r| OffsetFetchRequestGroup::decode(r, v))?;
+        }
+        if v >= 7 {
+            s.require_stable = r.bool()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -104,8 +134,15 @@ impl OffsetFetchRequestTopic {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v <= 7 { w.string(&self.name, flex)?; }
-        if v <= 7 { w.array(&self.partition_indexes, flex, |w, e| { w.i32(*e); Ok(()) })?; }
+        if v <= 7 {
+            w.string(&self.name, flex)?;
+        }
+        if v <= 7 {
+            w.array(&self.partition_indexes, flex, |w, e| {
+                w.i32(*e);
+                Ok(())
+            })?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -119,8 +156,12 @@ impl OffsetFetchRequestTopic {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v <= 7 { s.name = r.string(flex)?; }
-        if v <= 7 { s.partition_indexes = r.array(flex, |r| Ok(r.i32()?))?; }
+        if v <= 7 {
+            s.name = r.string(flex)?;
+        }
+        if v <= 7 {
+            s.partition_indexes = r.array(flex, |r| Ok(r.i32()?))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -162,10 +203,18 @@ impl OffsetFetchRequestGroup {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 8 { w.string(&self.group_id, flex)?; }
-        if v >= 9 { w.nullable_string(self.member_id.as_deref(), flex)?; }
-        if v >= 9 { w.i32(*&self.member_epoch); }
-        if v >= 8 { w.nullable_array(self.topics.as_deref(), flex, |w, e| e.encode(w, v))?; }
+        if v >= 8 {
+            w.string(&self.group_id, flex)?;
+        }
+        if v >= 9 {
+            w.nullable_string(self.member_id.as_deref(), flex)?;
+        }
+        if v >= 9 {
+            w.i32(*&self.member_epoch);
+        }
+        if v >= 8 {
+            w.nullable_array(self.topics.as_deref(), flex, |w, e| e.encode(w, v))?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -179,10 +228,18 @@ impl OffsetFetchRequestGroup {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 8 { s.group_id = r.string(flex)?; }
-        if v >= 9 { s.member_id = r.nullable_string(flex)?; }
-        if v >= 9 { s.member_epoch = r.i32()?; }
-        if v >= 8 { s.topics = r.nullable_array(flex, |r| OffsetFetchRequestTopics::decode(r, v))?; }
+        if v >= 8 {
+            s.group_id = r.string(flex)?;
+        }
+        if v >= 9 {
+            s.member_id = r.nullable_string(flex)?;
+        }
+        if v >= 9 {
+            s.member_epoch = r.i32()?;
+        }
+        if v >= 8 {
+            s.topics = r.nullable_array(flex, |r| OffsetFetchRequestTopics::decode(r, v))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -218,8 +275,15 @@ impl OffsetFetchRequestTopics {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 8 { w.string(&self.name, flex)?; }
-        if v >= 8 { w.array(&self.partition_indexes, flex, |w, e| { w.i32(*e); Ok(()) })?; }
+        if v >= 8 {
+            w.string(&self.name, flex)?;
+        }
+        if v >= 8 {
+            w.array(&self.partition_indexes, flex, |w, e| {
+                w.i32(*e);
+                Ok(())
+            })?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -233,12 +297,15 @@ impl OffsetFetchRequestTopics {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 8 { s.name = r.string(flex)?; }
-        if v >= 8 { s.partition_indexes = r.array(flex, |r| Ok(r.i32()?))?; }
+        if v >= 8 {
+            s.name = r.string(flex)?;
+        }
+        if v >= 8 {
+            s.partition_indexes = r.array(flex, |r| Ok(r.i32()?))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

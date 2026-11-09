@@ -19,6 +19,8 @@ async-trait.workspace = true
 getrandom.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
+# SCRAM verifiers (chapter 14): PBKDF2, HMAC and SHA-256/512.
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
@@ -31,6 +33,8 @@ sprig-meta.workspace = true
 sprig-proto-mysql.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true
+# SASLprep (RFC 4013) of SCRAM-SHA-256 passwords.
+stringprep.workspace = true
 subtle.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -38,6 +42,8 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# RFC 5802 / 7677 test vectors are base64.
+base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }

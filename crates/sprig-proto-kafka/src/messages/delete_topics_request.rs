@@ -49,8 +49,15 @@ impl Message for DeleteTopicsRequest {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 6 { w.array(&self.topics, flex, |w, e| e.encode(w, v))?; }
-        if v <= 5 { w.array(&self.topic_names, flex, |w, e| { w.string(e, flex)?; Ok(()) })?; }
+        if v >= 6 {
+            w.array(&self.topics, flex, |w, e| e.encode(w, v))?;
+        }
+        if v <= 5 {
+            w.array(&self.topic_names, flex, |w, e| {
+                w.string(e, flex)?;
+                Ok(())
+            })?;
+        }
         w.i32(*&self.timeout_ms);
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
@@ -61,8 +68,12 @@ impl Message for DeleteTopicsRequest {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 6 { s.topics = r.array(flex, |r| DeleteTopicState::decode(r, v))?; }
-        if v <= 5 { s.topic_names = r.array(flex, |r| Ok(r.string(flex)?))?; }
+        if v >= 6 {
+            s.topics = r.array(flex, |r| DeleteTopicState::decode(r, v))?;
+        }
+        if v <= 5 {
+            s.topic_names = r.array(flex, |r| Ok(r.string(flex)?))?;
+        }
         s.timeout_ms = r.i32()?;
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
@@ -99,8 +110,12 @@ impl DeleteTopicState {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 6 { w.nullable_string(self.name.as_deref(), flex)?; }
-        if v >= 6 { w.uuid(&self.topic_id); }
+        if v >= 6 {
+            w.nullable_string(self.name.as_deref(), flex)?;
+        }
+        if v >= 6 {
+            w.uuid(&self.topic_id);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -114,12 +129,15 @@ impl DeleteTopicState {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 6 { s.name = r.nullable_string(flex)?; }
-        if v >= 6 { s.topic_id = r.uuid()?; }
+        if v >= 6 {
+            s.name = r.nullable_string(flex)?;
+        }
+        if v >= 6 {
+            s.topic_id = r.uuid()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

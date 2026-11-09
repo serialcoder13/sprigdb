@@ -1957,6 +1957,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2358,6 +2367,7 @@ dependencies = [
  "sprig-settings",
  "sprig-shard",
  "sprig-sql",
+ "sprig-streams",
  "sprig-testkit",
  "sprig-txn",
  "sprig-workload",
@@ -2429,12 +2439,14 @@ dependencies = [
  "sprig-inherit",
  "sprig-logic",
  "sprig-meta",
+ "sprig-proto-kafka",
  "sprig-proto-mysql",
  "sprig-provision",
  "sprig-router",
  "sprig-settings",
  "sprig-shard",
  "sprig-sql",
+ "sprig-streams",
  "sprig-testkit",
  "sprig-txn",
  "sprig-types",
@@ -2447,6 +2459,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "twox-hash",
+ "uuid",
  "zeroize",
 ]
 
@@ -2623,6 +2636,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprig-proto-amqp"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "metrics",
+ "proptest",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "sprig-common",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
 name = "sprig-proto-bolt"
 version = "0.0.1"
 
@@ -2638,9 +2672,13 @@ dependencies = [
  "metrics",
  "proptest",
  "ring",
+ "rustls",
+ "rustls-pemfile",
  "sprig-common",
+ "subtle",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "twox-hash",
  "uuid",
@@ -2829,6 +2867,7 @@ dependencies = [
  "sprig-meta",
  "sprig-mover",
  "sprig-shard",
+ "sprig-streams",
  "tokio",
  "toml",
 ]
@@ -2895,6 +2934,7 @@ dependencies = [
  "sprig-mover",
  "sprig-settings",
  "sprig-shard",
+ "sprig-streams",
  "sprig-txn",
  "tokio",
  "tracing",

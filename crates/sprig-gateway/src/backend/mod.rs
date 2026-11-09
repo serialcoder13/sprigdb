@@ -659,3 +659,48 @@ pub fn packet_too_large() -> SprigError {
 pub(crate) fn unavailable(msg: impl Into<String>) -> SprigError {
     SprigError::new(SprigCode::BackendUnavailable, msg)
 }
+
+#[cfg(test)]
+mod packet_tests {
+    use super::*;
+
+    #[test]
+    fn clients_get_the_smaller_limit_less_the_headroom() {
+        let gw = 64 << 20;
+        // A provisioned cluster (chapter 27): the gateway's own limit.
+        let provisioned = usize::try_from(sprig_provision::mycnf::MAX_ALLOWED_PACKET).unwrap();
+        assert_eq!(client_limit(gw, Some(provisioned)), gw);
+        // MariaDB's default: 15 MiB, so rewrites still fit in 16.
+        assert_eq!(client_limit(gw, Some(16 << 20)), 15 << 20);
+        // Unknown counts as MariaDB's default.
+        assert_eq!(client_limit(gw, None), 15 << 20);
+        // A lower gateway limit wins.
+        assert_eq!(client_limit(4 << 20, Some(16 << 20)), 4 << 20);
+        // Never below MariaDB's minimum.
+        assert_eq!(client_limit(gw, Some(4096)), 1024);
+        assert_eq!(
+            PACKET_HEADROOM as u64,
+            sprig_provision::mycnf::PACKET_HEADROOM
+        );
+        assert_eq!(
+            crate::mysql::settings::MAX_ALLOWED_PACKET_BYTES.default,
+            sprig_provision::mycnf::GATEWAY_MAX_ALLOWED_PACKET
+        );
+    }
+
+    #[test]
+    fn a_failed_read_keeps_a_known_limit() {
+        let b = Backends::new(
+            DcId::new("dc-a").unwrap(),
+            StaticClusters::new(),
+            FixedSettings::new(BackendSettings::default()),
+        );
+        let c = ClusterId::new("dc-a-c1").unwrap();
+        assert_eq!(b.packet_limit(&c), None);
+        b.record_packet_limit(&c, Some(16 << 20));
+        b.record_packet_limit(&c, None);
+        assert_eq!(b.packet_limit(&c), Some(16 << 20));
+        b.record_packet_limit(&c, Some(64 << 20));
+        assert_eq!(b.packet_limit(&c), Some(64 << 20));
+    }
+}

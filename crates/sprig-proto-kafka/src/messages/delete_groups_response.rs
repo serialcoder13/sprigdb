@@ -117,4 +117,3 @@ impl DeletableGroupResult {
         Ok(s)
     }
 }
-

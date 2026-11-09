@@ -24,9 +24,13 @@ use mysql_async::prelude::Queryable;
 use sprig_common::Result;
 use sprig_common::names::quote;
 
-use crate::ddl::{DAYS_AHEAD, day_literal, day_of_ms, day_of_partition, hex_literal, partition_name};
+use crate::ddl::{
+    DAYS_AHEAD, day_literal, day_of_ms, day_of_partition, hex_literal, partition_name,
+};
 use crate::maria::map_err;
-use crate::model::{CKPT_TABLE, Cleanup, PartitionNo, SHARD_ROW, StreamId, log_table, outbox_table};
+use crate::model::{
+    CKPT_TABLE, Cleanup, PartitionNo, SHARD_ROW, StreamId, log_table, outbox_table,
+};
 use crate::partition;
 use crate::settings::Retention;
 
@@ -45,7 +49,11 @@ pub struct Maintained {
 
 /// The log's day partitions (day number, name) in order, and whether
 /// `pmax` exists.
-async fn days<Q: Queryable + Send>(q: &mut Q, schema: &str, table: &str) -> Result<Vec<(i64, String, u64)>> {
+async fn days<Q: Queryable + Send>(
+    q: &mut Q,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<(i64, String, u64)>> {
     let rows: Vec<(String, Option<u64>)> = q
         .exec(
             "SELECT PARTITION_NAME, DATA_LENGTH + INDEX_LENGTH FROM information_schema.PARTITIONS \
@@ -124,17 +132,22 @@ pub async fn maintain<Q: Queryable + Send>(
         }
     }
     if !drop.is_empty() {
-        q.query_drop(format!("ALTER TABLE {full} DROP PARTITION {}", drop.join(", ")))
-            .await
-            .map_err(map_err)?;
+        q.query_drop(format!(
+            "ALTER TABLE {full} DROP PARTITION {}",
+            drop.join(", ")
+        ))
+        .await
+        .map_err(map_err)?;
         out.dropped = u32::try_from(drop.len()).unwrap_or(u32::MAX);
         metrics::counter!("sprig_stream_retention_partitions_dropped_total")
             .increment(u64::from(out.dropped));
     }
     // Compaction.
     if cleanup == Cleanup::Compact {
-        let lag = now_ms - i64::try_from(r.compaction_lag_minutes.saturating_mul(60_000)).unwrap_or(i64::MAX);
-        let tomb = now_ms - i64::try_from(r.tombstone_hours.saturating_mul(3_600_000)).unwrap_or(i64::MAX);
+        let lag = now_ms
+            - i64::try_from(r.compaction_lag_minutes.saturating_mul(60_000)).unwrap_or(i64::MAX);
+        let tomb =
+            now_ms - i64::try_from(r.tombstone_hours.saturating_mul(3_600_000)).unwrap_or(i64::MAX);
         for p in 0..partitions {
             let n = compact_partition(q, &full, PartitionNo(p), lag, tomb).await?;
             out.compacted += n;

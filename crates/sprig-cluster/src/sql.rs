@@ -212,6 +212,12 @@ impl ProbeSession {
         self.conn.id()
     }
 
+    /// The timeout of every round trip.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// Runs a statement and returns every row as text.
     ///
     /// # Errors

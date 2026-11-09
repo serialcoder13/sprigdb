@@ -3,6 +3,13 @@
 //! 06, "Health checks" and "Read routing"), on one side connection per
 //! node, all nodes in parallel, each check with a 1 s timeout.
 //!
+//! The checks log in as the cluster's `sprig_gw` monitoring account
+//! (`SLAVE MONITOR` only), or, while it can't log in, as the first login's
+//! backend account ([`Backends::monitor_connection`]); a connection opened
+//! as the latter is replaced once `sprig_gw` may be tried again. Each
+//! poll also reads the node's `max_allowed_packet`; the smallest of a
+//! round is the cluster's packet limit (chapter 05, "Packet limit").
+//!
 //! Every node's position is polled, Galera nodes included (decision D13):
 //! a read that must see a write goes only to a node whose position covers
 //! it. After each round the monitor estimates every node's lag and marks
@@ -25,13 +32,14 @@ use crate::reads::GtidSet;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 
 const POLL_SQL: &str = "SELECT @@read_only, @@gtid_slave_pos, @@gtid_binlog_pos, \
-    (SELECT COUNT(*) FROM information_schema.SLAVE_STATUS)";
-const POLL_SQL_PLAIN: &str = "SELECT @@read_only, @@gtid_slave_pos, @@gtid_binlog_pos, 0";
+    (SELECT COUNT(*) FROM information_schema.SLAVE_STATUS), @@global.max_allowed_packet";
+const POLL_SQL_PLAIN: &str =
+    "SELECT @@read_only, @@gtid_slave_pos, @@gtid_binlog_pos, 0, @@global.max_allowed_packet";
 /// Galera: the GTIDs the node has applied are in `@@gtid_binlog_pos`;
 /// with `wsrep_gtid_mode` on, the cluster's writes share one domain,
 /// `wsrep_gtid_domain_id`, with the same sequence numbers on every node.
 const POLL_SQL_GALERA: &str = "SELECT @@read_only, @@gtid_slave_pos, @@gtid_binlog_pos, 0, \
-    @@wsrep_gtid_mode, @@wsrep_gtid_domain_id";
+    @@global.max_allowed_packet, @@wsrep_gtid_mode, @@wsrep_gtid_domain_id";
 const GALERA_SQL: &str =
     "SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_local_state', 'wsrep_ready')";
 
@@ -55,6 +63,8 @@ struct Polled {
     binlog: Option<GtidSet>,
     /// Galera with `wsrep_gtid_mode` on: `wsrep_gtid_domain_id`.
     galera_domain: Option<u32>,
+    /// `@@global.max_allowed_packet`.
+    max_packet: Option<usize>,
 }
 
 fn text(v: Option<&Option<bytes::Bytes>>) -> String {
@@ -87,8 +97,9 @@ async fn poll(c: &mut MysqlClient, topology: TopologyKind, health: bool) -> Resu
     let slave = GtidSet::parse(&text(row.get(1))).ok();
     let binlog = GtidSet::parse(&text(row.get(2))).ok();
     let channels: u64 = text(row.get(3)).parse().unwrap_or(0);
-    let galera_domain = (text(row.get(4)) == "1")
-        .then(|| text(row.get(5)).parse().ok())
+    let max_packet = text(row.get(4)).parse().ok();
+    let galera_domain = (text(row.get(5)) == "1")
+        .then(|| text(row.get(6)).parse().ok())
         .flatten();
     let mut obs = Observation {
         role: role_of(topology, read_only, channels_known.then_some(channels)),
@@ -115,28 +126,30 @@ async fn poll(c: &mut MysqlClient, topology: TopologyKind, health: bool) -> Resu
         slave,
         binlog,
         galera_domain,
+        max_packet,
     })
 }
+
+/// A monitor connection and whether it is `sprig_gw`'s.
+type MonitorConn = (MysqlClient, bool);
 
 async fn check(
     b: &Backends,
     view: &ClusterView,
     node: &NodeRef,
-    conn: Option<MysqlClient>,
+    conn: Option<MonitorConn>,
     health: bool,
-) -> (Option<MysqlClient>, Result<Polled, String>) {
-    let Some(target) = b.monitor_target(&view.id) else {
-        return (None, Err("no monitor account".to_owned()));
-    };
+) -> (Option<MonitorConn>, Result<Polled, String>) {
     let fut = async {
         let mut c = match conn {
-            Some(c) if c.is_idle() => c,
+            // A fallback connection goes once sprig_gw may be tried again.
+            Some((c, gw)) if c.is_idle() && (gw || !b.gw_usable(&view.id)) => (c, gw),
             _ => b
-                .side_connection(node, &target, CHECK_TIMEOUT)
+                .monitor_connection(view, node, CHECK_TIMEOUT)
                 .await
                 .map_err(|e| e.message)?,
         };
-        let r = poll(&mut c, view.topology, health).await;
+        let r = poll(&mut c.0, view.topology, health).await;
         Ok::<_, String>((c, r))
     };
     match tokio::time::timeout(CHECK_TIMEOUT, fut).await {
@@ -168,7 +181,7 @@ fn note_lag(b: &Backends, key: &NodeKey, max_lag: Duration) {
 }
 
 pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
-    let mut conns: HashMap<NodeId, MysqlClient> = HashMap::new();
+    let mut conns: HashMap<NodeId, MonitorConn> = HashMap::new();
     let mut last_health: HashMap<NodeId, Instant> = HashMap::new();
     loop {
         let settings = b.settings(&cluster);
@@ -190,6 +203,7 @@ pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
             let galera = view.topology == TopologyKind::Galera;
             let mut galera_round: Vec<(NodeKey, Option<GtidSet>)> = Vec::new();
             let mut galera_domain = None;
+            let mut max_packet: Option<usize> = None;
             for (n, health, (conn, result)) in futures::future::join_all(checks).await {
                 let key = view.key(&n.node);
                 if health {
@@ -197,6 +211,9 @@ pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
                 }
                 match result {
                     Ok(p) => {
+                        if let Some(m) = p.max_packet {
+                            max_packet = Some(max_packet.map_or(m, |x| x.min(m)));
+                        }
                         if galera {
                             galera_domain = galera_domain.or(p.galera_domain);
                             galera_round.push((key.clone(), p.binlog));
@@ -228,6 +245,9 @@ pub(super) async fn run(b: Arc<Backends>, cluster: ClusterId) {
             if galera {
                 b.nodes
                     .record_galera_positions(&cluster, &galera_round, galera_domain);
+            }
+            if max_packet.is_some() {
+                b.record_packet_limit(&cluster, max_packet);
             }
             let max_lag = if galera {
                 settings.max_galera_lag

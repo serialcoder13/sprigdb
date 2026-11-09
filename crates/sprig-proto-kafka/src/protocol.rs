@@ -150,7 +150,12 @@ pub const SERVED: &[ApiRange] = &[
     range!(api::SASL_AUTHENTICATE, 0, 2, sasl_authenticate_request),
     range!(api::CREATE_PARTITIONS, 0, 3, create_partitions_request),
     range!(api::DELETE_GROUPS, 0, 2, delete_groups_request),
-    range!(api::INCREMENTAL_ALTER_CONFIGS, 0, 1, incremental_alter_configs_request),
+    range!(
+        api::INCREMENTAL_ALTER_CONFIGS,
+        0,
+        1,
+        incremental_alter_configs_request
+    ),
 ];
 
 /// The served range of `key`, if any.
@@ -316,11 +321,11 @@ pub fn request_frame(
 ///
 /// # Errors
 /// `Truncated` or `Invalid`.
-pub fn read_response_header<'a>(
-    frame: &'a [u8],
+pub fn read_response_header(
+    frame: &[u8],
     api_key: i16,
     api_version: i16,
-) -> Result<(i32, Reader<'a>)> {
+) -> Result<(i32, Reader<'_>)> {
     let mut r = Reader::new(frame);
     let correlation_id = r.i32()?;
     if response_header_version(api_key, api_version) >= 1 {
@@ -338,13 +343,41 @@ mod tests {
     fn served_ranges_are_within_the_definitions() {
         use messages::*;
         let defs: &[(i16, i16, i16)] = &[
-            (api::METADATA, MetadataRequest::MIN_VERSION, MetadataRequest::MAX_VERSION),
-            (api::API_VERSIONS, ApiVersionsRequest::MIN_VERSION, ApiVersionsRequest::MAX_VERSION),
-            (api::JOIN_GROUP, JoinGroupRequest::MIN_VERSION, JoinGroupRequest::MAX_VERSION),
-            (api::OFFSET_COMMIT, OffsetCommitRequest::MIN_VERSION, OffsetCommitRequest::MAX_VERSION),
-            (api::OFFSET_FETCH, OffsetFetchRequest::MIN_VERSION, OffsetFetchRequest::MAX_VERSION),
-            (api::LIST_GROUPS, ListGroupsRequest::MIN_VERSION, ListGroupsRequest::MAX_VERSION),
-            (api::INIT_PRODUCER_ID, InitProducerIdRequest::MIN_VERSION, InitProducerIdRequest::MAX_VERSION),
+            (
+                api::METADATA,
+                MetadataRequest::MIN_VERSION,
+                MetadataRequest::MAX_VERSION,
+            ),
+            (
+                api::API_VERSIONS,
+                ApiVersionsRequest::MIN_VERSION,
+                ApiVersionsRequest::MAX_VERSION,
+            ),
+            (
+                api::JOIN_GROUP,
+                JoinGroupRequest::MIN_VERSION,
+                JoinGroupRequest::MAX_VERSION,
+            ),
+            (
+                api::OFFSET_COMMIT,
+                OffsetCommitRequest::MIN_VERSION,
+                OffsetCommitRequest::MAX_VERSION,
+            ),
+            (
+                api::OFFSET_FETCH,
+                OffsetFetchRequest::MIN_VERSION,
+                OffsetFetchRequest::MAX_VERSION,
+            ),
+            (
+                api::LIST_GROUPS,
+                ListGroupsRequest::MIN_VERSION,
+                ListGroupsRequest::MAX_VERSION,
+            ),
+            (
+                api::INIT_PRODUCER_ID,
+                InitProducerIdRequest::MIN_VERSION,
+                InitProducerIdRequest::MAX_VERSION,
+            ),
         ];
         for (k, lo, hi) in defs {
             let r = served(*k).unwrap();
@@ -401,6 +434,9 @@ mod tests {
         assert_eq!(frame, want);
         let mut r = Reader::new(&frame[4..]);
         assert_eq!(RequestHeader::decode(&mut r).unwrap(), header);
-        assert_eq!(messages::ApiVersionsRequest::decode(&mut r, 3).unwrap(), body);
+        assert_eq!(
+            messages::ApiVersionsRequest::decode(&mut r, 3).unwrap(),
+            body
+        );
     }
 }

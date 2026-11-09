@@ -41,7 +41,9 @@ impl Compression {
             2 => Ok(Self::Snappy),
             3 => Ok(Self::Lz4),
             4 => Ok(Self::Zstd),
-            n => Err(CodecError::UnsupportedCompression(n as u8)),
+            n => Err(CodecError::UnsupportedCompression(
+                u8::try_from(n).unwrap_or(u8::MAX),
+            )),
         }
     }
 
@@ -90,7 +92,9 @@ impl Compression {
                     .map_err(|_| CodecError::CorruptRecord("gzip"))
             }
             // Level 3, zstd's and Kafka's default.
-            Self::Zstd => zstd::bulk::compress(data, 3).map_err(|_| CodecError::CorruptRecord("zstd")),
+            Self::Zstd => {
+                zstd::bulk::compress(data, 3).map_err(|_| CodecError::CorruptRecord("zstd"))
+            }
             Self::Snappy | Self::Lz4 => Err(CodecError::UnsupportedCompression(self.id())),
         }
     }
@@ -132,7 +136,12 @@ mod tests {
 
     #[test]
     fn gzip_and_zstd_round_trip() {
-        let data: Vec<u8> = b"sprigdb event ".iter().copied().cycle().take(10_000).collect();
+        let data: Vec<u8> = b"sprigdb event "
+            .iter()
+            .copied()
+            .cycle()
+            .take(10_000)
+            .collect();
         for c in [Compression::None, Compression::Gzip, Compression::Zstd] {
             let z = c.compress(&data).unwrap();
             if c != Compression::None {
@@ -163,7 +172,10 @@ mod tests {
             Compression::from_attributes(0x0005),
             Err(CodecError::UnsupportedCompression(5))
         );
-        assert_eq!(Compression::from_attributes(0x0014).unwrap(), Compression::Zstd);
+        assert_eq!(
+            Compression::from_attributes(0x0014).unwrap(),
+            Compression::Zstd
+        );
     }
 
     #[test]

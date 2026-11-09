@@ -10,6 +10,7 @@ const fn tables() -> [[u32; 256]; 8] {
     let mut t = [[0u32; 256]; 8];
     let mut i = 0;
     while i < 256 {
+        #[allow(clippy::cast_possible_truncation)] // i < 256
         let mut c = i as u32;
         let mut k = 0;
         while k < 8 {
@@ -91,7 +92,9 @@ mod tests {
 
     #[test]
     fn slice_by_8_matches_bitwise_and_chains() {
-        let data: Vec<u8> = (0..1000u32).map(|i| (i * 31 + 7) as u8).collect();
+        let data: Vec<u8> = (0..1000u32)
+            .map(|i| (i * 31 + 7).to_le_bytes()[0])
+            .collect();
         for n in [0, 1, 7, 8, 9, 63, 64, 65, 999, 1000] {
             assert_eq!(crc32c(&data[..n]), bitwise(&data[..n]), "{n}");
         }

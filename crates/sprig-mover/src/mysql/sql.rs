@@ -147,10 +147,16 @@ pub fn digest_expr(t: &TableMeta) -> String {
     )
 }
 
-/// The key columns then the digest, for verification.
+/// The key columns then the digest, for verification. Key columns that are
+/// `ENUM`, `SET` or `BIT` are read as numbers, like a chunk's: the next
+/// page's `key > after` then compares them by member index, the order
+/// `ORDER BY` uses (as strings, `'object' < 'tenant'` while the index
+/// order is the reverse, so pages skipped rows and verification of a
+/// table such as the catalog's `settings` never converged; found by r9streams).
 #[must_use]
 pub fn digest_list(t: &TableMeta) -> String {
-    format!("{}, {}", key_list(t), digest_expr(t))
+    let keys: Vec<String> = t.pk.iter().map(|&i| col_expr(t, i)).collect();
+    format!("{}, {}", keys.join(", "), digest_expr(t))
 }
 
 /// Digests of up to `limit` rows after `after`.

@@ -17,7 +17,10 @@
 //! the sizes; `SPRIG_TEST_LARGE_EXTRA` (2) more sessions each run a 16 MiB
 //! `SELECT` three times meanwhile, so a gateway with few worker threads
 //! has all of them busy; `SPRIG_TEST_LARGE_STALL_MS` (1000) is the most a
-//! small statement may take while they run.
+//! small statement may take while they run. With
+//! `SPRIG_TEST_LARGE_DIRECT` (a `mysql://` URL of the same table straight
+//! on the cluster) as many sessions run the small statement on MariaDB
+//! directly, which tells a gateway stall from a server one.
 
 #![allow(
     clippy::unwrap_used,
@@ -50,7 +53,9 @@ fn env_usize(name: &str, default: usize) -> usize {
 fn opts(url: &str) -> Opts {
     let base = Opts::from_url(url).expect("SPRIG_TEST_LARGE_GATEWAY is a mysql:// URL");
     OptsBuilder::from_opts(base)
-        .ssl_opts(Some(SslOpts::default().with_danger_accept_invalid_certs(true)))
+        .ssl_opts(Some(
+            SslOpts::default().with_danger_accept_invalid_certs(true),
+        ))
         .max_allowed_packet(Some(256 * MIB))
         .wait_timeout(None)
         .into()
@@ -119,7 +124,10 @@ async fn large_statements_dont_stall_other_sessions() {
     let bound = Duration::from_millis(env_usize("SPRIG_TEST_LARGE_STALL_MS", 1000) as u64);
 
     let mut big = Conn::new(opts(&url)).await.expect("connect");
-    let limit: Option<u64> = big.query_first("SELECT @@max_allowed_packet").await.unwrap();
+    let limit: Option<u64> = big
+        .query_first("SELECT @@max_allowed_packet")
+        .await
+        .unwrap();
     println!("@@max_allowed_packet through the gateway: {limit:?}");
     big.query_drop("CREATE TABLE IF NOT EXISTS big (id BIGINT PRIMARY KEY, b LONGBLOB)")
         .await
@@ -136,6 +144,12 @@ async fn large_statements_dont_stall_other_sessions() {
     let t0 = Instant::now();
     let loops: Vec<_> = (0..8)
         .map(|_| tokio::spawn(small_loop(url.clone(), Arc::clone(&stop), t0)))
+        .collect();
+    let direct_url = std::env::var("SPRIG_TEST_LARGE_DIRECT").ok();
+    let direct: Vec<_> = direct_url
+        .iter()
+        .flat_map(|u| (0..8).map(move |_| u.clone()))
+        .map(|u| tokio::spawn(small_loop(u, Arc::clone(&stop), t0)))
         .collect();
 
     // Quiet phase.
@@ -175,12 +189,15 @@ async fn large_statements_dont_stall_other_sessions() {
     sql.extend(std::iter::repeat_n('a', fill));
     sql.push_str(tail);
     let s = Instant::now();
-    big.query_drop(&sql).await.expect("the large text statement");
+    big.query_drop(&sql)
+        .await
+        .expect("the large text statement");
     let text_took = s.elapsed();
     drop(sql);
 
     // The row back: a `big_mb` MiB value.
     let s = Instant::now();
+    println!("row read starts at +{:.2} s", t0.elapsed().as_secs_f64());
     let row: Option<(i64, Vec<u8>)> = big
         .query_first("SELECT id, b FROM big WHERE id = 1")
         .await
@@ -194,6 +211,10 @@ async fn large_statements_dont_stall_other_sessions() {
     // A prepared statement with a `param_mb` MiB parameter.
     let param = vec![b'p'; param_mb * MIB];
     let s = Instant::now();
+    println!(
+        "parameter insert starts at +{:.2} s",
+        t0.elapsed().as_secs_f64()
+    );
     big.exec_drop("INSERT INTO big VALUES (?, ?)", (2_i64, param))
         .await
         .expect("the large parameter");
@@ -221,6 +242,10 @@ async fn large_statements_dont_stall_other_sessions() {
     let mut all = Vec::new();
     for l in loops {
         all.extend(l.await.expect("small loop"));
+    }
+    let mut on_server = Vec::new();
+    for l in direct {
+        on_server.extend(l.await.expect("direct loop"));
     }
     big.query_drop("DELETE FROM big").await.unwrap();
     big.disconnect().await.ok();
@@ -250,6 +275,39 @@ async fn large_statements_dont_stall_other_sessions() {
             .map(|x| x.1)
             .collect(),
     );
+    let mut slow: Vec<_> = all.iter().filter(|(at, _)| *at >= quiet_end).collect();
+    slow.sort_by_key(|x| std::cmp::Reverse(x.1));
+    for (at, d) in slow.iter().take(5) {
+        println!(
+            "slow small statement at +{:.2} s: {:.0} ms",
+            at.as_secs_f64(),
+            d.as_secs_f64() * 1e3
+        );
+    }
+    if !on_server.is_empty() {
+        let mut slow: Vec<_> = on_server
+            .iter()
+            .filter(|(at, _)| *at >= quiet_end)
+            .collect();
+        slow.sort_by_key(|x| std::cmp::Reverse(x.1));
+        for (at, d) in slow.iter().take(3) {
+            println!(
+                "slow direct statement at +{:.2} s: {:.0} ms",
+                at.as_secs_f64(),
+                d.as_secs_f64() * 1e3
+            );
+        }
+        show(
+            "the same statement straight on MariaDB during the large ones",
+            &stats(
+                on_server
+                    .iter()
+                    .filter(|(at, _)| *at >= quiet_end && *at < busy_end)
+                    .map(|x| x.1)
+                    .collect(),
+            ),
+        );
+    }
     show("small statements before (8 sessions)", &quiet);
     show("small statements during the large ones", &busy);
     assert!(

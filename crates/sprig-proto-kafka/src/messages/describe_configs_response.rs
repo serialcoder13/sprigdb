@@ -185,12 +185,22 @@ impl DescribeConfigsResourceResult {
         w.string(&self.name, flex)?;
         w.nullable_string(self.value.as_deref(), flex)?;
         w.bool(*&self.read_only);
-        if v <= 0 { w.bool(*&self.is_default); }
-        if v >= 1 { w.i8(*&self.config_source); }
+        if v <= 0 {
+            w.bool(*&self.is_default);
+        }
+        if v >= 1 {
+            w.i8(*&self.config_source);
+        }
         w.bool(*&self.is_sensitive);
-        if v >= 1 { w.array(&self.synonyms, flex, |w, e| e.encode(w, v))?; }
-        if v >= 3 { w.i8(*&self.config_type); }
-        if v >= 3 { w.nullable_string(self.documentation.as_deref(), flex)?; }
+        if v >= 1 {
+            w.array(&self.synonyms, flex, |w, e| e.encode(w, v))?;
+        }
+        if v >= 3 {
+            w.i8(*&self.config_type);
+        }
+        if v >= 3 {
+            w.nullable_string(self.documentation.as_deref(), flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -207,12 +217,22 @@ impl DescribeConfigsResourceResult {
         s.name = r.string(flex)?;
         s.value = r.nullable_string(flex)?;
         s.read_only = r.bool()?;
-        if v <= 0 { s.is_default = r.bool()?; }
-        if v >= 1 { s.config_source = r.i8()?; }
+        if v <= 0 {
+            s.is_default = r.bool()?;
+        }
+        if v >= 1 {
+            s.config_source = r.i8()?;
+        }
         s.is_sensitive = r.bool()?;
-        if v >= 1 { s.synonyms = r.array(flex, |r| DescribeConfigsSynonym::decode(r, v))?; }
-        if v >= 3 { s.config_type = r.i8()?; }
-        if v >= 3 { s.documentation = r.nullable_string(flex)?; }
+        if v >= 1 {
+            s.synonyms = r.array(flex, |r| DescribeConfigsSynonym::decode(r, v))?;
+        }
+        if v >= 3 {
+            s.config_type = r.i8()?;
+        }
+        if v >= 3 {
+            s.documentation = r.nullable_string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -251,9 +271,15 @@ impl DescribeConfigsSynonym {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 1 { w.string(&self.name, flex)?; }
-        if v >= 1 { w.nullable_string(self.value.as_deref(), flex)?; }
-        if v >= 1 { w.i8(*&self.source); }
+        if v >= 1 {
+            w.string(&self.name, flex)?;
+        }
+        if v >= 1 {
+            w.nullable_string(self.value.as_deref(), flex)?;
+        }
+        if v >= 1 {
+            w.i8(*&self.source);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -267,13 +293,18 @@ impl DescribeConfigsSynonym {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 1 { s.name = r.string(flex)?; }
-        if v >= 1 { s.value = r.nullable_string(flex)?; }
-        if v >= 1 { s.source = r.i8()?; }
+        if v >= 1 {
+            s.name = r.string(flex)?;
+        }
+        if v >= 1 {
+            s.value = r.nullable_string(flex)?;
+        }
+        if v >= 1 {
+            s.source = r.i8()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

@@ -63,7 +63,9 @@ use crate::pipeline::{
 };
 use crate::session::{Session, SessionState};
 
-type ClientFramed = Framed<MaybeTls<TcpStream>, PacketCodec>;
+/// The client stream, paced so reading a large packet yields to other
+/// sessions ([`crate::offload::Paced`]).
+type ClientFramed = Framed<crate::offload::Paced<MaybeTls<TcpStream>>, PacketCodec>;
 
 /// The initial write buffer of a client connection.
 const WRITE_CAPACITY: usize = 16 * 1024;
@@ -190,7 +192,8 @@ impl CommandLoop {
         let mut codec = PacketCodec::new(l.proto.max_packet);
         // Compression starts after the auth OK packet (chapter 05).
         codec.set_framing(l.proto.framing);
-        let mut framed = Framed::with_capacity(l.stream, codec, WRITE_CAPACITY);
+        let mut framed =
+            Framed::with_capacity(crate::offload::Paced::new(l.stream), codec, WRITE_CAPACITY);
         framed.set_backpressure_boundary(settings.relay_buffer.max(WRITE_CAPACITY));
         let _ = l.attrs;
         Self {
@@ -797,6 +800,14 @@ impl CommandLoop {
         self.db = None;
         self.session.set_db(None);
         self.session.set_principal(principal.clone());
+        // Another login may go to another cluster: its packet limit.
+        if let Some(b) = self.ctx.backends.as_ref() {
+            let limit = b
+                .client_packet_limit(&principal.backend, self.settings.max_allowed_packet)
+                .await;
+            self.proto.max_packet = limit;
+            self.framed.codec_mut().max_packet = limit;
+        }
         self.exec = self.shared.cfg.executor.open(&LoginInfo {
             backend: principal.backend.clone(),
             principal,
@@ -840,7 +851,9 @@ impl CommandLoop {
             sessions: &self.ctx.sessions,
             persona: self.proto.persona,
             version: self.settings.version(self.proto.persona),
-            max_allowed_packet: self.settings.max_allowed_packet,
+            // The session's limit: the gateway's, no more than its
+            // cluster's (chapter 05, "Packet limit").
+            max_allowed_packet: self.proto.max_packet,
             hostname: &self.shared.cfg.hostname,
             status: self.status,
             peers: self.ctx.peers.as_deref(),

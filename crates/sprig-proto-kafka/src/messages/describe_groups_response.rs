@@ -46,7 +46,9 @@ impl Message for DescribeGroupsResponse {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 1 { w.i32(*&self.throttle_time_ms); }
+        if v >= 1 {
+            w.i32(*&self.throttle_time_ms);
+        }
         w.array(&self.groups, flex, |w, e| e.encode(w, v))?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
@@ -57,7 +59,9 @@ impl Message for DescribeGroupsResponse {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 1 { s.throttle_time_ms = r.i32()?; }
+        if v >= 1 {
+            s.throttle_time_ms = r.i32()?;
+        }
         s.groups = r.array(flex, |r| DescribedGroup::decode(r, v))?;
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
@@ -115,7 +119,9 @@ impl DescribedGroup {
         w.string(&self.protocol_type, flex)?;
         w.string(&self.protocol_data, flex)?;
         w.array(&self.members, flex, |w, e| e.encode(w, v))?;
-        if v >= 3 { w.i32(*&self.authorized_operations); }
+        if v >= 3 {
+            w.i32(*&self.authorized_operations);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -135,7 +141,9 @@ impl DescribedGroup {
         s.protocol_type = r.string(flex)?;
         s.protocol_data = r.string(flex)?;
         s.members = r.array(flex, |r| DescribedGroupMember::decode(r, v))?;
-        if v >= 3 { s.authorized_operations = r.i32()?; }
+        if v >= 3 {
+            s.authorized_operations = r.i32()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -184,7 +192,9 @@ impl DescribedGroupMember {
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.string(&self.member_id, flex)?;
-        if v >= 4 { w.nullable_string(self.group_instance_id.as_deref(), flex)?; }
+        if v >= 4 {
+            w.nullable_string(self.group_instance_id.as_deref(), flex)?;
+        }
         w.string(&self.client_id, flex)?;
         w.string(&self.client_host, flex)?;
         w.bytes(&self.member_metadata, flex)?;
@@ -203,7 +213,9 @@ impl DescribedGroupMember {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
         s.member_id = r.string(flex)?;
-        if v >= 4 { s.group_instance_id = r.nullable_string(flex)?; }
+        if v >= 4 {
+            s.group_instance_id = r.nullable_string(flex)?;
+        }
         s.client_id = r.string(flex)?;
         s.client_host = r.string(flex)?;
         s.member_metadata = r.bytes(flex)?;
@@ -214,4 +226,3 @@ impl DescribedGroupMember {
         Ok(s)
     }
 }
-

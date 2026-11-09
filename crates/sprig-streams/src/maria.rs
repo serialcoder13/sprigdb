@@ -60,22 +60,21 @@ impl PoolSource for FixedPool {
 /// schema for up to the hold).
 #[must_use]
 pub fn map_err(e: mysql_async::Error) -> SprigError {
-    match &e {
-        mysql_async::Error::Server(s) => {
-            let mut state = *b"HY000";
-            if s.state.len() == 5 {
-                state.copy_from_slice(s.state.as_bytes());
-            }
-            let mut out = SprigError::backend(s.code, state, s.message.clone());
-            out.retryable = matches!(s.code, 1205 | 1213 | 1146 | 1049 | 1927 | 1053 | 1290 | 1836);
-            out.with_source(e)
+    if let mysql_async::Error::Server(s) = &e {
+        let mut state = *b"HY000";
+        if s.state.len() == 5 {
+            state.copy_from_slice(s.state.as_bytes());
         }
-        _ => {
-            let mut out = SprigError::new(SprigCode::BackendUnavailable, format!("stream log: {e}"));
-            out.retryable = true;
-            out.with_source(e)
-        }
+        let mut out = SprigError::backend(s.code, state, s.message.clone());
+        out.retryable = matches!(
+            s.code,
+            1205 | 1213 | 1146 | 1049 | 1927 | 1053 | 1290 | 1836
+        );
+        return out.with_source(e);
     }
+    let mut out = SprigError::new(SprigCode::BackendUnavailable, format!("stream log: {e}"));
+    out.retryable = true;
+    out.with_source(e)
 }
 
 /// `'YYYY-MM-DD hh:mm:ss.fff'` of a time in ms since the Unix epoch.
@@ -145,7 +144,7 @@ impl MariaLog {
         self.pools.pool().await?.get_conn().await.map_err(map_err)
     }
 
-    fn values(&self, out: &mut String, r: &NewRecord, offset: u64, epoch: LeaderEpoch) {
+    fn values(out: &mut String, r: &NewRecord, offset: u64, epoch: LeaderEpoch) {
         let day = day_of_ms(r.ts_ms);
         let (y, m, d) = civil(day);
         let _ = write!(
@@ -153,11 +152,19 @@ impl MariaLog {
             "({},{offset},'{y:04}-{m:02}-{d:02}',{},{},{},{},{},{})",
             r.partition.0,
             datetime_literal(r.ts_ms),
-            r.key.as_deref().map_or_else(|| "NULL".into(), hex_literal_nonempty),
-            r.value.as_deref().map_or_else(|| "NULL".into(), hex_literal_nonempty),
-            r.headers
+            r.key
                 .as_deref()
-                .map_or_else(|| "NULL".into(), |h| format!("CONVERT({} USING utf8mb4)", hex_literal_nonempty(h.as_bytes()))),
+                .map_or_else(|| "NULL".into(), hex_literal_nonempty),
+            r.value
+                .as_deref()
+                .map_or_else(|| "NULL".into(), hex_literal_nonempty),
+            r.headers.as_deref().map_or_else(
+                || "NULL".into(),
+                |h| format!(
+                    "CONVERT({} USING utf8mb4)",
+                    hex_literal_nonempty(h.as_bytes())
+                )
+            ),
             hex_literal_nonempty(&r.source.to_bytes()),
             epoch.0
         );
@@ -173,7 +180,10 @@ fn hex_literal_nonempty(b: &[u8]) -> String {
 impl LogStore for MariaLog {
     async fn acquire(&self) -> Result<Acquired> {
         let mut c = self.conn().await?;
-        let mut tx = c.start_transaction(TxOpts::default()).await.map_err(map_err)?;
+        let mut tx = c
+            .start_transaction(TxOpts::default())
+            .await
+            .map_err(map_err)?;
         let rows: Vec<(u32, u32, Vec<u8>)> = tx
             .exec(
                 format!(
@@ -187,7 +197,10 @@ impl LogStore for MariaLog {
         let Some((_, _, resume)) = rows.iter().find(|(p, _, _)| *p == SHARD_ROW) else {
             let mut e = SprigError::new(
                 SprigCode::StreamNotFound,
-                format!("stream {} has no checkpoint in {}", self.stream.0, self.schema),
+                format!(
+                    "stream {} has no checkpoint in {}",
+                    self.stream.0, self.schema
+                ),
             );
             e.retryable = true;
             return Err(e);
@@ -210,7 +223,10 @@ impl LogStore for MariaLog {
     #[allow(clippy::too_many_lines)]
     async fn append(&self, epoch: LeaderEpoch, batch: &Batch) -> Result<AppendOutcome> {
         let mut c = self.conn().await?;
-        let mut tx = c.start_transaction(TxOpts::default()).await.map_err(map_err)?;
+        let mut tx = c
+            .start_transaction(TxOpts::default())
+            .await
+            .map_err(map_err)?;
         let now: Option<u32> = tx
             .exec_first(
                 format!(
@@ -228,7 +244,8 @@ impl LogStore for MariaLog {
         }
         let mut out = Appended::default();
         if !batch.records.is_empty() {
-            let touched: BTreeSet<PartitionNo> = batch.records.iter().map(|r| r.partition).collect();
+            let touched: BTreeSet<PartitionNo> =
+                batch.records.iter().map(|r| r.partition).collect();
             let list: Vec<String> = touched.iter().map(|p| p.0.to_string()).collect();
             let rows: Vec<(u32, u64)> = tx
                 .exec(
@@ -300,13 +317,15 @@ impl LogStore for MariaLog {
                 } else {
                     sql.push(',');
                 }
-                self.values(&mut sql, r, *o, epoch);
+                Self::values(&mut sql, r, *o, epoch);
                 *o += 1;
                 n += 1;
                 out.records += 1;
                 out.high_watermarks.insert(r.partition, Offset(*o));
                 if n >= 500 || sql.len() > 4 << 20 {
-                    tx.query_drop(std::mem::take(&mut sql)).await.map_err(map_err)?;
+                    tx.query_drop(std::mem::take(&mut sql))
+                        .await
+                        .map_err(map_err)?;
                     n = 0;
                 }
             }

@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::too_many_lines)]
 
 use std::collections::HashMap;
 
@@ -127,11 +127,19 @@ async fn create_publish_read_drop() {
     let def = created(&m);
     assert_eq!(def.partitions, 4);
     assert_eq!(def.attached_group, Some(GroupId(1)));
-    assert!(matches!(&m.committed[0], StreamsChange::Insert(_, Some(72))));
+    assert!(matches!(
+        &m.committed[0],
+        StreamsChange::Insert(_, Some(72))
+    ));
     assert_eq!(m.subscribed, vec![def.id]);
     assert!(m.ddl.iter().any(|s| s.contains("__sprig_eo_41")));
     assert!(m.ddl.iter().any(|s| s.contains("__sprig_sl_41")));
-    assert!(m.ddl.iter().any(|s| s.contains("X'4064632D612D63317C302D312D313030'")), "start position stored");
+    assert!(
+        m.ddl
+            .iter()
+            .any(|s| s.contains("X'4064632D612D63317C302D312D313030'")),
+        "start position stored"
+    );
 
     let state = StreamsState::new(vec![def.clone()]);
     // Publishing.
@@ -150,24 +158,37 @@ async fn create_publish_read_drop() {
             compact: false
         }
     );
-    let Handled::Forward { sql, .. } = handle("insert shop.order_events values ('k', 'v')", &cx(&state), &mut m)
-        .await
-        .unwrap()
-    else {
+    let Handled::Forward { sql, .. } = handle(
+        "insert shop.order_events values ('k', 'v')",
+        &cx(&state),
+        &mut m,
+    )
+    .await
+    .unwrap() else {
         panic!()
     };
-    assert_eq!(sql, "insert `shop`.`__sprig_eo_41` (k, v) values ('k', 'v')");
+    assert_eq!(
+        sql,
+        "insert `shop`.`__sprig_eo_41` (k, v) values ('k', 'v')"
+    );
     let e = handle(
-        &format!("INSERT INTO order_events (key, value) VALUES (1, '{}')", "x".repeat(101)),
+        &format!(
+            "INSERT INTO order_events (key, value) VALUES (1, '{}')",
+            "x".repeat(101)
+        ),
         &cx(&state),
         &mut m,
     )
     .await
     .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::StreamRecordTooLarge));
-    let e = handle("INSERT INTO order_events (key, nope) VALUES (1, 2)", &cx(&state), &mut m)
-        .await
-        .unwrap_err();
+    let e = handle(
+        "INSERT INTO order_events (key, nope) VALUES (1, 2)",
+        &cx(&state),
+        &mut m,
+    )
+    .await
+    .unwrap_err();
     assert!(e.message.contains("Unknown column 'nope'"));
     for w in [
         "UPDATE order_events SET v = 1",
@@ -195,38 +216,74 @@ async fn create_publish_read_drop() {
     assert!(!write);
     assert!(sql.contains("`__sprig_sl_41`"), "{sql}");
     // Not streams.
-    assert_eq!(handle("SELECT 1", &cx(&state), &mut m).await.unwrap(), Handled::NotStream);
     assert_eq!(
-        handle("INSERT INTO orders VALUES (1)", &cx(&state), &mut m).await.unwrap(),
+        handle("SELECT 1", &cx(&state), &mut m).await.unwrap(),
+        Handled::NotStream
+    );
+    assert_eq!(
+        handle("INSERT INTO orders VALUES (1)", &cx(&state), &mut m)
+            .await
+            .unwrap(),
         Handled::NotStream
     );
     // Privileges.
     m.deny = vec![Privilege::Insert, Privilege::Select];
-    let e = handle("INSERT INTO order_events (key, value) VALUES (1, 2)", &cx(&state), &mut m)
+    let e = handle(
+        "INSERT INTO order_events (key, value) VALUES (1, 2)",
+        &cx(&state),
+        &mut m,
+    )
+    .await
+    .unwrap_err();
+    assert!(e.message.contains("INSERT command denied"));
+    let e = handle("SELECT * FROM order_events", &cx(&state), &mut m)
         .await
         .unwrap_err();
-    assert!(e.message.contains("INSERT command denied"));
-    let e = handle("SELECT * FROM order_events", &cx(&state), &mut m).await.unwrap_err();
     assert!(e.message.contains("SELECT command denied"));
     m.deny.clear();
     // ALTER and DROP.
-    let e = handle("ALTER STREAM order_events PARTITIONS 2", &cx(&state), &mut m)
-        .await
-        .unwrap_err();
+    let e = handle(
+        "ALTER STREAM order_events PARTITIONS 2",
+        &cx(&state),
+        &mut m,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::StreamPartitionsDecrease));
-    handle("ALTER STREAM order_events PARTITIONS 6 CLEANUP compact", &cx(&state), &mut m)
+    handle(
+        "ALTER STREAM order_events PARTITIONS 6 CLEANUP compact",
+        &cx(&state),
+        &mut m,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(m.committed.last(), Some(StreamsChange::Update(d, None)) if d.partitions == 6 && d.cleanup == Cleanup::Compact)
+    );
+    assert!(m.ddl.iter().any(|s| s.contains("(41, 5, 0, 0, 0, '')")));
+    assert!(
+        m.ddl
+            .iter()
+            .any(|s| s.contains("ADD CONSTRAINT sprig_sc_needs_key"))
+    );
+    handle("DROP STREAM order_events", &cx(&state), &mut m)
         .await
         .unwrap();
-    assert!(matches!(m.committed.last(), Some(StreamsChange::Update(d, None)) if d.partitions == 6 && d.cleanup == Cleanup::Compact));
-    assert!(m.ddl.iter().any(|s| s.contains("(41, 5, 0, 0, 0, '')")));
-    assert!(m.ddl.iter().any(|s| s.contains("ADD CONSTRAINT sprig_sc_needs_key")));
-    handle("DROP STREAM order_events", &cx(&state), &mut m).await.unwrap();
     assert_eq!(m.unsubscribed, vec![def.id]);
-    assert!(m.ddl.iter().any(|s| s.starts_with("DROP TABLE IF EXISTS `t7_d1_g1_s1`.`__sprig_eo_41`")));
-    let e = handle("DROP STREAM nope", &cx(&state), &mut m).await.unwrap_err();
+    assert!(
+        m.ddl
+            .iter()
+            .any(|s| s.starts_with("DROP TABLE IF EXISTS `t7_d1_g1_s1`.`__sprig_eo_41`"))
+    );
+    let e = handle("DROP STREAM nope", &cx(&state), &mut m)
+        .await
+        .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::StreamNotFound));
-    handle("DROP STREAM IF EXISTS nope", &cx(&state), &mut m).await.unwrap();
-    let Handled::Rows { rows, .. } = handle("SHOW STREAMS", &cx(&state), &mut m).await.unwrap() else {
+    handle("DROP STREAM IF EXISTS nope", &cx(&state), &mut m)
+        .await
+        .unwrap();
+    let Handled::Rows { rows, .. } = handle("SHOW STREAMS", &cx(&state), &mut m).await.unwrap()
+    else {
         panic!()
     };
     assert_eq!(rows[0][0].as_deref(), Some("order_events"));
@@ -253,14 +310,28 @@ async fn change_topics() {
     )
     .unwrap();
     assert_eq!(q.name, "orders");
-    assert!(change_topic_target("ALTER TABLE orders SPRIG SET (x.y = 1)", &LexOptions::mariadb()).is_none());
-    assert!(reconcile_change_topic(&q, &cx(&empty), &mut m).await.unwrap());
+    assert!(
+        change_topic_target(
+            "ALTER TABLE orders SPRIG SET (x.y = 1)",
+            &LexOptions::mariadb()
+        )
+        .is_none()
+    );
+    assert!(
+        reconcile_change_topic(&q, &cx(&empty), &mut m)
+            .await
+            .unwrap()
+    );
     let def = created(&m);
     assert_eq!(def.name, "orders.changes");
     assert_eq!(def.kind, StreamKind::Changes);
     assert_eq!(def.source_object, Some(ObjectId(9)));
     let state = StreamsState::new(vec![def.clone()]);
-    assert!(!reconcile_change_topic(&q, &cx(&state), &mut m).await.unwrap());
+    assert!(
+        !reconcile_change_topic(&q, &cx(&state), &mut m)
+            .await
+            .unwrap()
+    );
     // Reading a change topic checks the source table, and refuses a row
     // filter it can't apply.
     m.filtered = true;
@@ -269,12 +340,20 @@ async fn change_topics() {
         .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::RlsUnsupported));
     m.filtered = false;
-    let e = handle("INSERT INTO `orders.changes` (key, value) VALUES (1, 2)", &cx(&state), &mut m)
-        .await
-        .unwrap_err();
+    let e = handle(
+        "INSERT INTO `orders.changes` (key, value) VALUES (1, 2)",
+        &cx(&state),
+        &mut m,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::StreamAppendOnly));
     m.change_topic = false;
-    assert!(reconcile_change_topic(&q, &cx(&state), &mut m).await.unwrap());
+    assert!(
+        reconcile_change_topic(&q, &cx(&state), &mut m)
+            .await
+            .unwrap()
+    );
     assert!(matches!(m.committed.last(), Some(StreamsChange::Delete(_))));
 }
 

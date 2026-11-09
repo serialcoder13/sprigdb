@@ -47,7 +47,10 @@ impl Message for SaslHandshakeResponse {
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.i16(*&self.error_code);
-        w.array(&self.mechanisms, flex, |w, e| { w.string(e, flex)?; Ok(()) })?;
+        w.array(&self.mechanisms, flex, |w, e| {
+            w.string(e, flex)?;
+            Ok(())
+        })?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -65,4 +68,3 @@ impl Message for SaslHandshakeResponse {
         Ok(s)
     }
 }
-

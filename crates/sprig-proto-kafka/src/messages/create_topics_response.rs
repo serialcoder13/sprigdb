@@ -46,7 +46,9 @@ impl Message for CreateTopicsResponse {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 2 { w.i32(*&self.throttle_time_ms); }
+        if v >= 2 {
+            w.i32(*&self.throttle_time_ms);
+        }
         w.array(&self.topics, flex, |w, e| e.encode(w, v))?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
@@ -57,7 +59,9 @@ impl Message for CreateTopicsResponse {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 2 { s.throttle_time_ms = r.i32()?; }
+        if v >= 2 {
+            s.throttle_time_ms = r.i32()?;
+        }
         s.topics = r.array(flex, |r| CreatableTopicResult::decode(r, v))?;
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
@@ -113,16 +117,32 @@ impl CreatableTopicResult {
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.string(&self.name, flex)?;
-        if v >= 7 { w.uuid(&self.topic_id); }
+        if v >= 7 {
+            w.uuid(&self.topic_id);
+        }
         w.i16(*&self.error_code);
-        if v >= 1 { w.nullable_string(self.error_message.as_deref(), flex)?; }
-        if v >= 5 { w.i32(*&self.num_partitions); }
-        if v >= 5 { w.i16(*&self.replication_factor); }
-        if v >= 5 { w.nullable_array(self.configs.as_deref(), flex, |w, e| e.encode(w, v))?; }
+        if v >= 1 {
+            w.nullable_string(self.error_message.as_deref(), flex)?;
+        }
+        if v >= 5 {
+            w.i32(*&self.num_partitions);
+        }
+        if v >= 5 {
+            w.i16(*&self.replication_factor);
+        }
+        if v >= 5 {
+            w.nullable_array(self.configs.as_deref(), flex, |w, e| e.encode(w, v))?;
+        }
         if flex {
             let mut known = Vec::new();
             if v >= 5 && self.topic_config_error_code != 0 {
-                known.push((0, encode_with(|w| { w.i16(*&self.topic_config_error_code); Ok(()) })?));
+                known.push((
+                    0,
+                    encode_with(|w| {
+                        w.i16(*&self.topic_config_error_code);
+                        Ok(())
+                    })?,
+                ));
             }
             w.tagged_fields(known, &self.unknown_tagged_fields)?;
         }
@@ -137,16 +157,29 @@ impl CreatableTopicResult {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
         s.name = r.string(flex)?;
-        if v >= 7 { s.topic_id = r.uuid()?; }
+        if v >= 7 {
+            s.topic_id = r.uuid()?;
+        }
         s.error_code = r.i16()?;
-        if v >= 1 { s.error_message = r.nullable_string(flex)?; }
-        if v >= 5 { s.num_partitions = r.i32()?; }
-        if v >= 5 { s.replication_factor = r.i16()?; }
-        if v >= 5 { s.configs = r.nullable_array(flex, |r| CreatableTopicConfigs::decode(r, v))?; }
+        if v >= 1 {
+            s.error_message = r.nullable_string(flex)?;
+        }
+        if v >= 5 {
+            s.num_partitions = r.i32()?;
+        }
+        if v >= 5 {
+            s.replication_factor = r.i16()?;
+        }
+        if v >= 5 {
+            s.configs = r.nullable_array(flex, |r| CreatableTopicConfigs::decode(r, v))?;
+        }
         if flex {
             let mut t = Self::default();
             s.unknown_tagged_fields = r.tagged_fields(|tag, r| match tag {
-                0 if v >= 5 => { t.topic_config_error_code = r.i16()?; Ok(true) }
+                0 if v >= 5 => {
+                    t.topic_config_error_code = r.i16()?;
+                    Ok(true)
+                }
                 _ => Ok(false),
             })?;
             s.topic_config_error_code = t.topic_config_error_code;
@@ -192,11 +225,21 @@ impl CreatableTopicConfigs {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 5 { w.string(&self.name, flex)?; }
-        if v >= 5 { w.nullable_string(self.value.as_deref(), flex)?; }
-        if v >= 5 { w.bool(*&self.read_only); }
-        if v >= 5 { w.i8(*&self.config_source); }
-        if v >= 5 { w.bool(*&self.is_sensitive); }
+        if v >= 5 {
+            w.string(&self.name, flex)?;
+        }
+        if v >= 5 {
+            w.nullable_string(self.value.as_deref(), flex)?;
+        }
+        if v >= 5 {
+            w.bool(*&self.read_only);
+        }
+        if v >= 5 {
+            w.i8(*&self.config_source);
+        }
+        if v >= 5 {
+            w.bool(*&self.is_sensitive);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -210,15 +253,24 @@ impl CreatableTopicConfigs {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 5 { s.name = r.string(flex)?; }
-        if v >= 5 { s.value = r.nullable_string(flex)?; }
-        if v >= 5 { s.read_only = r.bool()?; }
-        if v >= 5 { s.config_source = r.i8()?; }
-        if v >= 5 { s.is_sensitive = r.bool()?; }
+        if v >= 5 {
+            s.name = r.string(flex)?;
+        }
+        if v >= 5 {
+            s.value = r.nullable_string(flex)?;
+        }
+        if v >= 5 {
+            s.read_only = r.bool()?;
+        }
+        if v >= 5 {
+            s.config_source = r.i8()?;
+        }
+        if v >= 5 {
+            s.is_sensitive = r.bool()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

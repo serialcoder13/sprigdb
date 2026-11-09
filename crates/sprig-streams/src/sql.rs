@@ -259,7 +259,11 @@ fn db_of<'n>(q: &'n QName, cx: &'n Ctx<'_>) -> Result<&'n str> {
 }
 
 /// The stream a name names, if any.
-fn stream_of(cx: &Ctx<'_>, host: &dyn Host, q: &QName) -> Option<(String, std::sync::Arc<StreamDef>)> {
+fn stream_of(
+    cx: &Ctx<'_>,
+    host: &dyn Host,
+    q: &QName,
+) -> Option<(String, std::sync::Arc<StreamDef>)> {
     let db_name = q.db.as_deref().or(cx.current)?;
     let db = host.db_id(db_name)?;
     let s = cx.state.get(db, &q.name, cx.lctn)?;
@@ -298,6 +302,21 @@ pub async fn handle(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Hand
             )),
             None => Ok(Handled::NotStream),
         },
+        Stmt::DropDatabase(name) => {
+            // The database's streams go first (their tables go with its
+            // schemas); then the statement runs as usual.
+            if let Some(db) = host.db_id(&name) {
+                let streams: Vec<StreamDef> = cx.state.of_db(db).map(|s| (**s).clone()).collect();
+                if !streams.is_empty() && !host.allowed(Privilege::Drop, &name, None, "") {
+                    return Ok(Handled::NotStream);
+                }
+                for s in &streams {
+                    host.commit(&StreamsChange::Delete(s.clone())).await?;
+                    host.unsubscribe(s).await?;
+                }
+            }
+            Ok(Handled::NotStream)
+        }
         Stmt::Other => select(sql, cx, host),
     }
 }
@@ -405,18 +424,29 @@ async fn create(c: &grammar::CreateStream, cx: &Ctx<'_>, host: &mut dyn Host) ->
         }],
         created_at_ms: u64::try_from(crate::maria::wall_ms()).unwrap_or(0),
     };
-    host.ddl(&outbox_slot, &[ddl::outbox_sql(&outbox_slot.schema, id, cleanup)])
-        .await?;
-    host.ddl(&template, &log_statements(&template, id, partitions, &start))
-        .await?;
+    host.ddl(
+        &outbox_slot,
+        &[ddl::outbox_sql(&outbox_slot.schema, id, cleanup)],
+    )
+    .await?;
+    host.ddl(
+        &template,
+        &log_statements(&template, id, partitions, &start),
+    )
+    .await?;
     if let Err(e) = host
         .commit(&StreamsChange::Insert(def.clone(), c.retention_hours))
         .await
     {
         let _ = host
-            .ddl(&outbox_slot, &[ddl::drop_outbox_sql(&outbox_slot.schema, id)])
+            .ddl(
+                &outbox_slot,
+                &[ddl::drop_outbox_sql(&outbox_slot.schema, id)],
+            )
             .await;
-        let _ = host.ddl(&template, &ddl::drop_log_sql(&template.schema, id)).await;
+        let _ = host
+            .ddl(&template, &ddl::drop_log_sql(&template.schema, id))
+            .await;
         return Err(e);
     }
     host.subscribe(&def).await?;
@@ -493,7 +523,9 @@ async fn remove(def: &StreamDef, host: &mut dyn Host) -> Result<()> {
     };
     for slot in &def.outbox {
         let p = phys(*slot);
-        let _ = host.ddl(&p, &[ddl::drop_outbox_sql(&p.schema, def.id)]).await;
+        let _ = host
+            .ddl(&p, &[ddl::drop_outbox_sql(&p.schema, def.id)])
+            .await;
     }
     for l in &def.log {
         let p = phys(l.slot);
@@ -582,7 +614,9 @@ fn publish(
         )));
     }
     if i.on_duplicate {
-        return Err(append_only("INSERT ... ON DUPLICATE KEY UPDATE on a stream"));
+        return Err(append_only(
+            "INSERT ... ON DUPLICATE KEY UPDATE on a stream",
+        ));
     }
     if i.set_form {
         return Err(SprigError::standard(
@@ -615,8 +649,8 @@ fn publish(
     let mut out = String::with_capacity(sql.len() + 32);
     out.push_str(&sql[..i.target.range.start]);
     out.push_str(&target);
-    match &i.columns {
-        Some(cols) => {
+    if let Some(cols) = &i.columns {
+        {
             let mut last = i.target.range.end;
             for (name, r) in cols {
                 let col = outbox_column(name).ok_or_else(|| {
@@ -632,7 +666,8 @@ fn publish(
             }
             out.push_str(&sql[last..]);
         }
-        None => {
+    } else {
+        {
             let cols = if i.first_row_arity == Some(2) {
                 " (k, v)"
             } else {
@@ -773,10 +808,15 @@ pub async fn reconcile_change_topic(
                 }],
                 created_at_ms: u64::try_from(crate::maria::wall_ms()).unwrap_or(0),
             };
-            host.ddl(&template, &log_statements(&template, id, partitions, &start))
-                .await?;
+            host.ddl(
+                &template,
+                &log_statements(&template, id, partitions, &start),
+            )
+            .await?;
             if let Err(e) = host.commit(&StreamsChange::Insert(def.clone(), None)).await {
-                let _ = host.ddl(&template, &ddl::drop_log_sql(&template.schema, id)).await;
+                let _ = host
+                    .ddl(&template, &ddl::drop_log_sql(&template.schema, id))
+                    .await;
                 return Err(e);
             }
             host.subscribe(&def).await?;

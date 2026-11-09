@@ -308,10 +308,17 @@ impl StreamsStore {
     ///
     /// # Errors
     /// 39070 or a backend error.
-    pub async fn get<Q: Queryable + Send>(&self, q: &mut Q, id: StreamId) -> Result<Option<StreamDef>> {
+    pub async fn get<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        id: StreamId,
+    ) -> Result<Option<StreamDef>> {
         let row: Option<Row> = q
             .exec_first(
-                format!("SELECT {COLUMNS} FROM {} WHERE stream_id = ?", self.t("streams")),
+                format!(
+                    "SELECT {COLUMNS} FROM {} WHERE stream_id = ?",
+                    self.t("streams")
+                ),
                 (id.0,),
             )
             .await
@@ -383,7 +390,10 @@ impl StreamsStore {
     /// 39070 or a backend error.
     pub async fn delete<Q: Queryable + Send>(&self, q: &mut Q, id: StreamId) -> Result<()> {
         q.exec_drop(
-            format!("DELETE FROM {} WHERE stream_id = ?", self.t("stream_offsets")),
+            format!(
+                "DELETE FROM {} WHERE stream_id = ?",
+                self.t("stream_offsets")
+            ),
             (id.0,),
         )
         .await

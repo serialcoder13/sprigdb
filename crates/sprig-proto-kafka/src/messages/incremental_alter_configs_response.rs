@@ -127,4 +127,3 @@ impl AlterConfigsResourceResponse {
         Ok(s)
     }
 }
-

@@ -30,7 +30,9 @@ use sqlparser::ast::{ObjectNamePart, Statement, TableFactor, VisitMut, VisitorMu
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::{Parser, ParserOptions};
 
-use crate::model::{CKPT_TABLE, LeaderEpoch, Offset, PartitionNo, Record, SHARD_ROW, StreamId, log_table};
+use crate::model::{
+    CKPT_TABLE, LeaderEpoch, Offset, PartitionNo, Record, SHARD_ROW, StreamId, log_table,
+};
 
 /// Quotes bare `key` and `value` words (not index hints such as `USE KEY`
 /// or `PRIMARY KEY`).
@@ -75,9 +77,7 @@ pub fn derived_sql(db: Option<&str>, id: StreamId) -> String {
         Some(d) => format!("{}.{}", quote(d), quote(&log_table(id))),
         None => quote(&log_table(id)),
     };
-    format!(
-        "(SELECT partition_no, offset_no, ts, k AS `key`, v AS `value`, headers FROM {table})"
-    )
+    format!("(SELECT partition_no, offset_no, ts, k AS `key`, v AS `value`, headers FROM {table})")
 }
 
 fn parse(sql: &str) -> Option<Vec<Statement>> {
@@ -122,10 +122,17 @@ impl VisitorMut for Swap<'_> {
         let Some(id) = (self.lookup)(db.as_deref(), &n) else {
             return ControlFlow::Continue(());
         };
-        let alias_text = alias
-            .as_ref()
-            .map_or_else(|| quote(&n), ToString::to_string);
-        let snippet = format!("SELECT * FROM {} AS {alias_text}", derived_sql(db.as_deref(), id));
+        let alias_text = alias.as_ref().map_or_else(
+            || quote(&n),
+            |a| {
+                let t = a.to_string();
+                t.strip_prefix("AS ").map_or(t.clone(), str::to_owned)
+            },
+        );
+        let snippet = format!(
+            "SELECT * FROM {} AS {alias_text}",
+            derived_sql(db.as_deref(), id)
+        );
         let Some(mut stmts) = parse(&snippet) else {
             return ControlFlow::Break(());
         };
@@ -158,7 +165,11 @@ pub struct Rewritten {
 ///
 /// # Errors
 /// 1235 for a statement that names a stream but can't be rewritten.
-pub fn rewrite_select(sql: &str, lex_opts: &LexOptions, lookup: &Lookup<'_>) -> Result<Option<Rewritten>> {
+pub fn rewrite_select(
+    sql: &str,
+    lex_opts: &LexOptions,
+    lookup: &Lookup<'_>,
+) -> Result<Option<Rewritten>> {
     let quoted = quote_columns(sql, lex_opts);
     let Some(mut stmts) = parse(&quoted) else {
         return Ok(None);
@@ -284,7 +295,14 @@ impl LogReader {
                 ),
             ));
         }
-        let rows: Vec<(u64, i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<String>, u32)> = q
+        let rows: Vec<(
+            u64,
+            i64,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<String>,
+            u32,
+        )> = q
             .exec(
                 format!(
                     "SELECT offset_no, CAST(UNIX_TIMESTAMP(ts) * 1000 AS SIGNED), k, v, \
@@ -307,7 +325,9 @@ impl LogReader {
             }
             bytes += size;
             let headers = h
-                .and_then(|h| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&h).ok())
+                .and_then(|h| {
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&h).ok()
+                })
                 .map(|m| {
                     m.into_iter()
                         .map(|(k, v)| {
@@ -374,7 +394,10 @@ mod tests {
             quote_columns("SELECT key, value FROM s USE KEY (x)", &o),
             "SELECT `key`, `value` FROM s USE KEY (x)"
         );
-        assert_eq!(quote_columns("SELECT 'key' FROM s", &o), "SELECT 'key' FROM s");
+        assert_eq!(
+            quote_columns("SELECT 'key' FROM s", &o),
+            "SELECT 'key' FROM s"
+        );
     }
 
     #[test]
@@ -389,7 +412,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(r.sql.contains("FROM (SELECT partition_no, offset_no, ts, k AS `key`, v AS `value`, headers FROM `__sprig_sl_41`) AS `order_events`"), "{}", r.sql);
-        assert!(r.sql.contains("SELECT partition_no, offset_no, ts, `key`, `value` FROM"));
+        assert!(
+            r.sql
+                .contains("SELECT partition_no, offset_no, ts, `key`, `value` FROM")
+        );
         assert_eq!(r.streams, vec![(None, "order_events".into(), StreamId(41))]);
         let r = rewrite_select(
             "SELECT e.offset_no, o.status FROM shop.order_events AS e JOIN orders o ON o.id = e.offset_no",
@@ -398,8 +424,16 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(r.sql.contains("FROM `shop`.`__sprig_sl_41`) AS e JOIN orders"), "{}", r.sql);
-        assert_eq!(rewrite_select("SELECT order_events FROM t", &o, &look).unwrap(), None);
+        assert!(
+            r.sql
+                .contains("FROM `shop`.`__sprig_sl_41`) AS e JOIN orders"),
+            "{}",
+            r.sql
+        );
+        assert_eq!(
+            rewrite_select("SELECT order_events FROM t", &o, &look).unwrap(),
+            None
+        );
         assert_eq!(rewrite_select("SELECT 1 FROM", &o, &look).unwrap(), None);
     }
 }

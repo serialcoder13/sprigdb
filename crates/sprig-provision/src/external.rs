@@ -12,6 +12,9 @@
 //! 6. chapter 09's probes build the capability profile; record declared values
 //! 7. any failure -> 39511 ER_SPRIG_CLUSTER_PRECHECK_FAILED, listing every missing item;
 //!    success -> clusters/<id> with provisioner = external, then active
+//! 8. as sprig_ctl on the writer, make sure the gateways' monitoring account
+//!    sprig_gw exists ([`crate::gw_account`]); if it can't be created, an
+//!    advisory says what to run
 //! ```
 //!
 //! The settings in step 3 are chapter 27's table; the binlog half is the
@@ -284,6 +287,16 @@ impl ExternalProvisioner {
         out
     }
 
+    /// Makes sure `sprig_gw` exists on `node`, as `sprig_ctl`.
+    async fn ensure_gw(&self, node: &NodeSpec, req: &RegisterCluster) -> Result<()> {
+        let gw = crate::gw_account::gw_credential(&req.secrets.ctl)?;
+        let ctl = CredentialConnector::ctl(&req.secrets);
+        let ep = sprig_cluster::driver::NodeConnector::endpoint(&ctl, node)?;
+        let r = crate::gw_account::ensure(node, &ep, &gw, self.settings.probe_timeout).await?;
+        tracing::info!(node = %node.node, result = ?r, "sprig_gw");
+        Ok(())
+    }
+
     /// Eight hex digits that differ between concurrent prechecks.
     fn tag(&self) -> String {
         let nanos = self
@@ -304,9 +317,17 @@ impl ExternalProvisioner {
         &self,
         req: RegisterCluster,
     ) -> Result<(StoredCluster, PrecheckReport)> {
-        let report = self.precheck_report(&req).await;
+        let mut report = self.precheck_report(&req).await;
         if !report.passed() {
             return Err(report.error(&req.name));
+        }
+        // The gateways' monitoring account (chapter 09): created now, or
+        // an advisory naming what the operator runs.
+        if let Some(i) = active_target(req.topology, &report.probes)
+            && let Some(node) = req.nodes.get(i)
+            && let Err(e) = self.ensure_gw(node, &req).await
+        {
+            report.advisories.push(e.message);
         }
         let profile = report
             .profile

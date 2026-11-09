@@ -500,7 +500,19 @@ impl BackendSession {
     /// server's error for a failed sync (after one retry); 39100 without a
     /// writer.
     pub async fn query(&mut self, info: &StmtInfo, sql: &[u8]) -> Result<()> {
+        self.check_packet(sql.len() + 1)?;
         self.run(info, Req::Text(sql)).await
+    }
+
+    /// A statement the gateway's rewrites made longer than the cluster's
+    /// `max_allowed_packet` is refused with 1153 before it is sent:
+    /// MariaDB would drop the connection, leaving the outcome unknown
+    /// (chapter 05, "Packet limit").
+    fn check_packet(&self, len: usize) -> Result<()> {
+        match self.backends.packet_limit(&self.target.cluster) {
+            Some(limit) if len > limit => Err(super::packet_too_large()),
+            _ => Ok(()),
+        }
     }
 
     /// Runs a prepared statement (binary protocol): prepares `sql` on the
@@ -539,6 +551,7 @@ impl BackendSession {
     /// # Errors
     /// As [`query`](Self::query).
     pub async fn command(&mut self, info: &StmtInfo, payload: Bytes) -> Result<()> {
+        self.check_packet(payload.len())?;
         self.run(info, Req::Command(payload)).await
     }
 

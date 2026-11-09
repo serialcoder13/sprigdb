@@ -55,11 +55,20 @@ impl Message for ConsumerProtocolSubscription {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        w.array(&self.topics, flex, |w, e| { w.string(e, flex)?; Ok(()) })?;
+        w.array(&self.topics, flex, |w, e| {
+            w.string(e, flex)?;
+            Ok(())
+        })?;
         w.nullable_bytes(self.user_data.as_deref(), flex)?;
-        if v >= 1 { w.array(&self.owned_partitions, flex, |w, e| e.encode(w, v))?; }
-        if v >= 2 { w.i32(*&self.generation_id); }
-        if v >= 3 { w.nullable_string(self.rack_id.as_deref(), flex)?; }
+        if v >= 1 {
+            w.array(&self.owned_partitions, flex, |w, e| e.encode(w, v))?;
+        }
+        if v >= 2 {
+            w.i32(*&self.generation_id);
+        }
+        if v >= 3 {
+            w.nullable_string(self.rack_id.as_deref(), flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -71,9 +80,15 @@ impl Message for ConsumerProtocolSubscription {
         let mut s = Self::default();
         s.topics = r.array(flex, |r| Ok(r.string(flex)?))?;
         s.user_data = r.nullable_bytes(flex)?;
-        if v >= 1 { s.owned_partitions = r.array(flex, |r| TopicPartition::decode(r, v))?; }
-        if v >= 2 { s.generation_id = r.i32()?; }
-        if v >= 3 { s.rack_id = r.nullable_string(flex)?; }
+        if v >= 1 {
+            s.owned_partitions = r.array(flex, |r| TopicPartition::decode(r, v))?;
+        }
+        if v >= 2 {
+            s.generation_id = r.i32()?;
+        }
+        if v >= 3 {
+            s.rack_id = r.nullable_string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -109,8 +124,15 @@ impl TopicPartition {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 1 { w.string(&self.topic, flex)?; }
-        if v >= 1 { w.array(&self.partitions, flex, |w, e| { w.i32(*e); Ok(()) })?; }
+        if v >= 1 {
+            w.string(&self.topic, flex)?;
+        }
+        if v >= 1 {
+            w.array(&self.partitions, flex, |w, e| {
+                w.i32(*e);
+                Ok(())
+            })?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -124,12 +146,15 @@ impl TopicPartition {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 1 { s.topic = r.string(flex)?; }
-        if v >= 1 { s.partitions = r.array(flex, |r| Ok(r.i32()?))?; }
+        if v >= 1 {
+            s.topic = r.string(flex)?;
+        }
+        if v >= 1 {
+            s.partitions = r.array(flex, |r| Ok(r.i32()?))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

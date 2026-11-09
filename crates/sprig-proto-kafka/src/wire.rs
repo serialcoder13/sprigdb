@@ -444,19 +444,19 @@ impl Writer {
     /// Writes an `UNSIGNED_VARINT`.
     pub fn uvarint(&mut self, mut v: u32) {
         while v >= 0x80 {
-            self.buf.push((v as u8) | 0x80);
+            self.buf.push(v.to_le_bytes()[0] | 0x80);
             v >>= 7;
         }
-        self.buf.push(v as u8);
+        self.buf.push(v.to_le_bytes()[0]);
     }
 
     /// Writes an unsigned varlong.
     pub fn uvarlong(&mut self, mut v: u64) {
         while v >= 0x80 {
-            self.buf.push((v as u8) | 0x80);
+            self.buf.push(v.to_le_bytes()[0] | 0x80);
             v >>= 7;
         }
-        self.buf.push(v as u8);
+        self.buf.push(v.to_le_bytes()[0]);
     }
 
     /// Writes a zig-zag `VARINT`.

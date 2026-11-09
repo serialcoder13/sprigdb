@@ -55,7 +55,9 @@ impl Message for HeartbeatRequest {
         w.string(&self.group_id, flex)?;
         w.i32(*&self.generation_id);
         w.string(&self.member_id, flex)?;
-        if v >= 3 { w.nullable_string(self.group_instance_id.as_deref(), flex)?; }
+        if v >= 3 {
+            w.nullable_string(self.group_instance_id.as_deref(), flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -68,11 +70,12 @@ impl Message for HeartbeatRequest {
         s.group_id = r.string(flex)?;
         s.generation_id = r.i32()?;
         s.member_id = r.string(flex)?;
-        if v >= 3 { s.group_instance_id = r.nullable_string(flex)?; }
+        if v >= 3 {
+            s.group_instance_id = r.nullable_string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

@@ -156,7 +156,11 @@ async fn kind_ack_workload() {
     // instead of app.acks; measures the database without the gateway.
     let direct: Vec<String> = f[0].split('|').map(str::to_owned).collect();
     let is_direct = direct.len() > 1;
-    let table = if is_direct { "r2opfix_acks.acks" } else { "app.acks" };
+    let table = if is_direct {
+        "r2opfix_acks.acks"
+    } else {
+        "app.acks"
+    };
     let opts_for = |addr: &str| {
         let (host, port) = addr.rsplit_once(':').unwrap();
         let mut o = mysql_async::OptsBuilder::default()
@@ -183,12 +187,17 @@ async fn kind_ack_workload() {
         let mut last = None;
         for a in &direct {
             let (host, port) = a.rsplit_once(':').unwrap();
-            let o = opts.clone().ip_or_hostname(host.to_owned()).tcp_port(port.parse().unwrap());
+            let o = opts
+                .clone()
+                .ip_or_hostname(host.to_owned())
+                .tcp_port(port.parse().unwrap());
             match tokio::time::timeout(Duration::from_secs(2), mysql_async::Conn::new(o)).await {
                 Ok(Ok(mut c)) => {
-                    let ro: Option<i64> = c.query_first("SELECT @@read_only").await.unwrap_or(Some(1));
+                    let ro: Option<i64> =
+                        c.query_first("SELECT @@read_only").await.unwrap_or(Some(1));
                     if ro == Some(0) {
-                        c.query_drop("CREATE DATABASE IF NOT EXISTS r2opfix_acks").await?;
+                        c.query_drop("CREATE DATABASE IF NOT EXISTS r2opfix_acks")
+                            .await?;
                         c.query_drop("CREATE TABLE IF NOT EXISTS r2opfix_acks.acks (id BIGINT PRIMARY KEY, v VARCHAR(8))").await?;
                         return Ok(c);
                     }
@@ -246,7 +255,10 @@ async fn kind_ack_workload() {
         let c = conn.as_mut().unwrap();
         let r = tokio::time::timeout(
             Duration::from_secs(10),
-            c.exec_drop(format!("INSERT INTO {table} (id, v) VALUES (?, 'w')"), (id,)),
+            c.exec_drop(
+                format!("INSERT INTO {table} (id, v) VALUES (?, 'w')"),
+                (id,),
+            ),
         )
         .await;
         match r {

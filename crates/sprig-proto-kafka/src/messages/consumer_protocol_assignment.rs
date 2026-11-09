@@ -95,7 +95,10 @@ impl TopicPartition {
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.string(&self.topic, flex)?;
-        w.array(&self.partitions, flex, |w, e| { w.i32(*e); Ok(()) })?;
+        w.array(&self.partitions, flex, |w, e| {
+            w.i32(*e);
+            Ok(())
+        })?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -117,4 +120,3 @@ impl TopicPartition {
         Ok(s)
     }
 }
-

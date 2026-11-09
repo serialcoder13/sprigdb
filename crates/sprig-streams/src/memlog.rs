@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::model::{LeaderEpoch, NewRecord, Offset, PartitionNo, Source};
-use crate::sequencer::{AppendOutcome, Appended, Acquired, Batch, LogStore, Start};
+use crate::sequencer::{Acquired, AppendOutcome, Appended, Batch, LogStore, Start};
 
 /// A record in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +70,10 @@ impl std::fmt::Debug for MemLog {
 }
 
 fn lost() -> SprigError {
-    let mut e = SprigError::new(SprigCode::BackendUnavailable, "injected: log shard unreachable");
+    let mut e = SprigError::new(
+        SprigCode::BackendUnavailable,
+        "injected: log shard unreachable",
+    );
     e.retryable = true;
     e
 }

@@ -758,6 +758,15 @@ impl PassSession {
                 Err(e) => return self.fail(out, &e).await,
             };
             let r = settings_sql::execute(ts, &cat, current.as_deref(), &stmt, charset).await;
+            // Chapter 45: `stream.change_topic` creates or drops the change
+            // topic (R9).
+            let r = match r {
+                Ok(SettingsAnswer::Ok { warnings }) => self
+                    .streams_after_settings(text)
+                    .await
+                    .map(|()| SettingsAnswer::Ok { warnings }),
+                other => other,
+            };
             let s = status(self.status());
             return match r {
                 Ok(SettingsAnswer::Ok { warnings }) => {
@@ -856,6 +865,13 @@ impl PassSession {
         } else {
             text
         };
+        // Chapter 45: stream DDL, publishing and reads (R9).
+        if let Some(step) = self
+            .tenant_streams(cx, text, attrs, more, format, &cat, out)
+            .await?
+        {
+            return Ok(step);
+        }
         // Chapter 42: spaces, shares and merged views of inheritable
         // objects (before chapter 32, which never sees them).
         if let Some(step) = self

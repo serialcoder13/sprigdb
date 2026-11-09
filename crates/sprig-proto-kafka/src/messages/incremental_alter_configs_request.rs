@@ -179,4 +179,3 @@ impl AlterableConfig {
         Ok(s)
     }
 }
-

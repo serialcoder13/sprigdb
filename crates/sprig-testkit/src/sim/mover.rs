@@ -69,6 +69,8 @@ use crate::faults::Node;
 mod feed;
 // Chapter 41's after-commit triggers on the same feed (R7 order 5).
 mod logic;
+// Chapter 45's stream sequencer on the same feed (R9).
+mod streams;
 // Prepared distributed-transaction branches at cutover (chapter 18).
 pub mod xa;
 
@@ -1148,6 +1150,9 @@ pub struct Variant {
     pub xa: bool,
     /// The XA variant without the drain: the behaviour before it.
     pub xa_no_drain: bool,
+    /// Run a change topic's sequencer on the tenant's feed too (chapter
+    /// 45), killed and overlapped at random (the stream invariant).
+    pub streams: bool,
 }
 
 /// Runs one seed of [`run_move`] with an after-commit trigger on the
@@ -1161,6 +1166,24 @@ pub async fn run_move_triggers(world: World) -> std::result::Result<(), String> 
         world,
         Variant {
             triggers: true,
+            ..Variant::default()
+        },
+    )
+    .await
+}
+
+/// Runs one seed of [`run_move`] with a change topic's sequencer on the
+/// tenant's feed (chapter 45), killed, overlapped by a second sequencer
+/// (a lost lease) and failing its appends at random: every change of the
+/// topic's table is in the log once, in commit order per partition.
+///
+/// # Errors
+/// The first broken invariant.
+pub async fn run_move_streams(world: World) -> std::result::Result<(), String> {
+    run_move_with(
+        world,
+        Variant {
+            streams: true,
             ..Variant::default()
         },
     )
@@ -1364,6 +1387,20 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
             sc.faults,
             feed_goal.clone(),
             trig_log.clone(),
+            feed_stop.clone(),
+        ))
+    });
+    let stream_log = streams::new_log(&world, &feed_clusters, sc.faults);
+    let stream_run: Arc<Mutex<streams::StreamRun>> = Arc::default();
+    let mut stream_task = variant.streams.then(|| {
+        tokio::spawn(streams::sequencer_worker(
+            world.clone(),
+            feed_clusters.clone(),
+            tier.clone(),
+            sc.faults,
+            feed_goal.clone(),
+            stream_log.clone(),
+            stream_run.clone(),
             feed_stop.clone(),
         ))
     });
@@ -1579,9 +1616,18 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
             .is_ok(),
         _ => false,
     };
+    let stream_done = match (&mut stream_task, feed_done) {
+        (Some(t), true) => tokio::time::timeout(Duration::from_secs(600), t)
+            .await
+            .is_ok(),
+        _ => false,
+    };
     feed_stop.cancel();
     feed_task.abort();
     if let Some(t) = &trig_task {
+        t.abort();
+    }
+    if let Some(t) = &stream_task {
         t.abort();
     }
     let history = sprig_feed::ownership::history(&admin, TENANT, 0)
@@ -1595,6 +1641,15 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
             .clone();
         logic::check_triggers(&seen, &trig_log, trig_done).await?;
         world.record(logic::summary(&trig_log));
+    }
+    if variant.streams {
+        let seen = feed_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .seen
+            .clone();
+        world.record(streams::summary(&stream_log, &stream_run));
+        streams::check_stream(&seen, &stream_log, stream_done)?;
     }
     let maps = TenantMaps::new(admin);
     let (m, _) = maps.load(TENANT).await.map_err(|e| e.to_string())?;

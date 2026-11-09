@@ -12,6 +12,8 @@ pub mod inherit;
 pub mod logic;
 pub mod permit;
 pub mod runtime;
+// Chapter 45 (R9): stream sequencers.
+pub mod streams;
 pub mod xa_drain;
 
 use std::sync::Arc;
@@ -142,10 +144,13 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         Arc::clone(&env.pools),
         Arc::clone(&env.clusters),
     )?);
+    // Chapter 45's stream sequencers, on the logic jobs' pools and feeds.
+    let streams_env = streams::StreamsEnv::from_logic(&env);
     let jobs = runtime::WorkerRuntime::new(dc_logic, Arc::new(SystemClock), worker.clone())
         .with_handler(Arc::new(logic::LogicTrigger(env.clone())))
         .with_handler(Arc::new(logic::LogicSchedule(env)))
-        .with_handler(Arc::new(inherit::InheritCopy(inherit_env)));
+        .with_handler(Arc::new(inherit::InheritCopy(inherit_env)))
+        .with_handler(Arc::new(streams::StreamSequencer(streams_env)));
     ctx.health.set_ready();
     tracing::info!(%role, %worker, "ready: running mover and logic jobs");
     let shutdown = ctx.shutdown.clone();

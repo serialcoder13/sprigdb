@@ -296,7 +296,7 @@ async fn login(dc: &str, user: &str, pw: &str) -> Result<String, u16> {
         }
         Ok(Err(mysql_async::Error::Server(e))) => Err(e.code),
         Ok(Err(e)) => panic!("login {user} at {dc}: {e}"),
-        Err(_) => panic!("login {user} at {dc} timed out"),
+        Err(elapsed) => panic!("login {user} at {dc}: {elapsed}"),
     }
 }
 

@@ -21,6 +21,7 @@ getrandom.workspace = true
 metrics.workspace = true
 ring.workspace = true
 sprig-common.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
@@ -31,7 +32,11 @@ zstd.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-tokio = { workspace = true, features = ["io-util", "test-util"] }
+# The live test's TLS client.
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "test-util"] }
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

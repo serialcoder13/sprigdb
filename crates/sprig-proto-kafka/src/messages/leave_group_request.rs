@@ -50,8 +50,12 @@ impl Message for LeaveGroupRequest {
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.string(&self.group_id, flex)?;
-        if v <= 2 { w.string(&self.member_id, flex)?; }
-        if v >= 3 { w.array(&self.members, flex, |w, e| e.encode(w, v))?; }
+        if v <= 2 {
+            w.string(&self.member_id, flex)?;
+        }
+        if v >= 3 {
+            w.array(&self.members, flex, |w, e| e.encode(w, v))?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -62,8 +66,12 @@ impl Message for LeaveGroupRequest {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
         s.group_id = r.string(flex)?;
-        if v <= 2 { s.member_id = r.string(flex)?; }
-        if v >= 3 { s.members = r.array(flex, |r| MemberIdentity::decode(r, v))?; }
+        if v <= 2 {
+            s.member_id = r.string(flex)?;
+        }
+        if v >= 3 {
+            s.members = r.array(flex, |r| MemberIdentity::decode(r, v))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -102,9 +110,15 @@ impl MemberIdentity {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 3 { w.string(&self.member_id, flex)?; }
-        if v >= 3 { w.nullable_string(self.group_instance_id.as_deref(), flex)?; }
-        if v >= 5 { w.nullable_string(self.reason.as_deref(), flex)?; }
+        if v >= 3 {
+            w.string(&self.member_id, flex)?;
+        }
+        if v >= 3 {
+            w.nullable_string(self.group_instance_id.as_deref(), flex)?;
+        }
+        if v >= 5 {
+            w.nullable_string(self.reason.as_deref(), flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -118,13 +132,18 @@ impl MemberIdentity {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 3 { s.member_id = r.string(flex)?; }
-        if v >= 3 { s.group_instance_id = r.nullable_string(flex)?; }
-        if v >= 5 { s.reason = r.nullable_string(flex)?; }
+        if v >= 3 {
+            s.member_id = r.string(flex)?;
+        }
+        if v >= 3 {
+            s.group_instance_id = r.nullable_string(flex)?;
+        }
+        if v >= 5 {
+            s.reason = r.nullable_string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

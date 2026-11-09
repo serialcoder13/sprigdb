@@ -58,12 +58,20 @@ impl Message for MetadataResponse {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 3 { w.i32(*&self.throttle_time_ms); }
+        if v >= 3 {
+            w.i32(*&self.throttle_time_ms);
+        }
         w.array(&self.brokers, flex, |w, e| e.encode(w, v))?;
-        if v >= 2 { w.nullable_string(self.cluster_id.as_deref(), flex)?; }
-        if v >= 1 { w.i32(*&self.controller_id); }
+        if v >= 2 {
+            w.nullable_string(self.cluster_id.as_deref(), flex)?;
+        }
+        if v >= 1 {
+            w.i32(*&self.controller_id);
+        }
         w.array(&self.topics, flex, |w, e| e.encode(w, v))?;
-        if v >= 8 && v <= 10 { w.i32(*&self.cluster_authorized_operations); }
+        if v >= 8 && v <= 10 {
+            w.i32(*&self.cluster_authorized_operations);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -73,12 +81,20 @@ impl Message for MetadataResponse {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 3 { s.throttle_time_ms = r.i32()?; }
+        if v >= 3 {
+            s.throttle_time_ms = r.i32()?;
+        }
         s.brokers = r.array(flex, |r| MetadataResponseBroker::decode(r, v))?;
-        if v >= 2 { s.cluster_id = r.nullable_string(flex)?; }
-        if v >= 1 { s.controller_id = r.i32()?; }
+        if v >= 2 {
+            s.cluster_id = r.nullable_string(flex)?;
+        }
+        if v >= 1 {
+            s.controller_id = r.i32()?;
+        }
         s.topics = r.array(flex, |r| MetadataResponseTopic::decode(r, v))?;
-        if v >= 8 && v <= 10 { s.cluster_authorized_operations = r.i32()?; }
+        if v >= 8 && v <= 10 {
+            s.cluster_authorized_operations = r.i32()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -123,7 +139,9 @@ impl MetadataResponseBroker {
         w.i32(*&self.node_id);
         w.string(&self.host, flex)?;
         w.i32(*&self.port);
-        if v >= 1 { w.nullable_string(self.rack.as_deref(), flex)?; }
+        if v >= 1 {
+            w.nullable_string(self.rack.as_deref(), flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -140,7 +158,9 @@ impl MetadataResponseBroker {
         s.node_id = r.i32()?;
         s.host = r.string(flex)?;
         s.port = r.i32()?;
-        if v >= 1 { s.rack = r.nullable_string(flex)?; }
+        if v >= 1 {
+            s.rack = r.nullable_string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -189,11 +209,26 @@ impl MetadataResponseTopic {
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.i16(*&self.error_code);
-        if v >= 12 { w.nullable_string(self.name.as_deref(), flex)?; } else { w.string(self.name.as_ref().ok_or(CodecError::NullNotAllowed("Name"))?, flex)?; }
-        if v >= 10 { w.uuid(&self.topic_id); }
-        if v >= 1 { w.bool(*&self.is_internal); }
+        if v >= 12 {
+            w.nullable_string(self.name.as_deref(), flex)?;
+        } else {
+            w.string(
+                self.name
+                    .as_ref()
+                    .ok_or(CodecError::NullNotAllowed("Name"))?,
+                flex,
+            )?;
+        }
+        if v >= 10 {
+            w.uuid(&self.topic_id);
+        }
+        if v >= 1 {
+            w.bool(*&self.is_internal);
+        }
         w.array(&self.partitions, flex, |w, e| e.encode(w, v))?;
-        if v >= 8 { w.i32(*&self.topic_authorized_operations); }
+        if v >= 8 {
+            w.i32(*&self.topic_authorized_operations);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -208,11 +243,21 @@ impl MetadataResponseTopic {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
         s.error_code = r.i16()?;
-        s.name = if v >= 12 { r.nullable_string(flex)? } else { Some(r.string(flex)?) };
-        if v >= 10 { s.topic_id = r.uuid()?; }
-        if v >= 1 { s.is_internal = r.bool()?; }
+        s.name = if v >= 12 {
+            r.nullable_string(flex)?
+        } else {
+            Some(r.string(flex)?)
+        };
+        if v >= 10 {
+            s.topic_id = r.uuid()?;
+        }
+        if v >= 1 {
+            s.is_internal = r.bool()?;
+        }
         s.partitions = r.array(flex, |r| MetadataResponsePartition::decode(r, v))?;
-        if v >= 8 { s.topic_authorized_operations = r.i32()?; }
+        if v >= 8 {
+            s.topic_authorized_operations = r.i32()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -266,10 +311,23 @@ impl MetadataResponsePartition {
         w.i16(*&self.error_code);
         w.i32(*&self.partition_index);
         w.i32(*&self.leader_id);
-        if v >= 7 { w.i32(*&self.leader_epoch); }
-        w.array(&self.replica_nodes, flex, |w, e| { w.i32(*e); Ok(()) })?;
-        w.array(&self.isr_nodes, flex, |w, e| { w.i32(*e); Ok(()) })?;
-        if v >= 5 { w.array(&self.offline_replicas, flex, |w, e| { w.i32(*e); Ok(()) })?; }
+        if v >= 7 {
+            w.i32(*&self.leader_epoch);
+        }
+        w.array(&self.replica_nodes, flex, |w, e| {
+            w.i32(*e);
+            Ok(())
+        })?;
+        w.array(&self.isr_nodes, flex, |w, e| {
+            w.i32(*e);
+            Ok(())
+        })?;
+        if v >= 5 {
+            w.array(&self.offline_replicas, flex, |w, e| {
+                w.i32(*e);
+                Ok(())
+            })?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -286,14 +344,17 @@ impl MetadataResponsePartition {
         s.error_code = r.i16()?;
         s.partition_index = r.i32()?;
         s.leader_id = r.i32()?;
-        if v >= 7 { s.leader_epoch = r.i32()?; }
+        if v >= 7 {
+            s.leader_epoch = r.i32()?;
+        }
         s.replica_nodes = r.array(flex, |r| Ok(r.i32()?))?;
         s.isr_nodes = r.array(flex, |r| Ok(r.i32()?))?;
-        if v >= 5 { s.offline_replicas = r.array(flex, |r| Ok(r.i32()?))?; }
+        if v >= 5 {
+            s.offline_replicas = r.array(flex, |r| Ok(r.i32()?))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

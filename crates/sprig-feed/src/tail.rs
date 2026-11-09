@@ -69,6 +69,10 @@ pub struct TailOptions {
     pub handoff_alert: Duration,
     /// First retry delay after a broken stream; doubles up to 5 s.
     pub retry: Duration,
+    /// Internal tables whose rows are delivered anyway, by name prefix:
+    /// chapter 45's sequencers read their outboxes (`__sprig_eo_`).
+    /// Empty: filter rule 1 drops every internal table.
+    pub keep_internal: Vec<String>,
 }
 
 impl Default for TailOptions {
@@ -78,6 +82,7 @@ impl Default for TailOptions {
             handoff_poll: Duration::from_millis(500),
             handoff_alert: Duration::from_secs(300),
             retry: Duration::from_millis(100),
+            keep_internal: Vec::new(),
         }
     }
 }
@@ -575,7 +580,13 @@ impl TenantTail {
         let mut events: Vec<(u32, ChangeEvent)> = Vec::new();
         for (i, r) in rows.iter().enumerate() {
             let idx = u32::try_from(i).unwrap_or(u32::MAX - 1);
-            if is_internal_object(&r.table.table) {
+            if is_internal_object(&r.table.table)
+                && !self
+                    .opts
+                    .keep_internal
+                    .iter()
+                    .any(|p| r.table.table.starts_with(p.as_str()))
+            {
                 metrics::counter!("sprig_feed_filtered_total", "reason" => "internal").increment(1);
                 continue;
             }
@@ -1000,13 +1011,12 @@ mod tests {
         // While "x" was prepared, tokens point back at its prepare.
         let after3 = items
             .iter()
-            .filter_map(|i| match i {
+            .find_map(|i| match i {
                 FeedItem::TxnEnd { token } if token.until.map(|u| u.0) == Some(g(3)) => {
                     Some(token.clone())
                 }
                 _ => None,
             })
-            .next()
             .unwrap();
         assert_eq!(after3.pos, GtidPos::from_gtids([g(1)]));
         // Resuming there skips 3 but publishes "x" at its commit.

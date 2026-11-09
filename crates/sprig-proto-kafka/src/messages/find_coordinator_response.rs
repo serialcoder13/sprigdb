@@ -61,13 +61,27 @@ impl Message for FindCoordinatorResponse {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 1 { w.i32(*&self.throttle_time_ms); }
-        if v <= 3 { w.i16(*&self.error_code); }
-        if v >= 1 && v <= 3 { w.nullable_string(self.error_message.as_deref(), flex)?; }
-        if v <= 3 { w.i32(*&self.node_id); }
-        if v <= 3 { w.string(&self.host, flex)?; }
-        if v <= 3 { w.i32(*&self.port); }
-        if v >= 4 { w.array(&self.coordinators, flex, |w, e| e.encode(w, v))?; }
+        if v >= 1 {
+            w.i32(*&self.throttle_time_ms);
+        }
+        if v <= 3 {
+            w.i16(*&self.error_code);
+        }
+        if v >= 1 && v <= 3 {
+            w.nullable_string(self.error_message.as_deref(), flex)?;
+        }
+        if v <= 3 {
+            w.i32(*&self.node_id);
+        }
+        if v <= 3 {
+            w.string(&self.host, flex)?;
+        }
+        if v <= 3 {
+            w.i32(*&self.port);
+        }
+        if v >= 4 {
+            w.array(&self.coordinators, flex, |w, e| e.encode(w, v))?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -77,13 +91,27 @@ impl Message for FindCoordinatorResponse {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 1 { s.throttle_time_ms = r.i32()?; }
-        if v <= 3 { s.error_code = r.i16()?; }
-        if v >= 1 && v <= 3 { s.error_message = r.nullable_string(flex)?; }
-        if v <= 3 { s.node_id = r.i32()?; }
-        if v <= 3 { s.host = r.string(flex)?; }
-        if v <= 3 { s.port = r.i32()?; }
-        if v >= 4 { s.coordinators = r.array(flex, |r| Coordinator::decode(r, v))?; }
+        if v >= 1 {
+            s.throttle_time_ms = r.i32()?;
+        }
+        if v <= 3 {
+            s.error_code = r.i16()?;
+        }
+        if v >= 1 && v <= 3 {
+            s.error_message = r.nullable_string(flex)?;
+        }
+        if v <= 3 {
+            s.node_id = r.i32()?;
+        }
+        if v <= 3 {
+            s.host = r.string(flex)?;
+        }
+        if v <= 3 {
+            s.port = r.i32()?;
+        }
+        if v >= 4 {
+            s.coordinators = r.array(flex, |r| Coordinator::decode(r, v))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -131,12 +159,24 @@ impl Coordinator {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 4 { w.string(&self.key, flex)?; }
-        if v >= 4 { w.i32(*&self.node_id); }
-        if v >= 4 { w.string(&self.host, flex)?; }
-        if v >= 4 { w.i32(*&self.port); }
-        if v >= 4 { w.i16(*&self.error_code); }
-        if v >= 4 { w.nullable_string(self.error_message.as_deref(), flex)?; }
+        if v >= 4 {
+            w.string(&self.key, flex)?;
+        }
+        if v >= 4 {
+            w.i32(*&self.node_id);
+        }
+        if v >= 4 {
+            w.string(&self.host, flex)?;
+        }
+        if v >= 4 {
+            w.i32(*&self.port);
+        }
+        if v >= 4 {
+            w.i16(*&self.error_code);
+        }
+        if v >= 4 {
+            w.nullable_string(self.error_message.as_deref(), flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -150,16 +190,27 @@ impl Coordinator {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 4 { s.key = r.string(flex)?; }
-        if v >= 4 { s.node_id = r.i32()?; }
-        if v >= 4 { s.host = r.string(flex)?; }
-        if v >= 4 { s.port = r.i32()?; }
-        if v >= 4 { s.error_code = r.i16()?; }
-        if v >= 4 { s.error_message = r.nullable_string(flex)?; }
+        if v >= 4 {
+            s.key = r.string(flex)?;
+        }
+        if v >= 4 {
+            s.node_id = r.i32()?;
+        }
+        if v >= 4 {
+            s.host = r.string(flex)?;
+        }
+        if v >= 4 {
+            s.port = r.i32()?;
+        }
+        if v >= 4 {
+            s.error_code = r.i16()?;
+        }
+        if v >= 4 {
+            s.error_message = r.nullable_string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

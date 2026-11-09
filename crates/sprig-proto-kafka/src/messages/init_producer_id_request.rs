@@ -54,8 +54,12 @@ impl Message for InitProducerIdRequest {
         let flex = v >= FLEXIBLE_MIN;
         w.nullable_string(self.transactional_id.as_deref(), flex)?;
         w.i32(*&self.transaction_timeout_ms);
-        if v >= 3 { w.i64(*&self.producer_id); }
-        if v >= 3 { w.i16(*&self.producer_epoch); }
+        if v >= 3 {
+            w.i64(*&self.producer_id);
+        }
+        if v >= 3 {
+            w.i16(*&self.producer_epoch);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -67,12 +71,15 @@ impl Message for InitProducerIdRequest {
         let mut s = Self::default();
         s.transactional_id = r.nullable_string(flex)?;
         s.transaction_timeout_ms = r.i32()?;
-        if v >= 3 { s.producer_id = r.i64()?; }
-        if v >= 3 { s.producer_epoch = r.i16()?; }
+        if v >= 3 {
+            s.producer_id = r.i64()?;
+        }
+        if v >= 3 {
+            s.producer_epoch = r.i16()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

@@ -59,10 +59,18 @@ impl Message for OffsetCommitRequest {
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
         w.string(&self.group_id, flex)?;
-        if v >= 1 { w.i32(*&self.generation_id_or_member_epoch); }
-        if v >= 1 { w.string(&self.member_id, flex)?; }
-        if v >= 7 { w.nullable_string(self.group_instance_id.as_deref(), flex)?; }
-        if v >= 2 && v <= 4 { w.i64(*&self.retention_time_ms); }
+        if v >= 1 {
+            w.i32(*&self.generation_id_or_member_epoch);
+        }
+        if v >= 1 {
+            w.string(&self.member_id, flex)?;
+        }
+        if v >= 7 {
+            w.nullable_string(self.group_instance_id.as_deref(), flex)?;
+        }
+        if v >= 2 && v <= 4 {
+            w.i64(*&self.retention_time_ms);
+        }
         w.array(&self.topics, flex, |w, e| e.encode(w, v))?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
@@ -74,10 +82,18 @@ impl Message for OffsetCommitRequest {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
         s.group_id = r.string(flex)?;
-        if v >= 1 { s.generation_id_or_member_epoch = r.i32()?; }
-        if v >= 1 { s.member_id = r.string(flex)?; }
-        if v >= 7 { s.group_instance_id = r.nullable_string(flex)?; }
-        if v >= 2 && v <= 4 { s.retention_time_ms = r.i64()?; }
+        if v >= 1 {
+            s.generation_id_or_member_epoch = r.i32()?;
+        }
+        if v >= 1 {
+            s.member_id = r.string(flex)?;
+        }
+        if v >= 7 {
+            s.group_instance_id = r.nullable_string(flex)?;
+        }
+        if v >= 2 && v <= 4 {
+            s.retention_time_ms = r.i64()?;
+        }
         s.topics = r.array(flex, |r| OffsetCommitRequestTopic::decode(r, v))?;
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
@@ -177,8 +193,12 @@ impl OffsetCommitRequestPartition {
         let flex = v >= FLEXIBLE_MIN;
         w.i32(*&self.partition_index);
         w.i64(*&self.committed_offset);
-        if v >= 6 { w.i32(*&self.committed_leader_epoch); }
-        if v >= 1 && v <= 1 { w.i64(*&self.commit_timestamp); }
+        if v >= 6 {
+            w.i32(*&self.committed_leader_epoch);
+        }
+        if v >= 1 && v <= 1 {
+            w.i64(*&self.commit_timestamp);
+        }
         w.nullable_string(self.committed_metadata.as_deref(), flex)?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
@@ -195,8 +215,12 @@ impl OffsetCommitRequestPartition {
         let mut s = Self::default();
         s.partition_index = r.i32()?;
         s.committed_offset = r.i64()?;
-        if v >= 6 { s.committed_leader_epoch = r.i32()?; }
-        if v >= 1 && v <= 1 { s.commit_timestamp = r.i64()?; }
+        if v >= 6 {
+            s.committed_leader_epoch = r.i32()?;
+        }
+        if v >= 1 && v <= 1 {
+            s.commit_timestamp = r.i64()?;
+        }
         s.committed_metadata = r.nullable_string(flex)?;
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
@@ -204,4 +228,3 @@ impl OffsetCommitRequestPartition {
         Ok(s)
     }
 }
-

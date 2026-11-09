@@ -1,15 +1,19 @@
 //! Primary + replicas, driven by SprigDB (chapter 25 steps 3-10).
 //!
 //! ```text
-//! 3. on each replica whose agent answers: STOP SLAVE IO_THREAD, then
-//!    MASTER_GTID_WAIT(Gtid_IO_Pos, 30) so the relay log is applied
-//! 4. best = the replica whose gtid_slave_pos is highest in c's domain and contains
-//!    every other replica's; if two diverge, stop and alert
+//! 3. on each replica whose agent answers: apply what it received, with the
+//!    IO thread left running (the primary is fenced or down, so nothing new
+//!    arrives): START SLAVE SQL_THREAD only while the IO thread is alive,
+//!    MASTER_GTID_WAIT(received, 30) ([`drain`]; r2drain)
+//! 4. best = the replica whose received position contains every other's; none,
+//!    two that diverge, or best not fully applied (both threads stopped with
+//!    relay log left, or too slow) -> stop and alert
 //! 5. expected loss: at most 1 s if Rpl_semi_sync_master_status was ON in the last
 //!    per-second sample (AFTER_SYNC); otherwise best's last measured lag
 //! 6. loss > rpo, or failover.mode manual -> stop, alert, wait for an operator
-//! 8. best: STOP SLAVE; RESET SLAVE ALL; rpl_semi_sync_master_enabled = ON;
-//!    read_only = OFF
+//! 8. best: drain again; STOP SLAVE IO_THREAD; MASTER_GTID_WAIT; STOP SLAVE;
+//!    everything received applied, or refuse; RESET SLAVE ALL;
+//!    rpl_semi_sync_master_enabled = ON; read_only = OFF
 //! 9. others: CHANGE MASTER TO best, MASTER_USE_GTID = slave_pos; START SLAVE
 //! ```
 //!
@@ -26,7 +30,11 @@ use sprig_common::ids::NodeId;
 
 use crate::sql::{NodeEndpoint, ProbeError, ProbeSession, TextRow, literal};
 
-/// How long `MASTER_GTID_WAIT` may wait for the relay log (step 3).
+pub mod drain;
+
+pub use drain::{DrainStep, Drained, ReplStatus, next_step};
+
+/// How long a replica may take to apply its relay log (steps 3 and 8).
 pub const RELAY_WAIT_SECONDS: u32 = 30;
 
 /// Statement timeout for failover steps.
@@ -39,15 +47,24 @@ pub struct ReplicaState {
     pub node: NodeId,
     /// `@@gtid_slave_pos` after the relay log was applied.
     pub slave_pos: String,
-    /// `Seconds_Behind_Master` before the IO thread stopped.
+    /// What it received: `Gtid_IO_Pos`, or the applied position where that
+    /// is higher. The choice compares these.
+    #[serde(default)]
+    pub received: String,
+    /// `Seconds_Behind_Master` before the drain.
     pub lag_seconds: Option<u64>,
-    /// Whether the relay log was fully applied within the wait.
+    /// Whether everything received was applied within the wait.
     pub drained: bool,
+    /// Why it wasn't drained (both threads stopped, too slow, the SQL
+    /// thread failing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck: Option<String>,
 }
 
 impl ReplicaState {
-    fn pos(&self) -> GtidPos {
-        self.slave_pos.parse().unwrap_or_default()
+    fn received(&self) -> GtidPos {
+        let applied: GtidPos = self.slave_pos.parse().unwrap_or_default();
+        drain::merge(&self.received.parse().unwrap_or_default(), &applied)
     }
 }
 
@@ -106,88 +123,83 @@ async fn session(ep: &NodeEndpoint) -> Result<ProbeSession, ProbeError> {
     ProbeSession::connect(ep, STEP_TIMEOUT).await
 }
 
-/// Step 3 on one replica: stop the IO thread, wait for the relay log to
-/// be applied, and read the applied position.
+/// Step 3 on one replica: apply what it received without discarding its
+/// relay log ([`drain`]: the IO thread keeps running, and the SQL thread is
+/// started only while the IO thread is alive), and read the positions.
+/// Stops nothing.
 ///
 /// # Errors
 /// The replica couldn't be reached or a statement failed.
 pub async fn drain_relay(ep: &NodeEndpoint) -> Result<ReplicaState, ProbeError> {
     let mut s = session(ep).await?;
-    let before = s.rows("SHOW SLAVE STATUS").await?;
-    let lag_seconds = before
-        .first()
-        .and_then(|r| col(r, "Seconds_Behind_Master"))
-        .and_then(|v| v.parse().ok());
-    s.exec("STOP SLAVE IO_THREAD").await?;
-    let status = s.rows("SHOW SLAVE STATUS").await?;
-    let io_pos = status
-        .first()
-        .and_then(|r| col(r, "Gtid_IO_Pos"))
-        .unwrap_or_default()
-        .to_owned();
-    let drained = if io_pos.is_empty() {
-        true
-    } else {
-        let r = s
-            .scalar(&format!(
-                "SELECT MASTER_GTID_WAIT({}, {RELAY_WAIT_SECONDS})",
-                literal(&io_pos)
-            ))
-            .await?;
-        r.as_deref() == Some("0")
-    };
-    let slave_pos = s
-        .scalar("SELECT @@gtid_slave_pos")
-        .await?
-        .unwrap_or_default();
+    let d = drain::drain(&mut s, Duration::from_secs(RELAY_WAIT_SECONDS.into())).await?;
     s.close().await;
+    let lag_seconds = d.status.lag_seconds;
     Ok(ReplicaState {
         node: ep.node.clone(),
-        slave_pos,
+        received: d.status.received().to_string(),
+        slave_pos: d.status.slave_pos,
         lag_seconds,
-        drained,
+        drained: d.stuck.is_none(),
+        stuck: d.stuck,
     })
 }
 
-/// Step 4: the replica with the highest position in `domain` that
-/// contains every other one's. Equal sequence numbers from different
-/// servers mean two replicas diverge.
+/// Step 4: the replica whose received position contains every other's (it
+/// holds every transaction any replica acknowledged), preferring one that
+/// applied it all, then the lowest node id. Same sequence numbers from
+/// different servers mean two replicas diverge. The best one must have
+/// applied everything it received: promoting it otherwise would discard
+/// its relay log, and promoting another would lose what only it holds.
 #[must_use]
 pub fn choose(states: &[ReplicaState], domain: u32) -> Choice {
-    let seq = |p: &GtidPos| p.get(domain).map_or(0, |g| g.seq);
-    let Some(best) = states.iter().max_by(|a, b| {
-        seq(&a.pos())
-            .cmp(&seq(&b.pos()))
-            .then_with(|| b.node.cmp(&a.node))
-    }) else {
+    if states.is_empty() {
         return Choice::Blocked("no replica answered".into());
+    }
+    let mut sorted: Vec<&ReplicaState> = states.iter().collect();
+    sorted.sort_by(|a, b| b.drained.cmp(&a.drained).then_with(|| a.node.cmp(&b.node)));
+    let Some(best) = sorted.iter().copied().find(|c| {
+        let cp = c.received();
+        sorted.iter().all(|o| cp.reached(&o.received()))
+    }) else {
+        return Choice::Blocked(format!(
+            "no replica holds every other's transactions: {}",
+            states
+                .iter()
+                .map(|st| format!("{} received {}", st.node, st.received()))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
     };
-    let bp = best.pos();
+    let bp = best.received();
     for other in states.iter().filter(|s| s.node != best.node) {
-        let op = other.pos();
-        let (Some(b), Some(o)) = (bp.get(domain), op.get(domain)) else {
-            continue;
-        };
-        if o.seq == b.seq && o.server != b.server {
-            return Choice::Blocked(format!(
-                "replicas {} ({o}) and {} ({b}) diverge",
-                other.node, best.node
-            ));
+        for o in other.received().iter() {
+            if let Some(b) = bp.get(o.domain)
+                && b.seq == o.seq
+                && b.server != o.server
+            {
+                return Choice::Blocked(format!(
+                    "replicas {} ({o}) and {} ({b}) diverge",
+                    other.node, best.node
+                ));
+            }
         }
     }
-    let undrained = !best.drained;
+    if !best.drained {
+        return Choice::Blocked(format!(
+            "{} holds the most (received {bp}) but applied only {}: {}",
+            best.node,
+            best.slave_pos,
+            best.stuck.as_deref().unwrap_or("not drained")
+        ));
+    }
     Choice::Promote(Candidate {
         node: best.node.clone(),
         applied: best.slave_pos.clone(),
         expected_loss: None,
         why: format!(
-            "highest gtid_slave_pos in domain {domain}: {}{}",
-            bp.get(domain).map(ToString::to_string).unwrap_or_default(),
-            if undrained {
-                " (relay log not fully applied within the wait)"
-            } else {
-                ""
-            }
+            "received position contains every other replica's; in domain {domain}: {}",
+            bp.get(domain).map(ToString::to_string).unwrap_or_default()
         ),
     })
 }
@@ -239,6 +251,18 @@ pub async fn semisync_on(ep: &NodeEndpoint) -> Result<bool, ProbeError> {
         .is_some_and(|v| v.eq_ignore_ascii_case("ON")))
 }
 
+/// Step 8's stop: replication stopped with everything received applied
+/// ([`drain::stop_drained`]), so `RESET SLAVE ALL` discards nothing; an
+/// error, with nothing reset, otherwise.
+async fn stop_replication(s: &mut ProbeSession) -> Result<(), ProbeError> {
+    match drain::stop_drained(s, Duration::from_secs(RELAY_WAIT_SECONDS.into())).await? {
+        Ok(_) => Ok(()),
+        Err(why) => Err(ProbeError::other(format!(
+            "not promoted, the relay log would be lost: {why}"
+        ))),
+    }
+}
+
 /// Step 8: makes `ep` the primary. Call only while its agent holds the
 /// writer lease and a DC permit. Returns its applied position.
 ///
@@ -247,7 +271,7 @@ pub async fn semisync_on(ep: &NodeEndpoint) -> Result<bool, ProbeError> {
 /// idempotent, so the caller retries).
 pub async fn promote(ep: &NodeEndpoint) -> Result<String, ProbeError> {
     let mut s = session(ep).await?;
-    s.exec("STOP SLAVE").await?;
+    stop_replication(&mut s).await?;
     s.exec("RESET SLAVE ALL").await?;
     s.exec("SET GLOBAL rpl_semi_sync_slave_enabled = OFF")
         .await?;
@@ -273,7 +297,7 @@ pub async fn promote(ep: &NodeEndpoint) -> Result<String, ProbeError> {
 /// A statement failed; the steps are idempotent, so the caller retries.
 pub async fn promote_fenced(ep: &NodeEndpoint, semisync: bool) -> Result<String, ProbeError> {
     let mut s = session(ep).await?;
-    s.exec("STOP SLAVE").await?;
+    stop_replication(&mut s).await?;
     let pos = s
         .scalar("SELECT @@gtid_slave_pos")
         .await?

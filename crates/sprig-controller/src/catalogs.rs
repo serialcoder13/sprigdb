@@ -119,6 +119,16 @@ pub trait ClusterPools: Send + Sync + 'static {
     /// The store's errors.
     async fn placeable(&self) -> Result<Vec<ClusterId>>;
 
+    /// Clusters of this DC that may hold a tenant's objects, for a deleted
+    /// tenant's cleanup (chapter 08): every registered cluster but
+    /// `rejected` and `retired` ones. The default is [`Self::placeable`].
+    ///
+    /// # Errors
+    /// The store's errors.
+    async fn sweepable(&self) -> Result<Vec<ClusterId>> {
+        self.placeable().await
+    }
+
     /// A pool of connections to `cluster`'s writer as `sprig_ctl`.
     ///
     /// # Errors
@@ -240,29 +250,129 @@ impl RegistryPools {
     }
 
     async fn writer_spec(&self, rec: &ClusterRecord) -> Result<NodeSpec> {
-        let chosen = match &self.monitor {
+        let published = read_published(&**self.registry.dc_store(), &rec.cluster_id).await?;
+        let driver = match &self.monitor {
             Some(m) => m.writer_node(&rec.cluster_id).await,
             None => None,
+        };
+        writer_of(rec, &published, driver)
+    }
+}
+
+/// A cluster's writer as the failover loop publishes it (chapter 25), read
+/// as the gateway reads it (`sprig_gateway::backend::cluster`, W1):
+/// `leases/writer/<cluster>`, else the `cluster-failover` record's writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Published {
+    /// The writer node and its `writer_epoch`.
+    Node(sprig_common::ids::NodeId, u64),
+    /// A promotion is handing the writer over, or the lease is older than
+    /// the last failover: nobody may write yet.
+    InTransit(String),
+    /// Nothing published (no failover yet, no agents).
+    Nothing,
+}
+
+/// [`Published`] from the lease and the failover record.
+#[must_use]
+pub fn published(
+    lease: Option<&sprig_cluster::failover::writer::WriterLease>,
+    recorded: Option<&crate::failover::cluster::ClusterFailoverRecord>,
+) -> Published {
+    use sprig_common::ids::NodeId;
+    let recorded_epoch = recorded.map_or(0, |r| r.writer_epoch);
+    match (lease, recorded) {
+        (Some(l), _) if l.claimed_by_controller() => {
+            Published::InTransit(format!("a failover is handing the writer to {}", l.node_id))
         }
-        .or_else(|| {
+        (Some(l), _) if l.writer_epoch < recorded_epoch => Published::InTransit(format!(
+            "the writer lease (epoch {}) is older than the last failover (epoch {recorded_epoch})",
+            l.writer_epoch
+        )),
+        (Some(l), _) => NodeId::new(&l.node_id).map_or_else(
+            |_| Published::InTransit(format!("the lease names node {:?}", l.node_id)),
+            |n| Published::Node(n, l.writer_epoch),
+        ),
+        (None, Some(r)) => match &r.writer {
+            Some(w) => NodeId::new(w).map_or_else(
+                |_| Published::InTransit(format!("the failover record names {w:?}")),
+                |n| Published::Node(n, r.writer_epoch),
+            ),
+            None => Published::Nothing,
+        },
+        (None, None) => Published::Nothing,
+    }
+}
+
+/// Reads `cluster`'s [`Published`] writer from the DC tier.
+///
+/// # Errors
+/// The store's errors; `Internal` for a bad record.
+pub async fn read_published(dc: &dyn MetaStore, cluster: &ClusterId) -> Result<Published> {
+    use sprig_cluster::failover::writer::{WriterLease, writer_lease_key};
+    let lease = match dc
+        .get(
+            &writer_lease_key(dc.tier(), cluster)?,
+            Consistency::Serializable,
+        )
+        .await?
+    {
+        Some(kv) => Some(Record::<WriterLease>::decode(&kv.value)?.body),
+        None => None,
+    };
+    let recorded = match dc
+        .get(
+            &crate::failover::cluster::record_key(dc.tier(), cluster)?,
+            Consistency::Serializable,
+        )
+        .await?
+    {
+        Some(kv) => {
+            Some(Record::<crate::failover::cluster::ClusterFailoverRecord>::decode(&kv.value)?.body)
+        }
+        None => None,
+    };
+    Ok(published(lease.as_ref(), recorded.as_ref()))
+}
+
+/// The node controllers write to on `rec`'s cluster: the published writer
+/// first (after a failover the first registered node may be a read-only
+/// replica, and the topology driver only learns of the change on its next
+/// pass, or never if it can't see a writer); else the driver's; else
+/// Galera's heaviest writer; else the first node. While a failover hands
+/// the writer over, none (39100, retried by the caller's loop).
+///
+/// # Errors
+/// 39100 while in transit, or when no node fits.
+pub fn writer_of(
+    rec: &ClusterRecord,
+    published: &Published,
+    driver: Option<sprig_common::ids::NodeId>,
+) -> Result<NodeSpec> {
+    let unavailable = |why: String| {
+        SprigError::new(
+            SprigCode::ClusterUnavailable,
+            format!("cluster {}: {why}", rec.cluster_id),
+        )
+    };
+    let chosen = match published {
+        Published::InTransit(why) => return Err(unavailable(why.clone())),
+        Published::Node(n, _) if rec.nodes.iter().any(|s| &s.node == n) => Some(n.clone()),
+        Published::Node(..) | Published::Nothing => driver.or_else(|| {
             rec.galera.as_ref().and_then(|g| {
                 g.writers
                     .iter()
                     .max_by(|a, b| a.weight.total_cmp(&b.weight))
                     .map(|w| w.node.clone())
             })
-        });
-        let spec = match chosen {
-            Some(n) => rec.nodes.iter().find(|s| s.node == n),
-            None => rec.nodes.first(),
-        };
-        spec.cloned().ok_or_else(|| {
-            SprigError::new(
-                SprigCode::ClusterUnavailable,
-                format!("cluster {} has no writer", rec.cluster_id),
-            )
-        })
-    }
+        }),
+    };
+    let spec = match chosen {
+        Some(n) => rec.nodes.iter().find(|s| s.node == n),
+        None => rec.nodes.first(),
+    };
+    spec.cloned()
+        .ok_or_else(|| unavailable("no writer".to_owned()))
 }
 
 #[async_trait::async_trait]
@@ -274,6 +384,24 @@ impl ClusterPools for RegistryPools {
             .await?
             .into_iter()
             .filter(|c| c.body().admin_state == AdminState::Active)
+            .map(|c| (c.body().cluster_number, c.body().cluster_id.clone()))
+            .collect();
+        list.sort();
+        Ok(list.into_iter().map(|(_, id)| id).collect())
+    }
+
+    async fn sweepable(&self) -> Result<Vec<ClusterId>> {
+        let mut list: Vec<(u32, ClusterId)> = self
+            .registry
+            .list()
+            .await?
+            .into_iter()
+            .filter(|c| {
+                !matches!(
+                    c.body().admin_state,
+                    AdminState::Rejected | AdminState::Retired
+                )
+            })
             .map(|c| (c.body().cluster_number, c.body().cluster_id.clone()))
             .collect();
         list.sort();
@@ -443,3 +571,6 @@ impl CatalogLocator for ShardMapLocator {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

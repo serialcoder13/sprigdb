@@ -64,9 +64,15 @@ impl Message for SyncGroupRequest {
         w.string(&self.group_id, flex)?;
         w.i32(*&self.generation_id);
         w.string(&self.member_id, flex)?;
-        if v >= 3 { w.nullable_string(self.group_instance_id.as_deref(), flex)?; }
-        if v >= 5 { w.nullable_string(self.protocol_type.as_deref(), flex)?; }
-        if v >= 5 { w.nullable_string(self.protocol_name.as_deref(), flex)?; }
+        if v >= 3 {
+            w.nullable_string(self.group_instance_id.as_deref(), flex)?;
+        }
+        if v >= 5 {
+            w.nullable_string(self.protocol_type.as_deref(), flex)?;
+        }
+        if v >= 5 {
+            w.nullable_string(self.protocol_name.as_deref(), flex)?;
+        }
         w.array(&self.assignments, flex, |w, e| e.encode(w, v))?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
@@ -80,9 +86,15 @@ impl Message for SyncGroupRequest {
         s.group_id = r.string(flex)?;
         s.generation_id = r.i32()?;
         s.member_id = r.string(flex)?;
-        if v >= 3 { s.group_instance_id = r.nullable_string(flex)?; }
-        if v >= 5 { s.protocol_type = r.nullable_string(flex)?; }
-        if v >= 5 { s.protocol_name = r.nullable_string(flex)?; }
+        if v >= 3 {
+            s.group_instance_id = r.nullable_string(flex)?;
+        }
+        if v >= 5 {
+            s.protocol_type = r.nullable_string(flex)?;
+        }
+        if v >= 5 {
+            s.protocol_name = r.nullable_string(flex)?;
+        }
         s.assignments = r.array(flex, |r| SyncGroupRequestAssignment::decode(r, v))?;
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
@@ -142,4 +154,3 @@ impl SyncGroupRequestAssignment {
         Ok(s)
     }
 }
-

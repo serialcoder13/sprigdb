@@ -110,6 +110,12 @@ fn digest_of(t: &TableMeta, r: MyRow) -> RowDigest {
 /// must stay in the same schema as the writes they commit with.
 pub const MOVED_INTERNAL: &[&str] = &["__sprig_ldone"];
 
+/// Prefixes of internal tables that move with their shard like user
+/// tables: chapter 45's stream outboxes (`__sprig_eo_<stream>`), stream
+/// logs (`__sprig_sl_<stream>`) and their checkpoints (`__sprig_sl_ckpt`),
+/// whose rows commit with the shard's writes and the sequencer's position.
+pub const MOVED_INTERNAL_PREFIXES: &[&str] = &["__sprig_eo_", "__sprig_sl_"];
+
 /// `SET NAMES` for a stored program's `character_set_client` and
 /// `collation_connection` (`SHOW CREATE` columns 3 and 4), so the target
 /// parses its string literals as the source did; the copy session is
@@ -139,7 +145,9 @@ fn in_names(out: &mut Vec<String>, names: Vec<String>, body: String) {
 /// Whether a table name is one of the mover's or a fence's internal names
 /// (the tables of [`MOVED_INTERNAL`] are copied like any other).
 fn internal(name: &str) -> bool {
-    name.starts_with(INTERNAL_OBJECT_PREFIX) && !MOVED_INTERNAL.contains(&name)
+    name.starts_with(INTERNAL_OBJECT_PREFIX)
+        && !MOVED_INTERNAL.contains(&name)
+        && !MOVED_INTERNAL_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
 impl MysqlSource {
@@ -742,6 +750,23 @@ impl SourceIo for MysqlSource {
                 (self.job.to_bytes().to_vec(),),
             )
             .await;
+        Ok(())
+    }
+
+    async fn purge_tenant(&self) -> Result<()> {
+        let mut c = self.conn().await?;
+        // Accounts and name rows only: the schemas went above, and any
+        // other schema of the tenant here isn't this job's to judge.
+        let known = sprig_cluster::purge::Known::default();
+        let p = sprig_cluster::purge::purge(&mut c, self.tenant, &known).await?;
+        if let Some(mark) = &p.foreign {
+            tracing::warn!(tenant = %self.tenant, cluster = %self.access.cluster, mark,
+                "another tenant's catalog with this id is here; its accounts were left alone");
+        } else {
+            tracing::info!(tenant = %self.tenant, cluster = %self.access.cluster,
+                accounts = p.drop_accounts.len(), names = p.delete_names.len(),
+                "deleted tenant purged from the retained source's cluster");
+        }
         Ok(())
     }
 }

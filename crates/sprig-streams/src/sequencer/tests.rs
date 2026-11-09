@@ -64,7 +64,10 @@ fn outbox_event(seq: u64, row: u32, n: u8, key: &str) -> ChangeEvent {
             ("event_id".into(), Value::Bytes(id.to_vec())),
             ("partition_no".into(), Value::Null),
             ("k".into(), Value::Bytes(key.as_bytes().to_vec())),
-            ("v".into(), Value::Bytes(format!("v{seq}.{row}").into_bytes())),
+            (
+                "v".into(),
+                Value::Bytes(format!("v{seq}.{row}").into_bytes()),
+            ),
             ("headers".into(), Value::Null),
         ])),
         delta: None,
@@ -221,10 +224,14 @@ async fn lost_answers_are_replayed_without_duplicates() {
             _ => Fault::None,
         }
     }));
-    let s = sequencer(&log, &feed);
+    let mut s = sequencer(&log, &feed);
+    s.opts.max_batch = 4;
     run_for(&s, Duration::from_secs(20)).await;
     check(&log, &feed);
-    assert!(s.stats.duplicates.load(Ordering::Relaxed) > 0, "a replay happened");
+    assert!(
+        s.stats.duplicates.load(Ordering::Relaxed) > 0,
+        "a replay happened"
+    );
 }
 
 #[tokio::test(start_paused = true)]

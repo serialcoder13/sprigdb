@@ -75,6 +75,10 @@ pub struct PersonaVars {
     /// `CURRENT_ROLE()` (chapter 29, R4): `Some(None)` is `NULL`; `None`
     /// leaves it to the backend.
     pub current_role: Option<Option<String>>,
+    /// `max_allowed_packet`: the session's packet limit, the gateway's no
+    /// more than its cluster's (chapter 05, "Packet limit"); `None`
+    /// leaves it to the backend.
+    pub max_allowed_packet: Option<u64>,
 }
 
 impl PersonaVars {
@@ -87,7 +91,15 @@ impl PersonaVars {
             sql_mode: None,
             max_execution_time: None,
             current_role: None,
+            max_allowed_packet: None,
         }
+    }
+
+    /// With the session's packet limit.
+    #[must_use]
+    pub fn with_max_allowed_packet(mut self, bytes: Option<u64>) -> Self {
+        self.max_allowed_packet = bytes;
+        self
     }
 
     /// With the session's `CURRENT_ROLE()` answer (a tenant session's).
@@ -147,6 +159,7 @@ impl PersonaVars {
             (Persona::MySql84, "max_execution_time") => {
                 self.max_execution_time.map(|v| Cow::Owned(v.to_string()))
             }
+            (_, "max_allowed_packet") => self.max_allowed_packet.map(|v| Cow::Owned(v.to_string())),
             _ => None,
         }
     }
@@ -161,6 +174,9 @@ impl PersonaVars {
         ];
         if let Some(m) = &self.sql_mode {
             rows.push(("sql_mode", m.clone()));
+        }
+        if let Some(n) = self.max_allowed_packet {
+            rows.push(("max_allowed_packet", n.to_string()));
         }
         rows
     }
@@ -247,9 +263,15 @@ pub fn rewrite_reads(
                     .unwrap_or(name)
                     .trim_matches('`');
                 if let Some(v) = vars.value_at(name, global) {
+                    // A number stays a number (its column's type).
+                    let lit = if name == "max_allowed_packet" {
+                        v.into_owned()
+                    } else {
+                        sql_literal(&v, nbe)
+                    };
                     edits.push((
                         t.range(),
-                        sql_literal(&v, nbe),
+                        lit,
                         String::from_utf8_lossy(t.bytes(sql)).into_owned(),
                     ));
                 }
@@ -354,6 +376,25 @@ mod tests {
         // Prisma's flavour probe.
         let (sql, _) = rw("SELECT @@GLOBAL.version version", &my()).unwrap();
         assert_eq!(sql, "SELECT '8.4.8-SprigDB' version");
+    }
+
+    #[test]
+    fn the_packet_limit_is_the_sessions_number() {
+        let vars = my().with_max_allowed_packet(Some(15 << 20));
+        let (sql, r) = rw(
+            "SELECT @@max_allowed_packet, @@global.max_allowed_packet x",
+            &vars,
+        )
+        .unwrap();
+        assert_eq!(sql, "SELECT 15728640, 15728640 x");
+        assert_eq!(r[0].column, "15728640");
+        assert_eq!(r[0].written, "@@max_allowed_packet");
+        assert!(
+            vars.show_rows()
+                .contains(&("max_allowed_packet", "15728640".to_owned()))
+        );
+        // Without a limit the backend answers.
+        assert!(rw("SELECT @@max_allowed_packet", &my()).is_none());
     }
 
     #[test]

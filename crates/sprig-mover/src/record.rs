@@ -119,6 +119,11 @@ pub struct JobRecord {
     /// When a retained source may be dropped.
     #[serde(default)]
     pub retain_until_ms: Option<u64>,
+    /// The tenant was deleted (chapter 08, "Deleting a tenant"): cleaning
+    /// also removes the tenant's backend accounts and `__sprig_names` rows
+    /// on the source cluster, whose gateways no longer will.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub purge_tenant: bool,
     /// Chapter 11's decision row.
     #[serde(default)]
     pub decision_id: Option<u64>,
@@ -362,6 +367,7 @@ impl JobStore {
             epoch: None,
             not_before_ms: 0,
             retain_until_ms: None,
+            purge_tenant: false,
             created_ms: now,
             updated_ms: now,
         };
@@ -609,6 +615,80 @@ impl JobStore {
             })
             .await?;
         Ok(r.succeeded.then_some(r.revision))
+    }
+
+    /// Ends a deleted tenant's retention now (chapter 08, "Deleting a
+    /// tenant"): the job's cleaning then drops the retained source and
+    /// purges the tenant's accounts and name rows on that cluster
+    /// ([`JobRecord::purge_tenant`]). Only for a `retaining` job no worker
+    /// owns (workers hand such jobs back while they wait). `false` if the
+    /// job isn't one, or changed meanwhile.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn end_retention_for_deletion(&self, rec: &JobRecord, rev: Revision) -> Result<bool> {
+        if rec.state != JobState::Retaining
+            || (rec.purge_tenant && rec.retain_until_ms.is_some_and(|u| u <= self.now_ms()))
+        {
+            return Ok(false);
+        }
+        let mut next = rec.clone();
+        next.retain_until_ms = Some(self.now_ms());
+        next.purge_tenant = true;
+        next.updated_ms = self.now_ms();
+        let key = self.key(&job_rel(&rec.job_id))?;
+        let r = self
+            .dc
+            .txn(Txn {
+                when: vec![
+                    Cmp::ModRev(key.clone(), rev),
+                    Cmp::Missing(self.key(&owner_rel(&rec.job_id))?),
+                ],
+                then: vec![Op::Put {
+                    key,
+                    value: Record::new(next).encode()?,
+                    lease: None,
+                }],
+                otherwise: Vec::new(),
+            })
+            .await?;
+        Ok(r.succeeded)
+    }
+
+    /// Deletes a finished job's record (and any owner key left) if it is
+    /// still at `rev` and `guard` holds (the DC leader's): a deleted
+    /// tenant's job history goes with it. `false` if something changed.
+    ///
+    /// # Errors
+    /// 39132 for a job that isn't `done` or `rolled_back`; the store's
+    /// errors.
+    pub async fn remove_finished(
+        &self,
+        rec: &JobRecord,
+        rev: Revision,
+        guard: &[Cmp],
+    ) -> Result<bool> {
+        if !rec.state.is_terminal() {
+            return Err(SprigError::new(
+                SprigCode::JobStateInvalid,
+                format!("job {} is {}, not finished", rec.job_id.0, rec.state),
+            ));
+        }
+        let key = self.key(&job_rel(&rec.job_id))?;
+        let mut when = vec![Cmp::ModRev(key.clone(), rev)];
+        when.extend_from_slice(guard);
+        let r = self
+            .dc
+            .txn(Txn {
+                when,
+                then: vec![
+                    Op::Delete(key),
+                    Op::Delete(self.key(&owner_rel(&rec.job_id))?),
+                ],
+                otherwise: Vec::new(),
+            })
+            .await?;
+        Ok(r.succeeded)
     }
 
     /// Claims an unowned runnable job for `worker` on `lease`: creates the

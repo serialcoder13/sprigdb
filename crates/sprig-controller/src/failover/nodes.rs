@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sprig_catalog::placement::{MapRole, ShardMap};
+use sprig_cluster::failover::primary_replica::drain::stop_drained;
 use sprig_cluster::failover::primary_replica::{diverged, diverged_events};
 use sprig_cluster::record::ClusterRecord;
 use sprig_cluster::registry::ClusterRegistry;
@@ -40,6 +41,8 @@ use super::recovery::{CopyFence, errant_report};
 
 /// Per statement on a node.
 const NODE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a standby may take to apply its relay log before it stops.
+const STANDBY_DRAIN: Duration = Duration::from_secs(30);
 
 /// Accounts a fence never touches: SprigDB's own and MariaDB's.
 const SYSTEM_USERS: [&str; 6] = [
@@ -201,20 +204,23 @@ impl PromoteHooks for ClusterHooks {
                 col(st, "Master_Host").unwrap_or_default(),
                 col(st, "Master_Port").unwrap_or_default()
             );
-            s.exec("STOP SLAVE IO_THREAD").await.map_err(node_err)?;
-            let io = col(st, "Gtid_IO_Pos").unwrap_or_default().to_owned();
-            if !io.is_empty() {
-                // The relay log is applied before the copy stops.
-                let _ = s
-                    .scalar(&format!("SELECT MASTER_GTID_WAIT({}, 30)", literal(&io)))
-                    .await;
-            }
-            s.exec("STOP SLAVE").await.map_err(node_err)?;
-            let pos = s
-                .scalar("SELECT @@gtid_slave_pos")
+            // The relay log is applied before the copy stops, without ever
+            // starting the SQL thread while the IO thread is stopped
+            // (MariaDB would discard the relay log; r2drain). A copy that
+            // can't apply it stops the promotion here, nothing reset.
+            let pos = match stop_drained(&mut s, STANDBY_DRAIN)
                 .await
                 .map_err(node_err)?
-                .unwrap_or_default();
+            {
+                Ok(st) => st.slave_pos,
+                Err(why) => {
+                    s.close().await;
+                    return Err(SprigError::new(
+                        sprig_common::SprigCode::FailoverBlocked,
+                        format!("standby {id} of tenant {tenant}: {why}"),
+                    ));
+                }
+            };
             s.close().await;
             tracing::info!(%tenant, cluster = %id, %source, %pos, "standby replication stopped");
             applied.insert(source, pos);

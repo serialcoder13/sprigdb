@@ -91,6 +91,10 @@ getrandom = "0.3"
 sha2 = "0.10"
 subtle = "2.6"
 zeroize = "1.8"
+# SASLprep (RFC 4013) for SCRAM-SHA-256 verifiers (chapter 14), with its
+# Unicode tables (unicode-normalization, unicode-bidi, unicode-properties,
+# tinyvec). All MIT/Apache-2.0 (tinyvec also Zlib); from the local registry.
+stringprep = "0.1"
 
 # The MySQL and MariaDB wire codec (chapter 05): byte buffers, capability
 # bitflags, zstd compressed framing (zstd crate MIT; zstd-sys and zstd-safe

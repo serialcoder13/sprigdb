@@ -63,20 +63,46 @@ impl Message for ApiVersionsResponse {
         let flex = v >= FLEXIBLE_MIN;
         w.i16(*&self.error_code);
         w.array(&self.api_keys, flex, |w, e| e.encode(w, v))?;
-        if v >= 1 { w.i32(*&self.throttle_time_ms); }
+        if v >= 1 {
+            w.i32(*&self.throttle_time_ms);
+        }
         if flex {
             let mut known = Vec::new();
             if v >= 3 && self.supported_features != Vec::new() {
-                known.push((0, encode_with(|w| { w.array(&self.supported_features, true, |w, e| e.encode(w, v))?; Ok(()) })?));
+                known.push((
+                    0,
+                    encode_with(|w| {
+                        w.array(&self.supported_features, true, |w, e| e.encode(w, v))?;
+                        Ok(())
+                    })?,
+                ));
             }
             if v >= 3 && self.finalized_features_epoch != -1 {
-                known.push((1, encode_with(|w| { w.i64(*&self.finalized_features_epoch); Ok(()) })?));
+                known.push((
+                    1,
+                    encode_with(|w| {
+                        w.i64(*&self.finalized_features_epoch);
+                        Ok(())
+                    })?,
+                ));
             }
             if v >= 3 && self.finalized_features != Vec::new() {
-                known.push((2, encode_with(|w| { w.array(&self.finalized_features, true, |w, e| e.encode(w, v))?; Ok(()) })?));
+                known.push((
+                    2,
+                    encode_with(|w| {
+                        w.array(&self.finalized_features, true, |w, e| e.encode(w, v))?;
+                        Ok(())
+                    })?,
+                ));
             }
             if v >= 3 && self.zk_migration_ready != false {
-                known.push((3, encode_with(|w| { w.bool(*&self.zk_migration_ready); Ok(()) })?));
+                known.push((
+                    3,
+                    encode_with(|w| {
+                        w.bool(*&self.zk_migration_ready);
+                        Ok(())
+                    })?,
+                ));
             }
             w.tagged_fields(known, &self.unknown_tagged_fields)?;
         }
@@ -88,14 +114,28 @@ impl Message for ApiVersionsResponse {
         let mut s = Self::default();
         s.error_code = r.i16()?;
         s.api_keys = r.array(flex, |r| ApiVersion::decode(r, v))?;
-        if v >= 1 { s.throttle_time_ms = r.i32()?; }
+        if v >= 1 {
+            s.throttle_time_ms = r.i32()?;
+        }
         if flex {
             let mut t = Self::default();
             s.unknown_tagged_fields = r.tagged_fields(|tag, r| match tag {
-                0 if v >= 3 => { t.supported_features = r.array(true, |r| SupportedFeatureKey::decode(r, v))?; Ok(true) }
-                1 if v >= 3 => { t.finalized_features_epoch = r.i64()?; Ok(true) }
-                2 if v >= 3 => { t.finalized_features = r.array(true, |r| FinalizedFeatureKey::decode(r, v))?; Ok(true) }
-                3 if v >= 3 => { t.zk_migration_ready = r.bool()?; Ok(true) }
+                0 if v >= 3 => {
+                    t.supported_features = r.array(true, |r| SupportedFeatureKey::decode(r, v))?;
+                    Ok(true)
+                }
+                1 if v >= 3 => {
+                    t.finalized_features_epoch = r.i64()?;
+                    Ok(true)
+                }
+                2 if v >= 3 => {
+                    t.finalized_features = r.array(true, |r| FinalizedFeatureKey::decode(r, v))?;
+                    Ok(true)
+                }
+                3 if v >= 3 => {
+                    t.zk_migration_ready = r.bool()?;
+                    Ok(true)
+                }
                 _ => Ok(false),
             })?;
             s.supported_features = t.supported_features;
@@ -195,9 +235,15 @@ impl SupportedFeatureKey {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 3 { w.string(&self.name, flex)?; }
-        if v >= 3 { w.i16(*&self.min_version); }
-        if v >= 3 { w.i16(*&self.max_version); }
+        if v >= 3 {
+            w.string(&self.name, flex)?;
+        }
+        if v >= 3 {
+            w.i16(*&self.min_version);
+        }
+        if v >= 3 {
+            w.i16(*&self.max_version);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -211,9 +257,15 @@ impl SupportedFeatureKey {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 3 { s.name = r.string(flex)?; }
-        if v >= 3 { s.min_version = r.i16()?; }
-        if v >= 3 { s.max_version = r.i16()?; }
+        if v >= 3 {
+            s.name = r.string(flex)?;
+        }
+        if v >= 3 {
+            s.min_version = r.i16()?;
+        }
+        if v >= 3 {
+            s.max_version = r.i16()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
@@ -252,9 +304,15 @@ impl FinalizedFeatureKey {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 3 { w.string(&self.name, flex)?; }
-        if v >= 3 { w.i16(*&self.max_version_level); }
-        if v >= 3 { w.i16(*&self.min_version_level); }
+        if v >= 3 {
+            w.string(&self.name, flex)?;
+        }
+        if v >= 3 {
+            w.i16(*&self.max_version_level);
+        }
+        if v >= 3 {
+            w.i16(*&self.min_version_level);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -268,13 +326,18 @@ impl FinalizedFeatureKey {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 3 { s.name = r.string(flex)?; }
-        if v >= 3 { s.max_version_level = r.i16()?; }
-        if v >= 3 { s.min_version_level = r.i16()?; }
+        if v >= 3 {
+            s.name = r.string(flex)?;
+        }
+        if v >= 3 {
+            s.max_version_level = r.i16()?;
+        }
+        if v >= 3 {
+            s.min_version_level = r.i16()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

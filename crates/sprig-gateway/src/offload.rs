@@ -21,10 +21,14 @@
 //! Outside a multi-threaded runtime (unit tests) the future runs as is.
 
 use std::future::Future;
+use std::io;
+use std::pin::Pin;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 
 use sprig_settings::{Apply, HardBounds, Scopes, Setting};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Semaphore;
 
@@ -91,6 +95,120 @@ pub fn cpu<R>(size: usize, f: impl FnOnce() -> R) -> R {
     }
 }
 
+/// Bytes a client stream reads before it yields to the runtime.
+pub const PACE_BYTES: usize = 256 * 1024;
+
+/// What one read of a [`Paced`] stream asks for when the caller's buffer
+/// is larger: one TLS record.
+const READ_CHUNK: usize = 16 * 1024;
+
+/// A client stream that yields to the runtime after every [`PACE_BYTES`]
+/// it reads. Reading a large packet (and decrypting it, under TLS) would
+/// otherwise run on one worker thread for as long as the bytes keep
+/// arriving: about a second for 64 MiB in a debug build, every other task
+/// on that thread waiting. A read into a large buffer takes at most one
+/// TLS record's worth (through a scratch buffer allocated on first use).
+pub struct Paced<S> {
+    inner: S,
+    since_yield: usize,
+    scratch: Vec<u8>,
+    #[cfg(test)]
+    yields: usize,
+}
+
+impl<S> Paced<S> {
+    /// `inner`, paced.
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            since_yield: 0,
+            scratch: Vec::new(),
+            #[cfg(test)]
+            yields: 0,
+        }
+    }
+
+    /// The stream.
+    pub fn get_ref(&self) -> &S {
+        &self.inner
+    }
+
+    /// The stream, mutably.
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.inner
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Paced<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        if me.since_yield >= PACE_BYTES {
+            me.since_yield = 0;
+            #[cfg(test)]
+            {
+                me.yields += 1;
+            }
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let r = if buf.remaining() <= READ_CHUNK {
+            let before = buf.filled().len();
+            let r = Pin::new(&mut me.inner).poll_read(cx, buf);
+            me.since_yield += buf.filled().len() - before;
+            r
+        } else {
+            if me.scratch.is_empty() {
+                me.scratch = vec![0; READ_CHUNK];
+            }
+            let mut rb = ReadBuf::new(&mut me.scratch);
+            let r = Pin::new(&mut me.inner).poll_read(cx, &mut rb);
+            if r.is_ready() {
+                buf.put_slice(rb.filled());
+                me.since_yield += rb.filled().len();
+            }
+            r
+        };
+        if r.is_pending() {
+            me.since_yield = 0;
+        }
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Paced<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -143,8 +261,26 @@ mod tests {
             b.await.unwrap();
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
             let worst = ticker.await.unwrap();
-            assert!(worst < Duration::from_millis(200), "ticker stalled {worst:?}");
+            assert!(
+                worst < Duration::from_millis(200),
+                "ticker stalled {worst:?}"
+            );
         });
+    }
+
+    /// A large read arrives whole, yielding every PACE_BYTES.
+    #[tokio::test]
+    async fn a_paced_stream_reads_everything_and_yields() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut a, b) = tokio::io::duplex(8 << 20);
+        let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        a.write_all(&data).await.unwrap();
+        a.shutdown().await.unwrap();
+        let mut p = Paced::new(b);
+        let mut all = Vec::with_capacity(4 << 20);
+        p.read_to_end(&mut all).await.unwrap();
+        assert_eq!(all, data);
+        assert!(p.yields >= data.len() / PACE_BYTES, "{} yields", p.yields);
     }
 
     #[tokio::test]

@@ -60,4 +60,3 @@ impl Message for SaslHandshakeRequest {
         Ok(s)
     }
 }
-

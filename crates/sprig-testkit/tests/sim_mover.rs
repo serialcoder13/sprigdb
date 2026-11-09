@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use sprig_testkit::sim::Sim;
 use sprig_testkit::sim::mover::{
-    run_idle_move, run_move, run_move_triggers, run_move_xa, run_move_xa_no_drain, xa,
+    run_idle_move, run_move, run_move_streams, run_move_triggers, run_move_xa, run_move_xa_no_drain,
+    xa,
 };
 
 #[test]
@@ -42,6 +43,19 @@ fn a_trigger_runs_each_change_once_across_moves_and_worker_kills() {
         .seeds(100)
         .max_time(Duration::from_secs(3600))
         .run(|w| async move { run_move_triggers(w).await.map_err(Into::into) });
+}
+
+/// A change topic's sequencer runs on the tenant's feed while the tenant
+/// moves; sequencers are killed, overlapped by a second one (a lost
+/// lease) and lose append answers at random: each partition's log holds
+/// every change of the table once, in commit order, at offsets without
+/// gaps (chapter 45, R9).
+#[test]
+fn a_stream_sequencer_keeps_every_change_once_in_order_across_moves() {
+    Sim::new("mover-streams")
+        .seeds(100)
+        .max_time(Duration::from_secs(3600))
+        .run(|w| async move { run_move_streams(w).await.map_err(Into::into) });
 }
 
 /// A coordinator prepares distributed-transaction branches on the source

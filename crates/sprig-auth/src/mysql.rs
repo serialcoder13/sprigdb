@@ -1020,6 +1020,19 @@ impl MysqlLogin {
         self.principal.as_ref()
     }
 
+    /// The catalog account this login resolved to (tenant and user id),
+    /// before any check: for protocols whose verifiers this crate doesn't
+    /// load, such as Kafka's SCRAM (chapter 45), which read the account's
+    /// `verifiers` rows themselves and then call [`LoginFlow::decide`].
+    /// `None` for the decoy, file accounts and unreadable catalogs.
+    #[must_use]
+    pub fn account(&self) -> Option<(TenantId, UserId)> {
+        match &self.target {
+            Target::Catalog(c) => Some((c.tenant.id, c.user.row.user_id)),
+            _ => None,
+        }
+    }
+
     /// The fast path for a clear-text password (HTTP Basic): whether the
     /// fast cache holds `SHA256(SHA256(password))` for one of the account's
     /// verifiers. On `false` the caller runs the full path

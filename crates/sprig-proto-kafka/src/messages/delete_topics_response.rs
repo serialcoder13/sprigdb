@@ -46,7 +46,9 @@ impl Message for DeleteTopicsResponse {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 1 { w.i32(*&self.throttle_time_ms); }
+        if v >= 1 {
+            w.i32(*&self.throttle_time_ms);
+        }
         w.array(&self.responses, flex, |w, e| e.encode(w, v))?;
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
@@ -57,7 +59,9 @@ impl Message for DeleteTopicsResponse {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 1 { s.throttle_time_ms = r.i32()?; }
+        if v >= 1 {
+            s.throttle_time_ms = r.i32()?;
+        }
         s.responses = r.array(flex, |r| DeletableTopicResult::decode(r, v))?;
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
@@ -100,10 +104,23 @@ impl DeletableTopicResult {
     /// As [`Message::encode`].
     pub fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 6 { w.nullable_string(self.name.as_deref(), flex)?; } else { w.string(self.name.as_ref().ok_or(CodecError::NullNotAllowed("Name"))?, flex)?; }
-        if v >= 6 { w.uuid(&self.topic_id); }
+        if v >= 6 {
+            w.nullable_string(self.name.as_deref(), flex)?;
+        } else {
+            w.string(
+                self.name
+                    .as_ref()
+                    .ok_or(CodecError::NullNotAllowed("Name"))?,
+                flex,
+            )?;
+        }
+        if v >= 6 {
+            w.uuid(&self.topic_id);
+        }
         w.i16(*&self.error_code);
-        if v >= 5 { w.nullable_string(self.error_message.as_deref(), flex)?; }
+        if v >= 5 {
+            w.nullable_string(self.error_message.as_deref(), flex)?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -117,14 +134,21 @@ impl DeletableTopicResult {
     pub fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        s.name = if v >= 6 { r.nullable_string(flex)? } else { Some(r.string(flex)?) };
-        if v >= 6 { s.topic_id = r.uuid()?; }
+        s.name = if v >= 6 {
+            r.nullable_string(flex)?
+        } else {
+            Some(r.string(flex)?)
+        };
+        if v >= 6 {
+            s.topic_id = r.uuid()?;
+        }
         s.error_code = r.i16()?;
-        if v >= 5 { s.error_message = r.nullable_string(flex)?; }
+        if v >= 5 {
+            s.error_message = r.nullable_string(flex)?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

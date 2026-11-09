@@ -7,7 +7,7 @@
 //! 1. take spec.nodes free hosts in spec.dc across zones (txn on their records)
 //! 2. server_id = cluster_number * 100 + index; gtid_domain_id = cluster_number
 //! 3. Apply(install, configure) on every agent
-//! 4. primary + replicas: node 1 starts fenced, creates sprig_ctl and sprig_repl,
+//! 4. primary + replicas: node 1 starts fenced, creates sprig_ctl, sprig_repl and sprig_gw,
 //!    becomes primary when its agent takes the writer lease; each replica is seeded
 //!    by StreamBackup from node 1, then CHANGE MASTER ... MASTER_USE_GTID = slave_pos
 //! 5. Galera: galera_new_cluster on node 1, wait for Synced; then each other node
@@ -280,7 +280,7 @@ pub enum BootstrapStep {
         /// The node.
         node: String,
     },
-    /// Create `sprig_ctl` and `sprig_repl` on the node.
+    /// Create `sprig_ctl`, `sprig_repl` and `sprig_gw` (`sprig_provision::gw_account`) on the node.
     CreateSystemAccounts {
         /// The node.
         node: String,

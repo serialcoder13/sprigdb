@@ -1,5 +1,6 @@
-//! Step 4 of the reconcile: the system accounts `sprig_ctl` and
-//! `sprig_repl`, created over TLS with the root credentials in
+//! Step 4 of the reconcile: the system accounts `sprig_ctl`, `sprig_repl`
+//! and `sprig_gw` (the gateways' monitoring account, `SLAVE MONITOR` only,
+//! its password derived from `sprig_ctl`'s), created over TLS with the root credentials in
 //! mariadb-operator's Secret (chapter 27, "The Kubernetes operator"), and
 //! the cluster's `gtid_domain_id` once registration gave it a number.
 //!
@@ -53,7 +54,7 @@ impl std::fmt::Debug for BootstrapTarget {
 /// Creates the system accounts and sets live values.
 #[async_trait]
 pub trait SystemAccounts: Send + Sync + 'static {
-    /// Creates (or re-asserts) `sprig_ctl` and `sprig_repl` on the writer.
+    /// Creates (or re-asserts) `sprig_ctl`, `sprig_repl` and `sprig_gw` on the writer.
     ///
     /// # Errors
     /// The server's errors; the reconcile retries.
@@ -107,6 +108,13 @@ pub fn account_sql(ctl_password: &str, repl_password: &str) -> Vec<String> {
         format!("ALTER USER 'sprig_repl'@'%' IDENTIFIED BY {repl} REQUIRE SSL"),
         "GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO 'sprig_repl'@'%'".into(),
     ]
+    .into_iter()
+    // The gateways' monitoring account (chapter 09): `SLAVE MONITOR` only,
+    // its password derived from sprig_ctl's, as the gateways derive it.
+    .chain(sprig_provision::gw_account::account_sql(
+        &sprig_provision::gw_account::derived_password(ctl_password),
+    ))
+    .collect()
 }
 
 /// The credentials file the controllers read (`file:<dir>/<cluster>.toml`,
@@ -286,6 +294,10 @@ mod tests {
                 .any(|s| s.contains("BINLOG ADMIN, SET USER ON *.*"))
         );
         assert!(sql.iter().any(|s| s.contains("SELECT ON mysql.db")));
+        assert!(
+            sql.iter()
+                .any(|s| s == "GRANT SLAVE MONITOR ON *.* TO 'sprig_gw'@'%'")
+        );
         let p = generate_password().unwrap_or_default();
         assert_eq!(p.len(), 48);
         assert!(p.bytes().all(|b| b.is_ascii_hexdigit()));

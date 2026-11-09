@@ -49,9 +49,18 @@ impl Message for FindCoordinatorRequest {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v <= 3 { w.string(&self.key, flex)?; }
-        if v >= 1 { w.i8(*&self.key_type); }
-        if v >= 4 { w.array(&self.coordinator_keys, flex, |w, e| { w.string(e, flex)?; Ok(()) })?; }
+        if v <= 3 {
+            w.string(&self.key, flex)?;
+        }
+        if v >= 1 {
+            w.i8(*&self.key_type);
+        }
+        if v >= 4 {
+            w.array(&self.coordinator_keys, flex, |w, e| {
+                w.string(e, flex)?;
+                Ok(())
+            })?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -61,13 +70,18 @@ impl Message for FindCoordinatorRequest {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v <= 3 { s.key = r.string(flex)?; }
-        if v >= 1 { s.key_type = r.i8()?; }
-        if v >= 4 { s.coordinator_keys = r.array(flex, |r| Ok(r.string(flex)?))?; }
+        if v <= 3 {
+            s.key = r.string(flex)?;
+        }
+        if v >= 1 {
+            s.key_type = r.i8()?;
+        }
+        if v >= 4 {
+            s.coordinator_keys = r.array(flex, |r| Ok(r.string(flex)?))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

@@ -24,6 +24,8 @@ sprig-mover.workspace = true
 sprig-feed.workspace = true
 # Chapter 41's trigger runner under the mover simulation (R7 order 5).
 sprig-logic = { path = "../sprig-logic" }
+# Chapter 45's sequencer under the mover simulation (R9).
+sprig-streams = { path = "../sprig-streams" }
 sprig-shard.workspace = true
 serde.workspace = true
 serde_json.workspace = true

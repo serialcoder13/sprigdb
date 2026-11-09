@@ -46,8 +46,13 @@ impl Message for DescribeGroupsRequest {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        w.array(&self.groups, flex, |w, e| { w.string(e, flex)?; Ok(()) })?;
-        if v >= 3 { w.bool(*&self.include_authorized_operations); }
+        w.array(&self.groups, flex, |w, e| {
+            w.string(e, flex)?;
+            Ok(())
+        })?;
+        if v >= 3 {
+            w.bool(*&self.include_authorized_operations);
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -58,11 +63,12 @@ impl Message for DescribeGroupsRequest {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
         s.groups = r.array(flex, |r| Ok(r.string(flex)?))?;
-        if v >= 3 { s.include_authorized_operations = r.bool()?; }
+        if v >= 3 {
+            s.include_authorized_operations = r.bool()?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

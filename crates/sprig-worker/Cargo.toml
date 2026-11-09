@@ -23,6 +23,8 @@ sprig-feed.workspace = true
 # Chapter 42's copy worker (inherit_copy jobs).
 sprig-inherit = { path = "../sprig-inherit" }
 sprig-logic = { path = "../sprig-logic" }
+# Chapter 45: stream sequencers (R9).
+sprig-streams = { path = "../sprig-streams" }
 sprig-meta.workspace = true
 sprig-mover.workspace = true
 sprig-settings.workspace = true

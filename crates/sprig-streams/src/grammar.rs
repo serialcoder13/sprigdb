@@ -118,6 +118,8 @@ pub enum Stmt {
     },
     /// `CREATE TABLE name` (39942 when a stream has the name).
     CreateTable(QName),
+    /// `DROP DATABASE | SCHEMA [IF EXISTS] name`: its streams go first.
+    DropDatabase(String),
     /// Anything else: a read may name streams.
     Other,
 }
@@ -140,8 +142,8 @@ struct Cur<'a> {
 }
 
 impl<'a> Cur<'a> {
-    fn new(src: &'a [u8], lex_opts: &LexOptions) -> Option<Self> {
-        let toks = lex(src, lex_opts)
+    fn new(src: &'a [u8], lex_opts: LexOptions) -> Option<Self> {
+        let toks = lex(src, &lex_opts)
             .ok()?
             .into_iter()
             .filter(|t| !t.kind.is_trivia())
@@ -162,7 +164,9 @@ impl<'a> Cur<'a> {
     }
 
     fn is_word(&self, t: Option<&Token>, w: &str) -> bool {
-        t.is_some_and(|t| t.kind == TokenKind::Word && self.text(t).eq_ignore_ascii_case(w.as_bytes()))
+        t.is_some_and(|t| {
+            t.kind == TokenKind::Word && self.text(t).eq_ignore_ascii_case(w.as_bytes())
+        })
     }
 
     fn at(&self, w: &str) -> bool {
@@ -185,6 +189,18 @@ impl<'a> Cur<'a> {
 
     fn eat_punct(&mut self, p: u8) -> bool {
         if self.punct(p) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn eat_op(&mut self, op: &[u8]) -> bool {
+        if self
+            .peek()
+            .is_some_and(|t| t.kind == TokenKind::Op && self.text(t) == op)
+        {
             self.i += 1;
             true
         } else {
@@ -222,11 +238,7 @@ impl<'a> Cur<'a> {
 
     fn qname(&mut self) -> Option<QName> {
         let (first, r) = self.ident()?;
-        if self.punct(b'.')
-            && self
-                .peek_at(1)
-                .is_some_and(|t| t.kind.is_ident_like())
-        {
+        if self.punct(b'.') && self.peek_at(1).is_some_and(|t| t.kind.is_ident_like()) {
             self.i += 1;
             let (second, r2) = self.ident()?;
             return Some(QName {
@@ -281,16 +293,16 @@ pub fn maybe_stream(sql: &[u8], has_streams: bool) -> bool {
     }
     let up = sql.len().min(64);
     let head = &sql[..up];
-    head.windows(6)
-        .any(|w| w.eq_ignore_ascii_case(b"stream"))
+    head.windows(6).any(|w| w.eq_ignore_ascii_case(b"stream"))
 }
 
 /// Classifies one statement.
 ///
 /// # Errors
 /// 1064 for a malformed stream statement.
+#[allow(clippy::too_many_lines)] // one branch per statement kind
 pub fn classify(sql: &[u8], lex_opts: &LexOptions) -> Result<Stmt> {
-    let Some(mut c) = Cur::new(sql, lex_opts) else {
+    let Some(mut c) = Cur::new(sql, *lex_opts) else {
         return Ok(Stmt::Other);
     };
     if c.at("CREATE") && c.is_word(c.peek_at(1), "STREAM") {
@@ -314,6 +326,15 @@ pub fn classify(sql: &[u8], lex_opts: &LexOptions) -> Result<Stmt> {
             return Err(syntax(&c.near()));
         }
         return Ok(Stmt::Drop { if_exists, name });
+    }
+    if c.at("DROP") && (c.is_word(c.peek_at(1), "DATABASE") || c.is_word(c.peek_at(1), "SCHEMA")) {
+        c.i += 2;
+        if c.eat("IF") {
+            c.eat("EXISTS");
+        }
+        return Ok(c
+            .ident()
+            .map_or(Stmt::Other, |(n, _)| Stmt::DropDatabase(n)));
     }
     if c.at("SHOW") && c.is_word(c.peek_at(1), "STREAMS") {
         c.i += 2;
@@ -432,7 +453,7 @@ fn options(
     cleanup: &mut Option<Cleanup>,
 ) -> Result<bool> {
     if c.eat("PARTITIONS") {
-        c.eat_punct(b'=');
+        c.eat_op(b"=");
         let n = c
             .number()
             .and_then(|n| u32::try_from(n).ok())
@@ -442,13 +463,13 @@ fn options(
         return Ok(true);
     }
     if c.eat("RETENTION") {
-        c.eat_punct(b'=');
+        c.eat_op(b"=");
         let t = c.string_or_word().ok_or_else(|| syntax(&c.near()))?;
         *retention = Some(parse_retention(&t).ok_or_else(|| syntax(&t))?);
         return Ok(true);
     }
     if c.eat("CLEANUP") {
-        c.eat_punct(b'=');
+        c.eat_op(b"=");
         let t = c.string_or_word().ok_or_else(|| syntax(&c.near()))?;
         *cleanup = Some(Cleanup::parse(&t).ok_or_else(|| syntax(&t))?);
         return Ok(true);
@@ -481,8 +502,7 @@ fn alter(c: &mut Cur<'_>) -> Result<AlterStream> {
 }
 
 fn insert(c: &mut Cur<'_>) -> Option<InsertInto> {
-    while c.eat("LOW_PRIORITY") || c.eat("DELAYED") || c.eat("HIGH_PRIORITY") || c.eat("IGNORE")
-    {}
+    while c.eat("LOW_PRIORITY") || c.eat("DELAYED") || c.eat("HIGH_PRIORITY") || c.eat("IGNORE") {}
     c.eat("INTO");
     let target = c.qname()?;
     let after_target = target.range.end;
@@ -504,8 +524,8 @@ fn insert(c: &mut Cur<'_>) -> Option<InsertInto> {
     }
     let set_form = c.at("SET");
     let mut first_row_arity = None;
-    if c.eat("VALUES") || c.eat("VALUE") {
-        if c.punct(b'(') {
+    if (c.eat("VALUES") || c.eat("VALUE")) && c.punct(b'(') {
+        {
             let mut depth = 0usize;
             let mut n = 1usize;
             let mut empty = true;
@@ -619,11 +639,16 @@ mod tests {
                 name: QName {
                     db: None,
                     name: "orders.changes".into(),
-                    range: 21..37
+                    range: 22..38
                 }
             }
         );
-        assert_eq!(cl("SHOW STREAMS FROM shop"), Stmt::Show { db: Some("shop".into()) });
+        assert_eq!(
+            cl("SHOW STREAMS FROM shop"),
+            Stmt::Show {
+                db: Some("shop".into())
+            }
+        );
     }
 
     #[test]
@@ -631,7 +656,13 @@ mod tests {
         let s = "INSERT INTO order_events (key, value, headers) VALUES (7001, JSON_OBJECT('type','order.paid'), NULL)";
         let Stmt::Insert(i) = cl(s) else { panic!() };
         assert_eq!(i.target.name, "order_events");
-        let cols: Vec<&str> = i.columns.as_ref().unwrap().iter().map(|c| c.0.as_str()).collect();
+        let cols: Vec<&str> = i
+            .columns
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.0.as_str())
+            .collect();
         assert_eq!(cols, ["key", "value", "headers"]);
         assert_eq!(i.first_row_arity, Some(3));
         assert_eq!(i.longest_literal, 10);
@@ -647,12 +678,37 @@ mod tests {
             panic!()
         };
         assert_eq!(i.first_row_arity, None);
-        assert!(matches!(cl("UPDATE s SET v = 1"), Stmt::Write { verb: "UPDATE", .. }));
-        assert!(matches!(cl("DELETE FROM shop.s WHERE 1"), Stmt::Write { verb: "DELETE", .. }));
-        assert!(matches!(cl("TRUNCATE TABLE s"), Stmt::Write { verb: "TRUNCATE", .. }));
-        assert!(matches!(cl("REPLACE INTO s VALUES (1)"), Stmt::Write { verb: "REPLACE", .. }));
-        assert!(matches!(cl("CREATE TABLE IF NOT EXISTS s (a INT)"), Stmt::CreateTable(_)));
+        assert!(matches!(
+            cl("UPDATE s SET v = 1"),
+            Stmt::Write { verb: "UPDATE", .. }
+        ));
+        assert!(matches!(
+            cl("DELETE FROM shop.s WHERE 1"),
+            Stmt::Write { verb: "DELETE", .. }
+        ));
+        assert!(matches!(
+            cl("TRUNCATE TABLE s"),
+            Stmt::Write {
+                verb: "TRUNCATE",
+                ..
+            }
+        ));
+        assert!(matches!(
+            cl("REPLACE INTO s VALUES (1)"),
+            Stmt::Write {
+                verb: "REPLACE",
+                ..
+            }
+        ));
+        assert!(matches!(
+            cl("CREATE TABLE IF NOT EXISTS s (a INT)"),
+            Stmt::CreateTable(_)
+        ));
         assert_eq!(cl("SELECT 1"), Stmt::Other);
+        assert_eq!(
+            cl("DROP DATABASE IF EXISTS shop"),
+            Stmt::DropDatabase("shop".into())
+        );
     }
 
     #[test]

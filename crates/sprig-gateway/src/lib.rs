@@ -42,6 +42,10 @@
 //!   catalog login it plans every statement with chapter 07's rewrite and
 //!   maps results, errors and session tracking back to logical names.
 //!
+//! - [`kafka`]: the Kafka listener on 9092 (chapter 45 steps 9, 12, 13):
+//!   `sprig-proto-kafka`'s broker over chapter 14's logins, the DC's
+//!   gateway records, etcd coordinator leases and the tenant's streams.
+//!
 //! Not yet: the other front ends (chapters 30, 37, 40), limits,
 //! registration and the other `MetaStore` caches (steps 4-10).
 
@@ -51,6 +55,7 @@ pub mod exec;
 pub mod failover;
 pub mod frontend;
 pub mod http;
+pub mod kafka;
 pub mod lifecycle;
 pub mod limits;
 pub mod listener;
@@ -293,6 +298,33 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         )),
     });
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
+    // Kafka on 9092 (chapter 45, R9): catalog logins only, since topics are
+    // a tenant's streams.
+    let kafka_fe = tenants.as_ref().map(|t| {
+        let cluster = Arc::new(kafka::cluster::GatewayCluster::new(
+            Arc::clone(&stores.dc),
+            registrar.clone(),
+            live.clone(),
+            dc.clone(),
+        ));
+        Arc::new(kafka::KafkaFrontend::start(
+            kafka::KafkaDeps {
+                live: live.clone(),
+                dc: dc.clone(),
+                identity: Arc::new(kafka::identity::KafkaIdentity::new(
+                    Arc::clone(&login),
+                    Some(Arc::clone(t)),
+                )),
+                cluster,
+                topics: Arc::new(kafka::catalog::StreamTopics::new(
+                    Arc::clone(t),
+                    Arc::clone(&engine),
+                )),
+                groups: Arc::new(kafka::catalog::CatalogGroups::new(Arc::clone(t))),
+            },
+            stop.clone(),
+        ))
+    });
     let peer_host = Arc::new(PeerHost {
         login: Arc::clone(&login),
         core: Arc::clone(&core),
@@ -315,9 +347,15 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
 
     let listeners = Arc::new(
         ListenerManager::new(
-            mysql
-                .register(Frontends::new())
-                .with(http_fe as Arc<dyn frontend::Frontend>),
+            {
+                let fes = mysql
+                    .register(Frontends::new())
+                    .with(http_fe as Arc<dyn frontend::Frontend>);
+                match kafka_fe {
+                    Some(k) => fes.with(k as Arc<dyn frontend::Frontend>),
+                    None => fes,
+                }
+            },
             Arc::new(
                 GatewayContext::with_sessions(clock.clone(), Arc::clone(&sessions))
                     .with_backends(Arc::clone(&backends))

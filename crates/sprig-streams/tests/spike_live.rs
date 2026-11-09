@@ -10,7 +10,14 @@
 //! SPRIG_SPIKE_REPLICA=mysql://root:sprig-dev-root@127.0.0.1:13312 \
 //!   cargo test -p sprig-streams --test spike_live -- --ignored --nocapture
 //! ```
-#![allow(clippy::unwrap_used, clippy::cast_precision_loss, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::cast_precision_loss,
+    clippy::many_single_char_names,
+    clippy::format_push_string,
+    clippy::type_complexity,
+    missing_docs
+)]
 
 use std::time::{Duration, Instant};
 
@@ -101,12 +108,9 @@ async fn reset(c: &mut Conn, table: &str, partitioned: bool, parts: u32) {
     c.query_drop(log_ddl(table, partitioned)).await.unwrap();
     c.query_drop("DELETE FROM ckpt").await.unwrap();
     for p in 0..parts {
-        c.exec_drop(
-            "INSERT INTO ckpt VALUES (1, ?, 0, 0, 1, '')",
-            (p,),
-        )
-        .await
-        .unwrap();
+        c.exec_drop("INSERT INTO ckpt VALUES (1, ?, 0, 0, 1, '')", (p,))
+            .await
+            .unwrap();
     }
 }
 
@@ -176,9 +180,13 @@ async fn stream_log_spike() {
     .await
     .unwrap();
 
-    let phases = std::env::var("SPRIG_SPIKE_PHASES").unwrap_or_else(|_| "append,lag,read,drop".into());
+    let phases =
+        std::env::var("SPRIG_SPIKE_PHASES").unwrap_or_else(|_| "append,lag,read,drop".into());
     println!("== appends (records/s, worst batch ms), {secs} s each");
-    for partitioned in [true, false].into_iter().filter(|_| phases.contains("append")) {
+    for partitioned in [true, false]
+        .into_iter()
+        .filter(|_| phases.contains("append"))
+    {
         for (writers, batch) in [(1, 1), (1, 10), (1, 100), (1, 500), (4, 100), (8, 100)] {
             reset(&mut c, "sl", partitioned, writers).await;
             let (rps, worst) = run_appends(&url, "sl", writers, batch, secs).await;
@@ -211,7 +219,10 @@ async fn stream_log_spike() {
         if got == Some(last) {
             break;
         }
-        assert!(t.elapsed() < Duration::from_secs(120), "replica never caught up");
+        assert!(
+            t.elapsed() < Duration::from_secs(120),
+            "replica never caught up"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     println!(
@@ -224,7 +235,13 @@ async fn stream_log_spike() {
     let per_day = 50_000u64;
     let mut next = 0;
     for day in ["2026-11-07", "2026-11-08", "2026-11-09"] {
-        while next < per_day * (1 + ["2026-11-07", "2026-11-08", "2026-11-09"].iter().position(|d| *d == day).unwrap() as u64) {
+        while next
+            < per_day
+                * (1 + ["2026-11-07", "2026-11-08", "2026-11-09"]
+                    .iter()
+                    .position(|d| *d == day)
+                    .unwrap() as u64)
+        {
             append(&mut c, "sl", 0, next, 1000, day).await;
             next += 1000;
         }
@@ -295,9 +312,12 @@ async fn stream_log_spike() {
 
     // DROP PARTITION under an append load.
     let url2 = url.clone();
-    c.exec_drop("INSERT INTO ckpt VALUES (1, 1, 0, 0, 1, '') ON DUPLICATE KEY UPDATE next_offset = 0", ())
-        .await
-        .unwrap();
+    c.exec_drop(
+        "INSERT INTO ckpt VALUES (1, 1, 0, 0, 1, '') ON DUPLICATE KEY UPDATE next_offset = 0",
+        (),
+    )
+    .await
+    .unwrap();
     let load = tokio::spawn(async move {
         let mut c = conn(&url2).await;
         let start = Instant::now();
@@ -338,5 +358,7 @@ async fn stream_log_spike() {
 
     drop(c);
     let mut c = Conn::new(Opts::from_url(&url).unwrap()).await.unwrap();
-    c.query_drop(format!("DROP DATABASE {SCHEMA}")).await.unwrap();
+    c.query_drop(format!("DROP DATABASE {SCHEMA}"))
+        .await
+        .unwrap();
 }

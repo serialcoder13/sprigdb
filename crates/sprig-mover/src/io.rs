@@ -128,6 +128,16 @@ pub trait SourceIo: Send + Sync {
     async fn load(&self) -> Result<Load>;
     /// Drops the job's schemas (a retained source after the retention).
     async fn drop_schemas(&self) -> Result<()>;
+    /// Removes the job's tenant's backend accounts and `__sprig_names`
+    /// rows on the source cluster, after [`Self::drop_schemas`], when the
+    /// tenant was deleted ([`crate::record::JobRecord::purge_tenant`]).
+    /// The default removes nothing.
+    ///
+    /// # Errors
+    /// The cluster's.
+    async fn purge_tenant(&self) -> Result<()> {
+        Ok(())
+    }
     /// Finishes every prepared distributed-transaction branch of the job's
     /// tenant on the source cluster, within `within` (chapter 18's
     /// `drain_prepared`, cutover steps 2b and 3b). The default finishes

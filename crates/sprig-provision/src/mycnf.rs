@@ -9,6 +9,7 @@
 //! redo             = max(1G, 25% of the buffer pool)
 //! read_only        = ON: the node boots fenced; its agent unfences (chapter 25)
 //! semi-sync        = master side ON on the primary only, slave side on replicas
+//! max_allowed_packet = the gateway's limit (64 MiB) + 1 MiB for its rewrites
 //! Galera           = wsrep_* with mariabackup SST and wsrep_gtid_mode
 //! ```
 //!
@@ -29,6 +30,16 @@ pub const OPEN_FILES_LIMIT: u32 = 524_288;
 pub const MIN_REDO_BYTES: u64 = 1 << 30;
 /// `tuning.memory_budget_pct`'s default (chapter 09).
 pub const DEFAULT_TUNING_BUDGET_PCT: u8 = 10;
+/// `gateway.max_allowed_packet_bytes`' default (chapter 05).
+pub const GATEWAY_MAX_ALLOWED_PACKET: u64 = 64 * MIB;
+/// What the gateway may add to a statement on its way to MariaDB
+/// (rewritten names, the session's sync prefix); the gateway tells clients
+/// a limit this much below the backend's (`PACKET_HEADROOM` there).
+pub const PACKET_HEADROOM: u64 = MIB;
+/// `max_allowed_packet` on clusters SprigDB provisions: the gateway's
+/// default limit plus the headroom, so the gateway's own limit is the one
+/// clients get (chapter 05, "Packet limit").
+pub const MAX_ALLOWED_PACKET: u64 = GATEWAY_MAX_ALLOWED_PACKET + PACKET_HEADROOM;
 
 const MIB: u64 = 1 << 20;
 
@@ -108,6 +119,9 @@ pub struct NodeSettings {
     pub tls: Option<TlsFiles>,
     /// Galera, for [`NodeRole::Galera`].
     pub galera: Option<GaleraSettings>,
+    /// `max_allowed_packet`, bytes ([`MAX_ALLOWED_PACKET`]; more when a
+    /// deployment raised `gateway.max_allowed_packet_bytes`).
+    pub max_allowed_packet: u64,
 }
 
 impl NodeSettings {
@@ -134,6 +148,7 @@ impl NodeSettings {
             datadir: "/var/lib/mysql".into(),
             tls: None,
             galera: None,
+            max_allowed_packet: MAX_ALLOWED_PACKET,
         }
     }
 
@@ -225,6 +240,11 @@ pub fn render(n: &NodeSettings) -> String {
     line("innodb_io_capacity_max", &4000, "");
     line("gtid_strict_mode", &"ON", "");
     line("log_slave_updates", &"ON", "");
+    line(
+        "max_allowed_packet",
+        &n.max_allowed_packet,
+        "the gateway's limit + 1 MiB",
+    );
     if vm {
         line("read_only", &"ON", "boot fenced; the agent unfences");
         match n.role {
@@ -321,6 +341,8 @@ mod tests {
             get(&c, "rpl_semi_sync_master_wait_point"),
             Some("AFTER_SYNC")
         );
+        // The gateway's 64 MiB plus 1 MiB of headroom.
+        assert_eq!(get(&c, "max_allowed_packet"), Some("68157440"));
         // 16 GiB x 60% = 9830 MiB; redo 25% of that, over 1G.
         assert_eq!(get(&c, "innodb_buffer_pool_size"), Some("9830M"));
         assert_eq!(get(&c, "innodb_log_file_size"), Some("2457M"));
@@ -382,5 +404,6 @@ mod tests {
         assert_eq!(get(&render(&unknown), "wsrep_gtid_mode"), Some("ON"));
         assert_eq!(get(&render(&unknown), "wsrep_on"), None);
         assert_eq!(get(&c, "log_bin"), Some("mariadb-bin"));
+        assert_eq!(get(&c, "max_allowed_packet"), Some("68157440"));
     }
 }

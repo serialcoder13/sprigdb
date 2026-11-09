@@ -15,7 +15,7 @@
 //! set up with `sprigctl`. Tenant ids start at 4,030,600,000 (rule 8b).
 //! Containers are capped at 768 MB and removed at the end.
 //!
-//! - [`bins_primary_replica_kill9`]: `db1` (primary, semi-sync AFTER_SYNC)
+//! - [`bins_primary_replica_kill9`][]: `db1` (primary, semi-sync AFTER_SYNC)
 //!   and its replicas `db2`, `db3`, each with an agent. First the agent's
 //!   semi-sync guard: with both replicas stopped, `db1` is fenced and
 //!   unfenced again (its agent restarted); its first commit doesn't wait
@@ -31,7 +31,7 @@
 //!   rejoins it as a replica (or reports what diverged). Checked: every
 //!   acknowledged append is on the final writer; elle finds the history
 //!   serializable.
-//! - [`bins_galera_node_loss`]: a throwaway three-node Galera (768 MB
+//! - [`bins_galera_node_loss`][]: a throwaway three-node Galera (768 MB
 //!   each). One node is `kill -9`ed under a list-append workload through
 //!   the gateway: the controller's registry loop re-picks the writer set,
 //!   the `cluster_failover` loop records the node outside the primary

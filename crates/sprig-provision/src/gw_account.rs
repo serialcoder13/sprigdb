@@ -52,7 +52,10 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
         ipad[i] ^= k[i];
         opad[i] ^= k[i];
     }
-    let inner = Sha256::new().chain_update(ipad).chain_update(msg).finalize();
+    let inner = Sha256::new()
+        .chain_update(ipad)
+        .chain_update(msg)
+        .finalize();
     Sha256::new()
         .chain_update(opad)
         .chain_update(inner)
@@ -60,8 +63,10 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
         .into()
 }
 
-/// `sprig_gw`'s password derived from `sprig_ctl`'s.
-fn derived_password(ctl_password: &str) -> String {
+/// `sprig_gw`'s password derived from `sprig_ctl`'s (when the credentials
+/// file has no `[sprig_gw]` table).
+#[must_use]
+pub fn derived_password(ctl_password: &str) -> String {
     hmac_sha256(ctl_password.as_bytes(), GW_USER.as_bytes())
         .iter()
         .fold(String::with_capacity(64), |mut s, b| {
@@ -184,7 +189,11 @@ mod tests {
     #[test]
     fn hmac_matches_rfc_4231_case_2() {
         let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
-        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = mac.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
         assert_eq!(
             hex,
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
@@ -233,7 +242,11 @@ mod tests {
     fn the_statements_grant_only_slave_monitor() {
         let sql = account_sql("p'w");
         assert_eq!(sql.len(), 3);
-        assert!(sql[0].contains("IDENTIFIED BY 'p''w' REQUIRE SSL"), "{}", sql[0]);
+        assert!(
+            sql[0].contains("IDENTIFIED BY 'p''w' REQUIRE SSL"),
+            "{}",
+            sql[0]
+        );
         assert_eq!(sql[2], "GRANT SLAVE MONITOR ON *.* TO 'sprig_gw'@'%'");
     }
 }

@@ -57,15 +57,19 @@ fn tags(t: &serde_json::Map<String, Value>) -> String {
     if t.is_empty() {
         return "-".to_owned();
     }
-    t.iter()
+    // By key: serde_json's `preserve_order` (turned on in the workspace by
+    // KIRun) keeps insertion order otherwise.
+    let mut kv: Vec<String> = t
+        .iter()
         .map(|(k, v)| {
             format!(
                 "{k}={}",
                 v.as_str().map_or_else(|| v.to_string(), str::to_owned)
             )
         })
-        .collect::<Vec<_>>()
-        .join(",")
+        .collect();
+    kv.sort();
+    kv.join(",")
 }
 
 /// `sprigctl dc list`.

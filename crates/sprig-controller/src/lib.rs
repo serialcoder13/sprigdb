@@ -71,6 +71,7 @@ pub mod inherit_loop;
 pub mod latency;
 pub mod live;
 pub mod logic_loop;
+// Chapter 45 (R9): one sequencer job per stream.
 pub mod migrate;
 pub mod monitor;
 pub mod registration;
@@ -80,6 +81,7 @@ pub mod settings;
 pub mod settings_admin;
 pub mod sharding;
 pub mod sharding_runtime;
+pub mod streams_loop;
 pub mod tenants;
 pub mod traffic;
 pub mod tree;
@@ -456,6 +458,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         // Chapter 41 (R7 order 5): after-commit trigger jobs and schedules.
         .with_loop(Loop::new(logic_loop::LogicLoop::new(logic_locator)))
         .with_loop(Loop::new(inherit_loop::InheritLoop))
+        .with_loop(Loop::new(streams_loop::StreamsLoop))
         .global_candidate(cfg.controller.global_candidate);
     // Chapter 25 (R2): the DC lease, permits, observations, the return of
     // a lost DC and the global failover decision (failover::role).

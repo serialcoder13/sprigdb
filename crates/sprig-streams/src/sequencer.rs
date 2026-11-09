@@ -14,7 +14,7 @@
 //!       TxnEnd → the transaction's records join the batch; resume := its token
 //!       Progress → resume := its token
 //!  4. flush when the batch has stream.sequencer_batch_ms of age or 1,000
-//!     records, or the position moved and nothing was written for a second:
+//!     records, or the position moved and nothing was written for 5 s:
 //!       append(epoch, records, resume) — fenced: a different epoch in the
 //!       shard row means another sequencer took over; stop at once
 //!       publish the high watermarks; delete the appended outbox rows
@@ -252,7 +252,7 @@ impl Default for SeqOpts {
         Self {
             batch_window: Duration::from_millis(10),
             max_batch: 1000,
-            idle_checkpoint: Duration::from_secs(1),
+            idle_checkpoint: Duration::from_secs(5),
             retry: Duration::from_millis(100),
             cleanup: true,
         }
@@ -548,7 +548,11 @@ impl Sequencer {
             };
             match outcome {
                 AppendOutcome::Fenced { now } => {
-                    tracing::warn!(epoch = epoch.0, now = now.0, "stream sequencer fenced: another one took the log shard");
+                    tracing::warn!(
+                        epoch = epoch.0,
+                        now = now.0,
+                        "stream sequencer fenced: another one took the log shard"
+                    );
                     return Ok(RunEnd::Fenced);
                 }
                 AppendOutcome::Appended(a) => {
@@ -560,7 +564,13 @@ impl Sequencer {
                     metrics::counter!("sprig_stream_records_appended_total", "kind" => kind)
                         .increment(a.records);
                     #[allow(clippy::cast_precision_loss)]
-                    if let Some(oldest) = batch.records.iter().map(|r| r.ts_ms).filter(|t| *t > 0).min() {
+                    if let Some(oldest) = batch
+                        .records
+                        .iter()
+                        .map(|r| r.ts_ms)
+                        .filter(|t| *t > 0)
+                        .min()
+                    {
                         let wall = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0));

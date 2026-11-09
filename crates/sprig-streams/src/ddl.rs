@@ -22,9 +22,13 @@
 //!   position, written by every batch; partition rows hold `next_offset`,
 //!   `log_start` and the epoch of their last append.
 
+use std::fmt::Write as _;
+
 use sprig_common::names::quote;
 
-use crate::model::{CKPT_TABLE, Cleanup, PartitionNo, SHARD_ROW, StreamId, log_table, outbox_table};
+use crate::model::{
+    CKPT_TABLE, Cleanup, PartitionNo, SHARD_ROW, StreamId, log_table, outbox_table,
+};
 
 /// Days of partitions kept ahead of today.
 pub const DAYS_AHEAD: i64 = 3;
@@ -175,12 +179,21 @@ pub fn ckpt_sql(schema: &str) -> String {
 /// and the shard row with the feed position to start from
 /// ([`crate::sequencer::Start::encode`]).
 #[must_use]
-pub fn ckpt_rows_sql(schema: &str, id: StreamId, partitions: &[PartitionNo], start: &[u8]) -> String {
+pub fn ckpt_rows_sql(
+    schema: &str,
+    id: StreamId,
+    partitions: &[PartitionNo],
+    start: &[u8],
+) -> String {
     let mut rows: Vec<String> = partitions
         .iter()
         .map(|p| format!("({}, {}, 0, 0, 0, '')", id.0, p.0))
         .collect();
-    rows.push(format!("({}, {SHARD_ROW}, 0, 0, 0, {})", id.0, hex_literal(start)));
+    rows.push(format!(
+        "({}, {SHARD_ROW}, 0, 0, 0, {})",
+        id.0,
+        hex_literal(start)
+    ));
     format!(
         "INSERT IGNORE INTO {}.{} (stream_id, partition_no, next_offset, log_start, leader_epoch, resume_token) VALUES {}",
         quote(schema),
@@ -198,7 +211,7 @@ pub fn hex_literal(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2 + 3);
     s.push_str("X'");
     for x in b {
-        s.push_str(&format!("{x:02X}"));
+        let _ = write!(s, "{x:02X}");
     }
     s.push('\'');
     s
@@ -209,7 +222,11 @@ pub fn hex_literal(b: &[u8]) -> String {
 #[must_use]
 pub fn drop_log_sql(schema: &str, id: StreamId) -> Vec<String> {
     vec![
-        format!("DROP TABLE IF EXISTS {}.{}", quote(schema), quote(&log_table(id))),
+        format!(
+            "DROP TABLE IF EXISTS {}.{}",
+            quote(schema),
+            quote(&log_table(id))
+        ),
         format!(
             "DELETE FROM {}.{} WHERE stream_id = {}",
             quote(schema),
@@ -222,7 +239,11 @@ pub fn drop_log_sql(schema: &str, id: StreamId) -> Vec<String> {
 /// The outbox's drop.
 #[must_use]
 pub fn drop_outbox_sql(schema: &str, id: StreamId) -> String {
-    format!("DROP TABLE IF EXISTS {}.{}", quote(schema), quote(&outbox_table(id)))
+    format!(
+        "DROP TABLE IF EXISTS {}.{}",
+        quote(schema),
+        quote(&outbox_table(id))
+    )
 }
 
 /// New partitions' checkpoint rows (`ALTER STREAM ... PARTITIONS`).

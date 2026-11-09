@@ -75,4 +75,3 @@ impl Message for InitProducerIdResponse {
         Ok(s)
     }
 }
-

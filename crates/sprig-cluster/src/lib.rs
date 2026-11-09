@@ -44,6 +44,7 @@ pub mod fence;
 pub mod health;
 pub mod probe;
 pub mod profile;
+pub mod purge;
 pub mod record;
 pub mod registry;
 pub mod settings;

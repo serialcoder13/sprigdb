@@ -288,6 +288,13 @@ impl ClusterRegistry {
         &self.dc_id
     }
 
+    /// The DC tier's store (where the failover loop publishes each
+    /// cluster's writer, chapter 25).
+    #[must_use]
+    pub fn dc_store(&self) -> &Arc<dyn MetaStore> {
+        &self.dc
+    }
+
     /// Events from writes made through this registry.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<ClusterEvent> {

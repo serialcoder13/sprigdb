@@ -92,6 +92,12 @@ fn replication_follows_the_table() {
     assert!(cnf.contains("4915M"), "{cnf}");
     assert!(!cnf.contains("server_id"));
     assert!(!cnf.contains("gtid_domain_id"));
+    // The gateway's packet limit plus 1 MiB (chapter 27).
+    assert!(
+        cnf.lines()
+            .any(|l| l.starts_with("max_allowed_packet") && l.contains("= 68157440")),
+        "{cnf}"
+    );
     // Sprig drives failover: the operator's is off.
     let mut sprig = sc(Topology::Replication, 3);
     sprig.spec.failover_driver = FailoverDriver::Sprig;

@@ -46,8 +46,18 @@ impl Message for ListGroupsRequest {
 
     fn encode(&self, w: &mut Writer, v: i16) -> Result<()> {
         let flex = v >= FLEXIBLE_MIN;
-        if v >= 4 { w.array(&self.states_filter, flex, |w, e| { w.string(e, flex)?; Ok(()) })?; }
-        if v >= 5 { w.array(&self.types_filter, flex, |w, e| { w.string(e, flex)?; Ok(()) })?; }
+        if v >= 4 {
+            w.array(&self.states_filter, flex, |w, e| {
+                w.string(e, flex)?;
+                Ok(())
+            })?;
+        }
+        if v >= 5 {
+            w.array(&self.types_filter, flex, |w, e| {
+                w.string(e, flex)?;
+                Ok(())
+            })?;
+        }
         if flex {
             w.tagged_fields(Vec::new(), &self.unknown_tagged_fields)?;
         }
@@ -57,12 +67,15 @@ impl Message for ListGroupsRequest {
     fn decode(r: &mut Reader<'_>, v: i16) -> Result<Self> {
         let flex = v >= FLEXIBLE_MIN;
         let mut s = Self::default();
-        if v >= 4 { s.states_filter = r.array(flex, |r| Ok(r.string(flex)?))?; }
-        if v >= 5 { s.types_filter = r.array(flex, |r| Ok(r.string(flex)?))?; }
+        if v >= 4 {
+            s.states_filter = r.array(flex, |r| Ok(r.string(flex)?))?;
+        }
+        if v >= 5 {
+            s.types_filter = r.array(flex, |r| Ok(r.string(flex)?))?;
+        }
         if flex {
             s.unknown_tagged_fields = r.tagged_fields(|_, _| Ok(false))?;
         }
         Ok(s)
     }
 }
-

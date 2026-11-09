@@ -18,7 +18,11 @@ use crate::model::PartitionNo;
 
 /// Kafka's `Utils.murmur2` (seed `0x9747b28c`), bit for bit.
 #[must_use]
-#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
 pub fn murmur2(data: &[u8]) -> i32 {
     const M: u32 = 0x5bd1_e995;
     const R: u32 = 24;
@@ -96,12 +100,7 @@ mod tests {
             (b"abc", 479_470_107),
         ];
         for (input, want) in cases {
-            assert_eq!(
-                murmur2(input),
-                *want,
-                "{}",
-                String::from_utf8_lossy(input)
-            );
+            assert_eq!(murmur2(input), *want, "{}", String::from_utf8_lossy(input));
         }
     }
 
