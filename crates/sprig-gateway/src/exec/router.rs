@@ -66,6 +66,7 @@ use crate::pipeline::{EndOfRows, ExecCtx, ResultSink, RowFormat, RowValues};
 use crate::tenant::TenantServices;
 use crate::tenant::names::Accounts;
 
+pub(super) use self::binary::param_lit;
 pub(super) use self::fk_ddl::FkDdl;
 pub(crate) use self::layout::ShardingExtension;
 

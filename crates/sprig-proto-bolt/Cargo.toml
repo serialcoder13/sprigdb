@@ -8,5 +8,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+metrics.workspace = true
+sprig-common.workspace = true
+tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "net", "test-util", "rt-multi-thread"] }
+
 [lints]
 workspace = true

@@ -29,6 +29,9 @@ pub(crate) struct Recording {
     unsafe_why: Option<String>,
     /// The statement in flight, recorded when it succeeds.
     pub(super) pending: Option<String>,
+    /// The next binary-protocol statement with its bound values written
+    /// in (decision Q17): recorded like a text statement.
+    pub(super) bound: Option<String>,
 }
 
 fn first_word(sql: &[u8]) -> String {
@@ -64,6 +67,11 @@ impl Recording {
     /// Before a binary-protocol statement.
     pub(super) fn before_binary(&mut self, info: &StmtInfo, sql: &[u8]) {
         self.pending = None;
+        if let Some(text) = self.bound.take() {
+            // The values are written in: the same rules as a text write.
+            self.before(info, text.as_bytes());
+            return;
+        }
         let w = first_word(sql);
         if (info.class == StmtClass::Write
             && matches!(w.as_str(), "INSERT" | "UPDATE" | "DELETE" | "REPLACE"))

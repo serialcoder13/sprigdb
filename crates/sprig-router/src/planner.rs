@@ -212,6 +212,85 @@ pub fn parse_template(sql: &str, topo: &dyn Topology) -> R<Option<Template>> {
     }))
 }
 
+impl ParamLit {
+    /// The literal as SQL text (as [`plan_prepared`] writes it in).
+    #[must_use]
+    pub fn sql(&self) -> String {
+        let hex = |b: &[u8]| {
+            let mut h = String::with_capacity(b.len() * 2 + 3);
+            h.push_str("X'");
+            for x in b {
+                let _ = write!(h, "{x:02X}");
+            }
+            h.push('\'');
+            h
+        };
+        match self {
+            Self::Null => "NULL".into(),
+            Self::Int(i) => i.to_string(),
+            Self::Double(f) if f.is_finite() => format!("{f:e}"),
+            Self::Double(_) => "NULL".into(),
+            Self::Str { bytes, charset } => format!("_{charset} {}", hex(bytes)),
+            Self::Bytes(b) => hex(b),
+            Self::Raw(t) => t.clone(),
+        }
+    }
+}
+
+/// `sql` with its `?` placeholders (outside quotes, backticks and
+/// comments) replaced by `params` in order: the text a prepared
+/// statement's execution amounts to (chapter 18 records it for a held
+/// branch's redo). `None` when the counts differ.
+#[must_use]
+pub fn render_params(sql: &str, params: &[ParamLit]) -> Option<String> {
+    let b = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + 16 * params.len());
+    let mut next = params.iter();
+    let mut i = 0;
+    let mut last = 0;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'\'' | b'"' | b'`' => {
+                i += 1;
+                while i < b.len() && b[i] != c {
+                    if b[i] == b'\\' && c != b'`' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'#' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b'?' => {
+                out.push_str(&sql[last..i]);
+                out.push_str(&next.next()?.sql());
+                i += 1;
+                last = i;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&sql[last.min(sql.len())..]);
+    next.next().is_none().then_some(out)
+}
+
 fn param_expr(p: &ParamLit) -> Expr {
     let hex = |b: &[u8]| {
         let mut h = String::with_capacity(b.len() * 2);

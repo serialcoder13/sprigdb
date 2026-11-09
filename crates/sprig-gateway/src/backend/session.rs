@@ -522,6 +522,22 @@ impl BackendSession {
         }
     }
 
+    /// Whether this connection records its writes for a held branch's
+    /// redo (chapter 18's Sprig 2PC).
+    #[must_use]
+    pub fn recording(&self) -> bool {
+        self.redo.is_some()
+    }
+
+    /// The next [`execute`](Self::execute)'s statement with its bound
+    /// values written in, for the redo record (decision Q17): a prepared
+    /// write on a recording branch is then replayable.
+    pub fn bind_text(&mut self, text: String) {
+        if let Some(r) = self.redo.as_mut() {
+            r.bound = Some(text);
+        }
+    }
+
     /// Runs a prepared statement (binary protocol): prepares `sql` on the
     /// chosen connection if needed (lazily, under the node's budget) and
     /// sends the payload `build` makes for that backend statement. Set the

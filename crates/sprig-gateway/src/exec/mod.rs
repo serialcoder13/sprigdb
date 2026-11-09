@@ -614,6 +614,23 @@ impl PassSession {
             // Pin before routing, so FETCH finds the same connection.
             bs.open_cursor();
         }
+        // Chapter 18 (decision Q17): a write on a branch that records its
+        // redo is recorded with its values written in.
+        if bs.recording() {
+            let cs = bs
+                .vars()
+                .vars
+                .get("character_set_client")
+                .cloned()
+                .unwrap_or_else(|| "utf8mb4".to_owned());
+            let lits: Vec<sprig_router::ParamLit> = values
+                .iter()
+                .map(|v| router::param_lit(v, &cs))
+                .collect();
+            if let Some(t) = sprig_router::render_params(&String::from_utf8_lossy(&sql), &lits) {
+                bs.bind_text(t);
+            }
+        }
         let mut backend_id = 0u32;
         let mut build = |b: &BackendStmt| {
             backend_id = b.id;

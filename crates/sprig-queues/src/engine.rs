@@ -823,6 +823,18 @@ impl VShared {
         if rows.is_empty() {
             return 0;
         }
+        // Rows routed now (dead letters, due delayed messages) need the
+        // latest bindings: they may have been declared through another
+        // gateway a moment ago.
+        if rows
+            .iter()
+            .any(|r| matches!(r.dest, OutDest::Exchange { .. }))
+            && let Some(e) = self.engine.upgrade()
+            && let Err(err) = e.deps.catalog.refresh(&self.r).await
+        {
+            tracing::debug!(error = %err, "outbox forward deferred: catalog unavailable");
+            return 0;
+        }
         let n = rows.len();
         match self.forward(&rows).await {
             Ok(()) => {

@@ -57,6 +57,7 @@ pub use gather::{GatherLimits, GatherPlan, Scratch};
 pub use plan::{Plan, ShardAt, Target};
 pub use planner::{
     ParamLit, PlanCtx, PreparedPlan, Template, parse_template, plan, plan_gathered, plan_prepared,
+    render_params,
 };
 pub use reject::{Reason, Rejection};
 pub use settings::RouterConfig;

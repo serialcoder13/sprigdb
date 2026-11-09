@@ -550,3 +550,22 @@ fn single_shard_planning_cost() {
         "point select: plan {planned:?} (parse {parsed:?}); names by printing {rendered:?}, by splicing {spliced:?}"
     );
 }
+
+#[test]
+fn bound_values_render_into_the_text() {
+    use crate::planner::{ParamLit, render_params};
+    let p = [
+        ParamLit::Int(7),
+        ParamLit::Str {
+            bytes: b"a'b".to_vec(),
+            charset: "utf8mb4".into(),
+        },
+        ParamLit::Null,
+    ];
+    assert_eq!(
+        render_params("UPDATE t SET a = ?, b = '?' WHERE c = ? AND d <=> ? -- ?", &p).as_deref(),
+        Some("UPDATE t SET a = 7, b = '?' WHERE c = _utf8mb4 X'612762' AND d <=> NULL -- ?")
+    );
+    assert!(render_params("SELECT ?", &p).is_none());
+    assert!(render_params("SELECT ?, ?, ?, ?", &p).is_none());
+}

@@ -5,6 +5,7 @@
 pub mod db;
 pub mod kafka;
 pub mod s3;
+pub mod script;
 pub mod webhook;
 
 use std::collections::{BTreeMap, HashMap};

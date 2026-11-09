@@ -68,6 +68,8 @@ pub struct GatewayMq {
     stores: tokio::sync::Mutex<HashMap<(u64, u32), Arc<dyn MsgStore>>>,
     /// The same stores as MariaDB stores (their confirm mode).
     maria: Mutex<HashMap<(u64, u32), Arc<MariaStore>>>,
+    /// When each tenant's catalog was last refreshed for routing.
+    refreshed: Mutex<HashMap<u64, std::time::Instant>>,
     grants: Mutex<HashMap<GrantKey, Arc<dyn SessionGrants>>>,
 }
 
@@ -88,6 +90,7 @@ impl GatewayMq {
             keys: Mutex::new(HashMap::new()),
             stores: tokio::sync::Mutex::new(HashMap::new()),
             maria: Mutex::new(HashMap::new()),
+            refreshed: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashMap::new()),
         }
     }
@@ -250,6 +253,27 @@ impl MqCatalog for GatewayMq {
     }
 
     fn topology(&self, v: &VhostRef) -> Arc<Topology> {
+        // Routing never waits, but a change made through another gateway
+        // (known from the directory watch) is loaded in the background,
+        // at most every 100 ms per tenant.
+        let due = {
+            let mut r = lock(&self.refreshed);
+            let now = std::time::Instant::now();
+            match r.get(&v.tenant) {
+                Some(t) if now.duration_since(*t) < Duration::from_millis(100) => false,
+                _ => {
+                    r.insert(v.tenant, now);
+                    true
+                }
+            }
+        };
+        if due {
+            let svc = Arc::clone(&self.svc);
+            let t = TenantId(v.tenant);
+            tokio::spawn(async move {
+                let _ = svc.cache.get(t, Freshness::Latest).await;
+            });
+        }
         match self.svc.cache.cached(TenantId(v.tenant)) {
             Some(cat) => Self::state(&cat).topology(v.db_id, cat.version),
             None => Arc::new(Topology::new()),

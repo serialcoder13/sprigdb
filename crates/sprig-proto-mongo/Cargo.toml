@@ -28,8 +28,9 @@ tokio = { workspace = true, features = ["io-util"] }
 hex = "0.4"
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "macros"] }
 # Live tests through a real driver (Apache-2.0), without TLS or DNS
-# resolution, so no certificate-bundle crates come along.
-mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0"] }
+# resolution; TLS through the system OpenSSL, since its rustls option
+# brings webpki-roots (CDLA-Permissive-2.0, outside the allowed licences).
+mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "openssl-tls"] }
 futures-util = "0.3"
 
 [lints]
