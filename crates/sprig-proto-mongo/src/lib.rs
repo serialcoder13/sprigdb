@@ -10,6 +10,9 @@
 //!
 //! The front end that uses them is `sprig_gateway::mongo`.
 
+// MongoDB command and field names fill the docs.
+#![allow(clippy::doc_markdown)]
+
 pub mod codec;
 pub mod crc32c;
 pub mod errors;

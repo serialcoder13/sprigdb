@@ -554,6 +554,11 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             None
         };
         if let Some(ts) = held_ts {
+            // The redo table exists before the branch's transaction begins
+            // (a table created later can't take its `done` marker: 1412).
+            if let Err(e) = self.admin.ensure_redo(cluster, &shard.schema).await {
+                return Err(backend_error(&e));
+            }
             ctl.push(Ctl::SetTimestamp(Some(ts)));
         }
         if let Some(x) = &xid {
@@ -1553,6 +1558,7 @@ async fn finish_held<C: BranchConn>(
                 true
             }
             Err(e) => {
+                tracing::warn!(cluster = %b.cluster, schema = %b.anchor.schema, errno = e.errno, error = %e.message, "a held branch's phase 2 failed; the resolver replays it");
                 if !e.is_lost() {
                     let _ = b
                         .conn

@@ -82,6 +82,8 @@ pub mod settings_admin;
 pub mod sharding;
 pub mod sharding_runtime;
 pub mod streams_loop;
+// Chapter 51 (R9): sink tasks.
+pub mod sinks_loop;
 pub mod tenants;
 pub mod traffic;
 pub mod tree;
@@ -459,6 +461,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(logic_loop::LogicLoop::new(logic_locator)))
         .with_loop(Loop::new(inherit_loop::InheritLoop))
         .with_loop(Loop::new(streams_loop::StreamsLoop))
+        .with_loop(Loop::new(sinks_loop::SinksLoop::default()))
         .global_candidate(cfg.controller.global_candidate);
     // Chapter 25 (R2): the DC lease, permits, observations, the return of
     // a lost DC and the global failover decision (failover::role).

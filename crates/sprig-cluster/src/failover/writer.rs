@@ -54,6 +54,10 @@ pub struct AgentRecord {
     /// Whether `mysqld` answers.
     #[serde(default)]
     pub mysqld: MysqldState,
+    /// Where the agent's internal service listens (`node_rebuild`'s backup
+    /// stream and rebuild calls), `http://host:port`; older agents have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_url: Option<String>,
 }
 
 impl Versioned for AgentRecord {

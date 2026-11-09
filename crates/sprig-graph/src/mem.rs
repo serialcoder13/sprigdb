@@ -74,7 +74,7 @@ impl MemStore {
 #[must_use]
 pub fn shard_of_rk(rk: u64, n: usize) -> usize {
     let n = u128::try_from(n.max(1)).unwrap_or(1);
-    usize::try_from(u128::from(rk) * n >> 64).unwrap_or(0)
+    usize::try_from((u128::from(rk) * n) >> 64).unwrap_or(0)
 }
 
 #[async_trait]
@@ -128,7 +128,10 @@ impl GraphStore for MemStore {
 
     async fn nodes(&mut self, ids: &[u64]) -> Result<Vec<NodeRow>> {
         self.stats.shard_queries += 1;
-        Ok(ids.iter().filter_map(|i| self.nodes.get(i).cloned()).collect())
+        Ok(ids
+            .iter()
+            .filter_map(|i| self.nodes.get(i).cloned())
+            .collect())
     }
 
     async fn expand(
@@ -156,7 +159,11 @@ impl GraphStore for MemStore {
                 ));
                 // The far node joins only when it is on the edge's shard.
                 let local = shard_of_rk(far_rk, self.shards) == shard_of_rk(e.src_rk, self.shards);
-                let far_row = if local { self.nodes.get(&far).cloned() } else { None };
+                let far_row = if local {
+                    self.nodes.get(&far).cloned()
+                } else {
+                    None
+                };
                 out.push((e.clone(), far_row));
             }
         }
@@ -217,7 +224,10 @@ impl GraphStore for MemStore {
 
     async fn edges(&mut self, ids: &[u64]) -> Result<Vec<EdgeRow>> {
         self.stats.shard_queries += 1;
-        Ok(ids.iter().filter_map(|i| self.edges.get(i).cloned()).collect())
+        Ok(ids
+            .iter()
+            .filter_map(|i| self.edges.get(i).cloned())
+            .collect())
     }
 
     async fn edges_touching(&mut self, nodes: &[u64], limit: usize) -> Result<Vec<EdgeRow>> {
@@ -309,11 +319,15 @@ impl GraphStore for MemStore {
     }
 
     fn label_name(&self, id: u32) -> Option<String> {
-        self.labels.get(usize::try_from(id).ok()?.checked_sub(1)?).cloned()
+        self.labels
+            .get(usize::try_from(id).ok()?.checked_sub(1)?)
+            .cloned()
     }
 
     fn type_name(&self, id: u32) -> Option<String> {
-        self.types.get(usize::try_from(id).ok()?.checked_sub(1)?).cloned()
+        self.types
+            .get(usize::try_from(id).ok()?.checked_sub(1)?)
+            .cloned()
     }
 
     fn all_labels(&self) -> Vec<String> {

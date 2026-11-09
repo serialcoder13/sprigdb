@@ -211,7 +211,7 @@ fn hex_lower(b: &[u8]) -> String {
 }
 
 fn hex_bytes(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -300,13 +300,14 @@ impl Renderer<'_> {
                     self.ty(path, "long");
                 }
             }
-            Bson::Double(f) => match double_text(*f) {
-                Some(t) => self.out.push_str(&t),
-                None => {
+            Bson::Double(f) => {
+                if let Some(t) = double_text(*f) {
+                    self.out.push_str(&t);
+                } else {
                     write_json_string(&mut self.out, nonfinite_text(*f));
                     self.ty(path, "double");
                 }
-            },
+            }
             Bson::Decimal128(d) => {
                 let t = d.to_string();
                 if decimal_json_number(&t) {
@@ -501,9 +502,7 @@ pub fn render(d: &Document, opts: &RenderOpts) -> Result<(String, Option<String>
 /// 53 `InvalidIdField` for an array, regex or undefined `_id`; 39660 for
 /// an encoded `_id` over 1024 bytes; the errors of [`render`].
 pub fn to_stored(d: &Document, opts: &RenderOpts) -> Result<Stored, MongoError> {
-    let id = d
-        .get("_id")
-        .ok_or_else(|| invalid("document has no _id"))?;
+    let id = d.get("_id").ok_or_else(|| invalid("document has no _id"))?;
     let id_key = id_key(id)?;
     let (doc, types) = render(d, opts)?;
     Ok(Stored { id_key, doc, types })
@@ -663,7 +662,10 @@ impl Parser<'_> {
     fn number(&mut self) -> Result<&str, MongoError> {
         let start = self.at;
         while self.at < self.s.len()
-            && matches!(self.s[self.at], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+            && matches!(
+                self.s[self.at],
+                b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
+            )
         {
             self.at += 1;
         }
@@ -844,17 +846,16 @@ fn convert(t: Tok<'_>, entry: Option<&str>) -> Bson {
                     bytes,
                 })
             }),
-        (Tok::Str(s), e) if e.starts_with("binData:") => e["binData:".len()..]
-            .parse::<u8>()
-            .ok()
-            .and_then(|st| {
+        (Tok::Str(s), e) if e.starts_with("binData:") => {
+            e["binData:".len()..].parse::<u8>().ok().and_then(|st| {
                 B64.decode(s).ok().map(|bytes| {
                     Bson::Binary(Binary {
                         subtype: BinarySubtype::from(st),
                         bytes,
                     })
                 })
-            }),
+            })
+        }
         (Tok::Str(s), "timestamp") => s.split_once('.').and_then(|(a, b)| {
             Some(Bson::Timestamp(Timestamp {
                 time: a.parse().ok()?,
@@ -941,7 +942,10 @@ fn check_raw_val(v: bson::RawBsonRef<'_>, depth: usize) -> Result<(), MongoError
         bson::RawBsonRef::Document(d) => check_raw_doc(d, depth + 1),
         bson::RawBsonRef::Array(a) => {
             for e in a {
-                check_raw_val(e.map_err(|e| invalid(format!("invalid BSON: {e}")))?, depth + 1)?;
+                check_raw_val(
+                    e.map_err(|e| invalid(format!("invalid BSON: {e}")))?,
+                    depth + 1,
+                )?;
             }
             Ok(())
         }

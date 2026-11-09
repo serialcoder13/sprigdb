@@ -423,11 +423,11 @@ async fn present(
             if want.is_empty() {
                 continue;
             }
-            let wait = be.fk_lock_wait();
+            let lock_wait = be.fk_lock_wait();
             let t = target_of(
                 entry,
                 s,
-                probe_sql(&schema, &entry.name, cols, &want, wait),
+                probe_sql(&schema, &entry.name, cols, &want, lock_wait),
             );
             let ShardOutcome::Rows(rows) = be.run(&t, &t.sql, budget).await? else {
                 return Err(SprigError::internal("a foreign-key probe answered no rows"));

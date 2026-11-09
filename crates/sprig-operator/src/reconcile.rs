@@ -325,7 +325,7 @@ impl Reconciler {
             },
             "reason": reason,
             "message": message,
-            "type": if reason == "Failed" { "Warning" } else { "Normal" },
+            "type": if matches!(reason, "Failed" | "ReconcileError") { "Warning" } else { "Normal" },
             "firstTimestamp": now, "lastTimestamp": now, "count": 1,
             "source": {"component": "sprigdb-operator"},
         });
@@ -381,7 +381,40 @@ impl Reconciler {
             Err(_) => "error",
         };
         metrics::counter!("sprig_operator_reconcile_total", "kind" => "SprigCluster", "result" => result).increment(1);
+        if let Err(e) = &r {
+            self.note_error(raw, e).await;
+        }
         r
+    }
+
+    /// A pass that failed (an API refusal, such as mariadb-operator's
+    /// webhook refusing the `MariaDB`) leaves its reason in the status and
+    /// a `ReconcileError` Event when the reason changes, keeping the phase
+    /// (`Pending` for a new cluster), so `kubectl get sprigclusters` shows
+    /// why nothing happens (r2close; r2kind's leftover).
+    async fn note_error(&self, raw: &Value, e: &SprigError) {
+        let Ok(sc) = serde_json::from_value::<SprigCluster>(raw.clone()) else {
+            return;
+        };
+        if sc.metadata.deletion_timestamp.is_some() {
+            return;
+        }
+        let ns = sc
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| self.cfg.namespace.clone());
+        let old = sc.status.clone().unwrap_or_default();
+        let msg = format!("reconcile error: {e}");
+        if old.message.as_deref() == Some(msg.as_str()) {
+            return;
+        }
+        self.event(&sc, &ns, "ReconcileError", &msg).await;
+        let mut status = old;
+        status.message = Some(msg);
+        if let Err(w) = self.write_status(raw, &sc, &ns, status).await {
+            tracing::debug!(error = %w, "reconcile error not written to the status");
+        }
     }
 
     #[allow(clippy::too_many_lines)] // the six steps, in order

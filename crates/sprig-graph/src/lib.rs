@@ -15,11 +15,15 @@
 //! - [`settings`]: the `graph.*` keys.
 //! - [`neo4j`]: Neo4j status codes for errors.
 
+// An interpreter: evaluator and executor functions are one match or one
+// step-by-step walk each, with the short names of the algorithms.
+#![allow(clippy::too_many_lines, clippy::many_single_char_names)]
+
 pub mod ast;
-// pub mod catalog;
+pub mod catalog;
 pub mod eval;
 pub mod exec;
-// pub mod maria;
+pub mod maria;
 pub mod mem;
 pub mod neo4j;
 pub mod parser;
@@ -42,7 +46,11 @@ pub async fn execute(
     let q = parser::parse(text)?;
     let started = std::time::Instant::now();
     let r = exec::run(store, &q, params, budgets).await;
-    let kind = if r.as_ref().is_ok_and(|o| o.qtype != "r") { "write" } else { "read" };
+    let kind = if r.as_ref().is_ok_and(|o| o.qtype != "r") {
+        "write"
+    } else {
+        "read"
+    };
     metrics::counter!("sprig_graph_statements_total", "language" => "cypher", "kind" => kind,
         "result" => if r.is_ok() { "ok" } else { "error" })
     .increment(1);

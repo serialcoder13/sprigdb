@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sprig_common::ids::{ClusterId, JobId, TenantId};
 use sprig_common::time::Clock;
-use sprig_common::{Result, SprigError};
+use sprig_common::{Result, SprigCode, SprigError};
 use sprig_meta::elect::Leadership;
 use sprig_meta::session::Session;
 use sprig_meta::{
@@ -488,6 +488,40 @@ pub async fn submit(l: &Leadership, clock: &dyn Clock, new: NewJob) -> Result<Jo
         .await?;
     if !r.succeeded {
         return Err(SprigError::internal(format!("job id {id} already exists")));
+    }
+    tracing::info!(job = %id, "job submitted");
+    Ok(id)
+}
+
+/// Submits a job as `queued` under an Admin API leader guard (the
+/// leader's key compare) rather than a [`Leadership`] (r2close: an
+/// operator's `node_rebuild` and `errant_extract`).
+///
+/// # Errors
+/// 39504 `ER_SPRIG_NOT_LEADER` when the guard fails; the store's errors.
+pub async fn submit_guarded(
+    store: &dyn MetaStore,
+    guard: Vec<Cmp>,
+    clock: &dyn Clock,
+    new: NewJob,
+) -> Result<JobId> {
+    let id = JobId::new_v7();
+    let key = job_key(store, id)?;
+    let job = Job::queued(id, new, clock);
+    let mut when = guard;
+    when.push(Cmp::Missing(key.clone()));
+    let r = store
+        .txn(Txn {
+            when,
+            then: vec![put_job(key, &Record::new(job))?],
+            otherwise: Vec::new(),
+        })
+        .await?;
+    if !r.succeeded {
+        return Err(SprigError::new(
+            SprigCode::NotLeader,
+            "this controller no longer leads its DC; try again",
+        ));
     }
     tracing::info!(job = %id, "job submitted");
     Ok(id)

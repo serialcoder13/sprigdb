@@ -208,6 +208,7 @@ pub fn errant_report(
         },
         tables,
         path: None,
+        extract: None,
         statements: kept
             .iter()
             .flat_map(|t| t.statements.iter().cloned())

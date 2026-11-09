@@ -189,6 +189,12 @@ impl ClusterMonitor {
         &self.registry
     }
 
+    /// The live settings it resolves from.
+    #[must_use]
+    pub fn live(&self) -> &LiveSettings {
+        &self.live
+    }
+
     /// The settings of `id`, resolved now.
     #[must_use]
     pub fn settings_for(&self, id: Option<&ClusterId>) -> ClusterSettings {

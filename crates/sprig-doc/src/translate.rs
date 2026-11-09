@@ -119,7 +119,10 @@ fn field(path: &str, op: &FieldOp, m: &CollMeta) -> SqlPred {
         return id_op(op);
     }
     // A numeric part may be an array position or a field name; not pushed.
-    if path.split('.').any(|p| p.bytes().all(|b| b.is_ascii_digit())) {
+    if path
+        .split('.')
+        .any(|p| p.bytes().all(|b| b.is_ascii_digit()))
+    {
         return SqlPred::t();
     }
     let arrays = m.may_cross_array(path);
@@ -367,16 +370,15 @@ impl Field<'_> {
                 "JSON_TYPE({x}) = 'STRING' AND ({ty} IS NULL OR {ty} = 'symbol') AND {val} COLLATE utf8mb4_bin = {}",
                 str_lit(s)
             )),
-            Bson::Boolean(b) => SqlPred::exact(format!(
-                "JSON_TYPE({x}) = 'BOOLEAN' AND {val} = '{b}'"
-            )),
-            Bson::Null | Bson::Undefined => SqlPred::exact(format!(
-                "({x} IS NULL OR JSON_TYPE({x}) = 'NULL')"
-            )),
-            Bson::ObjectId(o) => SqlPred::exact(format!(
-                "{ty} = 'objectId' AND {val} = '{}'",
-                o.to_hex()
-            )),
+            Bson::Boolean(b) => {
+                SqlPred::exact(format!("JSON_TYPE({x}) = 'BOOLEAN' AND {val} = '{b}'"))
+            }
+            Bson::Null | Bson::Undefined => {
+                SqlPred::exact(format!("({x} IS NULL OR JSON_TYPE({x}) = 'NULL')"))
+            }
+            Bson::ObjectId(o) => {
+                SqlPred::exact(format!("{ty} = 'objectId' AND {val} = '{}'", o.to_hex()))
+            }
             Bson::DateTime(d) => match iso_from_ms(d.timestamp_millis()) {
                 Some(iso) => SqlPred::exact(format!("{ty} = 'date' AND {val} = '{iso}'")),
                 None => SqlPred::exact(format!(
@@ -471,9 +473,9 @@ impl Field<'_> {
                     SqlPred::exact(format!("{c} = 80 AND {s} {o} '{}'", x.to_hex()))
                 }
                 Bson::DateTime(d) => match iso_from_ms(d.timestamp_millis()) {
-                    Some(iso) if lower => SqlPred::sup(format!(
-                        "{c} = 100 AND ({s} {o} '{iso}' OR {s} = '')"
-                    )),
+                    Some(iso) if lower => {
+                        SqlPred::sup(format!("{c} = 100 AND ({s} {o} '{iso}' OR {s} = '')"))
+                    }
                     Some(iso) => SqlPred::sup(format!("{c} = 100 AND {s} {o} '{iso}'")),
                     None => SqlPred::sup(format!("{c} = 100")),
                 },
@@ -563,6 +565,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn tr(f: bson::Document, m: &CollMeta) -> SqlPred {
         translate(&parse(&f).unwrap(), m)
     }
@@ -592,7 +595,12 @@ mod tests {
         let m = meta(&["tags", "items"], &["status"]);
         let t = tr(doc! {"tags": "x"}, &m);
         assert!(!t.exact);
-        assert!(t.sql.starts_with("JSON_CONTAINS(JSON_EXTRACT(doc, '$.\"tags\"', '$.\"tags\"[*]')"), "{}", t.sql);
+        assert!(
+            t.sql
+                .starts_with("JSON_CONTAINS(JSON_EXTRACT(doc, '$.\"tags\"', '$.\"tags\"[*]')"),
+            "{}",
+            t.sql
+        );
         let t = tr(doc! {"items.sku": "A"}, &m);
         assert!(t.sql.contains("'$.\"items\"[*].\"sku\"'"), "{}", t.sql);
         assert_eq!(tr(doc! {"items.q": {"$gt": 1}}, &m).sql, "TRUE");

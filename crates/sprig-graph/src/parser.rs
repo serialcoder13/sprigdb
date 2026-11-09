@@ -129,7 +129,11 @@ fn lex(src: &str) -> Result<Vec<(Tok, usize)>> {
                 i += 1;
             }
             out.push((
-                Tok::Float(src[start..i].parse().map_err(|_| syntax(start, "bad number"))?),
+                Tok::Float(
+                    src[start..i]
+                        .parse()
+                        .map_err(|_| syntax(start, "bad number"))?,
+                ),
                 start,
             ));
             continue;
@@ -300,11 +304,10 @@ impl Parser {
 
     fn err(&self, expected: &str) -> SprigError {
         let got = match self.peek() {
-            Tok::Ident(s) | Tok::Quoted(s) => format!("'{s}'"),
+            Tok::Ident(s) | Tok::Quoted(s) | Tok::Str(s) => format!("'{s}'"),
             Tok::Int(i) => i.to_string(),
             Tok::MinMagnitude => "9223372036854775808".into(),
             Tok::Float(f) => f.to_string(),
-            Tok::Str(s) => format!("'{s}'"),
             Tok::Param(p) => format!("${p}"),
             Tok::Sym(s) => format!("'{s}'"),
             Tok::Eof => "end of input".into(),
@@ -601,7 +604,10 @@ impl Parser {
                 v.clone()
             } else {
                 if with {
-                    return Err(syntax(start, "expressions in WITH must be aliased (use AS)"));
+                    return Err(syntax(
+                        start,
+                        "expressions in WITH must be aliased (use AS)",
+                    ));
                 }
                 self.text(start, end)
             };
@@ -614,7 +620,11 @@ impl Parser {
     }
 
     fn text(&self, start: usize, end: usize) -> String {
-        self.src.get(start..end).unwrap_or_default().trim().to_owned()
+        self.src
+            .get(start..end)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
     }
 
     fn projection_tail(
@@ -890,7 +900,12 @@ impl Parser {
             if self.is_var_start() {
                 var = Some(self.var()?);
             }
-            if self.accept_sym(":") || (self.is_kw("IS") && { self.bump(); true }) {
+            if self.accept_sym(":")
+                || (self.is_kw("IS") && {
+                    self.bump();
+                    true
+                })
+            {
                 types.push(self.name()?);
                 while self.accept_sym("|") {
                     let _ = self.accept_sym(":");
@@ -1100,7 +1115,11 @@ impl Parser {
     fn power(&mut self) -> Result<Expr> {
         let l = self.unary()?;
         if self.accept_sym("^") {
-            return Ok(Expr::Binary(BinOp::Pow, Box::new(l), Box::new(self.power()?)));
+            return Ok(Expr::Binary(
+                BinOp::Pow,
+                Box::new(l),
+                Box::new(self.power()?),
+            ));
         }
         Ok(l)
     }
@@ -1167,7 +1186,8 @@ impl Parser {
     /// Whether the tokens at the cursor start a relationship (after a node
     /// pattern): `-[`, `--`, `->`, `<-`.
     fn rel_follows(&self) -> bool {
-        (self.is_sym("-") && (self.is_sym_at(1, "[") || self.is_sym_at(1, "-") || self.is_sym_at(1, ">")))
+        (self.is_sym("-")
+            && (self.is_sym_at(1, "[") || self.is_sym_at(1, "-") || self.is_sym_at(1, ">")))
             || (self.is_sym("<") && self.is_sym_at(1, "-"))
     }
 
@@ -1194,13 +1214,10 @@ impl Parser {
             Tok::Sym("(") => {
                 // A pattern predicate, or a parenthesized expression.
                 let save = self.pos;
-                if let Ok(start) = self.node_pat() {
-                    if self.rel_follows() {
-                        self.pos = save;
-                        let p = self.pattern_body()?;
-                        let _ = start;
-                        return Ok(Expr::Pattern(Box::new(p)));
-                    }
+                if self.node_pat().is_ok() && self.rel_follows() {
+                    self.pos = save;
+                    let p = self.pattern_body()?;
+                    return Ok(Expr::Pattern(Box::new(p)));
                 }
                 self.pos = save;
                 self.bump();
@@ -1404,11 +1421,16 @@ mod tests {
 
     #[test]
     fn parses_the_worked_example() {
-        let q = ok("MATCH (a:Person {email: $email})-[:KNOWS*1..2]->(f:Person)-[:BOUGHT]->(p:Product)
+        let q = ok(
+            "MATCH (a:Person {email: $email})-[:KNOWS*1..2]->(f:Person)-[:BOUGHT]->(p:Product)
                     WHERE NOT (a)-[:BOUGHT]->(p) AND f <> a
                     RETURN p.name AS product, count(DISTINCT f) AS buyers
-                    ORDER BY buyers DESC LIMIT 5");
-        let Clause::Match { patterns, where_, .. } = &q.parts[0].clauses[0] else {
+                    ORDER BY buyers DESC LIMIT 5",
+        );
+        let Clause::Match {
+            patterns, where_, ..
+        } = &q.parts[0].clauses[0]
+        else {
             panic!("match")
         };
         assert_eq!(patterns[0].steps.len(), 2);
@@ -1458,7 +1480,13 @@ mod tests {
 
     #[test]
     fn errors_are_39900_with_offsets() {
-        for s in ["MATCH (n RETURN n", "RETURN 1 +", "MATCH (a)-[:R]-<(b) RETURN a", "FOO", "RETURN 'x"] {
+        for s in [
+            "MATCH (n RETURN n",
+            "RETURN 1 +",
+            "MATCH (a)-[:R]-<(b) RETURN a",
+            "FOO",
+            "RETURN 'x",
+        ] {
             let e = parse(s).expect_err(s);
             assert_eq!(e.code(), Some(SprigCode::GraphSyntax), "{s}");
             assert!(e.to_string().contains("offset"), "{e}");

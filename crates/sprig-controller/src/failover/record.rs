@@ -104,6 +104,10 @@ pub struct ErrantReport {
     /// The statements, where the binlog annotates them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub statements: Vec<String>,
+    /// The `errant_extract` job's sealed row images, once written and
+    /// verified (r2close).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extract: Option<sprig_cluster::failover::extract::ExtractSummary>,
 }
 
 /// One tenant's line in the record.

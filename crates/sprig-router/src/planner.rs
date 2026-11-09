@@ -226,10 +226,9 @@ impl ParamLit {
             h
         };
         match self {
-            Self::Null => "NULL".into(),
             Self::Int(i) => i.to_string(),
             Self::Double(f) if f.is_finite() => format!("{f:e}"),
-            Self::Double(_) => "NULL".into(),
+            Self::Null | Self::Double(_) => "NULL".into(),
             Self::Str { bytes, charset } => format!("_{charset} {}", hex(bytes)),
             Self::Bytes(b) => hex(b),
             Self::Raw(t) => t.clone(),

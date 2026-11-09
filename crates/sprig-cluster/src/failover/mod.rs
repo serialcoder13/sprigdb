@@ -15,6 +15,10 @@
 //!   restore) and external clusters (follow the provider's endpoint);
 //! - [`damper`]: the failover-flapping damper (independent sources, the
 //!   minimum interval, suppression);
+//! - [`extract`]: `errant_extract`'s binlog read, row images and SQL,
+//!   the sealed file format and the extract stores;
+//! - [`rebuild`]: `node_rebuild`'s ticket, token, phases and the
+//!   restored node's attach, shared by the worker and the agents;
 //! - [`writer`]: the writer lease and the agent's registration, shared by
 //!   the agent and the controller's `cluster_failover` loop.
 //!
@@ -31,8 +35,10 @@
 //! returns `None`.
 
 pub mod damper;
+pub mod extract;
 pub mod galera;
 pub mod primary_replica;
+pub mod rebuild;
 pub mod topology;
 pub mod writer;
 

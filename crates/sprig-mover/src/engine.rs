@@ -244,7 +244,8 @@ impl Engine {
                 JobState::Retaining => self.retaining().await,
                 JobState::Cleaning => self.cleaning().await,
                 JobState::RollingBack => self.rolling_back(None).await,
-                JobState::Paused | JobState::Streaming | JobState::Done | JobState::RolledBack => {
+                JobState::Streaming => self.streaming().await,
+                JobState::Paused | JobState::Done | JobState::RolledBack => {
                     return Ok(state);
                 }
             };
@@ -290,7 +291,12 @@ impl Engine {
         }
         self.failures += 1;
         let msg = e.to_string();
-        if self.failures >= MAX_FAILURES && !self.claim.rec.state.is_committed() {
+        // A Continuous job (a standby) never gives up by itself: its source
+        // may be a lost DC, and its target is then what a promotion needs.
+        if self.failures >= MAX_FAILURES
+            && !self.claim.rec.state.is_committed()
+            && self.claim.rec.spec.cutover != CutoverMode::Continuous
+        {
             self.claim
                 .save(|r| {
                     r.state = JobState::RollingBack;
@@ -962,6 +968,11 @@ impl Engine {
             }
             self.ticks.pop_front();
             self.set_lag(now.saturating_duration_since(at));
+            // The source was seen: its tick is applied (chapter 25's
+            // `source_seen_at` for a standby).
+            if self.claim.rec.spec.cutover == CutoverMode::Continuous {
+                self.claim.rec.progress.source_seen_ms = Some(wall_ms(self.clock.wall()));
+            }
         }
         // An unapplied tick older than the lag so far raises it.
         if let Some(&(_, at)) = self.ticks.front() {
@@ -1291,6 +1302,11 @@ impl Engine {
             .store()
             .free_slots(&copy_target, &self.job, max)
             .await?;
+        if self.claim.rec.spec.cutover == CutoverMode::Continuous {
+            self.claim.save(|r| r.state = JobState::Streaming).await?;
+            tracing::info!(job = %self.job.0, "ready: streaming continuously (no cutover)");
+            return Ok(Step::Next);
+        }
         loop {
             self.check_cancel(true).await?;
             if self.cancelled() {
@@ -1319,6 +1335,40 @@ impl Engine {
             return Ok(Step::End(JobState::Paused));
         }
         self.cutover().await
+    }
+
+    /// `Continuous` (chapter 10, r2close): after `ready` the target keeps
+    /// applying the source's changes, with lag ticks, until the job is
+    /// cancelled (rolled back: targets dropped) or stopped by
+    /// [`crate::Mover::cut_over`] (`done`: the target keeps what it applied,
+    /// with the position in `applied_source_gtid`; the source and the
+    /// shard map are never touched). A stop needs nothing from the source,
+    /// so a standby whose home DC is lost stops at once.
+    async fn streaming(&mut self) -> Result<Step> {
+        loop {
+            self.check_cancel(false).await?;
+            if self.cancelled() {
+                return self.rolling_back(None).await;
+            }
+            if self.claim.rec.go {
+                if self.reader.is_some() {
+                    // What was read and not yet committed goes in first.
+                    let _ = self.flush(true).await;
+                }
+                let pos = self.applied.to_string();
+                tracing::warn!(job = %self.job.0, applied = %pos, "continuous job stopped; the target keeps what it applied");
+                self.claim.rec.progress.applied_source_gtid = Some(pos);
+                self.claim.finish(JobState::Done, None).await?;
+                return Ok(Step::End(JobState::Done));
+            }
+            self.pump(Until::For(Duration::from_millis(500)), None)
+                .await?;
+            let pos = self.applied.to_string();
+            if !pos.is_empty() {
+                self.claim.rec.progress.applied_source_gtid = Some(pos);
+            }
+            self.maybe_save().await?;
+        }
     }
 
     /// The cutover (chapter 10, "Cutover"). Every failure before the commit

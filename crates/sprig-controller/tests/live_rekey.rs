@@ -32,6 +32,9 @@
 #![allow(
     clippy::unwrap_used,
     clippy::too_many_lines,
+    clippy::many_single_char_names,
+    clippy::type_complexity,
+    clippy::single_match_else,
     clippy::cast_precision_loss,
     clippy::similar_names,
     clippy::too_many_arguments
@@ -1012,9 +1015,8 @@ async fn a_group_is_rekeyed_online_under_writes() {
     eprintln!("catalog: key {spec}, members {cols:?}");
     let prev_left: Option<u64> = c
         .query_first(format!(
-            "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA LIKE 't{}\\_%' \
-             AND COLUMN_NAME = '_sprig_rk_prev'",
-            TENANT
+            "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA LIKE 't{TENANT}\\_%' \
+             AND COLUMN_NAME = '_sprig_rk_prev'"
         ))
         .await
         .unwrap();

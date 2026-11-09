@@ -186,6 +186,7 @@ impl MysqlTarget {
 
     /// A re-key's target digests of source table `t`'s key range (see
     /// `ShardRoute::rekey_digests`).
+    #[allow(clippy::many_single_char_names)] // the module's names: route, table, rows
     async fn rekey_digests(
         &self,
         r: &Arc<ShardRoute>,
@@ -232,8 +233,8 @@ impl MysqlTarget {
                     key_values,
                     hash: num(vals.get(n)).unwrap_or(0),
                 };
-                let want = sprig_shard::rk::hash_values(&rk.key, &vals[(n + 3).min(vals.len())..])
-                    .ok();
+                let want =
+                    sprig_shard::rk::hash_values(&rk.key, &vals[(n + 3).min(vals.len())..]).ok();
                 all.push((
                     schema.clone(),
                     d,

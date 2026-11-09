@@ -118,8 +118,11 @@ pub trait BoltSession: Send {
     async fn reset(&mut self);
 
     /// `ROUTE`: the routing table (`rt`).
-    async fn route(&mut self, routing: &PackValue, extra: &PackValue)
-    -> Result<PackValue, BoltFailure>;
+    async fn route(
+        &mut self,
+        routing: &PackValue,
+        extra: &PackValue,
+    ) -> Result<PackValue, BoltFailure>;
 }
 
 /// Logins.
@@ -205,7 +208,10 @@ struct Conn {
 }
 
 fn int_of(extra: &PackValue, key: &str, default: i64) -> i64 {
-    extra.get(key).and_then(PackValue::as_int).unwrap_or(default)
+    extra
+        .get(key)
+        .and_then(PackValue::as_int)
+        .unwrap_or(default)
 }
 
 impl Conn {
@@ -246,7 +252,10 @@ impl Conn {
         }
         self.success(vec![
             ("server", PackValue::str(cfg.server_agent.clone())),
-            ("connection_id", PackValue::str(self.info.connection_id.clone())),
+            (
+                "connection_id",
+                PackValue::str(self.info.connection_id.clone()),
+            ),
             ("hints", PackValue::map(hints)),
         ]);
     }
@@ -327,10 +336,10 @@ impl Conn {
                     ),
                 ));
             }
-            if self.state == State::Streaming {
-                if let Some(b) = self.session.as_ref().and_then(|s| s.last_bookmark()) {
-                    meta.push(("bookmark", PackValue::String(b)));
-                }
+            if self.state == State::Streaming
+                && let Some(b) = self.session.as_ref().and_then(|s| s.last_bookmark())
+            {
+                meta.push(("bookmark", PackValue::String(b)));
             }
             self.success(meta);
             self.state = match self.state {
@@ -371,11 +380,11 @@ impl Conn {
                 self.success(vec![]);
             }
             (State::Connected, Request::Hello(extra)) => {
-                self.info.user_agent = extra
+                extra
                     .get("user_agent")
                     .and_then(PackValue::as_str)
                     .unwrap_or_default()
-                    .to_owned();
+                    .clone_into(&mut self.info.user_agent);
                 if self.info.version < BoltVersion::new(5, 1) {
                     // 5.0: credentials ride in HELLO.
                     if self.logon(svc, &extra).await {
@@ -397,14 +406,17 @@ impl Conn {
                 self.state = State::Authentication;
                 self.success(vec![]);
             }
-            (State::Ready, Request::Telemetry(_)) | (State::TxReady, Request::Telemetry(_)) => {
+            (State::Ready | State::TxReady, Request::Telemetry(_)) => {
                 self.success(vec![]);
             }
-            (State::Ready | State::TxReady, Request::Run {
-                query,
-                params,
-                extra,
-            }) => {
+            (
+                State::Ready | State::TxReady,
+                Request::Run {
+                    query,
+                    params,
+                    extra,
+                },
+            ) => {
                 let in_tx = self.state == State::TxReady;
                 let started = Instant::now();
                 let Some(s) = self.session.as_mut() else {
@@ -414,9 +426,11 @@ impl Conn {
                 match s.run(&query, &params, &extra).await {
                     Ok(mut r) => {
                         r.t_first = i64::try_from(started.elapsed().as_millis()).unwrap_or(0);
-                        let fields =
-                            PackValue::List(r.fields.iter().cloned().map(PackValue::String).collect());
-                        let mut meta = vec![("fields", fields), ("t_first", PackValue::Int(r.t_first))];
+                        let fields = PackValue::List(
+                            r.fields.iter().cloned().map(PackValue::String).collect(),
+                        );
+                        let mut meta =
+                            vec![("fields", fields), ("t_first", PackValue::Int(r.t_first))];
                         let qid = self.next_qid;
                         if in_tx {
                             self.next_qid += 1;
@@ -435,11 +449,14 @@ impl Conn {
                     Err(f) => self.fail(&f),
                 }
             }
-            (State::TxStreaming, Request::Run {
-                query,
-                params,
-                extra,
-            }) => {
+            (
+                State::TxStreaming,
+                Request::Run {
+                    query,
+                    params,
+                    extra,
+                },
+            ) => {
                 // Another statement in the transaction while an earlier
                 // result is still open: allowed, results keep their qid.
                 self.state = State::TxReady;
@@ -457,7 +474,9 @@ impl Conn {
                     self.state = State::TxStreaming;
                 }
             }
-            (State::Streaming | State::TxStreaming, Request::Pull(extra)) => self.pull(&extra, false),
+            (State::Streaming | State::TxStreaming, Request::Pull(extra)) => {
+                self.pull(&extra, false);
+            }
             (State::Streaming | State::TxStreaming, Request::Discard(extra)) => {
                 self.pull(&extra, true);
             }
@@ -504,9 +523,7 @@ impl Conn {
                 self.state = State::Ready;
                 self.success(vec![]);
             }
-            (State::Ready, Request::Route {
-                routing, extra, ..
-            }) => {
+            (State::Ready, Request::Route { routing, extra, .. }) => {
                 let Some(s) = self.session.as_mut() else {
                     self.fail(&BoltFailure::invalid("not logged in"));
                     return;
@@ -611,7 +628,10 @@ where
 {
     let mut inbuf = BytesMut::with_capacity(8192);
     let mut dechunk = Dechunker::new(cfg.max_message);
-    let idle = cfg.recv_timeout.saturating_mul(2).max(Duration::from_secs(1));
+    let idle = cfg
+        .recv_timeout
+        .saturating_mul(2)
+        .max(Duration::from_secs(1));
     loop {
         // Every complete message in the buffer, then one flush.
         loop {
@@ -642,7 +662,10 @@ where
             return Ok(End::Defunct("closed by the server".into()));
         }
         // Drain: close between requests, outside transactions.
-        let idle_now = matches!(conn.state, State::Ready | State::Connected | State::Authentication);
+        let idle_now = matches!(
+            conn.state,
+            State::Ready | State::Connected | State::Authentication
+        );
         if close.is_cancelled() && idle_now {
             return Ok(End::Drained);
         }

@@ -24,6 +24,9 @@
 //!
 //! A key with an end the router doesn't distribute is MariaDB's, as before.
 
+#![allow(clippy::many_single_char_names)] // a scanner's indexes and tokens
+
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use sprig_catalog::VersionKind;
@@ -181,8 +184,7 @@ fn clause(text: &str, toks: &[Token]) -> Clause {
     };
     let pstart = toks[i].start;
     let mut pend = toks[i].end;
-    let (parent_schema, parent) = if toks.get(i + 1).is_some_and(|t| t.tok == Tok::Punct(b'.'))
-    {
+    let (parent_schema, parent) = if toks.get(i + 1).is_some_and(|t| t.tok == Tok::Punct(b'.')) {
         let Some(second) = toks.get(i + 2).and_then(|t| ident(text, t)) else {
             return other();
         };
@@ -298,9 +300,10 @@ pub(super) fn enforcement_of(child: &TableEntry, parent: &TableEntry, fk: &AddFk
     let lc = |v: &[String]| -> Vec<String> { v.iter().map(|c| c.to_ascii_lowercase()).collect() };
     let (cols, pcols) = (lc(&fk.columns), lc(&fk.parent_columns));
     let same = child.group.same_layout(&parent.group) && !child.is_reference();
-    let through_parent = child.parent.as_ref().is_some_and(|l| {
-        l.table == parent.name && l.columns == cols && l.parent_columns == pcols
-    });
+    let through_parent = child
+        .parent
+        .as_ref()
+        .is_some_and(|l| l.table == parent.name && l.columns == cols && l.parent_columns == pcols);
     let both_keyed = cols.len() == 1
         && child.key() == Some(cols[0].as_str())
         && parent.key() == Some(pcols[0].as_str());
@@ -425,7 +428,11 @@ impl PassSession {
             .and_then(|cat| {
                 let s = cat.ext.get::<ShardingState>(sprig_shard::groups::MODULE)?;
                 Some((
-                    s.fks.iter().filter(|f| f.child == child_obj).cloned().collect(),
+                    s.fks
+                        .iter()
+                        .filter(|f| f.child == child_obj)
+                        .cloned()
+                        .collect(),
                     s.lookups
                         .iter()
                         .filter(|l| l.object == child_obj)
@@ -441,19 +448,16 @@ impl PassSession {
             match c {
                 Clause::Other(t) => kept.push(t.clone()),
                 Clause::DropFk(name) => {
-                    match existing.iter().find(|f| {
-                        f.name.eq_ignore_ascii_case(name)
-                            && f.enforcement != FkEnforcement::Native
-                    }) {
-                        Some(f) => change.drop.push((child_obj, f.name.clone())),
-                        None => {
-                            if let Some(f) =
-                                existing.iter().find(|f| f.name.eq_ignore_ascii_case(name))
-                            {
-                                change.drop.push((child_obj, f.name.clone()));
-                            }
+                    // A key the gateway keeps: its row goes, MariaDB has
+                    // nothing to drop. Else MariaDB drops it (a native
+                    // key's row goes too).
+                    if let Some(f) = existing.iter().find(|f| f.name.eq_ignore_ascii_case(name)) {
+                        change.drop.push((child_obj, f.name.clone()));
+                        if f.enforcement == FkEnforcement::Native {
                             kept.push(format!("DROP FOREIGN KEY {}", q(name)));
                         }
+                    } else {
+                        kept.push(format!("DROP FOREIGN KEY {}", q(name)));
                     }
                 }
                 Clause::AddFk(fk) => {
@@ -480,8 +484,9 @@ impl PassSession {
                             format!("Duplicate FOREIGN KEY constraint name '{name}'"),
                         ));
                     }
-                    let lc =
-                        |v: &[String]| -> Vec<String> { v.iter().map(|c| c.to_ascii_lowercase()).collect() };
+                    let lc = |v: &[String]| -> Vec<String> {
+                        v.iter().map(|c| c.to_ascii_lowercase()).collect()
+                    };
                     let child_lookup = lookups
                         .iter()
                         .find(|(_, cols)| lc(cols) == lc(&fk.columns))
@@ -504,14 +509,23 @@ impl PassSession {
                             t.push_str(&q(i));
                             t.push(' ');
                         }
-                        t.push_str(&format!(
+                        let _ = write!(
+                            t,
                             "({}) REFERENCES {} ({}) ON DELETE {} ON UPDATE {}",
-                            fk.columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", "),
+                            fk.columns
+                                .iter()
+                                .map(|c| q(c))
+                                .collect::<Vec<_>>()
+                                .join(", "),
                             fk.parent_text,
-                            fk.parent_columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", "),
+                            fk.parent_columns
+                                .iter()
+                                .map(|c| q(c))
+                                .collect::<Vec<_>>()
+                                .join(", "),
                             fk.on_delete.sql(),
                             fk.on_update.sql()
-                        ));
+                        );
                         kept.push(t);
                         continue;
                     }
@@ -559,7 +573,11 @@ impl PassSession {
                         kept.push(format!(
                             "ADD INDEX IF NOT EXISTS {} ({})",
                             q(fk.index.as_deref().unwrap_or(&name)),
-                            fk.columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ")
+                            fk.columns
+                                .iter()
+                                .map(|c| q(c))
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     }
                 }
@@ -677,7 +695,10 @@ mod tests {
         assert_eq!(f.index.as_deref(), Some("ix"));
         assert_eq!(f.parent_schema.as_deref(), Some("d"));
         assert_eq!(f.parent_text, "`d`.`p`");
-        assert_eq!((f.on_delete, f.on_update), (FkAction::Restrict, FkAction::Restrict));
+        assert_eq!(
+            (f.on_delete, f.on_update),
+            (FkAction::Restrict, FkAction::Restrict)
+        );
         // MATCH and other forms are left to MariaDB.
         let m = parse_alter("ALTER TABLE c ADD FOREIGN KEY (a) REFERENCES p (x) MATCH FULL")
             .unwrap_or_else(|| unreachable!());

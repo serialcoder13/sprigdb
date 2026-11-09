@@ -11,6 +11,7 @@
 //! supervision (steps 4-6).
 
 pub mod fence;
+pub mod rebuild;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,12 +62,54 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             }
         }
     };
-    let agent = fence::AgentFence::new(cfg.node.id(), cfg.node.dc.clone(), store, target);
+    let mut agent = fence::AgentFence::new(
+        cfg.node.id(),
+        cfg.node.dc.clone(),
+        Arc::clone(&store),
+        target.clone(),
+    );
+    // Chapter 25's node_rebuild: the internal service (backup streams and
+    // rebuilds), when `[agent] internal_addr` is set.
+    let mut service_task = None;
+    if let Some(addr) = cfg.agent.internal_addr {
+        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+            sprig_common::SprigError::new(
+                sprig_common::SprigCode::ConfigInvalid,
+                format!("[agent] internal_addr {addr}: {e}"),
+            )
+        })?;
+        let bound = listener.local_addr().map_err(|e| {
+            sprig_common::SprigError::internal(format!("[agent] internal_addr: {e}"))
+        })?;
+        let url = cfg
+            .agent
+            .internal_advertise
+            .clone()
+            .unwrap_or_else(|| format!("http://{bound}"));
+        let service = Arc::new(rebuild::RebuildService::new(
+            cfg.agent.rebuild.clone(),
+            store,
+            target.cluster.clone(),
+            target.node.clone(),
+            target.endpoint.clone(),
+            agent.hold(),
+        ));
+        service_task = Some(rebuild::serve(
+            listener,
+            Arc::clone(&service),
+            ctx.shutdown.clone(),
+        ));
+        tracing::info!(%url, "agent internal service (node_rebuild) listening");
+        agent = agent.with_rebuild(url, service);
+    }
     ctx.health.set_ready();
     tracing::info!(%role, "ready");
     let r = agent
         .run(Duration::from_millis(1000), ctx.shutdown.clone())
         .await;
+    if let Some(t) = service_task {
+        let _ = t.await;
+    }
     ctx.health.set_draining();
     r
 }

@@ -13,9 +13,13 @@ pub mod logic;
 // Chapter 41 (R9): triggers on streams and queues.
 pub mod msg_triggers;
 pub mod permit;
+// Chapter 25 (R2): errant_extract and node_rebuild.
+pub mod recovery;
 pub mod runtime;
 // Chapter 45 (R9): stream sequencers.
 pub mod streams;
+// Chapter 51 (R9): sink tasks.
+pub mod sinks;
 pub mod xa_drain;
 
 use std::sync::Arc;
@@ -59,6 +63,11 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     );
     let registry = ClusterRegistry::new(Arc::clone(&global), dc.clone())?;
     let registry_logic = registry.clone();
+    let recovery_env = recovery::RecoveryEnv {
+        dc: dc.clone(),
+        registry: registry.clone(),
+    };
+    let errant_extract = recovery::ErrantExtract::from_config(recovery_env.clone(), &cfg.recovery)?;
     let dc_logic = dc.clone();
     let settings = MoverSettings::default();
     // Chapter 18's resolver finishes the tenant's prepared branches at
@@ -148,6 +157,17 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     )?);
     // Chapter 45's stream sequencers, on the logic jobs' pools and feeds.
     let streams_env = streams::StreamsEnv::from_logic(&env);
+    // Chapter 51's sink tasks, on the same pools, with the global tier
+    // (platform connections) and the master key file (credentials).
+    let sinks_env = sinks::SinksEnv::new(
+        &env,
+        Arc::clone(&global),
+        cfg.gateway
+            .workload_key_file
+            .as_deref()
+            .or(cfg.controller.workload_key_file.as_deref()),
+        &worker,
+    );
     // Chapter 41 (R9): triggers on streams and queues, run in gateways.
     let peer_pems = cfg
         .tls
@@ -167,8 +187,11 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         .with_handler(Arc::new(logic::LogicSchedule(env)))
         .with_handler(Arc::new(inherit::InheritCopy(inherit_env)))
         .with_handler(Arc::new(streams::StreamSequencer(streams_env)))
+        .with_handler(Arc::new(sinks::SinkTask(sinks_env)))
         .with_handler(Arc::new(msg_triggers::StreamTrigger(msg_env.clone())))
-        .with_handler(Arc::new(msg_triggers::QueueTrigger(msg_env)));
+        .with_handler(Arc::new(msg_triggers::QueueTrigger(msg_env)))
+        .with_handler(Arc::new(errant_extract))
+        .with_handler(Arc::new(recovery::NodeRebuild::new(recovery_env)));
     ctx.health.set_ready();
     tracing::info!(%role, %worker, "ready: running mover and logic jobs");
     let shutdown = ctx.shutdown.clone();

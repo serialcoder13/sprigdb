@@ -520,6 +520,11 @@ impl PassSession {
                 return Ok(step);
             }
         }
+        // Chapter 51 (R9): sinks and connections, before anything else
+        // reads the text (it may hold credentials).
+        if let Some(step) = Box::pin(self.tenant_sinks(cx, text, more, format, out)).await? {
+            return Ok(step);
+        }
         let charset = cx.proto.collation;
         let previous_warnings = self.tenant.as_deref_mut().and_then(|ts| ts.warnings.take());
         let Some(ts) = self.tenant.as_deref_mut() else {
@@ -886,6 +891,10 @@ impl PassSession {
             return Ok(step);
         }
         if let Some(step) = Box::pin(self.tenant_queues(cx, text, more, format, out)).await? {
+            return Ok(step);
+        }
+        // Chapter 43 (R8): CREATE GRAPH and DROP GRAPH.
+        if let Some(step) = Box::pin(self.tenant_graph_ddl(text, more, out)).await? {
             return Ok(step);
         }
         // Chapter 42: spaces, shares and merged views of inheritable

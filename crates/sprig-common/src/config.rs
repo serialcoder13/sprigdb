@@ -57,6 +57,27 @@ pub struct ProcessConfig {
     /// The audit spool and its sink (chapter 47).
     #[serde(default)]
     pub audit: AuditConfig,
+    /// Where workers keep errant extracts (chapter 25).
+    #[serde(default)]
+    pub recovery: RecoveryConfig,
+}
+
+/// `[recovery]`: where a worker writes `errant_extract`'s sealed files and
+/// the keys it seals them with (chapter 25, "Diverged transactions are
+/// extracted and reported, never merged"). Without both, extract jobs fail
+/// with the reason, and `node_rebuild` of a diverged node waits for an
+/// operator (`--no-extract` keeps the old data directory instead).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryConfig {
+    /// The local directory extracts are written under (an object-storage
+    /// target comes later).
+    #[serde(default)]
+    pub extract_dir: Option<PathBuf>,
+    /// The master keyring file (chapter 12's format: `<version> <64 hex>`
+    /// per line); each tenant's extract key is derived from it.
+    #[serde(default)]
+    pub extract_key_file: Option<PathBuf>,
 }
 
 /// `[audit]`: where this process spools audit events and where its
@@ -307,6 +328,96 @@ pub struct AgentConfig {
     /// Unset: the cluster's `sprig_ctl` reference.
     #[serde(default)]
     pub credentials: Option<String>,
+    /// Where the agent's internal service listens (chapter 25
+    /// `node_rebuild`: the backup stream and rebuild calls). Unset: no
+    /// service, and the node can be neither rebuilt nor a rebuild's source.
+    #[serde(default)]
+    pub internal_addr: Option<SocketAddr>,
+    /// The URL other agents and workers reach the service at
+    /// (`http://host:port`). Unset: `http://` and the bound address.
+    #[serde(default)]
+    pub internal_advertise: Option<String>,
+    /// `[agent.rebuild]`: how the agent stops, starts and restores its
+    /// node.
+    #[serde(default)]
+    pub rebuild: AgentRebuildConfig,
+}
+
+/// `[agent.rebuild]`: the commands and paths `node_rebuild` uses on the
+/// node's host (chapter 25, "Recovery after an outage" step 3). Every
+/// command runs after `exec_prefix`, so a node in a container is reached
+/// with `exec_prefix = ["docker", "exec", "-i", "<container>"]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRebuildConfig {
+    /// Put before every command (empty: run on the agent's host).
+    #[serde(default)]
+    pub exec_prefix: Vec<String>,
+    /// Stops mysqld and returns once it has stopped.
+    #[serde(default = "default_stop_command")]
+    pub stop_command: Vec<String>,
+    /// Starts mysqld (it boots `read_only`).
+    #[serde(default = "default_start_command")]
+    pub start_command: Vec<String>,
+    /// MariaDB's data directory.
+    #[serde(default = "default_datadir")]
+    pub datadir: String,
+    /// Where backups are received and prepared, and a source's temporary
+    /// files go; needs room for one copy of the data.
+    #[serde(default = "default_staging_dir")]
+    pub staging_dir: String,
+    /// `user:group` that owns the restored files.
+    #[serde(default = "default_datadir_owner")]
+    pub owner: String,
+    /// The `mariadb-backup` binary.
+    #[serde(default = "default_backup_bin")]
+    pub backup_bin: String,
+    /// The `mbstream` binary.
+    #[serde(default = "default_mbstream_bin")]
+    pub mbstream_bin: String,
+}
+
+impl Default for AgentRebuildConfig {
+    fn default() -> Self {
+        Self {
+            exec_prefix: Vec::new(),
+            stop_command: default_stop_command(),
+            start_command: default_start_command(),
+            datadir: default_datadir(),
+            staging_dir: default_staging_dir(),
+            owner: default_datadir_owner(),
+            backup_bin: default_backup_bin(),
+            mbstream_bin: default_mbstream_bin(),
+        }
+    }
+}
+
+fn default_stop_command() -> Vec<String> {
+    vec!["systemctl".into(), "stop".into(), "mariadb".into()]
+}
+
+fn default_start_command() -> Vec<String> {
+    vec!["systemctl".into(), "start".into(), "mariadb".into()]
+}
+
+fn default_datadir() -> String {
+    "/var/lib/mysql".into()
+}
+
+fn default_staging_dir() -> String {
+    "/var/lib/sprigdb/rebuild".into()
+}
+
+fn default_datadir_owner() -> String {
+    "mysql:mysql".into()
+}
+
+fn default_backup_bin() -> String {
+    "mariadb-backup".into()
+}
+
+fn default_mbstream_bin() -> String {
+    "mbstream".into()
 }
 
 /// The Admin API's default address on a controller: loopback, port 7480.

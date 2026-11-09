@@ -11,10 +11,15 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
+# node_rebuild's stream tokens (chapter 25).
+getrandom.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
+# errant_extract's sealed files (chapter 25): AES-256-GCM.
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 # The binlog dump probe (chapter 09).
 sprig-binlog.workspace = true
 sprig-common.workspace = true

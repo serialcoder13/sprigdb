@@ -403,7 +403,11 @@ mod tests {
             ),
             (PackValue::List(vec![]), "90"),
             (
-                PackValue::List(vec![PackValue::Int(1), PackValue::Int(2), PackValue::Int(3)]),
+                PackValue::List(vec![
+                    PackValue::Int(1),
+                    PackValue::Int(2),
+                    PackValue::Int(3),
+                ]),
                 "93 01 02 03",
             ),
             (PackValue::Map(vec![]), "A0"),
@@ -436,11 +440,18 @@ mod tests {
         let l = PackValue::List((0..20).map(PackValue::Int).collect());
         assert_eq!(&enc(&l)[..2], &[0xD4, 20]);
         assert_eq!(decode(&enc(&l)).expect("decode"), l);
-        let m = PackValue::Map((0..300).map(|i| (format!("k{i}"), PackValue::Int(i))).collect());
+        let m = PackValue::Map(
+            (0..300)
+                .map(|i| (format!("k{i}"), PackValue::Int(i)))
+                .collect(),
+        );
         assert_eq!(&enc(&m)[..3], &[0xD9, 1, 0x2C]);
         assert_eq!(decode(&enc(&m)).expect("decode"), m);
         // Integers decode from any width, as the specification allows.
-        assert_eq!(decode(&hex("CB 00 00 00 00 00 00 00 01")).expect("decode"), PackValue::Int(1));
+        assert_eq!(
+            decode(&hex("CB 00 00 00 00 00 00 00 01")).expect("decode"),
+            PackValue::Int(1)
+        );
     }
 
     #[test]
@@ -479,7 +490,9 @@ mod tests {
         };
         for _ in 0..50_000 {
             let len = usize::try_from(next() % 24).unwrap_or(0);
-            let bytes: Vec<u8> = (0..len).map(|_| u8::try_from(next() & 0xFF).unwrap_or(0)).collect();
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| u8::try_from(next() & 0xFF).unwrap_or(0))
+                .collect();
             if let Ok(v) = decode(&bytes) {
                 let again = decode(&enc(&v)).expect("re-decode");
                 // NaN floats aren't equal to themselves.

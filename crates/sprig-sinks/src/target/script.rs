@@ -548,7 +548,8 @@ impl SinkOutbound {
             return Err(budget("sink.script_max_fetches", self.sh.max_fetches));
         }
         let named = header(&req, CONN_HEADER).map(str::to_owned);
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CONN_HEADER));
+        req.headers
+            .retain(|(k, _)| !k.eq_ignore_ascii_case(CONN_HEADER));
         let (conn, dest) = match &named {
             Some(n) => {
                 let c = self.conn(n)?.clone();
@@ -600,19 +601,31 @@ impl SinkOutbound {
         // Response headers that echo authorization never reach the script.
         resp.headers.retain(|(k, v)| {
             !k.contains("authorization")
-                && !secrets.iter().any(|s| !s.is_empty() && v.contains(s.as_str()))
+                && !secrets
+                    .iter()
+                    .any(|s| !s.is_empty() && v.contains(s.as_str()))
         });
         Ok(resp)
     }
 
-    async fn send(&self, req: &Request, conn: Option<&Conn>, dest: &Destinations) -> Result<Response> {
+    async fn send(
+        &self,
+        req: &Request,
+        conn: Option<&Conn>,
+        dest: &Destinations,
+    ) -> Result<Response> {
         let (host, port, tls) = url_host_port(&req.url)?;
         let uri: hyper::Uri = req
             .url
             .parse()
             .map_err(|e| bad_option(format!("bad url: {e}")))?;
         let addr = dest
-            .resolve(&host, port, Some(ConnKind::Webhook), conn.map(|c| &c.options))
+            .resolve(
+                &host,
+                port,
+                Some(ConnKind::Webhook),
+                conn.map(|c| &c.options),
+            )
             .await?;
         let tcp = tokio::net::TcpStream::connect(addr)
             .await
@@ -631,8 +644,8 @@ impl SinkOutbound {
         for (k, v) in &req.headers {
             let name = HeaderName::from_bytes(k.as_bytes())
                 .map_err(|e| bad_option(format!("header {k}: {e}")))?;
-            let mut value = HeaderValue::from_str(v)
-                .map_err(|e| bad_option(format!("header {k}: {e}")))?;
+            let mut value =
+                HeaderValue::from_str(v).map_err(|e| bad_option(format!("header {k}: {e}")))?;
             value.set_sensitive(true);
             b = b.header(name, value);
         }
@@ -729,8 +742,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%'
-            && i + 2 < b.len() + 0
-            && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16)
+            && i + 2 < b.len()
+            && let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16)
         {
             out.push(v);
             i += 3;
@@ -904,7 +918,10 @@ pub fn lua_source(source: &str) -> String {
 
 fn sig() -> ScriptSig {
     ScriptSig {
-        params: vec![("batch".into(), ParamTy::Json), ("ctx".into(), ParamTy::Json)],
+        params: vec![
+            ("batch".into(), ParamTy::Json),
+            ("ctx".into(), ParamTy::Json),
+        ],
         scalar: false,
     }
 }
@@ -964,7 +981,7 @@ fn reason_of(v: &Value, default: &str) -> String {
 fn ms_of(v: Option<&Value>) -> Option<Duration> {
     v.and_then(Value::as_f64)
         .filter(|f| f.is_finite() && *f >= 0.0)
-        .map(|f| Duration::from_millis(f as u64))
+        .map(|f| Duration::from_secs_f64(f.min(1e12) / 1000.0))
 }
 
 fn per_record(v: &Value) -> std::result::Result<Outcome, String> {
@@ -1045,10 +1062,7 @@ pub fn map_result(event: &str, fields: &Value, n: usize) -> Result<BatchOutcome>
     }
     if let Some(Value::Array(rs)) = o.get("results") {
         if rs.len() != n {
-            return Err(malformed(&format!(
-                "{} results for {n} records",
-                rs.len()
-            )));
+            return Err(malformed(&format!("{} results for {n} records", rs.len())));
         }
         let v = rs
             .iter()
@@ -1098,7 +1112,11 @@ impl std::fmt::Debug for ScriptTarget {
 /// 39218 for a sink that isn't a script sink or has no source; 39861 for
 /// source that doesn't compile.
 pub fn build(ctx: &TargetCtx, db: Option<Arc<dyn ReadOnlyDb>>) -> Result<Box<dyn Target>> {
-    Ok(Box::new(ScriptTarget::new(ctx, db, ScriptOptions::default())?))
+    Ok(Box::new(ScriptTarget::new(
+        ctx,
+        db,
+        ScriptOptions::default(),
+    )?))
 }
 
 fn lang_label(l: ScriptLanguage) -> &'static str {
@@ -1114,18 +1132,17 @@ impl ScriptTarget {
     ///
     /// # Errors
     /// See [`build`].
-    pub fn new(
-        ctx: &TargetCtx,
-        db: Option<Arc<dyn ReadOnlyDb>>,
-        o: ScriptOptions,
-    ) -> Result<Self> {
+    pub fn new(ctx: &TargetCtx, db: Option<Arc<dyn ReadOnlyDb>>, o: ScriptOptions) -> Result<Self> {
         let TargetSpec::Script {
             language,
             source,
             function,
         } = &ctx.sink.target
         else {
-            return Err(bad_option(format!("sink {} isn't a script sink", ctx.sink.name)));
+            return Err(bad_option(format!(
+                "sink {} isn't a script sink",
+                ctx.sink.name
+            )));
         };
         let src = o.source.or_else(|| source.clone()).ok_or_else(|| {
             bad_option(format!(
@@ -1288,8 +1305,14 @@ mod tests {
     fn results_map_onto_outcomes() {
         let all_ok = BatchOutcome::All(Outcome::Ok);
         assert_eq!(map_result("output", &json!({}), 2).unwrap(), all_ok);
-        assert_eq!(map_result("output", &json!({"value": true}), 2).unwrap(), all_ok);
-        assert_eq!(map_result("output", &json!({"ok": true}), 2).unwrap(), all_ok);
+        assert_eq!(
+            map_result("output", &json!({"value": true}), 2).unwrap(),
+            all_ok
+        );
+        assert_eq!(
+            map_result("output", &json!({"ok": true}), 2).unwrap(),
+            all_ok
+        );
         assert_eq!(
             map_result("output", &json!({"retry": true, "retryAfterMs": 1500}), 2).unwrap(),
             BatchOutcome::All(Outcome::Retry {
@@ -1313,7 +1336,11 @@ mod tests {
         assert_eq!(v[0], Outcome::Ok);
         assert!(matches!(&v[2], Outcome::Retry { reason, .. } if reason == "busy"));
         assert!(matches!(&v[3], Outcome::Fail { reason } if reason == "no"));
-        for bad in [json!({"results": ["ok"]}), json!({"value": 3}), json!({"x": 1})] {
+        for bad in [
+            json!({"results": ["ok"]}),
+            json!({"value": 3}),
+            json!({"x": 1}),
+        ] {
             let e = map_result("output", &bad, 4).unwrap_err();
             assert_eq!(e.code(), Some(SprigCode::SinkScriptFailed));
             assert!(e.retryable);
@@ -1369,7 +1396,14 @@ mod tests {
             };
             program(l, "t", src).unwrap();
         }
-        assert!(program(ScriptLanguage::Javascript, "t", "export function deliver( {").is_err());
+        assert!(
+            program(
+                ScriptLanguage::Javascript,
+                "t",
+                "export function deliver( {"
+            )
+            .is_err()
+        );
         assert!(program(ScriptLanguage::Lua, "t", "function deliver(").is_err());
         assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
         assert_eq!(hmac_hex(b"k", b"d").len(), 64);

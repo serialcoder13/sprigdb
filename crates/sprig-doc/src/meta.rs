@@ -247,7 +247,11 @@ impl CollMeta {
             str_lit(&self.array_paths_json()),
             u8::from(self.arrays_full),
             str_lit(&self.indexes_json()),
-            str_lit(&Bson::Document(self.options.clone()).into_relaxed_extjson().to_string()),
+            str_lit(
+                &Bson::Document(self.options.clone())
+                    .into_relaxed_extjson()
+                    .to_string()
+            ),
             self.next_index,
         )
     }
@@ -261,7 +265,13 @@ impl CollMeta {
     /// `indexes` as JSON text.
     #[must_use]
     pub fn indexes_json(&self) -> String {
-        Value::from(self.indexes.iter().map(IndexDef::to_json).collect::<Vec<_>>()).to_string()
+        Value::from(
+            self.indexes
+                .iter()
+                .map(IndexDef::to_json)
+                .collect::<Vec<_>>(),
+        )
+        .to_string()
     }
 
     /// Reads a row selected with [`META_COLUMNS`].
@@ -291,7 +301,11 @@ impl CollMeta {
             uuid,
             array_paths: paths
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default(),
             arrays_full: text(4)? == "1",
             indexes: idx
@@ -436,7 +450,12 @@ pub fn create_index_sql(db: &str, table: &str, idx: &IndexDef) -> String {
     for (p, dir) in &idx.key {
         let (c, n, s) = columns(p);
         let d = if *dir < 0 { " DESC" } else { "" };
-        cols.push(format!("{}{d}, {}{d}, {}{d}", ident(&c), ident(&n), ident(&s)));
+        cols.push(format!(
+            "{}{d}, {}{d}, {}{d}",
+            ident(&c),
+            ident(&n),
+            ident(&s)
+        ));
     }
     format!(
         "CREATE {}INDEX {} ON {}.{} ({})",
@@ -535,6 +554,9 @@ mod tests {
         assert_eq!(m.array_parts("items.sku"), vec![true, false]);
         assert_eq!(default_index_name(&doc! {"a": 1, "b": -1}), "a_1_b_-1");
         let sql = create_index_sql("d", "o", &m.indexes[0]);
-        assert!(sql.starts_with("CREATE UNIQUE INDEX `sprig_dix_1` ON `d`.`o`"), "{sql}");
+        assert!(
+            sql.starts_with("CREATE UNIQUE INDEX `sprig_dix_1` ON `d`.`o`"),
+            "{sql}"
+        );
     }
 }

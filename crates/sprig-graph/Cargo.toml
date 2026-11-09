@@ -24,6 +24,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The live Bolt and differential tests' client.
+sprig-proto-bolt = { path = "../sprig-proto-bolt" }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
 
 [lints]

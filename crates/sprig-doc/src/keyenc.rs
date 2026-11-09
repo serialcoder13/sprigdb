@@ -177,7 +177,7 @@ impl Big {
             if i == 0 {
                 s.push_str(&l.to_string());
             } else {
-                s.push_str(&format!("{l:09}"));
+                let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{l:09}"));
             }
         }
         s.bytes().map(|b| b - b'0').collect()
@@ -511,7 +511,10 @@ mod tests {
         let s: String = digits.iter().map(|d| char::from(b'0' + d)).collect();
         assert_eq!(s, "1000000000000000055511151231257827021181583404541015625");
         assert_eq!(exp, 0);
-        assert!(matches!(num_of_f64(f64::MIN_POSITIVE / 4.0), Num::Finite { .. }));
+        assert!(matches!(
+            num_of_f64(f64::MIN_POSITIVE / 4.0),
+            Num::Finite { .. }
+        ));
         assert_eq!(decimal_parts("59.90"), Some((false, vec![5, 9, 9], 2)));
         assert_eq!(decimal_parts("-1.5E+10"), Some((true, vec![1, 5], 11)));
         assert_eq!(decimal_parts("0E-6176"), Some((false, vec![], 0)));

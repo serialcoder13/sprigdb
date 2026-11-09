@@ -455,7 +455,15 @@ impl Expr {
 pub fn is_aggregate(name: &str) -> bool {
     matches!(
         name,
-        "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp" | "percentiledisc"
+        "count"
+            | "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "collect"
+            | "stdev"
+            | "stdevp"
+            | "percentiledisc"
             | "percentilecont"
     )
 }

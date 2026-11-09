@@ -83,7 +83,9 @@ pub fn types_path(path: &str) -> String {
 pub fn valid_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains('\0')
-        && path.split('.').all(|p| !p.is_empty() && !p.starts_with('$'))
+        && path
+            .split('.')
+            .all(|p| !p.is_empty() && !p.starts_with('$'))
 }
 
 /// A double as an SQL literal (finite only).
@@ -106,7 +108,10 @@ mod tests {
         assert_eq!(str_lit("a'b\\c"), "'a''b\\\\c'");
         assert_eq!(bin_lit(&[0x1e, 0xff]), "X'1EFF'");
         assert_eq!(ident("a`b"), "`a``b`");
-        assert_eq!(json_path(&["a", "b\"c"], &[true, false]), "$.\"a\"[*].\"b\\\"c\"");
+        assert_eq!(
+            json_path(&["a", "b\"c"], &[true, false]),
+            "$.\"a\"[*].\"b\\\"c\""
+        );
         assert_eq!(types_path("items.0.price"), "$.\"items.0.price\"");
         assert!(valid_path("a.b"));
         assert!(!valid_path("a..b"));

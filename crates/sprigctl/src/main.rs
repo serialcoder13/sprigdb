@@ -61,6 +61,7 @@ mod render;
 mod residency;
 mod settings;
 mod sharding;
+mod sink;
 mod space;
 mod txn;
 
@@ -348,6 +349,37 @@ fn cluster_group() -> Command {
                 .about("Retire a drained cluster's record; probes stop")
                 .arg(id()),
         )
+        // Chapter 25 (r2close): recovery jobs for a diverged or broken node.
+        .subcommand(
+            Command::new("extract")
+                .about("Extract a diverged former writer's transactions (row images, sealed) to the workers' extract store")
+                .arg(id())
+                .arg(Arg::new("node").required(true).help("The diverged node")),
+        )
+        .subcommand(
+            Command::new("rebuild")
+                .about("Rebuild a node from a replica's backup and attach it to the writer")
+                .arg(id())
+                .arg(Arg::new("node").required(true).help("The node to rebuild (never the writer)"))
+                .arg(Arg::new("from").long("from").help("The replica to stream from [default: the healthiest]"))
+                .arg(
+                    Arg::new("no-extract")
+                        .long("no-extract")
+                        .action(ArgAction::SetTrue)
+                        .help("Rebuild a diverged node without a verified extract; its old data directory is kept"),
+                ),
+        )
+        .subcommand(
+            Command::new("extract-open")
+                .about("Print a sealed errant extract as JSON lines (needs the workers' key file)")
+                .arg(Arg::new("file").required(true).help("The .extract file"))
+                .arg(
+                    Arg::new("key-file")
+                        .long("key-file")
+                        .required(true)
+                        .help("The workers' [recovery] extract_key_file"),
+                ),
+        )
 }
 
 fn cli() -> Command {
@@ -412,7 +444,8 @@ fn cli() -> Command {
         .subcommand(check::group())
         .subcommand(logic::group())
         .subcommand(space::group())
-        .subcommand(txn::group());
+        .subcommand(txn::group())
+        .subcommand(sink::group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -458,7 +491,7 @@ fn main() -> ExitCode {
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
-        | "shard" | "space" | "txn" => true,
+        | "shard" | "space" | "txn" | "sink" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "logic" => logic::implemented(&name),
@@ -508,6 +541,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "space" => space::run(sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "sink" => sink::run(sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "txn" => txn::run(&client, sub, output(&matches))
@@ -790,6 +826,63 @@ async fn run_cluster(
                 )
                 .await?;
             print(out, &r, render::cluster_show);
+            Ok(ExitCode::SUCCESS)
+        }
+        "extract" => {
+            let node = sub.get_one::<String>("node").cloned().unwrap_or_default();
+            let r: serde_json::Value = c
+                .post(
+                    &format!("/admin/v1/clusters/{}:extract", id()),
+                    &serde_json::json!({ "node": node }),
+                )
+                .await?;
+            print(out, &r, |r| {
+                format!(
+                    "errant_extract {} submitted for {node}; follow it with `sprigctl job show`\n",
+                    r["job_id"].as_str().unwrap_or_default()
+                )
+            });
+            Ok(ExitCode::SUCCESS)
+        }
+        "rebuild" => {
+            let node = sub.get_one::<String>("node").cloned().unwrap_or_default();
+            let r: serde_json::Value = c
+                .post(
+                    &format!("/admin/v1/clusters/{}:rebuild", id()),
+                    &serde_json::json!({
+                        "node": node,
+                        "source": sub.get_one::<String>("from"),
+                        "no_extract": sub.get_flag("no-extract"),
+                    }),
+                )
+                .await?;
+            print(out, &r, |r| {
+                format!(
+                    "node_rebuild {} submitted for {node}; follow it with `sprigctl job show`\n",
+                    r["job_id"].as_str().unwrap_or_default()
+                )
+            });
+            Ok(ExitCode::SUCCESS)
+        }
+        "extract-open" => {
+            let file = sub.get_one::<String>("file").cloned().unwrap_or_default();
+            let keys = sub.get_one::<String>("key-file").cloned().unwrap_or_default();
+            let fail = |e: String| Failed(e);
+            let sealed = std::fs::read(&file).map_err(|e| fail(format!("{file}: {e}")))?;
+            let ring = sprig_workload::keyring::MasterKeyring::from_file(std::path::Path::new(&keys))
+                .map_err(|e| fail(e.to_string()))?;
+            let h = sprig_cluster::failover::extract::header_of(&sealed)
+                .map_err(|e| fail(e.to_string()))?;
+            let key = ring
+                .key_for(
+                    sprig_cluster::failover::extract::PURPOSE,
+                    sprig_common::ids::TenantId(h.tenant),
+                    h.key_version,
+                )
+                .ok_or_else(|| fail(format!("no key version {} in {keys}", h.key_version)))?;
+            let (_, plain) = sprig_cluster::failover::extract::open(key.bytes(), &sealed)
+                .map_err(|e| fail(e.to_string()))?;
+            print!("{}", String::from_utf8_lossy(&plain));
             Ok(ExitCode::SUCCESS)
         }
         "retire" => {

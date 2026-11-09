@@ -54,6 +54,11 @@ pub const RK_COLUMN: &str = "_sprig_rk";
 /// source shard the row came from, for verification.
 pub const RK_PREV_COLUMN: &str = "_sprig_rk_prev";
 
+/// One target row as a re-key's verification reads it: its schema, its
+/// digest without `_sprig_rk`, its `_sprig_rk`, its `_sprig_rk_prev`, and
+/// the new key's hash recomputed from the row.
+pub type RekeyDigest = (String, RowDigest, Option<u64>, Option<u64>, Option<u64>);
+
 /// A re-key's routing (chapter 16): the new key and the columns each
 /// member supplies it from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,7 +193,7 @@ impl ShardRoute {
                 }
                 (*group, Some(Arc::new(RekeyRoute { key, columns })))
             }
-            _ => return Ok(None),
+            Routing::Whole => return Ok(None),
         };
         let mut sources = Vec::new();
         for s in &spec.sources {
@@ -438,9 +443,7 @@ impl ShardRoute {
                 .targets
                 .iter()
                 .position(|t| t.range.contains(h))
-                .ok_or_else(|| {
-                    unsupported(format!("no re-key target holds hash {h:#018x}"))
-                })?;
+                .ok_or_else(|| unsupported(format!("no re-key target holds hash {h:#018x}")))?;
             let mut row = r.clone();
             row[at] = Value::UInt(h);
             row.push(Value::UInt(prev));
@@ -479,11 +482,7 @@ impl ShardRoute {
     /// in the wrong target, with a wrong `_sprig_rk`, or in two targets
     /// gets a digest that can't match, so verification repairs it.
     #[must_use]
-    pub fn rekey_digests(
-        &self,
-        t: &TableMeta,
-        rows: Vec<(String, RowDigest, Option<u64>, Option<u64>, Option<u64>)>,
-    ) -> Vec<RowDigest> {
+    pub fn rekey_digests(&self, t: &TableMeta, rows: Vec<RekeyDigest>) -> Vec<RowDigest> {
         let Some(src) = self.source(&t.schema) else {
             return Vec::new();
         };
@@ -907,6 +906,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn a_rekey_hashes_rows_again_by_the_new_key() {
         let r = ShardRoute::from_spec(&rekey_spec()).unwrap().unwrap();
         // Every source feeds every target of its database.
@@ -945,7 +945,9 @@ mod tests {
         assert_eq!(ups[1].0, "t42_d1_g3_s7");
         assert_eq!(ups[1].1[0][2], Value::UInt(h(b)));
         // Each target loses the other's key first.
-        assert!(matches!(&ops[0], ApplyOp::Delete { table, keys } if table.schema == "t42_d1_g3_s6" && keys.len() == 1));
+        assert!(
+            matches!(&ops[0], ApplyOp::Delete { table, keys } if table.schema == "t42_d1_g3_s6" && keys.len() == 1)
+        );
         // A delete reaches every target.
         let dels = r
             .route_ops(&[ApplyOp::Delete {
@@ -981,7 +983,13 @@ mod tests {
                 // From s4, in the right target with the right hash.
                 ("t42_d1_g3_s6".into(), d(1, 10), Some(7), Some(3), Some(7)),
                 // s5's row (old hash in s5's range): not this source's.
-                ("t42_d1_g3_s6".into(), d(2, 20), Some(8), Some(HALF + 1), Some(8)),
+                (
+                    "t42_d1_g3_s6".into(),
+                    d(2, 20),
+                    Some(8),
+                    Some(HALF + 1),
+                    Some(8),
+                ),
                 // From s4 but in the wrong target.
                 ("t42_d1_g3_s7".into(), d(3, 30), Some(9), Some(4), Some(9)),
                 // From s4 with a stale `_sprig_rk`.

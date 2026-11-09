@@ -252,6 +252,10 @@ impl SessionExec for ObservedSession {
     fn idle_timeout(&self) -> Option<std::time::Duration> {
         self.inner.idle_timeout()
     }
+
+    fn set_internal(&mut self, on: bool) {
+        self.inner.set_internal(on);
+    }
 }
 
 /// A sink that notes the class of an error relayed through it (a backend

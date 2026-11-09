@@ -706,6 +706,10 @@ impl SessionExec for LimitedSession {
     fn idle_timeout(&self) -> Option<std::time::Duration> {
         self.inner.idle_timeout()
     }
+
+    fn set_internal(&mut self, on: bool) {
+        self.inner.set_internal(on);
+    }
 }
 
 #[cfg(test)]

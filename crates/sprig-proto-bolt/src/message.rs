@@ -304,7 +304,10 @@ impl Request {
                 routing,
                 bookmarks,
                 extra,
-            } => (0x66, vec![routing.clone(), bookmarks.clone(), extra.clone()]),
+            } => (
+                0x66,
+                vec![routing.clone(), bookmarks.clone(), extra.clone()],
+            ),
             Request::Telemetry(a) => (0x54, vec![a.clone()]),
         };
         let mut b = BytesMut::new();
@@ -433,7 +436,10 @@ mod tests {
     fn chunking_golden_bytes() {
         // SUCCESS {} is B1 70 A0: one chunk and the end marker.
         let mut out = BytesMut::new();
-        write_chunked(&Response::Success(PackValue::Map(vec![])).encode(), &mut out);
+        write_chunked(
+            &Response::Success(PackValue::Map(vec![])).encode(),
+            &mut out,
+        );
         assert_eq!(out.to_vec(), hex("00 03 B1 70 A0 00 00"));
         // RESET, GOODBYE, COMMIT, ROLLBACK, LOGOFF: no fields.
         for (r, h) in [
@@ -449,7 +455,10 @@ mod tests {
         // PULL {n: -1}.
         let pull = Request::Pull(PackValue::map([("n", PackValue::Int(-1))]));
         assert_eq!(pull.encode(), hex("B1 3F A1 81 6E FF"));
-        assert_eq!(Request::decode(&hex("B1 3F A1 81 6E FF")).expect("pull"), pull);
+        assert_eq!(
+            Request::decode(&hex("B1 3F A1 81 6E FF")).expect("pull"),
+            pull
+        );
         // RUN "RETURN 1 AS x" {} {}.
         let run = hex("B3 10 8D 52 45 54 55 52 4E 20 31 20 41 53 20 78 A0 A0");
         assert_eq!(
@@ -479,7 +488,9 @@ mod tests {
 
     #[test]
     fn dechunker_reassembles_and_skips_keepalives() {
-        let payload: Vec<u8> = (0..70_000u32).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
+        let payload: Vec<u8> = (0..70_000u32)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
         let mut wire = BytesMut::new();
         wire.put_u16(0); // keep-alive
         write_chunked(&payload, &mut wire);
@@ -490,7 +501,7 @@ mod tests {
         // Feed byte by byte at first, then the rest.
         let mut buf = BytesMut::new();
         let mut got = Vec::new();
-        for b in wire.iter() {
+        for b in &wire {
             buf.put_u8(*b);
             while let Some(m) = d.next(&mut buf).expect("dechunk") {
                 got.push(m);

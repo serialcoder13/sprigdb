@@ -178,7 +178,10 @@ pub fn tokens(sql: &str) -> Result<Vec<Tok>> {
             let rest = &sql[i + 1..];
             if let Some(close) = rest.find('$') {
                 let tag = &rest[..close];
-                if tag.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+                if tag
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                {
                     let delim = format!("${tag}$");
                     let body_start = i + delim.len();
                     let end = sql[body_start..]
@@ -195,7 +198,9 @@ pub fn tokens(sql: &str) -> Result<Vec<Tok>> {
             }
         }
         if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 {
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' || b[i] >= 0x80) {
+            while i < b.len()
+                && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' || b[i] >= 0x80)
+            {
                 i += 1;
             }
             out.push(Tok {
@@ -473,11 +478,7 @@ pub enum Stmt {
 /// A cheap check before tokenizing: could `sql` be a sink statement?
 #[must_use]
 pub fn maybe_sink(sql: &[u8]) -> bool {
-    let up: Vec<u8> = sql
-        .iter()
-        .take(4096)
-        .map(u8::to_ascii_uppercase)
-        .collect();
+    let up: Vec<u8> = sql.iter().take(4096).map(u8::to_ascii_uppercase).collect();
     let has = |w: &[u8]| up.windows(w.len()).any(|x| x == w);
     has(b"SINK") || has(b"CONNECTION")
 }
@@ -551,9 +552,9 @@ impl<'a> P<'a> {
     }
 
     fn unexpected(&self, what: &str) -> SprigError {
-        let near = self
-            .peek()
-            .map_or("", |t| &self.sql[t.range.start..self.sql.len().min(t.range.start + 40)]);
+        let near = self.peek().map_or("", |t| {
+            &self.sql[t.range.start..self.sql.len().min(t.range.start + 40)]
+        });
         syntax(format!("{what} near '{near}'"))
     }
 
@@ -882,7 +883,11 @@ fn create_connection(p: &mut P<'_>) -> Result<Stmt> {
             ))
         })?,
     };
-    let options = if p.kw("WITH") { p.options()? } else { Vec::new() };
+    let options = if p.kw("WITH") {
+        p.options()?
+    } else {
+        Vec::new()
+    };
     let credentials = if p.kw("CREDENTIALS") {
         p.credentials()?
     } else {
@@ -973,7 +978,11 @@ fn create_sink(p: &mut P<'_>) -> Result<Stmt> {
     p.need_kw("TO")?;
     let target = if p.kw("WEBHOOK") {
         let conn = p.conn_name()?;
-        let path = if p.kw("PATH") { Some(p.string()?) } else { None };
+        let path = if p.kw("PATH") {
+            Some(p.string()?)
+        } else {
+            None
+        };
         TargetAst::Webhook { conn, path }
     } else if p.kw("KAFKA") {
         let conn = p.conn_name()?;
@@ -1112,7 +1121,10 @@ pub fn redact(sql: &str) -> Option<(String, Vec<(String, zeroize::Zeroizing<Stri
     let mut values = Vec::new();
     let mut last = 0;
     let mut i = at + 1;
-    if !t.get(i).is_some_and(|x| x.kind == Tk::Punct && x.text == "(") {
+    if !t
+        .get(i)
+        .is_some_and(|x| x.kind == Tk::Punct && x.text == "(")
+    {
         return None;
     }
     i += 1;
@@ -1125,7 +1137,10 @@ pub fn redact(sql: &str) -> Option<(String, Vec<(String, zeroize::Zeroizing<Stri
                 out.push_str(&sql[last..v.range.start]);
                 out.push_str("'***'");
                 last = v.range.end;
-                values.push((k.text.to_ascii_lowercase(), zeroize::Zeroizing::new(v.text.clone())));
+                values.push((
+                    k.text.to_ascii_lowercase(),
+                    zeroize::Zeroizing::new(v.text.clone()),
+                ));
             }
         }
         i += 1;
@@ -1172,7 +1187,10 @@ mod tests {
         ));
         assert!(matches!(
             parse("DROP CONNECTION IF EXISTS shop.reporting;").unwrap(),
-            Some(Stmt::DropConnection { if_exists: true, .. })
+            Some(Stmt::DropConnection {
+                if_exists: true,
+                ..
+            })
         ));
         assert!(matches!(
             parse("GRANT USAGE ON CONNECTION billing_api TO alice@'%'").unwrap(),
@@ -1201,7 +1219,12 @@ mod tests {
             c.filter.as_deref(),
             Some("value->>'$.type' = 'order.paid' AND (key IS NOT NULL)")
         );
-        assert_eq!(c.start_at, StartAt::Timestamp { ms: 1_762_682_400_000 });
+        assert_eq!(
+            c.start_at,
+            StartAt::Timestamp {
+                ms: 1_794_218_400_000
+            }
+        );
         assert_eq!(options_map(&c.options)["lanes"], "4");
         let s = parse(
             "CREATE SINK orders_pg FROM CHANGES OF orders, items EXCEPT COLUMNS (card_token)
@@ -1221,7 +1244,9 @@ mod tests {
         .unwrap()
         .unwrap();
         let Stmt::CreateSink(c) = s else { panic!() };
-        assert!(matches!(c.target, TargetAst::Script { ref source, .. } if source.as_deref().is_some_and(|s| s.contains("deliver"))));
+        assert!(
+            matches!(c.target, TargetAst::Script { ref source, .. } if source.as_deref().is_some_and(|s| s.contains("deliver")))
+        );
         assert!(matches!(
             parse("CREATE SINK k FROM STREAM s TO KAFKA PLATFORM CONNECTION kafka_main TOPIC 'acme.o'").unwrap(),
             Some(Stmt::CreateSink(c)) if matches!(c.target, TargetAst::Kafka { ref conn, .. } if conn.platform)
@@ -1236,11 +1261,19 @@ mod tests {
         ));
         assert!(matches!(
             parse("DROP SINK x WITH DEAD LETTERS").unwrap(),
-            Some(Stmt::DropSink { with_dead_letters: true, .. })
+            Some(Stmt::DropSink {
+                with_dead_letters: true,
+                ..
+            })
         ));
-        assert!(matches!(parse("SHOW SINK STATUS shop.x").unwrap(), Some(Stmt::ShowSinkStatus(_))));
+        assert!(matches!(
+            parse("SHOW SINK STATUS shop.x").unwrap(),
+            Some(Stmt::ShowSinkStatus(_))
+        ));
         assert!(parse("CREATE SINK x FROM STREAM s TO NOWHERE").is_err());
-        assert!(parse("CREATE SINK x FOR EACH TENANT FROM STREAM s TO WEBHOOK CONNECTION c").is_err());
+        assert!(
+            parse("CREATE SINK x FOR EACH TENANT FROM STREAM s TO WEBHOOK CONNECTION c").is_err()
+        );
     }
 
     #[test]
@@ -1259,7 +1292,10 @@ mod tests {
     #[test]
     fn times_parse() {
         assert_eq!(parse_time("1970-01-01"), Some(0));
-        assert_eq!(parse_time("2026-11-09T10:00:00.5Z"), Some(1_762_682_400_500));
+        assert_eq!(
+            parse_time("2026-11-09T10:00:00.5Z"),
+            Some(1_794_218_400_500)
+        );
         assert_eq!(parse_time("nope"), None);
     }
 }

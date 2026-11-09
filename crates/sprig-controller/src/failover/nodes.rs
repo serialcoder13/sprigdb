@@ -82,6 +82,16 @@ pub fn ctl_endpoints(rec: &ClusterRecord) -> Result<Vec<NodeEndpoint>> {
     rec.nodes.iter().map(|n| cred.endpoint(n)).collect()
 }
 
+/// The cluster's nodes as `sprig_repl` sees them (binlog dumps:
+/// `errant_extract`, chapter 25).
+///
+/// # Errors
+/// The credentials can't be resolved or an address isn't `host:port`.
+pub fn repl_endpoints(rec: &ClusterRecord) -> Result<Vec<NodeEndpoint>> {
+    let cred = sprig_provision::credentials::resolve(&rec.secrets.repl, "sprig_repl")?;
+    rec.nodes.iter().map(|n| cred.endpoint(n)).collect()
+}
+
 /// The cluster record of `id` (any DC: other DCs' tiers are read through
 /// the registry, single-etcd mode).
 ///
@@ -566,6 +576,7 @@ pub async fn report_diverged(
         tables: Vec::new(),
         path: None,
         statements: Vec::new(),
+        extract: None,
     });
     let count = report.count;
     rec.body.tenants[i].errant = Some(report);

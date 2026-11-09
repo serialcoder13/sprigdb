@@ -185,6 +185,9 @@ impl ClusterAdmin for GwAdmin {
         self.of(c).await?.xa_recover(c).await
     }
     // Sprig 2PC (R3): held branches' redo rows, through `sprig_ctl`.
+    async fn ensure_redo(&self, c: &ClusterId, schema: &str) -> DbResult<()> {
+        self.of(c).await?.ensure_redo(c, schema).await
+    }
     async fn insert_redo(
         &self,
         c: &ClusterId,

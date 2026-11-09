@@ -47,6 +47,10 @@ pub(crate) mod types;
 mod streams;
 // Chapter 50: `sprig.mq_*` calls (R9).
 mod queues;
+// Chapter 51: sinks and connections (R9).
+pub mod sinks;
+// Chapter 43 (R8): CREATE GRAPH and DROP GRAPH.
+mod graph_ddl;
 // Chapter 41 (R9, r9triggers): triggers on streams and queues, and
 // chapter 45's `sprig.commit_offset`.
 pub(crate) mod msg_trigger;
@@ -623,10 +627,8 @@ impl PassSession {
                 .get("character_set_client")
                 .cloned()
                 .unwrap_or_else(|| "utf8mb4".to_owned());
-            let lits: Vec<sprig_router::ParamLit> = values
-                .iter()
-                .map(|v| router::param_lit(v, &cs))
-                .collect();
+            let lits: Vec<sprig_router::ParamLit> =
+                values.iter().map(|v| router::param_lit(v, &cs)).collect();
             if let Some(t) = sprig_router::render_params(&String::from_utf8_lossy(&sql), &lits) {
                 bs.bind_text(t);
             }
@@ -1037,6 +1039,14 @@ impl SessionExec for PassSession {
                 }
                 bs.close().await;
             }
+        }
+    }
+
+    fn set_internal(&mut self, on: bool) {
+        // Chapter 31: the document engine's own statements (see the
+        // trait); the same flag chapter 32's plans set.
+        if let Some(ts) = self.tenant.as_deref_mut() {
+            ts.types.internal = on;
         }
     }
 

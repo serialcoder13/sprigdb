@@ -13,10 +13,29 @@
     clippy::many_single_char_names,
     clippy::format_push_string,
     clippy::module_name_repetitions,
-    clippy::missing_errors_doc
+    clippy::missing_errors_doc,
+    clippy::too_many_lines,
+    clippy::type_complexity,
+    clippy::items_after_statements,
+    clippy::match_same_arms,
+    clippy::single_match_else,
+    clippy::needless_pass_by_value,
+    clippy::map_unwrap_or,
+    clippy::collapsible_if,
+    clippy::match_like_matches_macro,
+    clippy::redundant_closure_for_method_calls
 )]
 
+pub mod filter;
+pub mod grammar;
+pub mod job;
+pub mod meta;
 pub mod model;
 pub mod policy;
 pub mod runtime;
+pub mod secrets;
+pub mod settings;
+pub mod source;
+pub mod sql;
+pub mod store;
 pub mod target;

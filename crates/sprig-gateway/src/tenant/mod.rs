@@ -154,6 +154,10 @@ impl TenantServices {
             Arc::new(sprig_streams::StreamsExtension),
             // Chapter 50: exchanges, queues and bindings (R9).
             Arc::new(sprig_queues::catalog::MqExtension),
+            // Chapter 51: sinks and connections (R9).
+            Arc::new(sprig_sinks::store::SinksExtension),
+            // Chapter 43: graphs, labels and relationship types (R8).
+            Arc::new(sprig_graph::catalog::GraphExtension),
             // Chapter 42: spaces, inheritable objects and shares.
             Arc::new(sprig_inherit::InheritExtension),
             // Chapter 15's table groups, for the router (chapter 17).

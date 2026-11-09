@@ -329,7 +329,9 @@ impl Value {
             }
             (Value::Node(x), Value::Node(y)) => x.id.cmp(&y.id),
             (Value::Rel(x), Value::Rel(y)) => x.id.cmp(&y.id),
-            _ => self.cypher_cmp(o).unwrap_or_else(|| self.key().cmp(&o.key())),
+            _ => self
+                .cypher_cmp(o)
+                .unwrap_or_else(|| self.key().cmp(&o.key())),
         }
     }
 
@@ -362,8 +364,10 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Value::Map(m) => {
-                let parts: Vec<String> =
-                    m.iter().map(|(k, v)| format!("{k}: {}", v.literal())).collect();
+                let parts: Vec<String> = m
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {}", v.literal()))
+                    .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Value::Node(n) => format!("(:{} {})", n.labels.join(":"), props_literal(&n.props)),
@@ -399,7 +403,11 @@ pub fn fmt_float(f: f64) -> String {
         return "NaN".into();
     }
     if f.is_infinite() {
-        return if f > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        return if f > 0.0 {
+            "Infinity".into()
+        } else {
+            "-Infinity".into()
+        };
     }
     let s = format!("{f:?}");
     if s.contains('.') || s.contains('e') || s.contains("inf") {
@@ -573,7 +581,11 @@ pub fn to_plain_json(v: &Value) -> Json {
             "relationships": p.rels.iter().map(|r| to_plain_json(&Value::Rel(r.clone()))).collect::<Vec<_>>(),
         }),
         Value::List(l) => Json::Array(l.iter().map(to_plain_json).collect()),
-        Value::Map(m) => Json::Object(m.iter().map(|(k, x)| (k.clone(), to_plain_json(x))).collect()),
+        Value::Map(m) => Json::Object(
+            m.iter()
+                .map(|(k, x)| (k.clone(), to_plain_json(x)))
+                .collect(),
+        ),
         other => to_json_inner(other, "", &mut Map::new()),
     }
 }
@@ -588,10 +600,8 @@ mod tests {
         assert_eq!(Value::Int(1).cypher_eq(&Value::str("1")), Some(false));
         assert_eq!(Value::Int(1).cypher_eq(&Value::Null), None);
         assert_eq!(
-            Value::List(vec![Value::Int(1), Value::Null]).cypher_eq(&Value::List(vec![
-                Value::Int(2),
-                Value::Null
-            ])),
+            Value::List(vec![Value::Int(1), Value::Null])
+                .cypher_eq(&Value::List(vec![Value::Int(2), Value::Null])),
             Some(false)
         );
         assert_eq!(
@@ -633,17 +643,19 @@ mod tests {
         p.insert("a".into(), Value::Int(1));
         p.insert("b".into(), Value::Float(1.0));
         p.insert("c".into(), Value::Float(2.5));
-        p.insert("d".into(), Value::List(vec![Value::Float(3.0), Value::Float(1.5)]));
+        p.insert(
+            "d".into(),
+            Value::List(vec![Value::Float(3.0), Value::Float(1.5)]),
+        );
         p.insert("e".into(), Value::str("x"));
         let (j, t) = props_to_json(&p);
         let t = t.expect("types");
         assert_eq!(t["b"], "float");
         assert_eq!(t["d[0]"], "float");
         // Even if MariaDB rewrote 1.0 as 1, the type map restores it.
-        let rewritten: Json = serde_json::from_str(
-            &j.to_string().replace("1.0", "1").replace("3.0", "3"),
-        )
-        .expect("json");
+        let rewritten: Json =
+            serde_json::from_str(&j.to_string().replace("1.0", "1").replace("3.0", "3"))
+                .expect("json");
         assert_eq!(props_from_json(&rewritten, Some(&t)), p);
         assert!(check_property("m", &Value::Map(BTreeMap::new())).is_err());
         assert!(check_property("l", &Value::List(vec![Value::Int(1), Value::str("x")])).is_err());

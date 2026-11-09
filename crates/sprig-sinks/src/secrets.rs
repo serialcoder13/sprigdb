@@ -35,7 +35,8 @@ pub trait SinkKeyring: Send + Sync {
 
 impl SinkKeyring for sprig_workload::keyring::MasterKeyring {
     fn current(&self, tenant: TenantId) -> Option<(u32, [u8; 32])> {
-        self.current_for(PURPOSE, tenant).map(|(v, k)| (v, *k.bytes()))
+        self.current_for(PURPOSE, tenant)
+            .map(|(v, k)| (v, *k.bytes()))
     }
     fn key(&self, tenant: TenantId, version: u32) -> Option<[u8; 32]> {
         self.key_for(PURPOSE, tenant, version).map(|k| *k.bytes())
@@ -106,7 +107,10 @@ pub fn open(
 ) -> Result<Zeroizing<String>> {
     let k = Zeroizing::new(keys.key(tenant, key_version).ok_or_else(no_key)?);
     if sealed.len() < NONCE_LEN + 16 {
-        return Err(err(SprigCode::SinkCredentialsInvalid, "a sealed credential is too short"));
+        return Err(err(
+            SprigCode::SinkCredentialsInvalid,
+            "a sealed credential is too short",
+        ));
     }
     let lk = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &*k).map_err(|_| no_key())?);
     let mut nonce = [0u8; NONCE_LEN];
@@ -124,8 +128,12 @@ pub fn open(
                 format!("credential {name} doesn't open under key version {key_version}"),
             )
         })?;
-    let s = std::str::from_utf8(plain)
-        .map_err(|_| err(SprigCode::SinkCredentialsInvalid, "a credential isn't UTF-8"))?;
+    let s = std::str::from_utf8(plain).map_err(|_| {
+        err(
+            SprigCode::SinkCredentialsInvalid,
+            "a credential isn't UTF-8",
+        )
+    })?;
     Ok(Zeroizing::new(s.to_owned()))
 }
 
@@ -146,7 +154,13 @@ pub fn allowed_credentials(kind: crate::model::ConnKind) -> &'static [&'static s
             "tls_cert",
             "tls_key",
         ],
-        ConnKind::Kafka => &["username", "password", "tls_cert", "tls_key", "client_secret"],
+        ConnKind::Kafka => &[
+            "username",
+            "password",
+            "tls_cert",
+            "tls_key",
+            "client_secret",
+        ],
         ConnKind::S3 => &["access_key_id", "secret_access_key", "session_token"],
         ConnKind::Mysql | ConnKind::Postgresql => &["username", "password", "tls_cert", "tls_key"],
     }
@@ -195,18 +209,35 @@ mod tests {
         assert_eq!(kv, 3);
         assert!(!s.windows(7).any(|w| w == b"hunter2"));
         assert_eq!(
-            open(&K, TenantId(5), 9, "password", 1, kv, &s).unwrap().as_str(),
+            open(&K, TenantId(5), 9, "password", 1, kv, &s)
+                .unwrap()
+                .as_str(),
             "hunter2"
         );
-        for (t, c, n, v) in [(6, 9, "password", 1), (5, 8, "password", 1), (5, 9, "token", 1), (5, 9, "password", 2)] {
+        for (t, c, n, v) in [
+            (6, 9, "password", 1),
+            (5, 8, "password", 1),
+            (5, 9, "token", 1),
+            (5, 9, "password", 2),
+        ] {
             assert!(open(&K, TenantId(t), c, n, v, kv, &s).is_err());
         }
         let real = sprig_workload::keyring::MasterKeyring::new([(1, [1u8; 32])]).unwrap();
         let (kv, s) = seal(&real, TenantId(1), 1, "token", 1, "t").unwrap();
-        assert_eq!(open(&real, TenantId(1), 1, "token", 1, kv, &s).unwrap().as_str(), "t");
+        assert_eq!(
+            open(&real, TenantId(1), 1, "token", 1, kv, &s)
+                .unwrap()
+                .as_str(),
+            "t"
+        );
         // The sink key isn't the workload key.
-        let w = sprig_workload::keyring::TenantKeyring::current(&real, TenantId(1)).unwrap().1;
-        assert_ne!(*w.bytes(), SinkKeyring::current(&real, TenantId(1)).unwrap().1);
+        let w = sprig_workload::keyring::TenantKeyring::current(&real, TenantId(1))
+            .unwrap()
+            .1;
+        assert_ne!(
+            *w.bytes(),
+            SinkKeyring::current(&real, TenantId(1)).unwrap().1
+        );
         assert!(check_names(crate::model::ConnKind::S3, &["password"]).is_err());
         assert!(check_names(crate::model::ConnKind::Kafka, &["password"]).is_ok());
     }

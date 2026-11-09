@@ -1016,11 +1016,11 @@ fn check_spec(spec: &JobSpec) -> Result<()> {
     if spec.routing != Routing::Whole {
         return bad("R0 jobs route whole shards");
     }
-    if matches!(
-        spec.cutover,
-        CutoverMode::Group { .. } | CutoverMode::Continuous
-    ) {
-        return bad("group and continuous cutovers arrive in R1");
+    if matches!(spec.cutover, CutoverMode::Group { .. }) {
+        return bad("group cutovers are hash-range jobs'");
+    }
+    if spec.cutover == CutoverMode::Continuous && spec.kind != JobKind::MoveShard {
+        return bad("only a move streams continuously (a standby copy)");
     }
     let (s, t) = (&spec.sources[0], &spec.targets[0]);
     match spec.kind {
@@ -1246,7 +1246,8 @@ impl Mover for MetaMover {
 
     async fn cut_over(&self, id: &JobId) -> Result<()> {
         self.edit(id, |r| {
-            if r.spec.cutover != CutoverMode::Manual {
+            // A Continuous job stops streaming and keeps its targets.
+            if !matches!(r.spec.cutover, CutoverMode::Manual | CutoverMode::Continuous) {
                 return Err(SprigError::new(
                     SprigCode::JobStateInvalid,
                     format!("job {} cuts over by itself", r.job_id.0),

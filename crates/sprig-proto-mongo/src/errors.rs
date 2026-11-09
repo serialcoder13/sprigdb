@@ -16,7 +16,7 @@ pub struct MongoError {
     /// `errorLabels`, such as `RetryableWriteError`.
     pub labels: Vec<&'static str>,
     /// Extra fields for the reply (`keyPattern`, `keyValue`, `errInfo`).
-    pub extra: Option<Document>,
+    pub extra: Option<Box<Document>>,
 }
 
 impl MongoError {
@@ -42,7 +42,7 @@ impl MongoError {
     /// The same error with extra reply fields.
     #[must_use]
     pub fn with_extra(mut self, d: Document) -> Self {
-        self.extra = Some(d);
+        self.extra = Some(Box::new(d));
         self
     }
 
@@ -62,7 +62,7 @@ impl MongoError {
             "codeName": self.code_name(),
         };
         if let Some(x) = &self.extra {
-            for (k, v) in x {
+            for (k, v) in x.iter() {
                 d.insert(k.clone(), v.clone());
             }
         }
@@ -82,7 +82,7 @@ impl MongoError {
             "errmsg": self.message.clone(),
         };
         if let Some(x) = &self.extra {
-            for (k, v) in x {
+            for (k, v) in x.iter() {
                 d.insert(k.clone(), v.clone());
             }
         }
@@ -240,10 +240,12 @@ mod tests {
         let e = MongoError::new(code::DUPLICATE_KEY, "E11000 duplicate key")
             .with_extra(doc! {"keyPattern": {"_id": 1}, "keyValue": {"_id": 1}});
         let d = e.to_doc();
-        assert_eq!(d.get_f64("ok").unwrap(), 0.0);
+        assert!(d.get_f64("ok").unwrap().abs() < f64::EPSILON);
         assert_eq!(d.get_str("codeName").unwrap(), "DuplicateKey");
         assert!(d.contains_key("keyPattern"));
-        let d = MongoError::new(91, "draining").label("RetryableWriteError").to_doc();
+        let d = MongoError::new(91, "draining")
+            .label("RetryableWriteError")
+            .to_doc();
         assert_eq!(d.get_array("errorLabels").unwrap().len(), 1);
         assert_eq!(code_name(39630), "SprigCursorLimit");
     }

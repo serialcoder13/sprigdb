@@ -18,7 +18,10 @@ pub type Row = HashMap<String, Value>;
 pub type Params = BTreeMap<String, Value>;
 
 fn unsupported(what: impl std::fmt::Display) -> SprigError {
-    SprigError::new(SprigCode::GraphUnsupported, format!("{what} is not supported"))
+    SprigError::new(
+        SprigCode::GraphUnsupported,
+        format!("{what} is not supported"),
+    )
 }
 
 fn arith_err(msg: &str) -> SprigError {
@@ -41,7 +44,10 @@ pub fn eval(e: &Expr, row: &Row, params: &Params) -> Result<Value> {
             .with_neo4j("Neo.ClientError.Statement.ParameterMissing")
         })?,
         Expr::Var(v) | Expr::Slot(v) => row.get(v).cloned().ok_or_else(|| {
-            SprigError::new(SprigCode::GraphSyntax, format!("Variable `{v}` not defined"))
+            SprigError::new(
+                SprigCode::GraphSyntax,
+                format!("Variable `{v}` not defined"),
+            )
         })?,
         Expr::Prop(b, k) => prop(&eval(b, row, params)?, k)?,
         Expr::Index(b, i) => index(&eval(b, row, params)?, &eval(i, row, params)?)?,
@@ -374,7 +380,11 @@ pub fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
                         Some(false) => {}
                     }
                 }
-                if unknown { Value::Null } else { Value::Bool(false) }
+                if unknown {
+                    Value::Null
+                } else {
+                    Value::Bool(false)
+                }
             }
             other => return Err(type_error(format!("IN over a {}", other.type_name()))),
         },
@@ -542,7 +552,11 @@ fn math(args: &[Value], f: impl Fn(f64) -> f64) -> Result<Value> {
 ///
 /// # Errors
 /// 39901 for unknown functions; 39909 for argument types.
-#[allow(clippy::too_many_lines, clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
     let a0 = arg(&args, 0).clone();
     Ok(match name {
@@ -603,13 +617,21 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "relationships" => match a0 {
             Value::Path(p) => Value::List(p.rels.iter().cloned().map(Value::Rel).collect()),
             Value::Null => Value::Null,
-            o => return Err(type_error(format!("relationships() of a {}", o.type_name()))),
+            o => {
+                return Err(type_error(format!(
+                    "relationships() of a {}",
+                    o.type_name()
+                )));
+            }
         },
         "startnode" | "endnode" => match a0 {
             Value::Null => Value::Null,
             _ => return Err(unsupported(format!("{name}()"))),
         },
-        "coalesce" => args.into_iter().find(|v| !v.is_null()).unwrap_or(Value::Null),
+        "coalesce" => args
+            .into_iter()
+            .find(|v| !v.is_null())
+            .unwrap_or(Value::Null),
         "head" => match a0 {
             Value::List(l) => l.into_iter().next().unwrap_or(Value::Null),
             Value::Null => Value::Null,
@@ -683,7 +705,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
                 .trim()
                 .parse::<i64>()
                 .map(Value::Int)
-                .or_else(|_| s.trim().parse::<f64>().map(|f| Value::Int(f.trunc() as i64)))
+                .or_else(|_| {
+                    s.trim()
+                        .parse::<f64>()
+                        .map(|f| Value::Int(f.trunc() as i64))
+                })
                 .unwrap_or(Value::Null),
             Value::Null => Value::Null,
             o => return Err(type_error(format!("toInteger() of a {}", o.type_name()))),
@@ -707,7 +733,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
             o => return Err(type_error(format!("toBoolean() of a {}", o.type_name()))),
         },
         "abs" => match a0 {
-            Value::Int(i) => Value::Int(i.checked_abs().ok_or_else(|| arith_err("integer overflow"))?),
+            Value::Int(i) => Value::Int(
+                i.checked_abs()
+                    .ok_or_else(|| arith_err("integer overflow"))?,
+            ),
             Value::Float(f) => Value::Float(f.abs()),
             Value::Null => Value::Null,
             o => return Err(type_error(format!("abs() of a {}", o.type_name()))),
@@ -788,7 +817,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
             } else {
                 chars.len()
             };
-            Value::String(chars[start..(start + len).min(chars.len())].iter().collect())
+            Value::String(
+                chars[start..(start + len).min(chars.len())]
+                    .iter()
+                    .collect(),
+            )
         }
         "left" | "right" => {
             let Value::String(s) = &a0 else {
@@ -855,16 +888,30 @@ mod tests {
         assert_eq!(ev("'abc' STARTS WITH 'a'"), Value::Bool(true));
         assert_eq!(ev("'abc' =~ 'a.c'"), Value::Bool(true));
         assert_eq!(ev("'abc' =~ 'b'"), Value::Bool(false));
-        assert_eq!(ev("[x IN range(1, 6) WHERE x % 2 = 0 | x * 10]"), ev("[20, 40, 60]"));
+        assert_eq!(
+            ev("[x IN range(1, 6) WHERE x % 2 = 0 | x * 10]"),
+            ev("[20, 40, 60]")
+        );
         assert_eq!(ev("all(x IN [1, 2] WHERE x > 0)"), Value::Bool(true));
         assert_eq!(ev("single(x IN [1, 2] WHERE x > 1)"), Value::Bool(true));
-        assert_eq!(ev("CASE 2 WHEN 1 THEN 'a' WHEN 2 THEN 'b' END"), Value::str("b"));
+        assert_eq!(
+            ev("CASE 2 WHEN 1 THEN 'a' WHEN 2 THEN 'b' END"),
+            Value::str("b")
+        );
         assert_eq!(ev("{a: 1, b: [1, 2]}.b[0]"), Value::Int(1));
-        let e = eval(&parse_expr("1 / 0").expect("p"), &Row::new(), &Params::new())
-            .expect_err("div");
+        let e = eval(
+            &parse_expr("1 / 0").expect("p"),
+            &Row::new(),
+            &Params::new(),
+        )
+        .expect_err("div");
         assert_eq!(e.code(), Some(SprigCode::GraphPropertyType));
-        let e = eval(&parse_expr("9223372036854775807 + 1").expect("p"), &Row::new(), &Params::new())
-            .expect_err("overflow");
+        let e = eval(
+            &parse_expr("9223372036854775807 + 1").expect("p"),
+            &Row::new(),
+            &Params::new(),
+        )
+        .expect_err("overflow");
         assert_eq!(e.code(), Some(SprigCode::GraphPropertyType));
     }
 
@@ -881,8 +928,12 @@ mod tests {
         assert_eq!(ev("split('a,b', ',')"), ev("['a', 'b']"));
         assert_eq!(ev("reverse('abc')"), Value::str("cba"));
         assert_eq!(ev("range(0, 10, 5)"), ev("[0, 5, 10]"));
-        let e = eval(&parse_expr("nope(1)").expect("p"), &Row::new(), &Params::new())
-            .expect_err("unknown");
+        let e = eval(
+            &parse_expr("nope(1)").expect("p"),
+            &Row::new(),
+            &Params::new(),
+        )
+        .expect_err("unknown");
         assert_eq!(e.code(), Some(SprigCode::GraphUnsupported));
     }
 }

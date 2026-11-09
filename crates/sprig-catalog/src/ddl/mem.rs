@@ -23,6 +23,9 @@ pub enum Fault {
     /// The statement takes effect, then the connection is lost before the
     /// reply.
     LostAfter,
+    /// The statement runs normally (to aim a later fault at a plan's
+    /// second statement).
+    Pass,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,7 +399,7 @@ impl DdlExecutor for MemExecutor {
                 Self::apply(&mut s, stmt)?;
                 Err(lost())
             }
-            None => Self::apply(&mut s, stmt),
+            Some(Fault::Pass) | None => Self::apply(&mut s, stmt),
         }
     }
 

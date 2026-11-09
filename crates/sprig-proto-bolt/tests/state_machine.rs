@@ -2,6 +2,8 @@
 //! in-memory service, driven by the crate's own client through a duplex
 //! pipe.
 
+#![allow(clippy::many_single_char_names)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -64,7 +66,9 @@ impl BoltSession for Sess {
         let n: i64 = query.parse().unwrap_or(1);
         Ok(QueryResult {
             fields: vec!["x".into()],
-            records: (0..n).map(|i| vec![PackValue::Int(i)]).collect::<VecDeque<_>>(),
+            records: (0..n)
+                .map(|i| vec![PackValue::Int(i)])
+                .collect::<VecDeque<_>>(),
             qtype: "r",
             ..QueryResult::default()
         })
@@ -96,7 +100,12 @@ impl BoltSession for Sess {
     }
 }
 
-async fn start(proposals: Option<[[u8; 4]; 4]>) -> (BoltClient<tokio::io::DuplexStream>, tokio::task::JoinHandle<End>) {
+async fn start(
+    proposals: Option<[[u8; 4]; 4]>,
+) -> (
+    BoltClient<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<End>,
+) {
     let (a, b) = tokio::io::duplex(1 << 20);
     let svc = Arc::new(Svc);
     let h = tokio::spawn(async move {
@@ -112,7 +121,9 @@ async fn start(proposals: Option<[[u8; 4]; 4]>) -> (BoltClient<tokio::io::Duplex
         .await
         .expect("serve")
     });
-    let c = BoltClient::handshake(a, proposals).await.expect("handshake");
+    let c = BoltClient::handshake(a, proposals)
+        .await
+        .expect("handshake");
     (c, h)
 }
 
@@ -135,7 +146,14 @@ async fn login_run_pull_and_transactions() {
     // A failure, then RESET (done by the client) and a working session.
     let e = c.query("BAD", vec![], vec![]).await.expect_err("bad");
     assert_eq!(e.code, "Neo.ClientError.Statement.SyntaxError");
-    assert_eq!(c.query("1", vec![], vec![]).await.expect("after reset").records.len(), 1);
+    assert_eq!(
+        c.query("1", vec![], vec![])
+            .await
+            .expect("after reset")
+            .records
+            .len(),
+        1
+    );
     // PULL in batches.
     c.send(&Request::Run {
         query: "5".into(),
@@ -144,7 +162,10 @@ async fn login_run_pull_and_transactions() {
     })
     .await
     .expect("send");
-    assert!(matches!(c.recv().await.expect("run ok"), Response::Success(_)));
+    assert!(matches!(
+        c.recv().await.expect("run ok"),
+        Response::Success(_)
+    ));
     c.send(&Request::Pull(PackValue::map([("n", PackValue::Int(2))])))
         .await
         .expect("send");
@@ -160,10 +181,16 @@ async fn login_run_pull_and_transactions() {
         }
     }
     assert_eq!(recs, 2);
-    c.send(&Request::Discard(PackValue::map([("n", PackValue::Int(-1))])))
-        .await
-        .expect("send");
-    assert!(matches!(c.recv().await.expect("discard"), Response::Success(_)));
+    c.send(&Request::Discard(PackValue::map([(
+        "n",
+        PackValue::Int(-1),
+    )])))
+    .await
+    .expect("send");
+    assert!(matches!(
+        c.recv().await.expect("discard"),
+        Response::Success(_)
+    ));
     // Explicit transaction with two results and qids.
     c.begin(vec![]).await.expect("begin");
     c.send(&Request::Run {
@@ -183,16 +210,27 @@ async fn login_run_pull_and_transactions() {
     assert_eq!(b.get("bookmark").and_then(PackValue::as_str), Some("SB1:x"));
     // ROUTE answers the table.
     let rt = c.route(None).await.expect("route");
-    assert_eq!(rt.get("rt").and_then(|t| t.get("ttl")), Some(&PackValue::Int(300)));
+    assert_eq!(
+        rt.get("rt").and_then(|t| t.get("ttl")),
+        Some(&PackValue::Int(300))
+    );
     // Messages in the wrong state: COMMIT outside a transaction fails, then
     // everything but RESET is IGNORED.
     c.send(&Request::Commit).await.expect("send");
-    assert!(matches!(c.recv().await.expect("f"), Response::Failure { .. }));
-    c.send(&Request::Pull(PackValue::Map(vec![]))).await.expect("send");
+    assert!(matches!(
+        c.recv().await.expect("f"),
+        Response::Failure { .. }
+    ));
+    c.send(&Request::Pull(PackValue::Map(vec![])))
+        .await
+        .expect("send");
     assert_eq!(c.recv().await.expect("ignored"), Response::Ignored);
     c.reset().await.expect("reset");
     c.goodbye().await.expect("bye");
-    assert!(matches!(h.await.expect("join"), End::Defunct(_) | End::Closed));
+    assert!(matches!(
+        h.await.expect("join"),
+        End::Defunct(_) | End::Closed
+    ));
 }
 
 #[tokio::test]
@@ -208,7 +246,14 @@ async fn bolt_5_0_takes_credentials_in_hello() {
     let (mut c, _h) = start(Some([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]])).await;
     assert_eq!(c.version.to_string(), "5.0");
     c.login("u", "pw").await.expect("login");
-    assert_eq!(c.query("1", vec![], vec![]).await.expect("run").records.len(), 1);
+    assert_eq!(
+        c.query("1", vec![], vec![])
+            .await
+            .expect("run")
+            .records
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

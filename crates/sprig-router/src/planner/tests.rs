@@ -563,7 +563,11 @@ fn bound_values_render_into_the_text() {
         ParamLit::Null,
     ];
     assert_eq!(
-        render_params("UPDATE t SET a = ?, b = '?' WHERE c = ? AND d <=> ? -- ?", &p).as_deref(),
+        render_params(
+            "UPDATE t SET a = ?, b = '?' WHERE c = ? AND d <=> ? -- ?",
+            &p
+        )
+        .as_deref(),
         Some("UPDATE t SET a = 7, b = '?' WHERE c = _utf8mb4 X'612762' AND d <=> NULL -- ?")
     );
     assert!(render_params("SELECT ?", &p).is_none());

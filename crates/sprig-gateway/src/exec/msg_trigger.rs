@@ -568,12 +568,19 @@ impl PassSession {
             s
         };
         let session = u64::from(cx.session.id.0);
+        // Opening the vhost or taking a message isn't the code's failure:
+        // transient (the job ends by itself when the source is gone).
+        let infra = |e: &sprig_proto_amqp::error::MqError| {
+            let mut r = RunReply::failed(&mq_err(e));
+            r.transient = true;
+            r
+        };
         let v = match engine
             .sql_vhost(principal, &req.source.db_name, session)
             .await
         {
             Ok(v) => v,
-            Err(e) => return RunReply::failed(&mq_err(&e)),
+            Err(e) => return infra(&e),
         };
         // The trigger reads the queue of its own database: one with the
         // name in a database made since is another queue.
@@ -582,7 +589,7 @@ impl PassSession {
         }
         let ds = match v.get(&req.source.name, 1, req.lease_ms.max(1000)).await {
             Ok(d) => d,
-            Err(e) => return RunReply::failed(&mq_err(&e)),
+            Err(e) => return infra(&e),
         };
         let Some(d) = ds.into_iter().next() else {
             return RunReply::of(RunOutcome::Empty);

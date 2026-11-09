@@ -226,6 +226,9 @@ fn explain(q: &Query) -> Vec<String> {
     out
 }
 
+/// A procedure's columns, and its rows by input row.
+type CallRows = (Vec<String>, Vec<(usize, Vec<Value>)>);
+
 /// Hidden row keys start with a space, so no variable can clash.
 pub(crate) const RELS: &str = " rels";
 
@@ -245,9 +248,8 @@ pub(crate) struct Exec<'a> {
 /// result (chapter 43's `Mult`): the next clause is `WITH`/`RETURN
 /// DISTINCT`, or aggregates only with duplicate-insensitive aggregates.
 fn dup_insensitive(rest: &[Clause]) -> bool {
-    let p = match rest.first() {
-        Some(Clause::With(p) | Clause::Return(p)) => p,
-        _ => return false,
+    let Some(Clause::With(p) | Clause::Return(p)) = rest.first() else {
+        return false;
     };
     if p.distinct && !p.items.iter().any(|(e, _)| e.has_aggregate()) {
         return true;
@@ -371,7 +373,9 @@ impl Exec<'_> {
                 whens,
                 else_,
             } => Expr::Case {
-                subject: subject.as_ref().map(|s| Box::new(self.lift_patterns(s, out))),
+                subject: subject
+                    .as_ref()
+                    .map(|s| Box::new(self.lift_patterns(s, out))),
                 whens: whens
                     .iter()
                     .map(|(a, b)| (self.lift_patterns(a, out), self.lift_patterns(b, out)))
@@ -511,7 +515,9 @@ impl Exec<'_> {
                 }
                 Clause::Set(items) => rows = self.set(rows, items).await?,
                 Clause::Remove(items) => rows = self.remove(rows, items).await?,
-                Clause::Delete { detach, exprs } => rows = self.delete(rows, exprs, *detach).await?,
+                Clause::Delete { detach, exprs } => {
+                    rows = self.delete(rows, exprs, *detach).await?;
+                }
                 Clause::Call {
                     name,
                     args,
@@ -519,7 +525,7 @@ impl Exec<'_> {
                     where_,
                 } => {
                     let standalone = n == 1;
-                    let (cols, out) = self.call(name, args.as_deref(), yields.as_ref(), &rows).await?;
+                    let (cols, out) = self.call(name, args.as_deref(), yields.as_ref(), &rows)?;
                     if standalone {
                         return Ok((cols, out.into_iter().map(|(_, v)| v).collect()));
                     }
@@ -545,13 +551,13 @@ impl Exec<'_> {
         Ok((Vec::new(), Vec::new()))
     }
 
-    async fn call(
+    fn call(
         &mut self,
         name: &str,
         args: Option<&[Expr]>,
         yields: Option<&Vec<(String, String)>>,
         rows: &[Row],
-    ) -> Result<(Vec<String>, Vec<(usize, Vec<Value>)>)> {
+    ) -> Result<CallRows> {
         if args.is_some_and(|a| !a.is_empty()) {
             return Err(SprigError::new(
                 SprigCode::GraphSyntax,
@@ -591,7 +597,10 @@ impl Exec<'_> {
             }
         };
         let (out_cols, idx): (Vec<String>, Vec<usize>) = match yields {
-            None => (cols.iter().map(|c| (*c).to_owned()).collect(), (0..cols.len()).collect()),
+            None => (
+                cols.iter().map(|c| (*c).to_owned()).collect(),
+                (0..cols.len()).collect(),
+            ),
             Some(y) => {
                 let mut oc = Vec::new();
                 let mut ix = Vec::new();
@@ -623,7 +632,10 @@ impl Exec<'_> {
             Value::Int(i) if i >= 0 => Ok(usize::try_from(i).ok()),
             other => Err(SprigError::new(
                 SprigCode::GraphSyntax,
-                format!("{what} must be a non-negative integer, got {}", other.display()),
+                format!(
+                    "{what} must be a non-negative integer, got {}",
+                    other.display()
+                ),
             )),
         }
     }
@@ -661,7 +673,9 @@ impl Exec<'_> {
                 if !seen.insert(c) {
                     return Err(SprigError::new(
                         SprigCode::GraphSyntax,
-                        format!("Multiple result columns with the same name are not supported: {c}"),
+                        format!(
+                            "Multiple result columns with the same name are not supported: {c}"
+                        ),
                     ));
                 }
             }
@@ -686,24 +700,27 @@ impl Exec<'_> {
                     kv.push(self.eval_full(&items[i].0, r).await?);
                 }
                 let k: Vec<Key> = kv.iter().map(Value::key).collect();
-                let gi = match index.get(&k) {
-                    Some(g) => *g,
-                    None => {
-                        groups.push((r.clone(), kv, aggs.iter().map(agg::State::new).collect()));
-                        index.insert(k, groups.len() - 1);
-                        groups.len() - 1
-                    }
+                let gi = if let Some(g) = index.get(&k) {
+                    *g
+                } else {
+                    groups.push((r.clone(), kv, aggs.iter().map(agg::State::new).collect()));
+                    index.insert(k, groups.len() - 1);
+                    groups.len() - 1
                 };
                 for (ai, a) in aggs.iter().enumerate() {
                     let v = match &a.arg {
                         Some(e) => Some(self.eval_full(e, r).await?),
                         None => None,
                     };
-                    groups[gi].2[ai].add(a, v)?;
+                    groups[gi].2[ai].add(a, v);
                 }
             }
             if groups.is_empty() && key_items.is_empty() {
-                groups.push((Row::new(), vec![], aggs.iter().map(agg::State::new).collect()));
+                groups.push((
+                    Row::new(),
+                    vec![],
+                    aggs.iter().map(agg::State::new).collect(),
+                ));
             }
             self.check_rows(groups.len())?;
             for (first, kv, states) in groups {
@@ -909,25 +926,25 @@ mod agg {
             }
         }
 
-        pub(super) fn add(&mut self, s: &Spec, v: Option<Value>) -> Result<()> {
+        pub(super) fn add(&mut self, s: &Spec, v: Option<Value>) {
             let Some(v) = v else {
                 self.count += 1;
-                return Ok(());
+                return;
             };
-            if v.is_null() {
-                return Ok(());
-            }
-            if s.distinct && !self.seen.insert(v.key()) {
-                return Ok(());
+            if v.is_null() || (s.distinct && !self.seen.insert(v.key())) {
+                return;
             }
             self.count += 1;
             if s.name != "count" {
                 self.values.push(v);
             }
-            Ok(())
         }
 
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         pub(super) fn finish(self, s: &Spec, params: &Params) -> Result<Value> {
             let nums = |vals: &[Value]| -> Result<Vec<f64>> {
                 vals.iter()
@@ -950,7 +967,9 @@ mod agg {
                         let mut t: i64 = 0;
                         for v in &self.values {
                             if let Value::Int(i) = v {
-                                t = t.checked_add(*i).ok_or_else(|| type_error("integer overflow"))?;
+                                t = t
+                                    .checked_add(*i)
+                                    .ok_or_else(|| type_error("integer overflow"))?;
                             }
                         }
                         Value::Int(t)
@@ -963,11 +982,25 @@ mod agg {
                     if n.is_empty() {
                         Value::Null
                     } else {
-                        Value::Float(n.iter().sum::<f64>() / n.len() as f64)
+                        // A running mean, as Neo4j computes it (the last
+                        // bits of the result match).
+                        let mut m = 0.0;
+                        for (i, x) in n.iter().enumerate() {
+                            m += (x - m) / (i + 1) as f64;
+                        }
+                        Value::Float(m)
                     }
                 }
-                "min" => self.values.into_iter().min_by(Value::order).unwrap_or(Value::Null),
-                "max" => self.values.into_iter().max_by(Value::order).unwrap_or(Value::Null),
+                "min" => self
+                    .values
+                    .into_iter()
+                    .min_by(Value::order)
+                    .unwrap_or(Value::Null),
+                "max" => self
+                    .values
+                    .into_iter()
+                    .max_by(Value::order)
+                    .unwrap_or(Value::Null),
                 "stdev" | "stdevp" => {
                     let n = nums(&self.values)?;
                     let d = if s.name == "stdev" { 1.0 } else { 0.0 };
@@ -975,7 +1008,8 @@ mod agg {
                         Value::Float(0.0)
                     } else {
                         let m = n.iter().sum::<f64>() / n.len() as f64;
-                        let var = n.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n.len() as f64 - d);
+                        let var =
+                            n.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n.len() as f64 - d);
                         Value::Float(var.sqrt())
                     }
                 }
@@ -1001,7 +1035,9 @@ mod agg {
                     }
                     let last = (n.len() - 1) as f64;
                     if s.name == "percentiledisc" {
-                        let i = ((p * n.len() as f64).ceil() as usize).saturating_sub(1).min(n.len() - 1);
+                        let i = ((p * n.len() as f64).ceil() as usize)
+                            .saturating_sub(1)
+                            .min(n.len() - 1);
                         Value::Float(n[i])
                     } else {
                         let pos = p * last;

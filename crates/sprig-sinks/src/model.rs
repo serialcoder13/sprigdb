@@ -696,9 +696,7 @@ impl SinkRecord {
         let mut m = Map::new();
         m.insert(
             "key".into(),
-            self.key
-                .as_deref()
-                .map_or(Value::Null, bytes_json_text),
+            self.key.as_deref().map_or(Value::Null, bytes_json_text),
         );
         m.insert("value".into(), self.value_json());
         m.insert("headers".into(), self.headers_json());

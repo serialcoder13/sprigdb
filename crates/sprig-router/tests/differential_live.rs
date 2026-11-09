@@ -1850,7 +1850,10 @@ async fn fk_ddl(e: &Env, sut: &mut Conn, reference: &mut Conn, tally: &mut Tally
             "INSERT INTO orders (oid, cid, pid, amount, qty, note) VALUES (9101, 2, 5, 1, 1, 'x')",
             Some("orders"),
         ),
-        ("UPDATE orders SET pid = 888888 WHERE oid = 9101", Some("orders")),
+        (
+            "UPDATE orders SET pid = 888888 WHERE oid = 9101",
+            Some("orders"),
+        ),
         ("DELETE FROM products WHERE pid = 5", Some("products")),
         ("DELETE FROM orders WHERE oid = 9101", Some("orders")),
         ("DELETE FROM products WHERE pid = 5", Some("products")),
@@ -1869,7 +1872,9 @@ async fn fk_ddl(e: &Env, sut: &mut Conn, reference: &mut Conn, tally: &mut Tally
         let a = run(sut, q).await;
         let b = run(reference, q).await;
         if matches!(a, Outcome::Err(39420, _)) {
-            tally.mismatches.push(format!("R3 FK DDL REFUSED {q}: {a:?}"));
+            tally
+                .mismatches
+                .push(format!("R3 FK DDL REFUSED {q}: {a:?}"));
         }
         tally.check(q, Cmp::Bag, &a, &b);
         if let Some(t) = t {
@@ -1887,9 +1892,9 @@ async fn fk_ddl(e: &Env, sut: &mut Conn, reference: &mut Conn, tally: &mut Tally
         .unwrap();
     tally.compared += 1;
     if left != Some(0) {
-        tally
-            .mismatches
-            .push(format!("foreign_keys still has fk_o_p after DROP: {left:?}"));
+        tally.mismatches.push(format!(
+            "foreign_keys still has fk_o_p after DROP: {left:?}"
+        ));
     }
     for q in ["DELETE FROM orders WHERE oid IN (9100, 9101, 9102)"] {
         for c in [&mut *sut, &mut *reference] {
@@ -1907,9 +1912,7 @@ async fn fk_ddl(e: &Env, sut: &mut Conn, reference: &mut Conn, tally: &mut Tally
 async fn load(c: &mut Conn, sql: &str, data: &[u8]) -> Outcome {
     use futures::StreamExt as _;
     let bytes = bytes::Bytes::copy_from_slice(data);
-    c.set_infile_handler(async move {
-        Ok(futures::stream::iter(vec![Ok(bytes)]).boxed())
-    });
+    c.set_infile_handler(async move { Ok(futures::stream::iter(vec![Ok(bytes)]).boxed()) });
     run(c, sql).await
 }
 
@@ -1927,7 +1930,9 @@ async fn write_forms(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) ->
     let mut stmts = 0usize;
     // An unsharded table, made through the gateway on both sides.
     for c in [&mut *sut, &mut *reference] {
-        c.query_drop("DROP TABLE IF EXISTS wf_totals").await.unwrap();
+        c.query_drop("DROP TABLE IF EXISTS wf_totals")
+            .await
+            .unwrap();
         c.query_drop(
             "CREATE TABLE wf_totals (cid INT NOT NULL PRIMARY KEY, n INT, amt DECIMAL(14,2)) \
              DEFAULT CHARSET utf8mb4",
@@ -2097,7 +2102,8 @@ async fn write_forms(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) ->
     for c in [&mut *sut, &mut *reference] {
         c.query_drop("BEGIN").await.unwrap();
     }
-    let q = "LOAD DATA LOCAL INFILE 'r.csv' INTO TABLE customers FIELDS TERMINATED BY ',' (cid, name)";
+    let q =
+        "LOAD DATA LOCAL INFILE 'r.csv' INTO TABLE customers FIELDS TERMINATED BY ',' (cid, name)";
     let a = load(sut, q, b"40300,a\n40301,b\n").await;
     let b = load(reference, q, b"40300,a\n40301,b\n").await;
     tally.check(q, Cmp::Bag, &a, &b);
@@ -2105,7 +2111,14 @@ async fn write_forms(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) ->
         c.query_drop("ROLLBACK").await.unwrap();
     }
     stmts += 1;
-    compare_full(sut, reference, tally, "after LOAD DATA and ROLLBACK", "customers").await;
+    compare_full(
+        sut,
+        reference,
+        tally,
+        "after LOAD DATA and ROLLBACK",
+        "customers",
+    )
+    .await;
     let full = full("wf_totals");
     let a = run(sut, &full).await;
     let b = run(reference, &full).await;

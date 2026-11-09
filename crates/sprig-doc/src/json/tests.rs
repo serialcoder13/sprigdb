@@ -81,9 +81,14 @@ fn every_bson_type_round_trips() {
 
 #[test]
 fn plain_json_has_no_type_map() {
-    let (j, t) = round_trip(&doc! {"_id": "k", "a": [1, 2.5, "x", null, true], "b": {"c": 2_147_483_648i64}});
+    let (j, t) = round_trip(
+        &doc! {"_id": "k", "a": [1, 2.5, "x", null, true], "b": {"c": 2_147_483_648i64}},
+    );
     assert_eq!(t, None);
-    assert_eq!(j, r#"{"_id":"k","a":[1,2.5,"x",null,true],"b":{"c":2147483648}}"#);
+    assert_eq!(
+        j,
+        r#"{"_id":"k","a":[1,2.5,"x",null,true],"b":{"c":2147483648}}"#
+    );
 }
 
 #[test]
@@ -91,9 +96,15 @@ fn id_first_and_mariadb_spelling_parses() {
     let s = to_stored(&doc! {"a": 1, "_id": 2}, &RenderOpts::default()).unwrap();
     assert_eq!(s.doc, r#"{"_id":2,"a":1}"#);
     // JSON_SET re-serializes with spaces; numbers keep their digits.
-    let back = to_bson(r#"{"_id": 2, "a": 1, "price": 59.90, "q": 3}"#,
-        Some(r#"{"price": "decimal", "q": "long"}"#)).unwrap();
-    assert_eq!(back.get("price"), Some(&Bson::Decimal128(Decimal128::from_str("59.90").unwrap())));
+    let back = to_bson(
+        r#"{"_id": 2, "a": 1, "price": 59.90, "q": 3}"#,
+        Some(r#"{"price": "decimal", "q": "long"}"#),
+    )
+    .unwrap();
+    assert_eq!(
+        back.get("price"),
+        Some(&Bson::Decimal128(Decimal128::from_str("59.90").unwrap()))
+    );
     assert_eq!(back.get("q"), Some(&Bson::Int64(3)));
     // an entry that no longer fits the value (SQL changed it) is ignored
     let back = to_bson(r#"{"_id": "x", "q": "text"}"#, Some(r#"{"q": "long"}"#)).unwrap();
@@ -112,20 +123,36 @@ fn limits() {
     d.insert("_id", 1);
     let e = to_stored(&d, &RenderOpts::default()).unwrap_err();
     assert_eq!(e.code, code::SPRIG_DOC_TOO_DEEP);
-    assert_eq!(id_key(&Bson::Array(vec![])).unwrap_err().code, code::INVALID_ID_FIELD);
-    assert_eq!(id_key(&Bson::String("x".repeat(2000))).unwrap_err().code, code::SPRIG_DOC_ID_TOO_LONG);
+    assert_eq!(
+        id_key(&Bson::Array(vec![])).unwrap_err().code,
+        code::INVALID_ID_FIELD
+    );
+    assert_eq!(
+        id_key(&Bson::String("x".repeat(2000))).unwrap_err().code,
+        code::SPRIG_DOC_ID_TOO_LONG
+    );
     // duplicate names in raw BSON
     let mut raw = bson::RawDocumentBuf::new();
     raw.append("a", 1);
     raw.append("a", 2);
     assert_eq!(check_raw(&raw).unwrap_err().code, code::BAD_VALUE);
-    let off = render(&doc! {"_id": ObjectId::new()}, &RenderOpts { type_map: false }).unwrap();
+    let off = render(
+        &doc! {"_id": ObjectId::new()},
+        &RenderOpts { type_map: false },
+    )
+    .unwrap();
     assert_eq!(off.1, None);
 }
 
 #[test]
 fn dates() {
-    for ms in [0i64, 1_762_510_500_123, -1, 253_402_300_799_999, -30_610_224_000_000] {
+    for ms in [
+        0i64,
+        1_762_510_500_123,
+        -1,
+        253_402_300_799_999,
+        -30_610_224_000_000,
+    ] {
         let t = iso_from_ms(ms).unwrap();
         assert_eq!(ms_from_iso(&t), Some(ms), "{t}");
     }

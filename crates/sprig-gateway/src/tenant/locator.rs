@@ -395,7 +395,11 @@ impl GatewayLocator {
             .map(|n| n.node);
         let writer = writer.or_else(|| rec.nodes.first().map(|n| n.node.clone()));
         let mut out = Vec::new();
-        for n in rec.nodes.iter().filter(|n| Some(&n.node) != writer.as_ref()) {
+        for n in rec
+            .nodes
+            .iter()
+            .filter(|n| Some(&n.node) != writer.as_ref())
+        {
             out.push(CredentialConnector::ctl(&rec.secrets).endpoint(n)?.opts);
         }
         Ok(out)

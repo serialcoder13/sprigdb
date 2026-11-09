@@ -326,6 +326,14 @@ pub trait SessionExec: Send {
     fn idle_timeout(&self) -> Option<std::time::Duration> {
         None
     }
+
+    /// Internal mode for the statements of a gateway layer that names its
+    /// own reserved objects: chapter 31's document engine runs its SQL
+    /// (`_sprig_p_` field columns, `__sprig_doc_meta`) through the user's
+    /// session this way, as chapter 32's type layer does. Privileges still
+    /// apply; only chapter 07's reserved-name check is lifted. Executors
+    /// without tenant sessions ignore it.
+    fn set_internal(&mut self, _on: bool) {}
 }
 
 /// The client side of a response, as an executor sees it.
@@ -576,6 +584,10 @@ impl SessionExec for HookedSession {
 
     fn idle_timeout(&self) -> Option<std::time::Duration> {
         self.inner.idle_timeout()
+    }
+
+    fn set_internal(&mut self, on: bool) {
+        self.inner.set_internal(on);
     }
 }
 

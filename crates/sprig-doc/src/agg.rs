@@ -115,7 +115,11 @@ pub fn eval(e: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| loc(17276, format!("Use of undefined variable: {name}")))?;
-            let parts: Vec<&str> = if path.is_empty() { vec![] } else { path.split('.').collect() };
+            let parts: Vec<&str> = if path.is_empty() {
+                vec![]
+            } else {
+                path.split('.').collect()
+            };
             Ok(field_value(&base, &parts))
         }
         Bson::String(s) if s.starts_with('$') => {
@@ -143,7 +147,12 @@ pub fn eval(e: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 return Ok(Bson::Document(out));
             }
             if d.len() > 1 {
-                return Err(loc(15983, format!("An object representing an expression must have exactly one field: {d}")));
+                return Err(loc(
+                    15983,
+                    format!(
+                        "An object representing an expression must have exactly one field: {d}"
+                    ),
+                ));
             }
             op_eval(op, arg, vars)
         }
@@ -160,7 +169,10 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
     let cmp2 = |vars: &Vars| -> Result<Ordering, MongoError> {
         let v = evals(arg, vars)?;
         if v.len() != 2 {
-            return Err(loc(16020, format!("Expression {op} takes exactly 2 arguments")));
+            return Err(loc(
+                16020,
+                format!("Expression {op} takes exactly 2 arguments"),
+            ));
         }
         Ok(compare(&v[0], &v[1]))
     };
@@ -179,7 +191,13 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                     continue;
                 }
                 if num_f(&v).is_none() {
-                    return Err(loc(16554, format!("{op} only supports numeric or date types, not {}", type_name(&v))));
+                    return Err(loc(
+                        16554,
+                        format!(
+                            "{op} only supports numeric or date types, not {}",
+                            type_name(&v)
+                        ),
+                    ));
                 }
                 acc = Some(match acc {
                     None => v,
@@ -191,7 +209,7 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 Some(ms) => Bson::DateTime(DateTime::from_millis(
                     ms + acc.as_ref().and_then(num_f).unwrap_or(0.0) as i64,
                 )),
-                None => acc.unwrap_or(Bson::Int32(if op == "$add" { 0 } else { 1 })),
+                None => acc.unwrap_or(Bson::Int32(i32::from(op != "$add"))),
             }
         }
         "$subtract" => {
@@ -236,12 +254,17 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             }
             match (v.first().and_then(as_i64), v.get(1).and_then(as_i64)) {
                 (Some(_), Some(0)) => return Err(loc(16610, "can't $mod by zero")),
-                (Some(a), Some(b)) if matches!(v[0], Bson::Int32(_)) && matches!(v[1], Bson::Int32(_)) => {
+                (Some(a), Some(b))
+                    if matches!(v[0], Bson::Int32(_)) && matches!(v[1], Bson::Int32(_)) =>
+                {
                     Bson::Int32(i32::try_from(a % b).unwrap_or(0))
                 }
                 (Some(a), Some(b)) => Bson::Int64(a % b),
                 _ => {
-                    let (a, b) = (num_f(&v[0]).unwrap_or(f64::NAN), num_f(&v[1]).unwrap_or(f64::NAN));
+                    let (a, b) = (
+                        num_f(&v[0]).unwrap_or(f64::NAN),
+                        num_f(&v[1]).unwrap_or(f64::NAN),
+                    );
                     Bson::Double(a % b)
                 }
             }
@@ -257,7 +280,8 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 (Bson::Int64(i), "$abs") => Bson::Int64(i.abs()),
                 (Bson::Int32(_) | Bson::Int64(_), "$ceil" | "$floor" | "$round" | "$trunc") => x,
                 _ => {
-                    let f = num_f(&x).ok_or_else(|| loc(28765, format!("{op} only supports numeric types")))?;
+                    let f = num_f(&x)
+                        .ok_or_else(|| loc(28765, format!("{op} only supports numeric types")))?;
                     Bson::Double(match op {
                         "$abs" => f.abs(),
                         "$ceil" => f.ceil(),
@@ -279,7 +303,12 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 match v {
                     Bson::String(x) => s.push_str(&x),
                     v if nullish(&v) => return Ok(Bson::Null),
-                    v => return Err(loc(16702, format!("$concat only supports strings, not {}", type_name(&v)))),
+                    v => {
+                        return Err(loc(
+                            16702,
+                            format!("$concat only supports strings, not {}", type_name(&v)),
+                        ));
+                    }
                 }
             }
             Bson::String(s)
@@ -292,10 +321,21 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 Some(x) => x.to_string(),
                 None => String::new(),
             };
-            Bson::String(if op == "$toUpper" { s.to_uppercase() } else { s.to_lowercase() })
+            Bson::String(if op == "$toUpper" {
+                s.to_uppercase()
+            } else {
+                s.to_lowercase()
+            })
         }
         "$strLenCP" | "$strLenBytes" => match evals(arg, vars)?.first() {
-            Some(Bson::String(s)) => Bson::Int32(i32::try_from(if op == "$strLenCP" { s.chars().count() } else { s.len() }).unwrap_or(i32::MAX)),
+            Some(Bson::String(s)) => Bson::Int32(
+                i32::try_from(if op == "$strLenCP" {
+                    s.chars().count()
+                } else {
+                    s.len()
+                })
+                .unwrap_or(i32::MAX),
+            ),
             _ => return Err(loc(34471, format!("{op} requires a string argument"))),
         },
         "$substr" | "$substrCP" | "$substrBytes" => {
@@ -307,15 +347,26 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             let start = usize::try_from(v.get(1).and_then(as_i64).unwrap_or(0).max(0)).unwrap_or(0);
             let len = v.get(2).and_then(as_i64).unwrap_or(-1);
             let chars: Vec<char> = s.chars().collect();
-            let end = if len < 0 { chars.len() } else { (start + usize::try_from(len).unwrap_or(0)).min(chars.len()) };
-            Bson::String(chars.get(start.min(chars.len())..end.max(start.min(chars.len()))).map(|c| c.iter().collect()).unwrap_or_default())
+            let end = if len < 0 {
+                chars.len()
+            } else {
+                (start + usize::try_from(len).unwrap_or(0)).min(chars.len())
+            };
+            Bson::String(
+                chars
+                    .get(start.min(chars.len())..end.max(start.min(chars.len())))
+                    .map(|c| c.iter().collect())
+                    .unwrap_or_default(),
+            )
         }
         "$split" => {
             let v = evals(arg, vars)?;
             match (v.first(), v.get(1)) {
-                (Some(Bson::String(s)), Some(Bson::String(d))) => {
-                    Bson::Array(s.split(d.as_str()).map(|x| Bson::String(x.to_owned())).collect())
-                }
+                (Some(Bson::String(s)), Some(Bson::String(d))) => Bson::Array(
+                    s.split(d.as_str())
+                        .map(|x| Bson::String(x.to_owned()))
+                        .collect(),
+                ),
                 (Some(x), _) if nullish(x) => Bson::Null,
                 _ => return Err(loc(40085, "$split requires strings")),
             }
@@ -347,7 +398,9 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             }
             Bson::Boolean(false)
         }
-        "$not" => Bson::Boolean(!value_truthy(&evals(arg, vars)?.first().cloned().unwrap_or(Bson::Null))),
+        "$not" => Bson::Boolean(!value_truthy(
+            &evals(arg, vars)?.first().cloned().unwrap_or(Bson::Null),
+        )),
         "$cond" => {
             let (c, t, f) = match arg {
                 Bson::Document(d) => (
@@ -358,11 +411,20 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 Bson::Array(a) if a.len() == 3 => (a[0].clone(), a[1].clone(), a[2].clone()),
                 _ => return Err(loc(16020, "Expression $cond takes exactly 3 arguments")),
             };
-            if value_truthy(&eval(&c, vars)?) { eval(&t, vars)? } else { eval(&f, vars)? }
+            if value_truthy(&eval(&c, vars)?) {
+                eval(&t, vars)?
+            } else {
+                eval(&f, vars)?
+            }
         }
         "$switch" => {
-            let d = arg.as_document().ok_or_else(|| bad("$switch requires an object"))?;
-            for b in d.get_array("branches").map_err(|_| bad("$switch requires branches"))? {
+            let d = arg
+                .as_document()
+                .ok_or_else(|| bad("$switch requires an object"))?;
+            for b in d
+                .get_array("branches")
+                .map_err(|_| bad("$switch requires branches"))?
+            {
                 let b = b.as_document().ok_or_else(|| bad("bad branch"))?;
                 if value_truthy(&eval(b.get("case").unwrap_or(&Bson::Null), vars)?) {
                     return eval(b.get("then").unwrap_or(&Bson::Null), vars);
@@ -370,7 +432,12 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             }
             match d.get("default") {
                 Some(x) => eval(x, vars)?,
-                None => return Err(loc(40066, "$switch could not find a matching branch for an input, and no default was specified.")),
+                None => {
+                    return Err(loc(
+                        40066,
+                        "$switch could not find a matching branch for an input, and no default was specified.",
+                    ));
+                }
             }
         }
         "$ifNull" => {
@@ -392,7 +459,15 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
         }
         "$size" => match evals(arg, vars)?.first() {
             Some(Bson::Array(a)) => Bson::Int32(i32::try_from(a.len()).unwrap_or(i32::MAX)),
-            Some(x) => return Err(loc(17124, format!("The argument to $size must be an array. Type of the argument: {}", if missing(x) { "missing" } else { type_name(x) }))),
+            Some(x) => {
+                return Err(loc(
+                    17124,
+                    format!(
+                        "The argument to $size must be an array. Type of the argument: {}",
+                        if missing(x) { "missing" } else { type_name(x) }
+                    ),
+                ));
+            }
             None => return Err(loc(17124, "The argument to $size must be an array")),
         },
         "$isArray" => Bson::Boolean(matches!(evals(arg, vars)?.first(), Some(Bson::Array(_)))),
@@ -402,16 +477,27 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 (Some(Bson::Array(a)), Some(i)) => {
                     let len = i64::try_from(a.len()).unwrap_or(0);
                     let k = if i < 0 { len + i } else { i };
-                    usize::try_from(k).ok().and_then(|k| a.get(k)).cloned().unwrap_or(Bson::Undefined)
+                    usize::try_from(k)
+                        .ok()
+                        .and_then(|k| a.get(k))
+                        .cloned()
+                        .unwrap_or(Bson::Undefined)
                 }
                 (Some(x), _) if nullish(x) => Bson::Null,
                 _ => return Err(loc(28689, "$arrayElemAt's first argument must be an array")),
             }
         }
         "$first" | "$last" => match eval(arg, vars)? {
-            Bson::Array(a) => (if op == "$first" { a.first() } else { a.last() }).cloned().unwrap_or(Bson::Undefined),
+            Bson::Array(a) => (if op == "$first" { a.first() } else { a.last() })
+                .cloned()
+                .unwrap_or(Bson::Undefined),
             x if nullish(&x) => Bson::Null,
-            x => return Err(loc(28689, format!("{op}'s argument must be an array, but is {}", type_name(&x)))),
+            x => {
+                return Err(loc(
+                    28689,
+                    format!("{op}'s argument must be an array, but is {}", type_name(&x)),
+                ));
+            }
         },
         "$concatArrays" => {
             let mut out = Vec::new();
@@ -419,7 +505,12 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 match v {
                     Bson::Array(a) => out.extend(a),
                     v if nullish(&v) => return Ok(Bson::Null),
-                    v => return Err(loc(28664, format!("$concatArrays only supports arrays, not {}", type_name(&v)))),
+                    v => {
+                        return Err(loc(
+                            28664,
+                            format!("$concatArrays only supports arrays, not {}", type_name(&v)),
+                        ));
+                    }
                 }
             }
             Bson::Array(out)
@@ -448,13 +539,22 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             acc.result()
         }
         "$type" => {
-            let v = evals(arg, vars)?.first().cloned().unwrap_or(Bson::Undefined);
-            Bson::String(if missing(&v) { "missing".into() } else { type_name(&v).into() })
+            let v = evals(arg, vars)?
+                .first()
+                .cloned()
+                .unwrap_or(Bson::Undefined);
+            Bson::String(if missing(&v) {
+                "missing".into()
+            } else {
+                type_name(&v).into()
+            })
         }
         "$toString" => match evals(arg, vars)?.first() {
             Some(Bson::String(s)) => Bson::String(s.clone()),
             Some(Bson::ObjectId(o)) => Bson::String(o.to_hex()),
-            Some(Bson::DateTime(d)) => Bson::String(crate::json::iso_from_ms(d.timestamp_millis()).unwrap_or_default()),
+            Some(Bson::DateTime(d)) => {
+                Bson::String(crate::json::iso_from_ms(d.timestamp_millis()).unwrap_or_default())
+            }
             Some(Bson::Double(f)) => Bson::String(format!("{f}")),
             Some(x) if nullish(x) => Bson::Null,
             Some(x) => Bson::String(x.to_string()),
@@ -466,7 +566,10 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 return Ok(Bson::Null);
             }
             let f = match &v {
-                Bson::String(s) => s.trim().parse::<f64>().map_err(|_| loc(241, format!("Failed to parse number '{s}' in $convert")))?,
+                Bson::String(s) => s
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| loc(241, format!("Failed to parse number '{s}' in $convert")))?,
                 Bson::Boolean(b) => f64::from(u8::from(*b)),
                 x => num_f(x).ok_or_else(|| loc(241, "Unsupported conversion in $convert"))?,
             };
@@ -478,27 +581,40 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 "$toBool" => Bson::Boolean(f != 0.0 || matches!(v, Bson::String(_))),
                 _ => match &v {
                     Bson::String(s) => s.parse().map(Bson::Decimal128).unwrap_or(Bson::Double(f)),
-                    _ => format!("{f}").parse().map(Bson::Decimal128).unwrap_or(Bson::Double(f)),
+                    _ => format!("{f}")
+                        .parse()
+                        .map(Bson::Decimal128)
+                        .unwrap_or(Bson::Double(f)),
                 },
             }
         }
-        "$year" | "$month" | "$dayOfMonth" | "$hour" | "$minute" | "$second" | "$millisecond" | "$dayOfWeek" | "$dayOfYear" => {
+        "$year" | "$month" | "$dayOfMonth" | "$hour" | "$minute" | "$second" | "$millisecond"
+        | "$dayOfWeek" | "$dayOfYear" => {
             let v = match arg {
-                Bson::Document(d) if d.contains_key("date") => eval(d.get("date").unwrap_or(&Bson::Null), vars)?,
+                Bson::Document(d) if d.contains_key("date") => {
+                    eval(d.get("date").unwrap_or(&Bson::Null), vars)?
+                }
                 other => evals(other, vars)?.first().cloned().unwrap_or(Bson::Null),
             };
             let Bson::DateTime(d) = v else {
                 if nullish(&v) {
                     return Ok(Bson::Null);
                 }
-                return Err(loc(16006, format!("can't convert from BSON type {} to Date", type_name(&v))));
+                return Err(loc(
+                    16006,
+                    format!("can't convert from BSON type {} to Date", type_name(&v)),
+                ));
             };
             date_part(op, d.timestamp_millis())
         }
         "$dateToString" => {
-            let d = arg.as_document().ok_or_else(|| bad("$dateToString needs an object"))?;
+            let d = arg
+                .as_document()
+                .ok_or_else(|| bad("$dateToString needs an object"))?;
             let v = eval(d.get("date").unwrap_or(&Bson::Null), vars)?;
-            let Bson::DateTime(dt) = v else { return Ok(Bson::Null) };
+            let Bson::DateTime(dt) = v else {
+                return Ok(Bson::Null);
+            };
             let fmt = d.get_str("format").unwrap_or("%Y-%m-%dT%H:%M:%S.%LZ");
             Bson::String(date_format(fmt, dt.timestamp_millis()))
         }
@@ -520,7 +636,11 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             Bson::Document(out)
         }
         "$objectToArray" => match eval(arg, vars)? {
-            Bson::Document(d) => Bson::Array(d.into_iter().map(|(k, v)| Bson::Document(doc! {"k": k, "v": v})).collect()),
+            Bson::Document(d) => Bson::Array(
+                d.into_iter()
+                    .map(|(k, v)| Bson::Document(doc! {"k": k, "v": v}))
+                    .collect(),
+            ),
             x if nullish(&x) => Bson::Null,
             _ => return Err(loc(40390, "$objectToArray requires a document input")),
         },
@@ -547,7 +667,9 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             _ => Bson::Null,
         },
         "$map" | "$filter" => {
-            let d = arg.as_document().ok_or_else(|| bad(format!("{op} needs an object")))?;
+            let d = arg
+                .as_document()
+                .ok_or_else(|| bad(format!("{op} needs an object")))?;
             let input = eval(d.get("input").unwrap_or(&Bson::Null), vars)?;
             let name = d.get_str("as").unwrap_or("this");
             let Bson::Array(a) = input else {
@@ -565,7 +687,9 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             Bson::Array(out)
         }
         "$reduce" => {
-            let d = arg.as_document().ok_or_else(|| bad("$reduce needs an object"))?;
+            let d = arg
+                .as_document()
+                .ok_or_else(|| bad("$reduce needs an object"))?;
             let Bson::Array(a) = eval(d.get("input").unwrap_or(&Bson::Null), vars)? else {
                 return Ok(Bson::Null);
             };
@@ -577,7 +701,9 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             acc
         }
         "$let" => {
-            let d = arg.as_document().ok_or_else(|| bad("$let needs an object"))?;
+            let d = arg
+                .as_document()
+                .ok_or_else(|| bad("$let needs an object"))?;
             let mut v2 = vars.clone();
             if let Ok(vs) = d.get_document("vars") {
                 for (k, x) in vs {
@@ -591,7 +717,9 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             let vs = evals(arg, vars)?;
             let mut out: Vec<Bson> = Vec::new();
             for (i, v) in vs.iter().enumerate() {
-                let Bson::Array(a) = v else { return Ok(Bson::Null) };
+                let Bson::Array(a) = v else {
+                    return Ok(Bson::Null);
+                };
                 if op == "$setUnion" || i == 0 {
                     for x in a {
                         if !out.iter().any(|y| equal(x, y)) {
@@ -605,7 +733,9 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             Bson::Array(out)
         }
         "$regexMatch" => {
-            let d = arg.as_document().ok_or_else(|| bad("$regexMatch needs an object"))?;
+            let d = arg
+                .as_document()
+                .ok_or_else(|| bad("$regexMatch needs an object"))?;
             let input = eval(d.get("input").unwrap_or(&Bson::Null), vars)?;
             let (p, o) = match d.get("regex") {
                 Some(Bson::String(s)) => (s.clone(), d.get_str("options").unwrap_or("").to_owned()),
@@ -616,10 +746,7 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             Bson::Boolean(matches!(input, Bson::String(ref s) if re.re.is_match(s)))
         }
         _ => {
-            return Err(loc(
-                168,
-                format!("Unrecognized expression '{op}'"),
-            ));
+            return Err(loc(168, format!("Unrecognized expression '{op}'")));
         }
     })
 }
@@ -628,7 +755,8 @@ fn date_part(op: &str, ms: i64) -> Bson {
     let days = ms.div_euclid(86_400_000);
     let rem = ms.rem_euclid(86_400_000);
     let iso = crate::json::iso_from_ms(ms).unwrap_or_default();
-    let num = |r: std::ops::Range<usize>| iso.get(r).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+    let num =
+        |r: std::ops::Range<usize>| iso.get(r).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
     #[allow(clippy::cast_possible_truncation)]
     Bson::Int32(match op {
         "$year" => num(0..4),
@@ -665,7 +793,6 @@ fn date_format(fmt: &str, ms: i64) -> String {
             Some('M') => out.push_str(&g(14..16)),
             Some('S') => out.push_str(&g(17..19)),
             Some('L') => out.push_str(&g(20..23)),
-            Some('%') => out.push('%'),
             Some(x) => {
                 out.push('%');
                 out.push(x);
@@ -744,7 +871,9 @@ impl Acc {
                         None => v,
                         Some(s) => match arith(&s, &v, false) {
                             Ok(x) => x,
-                            Err(_) => Bson::Double(num_f(&s).unwrap_or(0.0) + num_f(&v).unwrap_or(0.0)),
+                            Err(_) => {
+                                Bson::Double(num_f(&s).unwrap_or(0.0) + num_f(&v).unwrap_or(0.0))
+                            }
                         },
                     });
                 }
@@ -757,7 +886,11 @@ impl Acc {
                     None => true,
                     Some(b) => {
                         let o = compare(&v, b);
-                        if self.op == "$min" { o == Ordering::Less } else { o == Ordering::Greater }
+                        if self.op == "$min" {
+                            o == Ordering::Less
+                        } else {
+                            o == Ordering::Greater
+                        }
                     }
                 };
                 if replace {
@@ -795,7 +928,9 @@ impl Acc {
             #[allow(clippy::cast_precision_loss)]
             "$avg" => {
                 if self.any_num {
-                    Bson::Double(self.sum.as_ref().and_then(num_f).unwrap_or(0.0) / self.count as f64)
+                    Bson::Double(
+                        self.sum.as_ref().and_then(num_f).unwrap_or(0.0) / self.count as f64,
+                    )
                 } else {
                     Bson::Null
                 }
@@ -835,16 +970,20 @@ impl Projection {
         let mut inclusion: Option<bool> = None;
         let mut id = true;
         for (k, v) in spec {
-            if k == "_id" {
-                if let Some(f) = proj_flag(v) {
-                    id = f;
-                    continue;
-                }
+            if k == "_id"
+                && let Some(f) = proj_flag(v)
+            {
+                id = f;
+                continue;
             }
             let this = match proj_flag(v) {
                 Some(f) => f,
                 None => match v {
-                    Bson::Document(d) if d.contains_key("$slice") || d.contains_key("$elemMatch") => continue,
+                    Bson::Document(d)
+                        if d.contains_key("$slice") || d.contains_key("$elemMatch") =>
+                    {
+                        continue;
+                    }
                     _ => true,
                 },
             };
@@ -853,15 +992,22 @@ impl Projection {
                 Some(i) if i != this => {
                     return Err(loc(
                         if i { 31253 } else { 31254 },
-                        format!("Cannot do {} on field {k} in {} projection", if this { "inclusion" } else { "exclusion" }, if i { "inclusion" } else { "exclusion" }),
+                        format!(
+                            "Cannot do {} on field {k} in {} projection",
+                            if this { "inclusion" } else { "exclusion" },
+                            if i { "inclusion" } else { "exclusion" }
+                        ),
                     ));
                 }
                 _ => {}
             }
         }
+        // `{_id: 1}` alone is an inclusion projection; `{_id: 0}` alone an
+        // exclusion one.
+        let only_id = spec.contains_key("_id") && id;
         Ok(Self {
             spec: spec.clone(),
-            inclusion: inclusion.unwrap_or(false),
+            inclusion: inclusion.unwrap_or(only_id),
             id,
         })
     }
@@ -907,20 +1053,37 @@ impl Projection {
         if !self.id {
             out.remove("_id");
         }
+        if self.inclusion {
+            out = reorder(&out, doc);
+        }
+        // MongoDB applies `$elemMatch` projections after the rest, so
+        // their fields come last.
+        for (k, v) in &self.spec {
+            if matches!(v, Bson::Document(d) if d.contains_key("$elemMatch"))
+                && let Some(x) = out.remove(k)
+            {
+                out.insert(k.clone(), x);
+            }
+        }
         Ok(out)
     }
 
-    fn special(&self, doc: &Document, out: &mut Document, k: &str, v: &Bson, vars: &Vars) -> Result<(), MongoError> {
+    fn special(
+        &self,
+        doc: &Document,
+        out: &mut Document,
+        k: &str,
+        v: &Bson,
+        vars: &Vars,
+    ) -> Result<(), MongoError> {
         if let Bson::Document(d) = v {
             if let Some(s) = d.get("$slice") {
                 if let Some(Bson::Array(a)) = get_path(doc, k) {
                     let sliced = slice(a, s);
-                    if self.inclusion {
-                        crate::update::set_path(out, k, Bson::Array(sliced))?;
-                    } else {
-                        crate::update::set_path(out, k, Bson::Array(sliced))?;
-                    }
-                } else if self.inclusion && let Some(x) = get_path(doc, k) {
+                    crate::update::set_path(out, k, Bson::Array(sliced))?;
+                } else if self.inclusion
+                    && let Some(x) = get_path(doc, k)
+                {
                     crate::update::set_path(out, k, x.clone())?;
                 }
                 return Ok(());
@@ -928,7 +1091,10 @@ impl Projection {
             if let Some(Bson::Document(cond)) = d.get("$elemMatch") {
                 let p = filter::parse(cond)?;
                 if let Some(Bson::Array(a)) = doc.get(k) {
-                    if let Some(e) = a.iter().find(|e| matches!(e, Bson::Document(x) if p.matches(x))) {
+                    if let Some(e) = a
+                        .iter()
+                        .find(|e| matches!(e, Bson::Document(x) if p.matches(x)))
+                    {
                         out.insert(k, Bson::Array(vec![e.clone()]));
                     } else {
                         out.remove(k);
@@ -945,6 +1111,33 @@ impl Projection {
     }
 }
 
+/// `out`'s fields in `src`'s order (MongoDB keeps the document's order
+/// in inclusion projections); fields `src` lacks (computed) come last.
+fn reorder(out: &Document, src: &Document) -> Document {
+    let mut d = Document::new();
+    for (k, sv) in src {
+        if let Some(v) = out.get(k) {
+            d.insert(k.clone(), reorder_val(v, sv));
+        }
+    }
+    for (k, v) in out {
+        if !d.contains_key(k) {
+            d.insert(k.clone(), v.clone());
+        }
+    }
+    d
+}
+
+fn reorder_val(v: &Bson, src: &Bson) -> Bson {
+    match (v, src) {
+        (Bson::Document(o), Bson::Document(s)) => Bson::Document(reorder(o, s)),
+        (Bson::Array(o), Bson::Array(s)) if o.len() == s.len() => {
+            Bson::Array(o.iter().zip(s).map(|(a, b)| reorder_val(a, b)).collect())
+        }
+        _ => v.clone(),
+    }
+}
+
 fn slice(a: &[Bson], s: &Bson) -> Vec<Bson> {
     let len = i64::try_from(a.len()).unwrap_or(0);
     let (skip, n) = match s {
@@ -954,13 +1147,19 @@ fn slice(a: &[Bson], s: &Bson) -> Vec<Bson> {
             if n >= 0 { (0, n) } else { (len + n, -n) }
         }
     };
-    let start = if skip < 0 { (len + skip).max(0) } else { skip.min(len) };
+    let start = if skip < 0 {
+        (len + skip).max(0)
+    } else {
+        skip.min(len)
+    };
     let end = (start + n.max(0)).min(len);
     a[usize::try_from(start).unwrap_or(0)..usize::try_from(end).unwrap_or(0)].to_vec()
 }
 
 fn include_path(src: &Document, out: &mut Document, path: &str) {
-    let (head, rest) = path.split_once('.').map_or((path, None), |(h, r)| (h, Some(r)));
+    let (head, rest) = path
+        .split_once('.')
+        .map_or((path, None), |(h, r)| (h, Some(r)));
     let Some(v) = src.get(head) else { return };
     match rest {
         None => {
@@ -1006,7 +1205,9 @@ fn include_path(src: &Document, out: &mut Document, path: &str) {
 }
 
 fn exclude_path(d: &mut Document, path: &str) {
-    let (head, rest) = path.split_once('.').map_or((path, None), |(h, r)| (h, Some(r)));
+    let (head, rest) = path
+        .split_once('.')
+        .map_or((path, None), |(h, r)| (h, Some(r)));
     match rest {
         None => {
             d.remove(head);
@@ -1039,7 +1240,10 @@ pub fn parse_sort(d: &Document) -> Result<SortSpec, MongoError> {
             Some(-1) => Ok((k.clone(), -1)),
             _ => match v {
                 Bson::Document(m) if m.contains_key("$meta") => Ok((k.clone(), -1)),
-                _ => Err(loc(15975, "$sort key ordering must be 1 (for ascending) or -1 (for descending)")),
+                _ => Err(loc(
+                    15975,
+                    "$sort key ordering must be 1 (for ascending) or -1 (for descending)",
+                )),
             },
         })
         .collect()
@@ -1053,7 +1257,8 @@ fn sort_key(doc: &Document, path: &str, dir: i32) -> Bson {
     for v in &vs.leaves {
         match v {
             Bson::Array(a) if !a.is_empty() => cands.extend(a.iter()),
-            Bson::Array(_) => cands.push(*v),
+            // An empty array sorts before null and missing, as in MongoDB.
+            Bson::Array(_) => cands.push(&Bson::Undefined),
             _ => cands.push(*v),
         }
     }
@@ -1065,11 +1270,34 @@ fn sort_key(doc: &Document, path: &str, dir: i32) -> Bson {
     pick.cloned().unwrap_or(Bson::Null)
 }
 
+/// Sort keys compare as values do, except that `Undefined` (an empty
+/// array's key) sorts before null.
+fn sort_compare(a: &Bson, b: &Bson) -> Ordering {
+    match (a, b) {
+        (Bson::Undefined, Bson::Undefined) => Ordering::Equal,
+        (Bson::Undefined, x) => {
+            if matches!(x, Bson::MinKey) {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        (x, Bson::Undefined) => {
+            if matches!(x, Bson::MinKey) {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        _ => compare(a, b),
+    }
+}
+
 /// Compares two documents by `spec`.
 #[must_use]
 pub fn cmp_docs(a: &Document, b: &Document, spec: &SortSpec) -> Ordering {
     for (p, dir) in spec {
-        let o = compare(&sort_key(a, p, *dir), &sort_key(b, p, *dir));
+        let o = sort_compare(&sort_key(a, p, *dir), &sort_key(b, p, *dir));
         if o != Ordering::Equal {
             return if *dir < 0 { o.reverse() } else { o };
         }
@@ -1094,14 +1322,19 @@ pub struct AggLimits {
 }
 
 fn size_of(docs: &[Document]) -> usize {
-    docs.iter().map(|d| bson::to_vec(d).map_or(0, |v| v.len())).sum()
+    docs.iter()
+        .map(|d| bson::to_vec(d).map_or(0, |v| v.len()))
+        .sum()
 }
 
 fn over(lim: &AggLimits, docs: &[Document], stage: &str) -> Result<(), MongoError> {
     if size_of(docs) > lim.stage_bytes {
         return Err(MongoError::new(
             code::QUERY_EXCEEDED_MEMORY_LIMIT,
-            format!("{stage} exceeded memory limit of {} bytes (doc.agg_stage_memory_bytes)", lim.stage_bytes),
+            format!(
+                "{stage} exceeded memory limit of {} bytes (doc.agg_stage_memory_bytes)",
+                lim.stage_bytes
+            ),
         ));
     }
     Ok(())
@@ -1112,23 +1345,40 @@ fn over(lim: &AggLimits, docs: &[Document], stage: &str) -> Result<(), MongoErro
 /// # Errors
 /// The stage's; 40324 for unknown stages.
 #[allow(clippy::too_many_lines)]
-pub fn run_stage(docs: Vec<Document>, stage: &Document, lim: &AggLimits) -> Result<Vec<Document>, MongoError> {
+pub fn run_stage(
+    docs: Vec<Document>,
+    stage: &Document,
+    lim: &AggLimits,
+) -> Result<Vec<Document>, MongoError> {
     let Some((name, arg)) = stage.iter().next() else {
-        return Err(loc(40323, "A pipeline stage specification object must contain exactly one field."));
+        return Err(loc(
+            40323,
+            "A pipeline stage specification object must contain exactly one field.",
+        ));
     };
     if stage.len() != 1 {
-        return Err(loc(40323, "A pipeline stage specification object must contain exactly one field."));
+        return Err(loc(
+            40323,
+            "A pipeline stage specification object must contain exactly one field.",
+        ));
     }
-    let doc_arg = || arg.as_document().ok_or_else(|| loc(15969, format!("{name} specification must be an object")));
+    let doc_arg = || {
+        arg.as_document()
+            .ok_or_else(|| loc(15969, format!("{name} specification must be an object")))
+    };
     Ok(match name.as_str() {
         "$match" => {
             let p = filter::parse(doc_arg()?)?;
             let cx = AggExpr { now: lim.now };
-            docs.into_iter().filter(|d| p.matches_with(d, &cx)).collect()
+            docs.into_iter()
+                .filter(|d| p.matches_with(d, &cx))
+                .collect()
         }
         "$project" => {
             let p = Projection::parse(doc_arg()?)?;
-            docs.iter().map(|d| p.apply(d, lim.now)).collect::<Result<_, _>>()?
+            docs.iter()
+                .map(|d| p.apply(d, lim.now))
+                .collect::<Result<_, _>>()?
         }
         "$addFields" | "$set" => {
             let spec = doc_arg()?;
@@ -1150,8 +1400,16 @@ pub fn run_stage(docs: Vec<Document>, stage: &Document, lim: &AggLimits) -> Resu
         "$unset" => {
             let fields: Vec<String> = match arg {
                 Bson::String(s) => vec![s.clone()],
-                Bson::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect(),
-                _ => return Err(loc(31002, "$unset specification must be a string or an array")),
+                Bson::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect(),
+                _ => {
+                    return Err(loc(
+                        31002,
+                        "$unset specification must be a string or an array",
+                    ));
+                }
             };
             docs.into_iter()
                 .map(|mut d| {
@@ -1164,7 +1422,10 @@ pub fn run_stage(docs: Vec<Document>, stage: &Document, lim: &AggLimits) -> Resu
         }
         "$replaceRoot" | "$replaceWith" => {
             let e = if name == "$replaceRoot" {
-                doc_arg()?.get("newRoot").cloned().ok_or_else(|| loc(40231, "no newRoot specified for the $replaceRoot stage"))?
+                doc_arg()?
+                    .get("newRoot")
+                    .cloned()
+                    .ok_or_else(|| loc(40231, "no newRoot specified for the $replaceRoot stage"))?
             } else {
                 arg.clone()
             };
@@ -1183,16 +1444,27 @@ pub fn run_stage(docs: Vec<Document>, stage: &Document, lim: &AggLimits) -> Resu
             docs
         }
         "$skip" => {
-            let n = usize::try_from(as_i64(arg).filter(|n| *n >= 0).ok_or_else(|| loc(15956, "invalid argument to $skip stage"))?).unwrap_or(usize::MAX);
+            let n = usize::try_from(
+                as_i64(arg)
+                    .filter(|n| *n >= 0)
+                    .ok_or_else(|| loc(15956, "invalid argument to $skip stage"))?,
+            )
+            .unwrap_or(usize::MAX);
             docs.into_iter().skip(n).collect()
         }
         "$limit" => {
-            let n = as_i64(arg).filter(|n| *n > 0).ok_or_else(|| loc(15958, "the limit must be positive"))?;
-            docs.into_iter().take(usize::try_from(n).unwrap_or(usize::MAX)).collect()
+            let n = as_i64(arg)
+                .filter(|n| *n > 0)
+                .ok_or_else(|| loc(15958, "the limit must be positive"))?;
+            docs.into_iter()
+                .take(usize::try_from(n).unwrap_or(usize::MAX))
+                .collect()
         }
         "$sample" => {
             let n = doc_arg()?.get("size").and_then(as_i64).unwrap_or(0);
-            docs.into_iter().take(usize::try_from(n.max(0)).unwrap_or(0)).collect()
+            docs.into_iter()
+                .take(usize::try_from(n.max(0)).unwrap_or(0))
+                .collect()
         }
         "$count" => {
             let Bson::String(f) = arg else {
@@ -1202,7 +1474,9 @@ pub fn run_stage(docs: Vec<Document>, stage: &Document, lim: &AggLimits) -> Resu
                 Vec::new()
             } else {
                 let n = docs.len();
-                vec![doc! {f.clone(): i32::try_from(n).map_or(Bson::Int64(i64::try_from(n).unwrap_or(i64::MAX)), Bson::Int32)}]
+                vec![
+                    doc! {f.clone(): i32::try_from(n).map_or(Bson::Int64(i64::try_from(n).unwrap_or(i64::MAX)), Bson::Int32)},
+                ]
             }
         }
         "$group" => group(&docs, doc_arg()?, lim)?,
@@ -1216,13 +1490,28 @@ pub fn run_stage(docs: Vec<Document>, stage: &Document, lim: &AggLimits) -> Resu
             let (path, keep_empty, index) = match arg {
                 Bson::String(s) => (s.clone(), false, None),
                 Bson::Document(d) => (
-                    d.get_str("path").map_err(|_| loc(28812, "no path specified to $unwind stage"))?.to_owned(),
+                    d.get_str("path")
+                        .map_err(|_| loc(28812, "no path specified to $unwind stage"))?
+                        .to_owned(),
                     d.get_bool("preserveNullAndEmptyArrays").unwrap_or(false),
                     d.get_str("includeArrayIndex").ok().map(str::to_owned),
                 ),
-                _ => return Err(loc(15981, "expected either a string or an object as specification for $unwind stage")),
+                _ => {
+                    return Err(loc(
+                        15981,
+                        "expected either a string or an object as specification for $unwind stage",
+                    ));
+                }
             };
-            let path = path.strip_prefix('$').ok_or_else(|| loc(28818, "path option to $unwind stage should be prefixed with a '$'"))?.to_owned();
+            let path = path
+                .strip_prefix('$')
+                .ok_or_else(|| {
+                    loc(
+                        28818,
+                        "path option to $unwind stage should be prefixed with a '$'",
+                    )
+                })?
+                .to_owned();
             let mut out = Vec::new();
             for d in docs {
                 match get_path(&d, &path).cloned() {
@@ -1236,7 +1525,7 @@ pub fn run_stage(docs: Vec<Document>, stage: &Document, lim: &AggLimits) -> Resu
                             out.push(n);
                         }
                     }
-                    Some(Bson::Array(_)) | Some(Bson::Null) | None => {
+                    Some(Bson::Array(_) | Bson::Null) | None => {
                         if keep_empty {
                             let mut n = d.clone();
                             if matches!(get_path(&d, &path), Some(Bson::Array(_))) {
@@ -1267,40 +1556,87 @@ pub fn run_stage(docs: Vec<Document>, stage: &Document, lim: &AggLimits) -> Resu
                 };
                 let mut cur = docs.clone();
                 for s in stages {
-                    let s = s.as_document().ok_or_else(|| bad("each stage must be an object"))?;
+                    let s = s
+                        .as_document()
+                        .ok_or_else(|| bad("each stage must be an object"))?;
                     cur = run_stage(cur, s, lim)?;
                 }
-                out.insert(k.clone(), cur.into_iter().map(Bson::Document).collect::<Vec<_>>());
+                out.insert(
+                    k.clone(),
+                    cur.into_iter().map(Bson::Document).collect::<Vec<_>>(),
+                );
             }
             vec![out]
         }
         other => {
             return Err(MongoError::new(
-                if matches!(other, "$out" | "$merge" | "$graphLookup" | "$setWindowFields" | "$densify" | "$fill" | "$geoNear" | "$search" | "$searchMeta" | "$vectorSearch" | "$changeStream" | "$collStats" | "$indexStats" | "$planCacheStats" | "$currentOp" | "$listSessions" | "$bucket" | "$bucketAuto" | "$redact") {
+                if matches!(
+                    other,
+                    "$out"
+                        | "$merge"
+                        | "$graphLookup"
+                        | "$setWindowFields"
+                        | "$densify"
+                        | "$fill"
+                        | "$geoNear"
+                        | "$search"
+                        | "$searchMeta"
+                        | "$vectorSearch"
+                        | "$changeStream"
+                        | "$collStats"
+                        | "$indexStats"
+                        | "$planCacheStats"
+                        | "$currentOp"
+                        | "$listSessions"
+                        | "$bucket"
+                        | "$bucketAuto"
+                        | "$redact"
+                ) {
                     code::SPRIG_DOC_FEATURE_UNSUPPORTED
                 } else {
                     40324
                 },
-                format!("Unrecognized pipeline stage name: '{other}' (or not supported in this release)"),
+                format!(
+                    "Unrecognized pipeline stage name: '{other}' (or not supported in this release)"
+                ),
             ));
         }
     })
 }
 
 fn group(docs: &[Document], spec: &Document, lim: &AggLimits) -> Result<Vec<Document>, MongoError> {
-    let id_expr = spec.get("_id").ok_or_else(|| loc(15955, "a group specification must include an _id"))?;
+    let id_expr = spec
+        .get("_id")
+        .ok_or_else(|| loc(15955, "a group specification must include an _id"))?;
     let mut accs: Vec<(String, String, Bson)> = Vec::new();
     for (k, v) in spec {
         if k == "_id" {
             continue;
         }
         let Bson::Document(d) = v else {
-            return Err(loc(40234, format!("The field '{k}' must be an accumulator object")));
+            return Err(loc(
+                40234,
+                format!("The field '{k}' must be an accumulator object"),
+            ));
         };
         let Some((op, e)) = d.iter().next() else {
-            return Err(loc(40234, format!("The field '{k}' must be an accumulator object")));
+            return Err(loc(
+                40234,
+                format!("The field '{k}' must be an accumulator object"),
+            ));
         };
-        if !matches!(op.as_str(), "$sum" | "$avg" | "$min" | "$max" | "$first" | "$last" | "$push" | "$addToSet" | "$count") {
+        if !matches!(
+            op.as_str(),
+            "$sum"
+                | "$avg"
+                | "$min"
+                | "$max"
+                | "$first"
+                | "$last"
+                | "$push"
+                | "$addToSet"
+                | "$count"
+        ) {
             return Err(loc(15952, format!("unknown group operator '{op}'")));
         }
         accs.push((k.clone(), op.clone(), e.clone()));
@@ -1320,11 +1656,18 @@ fn group(docs: &[Document], spec: &Document, lim: &AggLimits) -> Result<Vec<Docu
             accs.iter().map(|(_, op, _)| Acc::new(op)).collect()
         });
         for (i, (_, op, e)) in accs.iter().enumerate() {
-            let v = if op == "$count" { Bson::Null } else { eval(e, &vars)? };
+            let v = if op == "$count" {
+                Bson::Null
+            } else {
+                eval(e, &vars)?
+            };
             if matches!(op.as_str(), "$push" | "$addToSet") {
                 bytes += bson::to_vec(&doc! {"v": v.clone()}).map_or(0, |b| b.len());
                 if bytes > lim.stage_bytes {
-                    return Err(MongoError::new(code::QUERY_EXCEEDED_MEMORY_LIMIT, "$group exceeded memory limit (doc.agg_stage_memory_bytes)"));
+                    return Err(MongoError::new(
+                        code::QUERY_EXCEEDED_MEMORY_LIMIT,
+                        "$group exceeded memory limit (doc.agg_stage_memory_bytes)",
+                    ));
                 }
             }
             entry[i].add(v)?;
@@ -1348,17 +1691,31 @@ fn group(docs: &[Document], spec: &Document, lim: &AggLimits) -> Result<Vec<Docu
 ///
 /// # Errors
 /// The stages'.
-pub fn run_update_pipeline(doc: Document, stages: &[Document], now: DateTime) -> Result<Document, MongoError> {
-    let lim = AggLimits { stage_bytes: usize::MAX, now };
+pub fn run_update_pipeline(
+    doc: Document,
+    stages: &[Document],
+    now: DateTime,
+) -> Result<Document, MongoError> {
+    let lim = AggLimits {
+        stage_bytes: usize::MAX,
+        now,
+    };
     let mut cur = vec![doc];
     for s in stages {
-        let n = s.keys().next().map(String::as_str).unwrap_or("");
-        if !matches!(n, "$addFields" | "$set" | "$project" | "$unset" | "$replaceRoot" | "$replaceWith") {
-            return Err(MongoError::new(code::BAD_VALUE, format!("{n} is not allowed to be used within an update")));
+        let n = s.keys().next().map_or("", String::as_str);
+        if !matches!(
+            n,
+            "$addFields" | "$set" | "$project" | "$unset" | "$replaceRoot" | "$replaceWith"
+        ) {
+            return Err(MongoError::new(
+                code::BAD_VALUE,
+                format!("{n} is not allowed to be used within an update"),
+            ));
         }
         cur = run_stage(cur, s, &lim)?;
     }
-    cur.pop().ok_or_else(|| bad("the update pipeline produced no document"))
+    cur.pop()
+        .ok_or_else(|| bad("the update pipeline produced no document"))
 }
 
 #[cfg(test)]

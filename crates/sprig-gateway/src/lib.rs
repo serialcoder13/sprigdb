@@ -51,20 +51,29 @@
 //!   `sprig-proto-kafka`'s broker over chapter 14's logins, the DC's
 //!   gateway records, etcd coordinator leases and the tenant's streams.
 //!
-//! Not yet: the other front ends (chapters 30, 37, 40), limits,
+//! - [`mongo`]: the MongoDB listener (chapter 30, R5): `OP_MSG` and
+//!   SCRAM-SHA-256 over chapter 14's logins, commands run by `sprig-doc`'s
+//!   document engine through the user's executor session.
+//!
+//! Not yet: the other front ends (chapters 37, 40), limits,
 //! registration and the other `MetaStore` caches (steps 4-10).
 
 pub mod amqp;
 pub mod backend;
+// Chapter 43 (R8): the Bolt listener on 7687.
+pub mod bolt;
 pub mod dc;
 pub mod exec;
 pub mod failover;
 pub mod frontend;
+// Chapter 43 (R8): native graphs in the tenant catalog.
+pub mod graphs;
 pub mod http;
 pub mod kafka;
 pub mod lifecycle;
 pub mod limits;
 pub mod listener;
+pub mod mongo;
 pub mod mysql;
 pub mod observe;
 pub mod offload;
@@ -239,6 +248,9 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     if let Some(t) = &tenants {
         executor = executor.with_tenants(Arc::clone(t));
     }
+    // Chapter 51: sink credentials are sealed with the master key file's
+    // `sink` keys.
+    exec::sinks::install_keyring(rctx.config.gateway.workload_key_file.as_deref());
     // Workload capture (chapter 12, M0.4): the hook and its flusher.
     let (workload, flusher) = workload::start(
         &rctx.config,
@@ -338,7 +350,9 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     // go over the peer service.
     let queue_relay = amqp::peer::GatewayRelay::new(Arc::clone(&stores.dc), peer_tls.clone());
     let replies = match amqp::peer::reply_key(stores.dc.as_ref()).await {
-        Some(k) => sprig_proto_amqp::reply_to::DirectReplyTo::with_key(u32::from(sessions.slot()), &k),
+        Some(k) => {
+            sprig_proto_amqp::reply_to::DirectReplyTo::with_key(u32::from(sessions.slot()), &k)
+        }
         None => sprig_proto_amqp::reply_to::DirectReplyTo::new(u32::from(sessions.slot())),
     };
     replies.set_relay(Arc::new(queue_relay.clone()));
@@ -363,6 +377,19 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             u32::from(sessions.slot()),
         )
     });
+    // MongoDB (chapter 30, R5): catalog logins through SCRAM; the
+    // document engine runs in the user's executor session.
+    let mongo_fe = Arc::new(mongo::MongoFrontend::start(
+        mongo::MongoDeps {
+            login: Arc::clone(&login),
+            executor: Arc::clone(&shared_exec),
+            sessions: Arc::clone(&sessions),
+            live: Some((live.clone(), dc.clone())),
+            gateway_id: gateway_id.clone(),
+            draining: lifecycle.flag(),
+        },
+        stop.clone(),
+    ));
     let amqp_fe = Arc::new(amqp::AmqpFrontend::with_replies(
         Arc::new(amqp::identity::AmqpIdentity::new(
             Arc::clone(&login),
@@ -375,6 +402,18 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         gateway_id.clone(),
         replies,
     ));
+    // Bolt on 7687 (chapter 43, R8): catalog logins only, since graphs
+    // are a tenant's objects.
+    let bolt_fe = Arc::new(bolt::BoltFrontend::new(Arc::new(
+        bolt::BoltGraphService::new(
+            Arc::clone(&login),
+            tenants
+                .as_ref()
+                .map(|t| Arc::new(graphs::GatewayGraphs::new(Arc::clone(t)))),
+            live.clone(),
+            dc.clone(),
+        ),
+    )));
     let peer_host = Arc::new(PeerHost {
         login: Arc::clone(&login),
         core: Arc::clone(&core),
@@ -402,7 +441,9 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
                 let fes = mysql
                     .register(Frontends::new())
                     .with(http_fe as Arc<dyn frontend::Frontend>)
-                    .with(amqp_fe as Arc<dyn frontend::Frontend>);
+                    .with(amqp_fe as Arc<dyn frontend::Frontend>)
+                    .with(mongo_fe as Arc<dyn frontend::Frontend>)
+                    .with(bolt_fe as Arc<dyn frontend::Frontend>);
                 match kafka_fe {
                     Some(k) => fes.with(k as Arc<dyn frontend::Frontend>),
                     None => fes,

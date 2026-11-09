@@ -927,6 +927,14 @@ impl LoginService {
         self.start_as(req, Front::Kafka).await
     }
 
+    /// Starts a MongoDB login (chapter 30, "SCRAM-SHA-256"): as
+    /// [`Self::start_kafka`], with the protocol `mongo` in metrics and
+    /// events. SCRAM reads [`MysqlLogin::scram_credential`] and passes the
+    /// proof's result to [`LoginFlow::decide`].
+    pub async fn start_mongo(self: &Arc<Self>, req: LoginRequest) -> MysqlLogin {
+        self.start_as(req, Front::Mongo).await
+    }
+
     async fn start_as(self: &Arc<Self>, req: LoginRequest, front: Front) -> MysqlLogin {
         let max_user = if front == Front::Mysql {
             max_user_len(req.persona)
@@ -967,6 +975,8 @@ enum Front {
     Http,
     /// Kafka SASL (chapter 45).
     Kafka,
+    /// MongoDB SCRAM (chapter 30).
+    Mongo,
 }
 
 /// A verified clear-text password whose generation lacks SCRAM verifiers:
@@ -1494,6 +1504,7 @@ impl MysqlLogin {
         match (self.front, self.req.persona) {
             (Front::Http, _) => "http",
             (Front::Kafka, _) => "kafka",
+            (Front::Mongo, _) => "mongo",
             (Front::Mysql, Persona::MySql84) => "mysql",
             (Front::Mysql, Persona::MariaDb) => "mariadb",
         }

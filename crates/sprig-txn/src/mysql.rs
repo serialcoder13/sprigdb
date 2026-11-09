@@ -244,6 +244,8 @@ enum Pools {
 /// ([`MyAdmin::over`]).
 pub struct MyAdmin {
     pools: Pools,
+    /// Schemas known to have their redo table (Sprig 2PC).
+    redo_ready: std::sync::Mutex<std::collections::HashSet<(ClusterId, String)>>,
 }
 
 impl std::fmt::Debug for MyAdmin {
@@ -307,6 +309,7 @@ impl MyAdmin {
                     .map(|(k, c)| (k.clone(), pool_for(&c.admin_opts)))
                     .collect(),
             ),
+            redo_ready: std::sync::Mutex::default(),
         }
     }
 
@@ -315,6 +318,7 @@ impl MyAdmin {
     pub fn over(source: Arc<dyn PoolSource>) -> Self {
         Self {
             pools: Pools::Source(source),
+            redo_ready: std::sync::Mutex::default(),
         }
     }
 
@@ -503,6 +507,27 @@ impl ClusterAdmin for MyAdmin {
         ))
         .await
         .map_err(|e| db_error(&e))
+    }
+
+    async fn ensure_redo(&self, cluster: &ClusterId, schema: &str) -> DbResult<()> {
+        let key = (cluster.clone(), schema.to_owned());
+        if self
+            .redo_ready
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&key)
+        {
+            return Ok(());
+        }
+        let mut c = self.conn(cluster).await?;
+        c.query_drop(crate::redo::redo_table_sql(schema))
+            .await
+            .map_err(|e| db_error(&e))?;
+        self.redo_ready
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key);
+        Ok(())
     }
 
     async fn insert_redo(

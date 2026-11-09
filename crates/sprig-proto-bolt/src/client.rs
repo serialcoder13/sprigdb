@@ -67,7 +67,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> BoltClient<S> {
     ///
     /// # Errors
     /// I/O, or `00 00 00 00` (no common version).
-    pub async fn handshake(mut io: S, proposals: Option<[[u8; 4]; 4]>) -> Result<Self, ClientError> {
+    pub async fn handshake(
+        mut io: S,
+        proposals: Option<[[u8; 4]; 4]>,
+    ) -> Result<Self, ClientError> {
         let p = proposals.unwrap_or([[0, 4, 4, 5], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]);
         let mut hs = MAGIC.to_vec();
         for x in p {

@@ -83,7 +83,9 @@ pub(crate) fn shard_subcommands(cmd: Command) -> Command {
     )
     .subcommand(
         Command::new("rekey")
-            .about("Re-key a table group online: move its rows to new shards routed by another column")
+            .about(
+                "Re-key a table group online: move its rows to new shards routed by another column",
+            )
             .arg(tenant())
             .arg(group())
             .arg(

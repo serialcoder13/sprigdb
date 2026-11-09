@@ -10,7 +10,6 @@
 //! moments (no final settle). After each kill a new task starts from the
 //! committed offsets, as a worker claiming the task does.
 
-
 #![allow(
     clippy::unwrap_used,
     clippy::too_many_lines,

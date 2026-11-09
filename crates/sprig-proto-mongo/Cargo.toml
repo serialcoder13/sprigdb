@@ -30,7 +30,7 @@ tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "ma
 # Live tests through a real driver (Apache-2.0), without TLS or DNS
 # resolution; TLS through the system OpenSSL, since its rustls option
 # brings webpki-roots (CDLA-Permissive-2.0, outside the allowed licences).
-mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "openssl-tls"] }
+mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "openssl-tls", "zstd-compression", "snappy-compression", "zlib-compression"] }
 futures-util = "0.3"
 
 [lints]

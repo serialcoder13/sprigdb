@@ -163,7 +163,10 @@ pub enum CutoverMode {
         /// The parent job.
         parent: JobId,
     },
-    /// Never; keep streaming (reference copies, R1).
+    /// Never: copy, then keep the target streaming (`streaming`) until the
+    /// job is cancelled (targets dropped) or stopped with
+    /// [`Mover::cut_over`] (targets kept as they are, sources untouched):
+    /// chapter 25's standbys (r2close).
     Continuous,
 }
 
@@ -389,7 +392,7 @@ impl JobSpec {
     pub fn group(&self) -> Option<u32> {
         match self.routing {
             Routing::HashRange { group } | Routing::Rekey { group, .. } => Some(group),
-            _ => None,
+            Routing::Whole => None,
         }
     }
 
@@ -531,6 +534,15 @@ pub struct Progress {
     pub verify_mismatches: u32,
     /// Copies restarted from scratch (purged binlog, diverged source).
     pub restarts: u32,
+    /// A `Continuous` job: the source position the target has applied
+    /// through (chapter 25's `applied_source_gtid`), saved with the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_source_gtid: Option<String>,
+    /// A `Continuous` job: when the stream last brought the source's tick
+    /// or a change (Unix ms; chapter 25's `source_seen_at`). With
+    /// `lag_ms`, a standby's lag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_seen_ms: Option<u64>,
 }
 
 /// What [`Mover::status`] returns.

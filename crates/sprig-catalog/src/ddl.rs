@@ -1047,6 +1047,7 @@ where
         if let Some(set) = plan.intent.shards.clone() {
             self.apply_shards(tenant, &plan, &set, exec).await?;
         }
+        let mut created: Vec<SchemaName> = Vec::new();
         for stmt in plan
             .physical
             .iter()
@@ -1058,11 +1059,21 @@ where
                         "DDL outcome unknown; the reconciler will finish or roll it back");
                     return Err(map_names(e, tenant, &plan.names));
                 }
+                // A schema this statement's plan created a moment ago goes
+                // too (r2close; r2kind's leftover: a `CREATE DATABASE`
+                // refused at its second statement left its backend schema
+                // behind with no catalog entry).
+                for schema in &created {
+                    drop_if_ours(exec, tenant, job, schema).await;
+                }
                 if let Err(r) = self.rollback(tenant, &plan.intent).await {
                     tracing::warn!(%tenant, job = %job, error = %r,
                         "rolling back a refused DDL failed; the reconciler will");
                 }
                 return Err(map_names(e, tenant, &plan.names));
+            }
+            if matches!(stmt.effect, Effect::CreateSchema) {
+                created.push(stmt.schema);
             }
         }
         self.fail(tenant, DdlStep::Applied)?;
@@ -1354,7 +1365,14 @@ where
                 parent,
             } => {
                 sql_kind(*kind)?;
-                if is_internal_object(&name.name) {
+                // Chapter 31's document engine keeps its own hidden tables
+                // (`__sprig_doc_*`) in each logical database. Clients can't
+                // name `__sprig_` objects at all (chapter 07's rewrite
+                // refuses them), so these arrive only from the engine's
+                // internal-mode statements.
+                let doc_engine = name.name.len() > 12
+                    && name.name.as_bytes()[..12].eq_ignore_ascii_case(b"__sprig_doc_");
+                if is_internal_object(&name.name) && !doc_engine {
                     return Err(SprigError::new(
                         SprigCode::ReservedName,
                         format!("'{}' is a reserved name", name.name),
@@ -2000,6 +2018,27 @@ where
                 Err(e)
             }
         }
+    }
+}
+
+/// Drops `schema`, which the refused statement's own plan created, if it
+/// holds nothing but SprigDB's internal objects (the `__sprig_dtx` table
+/// the plan's next statement may have made); anything else in it means it
+/// isn't only ours, and it stays.
+async fn drop_if_ours(exec: &dyn DdlExecutor, tenant: TenantId, job: JobId, schema: &SchemaName) {
+    match exec.objects(schema).await {
+        Ok(objs) if objs.iter().all(|o| is_internal_object(&o.name)) => {
+            match exec.execute(&repair::drop_schema(*schema)).await {
+                Ok(()) => tracing::warn!(%tenant, job = %job, %schema,
+                    "a refused DDL's new schema dropped"),
+                Err(e) => tracing::warn!(%tenant, job = %job, %schema, error = %e,
+                    "a refused DDL's new schema couldn't be dropped"),
+            }
+        }
+        Ok(_) => tracing::warn!(%tenant, job = %job, %schema,
+            "a refused DDL's schema holds other objects; kept"),
+        Err(e) => tracing::warn!(%tenant, job = %job, %schema, error = %e,
+            "a refused DDL's schema couldn't be read; kept"),
     }
 }
 

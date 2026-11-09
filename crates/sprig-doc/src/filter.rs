@@ -50,9 +50,8 @@ impl Re {
         } else {
             format!("(?{flags}){pattern}")
         };
-        let re = regex::Regex::new(&src).map_err(|e| {
-            MongoError::new(51091, format!("Regular expression is invalid: {e}"))
-        })?;
+        let re = regex::Regex::new(&src)
+            .map_err(|e| MongoError::new(51091, format!("Regular expression is invalid: {e}")))?;
         Ok(Self {
             pattern: pattern.to_owned(),
             options: options.to_owned(),
@@ -70,7 +69,7 @@ impl Re {
         let rest = self.pattern.strip_prefix('^')?;
         let mut out = String::new();
         let mut chars = rest.chars().peekable();
-        while let Some(c) = chars.next() {
+        for c in chars.by_ref() {
             if "\\.^$|?*+()[]{}".contains(c) {
                 // A quantifier makes the previous character optional.
                 if matches!(c, '?' | '*' | '{') {
@@ -192,9 +191,7 @@ pub fn parse(filter: &Document) -> Result<Pred, MongoError> {
                         return Err(bad(format!("${op} must be an array")));
                     };
                     if a.is_empty() {
-                        return Err(bad(format!(
-                            "$and/$or/$nor must be a nonempty array"
-                        )));
+                        return Err(bad("$and/$or/$nor must be a nonempty array"));
                     }
                     let mut kids = Vec::new();
                     for x in a {
@@ -267,10 +264,10 @@ fn parse_ops(d: &Document) -> Result<Vec<FieldOp>, MongoError> {
                 let items = a
                     .iter()
                     .map(|x| match x {
-                        Bson::RegularExpression(r) => Ok(InItem::Regex(Re::new(&r.pattern, &r.options)?)),
-                        Bson::Document(d) if is_op_doc(d) => {
-                            Err(bad("cannot nest $ under $in"))
+                        Bson::RegularExpression(r) => {
+                            Ok(InItem::Regex(Re::new(&r.pattern, &r.options)?))
                         }
+                        Bson::Document(d) if is_op_doc(d) => Err(bad("cannot nest $ under $in")),
                         other => Ok(InItem::Value(other.clone())),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -317,7 +314,8 @@ fn parse_ops(d: &Document) -> Result<Vec<FieldOp>, MongoError> {
                 };
                 let ops_only = !e.is_empty()
                     && e.keys().all(|k| {
-                        k.starts_with('$') && !matches!(k.as_str(), "$and" | "$or" | "$nor" | "$expr")
+                        k.starts_with('$')
+                            && !matches!(k.as_str(), "$and" | "$or" | "$nor" | "$expr")
                     });
                 FieldOp::ElemMatch(Box::new(if ops_only {
                     ElemMatch::Ops(parse_ops(e)?)
@@ -349,10 +347,8 @@ fn parse_ops(d: &Document) -> Result<Vec<FieldOp>, MongoError> {
                 let Bson::Array(a) = v else {
                     return Err(bad("malformed mod, needs to be an array"));
                 };
-                let (Some(dv), Some(rm)) = (
-                    a.first().and_then(as_i64),
-                    a.get(1).and_then(as_i64),
-                ) else {
+                let (Some(dv), Some(rm)) = (a.first().and_then(as_i64), a.get(1).and_then(as_i64))
+                else {
                     return Err(bad("malformed mod, not enough elements"));
                 };
                 if dv == 0 {
@@ -412,7 +408,9 @@ fn type_sel(v: &Bson) -> Result<TypeSel, MongoError> {
     };
     Ok(match s.as_str() {
         "number" => TypeSel::Number,
-        name => TypeSel::Code(type_code(name).ok_or_else(|| bad(format!("Unknown type name alias: {name}")))?),
+        name => TypeSel::Code(
+            type_code(name).ok_or_else(|| bad(format!("Unknown type name alias: {name}")))?,
+        ),
     })
 }
 
@@ -602,6 +600,7 @@ fn type_matches(v: &Bson, sel: &[TypeSel]) -> bool {
 impl FieldOp {
     /// Whether the values at a path satisfy this condition.
     #[must_use]
+    #[allow(clippy::only_used_in_recursion)]
     pub fn eval(&self, vs: &Values<'_>, cx: &dyn ExprEval, root: &Document) -> bool {
         match self {
             Self::Eq(lit) => eq_values(vs, lit),
@@ -612,14 +611,13 @@ impl FieldOp {
             Self::Lte(l) => cmp_values(vs, l, |o| o != Ordering::Greater),
             Self::In(items) => in_values(vs, items),
             Self::Nin(items) => !in_values(vs, items),
-            Self::Exists(want) => !vs.leaves.is_empty() == *want,
+            Self::Exists(want) => vs.leaves.is_empty() != *want,
             Self::Type(sel) => vs.vals.iter().any(|v| type_matches(v, sel)),
-            Self::Size(n) => vs.leaves.iter().any(|v| {
-                matches!(v, Bson::Array(a) if i64::try_from(a.len()).ok() == Some(*n))
-            }),
-            Self::All(inner) => {
-                !inner.is_empty() && inner.iter().all(|op| op.eval(vs, cx, root))
-            }
+            Self::Size(n) => vs
+                .leaves
+                .iter()
+                .any(|v| matches!(v, Bson::Array(a) if i64::try_from(a.len()).ok() == Some(*n))),
+            Self::All(inner) => !inner.is_empty() && inner.iter().all(|op| op.eval(vs, cx, root)),
             Self::ElemMatch(em) => vs.leaves.iter().any(|v| {
                 let Bson::Array(a) = v else { return false };
                 a.iter().any(|e| match em.as_ref() {

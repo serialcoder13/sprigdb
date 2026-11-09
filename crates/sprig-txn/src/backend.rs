@@ -337,6 +337,15 @@ pub trait ClusterAdmin: Send + Sync {
         Err(DbError::new(1235, "this backend keeps no redo"))
     }
 
+    /// Sprig 2PC (R3): makes sure `schema` has its redo table before a
+    /// held branch opens there. A branch whose transaction began before
+    /// the table was created can't insert its `done` marker into it
+    /// (1412, table definition changed), so the table must exist first.
+    async fn ensure_redo(&self, cluster: &ClusterId, schema: &str) -> DbResult<()> {
+        let _ = (cluster, schema);
+        Ok(())
+    }
+
     /// Every held branch with redo rows on the cluster.
     async fn redo_branches(&self, cluster: &ClusterId) -> DbResult<Vec<crate::redo::RedoBranch>> {
         let _ = cluster;

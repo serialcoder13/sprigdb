@@ -51,6 +51,8 @@ pub mod http;
 pub mod jobs;
 pub mod mover;
 pub mod placement_admin;
+// Chapter 25 (r2close): an operator's errant_extract and node_rebuild.
+pub mod recovery;
 pub mod sharding_admin;
 pub mod txn_admin;
 pub mod types;

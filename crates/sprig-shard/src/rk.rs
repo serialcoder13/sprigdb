@@ -120,7 +120,10 @@ pub fn misrouted_count_sql(table: &str, lo: u64, hi: Option<u64>) -> String {
 /// # Errors
 /// 39400 for a value the class can't take; 39405 for one that can't be
 /// normalized.
-pub fn hash_values(spec: &crate::KeySpec, vals: &[mysql_async::Value]) -> sprig_common::Result<u64> {
+pub fn hash_values(
+    spec: &crate::KeySpec,
+    vals: &[mysql_async::Value],
+) -> sprig_common::Result<u64> {
     use mysql_async::Value;
     use sprig_common::{SprigCode, SprigError};
 
@@ -181,7 +184,11 @@ pub fn hash_values(spec: &crate::KeySpec, vals: &[mysql_async::Value]) -> sprig_
     if kv.len() != spec.parts.len() {
         return Err(SprigError::new(
             SprigCode::UnsupportedKeyType,
-            format!("{} key values for a key of {} parts", kv.len(), spec.parts.len()),
+            format!(
+                "{} key values for a key of {} parts",
+                kv.len(),
+                spec.parts.len()
+            ),
         ));
     }
     Ok(crate::hash_key(spec, &kv)?.0.0)
@@ -200,7 +207,10 @@ mod tests {
             .map(|(h, _)| h.0)
             .ok();
         assert_eq!(hash_values(&spec, &[mysql_async::Value::Int(42)]).ok(), lit);
-        assert_eq!(hash_values(&spec, &[mysql_async::Value::UInt(42)]).ok(), lit);
+        assert_eq!(
+            hash_values(&spec, &[mysql_async::Value::UInt(42)]).ok(),
+            lit
+        );
         assert!(hash_values(&spec, &[]).is_err());
     }
 

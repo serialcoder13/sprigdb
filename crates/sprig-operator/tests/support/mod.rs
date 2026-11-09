@@ -31,6 +31,9 @@ pub struct State {
     pub uid: u64,
     /// (method, path) of every request.
     pub log: Vec<(String, String)>,
+    /// Collections whose creates an admission webhook refuses, with its
+    /// message (r2close).
+    pub refuse_create: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -234,6 +237,9 @@ async fn handle(
             None => status(404, "NotFound", &format!("{n} not found")),
         },
         ("POST", None) => {
+            if let Some(m) = st.refuse_create.get(&coll) {
+                return status(400, "BadRequest", &format!("admission webhook denied the request: {m}"));
+            }
             let mut o = body;
             let name = match o["metadata"]["name"].as_str() {
                 Some(n) if !n.is_empty() => n.to_owned(),

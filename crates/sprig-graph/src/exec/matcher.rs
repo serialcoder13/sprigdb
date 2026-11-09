@@ -44,6 +44,9 @@ fn is_const(e: &Expr) -> bool {
 /// One hop's candidates: (relationship, far node).
 type Hops = HashMap<u64, Vec<(Arc<Rel>, Arc<Node>)>>;
 
+/// One side of a bidirectional search: node to (depth, predecessors).
+type Side = HashMap<u64, (u32, Vec<(u64, Arc<Rel>)>)>;
+
 /// A trail found by path-mode expansion.
 #[derive(Clone)]
 struct Trail {
@@ -73,7 +76,9 @@ impl Exec<'_> {
                 r
             })
             .collect();
-        let conj: Vec<Expr> = where_.map(|w| conjuncts(w).into_iter().cloned().collect()).unwrap_or_default();
+        let conj: Vec<Expr> = where_
+            .map(|w| conjuncts(w).into_iter().cloned().collect())
+            .unwrap_or_default();
         for (pi, p) in patterns.iter().enumerate() {
             // Types of the other relationship patterns of the clause, for
             // endpoint mode's uniqueness rule.
@@ -131,7 +136,11 @@ impl Exec<'_> {
 
     /// The indexes of `rows` for which `p` has a match (pattern
     /// predicates): its unbound variables are existential.
-    pub(crate) async fn pattern_hits(&mut self, rows: &[Row], p: &PathPattern) -> Result<HashSet<usize>> {
+    pub(crate) async fn pattern_hits(
+        &mut self,
+        rows: &[Row],
+        p: &PathPattern,
+    ) -> Result<HashSet<usize>> {
         let tagged: Vec<Row> = rows
             .iter()
             .enumerate()
@@ -152,6 +161,7 @@ impl Exec<'_> {
             .collect())
     }
 
+    #[allow(clippy::option_option)] // unbound, bound to a non-node, bound to a node
     fn bound_node(row: &Row, var: Option<&String>) -> Option<Option<Arc<Node>>> {
         let v = var?;
         match row.get(v)? {
@@ -190,7 +200,7 @@ impl Exec<'_> {
     }
 
     fn rel_ok(&self, rp: &RelPat, r: &Rel, row: &Row) -> Result<bool> {
-        if !rp.types.is_empty() && !rp.types.iter().any(|t| *t == r.rtype) {
+        if !rp.types.is_empty() && !rp.types.contains(&r.rtype) {
             return Ok(false);
         }
         if let Some(pe) = &rp.props
@@ -303,8 +313,7 @@ impl Exec<'_> {
                     _ => continue,
                 };
                 match &**a {
-                    Expr::Func { name, args, .. }
-                        if matches!(args.first(), Some(Expr::Var(x)) if x == v) =>
+                    Expr::Func { name, args, .. } if matches!(args.first(), Some(Expr::Var(x)) if x == v) =>
                     {
                         let ids: Vec<u64> = vals
                             .iter()
@@ -318,7 +327,9 @@ impl Exec<'_> {
                             .collect();
                         if name == "id" || name == "elementid" {
                             s.ids = Some(match s.ids.take() {
-                                Some(prev) => prev.into_iter().filter(|i| ids.contains(i)).collect(),
+                                Some(prev) => {
+                                    prev.into_iter().filter(|i| ids.contains(i)).collect()
+                                }
                                 None => ids,
                             });
                         }
@@ -349,15 +360,13 @@ impl Exec<'_> {
         if pat.kind != PathKind::Normal {
             return self.shortest(rows, pat).await;
         }
-        let (pat, rev) = if !pat.steps.is_empty() {
-            let last = &pat.steps[pat.steps.len() - 1].1;
-            if Self::score(last, &rows, conj) > Self::score(&pat.start, &rows, conj) {
+        let (pat, rev) = match pat.steps.last() {
+            Some((_, last))
+                if Self::score(last, &rows, conj) > Self::score(&pat.start, &rows, conj) =>
+            {
                 (Self::reversed(pat), true)
-            } else {
-                (pat.clone(), false)
             }
-        } else {
-            (pat.clone(), false)
+            _ => (pat.clone(), false),
         };
         let track = pat.var.is_some();
         // Start points.
@@ -374,7 +383,10 @@ impl Exec<'_> {
                         }
                     }
                     Some(None) => {
-                        if !r.get(pat.start.var.as_deref().unwrap_or_default()).is_some_and(Value::is_null) {
+                        if !r
+                            .get(pat.start.var.as_deref().unwrap_or_default())
+                            .is_some_and(Value::is_null)
+                        {
                             return Err(SprigError::new(
                                 SprigCode::GraphPropertyType,
                                 format!(
@@ -431,7 +443,9 @@ impl Exec<'_> {
             }
         }
         let compatible = |o: &RelPat, rp: &RelPat| {
-            o.types.is_empty() || rp.types.is_empty() || o.types.iter().any(|t| rp.types.contains(t))
+            o.types.is_empty()
+                || rp.types.is_empty()
+                || o.types.iter().any(|t| rp.types.contains(t))
         };
         for (si, (rp, np)) in pat.steps.iter().enumerate() {
             if cur.is_empty() {
@@ -469,7 +483,13 @@ impl Exec<'_> {
                 let mut ns: Vec<Arc<Node>> = match r.remove(PATH_NODES) {
                     Some(Value::List(l)) => l
                         .into_iter()
-                        .filter_map(|v| if let Value::Node(n) = v { Some(n) } else { None })
+                        .filter_map(|v| {
+                            if let Value::Node(n) = v {
+                                Some(n)
+                            } else {
+                                None
+                            }
+                        })
                         .collect(),
                     _ => vec![],
                 };
@@ -526,7 +546,11 @@ impl Exec<'_> {
         for d in dirs {
             for batch in ids.chunks(self.b.batch_nodes.max(1)) {
                 for (e, far) in self.store.expand(batch, types, *d).await? {
-                    let (near, far_id) = if *d == Dir::Out { (e.src, e.dst) } else { (e.dst, e.src) };
+                    let (near, far_id) = if *d == Dir::Out {
+                        (e.src, e.dst)
+                    } else {
+                        (e.dst, e.src)
+                    };
                     raw.push((near, e, far, far_id));
                 }
                 self.check_time()?;
@@ -636,13 +660,19 @@ impl Exec<'_> {
         self.plan.push(format!(
             "Expand {}{}: tier join, far node joined in the same statement",
             rp.var.as_deref().unwrap_or(""),
-            if rp.types.is_empty() { String::new() } else { format!(":{}", rp.types.join("|")) }
+            if rp.types.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", rp.types.join("|"))
+            }
         ));
         let ids = Self::frontier(&cur);
         let hops = self.hop_edges(&ids, &types, rp.dir).await?;
         let mut out = Vec::new();
         for (r, n) in cur {
-            let Some(cands) = hops.get(&n.id) else { continue };
+            let Some(cands) = hops.get(&n.id) else {
+                continue;
+            };
             let used = Self::row_rels(&r);
             for (rel, far) in cands {
                 if used.contains(&rel.id) {
@@ -667,7 +697,11 @@ impl Exec<'_> {
                 }
                 Self::push_rel(&mut nr, rel.id);
                 if track {
-                    Self::push_path(&mut nr, std::slice::from_ref(rel), std::slice::from_ref(far));
+                    Self::push_path(
+                        &mut nr,
+                        std::slice::from_ref(rel),
+                        std::slice::from_ref(far),
+                    );
                 }
                 out.push((nr, far.clone()));
             }
@@ -728,10 +762,15 @@ impl Exec<'_> {
             if pending.len() > self.b.max_frontier {
                 return Err(budget_error(
                     "frontier",
-                    format!("{} nodes in one level, graph.max_frontier = {}", pending.len(), self.b.max_frontier),
+                    format!(
+                        "{} nodes in one level, graph.max_frontier = {}",
+                        pending.len(),
+                        self.b.max_frontier
+                    ),
                 ));
             }
-            metrics::histogram!("sprig_graph_frontier_nodes").record(f64::from(u32::try_from(pending.len()).unwrap_or(u32::MAX)));
+            metrics::histogram!("sprig_graph_frontier_nodes")
+                .record(f64::from(u32::try_from(pending.len()).unwrap_or(u32::MAX)));
             // Group by (shard, depth).
             let mut groups: HashMap<(usize, u32), Vec<(u64, u64)>> = HashMap::new();
             let mut at_limit = Vec::new();
@@ -752,13 +791,17 @@ impl Exec<'_> {
                 let hops = self.hop_edges(&ids, &types, rp.dir).await?;
                 let more = at_limit.iter().any(|(o, n, _, d)| {
                     hops.get(n).is_some_and(|c| {
-                        c.iter().any(|(_, f)| best.get(&(*o, f.id)).is_none_or(|b| *b > d + 1))
+                        c.iter()
+                            .any(|(_, f)| best.get(&(*o, f.id)).is_none_or(|b| *b > d + 1))
                     })
                 });
                 if more {
                     return Err(budget_error(
                         "hops",
-                        format!("an unbounded pattern went past graph.max_hops = {}", self.b.max_hops),
+                        format!(
+                            "an unbounded pattern went past graph.max_hops = {}",
+                            self.b.max_hops
+                        ),
                     ));
                 }
             }
@@ -769,7 +812,8 @@ impl Exec<'_> {
                 let seeds = groups.remove(&(shard, depth)).unwrap_or_default();
                 let burst = self.b.local_burst_hops.max(1).min(max - depth);
                 for batch in seeds.chunks(self.b.batch_nodes.max(1)) {
-                    metrics::counter!("sprig_graph_shard_queries_total", "tier" => "cte").increment(1);
+                    metrics::counter!("sprig_graph_shard_queries_total", "tier" => "cte")
+                        .increment(1);
                     let found: Vec<Reach> = self
                         .store
                         .reach(shard, batch, &types, rp.dir, burst)
@@ -810,7 +854,12 @@ impl Exec<'_> {
         }
         let ids: Vec<u64> = {
             let mut s = HashSet::new();
-            by_origin.values().flatten().copied().filter(|i| s.insert(*i)).collect()
+            by_origin
+                .values()
+                .flatten()
+                .copied()
+                .filter(|i| s.insert(*i))
+                .collect()
         };
         let mut nodes: HashMap<u64, Arc<Node>> = HashMap::new();
         for batch in ids.chunks(self.b.batch_nodes.max(1)) {
@@ -820,7 +869,9 @@ impl Exec<'_> {
         }
         let mut out = Vec::new();
         for (r, n) in cur {
-            let Some(ends) = by_origin.get(&n.id) else { continue };
+            let Some(ends) = by_origin.get(&n.id) else {
+                continue;
+            };
             let mut ends = ends.clone();
             ends.sort_unstable();
             for e in ends {
@@ -898,7 +949,10 @@ impl Exec<'_> {
                     if more {
                         return Err(budget_error(
                             "hops",
-                            format!("an unbounded pattern went past graph.max_hops = {}", self.b.max_hops),
+                            format!(
+                                "an unbounded pattern went past graph.max_hops = {}",
+                                self.b.max_hops
+                            ),
                         ));
                     }
                 }
@@ -907,18 +961,27 @@ impl Exec<'_> {
             if live.len() > self.b.max_frontier {
                 return Err(budget_error(
                     "frontier",
-                    format!("{} paths in one level, graph.max_frontier = {}", live.len(), self.b.max_frontier),
+                    format!(
+                        "{} paths in one level, graph.max_frontier = {}",
+                        live.len(),
+                        self.b.max_frontier
+                    ),
                 ));
             }
             let ids: Vec<u64> = {
                 let mut s = HashSet::new();
-                live.iter().map(|(_, t)| t.end.id).filter(|i| s.insert(*i)).collect()
+                live.iter()
+                    .map(|(_, t)| t.end.id)
+                    .filter(|i| s.insert(*i))
+                    .collect()
             };
             metrics::counter!("sprig_graph_shard_queries_total", "tier" => "gateway").increment(1);
             let hops = self.hop_edges(&ids, &types, rp.dir).await?;
             let mut next = Vec::new();
             for (o, t) in live {
-                let Some(c) = hops.get(&t.end.id) else { continue };
+                let Some(c) = hops.get(&t.end.id) else {
+                    continue;
+                };
                 for (rel, far) in c {
                     if t.rels.iter().any(|x| x.id == rel.id) || !self.rel_ok(rp, rel, &empty)? {
                         continue;
@@ -945,7 +1008,9 @@ impl Exec<'_> {
         }
         let mut out = Vec::new();
         for (r, n) in cur {
-            let Some(trails) = done.get(&n.id) else { continue };
+            let Some(trails) = done.get(&n.id) else {
+                continue;
+            };
             let used = Self::row_rels(&r);
             for t in trails {
                 if t.rels.iter().any(|x| used.contains(&x.id)) {
@@ -956,7 +1021,13 @@ impl Exec<'_> {
                 {
                     let ids: Vec<u64> = b
                         .iter()
-                        .filter_map(|x| if let Value::Rel(r) = x { Some(r.id) } else { None })
+                        .filter_map(|x| {
+                            if let Value::Rel(r) = x {
+                                Some(r.id)
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
                     if ids != t.rels.iter().map(|x| x.id).collect::<Vec<_>>() {
                         continue;
@@ -967,7 +1038,10 @@ impl Exec<'_> {
                     continue;
                 }
                 if let Some(v) = &rp.var {
-                    nr.insert(v.clone(), Value::List(t.rels.iter().cloned().map(Value::Rel).collect()));
+                    nr.insert(
+                        v.clone(),
+                        Value::List(t.rels.iter().cloned().map(Value::Rel).collect()),
+                    );
                 }
                 for x in &t.rels {
                     Self::push_rel(&mut nr, x.id);
@@ -1013,8 +1087,15 @@ impl Exec<'_> {
             let a = Self::bound_node(&r, pat.start.var.as_ref());
             let b = Self::bound_node(&r, end_pat.var.as_ref());
             let (Some(Some(a)), Some(Some(b))) = (a, b) else {
-                if pat.start.var.as_ref().is_some_and(|v| r.get(v).is_some_and(Value::is_null))
-                    || end_pat.var.as_ref().is_some_and(|v| r.get(v).is_some_and(Value::is_null))
+                if pat
+                    .start
+                    .var
+                    .as_ref()
+                    .is_some_and(|v| r.get(v).is_some_and(Value::is_null))
+                    || end_pat
+                        .var
+                        .as_ref()
+                        .is_some_and(|v| r.get(v).is_some_and(Value::is_null))
                 {
                     continue;
                 }
@@ -1026,11 +1107,16 @@ impl Exec<'_> {
             if !self.node_ok(&pat.start, &a, &r)? || !self.node_ok(end_pat, &b, &r)? {
                 continue;
             }
-            let paths = self.bfs_paths(&a, &b, rp, &types, min, max, unbounded, all).await?;
+            let paths = self
+                .bfs_paths(&a, &b, rp, &types, min, max, unbounded, all)
+                .await?;
             for (ns, rs) in paths {
                 let mut nr = r.clone();
                 if let Some(v) = &rp.var {
-                    nr.insert(v.clone(), Value::List(rs.iter().cloned().map(Value::Rel).collect()));
+                    nr.insert(
+                        v.clone(),
+                        Value::List(rs.iter().cloned().map(Value::Rel).collect()),
+                    );
                 }
                 if let Some(pv) = &pat.var {
                     nr.insert(pv.clone(), path_value(ns, rs));
@@ -1055,14 +1141,18 @@ impl Exec<'_> {
         all: bool,
     ) -> Result<Vec<(Vec<Arc<Node>>, Vec<Arc<Rel>>)>> {
         if a.id == b.id {
-            return Ok(if min == 0 { vec![(vec![a.clone()], vec![])] } else { vec![] });
+            return Ok(if min == 0 {
+                vec![(vec![a.clone()], vec![])]
+            } else {
+                vec![]
+            });
         }
         let empty = Row::new();
         // node -> (depth, predecessors (prev node, rel))
-        type Side = HashMap<u64, (u32, Vec<(u64, Arc<Rel>)>)>;
         let mut fwd: Side = HashMap::from([(a.id, (0, vec![]))]);
         let mut bwd: Side = HashMap::from([(b.id, (0, vec![]))]);
-        let mut nodes: HashMap<u64, Arc<Node>> = HashMap::from([(a.id, a.clone()), (b.id, b.clone())]);
+        let mut nodes: HashMap<u64, Arc<Node>> =
+            HashMap::from([(a.id, a.clone()), (b.id, b.clone())]);
         let mut ff = vec![a.id];
         let mut bf = vec![b.id];
         let (mut df, mut db) = (0u32, 0u32);
@@ -1081,7 +1171,11 @@ impl Exec<'_> {
             if front.len() > self.b.max_frontier {
                 return Err(budget_error(
                     "frontier",
-                    format!("{} nodes in one level, graph.max_frontier = {}", front.len(), self.b.max_frontier),
+                    format!(
+                        "{} nodes in one level, graph.max_frontier = {}",
+                        front.len(),
+                        self.b.max_frontier
+                    ),
                 ));
             }
             let ids = front.clone();
@@ -1105,7 +1199,11 @@ impl Exec<'_> {
                     }
                 }
             }
-            meet = next.iter().copied().filter(|n| other.contains_key(n)).collect();
+            meet = next
+                .iter()
+                .copied()
+                .filter(|n| other.contains_key(n))
+                .collect();
             if forward {
                 ff = next;
             } else {
@@ -1119,17 +1217,16 @@ impl Exec<'_> {
             if unbounded && !ff.is_empty() && !bf.is_empty() {
                 return Err(budget_error(
                     "hops",
-                    format!("shortestPath went past graph.max_hops = {}", self.b.max_hops),
+                    format!(
+                        "shortestPath went past graph.max_hops = {}",
+                        self.b.max_hops
+                    ),
                 ));
             }
             return Ok(vec![]);
         }
         // The meeting nodes on a shortest path.
-        let best = meet
-            .iter()
-            .map(|m| fwd[m].0 + bwd[m].0)
-            .min()
-            .unwrap_or(0);
+        let best = meet.iter().map(|m| fwd[m].0 + bwd[m].0).min().unwrap_or(0);
         let meet: Vec<u64> = meet
             .into_iter()
             .filter(|m| fwd[m].0 + bwd[m].0 == best)
@@ -1162,16 +1259,15 @@ impl Exec<'_> {
 
 /// Every path from `m` back to its side's origin through the
 /// predecessors: node ids from `m`, relationships from `m`'s side.
-fn walk_back(
-    side: &HashMap<u64, (u32, Vec<(u64, Arc<Rel>)>)>,
-    m: u64,
-    limit: usize,
-) -> Vec<(Vec<u64>, Vec<Arc<Rel>>)> {
+fn walk_back(side: &Side, m: u64, limit: usize) -> Vec<(Vec<u64>, Vec<Arc<Rel>>)> {
     let mut out = Vec::new();
     let mut stack: Vec<(Vec<u64>, Vec<Arc<Rel>>)> = vec![(vec![m], vec![])];
     while let Some((ns, rs)) = stack.pop() {
         let last = *ns.last().unwrap_or(&m);
-        let preds = side.get(&last).map(|(_, p)| p.as_slice()).unwrap_or_default();
+        let preds = side
+            .get(&last)
+            .map(|(_, p)| p.as_slice())
+            .unwrap_or_default();
         if preds.is_empty() {
             out.push((ns, rs));
             if out.len() >= limit {

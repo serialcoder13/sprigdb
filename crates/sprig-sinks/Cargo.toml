@@ -42,7 +42,7 @@ sprig-logic-js.workspace = true
 sprig-meta.workspace = true
 sprig-proto-kafka = { path = "../sprig-proto-kafka" }
 sprig-settings.workspace = true
-# sprig-streams = { path = "../sprig-streams" }
+sprig-streams = { path = "../sprig-streams" }
 sprig-workload.workspace = true
 # The PostgreSQL database target (chapter 51 open question 10): sqlx's
 # PostgreSQL driver (MIT/Apache-2.0) on tokio with rustls and ring.

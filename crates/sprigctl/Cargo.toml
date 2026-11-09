@@ -20,6 +20,8 @@ hyper.workspace = true
 hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Chapter 51 (R9): sprigctl sink.
+sprig-sinks = { path = "../sprig-sinks" }
 # `explain placement|decision` render chapter 11's types.
 sprig-balancer.workspace = true
 sprig-cluster.workspace = true
@@ -34,6 +36,8 @@ sprig-meta.workspace = true
 sprig-mover.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true
+# `cluster extract-open` (chapter 25): the extract keys.
+sprig-workload.workspace = true
 tokio.workspace = true
 toml.workspace = true
 

@@ -268,11 +268,7 @@ impl ScramServer {
         let check = |stored: &[u8], server: &[u8]| -> Option<Vec<u8>> {
             let key = hmac::Key::new(hmac::HMAC_SHA256, stored);
             let sig = hmac::sign(&key, auth_message.as_bytes());
-            let client_key: Vec<u8> = proof
-                .iter()
-                .zip(sig.as_ref())
-                .map(|(a, b)| a ^ b)
-                .collect();
+            let client_key: Vec<u8> = proof.iter().zip(sig.as_ref()).map(|(a, b)| a ^ b).collect();
             let h = digest::digest(&digest::SHA256, &client_key);
             if bool::from(h.as_ref().ct_eq(stored)) {
                 let skey = hmac::Key::new(hmac::HMAC_SHA256, server);

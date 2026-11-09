@@ -1,3 +1,5 @@
+#![allow(clippy::many_single_char_names)]
+
 use bson::{doc, rawdoc};
 
 use super::*;
@@ -6,8 +8,21 @@ use super::*;
 /// byte by byte from the OP_MSG and BSON specifications.
 fn ping_bytes() -> Vec<u8> {
     let h = concat!(
-        "33000000", "01000000", "00000000", "dd070000", "00000000", "00", "1e000000", "10",
-        "70696e6700", "01000000", "02", "24646200", "06000000", "61646d696e00", "00"
+        "33000000",
+        "01000000",
+        "00000000",
+        "dd070000",
+        "00000000",
+        "00",
+        "1e000000",
+        "10",
+        "70696e6700",
+        "01000000",
+        "02",
+        "24646200",
+        "06000000",
+        "61646d696e00",
+        "00"
     );
     hex::decode(h).unwrap()
 }
@@ -20,7 +35,9 @@ fn golden_ping_decodes_and_reencodes() {
     assert_eq!(h.request_id, 1);
     assert_eq!(h.op_code, OP_MSG);
     assert_eq!(c, None);
-    let Frame::Msg(m) = &f else { panic!("not OP_MSG") };
+    let Frame::Msg(m) = &f else {
+        panic!("not OP_MSG")
+    };
     assert_eq!(m.flags, 0);
     assert_eq!(m.body, rawdoc! {"ping": 1, "$db": "admin"});
     assert!(m.sequences.is_empty());
@@ -75,7 +92,10 @@ fn compressors_round_trip() {
     });
     for c in [Compressor::Snappy, Compressor::Zlib, Compressor::Zstd] {
         let b = encode(3, 9, &f, Some(c)).unwrap();
-        assert_eq!(i32::from_le_bytes([b[12], b[13], b[14], b[15]]), OP_COMPRESSED);
+        assert_eq!(
+            i32::from_le_bytes([b[12], b[13], b[14], b[15]]),
+            OP_COMPRESSED
+        );
         assert_eq!(b[24], c.id());
         assert!(b.len() < 400, "{c:?} didn't compress");
         let (h, g, used) = decode(&b).unwrap();
@@ -147,7 +167,10 @@ fn refusals() {
     assert_eq!(decode(&b).unwrap_err(), CodecError::OpCode(2002));
     let mut b = ping_bytes();
     b[0..4].copy_from_slice(&15i32.to_le_bytes());
-    assert!(matches!(check_length(&header(&b[..16].try_into().unwrap())), Err(CodecError::Length(15))));
+    assert!(matches!(
+        check_length(&header(&b[..16].try_into().unwrap())),
+        Err(CodecError::Length(15))
+    ));
     let mut b = ping_bytes();
     b[0..4].copy_from_slice(&48_000_001i32.to_le_bytes());
     assert!(check_length(&header(&b[..16].try_into().unwrap())).is_err());

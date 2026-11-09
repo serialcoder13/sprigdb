@@ -11,6 +11,10 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 gethostname.workspace = true
+# Chapter 25's node_rebuild calls the nodes' agents.
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -29,6 +33,9 @@ sprig-inherit = { path = "../sprig-inherit" }
 sprig-logic = { path = "../sprig-logic" }
 # Chapter 45: stream sequencers (R9).
 sprig-streams = { path = "../sprig-streams" }
+# Chapter 51 (R9): sink tasks.
+sprig-sinks = { path = "../sprig-sinks" }
+sprig-workload.workspace = true
 sprig-meta.workspace = true
 sprig-mover.workspace = true
 sprig-settings.workspace = true

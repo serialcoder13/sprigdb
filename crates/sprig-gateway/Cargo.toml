@@ -57,12 +57,23 @@ sprig-sql.workspace = true
 sprig-types = { path = "../sprig-types" }
 # Chapter 45: event streams in tenant sessions (R9).
 sprig-streams = { path = "../sprig-streams" }
+# Chapter 51: sinks and connections (R9).
+sprig-sinks = { path = "../sprig-sinks" }
 # Chapter 45: the Kafka codec and broker on 9092 (R9).
 sprig-proto-kafka = { path = "../sprig-proto-kafka" }
 # Chapter 50: AMQP 0-9-1 and 1.0 on 5672 and 5671 (R9).
 sprig-proto-amqp = { path = "../sprig-proto-amqp" }
+# Chapter 30 and 31 (R5): the MongoDB codec and SCRAM, the document
+# engine, and BSON (MIT).
+sprig-proto-mongo = { path = "../sprig-proto-mongo" }
+sprig-doc = { path = "../sprig-doc" }
+bson = "=2.15.0"
+getrandom.workspace = true
 # Chapter 50: the queue engine behind AMQP (R9).
 sprig-queues = { path = "../sprig-queues" }
+# Chapter 43: graphs and the Bolt listener on 7687 (R8).
+sprig-graph = { path = "../sprig-graph" }
+sprig-proto-bolt = { path = "../sprig-proto-bolt" }
 uuid.workspace = true
 # Hierarchical data inheritance (chapter 42, R6).
 sprig-inherit = { path = "../sprig-inherit" }

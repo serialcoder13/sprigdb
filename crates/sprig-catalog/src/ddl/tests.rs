@@ -575,6 +575,36 @@ async fn a_refused_statement_rolls_back_without_a_version() {
         .unwrap();
     assert!(env.exec.has_schema(&shard(3, 3, 3)));
     assert_eq!(env.intents(), 0);
+
+    // CREATE DATABASE whose schema is made but whose second statement (the
+    // transactions' decision table) is refused: the new schema goes too
+    // (r2close; r2kind's leftover left such schemas behind).
+    env.exec.inject(Fault::Pass);
+    env.exec.inject(Fault::Refuse(SprigError::backend(
+        1142,
+        *b"42000",
+        "CREATE command denied",
+    )));
+    let e = env
+        .run(create_db("sales"), "CREATE DATABASE sales")
+        .await
+        .unwrap_err();
+    assert_eq!(errno_of(&e), 1142);
+    assert!(env.tables().databases.values().all(|d| d.name != "sales"));
+    let made = env
+        .exec
+        .log()
+        .iter()
+        .rev()
+        .find(|st| matches!(st.effect, super::exec::Effect::CreateSchema))
+        .map(|st| st.schema)
+        .unwrap();
+    assert!(
+        !env.exec.has_schema(&made),
+        "the refused database's new schema {made} is dropped"
+    );
+    assert!(env.exec.log().last().unwrap().sql.starts_with("DROP DATABASE IF EXISTS"));
+    assert_eq!(env.intents(), 0);
 }
 
 #[tokio::test]

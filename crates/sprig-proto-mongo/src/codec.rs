@@ -327,8 +327,8 @@ pub fn decode(msg: &[u8]) -> Result<(MsgHeader, Frame, Option<Compressor>), Code
     if len != msg.len() {
         return Err(bad("length doesn't match the message"));
     }
-    match h.op_code {
-        OP_COMPRESSED => {
+    if h.op_code == OP_COMPRESSED {
+        {
             let mut r = Reader::new(&msg[16..]);
             let original = r.i32()?;
             let size = r.i32()?;
@@ -351,10 +351,9 @@ pub fn decode(msg: &[u8]) -> Result<(MsgHeader, Frame, Option<Compressor>), Code
             let f = body_frame(&inner, &body)?;
             Ok((inner, f, Some(c)))
         }
-        _ => {
-            let f = body_frame(&h, &msg[16..])?;
-            Ok((h, f, None))
-        }
+    } else {
+        let f = body_frame(&h, &msg[16..])?;
+        Ok((h, f, None))
     }
 }
 
@@ -557,8 +556,7 @@ pub fn encode(
                 for d in &s.docs {
                     out.extend_from_slice(d.as_bytes());
                 }
-                let size =
-                    i32::try_from(out.len() - start).map_err(|_| CodecError::Length(0))?;
+                let size = i32::try_from(out.len() - start).map_err(|_| CodecError::Length(0))?;
                 out[start..start + 4].copy_from_slice(&size.to_le_bytes());
             }
         }

@@ -3,9 +3,9 @@
 //!
 //! | Tag | Structure | Fields (5.x) |
 //! |---|---|---|
-//! | `4E` | Node | id, labels, properties, element_id |
-//! | `52` | Relationship | id, start id, end id, type, properties, element_id, start element_id, end element_id |
-//! | `72` | UnboundRelationship | id, type, properties, element_id |
+//! | `4E` | Node | id, labels, properties, `element_id` |
+//! | `52` | Relationship | id, start id, end id, type, properties, `element_id`, start `element_id`, end `element_id` |
+//! | `72` | `UnboundRelationship` | id, type, properties, `element_id` |
 //! | `50` | Path | nodes, unbound relationships, indices |
 //!
 //! Path indices alternate a relationship index (1-based; negative when the
@@ -17,7 +17,7 @@ use crate::packstream::PackValue;
 pub const NODE: u8 = 0x4E;
 /// Relationship tag.
 pub const RELATIONSHIP: u8 = 0x52;
-/// UnboundRelationship tag.
+/// `UnboundRelationship` tag.
 pub const UNBOUND: u8 = 0x72;
 /// Path tag.
 pub const PATH: u8 = 0x50;
@@ -51,7 +51,13 @@ pub struct Ends<'a> {
 
 /// A Relationship structure.
 #[must_use]
-pub fn relationship(id: i64, ends: &Ends<'_>, rtype: &str, props: PackValue, eid: &str) -> PackValue {
+pub fn relationship(
+    id: i64,
+    ends: &Ends<'_>,
+    rtype: &str,
+    props: PackValue,
+    eid: &str,
+) -> PackValue {
     PackValue::Struct {
         tag: RELATIONSHIP,
         fields: vec![
@@ -67,7 +73,7 @@ pub fn relationship(id: i64, ends: &Ends<'_>, rtype: &str, props: PackValue, eid
     }
 }
 
-/// An UnboundRelationship structure.
+/// An `UnboundRelationship` structure.
 #[must_use]
 pub fn unbound(id: i64, rtype: &str, props: PackValue, eid: &str) -> PackValue {
     PackValue::Struct {
@@ -145,7 +151,11 @@ mod tests {
             b.to_vec(),
             hex("B8 52 07 01 02 85 4B 4E 4F 57 53 A0 81 72 81 61 81 62")
         );
-        let p = path(vec![PackValue::Null, PackValue::Null], vec![PackValue::Null], vec![1, 1]);
+        let p = path(
+            vec![PackValue::Null, PackValue::Null],
+            vec![PackValue::Null],
+            vec![1, 1],
+        );
         let mut b = BytesMut::new();
         encode(&p, &mut b);
         assert_eq!(b.to_vec(), hex("B3 50 92 C0 C0 91 C0 92 01 01"));

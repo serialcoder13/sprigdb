@@ -551,3 +551,56 @@ async fn a_stale_resource_version_is_a_conflict() {
     assert_eq!(w.reconcile("x").await.phase, Phase::Provisioning);
     let _ = w.clock.now();
 }
+
+/// r2close (r2kind's leftover): a pass the API refuses (mariadb-operator's
+/// webhook) leaves its reason in the status and one `ReconcileError` Event,
+/// instead of an empty phase; the next good pass clears it.
+#[tokio::test]
+async fn a_refused_pass_shows_its_reason_in_the_status() {
+    let w = world().await;
+    w.api.put(SC, sprig_cluster("fra1-c9", "replication", 3));
+    w.api
+        .state
+        .lock()
+        .unwrap()
+        .refuse_create
+        .insert(MDB.to_owned(), "spec.replication.replica.recovery needs bootstrapFrom".into());
+    let raw = w
+        .kube
+        .get(&crd::SPRIG_CLUSTER, NS, "fra1-c9")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(w.rec.reconcile(&raw).await.is_err());
+    let st = w.status("fra1-c9");
+    assert_eq!(st["phase"], "Pending", "{st}");
+    let msg = st["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("reconcile error") && msg.contains("bootstrapFrom"), "{st}");
+    let events = || {
+        w.api
+            .names(EVENTS)
+            .iter()
+            .filter_map(|n| w.api.get(EVENTS, n))
+            .filter(|e| e["reason"] == "ReconcileError")
+            .count()
+    };
+    assert_eq!(events(), 1);
+    // The same refusal again: no new Event, no status write.
+    let raw = w
+        .kube
+        .get(&crd::SPRIG_CLUSTER, NS, "fra1-c9")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(w.rec.reconcile(&raw).await.is_err());
+    assert_eq!(events(), 1);
+    // The webhook is fixed: the next pass proceeds and clears the message.
+    w.api.state.lock().unwrap().refuse_create.clear();
+    let o = w.reconcile("fra1-c9").await;
+    assert_eq!(o.phase, Phase::Provisioning);
+    let st = w.status("fra1-c9");
+    assert!(
+        !st["message"].as_str().unwrap_or_default().contains("reconcile error"),
+        "{st}"
+    );
+}

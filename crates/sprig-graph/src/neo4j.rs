@@ -64,13 +64,25 @@ mod tests {
     #[test]
     fn codes_follow_the_chapter() {
         let e = SprigError::new(SprigCode::GraphBudgetExceeded, "x");
-        assert_eq!(status_code(&e), "Neo.ClientError.Statement.SprigGraphBudgetExceeded");
+        assert_eq!(
+            status_code(&e),
+            "Neo.ClientError.Statement.SprigGraphBudgetExceeded"
+        );
         let e = SprigError::new(SprigCode::GraphSyntax, "x");
         assert_eq!(status_code(&e), "Neo.ClientError.Statement.SyntaxError");
         let e = SprigError::backend(1213, *b"40001", "deadlock");
-        assert_eq!(status_code(&e), "Neo.TransientError.Transaction.DeadlockDetected");
-        let e = SprigError::new(SprigCode::GraphSyntax, "[Neo.ClientError.Statement.ParameterMissing] Expected parameter(s): x");
-        assert_eq!(status_code(&e), "Neo.ClientError.Statement.ParameterMissing");
+        assert_eq!(
+            status_code(&e),
+            "Neo.TransientError.Transaction.DeadlockDetected"
+        );
+        let e = SprigError::new(
+            SprigCode::GraphSyntax,
+            "[Neo.ClientError.Statement.ParameterMissing] Expected parameter(s): x",
+        );
+        assert_eq!(
+            status_code(&e),
+            "Neo.ClientError.Statement.ParameterMissing"
+        );
         assert_eq!(message(&e), "Expected parameter(s): x");
     }
 }

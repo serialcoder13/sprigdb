@@ -286,7 +286,8 @@ async fn get_cluster(
     respond(r.await)
 }
 
-/// `{cluster_id}:probe`, `:drain`, `:retire` and `:setNodes`.
+/// `{cluster_id}:probe`, `:drain`, `:retire`, `:setNodes`, `:extract` and
+/// `:rebuild`.
 async fn cluster_method(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -313,9 +314,23 @@ async fn cluster_method(
             };
             respond(r.await)
         }
+        Some((id, "extract")) => {
+            let r = async {
+                let req: super::recovery::ExtractNodeRequest = parse(&body, false)?;
+                app.svc.extract_node(id, req).await
+            };
+            respond(r.await)
+        }
+        Some((id, "rebuild")) => {
+            let r = async {
+                let req: super::recovery::RebuildNodeRequest = parse(&body, false)?;
+                app.svc.rebuild_node(id, req).await
+            };
+            respond(r.await)
+        }
         _ => error_response(&invalid(format!(
-            "POST /admin/v1/clusters/{name}: expected {{cluster_id}}:probe, :drain, :retire \
-             or :setNodes"
+            "POST /admin/v1/clusters/{name}: expected {{cluster_id}}:probe, :drain, :retire, \
+             :setNodes, :extract or :rebuild"
         ))),
     }
 }

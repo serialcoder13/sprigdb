@@ -18,7 +18,10 @@ async fn q(s: &mut MemStore, text: &str) -> Output {
 }
 
 async fn qp(s: &mut MemStore, text: &str, params: &[(&str, Value)]) -> Output {
-    let p: Params = params.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect();
+    let p: Params = params
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect();
     crate::execute(s, text, &p, &Budgets::default())
         .await
         .unwrap_or_else(|e| panic!("{text}: {e}"))
@@ -65,14 +68,30 @@ async fn create_and_match_basics() {
         let mut s = social(shards).await;
         assert_eq!(s.node_count(), 8);
         assert_eq!(s.edge_count(), 9);
-        let o = q(&mut s, "MATCH (p:Person) WHERE p.age > 28 RETURN p.name AS n ORDER BY n").await;
+        let o = q(
+            &mut s,
+            "MATCH (p:Person) WHERE p.age > 28 RETURN p.name AS n ORDER BY n",
+        )
+        .await;
         assert_eq!(show(&o), ["Alice", "Carol", "Dave"]);
-        let o = q(&mut s, "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b) RETURN b.name, r.since").await;
+        let o = q(
+            &mut s,
+            "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b) RETURN b.name, r.since",
+        )
+        .await;
         assert_eq!(o.columns, ["b.name", "r.since"]);
         assert_eq!(show(&o), ["Bob|2010"]);
-        let o = q(&mut s, "MATCH (a)<-[:KNOWS]-(b {name: 'Bob'}) RETURN a.name").await;
+        let o = q(
+            &mut s,
+            "MATCH (a)<-[:KNOWS]-(b {name: 'Bob'}) RETURN a.name",
+        )
+        .await;
         assert_eq!(show(&o), ["Carol"]);
-        let o = q(&mut s, "MATCH (a {name: 'Alice'})-[:KNOWS]-(x) RETURN x.name ORDER BY x.name").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'})-[:KNOWS]-(x) RETURN x.name ORDER BY x.name",
+        )
+        .await;
         assert_eq!(show(&o), ["Bob", "Dave"]);
         let o = q(&mut s, "MATCH (n) RETURN count(*) AS c, count(n.age) AS a").await;
         assert_eq!(show(&o), ["8|4"]);
@@ -81,7 +100,11 @@ async fn create_and_match_basics() {
         // Labels(), type(), id and element ids.
         let o = q(&mut s, "MATCH (a {name: 'Alice'})-[r]->(p:Product) RETURN labels(p), type(r), elementId(a) STARTS WITH 'n:'").await;
         assert_eq!(show(&o), ["[\"Product\"]|BOUGHT|true"]);
-        let o = q(&mut s, "MATCH (a {name: 'Alice'}) WITH id(a) AS i MATCH (n) WHERE id(n) = i RETURN n.name").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'}) WITH id(a) AS i MATCH (n) WHERE id(n) = i RETURN n.name",
+        )
+        .await;
         assert_eq!(show(&o), ["Alice"]);
     }
 }
@@ -111,25 +134,49 @@ async fn variable_length_paths_endpoint_and_path_modes_agree() {
     for shards in [1, 4] {
         let mut s = social(shards).await;
         // Endpoint mode (DISTINCT).
-        let o = q(&mut s, "MATCH (a {name: 'Alice'})-[:KNOWS*1..3]->(x) RETURN DISTINCT x.name AS n ORDER BY n").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'})-[:KNOWS*1..3]->(x) RETURN DISTINCT x.name AS n ORDER BY n",
+        )
+        .await;
         assert_eq!(show(&o), ["Bob", "Carol", "Dave"]);
         // Path mode (paths are counted).
         let o = q(&mut s, "MATCH p = (a {name: 'Alice'})-[:KNOWS*1..4]->(x) RETURN x.name, length(p) ORDER BY length(p)").await;
         assert_eq!(show(&o), ["Bob|1", "Carol|2", "Dave|3", "Alice|4"]);
         // Zero-length.
-        let o = q(&mut s, "MATCH (a {name: 'Alice'})-[:KNOWS*0..1]->(x) RETURN x.name ORDER BY x.name").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'})-[:KNOWS*0..1]->(x) RETURN x.name ORDER BY x.name",
+        )
+        .await;
         assert_eq!(show(&o), ["Alice", "Bob"]);
         // Unbounded in endpoint mode: the cycle ends it.
-        let o = q(&mut s, "MATCH (a {name: 'Alice'})-[:KNOWS*]->(x) RETURN count(DISTINCT x) AS c").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'})-[:KNOWS*]->(x) RETURN count(DISTINCT x) AS c",
+        )
+        .await;
         assert_eq!(show(&o), ["4"]);
         // Relationship list variable.
-        let o = q(&mut s, "MATCH (a {name: 'Alice'})-[r:KNOWS*2]->(x) RETURN size(r), x.name").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'})-[r:KNOWS*2]->(x) RETURN size(r), x.name",
+        )
+        .await;
         assert_eq!(show(&o), ["2|Carol"]);
         // Undirected path mode: trails in both directions.
-        let o = q(&mut s, "MATCH (a {name: 'Alice'})-[:KNOWS*2]-(x) RETURN x.name ORDER BY x.name").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'})-[:KNOWS*2]-(x) RETURN x.name ORDER BY x.name",
+        )
+        .await;
         assert_eq!(show(&o), ["Carol", "Carol"]);
         // Quantifier syntax.
-        let o = q(&mut s, "MATCH (a {name: 'Alice'})-[:KNOWS]->{2,2}(x) RETURN x.name").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'})-[:KNOWS]->{2,2}(x) RETURN x.name",
+        )
+        .await;
         assert_eq!(show(&o), ["Carol"]);
     }
 }
@@ -141,17 +188,31 @@ async fn shortest_paths() {
         let o = q(&mut s, "MATCH (a {name: 'Alice'}), (d {name: 'Dave'})
                            MATCH p = shortestPath((a)-[:KNOWS*]-(d)) RETURN length(p), [n IN nodes(p) | n.name]").await;
         assert_eq!(show(&o), ["1|[\"Alice\", \"Dave\"]"]);
-        let o = q(&mut s, "MATCH (a {name: 'Alice'}), (d {name: 'Dave'})
-                           MATCH p = shortestPath((a)-[:KNOWS*]->(d)) RETURN length(p)").await;
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'}), (d {name: 'Dave'})
+                           MATCH p = shortestPath((a)-[:KNOWS*]->(d)) RETURN length(p)",
+        )
+        .await;
         assert_eq!(show(&o), ["3"]);
         // Two shortest paths from Bob to Product Pen: via Carol only (Dave is
         // farther), and all shortest from Alice to Carol undirected: one
         // each way? Alice-Bob-Carol and Alice-Dave-Carol.
         let o = q(&mut s, "MATCH (a {name: 'Alice'}), (c {name: 'Carol'})
                            MATCH p = allShortestPaths((a)-[:KNOWS*]-(c)) RETURN [n IN nodes(p) | n.name] AS ns ORDER BY ns").await;
-        assert_eq!(show(&o), ["[\"Alice\", \"Bob\", \"Carol\"]", "[\"Alice\", \"Dave\", \"Carol\"]"]);
-        let o = q(&mut s, "MATCH (a {name: 'Alice'}), (e {name: 'Eve'})
-                           OPTIONAL MATCH p = shortestPath((a)-[*..5]-(e)) RETURN p").await;
+        assert_eq!(
+            show(&o),
+            [
+                "[\"Alice\", \"Bob\", \"Carol\"]",
+                "[\"Alice\", \"Dave\", \"Carol\"]"
+            ]
+        );
+        let o = q(
+            &mut s,
+            "MATCH (a {name: 'Alice'}), (e {name: 'Eve'})
+                           OPTIONAL MATCH p = shortestPath((a)-[*..5]-(e)) RETURN p",
+        )
+        .await;
         assert_eq!(show(&o), ["null"]);
     }
 }
@@ -165,23 +226,47 @@ async fn optional_match_with_unwind_and_aggregation() {
     assert_eq!(o.rows[0][0], Value::Float(111.5));
     assert_eq!(o.rows[0][2], Value::str("Desk"));
     assert_eq!(o.rows[0][3], Value::Int(100));
-    let o = q(&mut s, "UNWIND [3, 1, 2, 1] AS x WITH DISTINCT x ORDER BY x DESC RETURN collect(x) AS xs").await;
+    let o = q(
+        &mut s,
+        "UNWIND [3, 1, 2, 1] AS x WITH DISTINCT x ORDER BY x DESC RETURN collect(x) AS xs",
+    )
+    .await;
     assert_eq!(show(&o), ["[3, 2, 1]"]);
-    let o = q(&mut s, "UNWIND range(1, 10) AS x WITH x WHERE x % 3 = 0 RETURN x SKIP 1 LIMIT 1").await;
+    let o = q(
+        &mut s,
+        "UNWIND range(1, 10) AS x WITH x WHERE x % 3 = 0 RETURN x SKIP 1 LIMIT 1",
+    )
+    .await;
     assert_eq!(show(&o), ["6"]);
     let o = q(&mut s, "MATCH (p:Person) WITH p.age IS NULL AS missing, count(*) AS c RETURN missing, c ORDER BY missing").await;
     assert_eq!(show(&o), ["false|4", "true|1"]);
-    let o = q(&mut s, "RETURN 1 AS x UNION RETURN 1 AS x UNION ALL RETURN 2 AS x").await;
+    let o = q(
+        &mut s,
+        "RETURN 1 AS x UNION RETURN 1 AS x UNION ALL RETURN 2 AS x",
+    )
+    .await;
     assert_eq!(show(&o).len(), 2);
-    let o = q(&mut s, "MATCH (n:Person) WHERE n.name =~ 'A.*' OR n.name IN ['Eve'] RETURN n.name ORDER BY n.name").await;
+    let o = q(
+        &mut s,
+        "MATCH (n:Person) WHERE n.name =~ 'A.*' OR n.name IN ['Eve'] RETURN n.name ORDER BY n.name",
+    )
+    .await;
     assert_eq!(show(&o), ["Alice", "Eve"]);
-    let o = q(&mut s, "CALL db.labels() YIELD label RETURN label ORDER BY label").await;
+    let o = q(
+        &mut s,
+        "CALL db.labels() YIELD label RETURN label ORDER BY label",
+    )
+    .await;
     assert_eq!(show(&o), ["Person", "Product"]);
     let o = q(&mut s, "CALL db.relationshipTypes").await;
     assert_eq!(o.columns, ["relationshipType"]);
     let o = q(&mut s, "MATCH (a:Person) WHERE exists((a)-[:BOUGHT]->(:Product {name: 'Pen'})) RETURN a.name ORDER BY a.name").await;
     assert_eq!(show(&o), ["Carol", "Dave"]);
-    let o = q(&mut s, "MATCH (a:Person) WHERE NOT EXISTS { (a)-[:BOUGHT]->() } RETURN a.name").await;
+    let o = q(
+        &mut s,
+        "MATCH (a:Person) WHERE NOT EXISTS { (a)-[:BOUGHT]->() } RETURN a.name",
+    )
+    .await;
     assert_eq!(show(&o), ["Eve"]);
 }
 
@@ -190,10 +275,18 @@ async fn relationship_uniqueness_within_a_match() {
     let mut s = MemStore::new(1);
     q(&mut s, "CREATE (a:N {i: 1})-[:R]->(b:N {i: 2})").await;
     // (x)-[r1]-(y)-[r2]-(z) can't reuse the one relationship.
-    let o = q(&mut s, "MATCH (x)-[r1:R]-(y)-[r2:R]-(z) RETURN count(*) AS c").await;
+    let o = q(
+        &mut s,
+        "MATCH (x)-[r1:R]-(y)-[r2:R]-(z) RETURN count(*) AS c",
+    )
+    .await;
     assert_eq!(show(&o), ["0"]);
     // Two MATCH clauses may.
-    let o = q(&mut s, "MATCH (x)-[r1:R]-(y) MATCH (y)-[r2:R]-(z) RETURN count(*) AS c").await;
+    let o = q(
+        &mut s,
+        "MATCH (x)-[r1:R]-(y) MATCH (y)-[r2:R]-(z) RETURN count(*) AS c",
+    )
+    .await;
     assert_eq!(show(&o), ["2"]);
 }
 
@@ -209,9 +302,17 @@ async fn merge_set_remove_delete() {
     // MERGE of a relationship between existing nodes, twice.
     q(&mut s, "CREATE (:User {id: 2})").await;
     for _ in 0..2 {
-        q(&mut s, "MATCH (a:User {id: 1}), (b:User {id: 2}) MERGE (a)-[:FOLLOWS]->(b)").await;
+        q(
+            &mut s,
+            "MATCH (a:User {id: 1}), (b:User {id: 2}) MERGE (a)-[:FOLLOWS]->(b)",
+        )
+        .await;
     }
-    let o = q(&mut s, "MATCH (:User)-[r:FOLLOWS]->(:User) RETURN count(r) AS c").await;
+    let o = q(
+        &mut s,
+        "MATCH (:User)-[r:FOLLOWS]->(:User) RETURN count(r) AS c",
+    )
+    .await;
     assert_eq!(show(&o), ["1"]);
     // UNWIND + MERGE: later rows see earlier creations.
     q(&mut s, "UNWIND [3, 3, 4] AS i MERGE (:User {id: i})").await;
@@ -220,14 +321,27 @@ async fn merge_set_remove_delete() {
     // SET items see earlier items; labels; += and =.
     let o = q(&mut s, "MATCH (n:User {id: 2}) SET n.a = 1, n.b = n.a + 1, n:Admin, n += {c: 3} RETURN n.a, n.b, n.c, labels(n)").await;
     assert_eq!(show(&o), ["1|2|3|[\"User\", \"Admin\"]"]);
-    let o = q(&mut s, "MATCH (n:Admin) SET n = {z: 9} REMOVE n:Admin RETURN keys(n), labels(n)").await;
+    let o = q(
+        &mut s,
+        "MATCH (n:Admin) SET n = {z: 9} REMOVE n:Admin RETURN keys(n), labels(n)",
+    )
+    .await;
     assert_eq!(show(&o), ["[\"z\"]|[\"User\"]"]);
-    let o = q(&mut s, "MATCH (n:User {id: 1}) REMOVE n.created RETURN n.created").await;
+    let o = q(
+        &mut s,
+        "MATCH (n:User {id: 1}) REMOVE n.created RETURN n.created",
+    )
+    .await;
     assert_eq!(show(&o), ["null"]);
     // Maps aren't property values.
-    let e = crate::execute(&mut s, "CREATE (:X {m: {a: 1}})", &Params::new(), &Budgets::default())
-        .await
-        .expect_err("map");
+    let e = crate::execute(
+        &mut s,
+        "CREATE (:X {m: {a: 1}})",
+        &Params::new(),
+        &Budgets::default(),
+    )
+    .await
+    .expect_err("map");
     assert_eq!(e.code(), Some(SprigCode::GraphPropertyType));
     // A plain DELETE of a connected node is recorded for the commit check.
     let o = q(&mut s, "MATCH (n:User {id: 1}) DELETE n").await;
@@ -244,9 +358,14 @@ async fn merge_set_remove_delete() {
         max_detach_edges: 2,
         ..Budgets::default()
     };
-    let e = crate::execute(&mut s, "MATCH (n:Person {name: 'Alice'}) DETACH DELETE n", &Params::new(), &b)
-        .await
-        .expect_err("detach");
+    let e = crate::execute(
+        &mut s,
+        "MATCH (n:Person {name: 'Alice'}) DETACH DELETE n",
+        &Params::new(),
+        &b,
+    )
+    .await
+    .expect_err("detach");
     assert_eq!(e.code(), Some(SprigCode::GraphDetachTooLarge));
 }
 
@@ -256,9 +375,17 @@ async fn merge_set_remove_delete() {
 async fn budgets_refuse_cleanly() {
     let mut s = MemStore::new(4);
     q(&mut s, "UNWIND range(0, 39) AS i CREATE (:C {i: i})").await;
-    q(&mut s, "MATCH (a:C), (b:C) WHERE b.i = a.i + 1 CREATE (a)-[:NEXT]->(b)").await;
+    q(
+        &mut s,
+        "MATCH (a:C), (b:C) WHERE b.i = a.i + 1 CREATE (a)-[:NEXT]->(b)",
+    )
+    .await;
     // A star: one hub with 50 leaves.
-    q(&mut s, "CREATE (h:Hub) WITH h UNWIND range(1, 50) AS i CREATE (h)-[:LEAF]->(:Leaf {i: i})").await;
+    q(
+        &mut s,
+        "CREATE (h:Hub) WITH h UNWIND range(1, 50) AS i CREATE (h)-[:LEAF]->(:Leaf {i: i})",
+    )
+    .await;
     let p = Params::new();
     let check = |r: sprig_common::Result<Output>, reason: &str| {
         let e = r.expect_err(reason);
@@ -267,16 +394,34 @@ async fn budgets_refuse_cleanly() {
     };
     // Unbounded past graph.max_hops (15): an error, in both modes.
     check(
-        crate::execute(&mut s, "MATCH (a:C {i: 0})-[:NEXT*]->(b) RETURN count(DISTINCT b)", &p, &Budgets::default()).await,
+        crate::execute(
+            &mut s,
+            "MATCH (a:C {i: 0})-[:NEXT*]->(b) RETURN count(DISTINCT b)",
+            &p,
+            &Budgets::default(),
+        )
+        .await,
         "hops",
     );
     check(
-        crate::execute(&mut s, "MATCH (a:C {i: 0})-[:NEXT*]->(b) RETURN b", &p, &Budgets::default()).await,
+        crate::execute(
+            &mut s,
+            "MATCH (a:C {i: 0})-[:NEXT*]->(b) RETURN b",
+            &p,
+            &Budgets::default(),
+        )
+        .await,
         "hops",
     );
     // An explicit bound above it.
     check(
-        crate::execute(&mut s, "MATCH (a:C {i: 0})-[:NEXT*1..20]->(b) RETURN b", &p, &Budgets::default()).await,
+        crate::execute(
+            &mut s,
+            "MATCH (a:C {i: 0})-[:NEXT*1..20]->(b) RETURN b",
+            &p,
+            &Budgets::default(),
+        )
+        .await,
         "hops",
     );
     // With max_hops 50 the chain is exact.
@@ -284,9 +429,14 @@ async fn budgets_refuse_cleanly() {
         max_hops: 50,
         ..Budgets::default()
     };
-    let o = crate::execute(&mut s, "MATCH (a:C {i: 0})-[:NEXT*]->(b) RETURN count(DISTINCT b) AS c", &p, &wide)
-        .await
-        .expect("exact");
+    let o = crate::execute(
+        &mut s,
+        "MATCH (a:C {i: 0})-[:NEXT*]->(b) RETURN count(DISTINCT b) AS c",
+        &p,
+        &wide,
+    )
+    .await
+    .expect("exact");
     assert_eq!(o.rows[0][0], Value::Int(39));
     // Frontier and rows.
     let narrow = Budgets {
@@ -294,7 +444,13 @@ async fn budgets_refuse_cleanly() {
         ..Budgets::default()
     };
     check(
-        crate::execute(&mut s, "MATCH (h:Hub)-[:LEAF*1..2]->(x) RETURN x", &p, &narrow).await,
+        crate::execute(
+            &mut s,
+            "MATCH (h:Hub)-[:LEAF*1..2]->(x) RETURN x",
+            &p,
+            &narrow,
+        )
+        .await,
         "frontier",
     );
     let few = Budgets {
@@ -343,9 +499,18 @@ async fn errors_and_explain() {
     let o = q(&mut s, "EXPLAIN MATCH (a)-[:KNOWS*1..2]->(b) RETURN b").await;
     assert!(o.rows.is_empty());
     assert!(o.plan.expect("plan").iter().any(|l| l.contains("cte")));
-    let o = q(&mut s, "PROFILE MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b.name").await;
+    let o = q(
+        &mut s,
+        "PROFILE MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b.name",
+    )
+    .await;
     assert_eq!(o.rows.len(), 1);
-    assert!(o.plan.expect("plan").iter().any(|l| l.contains("shard statements")));
+    assert!(
+        o.plan
+            .expect("plan")
+            .iter()
+            .any(|l| l.contains("shard statements"))
+    );
 }
 
 #[tokio::test]
@@ -354,10 +519,20 @@ async fn properties_keep_their_types() {
     let o = q(&mut s, "CREATE (n:T {i: 1, f: 1.0, s: 'x', b: true, l: [1, 2], fl: [1.5, 2.0]}) RETURN n.i, n.f, n.l, n.fl").await;
     assert_eq!(o.rows[0][0], Value::Int(1));
     assert_eq!(o.rows[0][1], Value::Float(1.0));
-    let o = q(&mut s, "MATCH (n:T) RETURN n.f, n.fl, n.i = 1, n.f = 1, n.s = 1").await;
+    let o = q(
+        &mut s,
+        "MATCH (n:T) RETURN n.f, n.fl, n.i = 1, n.f = 1, n.s = 1",
+    )
+    .await;
     assert_eq!(o.rows[0][0], Value::Float(1.0));
-    assert_eq!(o.rows[0][1], Value::List(vec![Value::Float(1.5), Value::Float(2.0)]));
-    assert_eq!(show(&o)[0].split('|').skip(2).collect::<Vec<_>>(), ["true", "true", "false"]);
+    assert_eq!(
+        o.rows[0][1],
+        Value::List(vec![Value::Float(1.5), Value::Float(2.0)])
+    );
+    assert_eq!(
+        show(&o)[0].split('|').skip(2).collect::<Vec<_>>(),
+        ["true", "true", "false"]
+    );
     // A pushed-down equality is a superset, rechecked: '1' doesn't match 1.
     let o = q(&mut s, "MATCH (n:T) WHERE n.i = '1' RETURN n").await;
     assert!(o.rows.is_empty());

@@ -116,7 +116,12 @@ impl Exec<'_> {
     }
 
     /// Creates the unbound parts of `pat` in `row`, binding them.
-    async fn create_path(&mut self, row: &mut Row, pat: &PathPattern, locked: &mut HashSet<u64>) -> Result<()> {
+    async fn create_path(
+        &mut self,
+        row: &mut Row,
+        pat: &PathPattern,
+        locked: &mut HashSet<u64>,
+    ) -> Result<()> {
         let mut nodes: Vec<Arc<Node>> = Vec::new();
         for np in std::iter::once(&pat.start).chain(pat.steps.iter().map(|(_, n)| n)) {
             let existing = np.var.as_ref().and_then(|v| row.get(v));
@@ -161,7 +166,11 @@ impl Exec<'_> {
         }
         // Existing endpoints are share-locked before an edge refers to them.
         if !pat.steps.is_empty() {
-            let need: Vec<u64> = nodes.iter().map(|n| n.id).filter(|i| !locked.contains(i)).collect();
+            let need: Vec<u64> = nodes
+                .iter()
+                .map(|n| n.id)
+                .filter(|i| !locked.contains(i))
+                .collect();
             if !need.is_empty() {
                 let got = self.store.lock_nodes(&need, false).await?;
                 for i in &need {
@@ -184,7 +193,9 @@ impl Exec<'_> {
                 )));
             }
             if rp.range.is_some() {
-                return Err(syntax("Variable length relationships cannot be used in CREATE"));
+                return Err(syntax(
+                    "Variable length relationships cannot be used in CREATE",
+                ));
             }
             let [t] = rp.types.as_slice() else {
                 return Err(syntax(
@@ -195,7 +206,9 @@ impl Exec<'_> {
                 Dir::Out => (&nodes[i], &nodes[i + 1]),
                 Dir::In => (&nodes[i + 1], &nodes[i]),
                 Dir::Both => {
-                    return Err(syntax("Only directed relationships are supported in CREATE"));
+                    return Err(syntax(
+                        "Only directed relationships are supported in CREATE",
+                    ));
                 }
             };
             let props = self.props_of(rp.props.as_ref(), row)?;
@@ -242,7 +255,11 @@ impl Exec<'_> {
     }
 
     /// `CREATE`.
-    pub(crate) async fn create(&mut self, rows: Vec<Row>, pats: &[PathPattern]) -> Result<Vec<Row>> {
+    pub(crate) async fn create(
+        &mut self,
+        rows: Vec<Row>,
+        pats: &[PathPattern],
+    ) -> Result<Vec<Row>> {
         let mut out = Vec::with_capacity(rows.len());
         let mut locked = HashSet::new();
         for mut r in rows {
@@ -344,7 +361,11 @@ impl Exec<'_> {
     }
 
     /// Writes the pending states back and refreshes the rows' values.
-    async fn flush_pending(&mut self, rows: &mut [Row], pend: HashMap<(bool, u64), Pending>) -> Result<()> {
+    async fn flush_pending(
+        &mut self,
+        rows: &mut [Row],
+        pend: HashMap<(bool, u64), Pending>,
+    ) -> Result<()> {
         let mut nodes: HashMap<u64, Arc<Node>> = HashMap::new();
         let mut rels: HashMap<u64, Arc<Rel>> = HashMap::new();
         for ((is_node, id), p) in pend {
@@ -511,7 +532,11 @@ impl Exec<'_> {
     }
 
     /// `REMOVE`.
-    pub(crate) async fn remove(&mut self, mut rows: Vec<Row>, items: &[RemoveItem]) -> Result<Vec<Row>> {
+    pub(crate) async fn remove(
+        &mut self,
+        mut rows: Vec<Row>,
+        items: &[RemoveItem],
+    ) -> Result<Vec<Row>> {
         let mut targets = Vec::new();
         for r in &rows {
             for it in items {
@@ -523,8 +548,12 @@ impl Exec<'_> {
         }
         let mut pend = self.load_pending(&targets).await?;
         for (t, it) in targets.iter().zip(items.iter().cycle()) {
-            let Some(key) = Self::target_key(t)? else { continue };
-            let Some(p) = pend.get_mut(&key) else { continue };
+            let Some(key) = Self::target_key(t)? else {
+                continue;
+            };
+            let Some(p) = pend.get_mut(&key) else {
+                continue;
+            };
             match it {
                 RemoveItem::Prop(_, k) => {
                     if p.props.remove(k).is_some() {
@@ -546,7 +575,12 @@ impl Exec<'_> {
     }
 
     /// `[DETACH] DELETE`.
-    pub(crate) async fn delete(&mut self, rows: Vec<Row>, exprs: &[Expr], detach: bool) -> Result<Vec<Row>> {
+    pub(crate) async fn delete(
+        &mut self,
+        rows: Vec<Row>,
+        exprs: &[Expr],
+        detach: bool,
+    ) -> Result<Vec<Row>> {
         let mut nodes: Vec<u64> = Vec::new();
         let mut rels: Vec<u64> = Vec::new();
         let add = |v: &Value, nodes: &mut Vec<u64>, rels: &mut Vec<u64>| -> Result<()> {
@@ -613,7 +647,9 @@ impl Exec<'_> {
                 if touching.len() > limit {
                     return Err(SprigError::new(
                         SprigCode::GraphDetachTooLarge,
-                        format!("DETACH DELETE would remove more than graph.max_detach_edges = {limit} relationships"),
+                        format!(
+                            "DETACH DELETE would remove more than graph.max_detach_edges = {limit} relationships"
+                        ),
                     ));
                 }
                 let ids: Vec<u64> = touching.iter().map(|e| e.id).collect();

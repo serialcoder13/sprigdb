@@ -34,9 +34,7 @@ use sprig_common::names::{SchemaName, quote};
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_shard::pins::PinKind;
 use sprig_shard::rk::{RK_COLUMN, add_rk_column, backfill_columns_sql, backfill_parent_sql};
-use sprig_shard::{
-    KeySpec, ShardMap, ShardMapStore, TenantMaps, shard_schema,
-};
+use sprig_shard::{KeySpec, ShardMap, ShardMapStore, TenantMaps, shard_schema};
 
 use super::design::{Design, Input, Obj, Routing};
 use super::input::Located;

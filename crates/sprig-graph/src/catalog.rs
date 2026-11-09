@@ -18,10 +18,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use mysql_async::prelude::Queryable;
+use sprig_catalog::CatalogExtension;
 use sprig_catalog::cache::{ExtState, SnapshotTx};
 use sprig_catalog::migrate::{Migration, Phase};
 use sprig_catalog::version::VersionKind;
-use sprig_catalog::CatalogExtension;
 use sprig_common::names::quote;
 use sprig_common::{Result, SprigCode, SprigError};
 
@@ -98,7 +98,11 @@ fn map_err(e: mysql_async::Error) -> SprigError {
             if s.state.len() == 5 {
                 state.copy_from_slice(s.state.as_bytes());
             }
-            SprigError::backend(s.code, state, format!("graph statement failed ({}): {}", s.code, s.message))
+            SprigError::backend(
+                s.code,
+                state,
+                format!("graph statement failed ({}): {}", s.code, s.message),
+            )
         }
         _ => SprigError::new(SprigCode::CatalogUnavailable, "graph storage unavailable"),
     }
@@ -188,7 +192,11 @@ impl GraphCatalog {
             name: MODULE,
             migrations: GRAPH_MIGRATIONS,
         }])?
-        .run(q, &self.schema, &sprig_catalog::migrate::MigrateOpts::default())
+        .run(
+            q,
+            &self.schema,
+            &sprig_catalog::migrate::MigrateOpts::default(),
+        )
         .await?;
         Ok(())
     }
@@ -254,7 +262,12 @@ impl GraphCatalog {
     ///
     /// # Errors
     /// A backend error.
-    pub async fn insert_native<Q: Queryable + Send>(&self, q: &mut Q, graph: u64, db: u32) -> Result<()> {
+    pub async fn insert_native<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        graph: u64,
+        db: u32,
+    ) -> Result<()> {
         q.exec_drop(
             format!(
                 "INSERT INTO {} (graph_id, db_id, kind, state, def_version, created_at, updated_at) \
@@ -273,11 +286,41 @@ impl GraphCatalog {
     /// A backend error.
     pub async fn delete<Q: Queryable + Send>(&self, q: &mut Q, graph: u64) -> Result<()> {
         for t in ["graph_node_sources", "graph_edge_sources", "graphs"] {
-            q.exec_drop(format!("DELETE FROM {} WHERE graph_id = ?", self.t(t)), (graph,))
-                .await
-                .map_err(map_err)?;
+            q.exec_drop(
+                format!("DELETE FROM {} WHERE graph_id = ?", self.t(t)),
+                (graph,),
+            )
+            .await
+            .map_err(map_err)?;
         }
         Ok(())
+    }
+
+    /// The id of a native label (`label = true`) or relationship type.
+    ///
+    /// # Errors
+    /// A backend error.
+    pub async fn find_source<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        graph: u64,
+        label: bool,
+        name: &str,
+    ) -> Result<Option<u32>> {
+        let (table, native) = if label {
+            ("graph_node_sources", "native_label")
+        } else {
+            ("graph_edge_sources", "native_type")
+        };
+        q.exec_first(
+            format!(
+                "SELECT source_id FROM {} WHERE graph_id = ? AND {native} = ?",
+                self.t(table)
+            ),
+            (graph, name),
+        )
+        .await
+        .map_err(map_err)
     }
 
     /// Adds a native label (`label = true`) or relationship type, or
@@ -438,7 +481,10 @@ impl Tables {
 ) ENGINE=InnoDB",
                 self.seq
             ),
-            format!("INSERT IGNORE INTO {} (kind, next) VALUES (1, 1), (2, 1)", self.seq),
+            format!(
+                "INSERT IGNORE INTO {} (kind, next) VALUES (1, 1), (2, 1)",
+                self.seq
+            ),
         ]
     }
 
@@ -531,7 +577,7 @@ fn qualified(s: &str) -> Result<(Option<String>, String)> {
         if n.is_empty()
             || n.len() > 64
             || n.to_ascii_lowercase().starts_with("__sprig_")
-            || n.chars().any(|c| c.is_control())
+            || n.chars().any(char::is_control)
         {
             return Err(bad());
         }
@@ -560,14 +606,18 @@ pub fn parse_ddl(sql: &str) -> Result<Option<GraphDdl>> {
     let w = words(sql);
     let up: Vec<String> = w.iter().map(|x| x.to_ascii_uppercase()).collect();
     let u: Vec<&str> = up.iter().map(String::as_str).collect();
-    let syntax = || SprigError::new(SprigCode::GraphSyntax, format!("malformed graph statement: {sql}"));
+    let syntax = || {
+        SprigError::new(
+            SprigCode::GraphSyntax,
+            format!("malformed graph statement: {sql}"),
+        )
+    };
     match u.as_slice() {
-        ["CREATE", "PROPERTY", "GRAPH", ..] | ["CREATE", "OR", "REPLACE", "PROPERTY", "GRAPH", ..] => {
-            Err(SprigError::new(
-                SprigCode::GraphUnsupported,
-                "CREATE PROPERTY GRAPH (mapped graphs) is not supported yet; use CREATE GRAPH for a native graph",
-            ))
-        }
+        ["CREATE", "PROPERTY", "GRAPH", ..]
+        | ["CREATE", "OR", "REPLACE", "PROPERTY", "GRAPH", ..] => Err(SprigError::new(
+            SprigCode::GraphUnsupported,
+            "CREATE PROPERTY GRAPH (mapped graphs) is not supported yet; use CREATE GRAPH for a native graph",
+        )),
         ["ALTER", "GRAPH", ..] => Err(SprigError::new(
             SprigCode::GraphUnsupported,
             "ALTER GRAPH (partitioning) is not supported yet",
@@ -656,7 +706,9 @@ mod tests {
             Some(SprigCode::GraphUnsupported)
         );
         assert_eq!(
-            parse_ddl("CREATE GRAPH __sprig_x").expect_err("reserved").code(),
+            parse_ddl("CREATE GRAPH __sprig_x")
+                .expect_err("reserved")
+                .code(),
             Some(SprigCode::GraphDefinitionInvalid)
         );
         assert_eq!(

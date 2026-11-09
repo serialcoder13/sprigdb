@@ -71,7 +71,10 @@ pub fn parse(u: &Bson) -> Result<UpdateSpec, MongoError> {
             if ops == 0 {
                 for k in d.keys() {
                     if k.starts_with('$') {
-                        return Err(MongoError::new(code::DOLLAR_PREFIXED_FIELD_NAME, "bad field"));
+                        return Err(MongoError::new(
+                            code::DOLLAR_PREFIXED_FIELD_NAME,
+                            "bad field",
+                        ));
                     }
                 }
                 return Ok(UpdateSpec::Replace(d.clone()));
@@ -87,24 +90,43 @@ pub fn parse(u: &Bson) -> Result<UpdateSpec, MongoError> {
             for (op, arg) in d {
                 if !matches!(
                     op.as_str(),
-                    "$set" | "$unset" | "$inc" | "$mul" | "$min" | "$max" | "$rename"
-                        | "$currentDate" | "$setOnInsert" | "$push" | "$addToSet" | "$pop"
-                        | "$pull" | "$pullAll" | "$bit"
+                    "$set"
+                        | "$unset"
+                        | "$inc"
+                        | "$mul"
+                        | "$min"
+                        | "$max"
+                        | "$rename"
+                        | "$currentDate"
+                        | "$setOnInsert"
+                        | "$push"
+                        | "$addToSet"
+                        | "$pop"
+                        | "$pull"
+                        | "$pullAll"
+                        | "$bit"
                 ) {
                     return Err(MongoError::new(
                         code::FAILED_TO_PARSE,
-                        format!("Unknown modifier: {op}. Expected a valid update modifier or pipeline-style update specified as an array"),
+                        format!(
+                            "Unknown modifier: {op}. Expected a valid update modifier or pipeline-style update specified as an array"
+                        ),
                     ));
                 }
                 let Bson::Document(fields) = arg else {
                     return Err(MongoError::new(
                         code::FAILED_TO_PARSE,
-                        format!("Modifiers operate on fields but we found type {} instead. For example: {{$mod: {{<field>: ...}}}} not {{{op}: {arg}}}", type_name(arg)),
+                        format!(
+                            "Modifiers operate on fields but we found type {} instead. For example: {{$mod: {{<field>: ...}}}} not {{{op}: {arg}}}",
+                            type_name(arg)
+                        ),
                     ));
                 };
                 for (path, v) in fields {
                     if path.is_empty() || path.split('.').any(str::is_empty) {
-                        return Err(bad(format!("The update path '{path}' contains an empty field name, which is not allowed.")));
+                        return Err(bad(format!(
+                            "The update path '{path}' contains an empty field name, which is not allowed."
+                        )));
                     }
                     let mut targets = vec![path.clone()];
                     if op == "$rename" {
@@ -126,11 +148,17 @@ pub fn parse(u: &Bson) -> Result<UpdateSpec, MongoError> {
                 }
             }
             if out.is_empty() {
-                return Err(MongoError::new(code::FAILED_TO_PARSE, "'$set' is empty. You must specify a field like so: {$set: {<field>: ...}}"));
+                return Err(MongoError::new(
+                    code::FAILED_TO_PARSE,
+                    "'$set' is empty. You must specify a field like so: {$set: {<field>: ...}}",
+                ));
             }
             Ok(UpdateSpec::Ops(out))
         }
-        _ => Err(MongoError::new(code::FAILED_TO_PARSE, "Update argument must be either an object or an array")),
+        _ => Err(MongoError::new(
+            code::FAILED_TO_PARSE,
+            "Update argument must be either an object or an array",
+        )),
     }
 }
 
@@ -138,7 +166,13 @@ fn conflicts(a: &str, b: &str) -> bool {
     // Positional parts stand for any element.
     let norm = |p: &str| -> Vec<String> {
         p.split('.')
-            .map(|x| if x.starts_with('$') { "$".to_owned() } else { x.to_owned() })
+            .map(|x| {
+                if x.starts_with('$') {
+                    "$".to_owned()
+                } else {
+                    x.to_owned()
+                }
+            })
             .collect()
     };
     let (a, b) = (norm(a), norm(b));
@@ -244,8 +278,7 @@ fn set_in_val(cur: &mut Bson, parts: &[&str], v: Bson, full: &str) -> Result<(),
         }
         other => Err(not_viable(format!(
             "Cannot create field '{}' in element {{{}}}",
-            parts[0],
-            other
+            parts[0], other
         ))),
     }
 }
@@ -279,7 +312,10 @@ pub fn unset_path(doc: &mut Document, path: &str) {
 // --- arithmetic --------------------------------------------------------------
 
 fn is_num(v: &Bson) -> bool {
-    matches!(v, Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_))
+    matches!(
+        v,
+        Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_)
+    )
 }
 
 /// `(coefficient, exponent)` of a finite number, for decimal arithmetic.
@@ -291,7 +327,9 @@ fn dec_parts(v: &Bson) -> Option<(i128, i32)> {
         Bson::Decimal128(d) => d.to_string(),
         _ => return None,
     };
-    let (neg, rest) = t.strip_prefix('-').map_or((false, t.as_str()), |r| (true, r));
+    let (neg, rest) = t
+        .strip_prefix('-')
+        .map_or((false, t.as_str()), |r| (true, r));
     let (mant, e) = match rest.find(['e', 'E']) {
         Some(i) => (&rest[..i], rest[i + 1..].parse::<i32>().ok()?),
         None => (rest, 0),
@@ -350,19 +388,22 @@ pub fn arith(a: &Bson, b: &Bson, mul: bool) -> Result<Bson, MongoError> {
                 }
                 _ => None,
             };
-            match r {
-                Some(r) => r,
-                None => {
-                    let f = if mul { to_f64(a) * to_f64(b) } else { to_f64(a) + to_f64(b) };
-                    Decimal128::from_str(&format!("{f:e}"))
-                        .map(Bson::Decimal128)
-                        .unwrap_or(Bson::Double(f))
-                }
+            if let Some(r) = r {
+                r
+            } else {
+                let f = if mul {
+                    to_f64(a) * to_f64(b)
+                } else {
+                    to_f64(a) + to_f64(b)
+                };
+                Decimal128::from_str(&format!("{f:e}")).map_or(Bson::Double(f), Bson::Decimal128)
             }
         }
-        (Bson::Double(_), _) | (_, Bson::Double(_)) => {
-            Bson::Double(if mul { to_f64(a) * to_f64(b) } else { to_f64(a) + to_f64(b) })
-        }
+        (Bson::Double(_), _) | (_, Bson::Double(_)) => Bson::Double(if mul {
+            to_f64(a) * to_f64(b)
+        } else {
+            to_f64(a) + to_f64(b)
+        }),
         (Bson::Int32(x), Bson::Int32(y)) => {
             let r = if mul {
                 i64::from(*x) * i64::from(*y)
@@ -374,7 +415,14 @@ pub fn arith(a: &Bson, b: &Bson, mul: bool) -> Result<Bson, MongoError> {
         _ => {
             let x = as_i64(a).ok_or_else(overflow)?;
             let y = as_i64(b).ok_or_else(overflow)?;
-            Bson::Int64(if mul { x.checked_mul(y) } else { x.checked_add(y) }.ok_or_else(overflow)?)
+            Bson::Int64(
+                if mul {
+                    x.checked_mul(y)
+                } else {
+                    x.checked_add(y)
+                }
+                .ok_or_else(overflow)?,
+            )
         }
     })
 }
@@ -395,7 +443,11 @@ fn matched_position(doc: &Document, query: &Pred, array_path: &str) -> Option<us
     a.iter().position(|e| {
         let wrap = bson::doc! {"e": e.clone()};
         conds.iter().all(|(sub, op)| {
-            let p = if sub.is_empty() { "e".to_owned() } else { format!("e.{sub}") };
+            let p = if sub.is_empty() {
+                "e".to_owned()
+            } else {
+                format!("e.{sub}")
+            };
             op.eval(&filter::values_at(&wrap, &p), &filter::NoExpr, &wrap)
         })
     })
@@ -406,7 +458,10 @@ fn collect_conds(p: &Pred, array_path: &str, out: &mut Vec<(String, filter::Fiel
         Pred::Field { path, op } => {
             if path == array_path {
                 out.push((String::new(), op.clone()));
-            } else if let Some(rest) = path.strip_prefix(array_path).and_then(|r| r.strip_prefix('.')) {
+            } else if let Some(rest) = path
+                .strip_prefix(array_path)
+                .and_then(|r| r.strip_prefix('.'))
+            {
                 out.push((rest.to_owned(), op.clone()));
             }
         }
@@ -429,7 +484,13 @@ fn expand(doc: &Document, path: &str, cx: &ApplyCx<'_>) -> Result<Vec<String>, M
     for (i, p) in parts.iter().enumerate() {
         let mut next = Vec::new();
         for pre in &prefixes {
-            let join = |x: &str| if pre.is_empty() { x.to_owned() } else { format!("{pre}.{x}") };
+            let join = |x: &str| {
+                if pre.is_empty() {
+                    x.to_owned()
+                } else {
+                    format!("{pre}.{x}")
+                }
+            };
             if *p == "$" {
                 let pos = matched_position(doc, cx.query, pre).ok_or_else(|| {
                     bad("The positional operator did not find the match needed from the query.")
@@ -499,8 +560,14 @@ fn sort_values(a: &mut [Bson], spec: &Bson) -> Result<(), MongoError> {
                 .collect();
             a.sort_by(|x, y| {
                 for (k, dir) in &keys {
-                    let gx = x.as_document().and_then(|d| get_path(d, k)).unwrap_or(&Bson::Null);
-                    let gy = y.as_document().and_then(|d| get_path(d, k)).unwrap_or(&Bson::Null);
+                    let gx = x
+                        .as_document()
+                        .and_then(|d| get_path(d, k))
+                        .unwrap_or(&Bson::Null);
+                    let gy = y
+                        .as_document()
+                        .and_then(|d| get_path(d, k))
+                        .unwrap_or(&Bson::Null);
                     let o = compare(gx, gy);
                     if o != Ordering::Equal {
                         return if *dir < 0 { o.reverse() } else { o };
@@ -511,7 +578,13 @@ fn sort_values(a: &mut [Bson], spec: &Bson) -> Result<(), MongoError> {
         }
         other => {
             let dir = as_i64(other).ok_or_else(|| bad("The $sort is invalid"))?;
-            a.sort_by(|x, y| if dir < 0 { compare(y, x) } else { compare(x, y) });
+            a.sort_by(|x, y| {
+                if dir < 0 {
+                    compare(y, x)
+                } else {
+                    compare(x, y)
+                }
+            });
         }
     }
     Ok(())
@@ -577,7 +650,10 @@ pub fn apply(doc: &mut Document, spec: &UpdateSpec, cx: &ApplyCx<'_>) -> Result<
         }
     }
     match (&old_id, doc.get("_id")) {
-        (Some(a), Some(b)) if bson::to_vec(&bson::doc! {"x": a.clone()}).ok() != bson::to_vec(&bson::doc! {"x": b.clone()}).ok() => {
+        (Some(a), Some(b))
+            if bson::to_vec(&bson::doc! {"x": a.clone()}).ok()
+                != bson::to_vec(&bson::doc! {"x": b.clone()}).ok() =>
+        {
             return Err(MongoError::new(
                 code::IMMUTABLE_FIELD,
                 "Performing an update on the path '_id' would modify the immutable field '_id'",
@@ -594,7 +670,13 @@ pub fn apply(doc: &mut Document, spec: &UpdateSpec, cx: &ApplyCx<'_>) -> Result<
 }
 
 #[allow(clippy::too_many_lines)]
-fn apply_one(doc: &mut Document, op: &str, path: &str, arg: &Bson, cx: &ApplyCx<'_>) -> Result<(), MongoError> {
+fn apply_one(
+    doc: &mut Document,
+    op: &str,
+    path: &str,
+    arg: &Bson,
+    cx: &ApplyCx<'_>,
+) -> Result<(), MongoError> {
     let cur = get_path(doc, path).cloned();
     match op {
         "$set" => set_path(doc, path, arg.clone()),
@@ -613,7 +695,14 @@ fn apply_one(doc: &mut Document, op: &str, path: &str, arg: &Bson, cx: &ApplyCx<
             if !is_num(arg) {
                 return Err(MongoError::new(
                     code::TYPE_MISMATCH,
-                    format!("Cannot {} with non-numeric argument: {{{path}: {arg}}}", if op == "$inc" { "increment" } else { "multiply" }),
+                    format!(
+                        "Cannot {} with non-numeric argument: {{{path}: {arg}}}",
+                        if op == "$inc" {
+                            "increment"
+                        } else {
+                            "multiply"
+                        }
+                    ),
                 ));
             }
             let v = match &cur {
@@ -628,7 +717,10 @@ fn apply_one(doc: &mut Document, op: &str, path: &str, arg: &Bson, cx: &ApplyCx<
                 Some(c) => {
                     return Err(MongoError::new(
                         code::TYPE_MISMATCH,
-                        format!("Cannot apply {op} to a value of non-numeric type. {{_id: ...}} has the field '{path}' of non-numeric type {}", type_name(c)),
+                        format!(
+                            "Cannot apply {op} to a value of non-numeric type. {{_id: ...}} has the field '{path}' of non-numeric type {}",
+                            type_name(c)
+                        ),
                     ));
                 }
             };
@@ -639,7 +731,11 @@ fn apply_one(doc: &mut Document, op: &str, path: &str, arg: &Bson, cx: &ApplyCx<
                 None => true,
                 Some(c) => {
                     let o = compare(arg, c);
-                    if op == "$min" { o == Ordering::Less } else { o == Ordering::Greater }
+                    if op == "$min" {
+                        o == Ordering::Less
+                    } else {
+                        o == Ordering::Greater
+                    }
                 }
             };
             if replace {
@@ -662,7 +758,10 @@ fn apply_one(doc: &mut Document, op: &str, path: &str, arg: &Bson, cx: &ApplyCx<
             let v = if ts {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let secs = (cx.now.timestamp_millis() / 1000) as u32;
-                Bson::Timestamp(Timestamp { time: secs, increment: 1 })
+                Bson::Timestamp(Timestamp {
+                    time: secs,
+                    increment: 1,
+                })
             } else {
                 Bson::DateTime(cx.now)
             };
@@ -717,44 +816,43 @@ fn apply_one(doc: &mut Document, op: &str, path: &str, arg: &Bson, cx: &ApplyCx<
             }
             set_path(doc, path, Bson::Array(arr))
         }
-        "$pop" => {
-            match cur {
-                None => Ok(()),
-                Some(Bson::Array(mut a)) => {
-                    if !a.is_empty() {
-                        if as_i64(arg) == Some(-1) {
-                            a.remove(0);
-                        } else {
-                            a.pop();
-                        }
-                    }
-                    set_path(doc, path, Bson::Array(a))
-                }
-                Some(other) => Err(MongoError::new(
-                    code::TYPE_MISMATCH,
-                    format!("Path '{path}' contains an element of non-array type '{}'", type_name(&other)),
-                )),
-            }
-        }
-        "$pull" | "$pullAll" => {
-            match cur {
-                None => Ok(()),
-                Some(Bson::Array(a)) => {
-                    let kept: Vec<Bson> = if op == "$pullAll" {
-                        let Bson::Array(list) = arg else {
-                            return Err(bad("$pullAll requires an array argument"));
-                        };
-                        a.into_iter()
-                            .filter(|e| !list.iter().any(|x| crate::keyenc::equal(e, x)))
-                            .collect()
+        "$pop" => match cur {
+            None => Ok(()),
+            Some(Bson::Array(mut a)) => {
+                if !a.is_empty() {
+                    if as_i64(arg) == Some(-1) {
+                        a.remove(0);
                     } else {
-                        a.into_iter().filter(|e| !pull_matches(e, arg)).collect()
-                    };
-                    set_path(doc, path, Bson::Array(kept))
+                        a.pop();
+                    }
                 }
-                Some(_) => Err(bad("Cannot apply $pull to a non-array value")),
+                set_path(doc, path, Bson::Array(a))
             }
-        }
+            Some(other) => Err(MongoError::new(
+                code::TYPE_MISMATCH,
+                format!(
+                    "Path '{path}' contains an element of non-array type '{}'",
+                    type_name(&other)
+                ),
+            )),
+        },
+        "$pull" | "$pullAll" => match cur {
+            None => Ok(()),
+            Some(Bson::Array(a)) => {
+                let kept: Vec<Bson> = if op == "$pullAll" {
+                    let Bson::Array(list) = arg else {
+                        return Err(bad("$pullAll requires an array argument"));
+                    };
+                    a.into_iter()
+                        .filter(|e| !list.iter().any(|x| crate::keyenc::equal(e, x)))
+                        .collect()
+                } else {
+                    a.into_iter().filter(|e| !pull_matches(e, arg)).collect()
+                };
+                set_path(doc, path, Bson::Array(kept))
+            }
+            Some(_) => Err(bad("Cannot apply $pull to a non-array value")),
+        },
         "$bit" => {
             let Bson::Document(b) = arg else {
                 return Err(bad("The $bit modifier is not compatible with a non-object"));
@@ -762,7 +860,11 @@ fn apply_one(doc: &mut Document, op: &str, path: &str, arg: &Bson, cx: &ApplyCx<
             let mut v = cur.unwrap_or(Bson::Int32(0));
             for (k, x) in b {
                 v = match (&v, x) {
-                    (Bson::Int32(a), Bson::Int32(y)) => Bson::Int32(bitop(k, i64::from(*a), i64::from(*y)).try_into().unwrap_or(0)),
+                    (Bson::Int32(a), Bson::Int32(y)) => Bson::Int32(
+                        bitop(k, i64::from(*a), i64::from(*y))
+                            .try_into()
+                            .unwrap_or(0),
+                    ),
                     (a, y) => match (as_i64(a), as_i64(y)) {
                         (Some(a), Some(y)) => Bson::Int64(bitop(k, a, y)),
                         _ => return Err(bad("$bit needs integers")),
@@ -791,6 +893,12 @@ fn bitop(k: &str, a: i64, b: i64) -> i64 {
 pub fn upsert_seed(query: &Pred) -> Result<Document, MongoError> {
     let mut fields = Vec::new();
     query.equality_fields(&mut fields);
+    // MongoDB adds the equality fields in path order (a `FieldRefSet`),
+    // `_id` first.
+    fields.sort_by(|(a, _), (b, _)| {
+        let key = |p: &str| (p != "_id" && !p.starts_with("_id."), p.split('.').map(str::to_owned).collect::<Vec<_>>());
+        key(a).cmp(&key(b))
+    });
     let mut d = Document::new();
     for (p, v) in fields {
         if p.split('.').any(|x| x.starts_with('$')) {

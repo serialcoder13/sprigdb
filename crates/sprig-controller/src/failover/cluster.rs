@@ -91,6 +91,8 @@ const BUSY_EVERY: Duration = Duration::from_millis(500);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Failovers kept in the record.
 const HISTORY: usize = 10;
+/// How often a diverged former writer's recovery jobs are looked at.
+const RECOVERY_EVERY: Duration = Duration::from_secs(3);
 /// The promotion's claim is re-sent this long after the agent should have
 /// taken it over, with an alert.
 const TAKEOVER_ALERT: Duration = Duration::from_secs(30);
@@ -124,9 +126,13 @@ pub enum FormerWriter {
     Fenced,
     /// Back with nothing diverged: a replica of the new writer now.
     Rejoined,
-    /// Back with transactions nobody else has: reported, kept out until an
-    /// operator rebuilds it.
+    /// Back with transactions nobody else has: reported, kept out until
+    /// it is extracted and rebuilt.
     Diverged,
+    /// A `node_rebuild` job is replacing its data from a replica.
+    Rebuilding,
+    /// Rebuilt from a replica and replicating from the writer (r2close).
+    Rebuilt,
 }
 
 /// One failover in the record.
@@ -167,6 +173,16 @@ pub struct FailoverEvent {
     /// Its diverged transactions, when it had any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errant: Option<ErrantReport>,
+    /// The `errant_extract` job of a diverged former writer (r2close).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extract_job: Option<String>,
+    /// Its `node_rebuild` job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuild_job: Option<String>,
+    /// Why the last extract or rebuild failed (an operator retries with
+    /// `sprigctl cluster extract|rebuild`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_error: Option<String>,
 }
 
 /// A promotion between the lease claim and the agent's takeover.
@@ -449,6 +465,8 @@ struct Watch {
     last_reason: Option<String>,
     /// An observed writer change and since when (r2opfix).
     observed: Option<(String, Instant)>,
+    /// The last look at a diverged former writer's recovery jobs (r2close).
+    recovery_checked: Option<Instant>,
 }
 
 /// The `cluster_failover` loop (see the module docs).
@@ -703,6 +721,9 @@ impl ClusterFailover {
                     domain: rec.cluster_number,
                     former: None,
                     errant: None,
+                    extract_job: None,
+                    rebuild_job: None,
+                    recovery_error: None,
                 });
                 if f.record.history.len() > HISTORY {
                     let drop_n = f.record.history.len() - HISTORY;
@@ -792,7 +813,7 @@ impl ClusterFailover {
                 tracing::info!(cluster = %c, %writer, "writer answers again");
             }
             self.note(cx, c, &mut f, "healthy", None).await?;
-            self.former_writer(cx, rec, &mut f, &eps).await?;
+            self.former_writer(cx, rec, s, w, &mut f, &eps).await?;
             return Ok(Outcome::RequeueAfter(HEALTHY_EVERY));
         }
         let failing_since = *w.failing_since.get_or_insert(now);
@@ -1144,6 +1165,9 @@ impl ClusterFailover {
             domain: p.domain,
             former: Some(FormerWriter::Fenced),
             errant: None,
+            extract_job: None,
+            rebuild_job: None,
+            recovery_error: None,
         };
         tracing::warn!(cluster = %c, from = %p.from, to = %p.to, epoch = p.writer_epoch, rto_ms = ev.rto_ms, "cluster failover done");
         metrics::counter!("sprig_controller_cluster_failovers_total",
@@ -1179,11 +1203,14 @@ impl ClusterFailover {
     }
 
     /// The former writer of the last failover, once it answers: rejoined
-    /// when nothing diverged, reported and kept out otherwise.
+    /// when nothing diverged, reported and kept out otherwise; a diverged
+    /// one is then extracted and rebuilt ([`Self::recover_former`]).
     async fn former_writer(
         &self,
         cx: &LoopCx,
         rec: &ClusterRecord,
+        s: &ClusterSettings,
+        w: &mut Watch,
         f: &mut Facts,
         eps: &BTreeMap<String, NodeEndpoint>,
     ) -> Result<()> {
@@ -1191,6 +1218,21 @@ impl ClusterFailover {
         let Some(ev) = f.record.history.last().cloned() else {
             return Ok(());
         };
+        if ev.kind == "promote"
+            && matches!(
+                ev.former,
+                Some(FormerWriter::Diverged | FormerWriter::Rebuilding)
+            )
+        {
+            if w
+                .recovery_checked
+                .is_some_and(|t| t.elapsed() < RECOVERY_EVERY)
+            {
+                return Ok(());
+            }
+            w.recovery_checked = Some(self.clock.now());
+            return self.recover_former(cx, rec, s, f, eps).await;
+        }
         if ev.kind != "promote" || ev.former != Some(FormerWriter::Fenced) {
             return Ok(());
         }
@@ -1233,6 +1275,202 @@ impl ClusterFailover {
         }
         if let Some(rev) = self.save(cx, c, &f.record, f.record_rev).await? {
             f.record_rev = rev;
+        }
+        Ok(())
+    }
+
+    /// A diverged former writer (chapter 25, "Recovery after an outage"
+    /// steps 2-3): its `errant_extract` job, then, once the extract is
+    /// verified, its `node_rebuild` job; `rebuilt` when that succeeds.
+    /// Jobs start on their own only in `failover.mode = auto`; an
+    /// operator's jobs (`sprigctl cluster extract|rebuild`) are followed
+    /// either way. A failed job isn't retried on its own: its reason goes
+    /// into the record for an operator.
+    #[allow(clippy::too_many_lines)] // the two stages in order
+    async fn recover_former(
+        &self,
+        cx: &LoopCx,
+        rec: &ClusterRecord,
+        s: &ClusterSettings,
+        f: &mut Facts,
+        eps: &BTreeMap<String, NodeEndpoint>,
+    ) -> Result<()> {
+        use crate::dispatch::{self, JobState, NewJob};
+        use sprig_cluster::failover::{extract, rebuild};
+        let c = &rec.cluster_id;
+        let Some(mut ev) = f.record.history.last().cloned() else {
+            return Ok(());
+        };
+        let node = ev.from.clone();
+        let mine = |j: &dispatch::Job, kind: &str| {
+            j.kind == kind
+                && j.spec.get("cluster").and_then(serde_json::Value::as_str) == Some(c.as_str())
+                && j.spec.get("node").and_then(serde_json::Value::as_str) == Some(node.as_str())
+        };
+        let jobs: Vec<dispatch::Job> = dispatch::list_jobs(&*cx.dc)
+            .await?
+            .into_iter()
+            .map(|j| j.job().clone())
+            .filter(|j| mine(j, extract::KIND) || mine(j, rebuild::KIND))
+            .collect();
+        let newest = |kind: &str| {
+            jobs.iter()
+                .filter(|j| j.kind == kind)
+                .max_by(|a, b| a.created_at.cmp(&b.created_at))
+                .cloned()
+        };
+        let before = ev.clone();
+        let auto = !s.manual;
+        let verified = ev
+            .errant
+            .as_ref()
+            .and_then(|r| r.extract.as_ref())
+            .is_some_and(|x| x.verified);
+        // Stage 1: the extract.
+        if !verified {
+            match newest(extract::KIND) {
+                Some(j) if j.state == JobState::Succeeded => {
+                    match serde_json::from_value::<extract::ExtractSummary>(j.progress.clone()) {
+                        Ok(x) => {
+                            tracing::warn!(cluster = %c, %node, job = %j.job_id, rows = x.rows, location = %x.location, "errant extract verified");
+                            if let Some(r) = ev.errant.as_mut() {
+                                r.path = Some(x.location.clone());
+                                r.extract = Some(x);
+                            }
+                            ev.extract_job = Some(j.job_id.to_string());
+                            ev.recovery_error = None;
+                        }
+                        Err(e) => ev.recovery_error = Some(format!("extract job {}: {e}", j.job_id)),
+                    }
+                }
+                Some(j) if j.state.is_final() => {
+                    ev.extract_job = Some(j.job_id.to_string());
+                    ev.recovery_error = Some(format!(
+                        "errant_extract {} {}: {}",
+                        j.job_id,
+                        j.state.as_str(),
+                        j.error.clone().unwrap_or_default()
+                    ));
+                }
+                Some(j) => ev.extract_job = Some(j.job_id.to_string()),
+                None if auto => {
+                    let Some(old) = eps.get(&node) else {
+                        return Ok(());
+                    };
+                    let Ok(pos) = binlog_pos(old).await else {
+                        return Ok(());
+                    };
+                    let Some(range) = diverged(&pos, &ev.applied, ev.domain) else {
+                        return Ok(());
+                    };
+                    if let Some(l) = cx.leadership.as_ref() {
+                        let spec = extract::ErrantExtractSpec {
+                            cluster: c.clone(),
+                            node: node.clone(),
+                            range,
+                            failover_at_unix_ms: ev.at_unix_ms,
+                        };
+                        let id = dispatch::submit(
+                            l,
+                            &*cx.clock,
+                            NewJob {
+                                kind: extract::KIND.into(),
+                                class: dispatch::JobClass::Recovery,
+                                tenant_id: None,
+                                clusters: vec![c.clone()],
+                                priority: 10,
+                                cause: "cluster_failover".into(),
+                                zone: None,
+                                spec: serde_json::to_value(&spec)
+                                    .map_err(|e| SprigError::internal(e.to_string()))?,
+                            },
+                        )
+                        .await?;
+                        tracing::warn!(cluster = %c, %node, job = %id, "errant_extract submitted for the diverged former writer");
+                        ev.extract_job = Some(id.to_string());
+                    }
+                }
+                None => {}
+            }
+        }
+        // Stage 2: the rebuild (after a verified extract, or an operator's
+        // rebuild with --no-extract).
+        let verified = ev
+            .errant
+            .as_ref()
+            .and_then(|r| r.extract.as_ref())
+            .is_some_and(|x| x.verified);
+        match newest(rebuild::KIND) {
+            Some(j) if j.state == JobState::Succeeded => {
+                tracing::warn!(cluster = %c, %node, job = %j.job_id, "the diverged former writer was rebuilt and replicates");
+                ev.former = Some(FormerWriter::Rebuilt);
+                ev.rebuild_job = Some(j.job_id.to_string());
+                ev.recovery_error = None;
+            }
+            Some(j) if j.state.is_final() => {
+                if ev.rebuild_job.as_deref() != Some(j.job_id.to_string().as_str())
+                    || ev.former != Some(FormerWriter::Diverged)
+                {
+                    tracing::error!(cluster = %c, %node, job = %j.job_id, error = ?j.error, "node_rebuild of the diverged former writer failed");
+                }
+                ev.former = Some(FormerWriter::Diverged);
+                ev.rebuild_job = Some(j.job_id.to_string());
+                ev.recovery_error = Some(format!(
+                    "node_rebuild {} {}: {}",
+                    j.job_id,
+                    j.state.as_str(),
+                    j.error.clone().unwrap_or_default()
+                ));
+            }
+            Some(j) => {
+                ev.former = Some(FormerWriter::Rebuilding);
+                ev.rebuild_job = Some(j.job_id.to_string());
+            }
+            None if auto && verified => {
+                if let Some(l) = cx.leadership.as_ref() {
+                    let rate = self.live.as_ref().map_or(fs::REBUILD_MAX_MB_PER_SECOND.default, |l| {
+                        l.snapshot().get(
+                            &fs::REBUILD_MAX_MB_PER_SECOND,
+                            &SettingCtx::process(&self.dc).with_cluster(c),
+                        )
+                    });
+                    let mut spec = serde_json::to_value(rebuild::NodeRebuildSpec {
+                        cluster: c.clone(),
+                        node: node.clone(),
+                        source: None,
+                        require_extract: true,
+                    })
+                    .map_err(|e| SprigError::internal(e.to_string()))?;
+                    spec["rate_mb_per_second"] = serde_json::json!(rate);
+                    let id = dispatch::submit(
+                        l,
+                        &*cx.clock,
+                        NewJob {
+                            kind: rebuild::KIND.into(),
+                            class: dispatch::JobClass::Recovery,
+                            tenant_id: None,
+                            clusters: vec![c.clone()],
+                            priority: 10,
+                            cause: "cluster_failover".into(),
+                            zone: None,
+                            spec,
+                        },
+                    )
+                    .await?;
+                    tracing::warn!(cluster = %c, %node, job = %id, rate_mb_per_second = rate, "node_rebuild submitted for the diverged former writer");
+                    ev.former = Some(FormerWriter::Rebuilding);
+                    ev.rebuild_job = Some(id.to_string());
+                }
+            }
+            None => {}
+        }
+        if ev != before {
+            if let Some(last) = f.record.history.last_mut() {
+                *last = ev;
+            }
+            if let Some(rev) = self.save(cx, c, &f.record, f.record_rev).await? {
+                f.record_rev = rev;
+            }
         }
         Ok(())
     }
@@ -1310,6 +1548,9 @@ impl ClusterFailover {
                     domain: 0,
                     former: None,
                     errant: None,
+                    extract_job: None,
+                    rebuild_job: None,
+                    recovery_error: None,
                 });
                 if f.record.history.len() > HISTORY {
                     f.record.history.remove(0);
@@ -1357,7 +1598,10 @@ async fn gtid_domain(ep: &NodeEndpoint) -> Option<u32> {
 
 /// Where replicas reach `to`, as `sprig_repl`: its `report_host` and
 /// `report_port`, else its registered address.
-async fn repl_source(rec: &ClusterRecord, to: &NodeEndpoint) -> Result<ReplSource> {
+///
+/// # Errors
+/// The credentials can't be resolved; `to` can't be reached.
+pub async fn repl_source(rec: &ClusterRecord, to: &NodeEndpoint) -> Result<ReplSource> {
     let cred = sprig_provision::credentials::resolve(&rec.secrets.repl, "sprig_repl")?;
     let (host, port) = if let Some(hp) = report_address(to).await.map_err(node_err)? {
         hp

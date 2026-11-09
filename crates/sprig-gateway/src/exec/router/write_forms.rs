@@ -29,6 +29,10 @@
 //! text, strings without a backslash as quoted text, other strings and
 //! binary values as `X'…'`.
 
+#![allow(clippy::many_single_char_names)] // a scanner's indexes and tokens
+
+use std::fmt::Write as _;
+
 use bytes::Bytes;
 use sprig_common::{Result, SprigError};
 use sprig_proto_mysql::ColumnDef;
@@ -306,7 +310,6 @@ pub(super) struct LoadData {
 
 fn name_of(t: &Token) -> Option<String> {
     match &t.tok {
-        Tok::Word(_) => None,
         Tok::Ident(s) => Some(s.clone()),
         _ => None,
     }
@@ -607,7 +610,7 @@ fn hex(b: &[u8]) -> String {
     let mut s = String::with_capacity(3 + 2 * b.len());
     s.push_str("X'");
     for x in b {
-        s.push_str(&format!("{x:02X}"));
+        let _ = write!(s, "{x:02X}");
     }
     s.push('\'');
     s
@@ -1002,7 +1005,7 @@ impl PassSession {
     }
 
     /// `LOAD DATA LOCAL INFILE … INTO TABLE` a sharded table (module docs).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // the file, its rows, the inserts
     pub(super) async fn load_data(
         &mut self,
         cx: &mut ExecCtx<'_>,

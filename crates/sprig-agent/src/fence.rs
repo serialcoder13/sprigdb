@@ -43,8 +43,10 @@
 //! missing.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use sprig_cluster::failover::primary_replica::{fence_node, semisync_guard, semisync_resume};
 pub use sprig_cluster::failover::writer::{AgentRecord, MysqldState, WriterLease};
@@ -282,6 +284,40 @@ impl Held {
     }
 }
 
+/// The part of the controller's `cluster-failover/<cluster>` record the
+/// agent reads: the last failovers' former writers.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct FailoverView {
+    #[serde(default)]
+    history: Vec<FormerView>,
+}
+
+impl sprig_meta::Versioned for FailoverView {
+    const V: u32 = 1;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FormerView {
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    former: Option<String>,
+}
+
+/// Whether the controller's record keeps `node` out: the former writer of
+/// its last failover that hasn't been rejoined or rebuilt (`fenced`,
+/// `diverged`, `rebuilding`). Such a node must never take the writer
+/// lease, even if the lease is free (chapter 25 step 2: a returning
+/// former writer is checked, then rejoined or rebuilt, never served).
+fn kept_out(v: &FailoverView, node: &str) -> bool {
+    v.history.iter().rev().find(|e| e.from == node).is_some_and(|e| {
+        matches!(
+            e.former.as_deref(),
+            Some("fenced" | "diverged" | "rebuilding")
+        )
+    })
+}
+
 /// The agent's fence (see the module docs).
 pub struct AgentFence {
     agent_id: String,
@@ -290,6 +326,11 @@ pub struct AgentFence {
     clock: Arc<dyn Clock>,
     target: Target,
     keeper: Arc<PermitKeeper>,
+    /// Set while `node_rebuild` works on the node: never take the lease.
+    hold: Arc<AtomicBool>,
+    /// The internal service's URL, published in the registration.
+    internal_url: Option<String>,
+    rebuild: Option<Arc<crate::rebuild::RebuildService>>,
 }
 
 impl std::fmt::Debug for AgentFence {
@@ -322,7 +363,29 @@ impl AgentFence {
             clock,
             target,
             keeper,
+            hold: Arc::new(AtomicBool::new(false)),
+            internal_url: None,
+            rebuild: None,
         }
+    }
+
+    /// The hold flag `node_rebuild` sets (see [`crate::rebuild`]).
+    #[must_use]
+    pub fn hold(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.hold)
+    }
+
+    /// Publishes the internal service at `url` and lets the rebuild
+    /// service know when the rebuilt node replicates.
+    #[must_use]
+    pub fn with_rebuild(
+        mut self,
+        url: String,
+        service: Arc<crate::rebuild::RebuildService>,
+    ) -> Self {
+        self.internal_url = Some(url);
+        self.rebuild = Some(service);
+        self
     }
 
     /// Runs until `stop`: the permit, the registration, the writer lease,
@@ -380,6 +443,7 @@ impl AgentFence {
                 addr: self.target.addr.clone(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 mysqld,
+                internal_url: self.internal_url.clone(),
             })
             .encode()
             .ok()
@@ -406,6 +470,12 @@ impl AgentFence {
         // The agent switched semi-sync's primary side off (no replica).
         let mut semisync_suspended = false;
         let mut round: u64 = 0;
+        // The controller keeps this node out (see `kept_out`).
+        let mut kept = false;
+        let failover_key = self
+            .store
+            .tier()
+            .key(&format!("cluster-failover/{}", self.target.cluster))?;
         tracing::info!(agent = %self.agent_id, dc = %self.dc, cluster = %self.target.cluster, node = %self.target.node, addr = %self.target.addr, "agent fencing its node");
         let bounded = Duration::from_millis(800);
         while !stop.is_cancelled() {
@@ -443,6 +513,31 @@ impl AgentFence {
             if replicating.is_none() {
                 conn = None;
             }
+            if replicating == Some(true)
+                && let Some(r) = &self.rebuild
+            {
+                r.observe_replicating();
+            }
+            // A node the controller keeps out (a former writer not yet
+            // rejoined, a diverged one, one being rebuilt) and a node under
+            // rebuild never take the writer lease (r2close).
+            if replicating == Some(false) && !writer.valid(&*self.clock) && round.is_multiple_of(5)
+            {
+                kept = match tokio::time::timeout(
+                    bounded,
+                    self.store.get(&failover_key, Consistency::Linearizable),
+                )
+                .await
+                {
+                    Ok(Ok(Some(kv))) => Record::<FailoverView>::decode(&kv.value)
+                        .map(|r| kept_out(&r.body, self.target.node.as_str()))
+                        .unwrap_or(false),
+                    Ok(Ok(None)) => false,
+                    // Unknown: keep the last answer.
+                    _ => kept,
+                };
+            }
+            let held_back = kept || self.hold.load(Ordering::SeqCst);
             // The agent fences, then releases the lease (chapter 25 step
             // 1): a down mysqld can't be the writer, and the controller's
             // cluster failover waits for the lease to go.
@@ -468,7 +563,7 @@ impl AgentFence {
                     published = mysqld;
                 }
             }
-            let lease_held = if permitted && replicating == Some(false) {
+            let lease_held = if permitted && replicating == Some(false) && !held_back {
                 tokio::time::timeout(
                     bounded,
                     writer.keep(
