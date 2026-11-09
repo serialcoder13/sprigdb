@@ -998,7 +998,11 @@ async fn m05_isolation_suite() {
         let prefix = tenant_prefix(&a_url);
         let login = format!("{prefix}m05_rn");
         let mut adm = Conn::new(opts(&a_url, None, None)).await.unwrap();
-        admin(&mut adm, &format!("CREATE USER m05_rn IDENTIFIED BY '{PW}'")).await;
+        admin(
+            &mut adm,
+            &format!("CREATE USER m05_rn IDENTIFIED BY '{PW}'"),
+        )
+        .await;
         let mut backend = match skip::var(BACKEND) {
             Some(u) => Some(Conn::new(Opts::from_url(&u).unwrap()).await.unwrap()),
             None => None,
@@ -1012,19 +1016,20 @@ async fn m05_isolation_suite() {
             }),
             None => None,
         };
-        let mut step = |persona: Persona, what: &str, got: Option<u16>, want: Option<u16>, msg: &str| {
-            checks += 1;
-            let ok = got == want;
-            report.line(&serde_json::json!({
-                "tenant": "A", "persona": format!("{persona:?}"), "user": "m05_rn",
-                "sql": what, "expected": want, "got": got, "message": msg, "pass": ok,
-            }));
-            if !ok {
-                failures.push(format!(
-                    "rename {persona:?}: {what}: expected {want:?}, got {got:?} {msg}"
-                ));
-            }
-        };
+        let mut step =
+            |persona: Persona, what: &str, got: Option<u16>, want: Option<u16>, msg: &str| {
+                checks += 1;
+                let ok = got == want;
+                report.line(&serde_json::json!({
+                    "tenant": "A", "persona": format!("{persona:?}"), "user": "m05_rn",
+                    "sql": what, "expected": want, "got": got, "message": msg, "pass": ok,
+                }));
+                if !ok {
+                    failures.push(format!(
+                        "rename {persona:?}: {what}: expected {want:?}, got {got:?} {msg}"
+                    ));
+                }
+            };
         for (persona, hp) in &endpoints {
             let persona = *persona;
             for s in [
@@ -1114,7 +1119,13 @@ async fn m05_isolation_suite() {
             // The tool drops the old copy: nothing changes for the app.
             admin(&mut adm, "DROP TABLE m05_shop.rn_old").await;
             let (got, _, msg) = run(&mut c, "SELECT COUNT(*) FROM m05_shop.rn_live").await;
-            step(persona, "swap, old copy dropped: SELECT rn_live", got, None, &msg);
+            step(
+                persona,
+                "swap, old copy dropped: SELECT rn_live",
+                got,
+                None,
+                &msg,
+            );
 
             // Three-way swap: rn_live <-> rn_other through rn_tmp.
             for s in [
@@ -1137,13 +1148,29 @@ async fn m05_isolation_suite() {
 
             // ALTER TABLE ... RENAME: away (no access), then back with
             // another change in the same statement (access again).
-            admin(&mut adm, "ALTER TABLE m05_shop.rn_live RENAME TO m05_shop.rn_b").await;
+            admin(
+                &mut adm,
+                "ALTER TABLE m05_shop.rn_live RENAME TO m05_shop.rn_b",
+            )
+            .await;
+            // The name rn_live has no table now. MySQL and MariaDB answer
+            // 1146 to a user holding a grant on it. SprigDB gives a backend
+            // account a grant on a name without a table only with CREATE
+            // (MariaDB can't create others), so the reconciler removes the
+            // one MariaDB kept and MariaDB answers 1142 (chapter 29,
+            // "Renamed tables": a known gap, as for dropped tables).
             for (sql, want) in [
                 ("SELECT COUNT(*) FROM m05_shop.rn_b", Some(1142)),
-                ("SELECT COUNT(*) FROM m05_shop.rn_live", Some(1146)),
+                ("SELECT COUNT(*) FROM m05_shop.rn_live", Some(1142)),
             ] {
                 let (got, _, msg) = run(&mut c, sql).await;
-                step(persona, &format!("ALTER RENAME away: {sql}"), got, want, &msg);
+                step(
+                    persona,
+                    &format!("ALTER RENAME away: {sql}"),
+                    got,
+                    want,
+                    &msg,
+                );
             }
             let (got, text, msg) = run(&mut c, "SHOW GRANTS").await;
             let ok = text.contains("`rn_live`") && !text.contains("`rn_b`");
@@ -1175,7 +1202,13 @@ async fn m05_isolation_suite() {
                 "INSERT INTO m05_shop.rn_live (id, note) VALUES (6, 'v')",
             ] {
                 let (got, _, msg) = run(&mut c, sql).await;
-                step(persona, &format!("ALTER RENAME back: {sql}"), got, None, &msg);
+                step(
+                    persona,
+                    &format!("ALTER RENAME back: {sql}"),
+                    got,
+                    None,
+                    &msg,
+                );
             }
             if let Some(ok) = audit("rn_live", true).await {
                 step(

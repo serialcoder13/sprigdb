@@ -397,11 +397,17 @@ impl SqlEngine {
             sql: bytes,
             attrs: QueryAttrs::default(),
         };
-        let end = tokio::select! {
-            biased;
-            r = exec.execute(&mut cx, req, sink) => End::Done(r),
-            () = handle.flags().query_killed() => End::Killed,
-        };
+        // A large statement runs on a blocking thread (chapter 04, "Large
+        // statements").
+        let (size, threshold) = (req.size(), self.frontend.current().large_statement);
+        let end = crate::offload::run(size, threshold, async {
+            tokio::select! {
+                biased;
+                r = exec.execute(&mut cx, req, &mut *sink) => End::Done(r),
+                () = handle.flags().query_killed() => End::Killed,
+            }
+        })
+        .await;
         match end {
             End::Done(Ok(summary)) => {
                 if sink.closed() {

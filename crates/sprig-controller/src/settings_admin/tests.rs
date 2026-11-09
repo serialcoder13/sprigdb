@@ -79,6 +79,7 @@ fn registry() -> &'static Registry {
             &MODE,
             &WILDCARD,
             &CACHE_MB,
+            &sprig_auth::authz::settings::AUTHORIZER,
         ])
         .unwrap()
     })
@@ -339,7 +340,7 @@ fn scope_syntax_round_trips() {
 #[test]
 fn keys_list_describe_and_parse() {
     let all = list_keys(registry(), &ListSettingKeysQuery::default()).unwrap();
-    assert_eq!(all.keys.len(), 4);
+    assert_eq!(all.keys.len(), 5);
     let q = |prefix: Option<&str>, op: Option<bool>, scope: Option<&str>| ListSettingKeysQuery {
         prefix: prefix.map(Into::into),
         operator_only: op,
@@ -357,7 +358,7 @@ fn keys_list_describe_and_parse() {
     assert_eq!(
         cl.keys.len(),
         2,
-        "WILDCARD and CACHE_MB don't accept cluster"
+        "WILDCARD, CACHE_MB and auth.authorizer don't accept cluster"
     );
     assert_eq!(
         code(&list_keys(registry(), &q(None, None, Some("planet"))).unwrap_err()),
@@ -857,4 +858,51 @@ async fn ancestors_and_a_tenants_rows() {
         code(&env.svc.tenant_settings("nobody").await.unwrap_err()),
         39072
     );
+}
+
+/// Chapter 29's engine-switch guard on the Admin API: `auth.authorizer` is
+/// refused with 39368 at every scope while a live gateway doesn't list the
+/// engine, and accepted once none is left that doesn't.
+#[tokio::test]
+async fn authorizer_needs_every_gateway_to_know_the_engine() {
+    let env = Env::new().await;
+    let k = sprig_auth::authz::settings::AUTHORIZER.key;
+    let gateways = env.live.stores().dc.tier().key("gateways/gw-old").unwrap();
+    let put = sprig_meta::Txn {
+        then: vec![sprig_meta::Op::Put {
+            key: gateways.clone(),
+            value: br#"{"v":1,"gateway_id":"gw-old","slot":1,"authorizers":[]}"#.to_vec(),
+            lease: None,
+        }],
+        ..sprig_meta::Txn::default()
+    };
+    env.live.stores().dc.txn(put).await.unwrap();
+    for scope in ["tenant:acme", "dc:mum1", "global"] {
+        let e = env.set(k, scope, "mysql_grants").await.unwrap_err();
+        assert_eq!(code(&e), 39368, "{scope}: {e}");
+        assert!(e.message.contains("gw-old (dc mum1)"), "{e}");
+    }
+    // A reset isn't checked; an engine this build doesn't know is the
+    // bounds' to refuse.
+    env.write(
+        k,
+        "tenant:acme",
+        SettingOp::Reset {
+            value: true,
+            bounds: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        code(&env.set(k, "dc:mum1", "supabase").await.unwrap_err()),
+        39080
+    );
+    let del = sprig_meta::Txn {
+        then: vec![sprig_meta::Op::Delete(gateways)],
+        ..sprig_meta::Txn::default()
+    };
+    env.live.stores().dc.txn(del).await.unwrap();
+    env.set(k, "tenant:acme", "mysql_grants").await.unwrap();
+    env.set(k, "dc:mum1", "mysql_grants").await.unwrap();
 }

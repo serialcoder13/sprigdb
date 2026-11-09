@@ -422,7 +422,9 @@ impl ClusterMonitor {
                 .update(id, |r| {
                     let mut changed = false;
                     for (n, u) in &pins {
-                        if r.nodes.iter().any(|s| &s.node == n) && !r.node_identities.contains_key(n) {
+                        if r.nodes.iter().any(|s| &s.node == n)
+                            && !r.node_identities.contains_key(n)
+                        {
                             r.node_identities.insert(n.clone(), u.clone());
                             changed = true;
                         }

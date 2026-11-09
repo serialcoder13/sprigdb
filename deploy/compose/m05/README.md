@@ -42,6 +42,13 @@ MariaDB):
   with `drop` its `CREATE TABLE` and any access to a table the
   administrator re-creates get 1142; a database value wins over the
   tenant's;
+- renamed tables (chapter 29, tenant A, both personas): a user with table
+  and column grants on `rn_live` reaches the new `rn_live` and not
+  `rn_old` after a `pt-online-schema-change` swap (`RENAME TABLE rn_live
+  TO rn_old, rn_new TO rn_live`), a three-way swap exchanges the names'
+  grants, `ALTER TABLE ... RENAME` away leaves it nothing on the renamed
+  table and renaming back gives its access back; MariaDB's `tables_priv`
+  rows follow the names the same way;
 - propagation: a session on the second gateway reads a table, the
   administrator revokes the grant (table level, then database level while
   the session is `USE`d into it) on the first, and the session polls until
@@ -62,3 +69,6 @@ gateways): 301 checks, 0 failures; a `REVOKE` was refused on the second
 gateway 112 to 186 ms after it was sent. With the grants-on-drop cases
 (pluggable authorization, the same day): 333 checks, 0 failures; a
 `REVOKE` was refused on the second gateway 36 to 37 ms after it was sent.
+With the rename cases (9 November 2026, agent authz3's own two gateways on
+14406/14407 and 14416/14417): 379 checks, 0 failures; a `REVOKE` was
+refused on the second gateway 126 and 161 ms after it was sent.

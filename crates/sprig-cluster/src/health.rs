@@ -376,9 +376,15 @@ impl HeartbeatWriter {
     /// The write failed or timed out; the sequence number is not consumed.
     pub async fn beat(&mut self, session: &mut ProbeSession) -> Result<u64, ProbeError> {
         let seq = self.seq + 1;
+        // Only while the node is writable (r2opfix): sprig_ctl bypasses
+        // read_only, and a beat sent to a writer that a provider just
+        // demoted (from facts a probe read moments before) logged an errant
+        // transaction there. A node that turned read-only writes nothing,
+        // so nothing reaches its binlog.
         session
             .exec(&format!(
-                "INSERT INTO {} (writer_node, seq, written_at) VALUES ({}, {seq}, UTC_TIMESTAMP(6)) \
+                "INSERT INTO {} (writer_node, seq, written_at) \
+                 SELECT {}, {seq}, UTC_TIMESTAMP(6) FROM DUAL WHERE @@GLOBAL.read_only = 0 \
                  ON DUPLICATE KEY UPDATE seq = VALUES(seq), written_at = VALUES(written_at)",
                 sys::heartbeat_table(),
                 literal(self.writer.as_str())

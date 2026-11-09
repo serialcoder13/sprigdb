@@ -593,6 +593,28 @@ sprig_codes! {
     /// The function was placed in the engine tier, whose runtime this
     /// build doesn't have yet (chapter 41, as built).
     LogicEngineUnavailable = 39876, "ER_SPRIG_LOGIC_ENGINE_UNAVAILABLE", "SprigLogicEngineUnavailable", SQLSTATE_GENERAL, false;
+    /// Unknown stream or topic (chapter 45).
+    StreamNotFound = 39940, "ER_SPRIG_STREAM_NOT_FOUND", "SprigStreamNotFound", SQLSTATE_GENERAL, false;
+    /// `UPDATE` or `DELETE` on a stream; a produce to a change topic
+    /// (chapter 45).
+    StreamAppendOnly = 39941, "ER_SPRIG_STREAM_APPEND_ONLY", "SprigStreamAppendOnly", SQLSTATE_GENERAL, false;
+    /// A stream name in use (chapter 45).
+    StreamExists = 39942, "ER_SPRIG_STREAM_EXISTS", "SprigStreamExists", SQLSTATE_GENERAL, false;
+    /// Partitions can only grow (chapter 45).
+    StreamPartitionsDecrease = 39943, "ER_SPRIG_STREAM_PARTITIONS_DECREASE", "SprigStreamPartitionsDecrease", SQLSTATE_GENERAL, false;
+    /// A record above `stream.max_message_bytes`, or a key above 4096
+    /// bytes (chapter 45).
+    StreamRecordTooLarge = 39944, "ER_SPRIG_STREAM_RECORD_TOO_LARGE", "SprigStreamRecordTooLarge", SQLSTATE_GENERAL, false;
+    /// The event key doesn't determine the attached group's distribution
+    /// key (chapter 45).
+    StreamKeyNotAttached = 39945, "ER_SPRIG_STREAM_KEY_NOT_ATTACHED", "SprigStreamKeyNotAttached", SQLSTATE_GENERAL, false;
+    /// No offset assigned within `stream.produce_wait_ms` (chapter 45).
+    StreamSequencingTimeout = 39946, "ER_SPRIG_STREAM_SEQUENCING_TIMEOUT", "SprigStreamSequencingTimeout", SQLSTATE_GENERAL, true;
+    /// An offset below the log start or above the high watermark
+    /// (chapter 45).
+    StreamOffsetOutOfRange = 39947, "ER_SPRIG_STREAM_OFFSET_OUT_OF_RANGE", "SprigStreamOffsetOutOfRange", SQLSTATE_GENERAL, false;
+    /// A record without a key on a compacted stream (chapter 45).
+    StreamCompactNeedsKey = 39955, "ER_SPRIG_STREAM_COMPACT_NEEDS_KEY", "SprigStreamCompactNeedsKey", SQLSTATE_GENERAL, false;
     /// The audit spool is full (`audit.spool_max_mb`): admin API mutations
     /// and account statements fail closed (chapter 47).
     AuditUnavailable = 39970, "ER_SPRIG_AUDIT_UNAVAILABLE", "SprigAuditUnavailable", SQLSTATE_GENERAL, true;
@@ -711,7 +733,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::FeedBadResumeToken
         | SprigCode::InheritKeyUpdate
         | SprigCode::ShareFilterInvalid
-        | SprigCode::ResidencyInvalid => (Code::InvalidArgument, 400),
+        | SprigCode::ResidencyInvalid
+        | SprigCode::StreamPartitionsDecrease
+        | SprigCode::StreamKeyNotAttached
+        | SprigCode::StreamCompactNeedsKey => (Code::InvalidArgument, 400),
         SprigCode::SettingLocked
         | SprigCode::BinlogUnsupported
         | SprigCode::FeedSourceUnsupported
@@ -761,7 +786,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::LookupUnavailable
         | SprigCode::MoveSourceDiverged
         | SprigCode::InheritCopyStale
-        | SprigCode::InheritFederatedUnavailable => (Code::Unavailable, 503),
+        | SprigCode::InheritFederatedUnavailable
+        | SprigCode::StreamSequencingTimeout => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
         | SprigCode::TxnHandleUnknown
@@ -797,13 +823,13 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::JobNotFound
         | SprigCode::TxnNotInDoubt
         | SprigCode::SpaceNotFound
-        | SprigCode::ShareNotFound => (Code::NotFound, 404),
+        | SprigCode::ShareNotFound
+        | SprigCode::StreamNotFound => (Code::NotFound, 404),
         SprigCode::ClusterExists
         | SprigCode::TenantExists
         | SprigCode::FeedSubscriptionExists
-        | SprigCode::SpaceExists => {
-            (Code::AlreadyExists, 409)
-        }
+        | SprigCode::SpaceExists
+        | SprigCode::StreamExists => (Code::AlreadyExists, 409),
         SprigCode::ClusterStateInvalid
         | SprigCode::TypeHasDependents
         | SprigCode::HierarchyCycle
@@ -852,7 +878,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts => {
             (Code::ResourceExhausted, 503)
         }
-        SprigCode::RequestTooLarge => (Code::InvalidArgument, 413),
+        SprigCode::RequestTooLarge | SprigCode::StreamRecordTooLarge => {
+            (Code::InvalidArgument, 413)
+        }
+        SprigCode::StreamAppendOnly => (Code::FailedPrecondition, 409),
+        SprigCode::StreamOffsetOutOfRange => (Code::OutOfRange, 416),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
         SprigCode::AdminUnauthenticated
         | SprigCode::SessionRevoked

@@ -56,6 +56,7 @@ pub mod limits;
 pub mod listener;
 pub mod mysql;
 pub mod observe;
+pub mod offload;
 pub mod peer;
 pub mod pipeline;
 pub mod reads;

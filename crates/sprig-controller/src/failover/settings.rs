@@ -121,6 +121,13 @@ key! {
     "Probe failures before a primary is lost"
 }
 key! {
+    /// `failover.observe_settle_ms` (r2opfix): how long an observed writer
+    /// change (Kubernetes, provider failover) must hold before it is
+    /// published to gateways.
+    OBSERVE_SETTLE_MS: u64 = "failover.observe_settle_ms", 2000, CDG, 0, 60000,
+    "An observed writer change holds this long before it is published"
+}
+key! {
     /// `failover.cluster_detect_sources`.
     CLUSTER_DETECT_SOURCES: u32 = "failover.cluster_detect_sources", 2, CDG, 1, 3,
     "Sources that must agree a writer is down"

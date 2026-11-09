@@ -14,7 +14,9 @@
 //! `SPRIG SET`, the Admin API and `sprigctl settings set` all pass through
 //! it. It looks at every DC in `/sprig/g/dcs/` (and its own) through the
 //! DC tier it is given, which reaches every DC in single-etcd mode (R0).
-//! A failure to read the records refuses the change.
+//! A failure to read the records refuses the change. A name this build
+//! doesn't know either is left to the key's bounds (39080), so the guard
+//! only speaks for engines the writer's own build has.
 //!
 //! The gateway's runtime refusal stays: a gateway that doesn't know the
 //! configured engine refuses the tenant's sessions everything. After the
@@ -29,7 +31,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use sprig_meta::{ListOpts, MetaStore, Record, Tier, TierView, Versioned};
 use sprig_settings::{GuardFuture, Value, ValueGuard};
 
-use super::authorizer::MYSQL_GRANTS;
+use super::authorizer::{KNOWN, MYSQL_GRANTS};
 use super::settings::AUTHORIZER;
 
 /// What the guard reads of a gateway's registration record (the rest of
@@ -73,6 +75,7 @@ pub struct EngineGuard {
 impl std::fmt::Debug for EngineGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngineGuard")
+            .field("global", self.global.tier())
             .field("dc", self.dc.tier())
             .finish()
     }
@@ -122,8 +125,8 @@ impl EngineGuard {
             else {
                 continue;
             };
-            let retired = Record::<DcState>::decode(&kv.value)
-                .is_ok_and(|r| r.body.state == "retired");
+            let retired =
+                Record::<DcState>::decode(&kv.value).is_ok_and(|r| r.body.state == "retired");
             if !retired && !dcs.contains(&id) {
                 dcs.push(id);
             }
@@ -176,9 +179,14 @@ impl ValueGuard for EngineGuard {
             if key != AUTHORIZER.key {
                 return Ok(());
             }
+            // A name this build doesn't know either is left to the
+            // key's bounds (39080).
             let Value::Str(engine) = value else {
                 return Ok(());
             };
+            if !KNOWN.contains(&engine.as_str()) {
+                return Ok(());
+            }
             self.check_engine(engine).await
         })
     }
@@ -248,10 +256,21 @@ mod tests {
         assert!(!e.message.contains("gw-a"), "{e}");
         // The old build knows mysql_grants, so switching back is allowed.
         guard.check_engine(MYSQL_GRANTS).await.unwrap();
-        // Through the settings hook: only auth.authorizer is guarded.
+        // Through the settings hook: only auth.authorizer is guarded, and
+        // only for engines this build knows (others fail the bounds).
         let v = Value::Str("supabase".into());
-        assert!(guard.check(AUTHORIZER.key, &v).await.is_err());
-        guard.check("auth.grants_on_drop", &v).await.unwrap();
+        guard.check(AUTHORIZER.key, &v).await.unwrap();
+        put(
+            pune.as_ref(),
+            "gateways/gw-none",
+            serde_json::json!({"v": 1, "gateway_id": "gw-none", "slot": 3, "authorizers": []}),
+        )
+        .await;
+        let mysql = Value::Str(MYSQL_GRANTS.into());
+        let e = guard.check(AUTHORIZER.key, &mysql).await.unwrap_err();
+        assert!(e.message.contains("gw-none (dc pune1)"), "{e}");
+        assert!(!e.message.contains("gw-old"), "{e}");
+        guard.check("auth.grants_on_drop", &mysql).await.unwrap();
         // A retired DC's records don't count.
         put(
             global.as_ref(),

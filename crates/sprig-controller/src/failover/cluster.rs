@@ -224,6 +224,10 @@ pub struct ClusterFailoverRecord {
     /// The last failovers, oldest first.
     #[serde(default)]
     pub history: Vec<FailoverEvent>,
+    /// Who decided the writer: `sprig failover`, `observed:
+    /// mariadb-operator` or `observed: provider` (r2opfix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl Versioned for ClusterFailoverRecord {
@@ -443,6 +447,8 @@ struct Watch {
     claim: Option<Session>,
     claimed_at: Option<Instant>,
     last_reason: Option<String>,
+    /// An observed writer change and since when (r2opfix).
+    observed: Option<(String, Instant)>,
 }
 
 /// The `cluster_failover` loop (see the module docs).
@@ -602,7 +608,11 @@ impl ClusterFailover {
             return Ok(Outcome::Done);
         };
         let rec = stored.body().clone();
-        if rec.admin_state != AdminState::Active || rec.provisioner == ProvisionerKind::Kubernetes {
+        if rec.admin_state != AdminState::Active {
+            return Ok(Outcome::RequeueAfter(Duration::from_secs(5)));
+        }
+        let observed_source = super::observed::observed_source(&rec);
+        if observed_source.is_none() && rec.provisioner == ProvisionerKind::Kubernetes {
             return Ok(Outcome::RequeueAfter(Duration::from_secs(5)));
         }
         let w = self.watch(c);
@@ -617,11 +627,119 @@ impl ClusterFailover {
                 ..Watch::default()
             };
         }
+        if let Some(source) = observed_source {
+            return self.observed_writer(cx, &rec, source, &mut w).await;
+        }
         let s = ClusterSettings::resolve(self.live.as_ref(), &self.dc, c);
         match rec.topology {
             TopologyKind::PrimaryReplica => self.primary_replica(cx, &rec, &s, &mut w).await,
             TopologyKind::Galera => self.galera(cx, &rec, &s, &mut w).await,
             _ => Ok(Outcome::RequeueAfter(Duration::from_secs(30))),
+        }
+    }
+
+    // ---- writers someone else fails over (r2opfix) -------------------------
+
+    /// Publishes the writer of a cluster someone else fails over
+    /// ([`super::observed`]).
+    async fn observed_writer(
+        &self,
+        cx: &LoopCx,
+        rec: &ClusterRecord,
+        source: &str,
+        w: &mut Watch,
+    ) -> Result<Outcome> {
+        use super::observed::{Observed, decide, observe};
+        let c = &rec.cluster_id;
+        let mut f = self.facts(&*cx.dc, c).await?;
+        let eps = ctl_endpoints(rec)?;
+        let obs = futures::future::join_all(eps.iter().map(observe)).await;
+        let settle =
+            self.live
+                .as_ref()
+                .map_or(Duration::from_millis(fs::OBSERVE_SETTLE_MS.default), |l| {
+                    Duration::from_millis(l.snapshot().get(
+                        &fs::OBSERVE_SETTLE_MS,
+                        &SettingCtx::process(&self.dc).with_cluster(c),
+                    ))
+                });
+        match decide(f.record.writer.as_deref(), &obs) {
+            Observed::Keep(_) => {
+                w.observed = None;
+                self.note(cx, c, &mut f, "healthy", None).await?;
+                Ok(Outcome::RequeueAfter(HEALTHY_EVERY))
+            }
+            Observed::Candidate(x) => {
+                let now = self.clock.now();
+                let since = match &w.observed {
+                    Some((n, t)) if *n == x => *t,
+                    _ => {
+                        w.observed = Some((x.clone(), now));
+                        now
+                    }
+                };
+                let held = now.saturating_duration_since(since);
+                if held < settle {
+                    let why = format!("{x} is the only writable node; settling ({} ms)", ms(held));
+                    self.note(cx, c, &mut f, "writer_changing", Some(why))
+                        .await?;
+                    return Ok(Outcome::RequeueAfter(BUSY_EVERY));
+                }
+                let wall = self.clock.wall();
+                let from = f.record.writer.clone().unwrap_or_default();
+                let epoch = f.record.writer_epoch + 1;
+                f.record.history.push(FailoverEvent {
+                    kind: "observed".into(),
+                    at: rfc3339(wall),
+                    at_unix_ms: unix_ms(wall),
+                    from: from.clone(),
+                    to: x.clone(),
+                    writer_epoch: epoch,
+                    detect_ms: ms(held),
+                    rto_ms: ms(held),
+                    loss_estimate_ms: None,
+                    sources: vec![source.to_owned()],
+                    applied: String::new(),
+                    domain: rec.cluster_number,
+                    former: None,
+                    errant: None,
+                });
+                if f.record.history.len() > HISTORY {
+                    let drop_n = f.record.history.len() - HISTORY;
+                    f.record.history.drain(..drop_n);
+                }
+                f.record.writer = Some(x.clone());
+                f.record.writer_epoch = epoch;
+                f.record.source = Some(source.to_owned());
+                f.record.state = "healthy".into();
+                f.record.reason = None;
+                if let Some(rev) = self.save(cx, c, &f.record, f.record_rev).await? {
+                    f.record_rev = rev;
+                    w.observed = None;
+                    metrics::counter!("sprig_controller_observed_writer_changes_total")
+                        .increment(1);
+                    tracing::warn!(cluster = %c, %from, to = %x, epoch, %source, settled_ms = ms(held), "observed writer published");
+                }
+                Ok(Outcome::RequeueAfter(HEALTHY_EVERY))
+            }
+            Observed::NoWriter(why) => {
+                w.observed = None;
+                self.note(cx, c, &mut f, "writer_lost", Some(why)).await?;
+                Ok(Outcome::RequeueAfter(BUSY_EVERY))
+            }
+            Observed::Diverged(nodes) => {
+                w.observed = None;
+                let why = format!(
+                    "{} are all writable and replicating from nobody: nothing new is published",
+                    nodes.join(", ")
+                );
+                if f.record.state != "diverged" {
+                    tracing::error!(cluster = %c, %why, "two writable nodes");
+                    metrics::counter!("sprig_controller_diverged_writers_total").increment(1);
+                }
+                self.note(cx, c, &mut f, "diverged", Some(why)).await?;
+                Ok(Outcome::RequeueAfter(HEALTHY_EVERY))
+            }
         }
     }
 
@@ -1048,6 +1166,7 @@ impl ClusterFailover {
         f.record.promotion = None;
         f.record.writer = Some(p.to.clone());
         f.record.writer_epoch = p.writer_epoch;
+        f.record.source = Some("sprig failover".into());
         f.record.last_failover_unix_ms = Some(now_ms);
         f.record.state = "healthy".into();
         f.record.reason = None;

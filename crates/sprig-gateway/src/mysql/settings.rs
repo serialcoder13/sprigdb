@@ -131,6 +131,8 @@ pub struct FrontendSettings {
     pub compression: CompressionOffer,
     /// `gateway.relay_buffer_kb`, in bytes.
     pub relay_buffer: usize,
+    /// `gateway.large_statement_bytes` ([`crate::offload`]).
+    pub large_statement: usize,
 }
 
 impl Default for FrontendSettings {
@@ -143,6 +145,7 @@ impl Default for FrontendSettings {
             max_prepared: to_usize(MAX_PREPARED_PER_SESSION.default),
             compression: CompressionOffer::parse(&COMPRESSION.default),
             relay_buffer: to_usize(RELAY_BUFFER_KB.default) * 1024,
+            large_statement: to_usize(crate::offload::LARGE_STATEMENT_BYTES.default),
         }
     }
 }
@@ -174,6 +177,7 @@ impl FrontendSettings {
             max_prepared: to_usize(snap.get(&MAX_PREPARED_PER_SESSION, &ctx)),
             compression: CompressionOffer::parse(&snap.get(&COMPRESSION, &ctx)),
             relay_buffer: to_usize(snap.get(&RELAY_BUFFER_KB, &ctx)).saturating_mul(1024),
+            large_statement: to_usize(snap.get(&crate::offload::LARGE_STATEMENT_BYTES, &ctx)),
         }
     }
 }

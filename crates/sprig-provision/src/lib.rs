@@ -24,6 +24,7 @@
 
 pub mod credentials;
 pub mod external;
+pub mod gw_account;
 pub mod mycnf;
 pub mod vm;
 

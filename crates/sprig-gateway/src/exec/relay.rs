@@ -433,9 +433,13 @@ pub(crate) async fn relay(
                     match r.format {
                         RowFormat::Text => {
                             let mut rows = Vec::new();
-                            n.mapper
-                                .row_packet(&p.payload, cols.len(), &n.ctx, &mut rows)
-                                .map_err(|e| protocol_error(&format!("text row: {e}")))?;
+                            // A large row is decoded off the worker
+                            // thread (chapter 04, "Large statements").
+                            crate::offload::cpu(p.payload.len(), || {
+                                n.mapper
+                                    .row_packet(&p.payload, cols.len(), &n.ctx, &mut rows)
+                            })
+                            .map_err(|e| protocol_error(&format!("text row: {e}")))?;
                             for row in rows {
                                 let row = n.alias_text(row, cols.len());
                                 let row = r
@@ -447,7 +451,10 @@ pub(crate) async fn relay(
                             }
                         }
                         RowFormat::Binary => {
-                            let row = n.scrub_binary(&p.payload, &cols).unwrap_or(p.payload);
+                            let row = crate::offload::cpu(p.payload.len(), || {
+                                n.scrub_binary(&p.payload, &cols)
+                            })
+                            .unwrap_or(p.payload);
                             // SHOW STATUS prepared (Prisma's raw queries):
                             // the client's own connection rows.
                             let row = r

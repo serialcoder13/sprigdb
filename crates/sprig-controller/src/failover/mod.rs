@@ -34,6 +34,7 @@ pub mod global;
 pub mod manual;
 pub mod nodes;
 pub mod observe;
+pub mod observed;
 pub mod promote;
 pub mod record;
 pub mod recovery;

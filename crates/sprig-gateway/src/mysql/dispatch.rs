@@ -512,6 +512,7 @@ impl CommandLoop {
         }
         let silent = req.is_silent();
         let is_prepare = matches!(req, Request::Prepare { .. });
+        let size = req.size();
         let handle = Arc::clone(self.session.handle());
         let mut sink = WireSink::new(&mut self.framed, self.proto.persona, self.proto.caps);
         let mut cx = ExecCtx {
@@ -519,12 +520,19 @@ impl CommandLoop {
             proto: &self.proto,
             db: self.db.as_deref(),
         };
-        let end = tokio::select! {
-            biased;
-            r = self.exec.execute(&mut cx, req, &mut sink) => End::Done(r),
-            () = handle.flags().query_killed() => End::Killed,
-            () = self.watch.gone() => End::Gone,
-        };
+        // A large request (gateway.large_statement_bytes) runs on a
+        // blocking thread, with its KILL and hang-up watches (chapter 04,
+        // "Large statements").
+        let (exec, watch) = (&mut self.exec, &self.watch);
+        let end = crate::offload::run(size, self.settings.large_statement, async {
+            tokio::select! {
+                biased;
+                r = exec.execute(&mut cx, req, &mut sink) => End::Done(r),
+                () = handle.flags().query_killed() => End::Killed,
+                () = watch.gone() => End::Gone,
+            }
+        })
+        .await;
         let ran = match end {
             End::Done(Ok(summary)) => {
                 if let Some(db) = &summary.db {

@@ -13,6 +13,7 @@ async-trait.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
+sha2.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true

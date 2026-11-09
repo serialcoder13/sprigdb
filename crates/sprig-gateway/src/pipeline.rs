@@ -171,6 +171,35 @@ impl Request {
         }
     }
 
+    /// The bytes the request carries (statement text, parameters, long
+    /// data), which decides whether it runs off the worker threads
+    /// ([`crate::offload`]).
+    #[must_use]
+    pub fn size(&self) -> usize {
+        match self {
+            Request::Query { sql, .. } | Request::Prepare { sql } => sql.len(),
+            // Long data was buffered before, size unknown here: counted as
+            // large.
+            Request::Execute { raw, params, .. } => {
+                if params
+                    .params
+                    .iter()
+                    .any(|p| matches!(p.value, sprig_proto_mysql::command::ParamValue::LongData))
+                {
+                    usize::MAX
+                } else {
+                    raw.raw_params.len()
+                }
+            }
+            Request::LongData { data, .. } => data.len(),
+            Request::BulkExecute { raw, .. } => raw.raw.len(),
+            Request::Fetch { .. }
+            | Request::ResetStmt { .. }
+            | Request::CloseStmt { .. }
+            | Request::FieldList { .. } => 0,
+        }
+    }
+
     /// Whether the client expects no response at all.
     #[must_use]
     pub fn is_silent(&self) -> bool {

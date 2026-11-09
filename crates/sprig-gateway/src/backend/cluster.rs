@@ -57,6 +57,11 @@ pub struct ClusterView {
     /// Primary + replicas: the writer the controller publishes (chapter
     /// 25's writer lease), as last read.
     pub published: Published,
+    /// The record's `sprig_ctl` secret reference, which also locates the
+    /// `sprig_gw` monitoring account's credential the checks log in with
+    /// (`sprig_provision::gw_account`); `None` for views built without a
+    /// record.
+    pub monitor_secret: Option<String>,
 }
 
 /// The writer of a primary + replicas cluster as the controller publishes
@@ -222,6 +227,7 @@ impl ClusterView {
             galera_writers,
             ryw,
             published: Published::default(),
+            monitor_secret: Some(rec.secrets.ctl.clone()),
         }
     }
 
@@ -247,6 +253,7 @@ impl ClusterView {
             galera_writers,
             ryw,
             published: Published::default(),
+            monitor_secret: None,
         }
     }
 

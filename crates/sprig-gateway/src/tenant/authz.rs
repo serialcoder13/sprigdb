@@ -42,7 +42,9 @@
 //!
 //! **Renamed tables.** Before a `RENAME TABLE` or `ALTER TABLE ... RENAME`
 //! runs, the tables it moves go to the engine ([`objects_renamed`]): their
-//! grants stay with their old names, as MySQL's do.
+//! grants stay with their old names, as MySQL's do. After it, MariaDB's
+//! grants on the session's cluster follow the new snapshot before the
+//! client gets its `OK` ([`after_rename`]).
 //!
 //! **Migration.** A tenant whose catalog predates the `authz` module is
 //! migrated by the first session that reads it (every existing user keeps
@@ -1140,6 +1142,52 @@ pub async fn objects_renamed(ts: &TenantSession, renamed: &[Renamed]) {
         Err(e) => {
             tracing::warn!(tenant = %ts.tenant, error = %e, "grants of renamed tables not moved to their names");
         }
+    }
+}
+
+/// Whether `stmt` renames tables or views (`RENAME TABLE`, `ALTER TABLE
+/// ... RENAME`).
+#[must_use]
+pub fn renames_relations(stmt: &sprig_catalog::ddl::DdlStatement) -> bool {
+    use sprig_catalog::ddl::DdlStatement;
+    match stmt {
+        DdlStatement::RenameTables { .. } => true,
+        DdlStatement::AlterObject {
+            kind,
+            rename_to: Some(_),
+            ..
+        } => kind.namespace() == Namespace::Relation,
+        _ => false,
+    }
+}
+
+/// After a rename committed at catalog `version`: brings MariaDB's grants
+/// on the session's cluster to that snapshot before the client gets its
+/// `OK` (grants held by the new names now apply to the renamed tables,
+/// those of names left empty don't), as a `DROP` does. Without this, a
+/// session whose snapshot still predates the rename could reach MariaDB
+/// before any reconcile at the new snapshot. Failures are logged.
+pub async fn after_rename(ts: &TenantSession, version: u64) {
+    let svc = Arc::clone(ts.services());
+    let cat = match svc
+        .cache
+        .get(
+            ts.tenant,
+            Freshness::Cached {
+                min_version: version,
+            },
+        )
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(tenant = %ts.tenant, error = %e, "backend grants after a rename not applied yet");
+            return;
+        }
+    };
+    let cluster = ts.principal.backend.cluster.clone();
+    if let Err(e) = svc.authz.ensure(&svc, &cat, &cluster).await {
+        tracing::warn!(tenant = %ts.tenant, error = %e, "backend grants after a rename not applied yet");
     }
 }
 

@@ -1312,6 +1312,14 @@ impl PassSession {
             // Every gateway reloads the tenant at the new auth version.
             crate::tenant::authz::objects_dropped(ts, &dropped).await;
         }
+        // Chapter 29: after a rename, MariaDB's grants follow the names
+        // before the client hears OK.
+        if let Some(v) = result.as_ref().ok().and_then(|o| o.version)
+            && crate::tenant::authz::renames_relations(&stmt)
+            && let Some(ts) = self.tenant.as_deref()
+        {
+            crate::tenant::authz::after_rename(ts, v).await;
+        }
         match result {
             Ok(outcome) => {
                 if let Some(ts) = self.tenant.as_deref_mut() {

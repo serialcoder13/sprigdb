@@ -151,18 +151,60 @@ async fn kind_ack_workload() {
         }
     };
     let f: Vec<&str> = raw.split(',').collect();
-    let (host, port) = f[0].rsplit_once(':').unwrap();
-    let opts = mysql_async::OptsBuilder::default()
-        .ip_or_hostname(host.to_owned())
-        .tcp_port(port.parse().unwrap())
-        .user(Some(f[1].to_owned()))
-        .pass(Some(f[2].to_owned()))
-        .prefer_socket(false);
+    // `a|b|c` (r2opfix): straight to MariaDB, as root over TLS, always to
+    // the node that is writable (`@@read_only = 0`), into r2opfix_acks.acks
+    // instead of app.acks; measures the database without the gateway.
+    let direct: Vec<String> = f[0].split('|').map(str::to_owned).collect();
+    let is_direct = direct.len() > 1;
+    let table = if is_direct { "r2opfix_acks.acks" } else { "app.acks" };
+    let opts_for = |addr: &str| {
+        let (host, port) = addr.rsplit_once(':').unwrap();
+        let mut o = mysql_async::OptsBuilder::default()
+            .ip_or_hostname(host.to_owned())
+            .tcp_port(port.parse().unwrap())
+            .user(Some(f[1].to_owned()))
+            .pass(Some(f[2].to_owned()))
+            .prefer_socket(false);
+        if is_direct {
+            o = o.ssl_opts(Some(
+                mysql_async::SslOpts::default()
+                    .with_danger_accept_invalid_certs(true)
+                    .with_danger_skip_domain_validation(true),
+            ));
+        }
+        o
+    };
+    let opts = opts_for(&direct[0]);
+    // The writable node among `direct`, or the gateway.
+    let connect = |direct: Vec<String>, opts: mysql_async::OptsBuilder| async move {
+        if direct.len() < 2 {
+            return mysql_async::Conn::new(opts).await;
+        }
+        let mut last = None;
+        for a in &direct {
+            let (host, port) = a.rsplit_once(':').unwrap();
+            let o = opts.clone().ip_or_hostname(host.to_owned()).tcp_port(port.parse().unwrap());
+            match tokio::time::timeout(Duration::from_secs(2), mysql_async::Conn::new(o)).await {
+                Ok(Ok(mut c)) => {
+                    let ro: Option<i64> = c.query_first("SELECT @@read_only").await.unwrap_or(Some(1));
+                    if ro == Some(0) {
+                        c.query_drop("CREATE DATABASE IF NOT EXISTS r2opfix_acks").await?;
+                        c.query_drop("CREATE TABLE IF NOT EXISTS r2opfix_acks.acks (id BIGINT PRIMARY KEY, v VARCHAR(8))").await?;
+                        return Ok(c);
+                    }
+                    let _ = c.disconnect().await;
+                }
+                Ok(Err(e)) => last = Some(e),
+                Err(_) => {}
+            }
+        }
+        Err(last.unwrap_or_else(|| mysql_async::Error::Other("no writable node".into())))
+    };
     let secs: u64 = f[3].parse().unwrap();
     let out = PathBuf::from(f[4]);
     if mode == "verify" {
-        let mut c = mysql_async::Conn::new(opts).await.unwrap();
-        let have: Vec<i64> = c.query("SELECT id FROM app.acks").await.unwrap();
+        let mut c = connect(direct.clone(), opts).await.unwrap();
+        let have: Vec<i64> = c.query(format!("SELECT id FROM {table}")).await.unwrap();
         let have: std::collections::HashSet<i64> = have.into_iter().collect();
         let acked: Vec<i64> = std::fs::read_to_string(&out)
             .unwrap()
@@ -190,7 +232,7 @@ async fn kind_ack_workload() {
     let mut longest_gap = Duration::ZERO;
     while Instant::now() < deadline {
         if conn.is_none() {
-            match mysql_async::Conn::new(opts.clone()).await {
+            match connect(direct.clone(), opts.clone()).await {
                 Ok(c) => conn = Some(c),
                 Err(e) => {
                     errors += 1;
@@ -204,7 +246,7 @@ async fn kind_ack_workload() {
         let c = conn.as_mut().unwrap();
         let r = tokio::time::timeout(
             Duration::from_secs(10),
-            c.exec_drop("INSERT INTO app.acks (id, v) VALUES (?, 'w')", (id,)),
+            c.exec_drop(format!("INSERT INTO {table} (id, v) VALUES (?, 'w')"), (id,)),
         )
         .await;
         match r {

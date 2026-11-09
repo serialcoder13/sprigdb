@@ -1095,11 +1095,7 @@ mod tests {
         assert_eq!(
             rename_plan(
                 state,
-                &[
-                    renamed(10, "orders"),
-                    renamed(30, "x"),
-                    renamed(10, "tmp")
-                ]
+                &[renamed(10, "orders"), renamed(30, "x"), renamed(10, "tmp")]
             ),
             vec![keep]
         );

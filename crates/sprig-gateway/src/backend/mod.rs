@@ -99,7 +99,7 @@ pub mod writer;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use classify::{Effect, StmtClass, StmtInfo};
 pub use cluster::{ClusterSource, ClusterView, NodeKey, NodeRef, RegistryClusters, StaticClusters};
@@ -136,6 +136,11 @@ pub struct Backends {
     tls: Mutex<HashMap<TlsKey, Arc<rustls::ClientConfig>>>,
     monitors: Mutex<HashMap<ClusterId, JoinHandle<()>>>,
     monitor_targets: Mutex<HashMap<ClusterId, BackendTarget>>,
+    /// Clusters whose `sprig_gw` refused the checks' login, and when.
+    gw_refused: Mutex<HashMap<ClusterId, Instant>>,
+    /// Each cluster's smallest `max_allowed_packet` (`None`: couldn't be
+    /// read), and when it was read.
+    packet_limits: Mutex<HashMap<ClusterId, (Option<usize>, Instant)>>,
     budgets: Mutex<HashMap<NodeKey, Arc<PreparedBudget>>>,
     gateways_in_dc: u32,
     read_spread: std::sync::atomic::AtomicU64,
@@ -171,6 +176,8 @@ impl Backends {
             tls: Mutex::new(HashMap::new()),
             monitors: Mutex::new(HashMap::new()),
             monitor_targets: Mutex::new(HashMap::new()),
+            gw_refused: Mutex::new(HashMap::new()),
+            packet_limits: Mutex::new(HashMap::new()),
             budgets: Mutex::new(HashMap::new()),
             // Registration (chapter 04 step 7) will say how many gateways
             // share a DC; until then this gateway takes the whole share.
@@ -337,18 +344,198 @@ impl Backends {
         timeout: Duration,
     ) -> Result<MysqlClient> {
         let cred = target.credential()?;
+        self.connect_as(node, &cred, timeout)
+            .await?
+            .map_err(|e| unavailable(format!("{}: {e}", node.addr)))
+    }
+
+    /// A one-off connection to a node with `cred`. The outer error is a
+    /// TLS configuration that can't be built; the inner one the server's
+    /// or the network's.
+    async fn connect_as(
+        &self,
+        node: &NodeRef,
+        cred: &Credential,
+        timeout: Duration,
+    ) -> Result<std::result::Result<MysqlClient, sprig_proto_mysql::client::ClientError>> {
         let mut cfg = ClientConfig::new(cred.user.clone(), cred.password());
         cfg.tls = TlsMode::Required;
-        cfg.tls_config = Some(self.tls_for(&cred)?);
+        cfg.tls_config = Some(self.tls_for(cred)?);
         cfg.connect_timeout = timeout;
         cfg.multi_statements = false;
         cfg.attrs.push((
             "program_name".to_owned(),
             "sprig-gateway-monitor".to_owned(),
         ));
-        MysqlClient::connect(&node.addr, &cfg)
+        Ok(MysqlClient::connect(&node.addr, &cfg).await)
+    }
+
+    /// A connection for the checks of `view`'s cluster (chapter 06,
+    /// "Health checks"): as the cluster's `sprig_gw` monitoring account,
+    /// or, where that account can't log in (not created yet; a view
+    /// without a record), as the first login's backend account, which
+    /// can't read the replication status: replicas then get no reads,
+    /// writes are unaffected. A refused `sprig_gw` is tried again after
+    /// [`GW_RETRY`]. The flag says whether the connection is `sprig_gw`'s.
+    ///
+    /// # Errors
+    /// 39030 if the node can't be reached; 39998 for a credential that
+    /// doesn't resolve.
+    pub(crate) async fn monitor_connection(
+        &self,
+        view: &ClusterView,
+        node: &NodeRef,
+        timeout: Duration,
+    ) -> Result<(MysqlClient, bool)> {
+        if let Some(secret) = view.monitor_secret.as_deref()
+            && self.gw_usable(&view.id)
+        {
+            match sprig_provision::gw_account::gw_credential(secret) {
+                Ok(cred) => match self.connect_as(node, &cred, timeout).await? {
+                    Ok(c) => {
+                        self.gw_accepted(&view.id);
+                        return Ok((c, true));
+                    }
+                    Err(e) if e.server_error().is_some() => {
+                        self.gw_refused(&view.id, &e.to_string());
+                    }
+                    Err(e) => return Err(unavailable(format!("{}: {e}", node.addr))),
+                },
+                Err(e) => self.gw_refused(&view.id, &e.message),
+            }
+        }
+        let target = self
+            .monitor_target(&view.id)
+            .ok_or_else(|| unavailable("no monitor account"))?;
+        let c = self.side_connection(node, &target, timeout).await?;
+        Ok((c, false))
+    }
+
+    /// Whether the checks of `cluster` try `sprig_gw` now.
+    pub(crate) fn gw_usable(&self, cluster: &ClusterId) -> bool {
+        self.gw_refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(cluster)
+            .is_none_or(|at| at.elapsed() >= GW_RETRY)
+    }
+
+    fn gw_refused(&self, cluster: &ClusterId, why: &str) {
+        let first = self
+            .gw_refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(cluster.clone(), Instant::now())
+            .is_none();
+        if first {
+            tracing::warn!(event = "backend.monitor_account_refused", %cluster, error = why,
+                "sprig_gw can't log in: health checks use the first login's account, which \
+                 can't read replication, so replicas get no reads until sprig_gw exists");
+        }
+    }
+
+    fn gw_accepted(&self, cluster: &ClusterId) {
+        if self
+            .gw_refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(cluster)
+            .is_some()
+        {
+            tracing::info!(event = "backend.monitor_account_accepted", %cluster,
+                "sprig_gw logs in: health checks read replication again");
+        }
+    }
+
+    /// The smallest `max_allowed_packet` of `cluster`'s nodes, as the
+    /// checks last read it.
+    #[must_use]
+    pub fn packet_limit(&self, cluster: &ClusterId) -> Option<usize> {
+        self.packet_limits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(cluster)
+            .and_then(|(b, _)| *b)
+    }
+
+    pub(crate) fn record_packet_limit(&self, cluster: &ClusterId, bytes: Option<usize>) {
+        let mut m = self
+            .packet_limits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // A failed read never forgets a value read before.
+        if bytes.is_none()
+            && let Some((Some(_), _)) = m.get(cluster)
+        {
+            return;
+        }
+        let old = m.insert(cluster.clone(), (bytes, Instant::now()));
+        if let Some(b) = bytes
+            && old.and_then(|(o, _)| o) != Some(b)
+        {
+            tracing::info!(%cluster, max_allowed_packet = b, "backend packet limit");
+        }
+    }
+
+    /// The largest packet a client whose statements go to `target` may
+    /// send (chapter 05, "Packet limit"): `gateway`
+    /// (`gateway.max_allowed_packet_bytes`), but no more than the
+    /// cluster's smallest `max_allowed_packet` less [`PACKET_HEADROOM`]
+    /// for what the gateway adds (rewritten names, the session's sync
+    /// prefix). The first login to a cluster reads its limit when no
+    /// check has yet; one that can't be read counts as MariaDB's default,
+    /// [`UNKNOWN_BACKEND_PACKET`], and is read again after 10 s.
+    pub async fn client_packet_limit(&self, target: &BackendTarget, gateway: usize) -> usize {
+        let cluster = &target.cluster;
+        let cached = self
+            .packet_limits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(cluster)
+            .copied();
+        let backend = match cached {
+            Some((Some(b), _)) => Some(b),
+            Some((None, at)) if at.elapsed() < PACKET_LIMIT_RETRY => None,
+            _ => {
+                let b = self.read_packet_limit(target).await;
+                self.record_packet_limit(cluster, b);
+                b
+            }
+        };
+        client_limit(gateway, backend)
+    }
+
+    /// `@@global.max_allowed_packet` of the cluster's writer (or first
+    /// node), on a monitor connection.
+    async fn read_packet_limit(&self, target: &BackendTarget) -> Option<usize> {
+        let view = self.view(&target.cluster).await.ok()?;
+        self.monitor_targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(view.id.clone())
+            .or_insert_with(|| target.clone());
+        let node = self
+            .writers
+            .writer(&view, sprig_common::ids::ShardId(0))
+            .ok()
+            .or_else(|| view.nodes.first().cloned())?;
+        let fut = async {
+            let (mut c, _) = self
+                .monitor_connection(&view, &node, Duration::from_secs(1))
+                .await
+                .ok()?;
+            let row = c
+                .query_first("SELECT @@global.max_allowed_packet")
+                .await
+                .ok()??;
+            c.quit().await;
+            let v = row.into_iter().next().flatten()?;
+            String::from_utf8_lossy(&v).trim().parse::<usize>().ok()
+        };
+        tokio::time::timeout(Duration::from_secs(2), fut)
             .await
-            .map_err(|e| unavailable(format!("{}: {e}", node.addr)))
+            .ok()
+            .flatten()
     }
 
     /// `KILL QUERY <thread_id>` on a node, through a side connection as
@@ -428,6 +615,44 @@ impl Backends {
             .get(cluster)
             .cloned()
     }
+}
+
+/// How long a `sprig_gw` that refused the checks' login is left alone.
+pub const GW_RETRY: Duration = Duration::from_secs(60);
+
+/// What the gateway may add to a client's statement on its way to MariaDB
+/// (rewritten names, the session's sync prefix, trace context): clients
+/// are told a limit this much below the backend's, and chapter 27's
+/// clusters get the gateway's limit plus this much.
+pub const PACKET_HEADROOM: usize = 1 << 20;
+
+/// A backend limit that couldn't be read: MariaDB's default.
+pub const UNKNOWN_BACKEND_PACKET: usize = 16 << 20;
+
+/// How long a backend limit that couldn't be read is assumed.
+const PACKET_LIMIT_RETRY: Duration = Duration::from_secs(10);
+
+/// The client's limit from the gateway's and the backend's.
+#[must_use]
+pub fn client_limit(gateway: usize, backend: Option<usize>) -> usize {
+    let backend = backend.unwrap_or(UNKNOWN_BACKEND_PACKET);
+    gateway
+        .min(backend.saturating_sub(PACKET_HEADROOM))
+        .max(MIN_PACKET)
+}
+
+/// The smallest limit a client is ever given (MariaDB's own minimum).
+const MIN_PACKET: usize = 1024;
+
+/// 1153, as MariaDB answers a packet over its limit; the gateway sends it
+/// without forwarding a statement that grew past the backend's limit.
+#[must_use]
+pub fn packet_too_large() -> SprigError {
+    SprigError::standard(
+        1153,
+        *b"08S01",
+        "Got a packet bigger than 'max_allowed_packet' bytes",
+    )
 }
 
 /// 39030.

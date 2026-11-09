@@ -94,6 +94,11 @@ fn words(s: &str) -> Vec<String> {
 
 /// Recognizes a local statement.
 pub(crate) fn classify(sql: &[u8]) -> Option<Local> {
+    // Every local statement is short; a large statement isn't scanned here
+    // on the worker thread (chapter 04, "Large statements").
+    if sql.len() > 4096 {
+        return None;
+    }
     let text = std::str::from_utf8(sql).ok()?.trim();
     let text = text.strip_suffix(';').unwrap_or(text).trim_end();
     if text.contains(';') || text.len() > 512 {

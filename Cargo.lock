@@ -2629,6 +2629,23 @@ version = "0.0.1"
 [[package]]
 name = "sprig-proto-kafka"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "flate2",
+ "getrandom 0.3.4",
+ "metrics",
+ "proptest",
+ "ring",
+ "sprig-common",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "twox-hash",
+ "uuid",
+ "zstd",
+]
 
 [[package]]
 name = "sprig-proto-mongo"
@@ -2673,6 +2690,7 @@ dependencies = [
  "mysql_async",
  "serde",
  "serde_json",
+ "sha2",
  "sprig-cluster",
  "sprig-common",
  "sprig-meta",
@@ -2771,6 +2789,23 @@ dependencies = [
 [[package]]
 name = "sprig-streams"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "metrics",
+ "mysql_async",
+ "serde",
+ "serde_json",
+ "sprig-binlog",
+ "sprig-catalog",
+ "sprig-common",
+ "sprig-feed",
+ "sprig-meta",
+ "sprig-settings",
+ "sprig-sql",
+ "sqlparser",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "sprig-studio"

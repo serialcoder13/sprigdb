@@ -863,7 +863,10 @@ impl ValueGuard for NoOff {
         Box::pin(async move {
             self.0.fetch_add(1, Ordering::SeqCst);
             if key == "test.mode" && *value == Value::Str("off".into()) {
-                return Err(SprigError::new(SprigCode::SettingBadValue, "off is refused"));
+                return Err(SprigError::new(
+                    SprigCode::SettingBadValue,
+                    "off is refused",
+                ));
             }
             Ok(())
         })
@@ -875,7 +878,9 @@ impl ValueGuard for NoOff {
 /// don't ask.
 async fn value_guard_checks_every_set(env: Env) {
     let g = Arc::new(NoOff::default());
-    let w = env.writer().with_guard(Arc::clone(&g) as Arc<dyn ValueGuard>);
+    let w = env
+        .writer()
+        .with_guard(Arc::clone(&g) as Arc<dyn ValueGuard>);
     let dl = env.lead(&env.stores.dc).await;
     let fence = vec![Cmp::CreateRev(dl.key().clone(), dl.token)];
     let dc = env.dc();
@@ -889,7 +894,14 @@ async fn value_guard_checks_every_set(env: Env) {
         .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::SettingBadValue));
     let e = w
-        .set_guarded(&fence, &dc, "test.mode", SettingEdit::Change(set("off")), "op", "")
+        .set_guarded(
+            &fence,
+            &dc,
+            "test.mode",
+            SettingEdit::Change(set("off")),
+            "op",
+            "",
+        )
         .await
         .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::SettingBadValue));
