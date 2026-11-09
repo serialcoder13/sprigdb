@@ -38,7 +38,7 @@ use crate::sys;
 pub const VARIABLES: &[&str] = &[
     "version",
     "server_id",
-    "server_uuid",
+    "hostname",
     "lower_case_table_names",
     "default_storage_engine",
     "read_only",
@@ -110,7 +110,7 @@ pub fn check_identity(
     let mut new = Vec::new();
     for p in probes.iter_mut() {
         let Ok(f) = &p.result else { continue };
-        let found = f.server.server_uuid.clone();
+        let found = f.server.identity();
         if found.is_empty() {
             continue;
         }

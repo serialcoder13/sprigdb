@@ -287,7 +287,7 @@ fn record(kind: TopologyKind, eps: &[NodeEndpoint]) -> ClusterRecord {
         health: None,
         tuning: None,
         gaps: Vec::new(),
-        node_uuids: std::collections::BTreeMap::new(),
+        node_identities: std::collections::BTreeMap::new(),
     }
 }
 

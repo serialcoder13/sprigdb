@@ -593,7 +593,7 @@ impl Reconciler {
         } else if status.nodes != nodes {
             // A scale or a replaced Service: the record follows (r2opfix),
             // so a freed address can't keep pointing at another cluster's
-            // node; the probes also refuse a node whose server_uuid isn't
+            // node; the probes also refuse a node whose identity isn't
             // the pinned one.
             let specs: Vec<NodeSpec> = nodes
                 .iter()
@@ -821,26 +821,15 @@ impl Reconciler {
         let started = Instant::now();
         // a. Every other pod applies what it received.
         let mut views: Vec<ReplView> = Vec::new();
-        let mut drained = Vec::new();
         for i in (0..replicas).filter(|i| *i != cur) {
             let addr = self.pod_addr(sc, ns, i);
             match repl.drain(&addr, root, i, failover::DRAIN_WAIT).await {
-                Ok(v) => {
-                    drained.push(addr);
-                    views.push(v);
-                }
+                Ok(v) => views.push(v),
                 Err(e) => {
                     tracing::warn!(cluster = %name, pod = i, error = %e, "replica unreachable during failover");
                 }
             }
         }
-        let resume = |why: &'static str| async move {
-            for a in &drained {
-                if let Err(e) = repl.resume(a, root).await {
-                    tracing::warn!(addr = %a, error = %e, why, "replica not resumed");
-                }
-            }
-        };
         // b. The most advanced replica.
         let best = match failover::choose(&views) {
             Ok(b) => b,
@@ -856,7 +845,6 @@ impl Reconciler {
                 metrics::counter!("sprig_operator_failovers_total", "result" => "blocked")
                     .increment(1);
                 tracing::warn!(cluster = %name, %why, "failover blocked");
-                resume("blocked").await;
                 return Ok(WatchOutcome::Blocked(why));
             }
         };
@@ -868,16 +856,8 @@ impl Reconciler {
         {
             tracing::info!(cluster = %name, "primary answered again; failover abandoned");
             self.note(&name, |w| w.down_since = None);
-            resume("abandoned").await;
             return Ok(WatchOutcome::Healthy { repaired: vec![] });
         }
-        // The replicas receive again before the switch: if the old primary
-        // comes back while mariadb-operator switches, its planned switchover
-        // waits for every replica to reach the old primary's position, which
-        // a stopped IO thread never does (r2kind's 59 s wait). With the
-        // primary still down nothing arrives, so the chosen replica's relay
-        // log stays empty for mariadb-operator's "new primary synced" check.
-        resume("switching").await;
         let chosen = views
             .iter()
             .find(|v| v.index == best)

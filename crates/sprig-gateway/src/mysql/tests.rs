@@ -46,21 +46,22 @@ fn hex(b: &[u8]) -> String {
     })
 }
 
-/// The accounts file: `app` (both verifiers), `other`, and `nat` (native
-/// only).
+/// The accounts file: `app` (both verifiers), `other`, `nat` (native
+/// only), and `nopw` (both verifiers, the empty password).
 fn accounts_toml() -> String {
     let sha2 = |pw: &str| {
         hex(&CachingSha2Verifier::create(pw.as_bytes(), 1000)
             .unwrap()
             .to_bytes())
     };
-    let native = NativeVerifier::create(PW.as_bytes()).to_string();
     let mut s = String::new();
     for (user, pw, with_sha2, with_native) in [
         ("app", PW, true, true),
         ("other", OTHER_PW, true, false),
         ("nat", PW, false, true),
+        ("nopw", "", true, true),
     ] {
+        let native = NativeVerifier::create(pw.as_bytes()).to_string();
         let _ = writeln!(s, "[[account]]\nuser = \"{user}\"");
         if with_sha2 {
             let _ = writeln!(s, "caching_sha2_password = \"{}\"", sha2(pw));
@@ -331,6 +332,43 @@ async fn wrong_password_and_unknown_user_look_alike() {
     assert_eq!(w.state, g.state);
     // Both did a full exchange with a hash; neither is instant.
     tracing::debug!(?t_wrong, ?t_ghost, "login failure times");
+    gw.stop().await;
+}
+
+/// Empty passwords behave as on MySQL 8.4 and MariaDB 11.8: an account
+/// whose password is empty logs in; an empty password for an account with
+/// one, or for an unknown account, gets the same 1045 "(using password:
+/// NO)", on both personas, with and without TLS.
+#[tokio::test]
+async fn empty_passwords_like_the_real_servers() {
+    let gw = Gateway::start(TlsMode::Optional).await;
+    for persona in [Persona::MySql84, Persona::MariaDb] {
+        for tls in [false, true] {
+            let what = format!("{persona:?} tls={tls}");
+            let mut c = connect(opts(gw.addr(persona), "nopw", "", tls))
+                .await
+                .unwrap_or_else(|e| panic!("{what}: nopw: {e}"));
+            c.ping().await.unwrap();
+            c.disconnect().await.unwrap();
+            let mut messages = Vec::new();
+            for user in ["app", "nat", "ghost"] {
+                let e = connect(opts(gw.addr(persona), user, "", tls))
+                    .await
+                    .unwrap_err();
+                let mysql_async::Error::Server(e) = e else {
+                    panic!("{what}: {user}: not a server error: {e}");
+                };
+                assert_eq!(e.code, 1045, "{what}: {user}");
+                assert_eq!(e.state, "28000", "{what}: {user}");
+                messages.push(e.message.replace(&format!("'{user}'"), "'?'"));
+            }
+            assert!(
+                messages.iter().all(|m| m == &messages[0]),
+                "{what}: {messages:?}"
+            );
+            assert!(messages[0].ends_with("(using password: NO)"), "{what}");
+        }
+    }
     gw.stop().await;
 }
 
@@ -608,6 +646,77 @@ async fn raw_commands() {
             .unwrap()
             .is_none()
     );
+    gw.stop().await;
+}
+
+/// One login with the response libmysqlclient sends for the empty
+/// password (`caching_sha2_password` and a single NUL byte), answering an
+/// AuthSwitchRequest to `mysql_native_password` with an empty packet as its
+/// native plugin does. Returns the final packet and how many switches came.
+async fn raw_empty_login(addr: SocketAddr, user: &str) -> (Packet, usize) {
+    let mut raw = Framed::new(
+        TcpStream::connect(addr).await.unwrap(),
+        PacketCodec::default(),
+    );
+    let _ = next(&mut raw).await;
+    let resp = HandshakeResponse {
+        caps: client_caps(),
+        max_packet: 1 << 24,
+        collation: 255,
+        user: user.as_bytes().to_vec(),
+        auth_response: Bytes::from_static(&[0]),
+        plugin: Some("caching_sha2_password".to_owned()),
+        ..HandshakeResponse::default()
+    };
+    raw.send(Packet::new(1, resp.encode())).await.unwrap();
+    let mut switches = 0;
+    loop {
+        let p = tokio::time::timeout(Duration::from_secs(5), raw.next())
+            .await
+            .expect("reply in time")
+            .expect("open")
+            .expect("valid packet");
+        if p.payload.first() == Some(&0xFE) && switches == 0 {
+            switches += 1;
+            let sw = sprig_proto_mysql::packets::AuthSwitchRequest::decode(&p.payload).unwrap();
+            assert_eq!(sw.plugin, "mysql_native_password", "{user}");
+            raw.send(Packet::new(p.seq.wrapping_add(1), Bytes::new()))
+                .await
+                .unwrap();
+            continue;
+        }
+        return (p, switches);
+    }
+}
+
+/// The loginerr bug: the `mysql` 8.x/9.x client sends one NUL byte for the
+/// empty password and then expects OK or ERR. The gateway answered with
+/// `AuthMoreData 0x04` and the client failed with "2027 Malformed packet".
+/// Now: OK for the empty-password account, and for the others the same
+/// ERR 1045 as the very next packet (sequence 2), as MySQL 8.4 sends it.
+#[tokio::test]
+async fn raw_empty_password_is_one_nul() {
+    let gw = Gateway::start(TlsMode::Off).await;
+    for persona in [Persona::MySql84, Persona::MariaDb] {
+        let addr = gw.addr(persona);
+        let (ok, sw) = raw_empty_login(addr, "nopw").await;
+        assert_eq!((ok.seq, ok.payload[0], sw), (2, 0, 0), "{persona:?}");
+        for user in ["app", "ghost", "other"] {
+            let (p, sw) = raw_empty_login(addr, user).await;
+            assert_eq!((p.seq, sw), (2, 0), "{persona:?} {user}");
+            let e = ErrPacket::decode(&p.payload).unwrap();
+            assert_eq!(e.code, 1045, "{persona:?} {user}");
+            assert_eq!(
+                e.message,
+                format!("Access denied for user '{user}'@'127.0.0.1' (using password: NO)")
+            );
+        }
+        // A native-only account switches (as before), then refuses the
+        // empty native response the same way.
+        let (p, sw) = raw_empty_login(addr, "nat").await;
+        assert_eq!((p.seq, sw), (4, 1), "{persona:?} nat");
+        assert_eq!(err_code(&p.payload), Some(1045));
+    }
     gw.stop().await;
 }
 

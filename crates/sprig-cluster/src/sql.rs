@@ -140,7 +140,7 @@ impl ProbeError {
     #[must_use]
     pub fn wrong_node(expected: &str, found: &str) -> Self {
         Self::other(format!(
-            "{WRONG_NODE} the address answers as server_uuid {found}, not the pinned {expected} \
+            "{WRONG_NODE} the address answers as {found}, not the pinned {expected} \
              (a reused address? update the record's nodes)"
         ))
     }

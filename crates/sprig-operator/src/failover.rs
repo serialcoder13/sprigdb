@@ -16,8 +16,9 @@
 //!    repair broken replicas (below)
 //! 2. it doesn't answer, and its pod is not Ready (two sources), for
 //!    failover.cluster_detect_seconds:
-//!    a. on every other pod: STOP SLAVE IO_THREAD; START SLAVE SQL_THREAD;
-//!       MASTER_GTID_WAIT(Gtid_IO_Pos), so what it received is applied
+//!    a. on every other pod: START SLAVE SQL_THREAD if only the SQL thread is
+//!       stopped (never with the IO thread stopped: MariaDB then discards the
+//!       relay log); MASTER_GTID_WAIT(Gtid_IO_Pos), so what it received is applied
 //!    b. best = the replica whose received position contains every other's
 //!       (the most advanced: it holds every acknowledged commit); none, or
 //!       best not fully applied: stop and report (FailoverBlocked)
@@ -245,17 +246,12 @@ pub trait ReplicationOps: Send + Sync + 'static {
     /// # Errors
     /// The node didn't answer within [`STATEMENT_TIMEOUT`].
     async fn view(&self, addr: &str, root: &str, index: u8) -> Result<ReplView>;
-    /// Step 2a: stop receiving, apply the relay log (waiting up to
-    /// `wait`), and return the state after.
+    /// Step 2a: apply the relay log (waiting up to `wait`) without ever
+    /// stopping the IO thread, and return the state after.
     ///
     /// # Errors
     /// The node didn't answer.
     async fn drain(&self, addr: &str, root: &str, index: u8, wait: Duration) -> Result<ReplView>;
-    /// Starts the IO thread again (an abandoned failover).
-    ///
-    /// # Errors
-    /// The node didn't answer.
-    async fn resume(&self, addr: &str, root: &str) -> Result<()>;
     /// `STOP SLAVE; SET GLOBAL gtid_slave_pos = @@gtid_binlog_pos; START SLAVE`.
     ///
     /// # Errors
@@ -401,39 +397,36 @@ impl ReplicationOps for MysqlReplication {
     async fn drain(&self, addr: &str, root: &str, index: u8, wait: Duration) -> Result<ReplView> {
         let mut c = self.conn(addr, root).await?;
         let before = Self::read(&mut c, addr, index).await?;
-        if before.master_host.is_empty() {
+        if before.master_host.is_empty() || before.drained() {
             return Ok(before);
         }
-        let step = async {
-            c.query_drop("STOP SLAVE IO_THREAD").await?;
-            // A stopped SQL thread (by hand, or a lag test) must apply too.
-            c.query_drop("START SLAVE SQL_THREAD").await?;
-            Ok::<_, mysql_async::Error>(())
-        };
-        tokio::time::timeout(STATEMENT_TIMEOUT, step)
-            .await
-            .map_err(|_| unavailable(addr, "timed out"))?
-            .map_err(|e| unavailable(addr, e))?;
-        let io = Self::read(&mut c, addr, index).await?;
-        if !io.drained() {
-            let target = io.received().to_string();
-            let secs = wait.as_secs().max(1);
-            let r: std::result::Result<Option<i64>, _> = tokio::time::timeout(
-                wait + STATEMENT_TIMEOUT,
-                c.exec_first("SELECT MASTER_GTID_WAIT(?, ?)", (target, secs)),
-            )
-            .await
-            .map_err(|_| unavailable(addr, "MASTER_GTID_WAIT timed out"))?;
-            r.map_err(|e| unavailable(addr, e))?;
+        // The IO thread keeps running (with the primary down it receives
+        // nothing new). Never stop it: under MASTER_USE_GTID, starting the
+        // SQL thread while the IO thread is stopped discards the relay log
+        // and resets Gtid_IO_Pos to gtid_slave_pos, losing exactly the
+        // received, acknowledged, unapplied transactions (found on kind).
+        match (before.io_running, before.sql_running) {
+            (_, true) => {}
+            (true, false) => {
+                tokio::time::timeout(STATEMENT_TIMEOUT, c.query_drop("START SLAVE SQL_THREAD"))
+                    .await
+                    .map_err(|_| unavailable(addr, "timed out"))?
+                    .map_err(|e| unavailable(addr, e))?;
+            }
+            // Both stopped: starting the SQL thread would discard the relay
+            // log, so it stays as it is; choose() sees it undrained.
+            (false, false) => return Ok(before),
         }
+        let target = before.received().to_string();
+        let secs = wait.as_secs().max(1);
+        let r: std::result::Result<Option<i64>, _> = tokio::time::timeout(
+            wait + STATEMENT_TIMEOUT,
+            c.exec_first("SELECT MASTER_GTID_WAIT(?, ?)", (target, secs)),
+        )
+        .await
+        .map_err(|_| unavailable(addr, "MASTER_GTID_WAIT timed out"))?;
+        r.map_err(|e| unavailable(addr, e))?;
         Self::read(&mut c, addr, index).await
-    }
-
-    async fn resume(&self, addr: &str, root: &str) -> Result<()> {
-        let mut c = self.conn(addr, root).await?;
-        c.query_drop("START SLAVE")
-            .await
-            .map_err(|e| unavailable(addr, e))
     }
 
     async fn repair(&self, addr: &str, root: &str) -> Result<()> {

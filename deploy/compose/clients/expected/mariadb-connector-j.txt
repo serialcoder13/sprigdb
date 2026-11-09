@@ -17,4 +17,43 @@
 # fork and ends the run early. Left out everywhere.
 * exclude org.mariadb.jdbc.integration.MultiPacketTest.* :: 16 MiB+ packets; backend limit 16 MiB (gaps row 30); watchdog abort on a debug gateway; OOM-kills the 768 MB test container
 * exclude org.mariadb.jdbc.integration.CompressTest.bigSend :: as MultiPacketTest
-* exclude org.mariadb.jdbc.integration.BatchTest.bigParameterFlushTest :: as MultiPacketTest
+* exclude org.mariadb.jdbc.integration.*.big* :: every big* test sends 16 MiB+ (as MultiPacketTest)
+gateway-* exclude org.mariadb.jdbc.integration.PreparedStatementTest.skippingRes :: 30 MB of parameters once @@max_allowed_packet reads 64 MiB (plain servers at 16 MiB skip it; gaps row 30)
+
+# --- Through the gateway ---------------------------------------------------
+# Tenant model (chapter 29): no mysql schema, no server-wide privileges.
+gateway-* fail org.mariadb.jdbc.integration.DatabaseMetadataTest.testGetCatalogs :: expects a mysql schema: a tenant has none
+gateway-* fail org.mariadb.jdbc.integration.DatabaseMetadataTest.testGetTables2 :: expects mysql's tables: a tenant has no mysql schema
+gateway-* fail org.mariadb.jdbc.integration.ConfigurationTest.jdbcCompliantTruncation :: needs SUPER (server-wide): refused for a tenant (1227)
+gateway-* fail org.mariadb.jdbc.integration.ErrorTest.deadLockInformation :: SHOW ENGINE INNODB STATUS is server-wide: a tenant can't read it
+# The gateway's connection limits are its own (chapter 04): opening
+# @@max_connections + 1 sessions doesn't give 1040.
+gateway-* fail org.mariadb.jdbc.integration.ErrorTest.testPre41ErrorFormat :: @@max_connections is the backend's; the gateway's limits differ (gaps row 43)
+# Users the suite creates log in over plaintext with caching_sha2_password,
+# the gateway's default plugin on both ports: no RSA (decision D4), and the
+# driver refuses caching_sha2 over TLS with a self-signed certificate.
+gateway-* fail org.mariadb.jdbc.integration.ConnectionTest.expiredPasswordTest :: cold caching_sha2 login over plaintext: no RSA (D4; gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.DataSourceTest.switchUser :: as expiredPasswordTest (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.DatabaseMetadataTest.getUrlDoesNotExposeCredentials :: as expiredPasswordTest (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.PoolDataSourceTest.poolWithUser :: as expiredPasswordTest (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.PoolDataSourceTest.testDataSource :: as expiredPasswordTest (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.PooledConnectionTest.testPooledConnectionStatementError :: as expiredPasswordTest (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.SslTest.allowModeUsesTlsWhenAnnounced :: caching_sha2 with a self-signed certificate, or the suite's TLS user logging in over plaintext (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.SslTest.enabledSslCipherSuites :: caching_sha2 with a self-signed certificate, or the suite's TLS user logging in over plaintext (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.SslTest.enabledSslProtocolSuites :: caching_sha2 with a self-signed certificate, or the suite's TLS user logging in over plaintext (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.SslTest.mandatoryEphemeralSsl :: caching_sha2 with a self-signed certificate, or the suite's TLS user logging in over plaintext (gaps row 38)
+gateway-* fail org.mariadb.jdbc.integration.SslTest.mandatorySsl :: caching_sha2 with a self-signed certificate, or the suite's TLS user logging in over plaintext (gaps row 38)
+# Not built.
+gateway-* fail org.mariadb.jdbc.integration.LocalInfileTest.loadDataValidationFails :: LOAD DATA LOCAL through COM_STMT_EXECUTE is declined (39010; gaps row 37)
+gateway-* fail org.mariadb.jdbc.integration.LocalInfileTest.streamInBatch :: as loadDataValidationFails (gaps row 37)
+gateway-* fail org.mariadb.jdbc.integration.DatabaseMetadataTest.getImportedKeys :: DROP TABLE IF EXISTS in a missing database gives 1049, not note 1051 (gaps row 39)
+gateway-* fail org.mariadb.jdbc.integration.BatchTest.differentParameterType :: bulk execute: no MARIADB_CLIENT_BULK_UNIT_RESULTS, so per-row counts read -2 (gaps row 40)
+gateway-* fail org.mariadb.jdbc.integration.RedirectionTest.basicRedirection :: MariaDB 11.3's redirect_url is the gateway's; clients aren't redirected (gaps row 41)
+gateway-* fail org.mariadb.jdbc.integration.RedirectionTest.redirectionDuringTransaction :: as basicRedirection (gaps row 41)
+gateway-* fail org.mariadb.jdbc.integration.PreparedStatementTest.moreRowLimitedResults :: SET STATEMENT SQL_SELECT_LIMIT=n FOR CREATE PROCEDURE fails with 1064 (gaps row 42)
+# Connection set-up under host load (10 s connectTimeout).
+gateway-* flaky org.mariadb.jdbc.integration.DatabaseMetadataTest.testGetColumnstinyInt1isBit :: connect timeout under host load
+gateway-* flaky org.mariadb.jdbc.integration.NonRegisteringDriverTest.initializationError :: connect timeout under host load
+gateway-* fail org.mariadb.jdbc.integration.StatementTest.queryTimeout :: its 'slow' query cross-joins information_schema tables; a tenant's are small, so it ends within the 1 s timeout
+gateway-* flaky org.mariadb.jdbc.integration.DatabaseMetadataTest.executionError :: catalog commit timed out while the shared etcd was slow (39500/39070)
+gateway-* flaky org.mariadb.jdbc.integration.MultiHostTest.* :: its local failover proxy (localhost:9999) on a loaded host

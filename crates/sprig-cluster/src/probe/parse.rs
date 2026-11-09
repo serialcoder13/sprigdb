@@ -425,9 +425,10 @@ pub struct ServerFacts {
     pub version_text: String,
     /// `@@server_id`.
     pub server_id: u32,
-    /// `@@server_uuid`: the identity the record pins (r2opfix).
+    /// `@@hostname` (a pod's name on Kubernetes): with `server_id`, the
+    /// identity the record pins (r2opfix; MariaDB has no `server_uuid`).
     #[serde(default)]
-    pub server_uuid: String,
+    pub hostname: String,
     /// `lower_case_table_names`.
     pub lower_case_table_names: u8,
     /// `default_storage_engine`.
@@ -444,6 +445,19 @@ pub struct ServerFacts {
     pub clock_skew_ms: Option<i64>,
     /// `wsrep_on`.
     pub wsrep_on: bool,
+}
+
+impl ServerFacts {
+    /// The identity a cluster record pins for a node: `<hostname>#<server_id>`
+    /// (r2opfix); empty when the probe didn't read the host name.
+    #[must_use]
+    pub fn identity(&self) -> String {
+        if self.hostname.is_empty() {
+            String::new()
+        } else {
+            format!("{}#{}", self.hostname, self.server_id)
+        }
+    }
 }
 
 /// A heartbeat row as one node sees it.
@@ -490,7 +504,7 @@ impl NodeFacts {
                 version: raw.var("version").and_then(ServerVersion::parse),
                 version_text: raw.var("version").unwrap_or_default().to_owned(),
                 server_id: num(raw.var("server_id")),
-                server_uuid: raw.var("server_uuid").unwrap_or_default().to_owned(),
+                hostname: raw.var("hostname").unwrap_or_default().to_owned(),
                 lower_case_table_names: num(raw.var("lower_case_table_names")),
                 default_storage_engine: raw
                     .var("default_storage_engine")

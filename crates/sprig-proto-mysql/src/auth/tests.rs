@@ -18,6 +18,7 @@ struct Mock {
     password: Vec<u8>,
     fast_nonces: Vec<[u8; NONCE_LEN]>,
     passwords: Vec<Vec<u8>>,
+    native_scrambles: Vec<Vec<u8>>,
     decided: Vec<(Outcome, AuthPath)>,
 }
 
@@ -30,7 +31,8 @@ impl LoginFlow for Mock {
         self.fast_nonces.push(*nonce);
         self.fast_hit
     }
-    fn check_native(&mut self, _nonce: &[u8; NONCE_LEN], _scramble: &[u8]) -> bool {
+    fn check_native(&mut self, _nonce: &[u8; NONCE_LEN], scramble: &[u8]) -> bool {
+        self.native_scrambles.push(scramble.to_vec());
         self.native_ok
     }
     async fn check_password(&mut self, password: Zeroizing<Vec<u8>>) -> bool {
@@ -203,6 +205,80 @@ async fn empty_password_needs_no_exchange() {
     .await;
     assert_eq!(v, AuthVerdict::Accept);
     assert_eq!(flow.passwords, [Vec::<u8>::new()]);
+    assert_eq!(flow.decided, [(Outcome::Verified, AuthPath::Empty)]);
+}
+
+/// libmysqlclient's `caching_sha2_password` (the `mysql` 8.x/9.x CLI)
+/// sends one NUL byte for the empty password and then waits for OK or ERR:
+/// an `AuthMoreData` there is "2027 Malformed packet" (the loginerr bug).
+#[tokio::test]
+async fn a_single_nul_is_the_empty_password() {
+    for (password, want) in [
+        (&b""[..], AuthVerdict::Accept),
+        (
+            b"pw",
+            AuthVerdict::Refuse(ErrPacket::access_denied(
+                Persona::MySql84,
+                "app",
+                "127.0.0.1",
+                true,
+            )),
+        ),
+    ] {
+        let mut flow = Mock {
+            password: password.to_vec(),
+            ..Mock::default()
+        };
+        let (v, _) = exchange(
+            &mut flow,
+            false,
+            Some(CACHING_SHA2_PASSWORD),
+            b"\0",
+            false,
+            |mut d| async move {
+                // Nothing is written before the caller's OK or ERR.
+                let mut b = [0u8; 1];
+                let r = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    tokio::io::AsyncReadExt::read(&mut d, &mut b),
+                )
+                .await;
+                assert!(r.is_err() || matches!(r, Ok(Ok(0))), "unexpected bytes");
+            },
+        )
+        .await;
+        assert_eq!(v, want);
+        assert_eq!(flow.passwords, [Vec::<u8>::new()]);
+        assert!(flow.fast_nonces.is_empty());
+        let outcome = if password.is_empty() {
+            Outcome::Verified
+        } else {
+            Outcome::WrongCredentials
+        };
+        assert_eq!(flow.decided, [(outcome, AuthPath::Empty)]);
+    }
+}
+
+/// After a switch to `mysql_native_password`, a NUL is still the empty
+/// password: the flow sees an empty scramble.
+#[tokio::test]
+async fn native_reads_a_single_nul_as_empty() {
+    let mut flow = Mock {
+        method: Some(Method::Native),
+        native_ok: true,
+        ..Mock::default()
+    };
+    let (v, _) = exchange(
+        &mut flow,
+        false,
+        Some(MYSQL_NATIVE_PASSWORD),
+        b"\0",
+        false,
+        |_d| async {},
+    )
+    .await;
+    assert_eq!(v, AuthVerdict::Accept);
+    assert_eq!(flow.native_scrambles, [Vec::<u8>::new()]);
     assert_eq!(flow.decided, [(Outcome::Verified, AuthPath::Empty)]);
 }
 

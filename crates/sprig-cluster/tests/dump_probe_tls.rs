@@ -8,7 +8,12 @@
 //! `SPRIG_TEST_BINLOG_TLS_ROOT` (root, for the control connection) and
 //! `SPRIG_TEST_BINLOG_TLS_CA`. Skips when unset.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::option_option, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::option_option,
+    missing_docs
+)]
 
 use std::path::PathBuf;
 use std::time::Duration;

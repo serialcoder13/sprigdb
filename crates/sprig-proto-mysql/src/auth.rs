@@ -4,7 +4,8 @@
 //! implemented by the gateway) decides. The plugins:
 //!
 //! - [`CachingSha2Password`] (both personas, the default): the empty
-//!   password, the fast path (`AuthMoreData 0x03` then the verdict), and the
+//!   password (an empty response or a single NUL, answered with the
+//!   verdict at once), the fast path (`AuthMoreData 0x03` then the verdict), and the
 //!   full path (`AuthMoreData 0x04`, then the clear-text password over TLS).
 //!   Without TLS the full path would need the server's RSA key; decision D4
 //!   (`decisions/m0.2-interim.md`) refuses it with [`Outcome::NeedsTls`],
@@ -234,6 +235,16 @@ fn password_of(packet: &[u8]) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(p.to_vec())
 }
 
+/// Whether a scramble response stands for the empty password: no bytes,
+/// or the single NUL byte that libmysqlclient's `caching_sha2_password`
+/// sends for an empty password (the `mysql` CLI, Connector/C and every
+/// driver built on them). MySQL's server plugin accepts both forms
+/// (`sha2_password.cc`: `!pkt_len || (pkt_len == 1 && *pkt == 0)`); a real
+/// scramble is 20 or 32 bytes, so the NUL can't be one.
+fn is_empty_response(r: &[u8]) -> bool {
+    r.is_empty() || r == [0]
+}
+
 /// `caching_sha2_password`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CachingSha2Password;
@@ -250,8 +261,9 @@ impl ServerAuthPlugin for CachingSha2Password {
         first: Bytes,
         flow: &mut dyn LoginFlow,
     ) -> ProtoResult<AuthVerdict> {
-        // Step 2: the empty password.
-        if first.is_empty() {
+        // Step 2: the empty password (no bytes, or libmysqlclient's single
+        // NUL): the verdict at once, no AuthMoreData, for every account.
+        if is_empty_response(&first) {
             let ok = flow.check_password(Zeroizing::new(Vec::new())).await;
             return Ok(flow.decide(verified(ok), AuthPath::Empty).await);
         }
@@ -289,12 +301,12 @@ impl ServerAuthPlugin for NativePassword {
         first: Bytes,
         flow: &mut dyn LoginFlow,
     ) -> ProtoResult<AuthVerdict> {
-        let ok = flow.check_native(&io.nonce, &first);
-        let path = if first.is_empty() {
-            AuthPath::Empty
+        let (scramble, path) = if is_empty_response(&first) {
+            (&[][..], AuthPath::Empty)
         } else {
-            AuthPath::Native
+            (&first[..], AuthPath::Native)
         };
+        let ok = flow.check_native(&io.nonce, scramble);
         Ok(flow.decide(verified(ok), path).await)
     }
 }

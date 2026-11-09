@@ -113,6 +113,11 @@ async fn kill(
     env: &LocalEnv<'_>,
     sink: &mut dyn ResultSink,
 ) -> Result<()> {
+    let id = if id == super::local::KILL_SELF {
+        me.id
+    } else {
+        id
+    };
     let user = me.principal.as_ref().map(|p| p.user.clone());
     let tenant = me.principal.as_ref().and_then(|p| p.tenant);
     let unknown = || SprigError::standard(1094, *b"HY000", format!("Unknown thread id: {id}"));

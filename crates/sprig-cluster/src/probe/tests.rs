@@ -1,5 +1,5 @@
 use super::*;
-use crate::testutil::{failed, probe, raw};
+use crate::testutil::{failed, node, probe, raw};
 
 #[test]
 fn single_11_8() {
@@ -145,4 +145,38 @@ fn fixtures_hold_no_password_hashes() {
             assert!(!g.contains("IDENTIFIED"), "{name}: {g}");
         }
     }
+}
+
+/// r2opfix: a probe that reaches another server than the pinned one is
+/// refused (the node becomes `broken`); a node without a pin gets one.
+#[test]
+fn identity_is_pinned_and_checked() {
+    use std::collections::BTreeMap;
+    let with_uuid = |host: &str| {
+        let mut r = raw("11.8-replica");
+        r.variables.insert("hostname".into(), host.into());
+        r
+    };
+    let mut probes = vec![
+        probe("n1", &with_uuid("db-a-1")),
+        probe("n2", &with_uuid("db-b-2")),
+        probe("n3", &with_uuid("db-c-3")),
+        failed("n4", None),
+    ];
+    let mut pinned = BTreeMap::new();
+    pinned.insert(node("n1"), probes[0].facts().unwrap().server.identity());
+    pinned.insert(node("n2"), "other-server".to_owned());
+    let new = check_identity(&pinned, &mut probes);
+    assert_eq!(new.len(), 1);
+    assert_eq!(new[0].0, node("n3"));
+    assert!(new[0].1.starts_with("db-c-3#"), "{}", new[0].1);
+    assert!(probes[0].result.is_ok());
+    let e = probes[1].result.as_ref().unwrap_err();
+    assert!(
+        e.is_auth_failure(),
+        "a wrong node is broken, not unreachable"
+    );
+    assert!(e.message.contains("db-b-2#") && e.message.contains("other-server"));
+    assert!(probes[2].result.is_ok());
+    assert!(probes[3].result.is_err());
 }

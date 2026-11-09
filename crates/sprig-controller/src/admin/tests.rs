@@ -296,7 +296,7 @@ async fn drain_retire_and_set_nodes() {
     let old = s.body().nodes.clone();
     reg.update(&id, |r| {
         for n in &r.nodes.clone() {
-            r.node_uuids
+            r.node_identities
                 .insert(n.node.clone(), format!("uuid-{}", n.node));
         }
         Ok(true)
@@ -321,9 +321,9 @@ async fn drain_retire_and_set_nodes() {
         .await
         .unwrap();
     assert_eq!(v.record.nodes, nodes);
-    assert!(!v.record.node_uuids.contains_key(&old[0].node));
+    assert!(!v.record.node_identities.contains_key(&old[0].node));
     if old.len() > 1 {
-        assert!(v.record.node_uuids.contains_key(&old[1].node));
+        assert!(v.record.node_identities.contains_key(&old[1].node));
     }
     assert_eq!(
         code(

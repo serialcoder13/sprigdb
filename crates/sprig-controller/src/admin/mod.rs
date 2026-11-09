@@ -740,7 +740,7 @@ impl AdminService {
                     return Ok(false);
                 }
                 let old = std::mem::replace(&mut r.nodes, nodes.clone());
-                r.node_uuids.retain(|n, _| {
+                r.node_identities.retain(|n, _| {
                     let before = old.iter().find(|s| &s.node == n).map(|s| &s.addr);
                     let now = nodes.iter().find(|s| &s.node == n).map(|s| &s.addr);
                     before.is_some() && before == now

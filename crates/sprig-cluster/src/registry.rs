@@ -457,7 +457,7 @@ impl ClusterRegistry {
             health: None,
             tuning: None,
             gaps: Vec::new(),
-            node_uuids: std::collections::BTreeMap::new(),
+            node_identities: std::collections::BTreeMap::new(),
         };
         let record = Record::new(body);
         let key = self.record_key(&cluster_id)?;

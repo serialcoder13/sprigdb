@@ -260,7 +260,7 @@ fn view(
             }),
             tuning: None,
             gaps: Vec::new(),
-            node_uuids: std::collections::BTreeMap::new(),
+            node_identities: std::collections::BTreeMap::new(),
         },
         mod_revision: 42,
         health_report: Some(report),

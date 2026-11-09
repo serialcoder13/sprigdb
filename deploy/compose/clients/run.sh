@@ -203,7 +203,7 @@ case $SUITE in
     suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -e MAVEN_OPTS="-Xmx160m -XX:+UseSerialGC" -e TEST_DB_DATABASE=testj -- maven:3.9-eclipse-temurin-21 \
       sh -c 'export TEST_DB_HOST=$TARGET_HOST TEST_DB_PORT=$TARGET_PORT TEST_DB_USER=$TARGET_USER TEST_DB_PASSWORD=$TARGET_PASS;
              mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
-             sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" /out/excludes.txt > /tmp/excludes;
+             sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" -e "s|^|**/|" /out/excludes.txt > /tmp/excludes;
              mvn -B test -Dsurefire.excludesFile=/tmp/excludes -Dmaven.test.failure.ignore=true -Dsurefire.timeout=1500 -DargLine="-Xmx320m -XX:+UseSerialGC -XX:MaxMetaspaceSize=160m" \
                ${FILTER:+-Dtest="$FILTER" -Dsurefire.failIfNoSpecifiedTests=false} > /out/mvn.log 2>&1;
              mkdir -p /out/junit && cp target/surefire-reports/*.xml /out/junit/ 2>/dev/null; true' ||
@@ -221,7 +221,7 @@ case $SUITE in
       -e MAVEN_OPTS="-Xmx448m -XX:+UseSerialGC -XX:MaxMetaspaceSize=192m -Xss512k -Dfile.encoding=UTF-8" -- maven:3.9-eclipse-temurin-21 \
       sh -c 'mkdir -p /work/src && cp /pom.xml /work/ && cp -r /src/src/test /work/src/ && cd /work &&
              url="jdbc:mysql://$TARGET_HOST:$TARGET_PORT/cjtest?user=$TARGET_USER&password=$TARGET_PASS&sslMode=DISABLED&allowPublicKeyRetrieval=true";
-             sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" /out/excludes.txt > /tmp/excludes;
+             sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" -e "s|^|**/|" /out/excludes.txt > /tmp/excludes;
              mvn -B test -Dsurefire.excludesFile=/tmp/excludes -Dtestsuite.url="$url" -Dsurefire.timeout=1500 \
                ${FILTER:+-Dtest="$FILTER" -Dsurefire.failIfNoSpecifiedTests=false} > /out/mvn.log 2>&1;
              mkdir -p /out/junit && cp target/surefire-reports/*.xml /out/junit/ 2>/dev/null; true' ||

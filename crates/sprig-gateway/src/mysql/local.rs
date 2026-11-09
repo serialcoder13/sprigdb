@@ -13,10 +13,13 @@
 //!   `@@max_allowed_packet` or `@@hostname` (optionally `@@session.` or
 //!   `@@global.`). A select mixing these with other items goes to the
 //!   executor whole (the router splits them in R1).
-//! - `KILL [CONNECTION | QUERY] id`.
+//! - `KILL [CONNECTION | QUERY] id`, where `id` may be `CONNECTION_ID()`.
 //! - `SHOW [FULL] PROCESSLIST`.
 
 use sprig_common::ids::ConnId;
+
+/// The id [`classify`] gives `KILL CONNECTION_ID()`: no session has id 0.
+pub(crate) const KILL_SELF: ConnId = ConnId(0);
 
 /// A statement the gateway answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,10 +108,14 @@ pub(crate) fn classify(sql: &[u8]) -> Option<Local> {
                 [_, k, id] if k == "query" => (true, id),
                 _ => return None,
             };
-            Some(Local::Kill {
-                id: ConnId(id.parse().ok()?),
-                query_only,
-            })
+            // `KILL CONNECTION_ID()`: the session's own id (answer.rs
+            // reads [`KILL_SELF`] as the caller's).
+            let id = if id == "connection_id()" {
+                KILL_SELF
+            } else {
+                ConnId(id.parse().ok()?)
+            };
+            Some(Local::Kill { id, query_only })
         }
         Some("show") => match w.as_slice() {
             [_, p] if p == "processlist" => Some(Local::ProcessList { full: false }),
@@ -181,6 +188,13 @@ mod tests {
             })
         );
         assert_eq!(classify(b"kill x"), None);
+        assert_eq!(
+            classify(b"KILL CONNECTION_ID()"),
+            Some(Local::Kill {
+                id: KILL_SELF,
+                query_only: false
+            })
+        );
         assert_eq!(
             classify(b"show full processlist"),
             Some(Local::ProcessList { full: true })

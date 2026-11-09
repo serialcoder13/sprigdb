@@ -59,7 +59,6 @@ struct FakeRepl {
     /// Pods whose SQL thread can't catch up within the drain.
     stuck: Mutex<HashSet<String>>,
     drained: Mutex<Vec<String>>,
-    resumed: Mutex<Vec<String>>,
     repaired: Mutex<Vec<String>>,
     in_history: Mutex<bool>,
 }
@@ -97,17 +96,12 @@ impl ReplicationOps for FakeRepl {
     async fn drain(&self, a: &str, _: &str, _: u8, _: Duration) -> Result<ReplView> {
         let mut v = self.answer(a)?;
         self.drained.lock().unwrap().push(a.to_owned());
-        v.io_running = false;
         v.sql_running = true;
         if !self.stuck.lock().unwrap().contains(a) {
             v.slave_pos = v.received().to_string();
         }
         self.views.lock().unwrap().insert(a.to_owned(), v.clone());
         Ok(v)
-    }
-    async fn resume(&self, a: &str, _: &str) -> Result<()> {
-        self.resumed.lock().unwrap().push(a.to_owned());
-        Ok(())
     }
     async fn repair(&self, a: &str, _: &str) -> Result<()> {
         self.repaired.lock().unwrap().push(a.to_owned());
@@ -291,11 +285,11 @@ async fn detection_waits_and_a_returning_primary_keeps_its_role() {
 }
 
 #[tokio::test]
-async fn no_safe_candidate_blocks_and_resumes_the_replicas() {
+async fn no_safe_candidate_blocks() {
     let w = world(Duration::ZERO).await;
     // Pod 2 received more than it can apply in the drain: promoting pod 1
     // loses pod 2's acknowledged commits; promoting pod 2 drops its relay
-    // log. Stop, report once, and let the replicas receive again.
+    // log. Stop and report once.
     w.repl.set(1, replica(1, "2-10-100", "2-10-100"));
     w.repl.set(2, replica(2, "2-10-130", "2-10-118"));
     w.repl.stuck.lock().unwrap().insert(addr(2));
@@ -307,7 +301,6 @@ async fn no_safe_candidate_blocks_and_resumes_the_replicas() {
         "{o:?}"
     );
     assert_eq!(w.pod_index(), json!(0));
-    assert_eq!(w.repl.resumed.lock().unwrap().len(), 2);
     let _ = w.watch().await;
     assert_eq!(w.events("FailoverBlocked").len(), 1, "reported once");
 }
@@ -381,4 +374,29 @@ async fn operator_driven_and_unregistered_clusters_are_not_watched() {
         .mutate(SC, "kc", &json!({"spec": {"failoverDriver": "operator"}}));
     w.repl.down.lock().unwrap().insert(addr(0));
     assert_eq!(w.watch().await, WatchOutcome::Skipped);
+}
+
+/// The real SQL seam against a live replica (r2opfix, kind):
+/// `SPRIG_R2OPFIX_REPLICA=<host:port>,<root password>`. Reads its state,
+/// and drains it.
+#[tokio::test]
+async fn live_view_and_drain() {
+    use sprig_operator::failover::MysqlReplication;
+    let Some(v) = std::env::var("SPRIG_R2OPFIX_REPLICA").ok() else {
+        return;
+    };
+    let (addr, pw) = v.split_once(',').unwrap();
+    let ops = MysqlReplication::new(None);
+    let before = ops.view(addr, pw, 0).await.unwrap();
+    println!("view:  {before:?}");
+    let after = ops
+        .drain(addr, pw, 0, Duration::from_secs(20))
+        .await
+        .unwrap();
+    println!(
+        "drain: {after:?} received={} drained={}",
+        after.received(),
+        after.drained()
+    );
+    assert!(after.drained());
 }
