@@ -175,7 +175,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                         "saslStart" => st.sasl_start(&cmd).await,
                         "saslContinue" => st.sasl_continue(&cmd).await,
                         "buildinfo" | "buildInfo" => {
-                            super::commands::run(&mut st, &name, &cmd).await
+                            Box::pin(super::commands::run(&mut st, &name, &cmd)).await
                         }
                         // Java 3.x reads its connection id this way.
                         "getlasterror" | "getLastError" => {
@@ -206,7 +206,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                 }
                 Frame::Msg(m) => {
                     let more = m.flags & FLAG_MORE_TO_COME != 0;
-                    let (name, body) = st.guarded_dispatch(m, msg.len()).await;
+                    let (name, body) = Box::pin(st.guarded_dispatch(m, msg.len())).await;
                     if st.close_now {
                         return Ok(());
                     }
@@ -557,7 +557,7 @@ impl Conn {
     pub(crate) async fn guarded_dispatch(&mut self, m: OpMsg, size: usize) -> (String, Document) {
         let threshold = usize::try_from(self.shared.large_request_bytes()).unwrap_or(usize::MAX);
         let Some(h) = self.sql.as_ref().map(SqlSession::handle) else {
-            return crate::offload::run(size, threshold, self.dispatch(m)).await;
+            return crate::offload::run(size, threshold, Box::pin(self.dispatch(m))).await;
         };
         h.flags().take_kill_query();
         let name = m
@@ -570,22 +570,20 @@ impl Conn {
         let r = crate::offload::run_for(&h, size, threshold, async {
             tokio::select! {
                 biased;
-                r = self.dispatch(m) => Some(r),
+                r = Box::pin(self.dispatch(m)) => Some(r),
                 () = h.flags().query_killed() => None,
             }
         })
         .await;
-        match r {
-            Some(r) => r,
-            None => {
-                h.flags().take_kill_query();
-                metrics::counter!("sprig_mongo_commands_total", "command" => name.clone(), "result" => "interrupted").increment(1);
-                (
-                    name,
-                    MongoError::new(code::INTERRUPTED, "operation was interrupted").to_doc(),
-                )
-            }
+        if let Some(r) = r {
+            return r;
         }
+        h.flags().take_kill_query();
+        metrics::counter!("sprig_mongo_commands_total", "command" => name.clone(), "result" => "interrupted").increment(1);
+        (
+            name,
+            MongoError::new(code::INTERRUPTED, "operation was interrupted").to_doc(),
+        )
     }
 
     /// Dispatches one `OP_MSG`: returns the command name and the reply.
@@ -680,38 +678,34 @@ impl Conn {
             }
             if let Some(c) = i.error_code {
                 let mut e = MongoError::new(c, "Failing command via 'failCommand' failpoint");
-                match &i.labels {
-                    Some(l) => {
-                        for x in l {
-                            let known = [
-                                "RetryableWriteError",
-                                "TransientTransactionError",
-                                "UnknownTransactionCommitResult",
-                                "NoWritesPerformed",
-                                "ResumableChangeStreamError",
-                                "NonResumableChangeStreamError",
-                                "SystemOverloadedError",
-                                "RetryableError",
-                            ];
-                            if let Some(k) = known.iter().find(|k| **k == x.as_str()) {
-                                e = e.label(k);
-                            }
+                if let Some(l) = &i.labels {
+                    for x in l {
+                        let known = [
+                            "RetryableWriteError",
+                            "TransientTransactionError",
+                            "UnknownTransactionCommitResult",
+                            "NoWritesPerformed",
+                            "ResumableChangeStreamError",
+                            "NonResumableChangeStreamError",
+                            "SystemOverloadedError",
+                            "RetryableError",
+                        ];
+                        if let Some(k) = known.iter().find(|k| **k == x.as_str()) {
+                            e = e.label(k);
                         }
                     }
-                    None => {
-                        // The labels a MongoDB server attaches itself.
-                        let ending =
-                            matches!(name.as_str(), "commitTransaction" | "abortTransaction");
-                        let in_txn = body.get_bool("autocommit") == Ok(false) && !ending;
-                        let retryable = super::retry::applies(&name, &body) || ending;
-                        if retryable && super::retry::retryable_code(c) {
-                            e = e.label("RetryableWriteError");
-                        }
-                        if (in_txn && (matches!(c, 112 | 251) || super::retry::retryable_code(c)))
-                            || (ending && c == 251)
-                        {
-                            e = e.label("TransientTransactionError");
-                        }
+                } else {
+                    // The labels a MongoDB server attaches itself.
+                    let ending = matches!(name.as_str(), "commitTransaction" | "abortTransaction");
+                    let in_txn = body.get_bool("autocommit") == Ok(false) && !ending;
+                    let retryable = super::retry::applies(&name, &body) || ending;
+                    if retryable && super::retry::retryable_code(c) {
+                        e = e.label("RetryableWriteError");
+                    }
+                    if (in_txn && (matches!(c, 112 | 251) || super::retry::retryable_code(c)))
+                        || (ending && c == 251)
+                    {
+                        e = e.label("TransientTransactionError");
                     }
                 }
                 return (name, e.to_doc());
@@ -781,7 +775,7 @@ impl Conn {
                 }
                 Ok(doc! {"ok": 1.0})
             }
-            _ => super::commands::run(self, &name, &body).await,
+            _ => Box::pin(super::commands::run(self, &name, &body)).await,
         };
         if close_after {
             // The write committed; the client never hears.

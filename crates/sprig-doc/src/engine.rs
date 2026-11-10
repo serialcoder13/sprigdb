@@ -944,11 +944,12 @@ impl Engine {
                 let key = r.first_mut().and_then(Option::take).unwrap_or_default();
                 let doc = r.get(1).and_then(Option::as_deref).unwrap_or_default();
                 let d = json::to_bson(
-                    std::str::from_utf8(doc).map_or_else(
-                        |_| std::borrow::Cow::Owned(String::from_utf8_lossy(doc).into_owned()),
-                        std::borrow::Cow::Borrowed,
-                    )
-                    .as_ref(),
+                    std::str::from_utf8(doc)
+                        .map_or_else(
+                            |_| std::borrow::Cow::Owned(String::from_utf8_lossy(doc).into_owned()),
+                            std::borrow::Cow::Borrowed,
+                        )
+                        .as_ref(),
                     r.get(2)
                         .and_then(Option::as_ref)
                         .map(|b| String::from_utf8_lossy(b))
@@ -2082,7 +2083,14 @@ impl Engine {
                 _ => Box::pin(self.aggregate(sql, &fns, &pipe)).await?,
             };
             let joined = crate::heavy::run(chunk.len() * foreign_docs.len().max(1), || {
-                join_chunk(chunk, &foreign_docs, local.zip(foreign), as_f, lim, &mut bytes)
+                join_chunk(
+                    chunk,
+                    &foreign_docs,
+                    local.zip(foreign),
+                    as_f,
+                    lim,
+                    &mut bytes,
+                )
             })?;
             out.extend(joined);
         }

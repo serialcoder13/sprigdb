@@ -438,7 +438,9 @@ impl<'c> MariaStore<'c> {
     /// Claims `key` of constraint `d` for element `owner` (on the shard of
     /// `owner_rk`), in the statement's transaction (decision G41, chapter
     /// 19's `claim` with Pre joined to Main): insert the claim row; when
-    /// one is there, lock it and check its owner with a locking read on
+    /// one is there, share-lock it (the duplicate-key error already holds
+    /// a shared lock, so writers queued on one key never deadlock taking
+    /// it exclusively) and check its owner with a locking read on
     /// the owner's shard (which waits for an in-flight commit of it); a
     /// live owner with the same key is a duplicate (1062), anything else
     /// (an orphan) is taken over.
@@ -473,7 +475,9 @@ impl<'c> MariaStore<'c> {
         let held = self
             .write_rows_at(
                 i,
-                format!("SELECT owner, owner_rk FROM {table} WHERE idx = ? AND k = ? FOR UPDATE"),
+                format!(
+                    "SELECT owner, owner_rk FROM {table} WHERE idx = ? AND k = ? LOCK IN SHARE MODE"
+                ),
                 Params::Positional(vec![MyValue::from(d.id), MyValue::Bytes(key.to_vec())]),
             )
             .await?;
@@ -487,14 +491,10 @@ impl<'c> MariaStore<'c> {
             return Ok(());
         }
         let live = match d.entity {
-            Entity::Node => self
-                .lock_nodes(&[o0], false)
-                .await?
-                .into_iter()
-                .any(|n| {
-                    n.labels.contains(&d.token_id)
-                        && crate::schema::claim_key(d, &n.props).as_deref() == Some(key)
-                }),
+            Entity::Node => self.lock_nodes(&[o0], false).await?.into_iter().any(|n| {
+                n.labels.contains(&d.token_id)
+                    && crate::schema::claim_key(d, &n.props).as_deref() == Some(key)
+            }),
             Entity::Relationship => {
                 let j = self.layout.index_of(rk0);
                 let sql = format!(
@@ -1335,8 +1335,7 @@ impl GraphStore for MariaStore<'_> {
                     continue;
                 }
                 if let Some(k) = &now {
-                    self.claim(d, k, "Relationship", row.id, row.src_rk)
-                        .await?;
+                    self.claim(d, k, "Relationship", row.id, row.src_rk).await?;
                 }
                 if let Some(k) = &was {
                     self.release(d, k, row.id).await?;

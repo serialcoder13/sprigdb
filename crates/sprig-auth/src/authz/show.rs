@@ -344,7 +344,7 @@ fn render_one(
             q(name)
         ));
     }
-        // Roles.
+    // Roles.
     let edges = state.edges_of(grantee);
     let role_acc = |r: RoleId| {
         state.role(r).map(|row| AccountRef {

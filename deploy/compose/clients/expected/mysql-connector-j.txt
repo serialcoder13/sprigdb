@@ -92,7 +92,6 @@ gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug119245 ::
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug17881458 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug21132376 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 *-mysql fail testsuite.regression.StatementRegressionTest.testBug21876798 :: fails on plain MySQL 8.4.11 too: Case: 0 [ - | - ] ==> expected: <true> but was: <false>
-gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug39956 :: gaps row 48: SHOW ENGINES lists MariaDB's engines (SEQUENCE)
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug41532 :: gaps row 46: session status counters are the pooled connection's
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug48172 :: gaps row 46
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug68916 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (mysql.time_zone_name)
@@ -117,7 +116,7 @@ gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testTableCompressio
 gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testUserAccountLocking :: decision D4
 gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testUserAccountPwdExpiration :: decision D4
 gateway-mysql fail testsuite.simple.AuthenticationTest.testWl14650 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (mysql.plugin)
-gateway-mysql fail testsuite.simple.CallableStatementTest.testParameterParser :: gaps row 50: a procedure body naming the missing database `test` fails at CREATE
+gateway-mysql flaky testsuite.simple.CallableStatementTest.testParameterParser :: gaps row 50: a procedure body naming a missing database `test` fails at CREATE; passes when the tenant has a `test` database (r4two's run, after SQLAlchemy's setup made one)
 gateway-mysql fail testsuite.simple.ConnectionTest.testCompression :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 gateway-mysql fail testsuite.simple.ConnectionTest.testDeadlockDetection :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SHOW ENGINE INNODB STATUS: PROCESS)
 gateway-mysql fail testsuite.simple.ConnectionTest.testDriverConnectPropertiesPrecedence :: decision D4: no RSA key exchange; the gateway's 1045 says so
@@ -129,16 +128,6 @@ gateway-mysql fail testsuite.simple.MetaDataTest.testGetColumnPrivileges :: tena
 gateway-mysql fail testsuite.simple.MetaDataTest.testGetImportedKeys :: gaps row 51
 gateway-mysql fail testsuite.simple.MetaDataTest.testGetIndexInfo :: gaps row 51
 gateway-mysql fail testsuite.simple.MetaDataTest.testGetTablePrivileges :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (mysql.tables_priv)
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverAutoFallBack :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverAutoReconnect :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverCombinations :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverConnection :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverConnectionSynchronization :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverDefaultSettings :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverQueriesBeforeRetrySource :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverReadOnly :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverSecondsBeforeRetrySource :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
-gateway-mysql fail testsuite.simple.MultiHostConnectionTest.testFailoverTransitions :: gaps row 34: SELECT 1 is LONG (Integer) through MariaDB, LONGLONG (Long) on MySQL
 gateway-mysql fail testsuite.simple.QueryAttributesTest.cachedServerPreparedStatementsWithQueryAttributes :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (reads mysql.component to find the query-attributes component)
 gateway-mysql fail testsuite.simple.QueryAttributesTest.multiQueriesWithAttributesInPlainStatement :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (reads mysql.component to find the query-attributes component)
 gateway-mysql fail testsuite.simple.QueryAttributesTest.multiQueriesWithAttributesInPreparedStatement :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (reads mysql.component to find the query-attributes component)
@@ -164,3 +153,4 @@ gateway-mysql flaky testsuite.simple.StatementsTest.testQueryInfoParsingAndRewri
 gateway-mysql flaky testsuite.simple.StatementsTest.testQueryInfoParsingAndRewrittingSpecialCases :: row alias without a column list: fixed after the measured run (compat::rowsyntax); expected to pass
 gateway-mysql fail testsuite.simple.StatementsTest.testReadOnlySafeStatements :: not investigated (r4close): Query: INSERT INTO roSafeTest VALUES (99, 'test99') the error message «No operations allowed after statement closed.» was expected to match «Connectio
 gateway-mysql flaky testsuite.simple.StatementsTest.testResultSetProducingQueries :: standalone VALUES ROW: fixed after the measured run (compat::rowsyntax); expected to pass
+gateway-mysql flaky testsuite.simple.ConnectionTest.testIPv6 :: 39070 catalog unavailable: the shared dev controller's catalog didn't answer during r4two's run (10 November)

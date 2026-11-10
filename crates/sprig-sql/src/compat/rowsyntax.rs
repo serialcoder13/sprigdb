@@ -115,6 +115,10 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     if !edits.is_empty() {
         return None;
     }
+    // `VALUES AS t(..)` with no row: MySQL's 1064 names the alias.
+    if values.is_some_and(|v| as_at == v + 1) {
+        return None;
+    }
     if !is_ident(as_at + 1) {
         return None;
     }
@@ -345,6 +349,7 @@ mod tests {
     #[test]
     fn row_alias_after_values_row_is_refused_as_mysql_does() {
         assert_eq!(r("INSERT INTO t VALUES ROW(?, ?) AS new(v1, v2)"), None);
+        assert_eq!(r("INSERT INTO t VALUES/* (?, ?) */AS t2(a, b)"), None);
         assert_eq!(
             r("INSERT INTO t VALUES ROW(1, 2) AS n ON DUPLICATE KEY UPDATE b = n.b"),
             None

@@ -462,13 +462,14 @@ impl MsgEnv {
                 lease_ms: 30_000.max(u64::try_from(budget.as_millis()).unwrap_or(30_000) + 5_000),
                 budget_ms: u64::try_from(budget.as_millis()).unwrap_or(30_000),
                 instance_tenant: 0,
+                instance_stream: 0,
                 replay: None,
             },
             version: Arc::new(AtomicU64::new(l.version)),
         }
     }
 
-    async fn shard_pool(&self, tenant: TenantId) -> Result<Pool> {
+    async fn shard_pool(&self, tenant: TenantId) -> Result<ShardPool> {
         let cluster = self.locator.cluster_of(tenant).await?.ok_or_else(|| {
             let mut e = SprigError::new(
                 SprigCode::TenantNotReady,
@@ -477,7 +478,10 @@ impl MsgEnv {
             e.retryable = true;
             e
         })?;
-        self.pools.writer(&cluster).await
+        Ok(ShardPool {
+            pools: Arc::clone(&self.pools),
+            cluster,
+        })
     }
 
     /// Supervises a running trigger: progress every second, a new version
@@ -622,11 +626,42 @@ async fn replay_due(l: &Loaded, t: &Template, gw: &dyn Gateway) -> Result<u64> {
     Ok(n)
 }
 
+/// A tenant's shard pool, from the pool cache at each use.
+#[derive(Clone)]
+struct ShardPool {
+    pools: Arc<dyn ClusterPools>,
+    cluster: sprig_common::ids::ClusterId,
+}
+
+impl ShardPool {
+    async fn get(&self) -> Result<Pool> {
+        self.pools.writer(&self.cluster).await
+    }
+}
+
+/// A tenant's catalog pool, from the locator at each use (see
+/// [`ShardPool`]).
+#[derive(Clone)]
+struct CatalogPool {
+    locator: Arc<ShardMapLocator>,
+    tenant: TenantId,
+}
+
+impl CatalogPool {
+    async fn get_conn(&self) -> Result<mysql_async::Conn> {
+        let ep = self.locator.writer(self.tenant).await?;
+        ep.pool.get_conn().await.map_err(db_err)
+    }
+}
+
 /// A stream trigger's stream and offsets, as `sprig_ctl`.
 struct MariaSide {
-    catalog: Pool,
+    catalog: CatalogPool,
     schema: String,
-    shard: Pool,
+    /// The shard's cluster: its pool is asked for at each use (the pool
+    /// cache replaces, and disconnects, a cluster's pool when its writer
+    /// changes, which a pool held for a job's life wouldn't follow).
+    shard: ShardPool,
     log_schema: String,
     group: String,
     /// A fan-in trigger's member (R9); 0 for the tenant's own stream.
@@ -643,7 +678,7 @@ fn db_err(e: mysql_async::Error) -> SprigError {
 #[async_trait]
 impl StreamSide for MariaSide {
     async fn positions(&self) -> Result<HashMap<u32, u64>> {
-        let mut c = self.catalog.get_conn().await.map_err(db_err)?;
+        let mut c = self.catalog.get_conn().await?;
         Ok(
             offsets::positions_of(
                 &mut c,
@@ -659,7 +694,7 @@ impl StreamSide for MariaSide {
     }
 
     async fn bounds(&self) -> Result<HashMap<u32, (u64, u64)>> {
-        let mut c = self.shard.get_conn().await.map_err(db_err)?;
+        let mut c = self.shard.get().await?.get_conn().await.map_err(db_err)?;
         let rows: Vec<(u32, u64, u64)> = c
             .exec(
                 format!(
@@ -676,7 +711,7 @@ impl StreamSide for MariaSide {
     }
 
     async fn read(&self, p: u32, from: u64, max: u32) -> Result<Vec<RecordIn>> {
-        let mut c = self.shard.get_conn().await.map_err(db_err)?;
+        let mut c = self.shard.get().await?.get_conn().await.map_err(db_err)?;
         let r = LogReader {
             schema: self.log_schema.clone(),
         }
@@ -712,7 +747,7 @@ impl StreamSide for MariaSide {
     }
 
     async fn init(&self, p: u32, at: u64) -> Result<()> {
-        let mut c = self.catalog.get_conn().await.map_err(db_err)?;
+        let mut c = self.catalog.get_conn().await?;
         offsets::init_positions_of(
             &mut c,
             &self.schema,
@@ -725,7 +760,7 @@ impl StreamSide for MariaSide {
     }
 
     async fn advance(&self, p: u32, expect: u64, to: u64) -> Result<bool> {
-        let mut c = self.catalog.get_conn().await.map_err(db_err)?;
+        let mut c = self.catalog.get_conn().await?;
         offsets::advance_of(
             &mut c,
             &self.schema,
@@ -740,7 +775,7 @@ impl StreamSide for MariaSide {
     }
 
     async fn dead_letter(&self, r: &RecordIn, attempts: u32, last: &RunReply) -> Result<()> {
-        let mut c = self.catalog.get_conn().await.map_err(db_err)?;
+        let mut c = self.catalog.get_conn().await?;
         let store = LogicStore::new(&self.schema);
         let version = self.version.load(Ordering::Relaxed);
         let event =
@@ -821,7 +856,10 @@ impl JobHandler for StreamTrigger {
         let shard = env.shard_pool(tenant).await.map_err(|e| e.to_string())?;
         let t = env.template(tenant, &l);
         let side: Arc<dyn StreamSide> = Arc::new(MariaSide {
-            catalog: l.catalog.clone(),
+            catalog: CatalogPool {
+                locator: Arc::clone(&env.locator),
+                tenant,
+            },
             schema: l.schema.clone(),
             shard,
             log_schema: log.slot.schema(tenant, def.db).to_string(),
@@ -956,10 +994,11 @@ async fn run_fan_in(
             if running.contains_key(&m.member.0) {
                 continue;
             }
-            match fan_in_side(env, l, &t, binding, &m).await {
+            match fan_in_side(env, tenant, l, &t, binding, &m).await {
                 Ok((side, parts)) => {
                     let mut mt = t.clone();
                     mt.req.instance_tenant = m.member.0;
+                    mt.req.instance_stream = m.stream;
                     let h = tokio::spawn(msgrun::run_stream(
                         side,
                         Arc::clone(&gw),
@@ -996,6 +1035,7 @@ async fn run_fan_in(
 /// partitions.
 async fn fan_in_side(
     env: &MsgEnv,
+    tenant: TenantId,
     l: &Loaded,
     t: &Template,
     binding: u64,
@@ -1018,7 +1058,10 @@ async fn fan_in_side(
         .ok_or_else(|| SprigError::internal("the instance has no log shard"))?;
     let shard = env.shard_pool(m.member).await?;
     let side: Arc<dyn StreamSide> = Arc::new(MariaSide {
-        catalog: l.catalog.clone(),
+        catalog: CatalogPool {
+            locator: Arc::clone(&env.locator),
+            tenant,
+        },
         schema: l.schema.clone(),
         shard,
         log_schema: log.slot.schema(m.member, def.db).to_string(),

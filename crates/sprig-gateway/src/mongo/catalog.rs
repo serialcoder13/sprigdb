@@ -1233,4 +1233,18 @@ impl super::changes::TableNames for CatalogDocs {
             .find(|m| m.table == table)
             .map(|m| m.name.clone())
     }
+
+    async fn images(&self, tenant: TenantId, db: &str, table: &str) -> bool {
+        let Ok(cat) = self.snapshot(tenant).await else {
+            return false;
+        };
+        let lctn = self.lctn(&cat);
+        let Some(row) = cat.database(&database_key(db, lctn)) else {
+            return false;
+        };
+        cat.ext
+            .get::<DocState>(MODULE)
+            .and_then(|s| s.of(row.db_id.0).find(|m| m.table == table).cloned())
+            .is_some_and(|m| sprig_doc::meta::keeps_images(&m.options))
+    }
 }

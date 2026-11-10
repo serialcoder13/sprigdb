@@ -896,6 +896,11 @@ async fn shortest_paths_to_many_ends_match_pairwise_searches() {
             "MATCH (a:P {i: 0}), (b:P) WHERE b <> a MATCH p = shortestPath((a)-[:K*1..4]->(b)) RETURN nodes(p)[0] = a AND last(nodes(p)) = b AND size(nodes(p)) = length(p) + 1 AS ok, count(*) AS n",
         )
         .await;
-        assert_eq!(show(&o)[0].split('|').next(), Some("true"), "{:?}", show(&o));
+        assert_eq!(
+            show(&o)[0].split('|').next(),
+            Some("true"),
+            "{:?}",
+            show(&o)
+        );
     }
 }

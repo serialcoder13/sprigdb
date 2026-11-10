@@ -282,6 +282,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/databases/{database}/namespaces/{namespace}:geoSearch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["KeyValue.GeoSearch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/databases/{database}/namespaces/{namespace}:get": {
         parameters: {
             query?: never;
@@ -819,6 +835,10 @@ export interface components {
         KvExecRequest: Record<string, never>;
         /** @description The KvExecResponse message as JSON (proto3 mapping) */
         KvExecResponse: Record<string, never>;
+        /** @description The KvGeoSearchRequest message as JSON (proto3 mapping) */
+        KvGeoSearchRequest: Record<string, never>;
+        /** @description The KvGeoSearchResponse message as JSON (proto3 mapping) */
+        KvGeoSearchResponse: Record<string, never>;
         /** @description The KvGetRequest message as JSON (proto3 mapping) */
         KvGetRequest: Record<string, never>;
         /** @description The KvGetResponse message as JSON (proto3 mapping) */
@@ -1653,6 +1673,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["KvExecResponse"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "KeyValue.GeoSearch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                namespace: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["KvGeoSearchRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KvGeoSearchResponse"];
                 };
             };
             /** @description An error */

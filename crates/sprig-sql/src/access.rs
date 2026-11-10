@@ -159,11 +159,106 @@ fn take(v: &mut Vec<ObjectName>, n: &ObjectName) {
 
 /// The relations `sql` (one data statement, as the client wrote it) names,
 /// with the actions each needs; `None` when it isn't modelled.
+///
+/// Data statements are remembered by their shape (the tokens with every
+/// literal's value left out): the relations and actions a statement needs
+/// never depend on its literals, and parsing the same shape again was a
+/// tenth of a MongoDB point read's gateway CPU (R5 round 4).
 #[must_use]
 pub fn requirements(sql: &[u8], opts: &LexOptions) -> Option<Vec<Need>> {
     let text = std::str::from_utf8(sql).ok()?;
     let tokens = lex::lex(sql, opts).ok()?;
-    let toks: Vec<Token> = tokens.clone();
+    let key = shape_key(text, &tokens);
+    if let Some(k) = &key
+        && let Some(hit) = shapes::get(k)
+    {
+        return hit;
+    }
+    let r = requirements_of(text, tokens);
+    if let Some(k) = key {
+        shapes::put(k, r.clone());
+    }
+    r
+}
+
+/// The shape of a data statement (`SELECT`, `INSERT`, `UPDATE`, `DELETE`,
+/// `REPLACE`, `WITH`) for [`shapes`]: its tokens with literals as `?`
+/// and trivia as one space; `None` for other statements and long shapes.
+fn shape_key(text: &str, toks: &[Token]) -> Option<String> {
+    let first = toks.iter().find(|t| !t.kind.is_trivia())?;
+    if first.kind != TokenKind::Word {
+        return None;
+    }
+    let w = &text[first.range()];
+    if !["select", "insert", "update", "delete", "replace", "with"]
+        .iter()
+        .any(|k| w.eq_ignore_ascii_case(k))
+    {
+        return None;
+    }
+    let mut key = String::with_capacity(128);
+    for t in toks {
+        match t.kind {
+            k if k.is_trivia() => key.push(' '),
+            TokenKind::String
+            | TokenKind::NationalString
+            | TokenKind::HexString
+            | TokenKind::BitString
+            | TokenKind::Number
+            | TokenKind::HexNumber
+            | TokenKind::BitNumber => key.push_str(" ? "),
+            _ => {
+                key.push_str(&text[t.range()]);
+                key.push('\u{1}');
+            }
+        }
+        if key.len() > shapes::MAX_KEY {
+            return None;
+        }
+    }
+    Some(key)
+}
+
+/// Requirements by statement shape, per process.
+mod shapes {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+
+    use super::Need;
+
+    /// Longest shape kept, in bytes.
+    pub(super) const MAX_KEY: usize = 4096;
+    /// Shapes kept; the map starts over when it is full.
+    const MAX_SHAPES: usize = 8192;
+
+    type Map = HashMap<String, Option<Vec<Need>>>;
+
+    fn map() -> &'static Mutex<Map> {
+        static M: OnceLock<Mutex<Map>> = OnceLock::new();
+        M.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// The cached answer for shape `k`: `Some(None)` is "not modelled".
+    #[allow(clippy::option_option)]
+    pub(super) fn get(k: &str) -> Option<Option<Vec<Need>>> {
+        map()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(k)
+            .cloned()
+    }
+
+    pub(super) fn put(k: String, v: Option<Vec<Need>>) {
+        let mut m = map().lock().unwrap_or_else(PoisonError::into_inner);
+        if m.len() >= MAX_SHAPES {
+            m.clear();
+        }
+        m.insert(k, v);
+    }
+}
+
+fn requirements_of(text: &str, tokens: Vec<Token>) -> Option<Vec<Need>> {
+    let toks: Vec<Token> = tokens;
     let view = parse_view(text, &toks)?;
     let mut stmts = Parser::parse_sql(&MySqlDialect {}, &view).ok()?;
     if stmts.len() != 1 {

@@ -900,6 +900,10 @@ pub struct RunRequest {
     /// for the tenant's own stream.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub instance_tenant: u64,
+    /// With `instance_tenant`: the instance's stream id in the member (the
+    /// source row's id names the definition).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub instance_stream: u64,
     /// A dead letter's replay (RC11): the event to run, outside the
     /// consumer group's position.
     #[serde(default, skip_serializing_if = "Option::is_none")]

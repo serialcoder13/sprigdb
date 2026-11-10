@@ -2059,7 +2059,7 @@ impl PassSession {
             }
             // 3306: MySQL's integer result types (chapter 28, R4).
             if self.persona == Persona::MySql84 {
-                super::compat_sink::prepared_columns(&sql, &lex, &mut meta.columns);
+                super::compat_sink::prepared_columns(&sql, lex, &mut meta.columns);
             }
         }
         Ok(summary)

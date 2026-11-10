@@ -248,7 +248,7 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
     // The command's collation (chapter 31): every comparison it makes.
     // Writes carry theirs per statement (`writes`).
     let coll = sprig_doc::collation::Collation::of(body)?;
-    sprig_doc::collation::scope(coll, run_inner(c, name, body)).await
+    Box::pin(sprig_doc::collation::scope(coll, run_inner(c, name, body))).await
 }
 
 async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document, MongoError> {
@@ -387,7 +387,9 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         if !super::snapshot::reads(name, body) {
             return Err(MongoError::new(
                 code::INVALID_OPTIONS,
-                format!("readConcern level snapshot is not supported for {name} outside multi-document transactions"),
+                format!(
+                    "readConcern level snapshot is not supported for {name} outside multi-document transactions"
+                ),
             ));
         }
         return snapshot_read(c, name, body, &db, lsid.as_deref()).await;
@@ -674,10 +676,7 @@ async fn snapshot_read(
     let mut g = entry.lock().await;
     let at = g.at;
     let mut s = g.sql.take().ok_or_else(|| {
-        MongoError::new(
-            super::snapshot::SNAPSHOT_TOO_OLD,
-            "the snapshot was closed",
-        )
+        MongoError::new(super::snapshot::SNAPSHOT_TOO_OLD, "the snapshot was closed")
     })?;
     let r = exec(c, &mut s, name, body, db, lsid).await;
     g.sql = Some(s);
@@ -971,11 +970,23 @@ async fn exec(
         }
         "collMod" => {
             let ns = ns_of("collMod")?;
-            if engine.meta(sql, &ns).await?.is_none() {
+            let Some(mut m) = engine.meta(sql, &ns).await? else {
                 return Err(MongoError::new(
                     code::NAMESPACE_NOT_FOUND,
                     format!("ns does not exist: {ns}"),
                 ));
+            };
+            // Options kept with the collection (chapter 31): change
+            // streams' pre- and post-images (R5 round 4).
+            if let Some(v) = body.get("changeStreamPreAndPostImages") {
+                let Some(enabled) = v.as_document().and_then(|d| d.get_bool("enabled").ok()) else {
+                    return Err(bad(
+                        "changeStreamPreAndPostImages must be an object with a boolean 'enabled'",
+                    ));
+                };
+                m.options
+                    .insert("changeStreamPreAndPostImages", doc! {"enabled": enabled});
+                engine.catalog.save_indexes(sql, &ns, &m).await?;
             }
             Ok(doc! {"ok": 1.0})
         }

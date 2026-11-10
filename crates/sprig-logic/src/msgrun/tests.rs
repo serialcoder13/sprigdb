@@ -153,6 +153,7 @@ fn template(binding: u64) -> Template {
             lease_ms: 30_000,
             budget_ms: 30_000,
             instance_tenant: 0,
+            instance_stream: 0,
             replay: None,
         },
         version: Arc::new(AtomicU64::new(1)),

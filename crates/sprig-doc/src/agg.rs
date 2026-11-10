@@ -934,7 +934,11 @@ pub fn bind_expr(expr: &Bson, lets: &Document) -> Bson {
             if d.len() == 1 && d.contains_key("$literal") {
                 return expr.clone();
             }
-            Bson::Document(d.iter().map(|(k, v)| (k.clone(), bind_expr(v, lets))).collect())
+            Bson::Document(
+                d.iter()
+                    .map(|(k, v)| (k.clone(), bind_expr(v, lets)))
+                    .collect(),
+            )
         }
         other => other.clone(),
     }

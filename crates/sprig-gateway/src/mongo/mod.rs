@@ -252,7 +252,10 @@ impl Shared {
     #[must_use]
     pub fn large_request_bytes(&self) -> u64 {
         match &self.d.live {
-            Some((l, dc)) => l.get(&crate::offload::LARGE_STATEMENT_BYTES, &SettingCtx::process(dc)),
+            Some((l, dc)) => l.get(
+                &crate::offload::LARGE_STATEMENT_BYTES,
+                &SettingCtx::process(dc),
+            ),
             None => crate::offload::LARGE_STATEMENT_BYTES.default,
         }
     }
@@ -365,7 +368,7 @@ impl Frontend for MongoFrontend {
 
     async fn serve(&self, conn: ClientConn, _ctx: Arc<GatewayContext>) -> Result<()> {
         let peer = conn.peer;
-        if let Err(e) = conn::serve(Arc::clone(&self.shared), conn).await {
+        if let Err(e) = Box::pin(conn::serve(Arc::clone(&self.shared), conn)).await {
             tracing::debug!(%peer, error = %e, "mongo connection ended");
         }
         Ok(())

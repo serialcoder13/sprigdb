@@ -451,7 +451,10 @@ mod tests {
         let c = CompiledPrivileges::compile(&st, UserId(9), &[]);
         let e = c.graph_elements(ObjectId(77));
         assert_eq!(e.len(), 2);
-        assert!(e.iter().any(|(r, n, a)| !r && n == "Person" && a.has(Action::Select)));
+        assert!(
+            e.iter()
+                .any(|(r, n, a)| !r && n == "Person" && a.has(Action::Select))
+        );
         assert!(e.iter().any(|(r, n, _)| *r && n == "KNOWS"));
         assert!(c.graph_elements(ObjectId(78)).is_empty());
         // The database becomes visible, the graph itself isn't readable.

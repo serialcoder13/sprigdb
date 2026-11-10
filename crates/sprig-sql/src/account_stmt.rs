@@ -554,9 +554,9 @@ fn priv_list(p: &mut P<'_>) -> R<Vec<PrivItem>> {
 /// `GRAPH [db.]g NODES L` / `GRAPH [db.]g RELATIONSHIPS T` (chapter 43,
 /// R8), when `GRAPH` is followed by a graph name and an element kind (so
 /// `ON graph TO ...` still names a table called `graph`).
-fn graph_target(p: &mut P<'_>) -> R<Option<GrantOn>> {
+fn graph_target(p: &mut P<'_>) -> Option<GrantOn> {
     if !p.word("GRAPH") {
-        return Ok(None);
+        return None;
     }
     let save = p.at;
     p.at += 1;
@@ -582,17 +582,15 @@ fn graph_target(p: &mut P<'_>) -> R<Option<GrantOn>> {
             name,
         }))
     })();
-    match parsed {
-        Ok(Some(on)) => Ok(Some(on)),
-        Ok(None) | Err(_) => {
-            p.at = save;
-            Ok(None)
-        }
+    if let Ok(Some(on)) = parsed {
+        return Some(on);
     }
+    p.at = save;
+    None
 }
 
 fn target(p: &mut P<'_>) -> R<GrantOn> {
-    if let Some(on) = graph_target(p)? {
+    if let Some(on) = graph_target(p) {
         return Ok(on);
     }
     let kind = if p.eat_word("TABLE") {

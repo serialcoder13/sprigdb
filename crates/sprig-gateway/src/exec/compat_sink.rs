@@ -110,10 +110,16 @@ pub(super) struct IntMetaSink<'a> {
     inner: &'a mut dyn ResultSink,
     sql: &'a [u8],
     lex: sprig_sql::lex::LexOptions,
-    /// The statement's plan, once read (`Some(None)`: none).
-    plan: Option<Option<sprig_sql::compat::intmeta::Plan>>,
+    /// The statement's plan, once read.
+    plan: PlanState,
     /// The current resultset, when its rows change.
     cur: Option<Rows>,
+}
+
+/// Whether the statement's plan has been read.
+enum PlanState {
+    Unread,
+    Read(Option<sprig_sql::compat::intmeta::Plan>),
 }
 
 /// A resultset whose rows the sink rewrites.
@@ -137,7 +143,7 @@ impl<'a> IntMetaSink<'a> {
             inner,
             sql,
             lex,
-            plan: None,
+            plan: PlanState::Unread,
             cur: None,
         }
     }
@@ -162,11 +168,12 @@ impl<'a> IntMetaSink<'a> {
         if !intmeta::candidates(columns) {
             return None;
         }
-        let (sql, lex) = (self.sql, self.lex);
-        let plan = self
-            .plan
-            .get_or_insert_with(|| intmeta::plan(sql, &lex))
-            .as_ref()?;
+        if matches!(self.plan, PlanState::Unread) {
+            self.plan = PlanState::Read(intmeta::plan(self.sql, &self.lex));
+        }
+        let PlanState::Read(Some(plan)) = &self.plan else {
+            return None;
+        };
         let mut cols = columns.to_vec();
         intmeta::apply(plan, &mut cols).then_some(cols)
     }
@@ -357,13 +364,13 @@ impl ResultSink for IntMetaSink<'_> {
 /// [`IntMetaSink`]).
 pub(super) fn prepared_columns(
     sql: &[u8],
-    lex: &sprig_sql::lex::LexOptions,
+    lex: sprig_sql::lex::LexOptions,
     cols: &mut [ColumnDef],
 ) {
     use sprig_sql::compat::intmeta;
     if IntMetaSink::wanted(sql)
         && intmeta::candidates(cols)
-        && let Some(plan) = intmeta::plan(sql, lex)
+        && let Some(plan) = intmeta::plan(sql, &lex)
     {
         intmeta::apply(&plan, cols);
     }

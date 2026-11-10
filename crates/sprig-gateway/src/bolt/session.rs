@@ -33,11 +33,11 @@ use sprig_catalog::{Freshness, TenantCatalog};
 use sprig_common::ids::{ClusterId, DcId, TenantId};
 use sprig_common::ids::{DbId, GroupId};
 use sprig_common::{Result, SprigCode, SprigError};
+use sprig_graph::access::{FilteredStore, Visible};
 use sprig_graph::ast::{Clause, Query};
 use sprig_graph::bookmark::{self, Bookmark};
 use sprig_graph::catalog::backend_error;
 use sprig_graph::eval::Params;
-use sprig_graph::access::{FilteredStore, Visible};
 use sprig_graph::maria::{GraphShards, MariaStore, ShardConns, check_deleted};
 use sprig_graph::store::GraphStore;
 use sprig_proto_bolt::PackValue;
@@ -112,6 +112,7 @@ struct Prepared {
 }
 
 /// Runs `q` on `store`, filtered by `vis` when given.
+#[allow(clippy::many_single_char_names)] // the executor's names
 async fn run_on(
     store: &mut dyn GraphStore,
     vis: Option<Visible>,
@@ -129,6 +130,7 @@ async fn run_on(
 }
 
 /// [`run_on`] for a streamed read.
+#[allow(clippy::many_single_char_names)] // the executor's names
 async fn stream_on(
     store: &mut dyn GraphStore,
     vis: Option<Visible>,

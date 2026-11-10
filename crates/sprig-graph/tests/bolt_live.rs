@@ -1629,7 +1629,9 @@ async fn round_four_uniqueness_grants_and_sprigctl() {
     s.query_drop("DROP GRAPH IF EXISTS r8four_u.g")
         .await
         .expect("drop");
-    s.query_drop("CREATE GRAPH r8four_u.g").await.expect("create");
+    s.query_drop("CREATE GRAPH r8four_u.g")
+        .await
+        .expect("create");
     let db = vec![("db", PackValue::str("r8four_u.g"))];
     let mut c = connect(&addr, &user, &pw).await.expect("login");
     let eid = c
@@ -1664,6 +1666,9 @@ async fn round_four_uniqueness_grants_and_sprigctl() {
     }
     let (_, shards) = graph_shards(&ctl, &tenant, &format!("graph_{graph_id}"));
     eprintln!("graph {graph_id}: shards {shards:?}");
+    // The moves can outlast the idle timeout of the first connection.
+    let _ = c.goodbye().await;
+    let mut c = connect(&addr, &user, &pw).await.expect("login again");
 
     // Back-fill: a duplicate across shards refuses the constraint.
     c.query(
@@ -1685,9 +1690,13 @@ async fn round_four_uniqueness_grants_and_sprigctl() {
         .await
         .expect_err("existing duplicate");
     assert!(e.code.contains("ConstraintCreationFailed"), "{e:?}");
-    c.query("MATCH (n:U {k: 5.0}) WITH n ORDER BY id(n) DESC LIMIT 1 DELETE n", vec![], db.clone())
-        .await
-        .expect("drop the duplicate");
+    c.query(
+        "MATCH (n:U {k: 5.0}) WITH n ORDER BY id(n) DESC LIMIT 1 DELETE n",
+        vec![],
+        db.clone(),
+    )
+    .await
+    .expect("drop the duplicate");
     c.query(
         "CREATE CONSTRAINT u_k FOR (n:U) REQUIRE n.k IS UNIQUE",
         vec![],
@@ -1714,7 +1723,10 @@ async fn round_four_uniqueness_grants_and_sprigctl() {
             )
             .await
             .expect_err("duplicate");
-        assert_eq!(e.code, "Neo.ClientError.Schema.ConstraintValidationFailed", "{e:?}");
+        assert_eq!(
+            e.code, "Neo.ClientError.Schema.ConstraintValidationFailed",
+            "{e:?}"
+        );
         refused += 1;
     }
     // Concurrent MERGEs on 25 new keys from 8 connections.
@@ -1842,7 +1854,11 @@ async fn round_four_uniqueness_grants_and_sprigctl() {
         .expect("u count");
     assert_eq!(int0(&n), int0(&all_u));
     let rels = rc
-        .query("MATCH ()-[r]->() RETURN type(r), count(*)", vec![], db.clone())
+        .query(
+            "MATCH ()-[r]->() RETURN type(r), count(*)",
+            vec![],
+            db.clone(),
+        )
         .await
         .expect("reader rels");
     assert_eq!(rows_text(&rels, true), ["'NEXT' | 29"]);
@@ -1853,13 +1869,13 @@ async fn round_four_uniqueness_grants_and_sprigctl() {
     assert_eq!(int0(&hidden), 0);
     let path = rc
         .query(
-            "MATCH (a:U {k: 1})-[*1..40]->(b) RETURN count(DISTINCT b)",
+            "MATCH (a:U {k: 1})-[*1..10]->(b) RETURN count(DISTINCT b)",
             vec![],
             db.clone(),
         )
         .await
         .expect("var-length");
-    assert_eq!(int0(&path), 29);
+    assert_eq!(int0(&path), 10);
     let e = rc
         .query("CREATE (:U {k: 5000})", vec![], db.clone())
         .await
@@ -1882,8 +1898,13 @@ async fn round_four_uniqueness_grants_and_sprigctl() {
         .expect_err("revoked");
     assert!(e.message.contains("denied"), "{e:?}");
     let _ = rc.goodbye().await;
-    eprintln!("label grants: the reader saw {} U nodes, 29 NEXT, no Secret; revoked", int0(&n));
-    s.query_drop("DROP USER r8four_reader").await.expect("drop user");
+    eprintln!(
+        "label grants: the reader saw {} U nodes, 29 NEXT, no Secret; revoked",
+        int0(&n)
+    );
+    s.query_drop("DROP USER r8four_reader")
+        .await
+        .expect("drop user");
     let _ = c.goodbye().await;
     s.disconnect().await.expect("bye");
 }

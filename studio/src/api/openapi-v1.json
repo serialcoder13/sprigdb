@@ -408,6 +408,14 @@
         "description": "The KvExecResponse message as JSON (proto3 mapping)",
         "type": "object"
       },
+      "KvGeoSearchRequest": {
+        "description": "The KvGeoSearchRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvGeoSearchResponse": {
+        "description": "The KvGeoSearchResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
       "KvGetRequest": {
         "description": "The KvGetRequest message as JSON (proto3 mapping)",
         "type": "object"
@@ -1816,6 +1824,64 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/KvExecResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.KeyValue"
+        ]
+      }
+    },
+    "/v1/databases/{database}/namespaces/{namespace}:geoSearch": {
+      "post": {
+        "operationId": "KeyValue.GeoSearch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KvGeoSearchRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KvGeoSearchResponse"
                 }
               }
             },

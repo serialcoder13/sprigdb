@@ -202,6 +202,17 @@ pub struct CollMeta {
     pub next_index: u32,
 }
 
+/// Whether collection options `options` keep change-stream pre- and
+/// post-images (`changeStreamPreAndPostImages: {enabled: true}`).
+#[must_use]
+pub fn keeps_images(options: &Document) -> bool {
+    options
+        .get_document("changeStreamPreAndPostImages")
+        .ok()
+        .and_then(|d| d.get_bool("enabled").ok())
+        .unwrap_or(false)
+}
+
 /// Paths with field columns.
 impl CollMeta {
     /// Whether some document may hold an array at `path` or any prefix.

@@ -17,5 +17,12 @@
     "deploy/compose/m07/.state/**": true
   },
   "search.followSymlinks": false,
-  "rust-analyzer.files.excludeDirs": ["target", "studio/node_modules"]
+  "rust-analyzer.files.excludeDirs": ["target", "studio/node_modules"],
+  // The Python extension's project discovery runs `rg --files --no-ignore --follow`
+  // over the whole workspace, ignoring search.exclude; it spawned ~660 rg processes
+  // into target/ on 10 Nov. Python here is only small scripts.
+  "python.analysis.exclude": ["**/target/**", "**/node_modules/**", "studio/dist/**"],
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.indexing": false,
+  "python.terminal.activateEnvironment": false
 }

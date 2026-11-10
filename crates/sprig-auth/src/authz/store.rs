@@ -410,6 +410,7 @@ impl AuthzStore {
     ///
     /// # Errors
     /// 39070, a backend error, or `Internal` for a malformed row.
+    #[allow(clippy::too_many_lines)] // one arm per level
     pub async fn load<Q: Queryable + Send>(&self, q: &mut Q) -> Result<AuthzRows> {
         let roles: Vec<Row> = q
             .query(format!(

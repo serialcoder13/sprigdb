@@ -92,7 +92,6 @@ impl Collation {
         };
         for (k, v) in d {
             match (k.as_str(), v) {
-                ("locale", _) => {}
                 ("strength", v) => {
                     let n = crate::filter::as_i64(v)
                         .filter(|n| (1..=5).contains(n))
@@ -106,9 +105,12 @@ impl Collation {
                     "lower" | "off" => {}
                     _ => return Err(bad(format!("unsupported caseFirst value: {s}"))),
                 },
-                ("alternate", Bson::String(s)) if matches!(s.as_str(), "non-ignorable" | "shifted") => {}
+                ("alternate", Bson::String(s))
+                    if matches!(s.as_str(), "non-ignorable" | "shifted") => {}
                 ("maxVariable", Bson::String(s)) if matches!(s.as_str(), "punct" | "space") => {}
-                ("backwards" | "normalization", Bson::Boolean(_)) | ("version", Bson::String(_)) => {}
+                ("locale", _)
+                | ("backwards" | "normalization", Bson::Boolean(_))
+                | ("version", Bson::String(_)) => {}
                 _ => return Err(bad(format!("unknown or invalid collation field: {k}"))),
             }
         }
@@ -141,7 +143,7 @@ impl Collation {
 
     /// Compares two strings under this collation.
     #[must_use]
-    pub fn compare(&self, a: &str, b: &str) -> Ordering {
+    pub fn compare(self, a: &str, b: &str) -> Ordering {
         if a == b {
             return Ordering::Equal;
         }
@@ -175,7 +177,7 @@ impl Collation {
         Ordering::Equal
     }
 
-    fn cmp_level(&self, a: &[char], b: &[char]) -> Ordering {
+    fn cmp_level(self, a: &[char], b: &[char]) -> Ordering {
         if self.numeric {
             numeric_cmp(a, b)
         } else {
@@ -184,7 +186,7 @@ impl Collation {
     }
 
     /// Lower case before upper case unless `caseFirst: "upper"`.
-    fn cmp_case(&self, a: &[bool], b: &[bool]) -> Ordering {
+    fn cmp_case(self, a: &[bool], b: &[bool]) -> Ordering {
         let o = a.cmp(b);
         if self.upper_first { o.reverse() } else { o }
     }
@@ -263,15 +265,15 @@ mod tests {
 
     use super::*;
 
-    fn c(d: Document) -> Collation {
-        Collation::parse(&d).unwrap().unwrap()
+    fn c(d: &Document) -> Collation {
+        Collation::parse(d).unwrap().unwrap()
     }
 
     #[test]
     fn strengths() {
-        let s1 = c(doc! {"locale": "en_US", "strength": 1});
-        let s2 = c(doc! {"locale": "en_US", "strength": 2});
-        let s3 = c(doc! {"locale": "en_US"});
+        let s1 = c(&doc! {"locale": "en_US", "strength": 1});
+        let s2 = c(&doc! {"locale": "en_US", "strength": 2});
+        let s3 = c(&doc! {"locale": "en_US"});
         assert_eq!(s1.compare("ping", "PING"), Ordering::Equal);
         assert_eq!(s1.compare("café", "CAFE"), Ordering::Equal);
         assert_eq!(s2.compare("ping", "PING"), Ordering::Equal);
@@ -279,22 +281,26 @@ mod tests {
         assert_eq!(s3.compare("a", "A"), Ordering::Less);
         assert_eq!(s3.compare("A", "b"), Ordering::Less);
         assert_eq!(s3.compare("ping", "pong"), Ordering::Less);
-        let up = c(doc! {"locale": "en", "caseFirst": "upper"});
+        let up = c(&doc! {"locale": "en", "caseFirst": "upper"});
         assert_eq!(up.compare("a", "A"), Ordering::Greater);
     }
 
     #[test]
     fn numeric_ordering() {
-        let n = c(doc! {"locale": "en", "numericOrdering": true});
+        let n = c(&doc! {"locale": "en", "numericOrdering": true});
         assert_eq!(n.compare("item10", "item9"), Ordering::Greater);
         assert_eq!(n.compare("item010", "item10"), Ordering::Equal);
-        let plain = c(doc! {"locale": "en"});
+        let plain = c(&doc! {"locale": "en"});
         assert_eq!(plain.compare("item10", "item9"), Ordering::Less);
     }
 
     #[test]
     fn simple_and_errors() {
-        assert!(Collation::parse(&doc! {"locale": "simple"}).unwrap().is_none());
+        assert!(
+            Collation::parse(&doc! {"locale": "simple"})
+                .unwrap()
+                .is_none()
+        );
         assert!(Collation::parse(&doc! {"strength": 1}).is_err());
         assert!(Collation::parse(&doc! {"locale": "en", "strength": 9}).is_err());
         assert!(Collation::parse(&doc! {"locale": "en", "bogus": 1}).is_err());
@@ -302,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_scope_reaches_keyenc() {
-        let ci = c(doc! {"locale": "en", "strength": 2});
+        let ci = c(&doc! {"locale": "en", "strength": 2});
         let eq = scope(Some(ci), async {
             crate::keyenc::equal(&Bson::String("ping".into()), &Bson::String("PING".into()))
         })

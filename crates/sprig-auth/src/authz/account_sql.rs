@@ -497,6 +497,7 @@ impl AccountCtx<'_> {
     /// (`held_by_name`), a table that doesn't exist resolves to its grants
     /// held by name, if any (MySQL revokes `tables_priv` rows of missing
     /// tables too).
+    #[allow(clippy::too_many_lines)] // one arm per level
     fn target(
         &self,
         on: &GrantOn,

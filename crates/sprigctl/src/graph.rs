@@ -74,7 +74,9 @@ fn list_text(v: &Value) -> String {
         })
         .unwrap_or_default();
     table(
-        ["DATABASE", "GRAPH", "ID", "KIND", "STATE", "GROUP", "SHARDS"],
+        [
+            "DATABASE", "GRAPH", "ID", "KIND", "STATE", "GROUP", "SHARDS",
+        ],
         &rows,
     )
 }
@@ -133,7 +135,14 @@ fn show_text(v: &Value) -> String {
         .unwrap_or_default();
     if !idx.is_empty() {
         out.push_str(&table(
-            ["INDEX", "KIND", "ON", "LABEL OR TYPE", "PROPERTIES", "STATE"],
+            [
+                "INDEX",
+                "KIND",
+                "ON",
+                "LABEL OR TYPE",
+                "PROPERTIES",
+                "STATE",
+            ],
             &idx,
         ));
     }
@@ -156,7 +165,14 @@ fn show_text(v: &Value) -> String {
         .unwrap_or_default();
     if !shards.is_empty() {
         out.push_str(&table(
-            ["SHARD", "CLUSTER", "NODES", "RELATIONSHIPS", "MIRRORS", "CLAIMS"],
+            [
+                "SHARD",
+                "CLUSTER",
+                "NODES",
+                "RELATIONSHIPS",
+                "MIRRORS",
+                "CLAIMS",
+            ],
             &shards,
         ));
     }

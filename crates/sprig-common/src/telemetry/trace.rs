@@ -391,20 +391,40 @@ pub fn tracer() -> &'static Arc<Tracer> {
 
 /// A random non-zero `u64`.
 fn random_u64() -> u64 {
+    // Span and trace ids and the head sample need uniqueness, not secrecy:
+    // a per-thread SplitMix64 seeded once from the OS (a `getentropy`
+    // system call per id cost about 3% of a gateway's CPU per statement;
+    // R5 round 4).
+    thread_local! {
+        static STATE: std::cell::Cell<u64> = std::cell::Cell::new(seed());
+    }
     loop {
-        let v = getrandom::u64().unwrap_or_else(|_| {
-            // No OS randomness: the clock is good enough for ids.
-            let t = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(1, |d| d.as_nanos());
-            #[allow(clippy::cast_possible_truncation)]
-            let v = (t as u64) ^ (t >> 64) as u64;
-            v.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        let v = STATE.with(|st| {
+            let x = st.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+            st.set(x);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
         });
         if v != 0 {
             return v;
         }
     }
+}
+
+/// A thread's seed: OS randomness, else the clock and the thread.
+fn seed() -> u64 {
+    getrandom::u64().unwrap_or_else(|_| {
+        // No OS randomness: the clock is good enough for ids.
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos());
+        #[allow(clippy::cast_possible_truncation)]
+        let v = (t as u64) ^ (t >> 64) as u64;
+        let local = 0u8;
+        (v ^ std::ptr::from_ref(&local).addr() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    })
 }
 
 fn unix_nanos() -> u64 {

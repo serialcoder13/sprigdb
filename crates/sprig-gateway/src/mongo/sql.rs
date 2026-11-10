@@ -27,10 +27,18 @@ use crate::pipeline::{
 };
 use crate::session::{Principal, Session, SessionState, SessionTable};
 
-/// The capabilities the executor sees: a MySQL 8.4 client without TLS,
+/// The persona of the engine's statements: MariaDB's, whose SQL the
+/// engine writes. The MySQL 8.4 persona's compatibility layer (chapter 28:
+/// canonical JSON text in results, MySQL's integer metadata and `1062`
+/// texts, `ONLY_FULL_GROUP_BY` checks, text rewrites) is for MySQL
+/// clients, and cost about a tenth of a point read's gateway CPU (R5
+/// round 4).
+const PERSONA: Persona = Persona::MariaDb;
+
+/// The capabilities the executor sees: a client without TLS,
 /// compression or `LOCAL INFILE`, with `DEPRECATE_EOF` and multi-results.
 fn caps() -> Caps {
-    let mut c = Caps::server_default(Persona::MySql84);
+    let mut c = Caps::server_default(PERSONA);
     c.remove(Caps::SSL | Caps::COMPRESS | Caps::ZSTD_COMPRESSION_ALGORITHM | Caps::LOCAL_FILES);
     c
 }
@@ -49,7 +57,7 @@ struct Collect {
 impl ResultSink for Collect {
     fn wire(&self) -> Wire {
         Wire {
-            persona: Persona::MySql84,
+            persona: PERSONA,
             caps: caps(),
         }
     }
@@ -131,12 +139,12 @@ impl ResultSink for Collect {
     }
 }
 
-/// A SQL error as the engine sees it: the MySQL persona's number and text
-/// (MariaDB-only errors mapped as the wire maps them).
+/// A SQL error as the engine sees it: the engine persona's number and
+/// text.
 #[must_use]
 pub fn sql_error(e: &SprigError) -> SqlError {
-    let mapped = sprig_sql::compat::errmap::for_persona(Persona::MySql84, e);
-    let p = ErrPacket::from_error(Persona::MySql84, mapped.as_ref().unwrap_or(e));
+    let mapped = sprig_sql::compat::errmap::for_persona(PERSONA, e);
+    let p = ErrPacket::from_error(PERSONA, mapped.as_ref().unwrap_or(e));
     SqlError {
         errno: Some(p.code),
         message: p.message,
@@ -153,6 +161,8 @@ pub struct SqlSession {
     tenant: u64,
     /// A transaction is open (`startTransaction`).
     pub in_txn: bool,
+    /// The session runs at READ COMMITTED ([`Self::read_committed`]).
+    read_committed: bool,
 }
 
 impl std::fmt::Debug for SqlSession {
@@ -184,9 +194,9 @@ impl SqlSession {
         session.set_principal(principal.clone());
         session.set_state(SessionState::Ready);
         let proto = ProtoState {
-            persona: Persona::MySql84,
+            persona: PERSONA,
             caps: caps(),
-            collation: u16::from(Persona::MySql84.greeting_collation()),
+            collation: u16::from(PERSONA.greeting_collation()),
             multi_statements: false,
             framing: Framing::Plain,
             max_packet,
@@ -200,7 +210,7 @@ impl SqlSession {
         let exec = executor.open(&LoginInfo {
             principal: principal.clone(),
             backend: principal.backend.clone(),
-            persona: Persona::MySql84,
+            persona: PERSONA,
         });
         Ok(Self {
             session,
@@ -208,6 +218,7 @@ impl SqlSession {
             proto,
             tenant: principal.tenant.map_or(0, |t| t.0),
             in_txn: false,
+            read_committed: false,
         })
     }
 
@@ -244,6 +255,21 @@ impl SqlSession {
     #[must_use]
     pub fn handle(&self) -> std::sync::Arc<crate::session::SessionHandle> {
         std::sync::Arc::clone(self.session.handle())
+    }
+
+    /// Sets the session's isolation to READ COMMITTED, once (retryable
+    /// writes); a failure leaves it as it was and is logged.
+    pub async fn read_committed(&mut self) {
+        if self.read_committed {
+            return;
+        }
+        self.read_committed = true;
+        if let Err(e) = self
+            .run("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .await
+        {
+            tracing::debug!(error = %e.message, "READ COMMITTED for retryable writes not set");
+        }
     }
 
     /// Closes the session (rolls back).

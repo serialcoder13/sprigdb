@@ -116,6 +116,10 @@ pub struct GraphPartition {
     pub advice: String,
 }
 
+/// `graphs` joined with `objects` and `databases`: id, database id and
+/// name, graph name, kind, state, group, the database's default group.
+type GraphCatalogRow = (u64, u32, String, String, String, String, Option<u32>, u32);
+
 /// A graph's catalog row and where its shards are.
 struct Located {
     row: GraphRow,
@@ -145,7 +149,7 @@ impl ShardingLoop {
         if have.is_none() {
             return Ok(Vec::new());
         }
-        let rows: Vec<(u64, u32, String, String, String, String, Option<u32>, u32)> = c
+        let rows: Vec<GraphCatalogRow> = c
             .query(format!(
                 "SELECT g.graph_id, g.db_id, d.name, o.name, g.kind, g.state, g.group_id, \
                  d.default_group_id \
@@ -167,7 +171,7 @@ impl ShardingLoop {
                             (
                                 r.shard.0,
                                 r.cluster.clone(),
-                                shard_schema(tenant, DbId(db), GroupId(g), r.shard).to_string(),
+                                shard_schema(tenant, DbId(db), GroupId(g), r.shard),
                                 r.lo,
                             )
                         })
@@ -177,7 +181,7 @@ impl ShardingLoop {
                 None => vec![(
                     1,
                     home.clone(),
-                    shard_schema(tenant, DbId(db), GroupId(default_group), ShardId(1)).to_string(),
+                    shard_schema(tenant, DbId(db), GroupId(default_group), ShardId(1)),
                     0,
                 )],
             };
@@ -209,7 +213,10 @@ impl ShardingLoop {
             .into_iter()
             .find(|g| g.row.database == db && g.row.name == name)
             .ok_or_else(|| {
-                SprigError::new(SprigCode::GraphNotFound, format!("Graph '{graph}' doesn't exist"))
+                SprigError::new(
+                    SprigCode::GraphNotFound,
+                    format!("Graph '{graph}' doesn't exist"),
+                )
             })
     }
 
@@ -278,15 +285,17 @@ impl ShardingLoop {
         drop(c);
         let indexes = idx
             .into_iter()
-            .map(|(name, kind, unique, entity, token, props, state)| GraphIndexRow {
-                name,
-                kind,
-                unique,
-                entity,
-                token,
-                properties: serde_json::from_str(&props).unwrap_or_default(),
-                state,
-            })
+            .map(
+                |(name, kind, unique, entity, token, props, state)| GraphIndexRow {
+                    name,
+                    kind,
+                    unique,
+                    entity,
+                    token,
+                    properties: serde_json::from_str(&props).unwrap_or_default(),
+                    state,
+                },
+            )
             .collect();
         let mut shards = Vec::new();
         if g.row.kind == "native" {
@@ -295,10 +304,18 @@ impl ShardingLoop {
                     shard: *shard,
                     cluster: cluster.to_string(),
                     schema: schema.clone(),
-                    nodes: self.count(cluster, schema, &format!("__sprig_gn_{id}")).await,
-                    relationships: self.count(cluster, schema, &format!("__sprig_ge_{id}")).await,
-                    mirrors: self.count(cluster, schema, &format!("__sprig_gm_{id}")).await,
-                    claims: self.count(cluster, schema, &format!("__sprig_gu_{id}")).await,
+                    nodes: self
+                        .count(cluster, schema, &format!("__sprig_gn_{id}"))
+                        .await,
+                    relationships: self
+                        .count(cluster, schema, &format!("__sprig_ge_{id}"))
+                        .await,
+                    mirrors: self
+                        .count(cluster, schema, &format!("__sprig_gm_{id}"))
+                        .await,
+                    claims: self
+                        .count(cluster, schema, &format!("__sprig_gu_{id}"))
+                        .await,
                 });
             }
         }

@@ -97,10 +97,10 @@ pub fn target_dbs(name: &str, body: &Document, db: &str) -> Vec<String> {
 /// namespace's.
 #[must_use]
 pub fn record_db(name: &str, body: &Document, db: &str) -> String {
-    if name == "bulkWrite" {
-        if let Some(n) = namespaces(body).ok().and_then(|v| v.into_iter().next()) {
-            return n.db;
-        }
+    if name == "bulkWrite"
+        && let Some(n) = namespaces(body).ok().and_then(|v| v.into_iter().next())
+    {
+        return n.db;
     }
     db.to_owned()
 }
@@ -453,6 +453,7 @@ fn bulk_error(e: &MongoError, i: usize, update: bool) -> Document {
     d
 }
 
+#[allow(clippy::too_many_lines)]
 /// MongoDB 8.0's `bulkWrite` (chapter 30, "Dispatch"): `ops` over the
 /// collections of `nsInfo`, one statement per op (its index is its
 /// statement id), with a cursor of per-op results and the totals.
@@ -544,18 +545,18 @@ async fn bulk_write(
                             Err(e) => Err(e),
                         }
                         .map(|o| {
-                                let mut d = doc! {
-                                    "ok": 1.0,
-                                    "idx": idx(i),
-                                    "n": i32::try_from(o.matched).unwrap_or(i32::MAX)
-                                        + i32::from(o.upserted.is_some()),
-                                    "nModified": i32::try_from(o.modified).unwrap_or(i32::MAX),
-                                };
-                                if let Some(id) = o.upserted {
-                                    d.insert("upserted", doc! {"_id": id});
-                                }
-                                d
-                            }),
+                            let mut d = doc! {
+                                "ok": 1.0,
+                                "idx": idx(i),
+                                "n": i32::try_from(o.matched).unwrap_or(i32::MAX)
+                                    + i32::from(o.upserted.is_some()),
+                                "nModified": i32::try_from(o.modified).unwrap_or(i32::MAX),
+                            };
+                            if let Some(id) = o.upserted {
+                                d.insert("upserted", doc! {"_id": id});
+                            }
+                            d
+                        }),
                     }
                 }
                 _ => {

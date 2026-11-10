@@ -253,8 +253,28 @@ impl ChangeFeed {
 pub enum Images {
     /// `default` / `off`.
     Off,
-    /// `updateLookup`, `whenAvailable`, `required`.
+    /// `updateLookup`: the document as the update left it (the row image;
+    /// MongoDB reads the current one).
     On,
+    /// `whenAvailable`: the image when the collection keeps them
+    /// (`changeStreamPreAndPostImages`), else `null`.
+    WhenAvailable,
+    /// `required`: the image, or the stream fails when the collection
+    /// doesn't keep them.
+    Required,
+}
+
+impl Images {
+    /// Whether the event carries the image at all.
+    fn wanted(self) -> bool {
+        self != Self::Off
+    }
+
+    /// Whether this mode needs the collection's
+    /// `changeStreamPreAndPostImages`.
+    fn needs_option(self) -> bool {
+        matches!(self, Self::WhenAvailable | Self::Required)
+    }
 }
 
 /// What a stream watches and how it renders.
@@ -284,6 +304,12 @@ pub struct StreamSpec {
 pub trait TableNames: Send + Sync + std::fmt::Debug {
     /// The collection whose table is `table` in database `db`.
     async fn collection(&self, tenant: TenantId, db: &str, table: &str) -> Option<String>;
+
+    /// Whether the collection of `table` keeps pre- and post-images
+    /// (`changeStreamPreAndPostImages: {enabled: true}`).
+    async fn images(&self, _tenant: TenantId, _db: &str, _table: &str) -> bool {
+        false
+    }
 }
 
 /// One item of a stream's queue.
@@ -425,7 +451,71 @@ fn bson_eq(a: &Bson, b: &Bson) -> bool {
 }
 
 /// The event for `e`, or `None` when the stream doesn't show it.
-async fn render(spec: &StreamSpec, e: &ChangeEvent) -> Option<(Document, bool)> {
+async fn render(
+    spec: &StreamSpec,
+    e: &ChangeEvent,
+) -> std::result::Result<Option<(Document, bool)>, MongoError> {
+    // Pre- and post-images for `whenAvailable` and `required` exist only
+    // for collections that keep them (MongoDB 6.0's collection option).
+    let kept = if (spec.full.needs_option() || spec.before.needs_option())
+        && matches!(e.op, Op::Update | Op::Delete)
+    {
+        match &spec.tables {
+            Some(t) => t.images(spec.tenant, &e.db_name, &e.table).await,
+            None => false,
+        }
+    } else {
+        true
+    };
+    let image = |mode: Images, img: Document| -> std::result::Result<Bson, MongoError> {
+        if kept || !mode.needs_option() {
+            return Ok(Bson::Document(img));
+        }
+        if mode == Images::Required {
+            return Err(MongoError::new(
+                280,
+                "Change stream was configured to require a pre- or post-image, but the collection doesn't keep them (changeStreamPreAndPostImages)",
+            )
+            .label("NonResumableChangeStreamError"));
+        }
+        Ok(Bson::Null)
+    };
+    let mut err = None;
+    let r = render_inner(spec, e, &image, &mut err).await;
+    match err {
+        Some(x) => Err(x),
+        None => Ok(r),
+    }
+}
+
+/// Puts `img` under `key` as `mode` allows; records the error of a
+/// `required` image that isn't kept.
+fn put_image(
+    d: &mut Document,
+    key: &str,
+    mode: Images,
+    img: Document,
+    image: &(dyn Fn(Images, Document) -> std::result::Result<Bson, MongoError> + Sync),
+    err: &mut Option<MongoError>,
+) {
+    if !mode.wanted() {
+        return;
+    }
+    match image(mode, img) {
+        Ok(v) => {
+            d.insert(key, v);
+        }
+        Err(x) => *err = Some(x),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn render_inner(
+    spec: &StreamSpec,
+    e: &ChangeEvent,
+    image: &(dyn Fn(Images, Document) -> std::result::Result<Bson, MongoError> + Sync),
+    err: &mut Option<MongoError>,
+) -> Option<(Document, bool)> {
     if let Some(db) = &spec.db
         && &e.db_name != db
     {
@@ -476,26 +566,34 @@ async fn render(spec: &StreamSpec, e: &ChangeEvent) -> Option<(Document, bool)> 
                 "documentKey",
                 doc! {"_id": after.get("_id").cloned().unwrap_or(Bson::Null)},
             );
-            if spec.before == Images::On {
-                d.insert("fullDocumentBeforeChange", before);
-            }
+            put_image(
+                &mut d,
+                "fullDocumentBeforeChange",
+                spec.before,
+                before,
+                image,
+                err,
+            );
         }
         Op::Update => {
             let before = image_doc(e.before.as_ref())?;
             let after = image_doc(e.after.as_ref())?;
             d.insert("operationType", "update");
-            if spec.full == Images::On {
-                d.insert("fullDocument", after.clone());
-            }
+            put_image(&mut d, "fullDocument", spec.full, after.clone(), image, err);
             d.insert("ns", ns);
             d.insert(
                 "documentKey",
                 doc! {"_id": after.get("_id").cloned().unwrap_or(Bson::Null)},
             );
             d.insert("updateDescription", diff(&before, &after));
-            if spec.before == Images::On {
-                d.insert("fullDocumentBeforeChange", before);
-            }
+            put_image(
+                &mut d,
+                "fullDocumentBeforeChange",
+                spec.before,
+                before,
+                image,
+                err,
+            );
         }
         Op::Delete => {
             let before = image_doc(e.before.as_ref())?;
@@ -505,9 +603,14 @@ async fn render(spec: &StreamSpec, e: &ChangeEvent) -> Option<(Document, bool)> 
                 "documentKey",
                 doc! {"_id": before.get("_id").cloned().unwrap_or(Bson::Null)},
             );
-            if spec.before == Images::On {
-                d.insert("fullDocumentBeforeChange", before);
-            }
+            put_image(
+                &mut d,
+                "fullDocumentBeforeChange",
+                spec.before,
+                before,
+                image,
+                err,
+            );
         }
         Op::Ddl(DdlKind::Drop) => {
             d.insert("operationType", "drop");
@@ -610,9 +713,10 @@ async fn run(
         };
         let out = match item {
             Ok(FeedItem::Event(e)) => match render(&spec, &e).await {
-                Some((d, false)) => Item::Event(Box::new(d), e.token.to_hex()),
-                Some((d, true)) => Item::Invalidate(Box::new(d), e.token.to_hex()),
-                None => Item::Progress(e.token.to_hex()),
+                Ok(Some((d, false))) => Item::Event(Box::new(d), e.token.to_hex()),
+                Ok(Some((d, true))) => Item::Invalidate(Box::new(d), e.token.to_hex()),
+                Ok(None) => Item::Progress(e.token.to_hex()),
+                Err(x) => Item::Failed(x),
             },
             Ok(FeedItem::TxnEnd { token } | FeedItem::Progress { token }) => {
                 Item::Progress(token.to_hex())
@@ -731,7 +835,9 @@ pub fn parse_stage(
             "fullDocument" => {
                 full = match v.as_str() {
                     Some("default") => Images::Off,
-                    Some("updateLookup" | "whenAvailable" | "required") => Images::On,
+                    Some("updateLookup") => Images::On,
+                    Some("whenAvailable") => Images::WhenAvailable,
+                    Some("required") => Images::Required,
                     _ => {
                         return Err(MongoError::new(
                             code::BAD_VALUE,
@@ -743,7 +849,8 @@ pub fn parse_stage(
             "fullDocumentBeforeChange" => {
                 before = match v.as_str() {
                     Some("off") => Images::Off,
-                    Some("whenAvailable" | "required") => Images::On,
+                    Some("whenAvailable") => Images::WhenAvailable,
+                    Some("required") => Images::Required,
                     _ => {
                         return Err(MongoError::new(
                             code::BAD_VALUE,

@@ -628,7 +628,8 @@ async fn four_shards_uniqueness_across_shards() {
 
     // 40 keys, then each again: most second copies would land on another
     // shard than the first (ids hash over four shards).
-    live.run("UNWIND range(1, 40) AS i CREATE (:U {k: i})").await;
+    live.run("UNWIND range(1, 40) AS i CREATE (:U {k: i})")
+        .await;
     let mut refused = 0;
     let mut other_shard = 0;
     for i in 1..=40 {
@@ -644,9 +645,13 @@ async fn four_shards_uniqueness_across_shards() {
         assert!(e.message.contains("already exists with label `U`"), "{e}");
         refused += 1;
         // Where a new node would have gone: the next id's shard.
-        let o = live.run("CREATE (n:Tmp) WITH n, id(n) AS i DELETE n RETURN i").await;
+        let o = live
+            .run("CREATE (n:Tmp) WITH n, id(n) AS i DELETE n RETURN i")
+            .await;
         let next: u64 = show(&o)[0].parse().expect("id");
-        let holder = live.run(&format!("MATCH (n:U {{k: {i}}}) RETURN id(n)")).await;
+        let holder = live
+            .run(&format!("MATCH (n:U {{k: {i}}}) RETURN id(n)"))
+            .await;
         let h: u64 = show(&holder)[0].parse().expect("id");
         if live.layout.index_of(sprig_graph::store::rk_of(next))
             != live.layout.index_of(sprig_graph::store::rk_of(h))
@@ -655,7 +660,10 @@ async fn four_shards_uniqueness_across_shards() {
         }
     }
     assert_eq!(refused, 40);
-    assert!(other_shard > 10, "only {other_shard} of 40 on another shard");
+    assert!(
+        other_shard > 10,
+        "only {other_shard} of 40 on another shard"
+    );
     // MERGE on a held key matches the holder, wherever it is.
     let o = live
         .run("UNWIND range(1, 40) AS i MERGE (n:U {k: i}) ON MATCH SET n.seen = true RETURN count(*)")
@@ -694,7 +702,8 @@ async fn four_shards_uniqueness_across_shards() {
     }
     live.run("MATCH (a:U {k: 6}), (b:U {k: 7}) CREATE (a)-[:OWNS {serial: 7, kind: 'y'}]->(b)")
         .await;
-    live.run("MATCH ()-[r:OWNS {kind: 'x'}]->() SET r.serial = 8").await;
+    live.run("MATCH ()-[r:OWNS {kind: 'x'}]->() SET r.serial = 8")
+        .await;
     live.run("MATCH (a:U {k: 8}), (b:U {k: 9}) CREATE (a)-[:OWNS {serial: 7, kind: 'x'}]->(b)")
         .await;
     live.run("MATCH ()-[r:OWNS {serial: 8}]->() DELETE r").await;
@@ -712,10 +721,12 @@ async fn four_shards_uniqueness_across_shards() {
     for w in 0..8u64 {
         let live = Arc::clone(&live);
         tasks.push(tokio::spawn(async move {
-            let mut ok = 0;
+            let (mut ok, mut retried) = (0, 0);
             for j in 0..25u64 {
                 let k = 500 + (j * 7 + w * 3) % 25;
-                let q = format!("MERGE (n:U {{k: {k}}}) ON CREATE SET n.by = {w} RETURN n.k");
+                let q = format!(
+                    "MERGE (n:U {{k: {k}}}) ON CREATE SET n.by = {w} ON MATCH SET n.seen = coalesce(n.seen, 0) + 1 RETURN n.k"
+                );
                 for _ in 0..20 {
                     match live.run_with(&q, &Budgets::default()).await {
                         Ok(_) => {
@@ -730,17 +741,22 @@ async fn four_shards_uniqueness_across_shards() {
                                     errno: 1213 | 1205,
                                     ..
                                 }
-                            ) => {}
+                            ) =>
+                        {
+                            retried += 1;
+                        }
                         Err(e) => panic!("{q}: {e}"),
                     }
                 }
             }
-            ok
+            (ok, retried)
         }));
     }
-    let mut merged = 0;
+    let (mut merged, mut retried) = (0, 0);
     for t in tasks {
-        merged += t.await.expect("task");
+        let (m, r) = t.await.expect("task");
+        merged += m;
+        retried += r;
     }
     assert_eq!(merged, 8 * 25);
     let o = live
@@ -752,7 +768,10 @@ async fn four_shards_uniqueness_across_shards() {
     let mut claims = 0u64;
     for sh in &live.layout.shards {
         let n: Option<u64> = c
-            .query_first(format!("SELECT COUNT(*) FROM {} WHERE idx = 41", sh.tables.claims))
+            .query_first(format!(
+                "SELECT COUNT(*) FROM {} WHERE idx = 41",
+                sh.tables.claims
+            ))
             .await
             .expect("claims");
         claims += n.unwrap_or(0);
@@ -763,10 +782,10 @@ async fn four_shards_uniqueness_across_shards() {
         .await;
     assert_eq!(show(&o), [claims.to_string()]);
     eprintln!(
-        "uniqueness across 4 shards: {refused} duplicates refused ({other_shard} on another shard), {merged} concurrent MERGEs, {claims} claims"
+        "uniqueness across 4 shards: {refused} duplicates refused ({other_shard} on another shard), {merged} concurrent MERGEs ({retried} deadlock retries), {claims} claims"
     );
-    match Arc::try_unwrap(live) {
-        Ok(l) => l.cleanup().await,
-        Err(_) => panic!("live still shared"),
-    }
+    let Ok(live) = Arc::try_unwrap(live) else {
+        panic!("live still shared");
+    };
+    live.cleanup().await;
 }

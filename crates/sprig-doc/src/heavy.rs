@@ -39,7 +39,9 @@ mod tests {
 
     fn docs(n: i64) -> Vec<Document> {
         (0..n)
-            .map(|i| doc! {"_id": i, "k": (i * 7_919) % 1_000, "g": i % 50, "tags": ["a", "b", "c"]})
+            .map(
+                |i| doc! {"_id": i, "k": (i * 7_919) % 1_000, "g": i % 50, "tags": ["a", "b", "c"]},
+            )
             .collect()
     }
 

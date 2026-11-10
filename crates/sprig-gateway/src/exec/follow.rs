@@ -87,8 +87,15 @@ impl PassSession {
             let Some(p) = locator.placement_followed(tenant).await else {
                 return Ok(()); // no map copy yet: route as before
             };
-            // RL13: a promotion is still draining the new home's copy.
-            if locator.followed_role(tenant) == Some(MapRole::Standby) {
+            // RL13: a promotion is still draining the new home's copy. A
+            // `quarantined` map is a home left behind (a move between DCs,
+            // a failover) until the directory names the new one (read at
+            // most once a second): wait for it too rather than answer
+            // 39530.
+            if matches!(
+                locator.followed_role(tenant),
+                Some(MapRole::Standby | MapRole::Quarantined)
+            ) {
                 if promotion.is_none() {
                     promotion = Some(std::time::Instant::now());
                     metrics::counter!("sprig_gateway_promotion_holds_total").increment(1);

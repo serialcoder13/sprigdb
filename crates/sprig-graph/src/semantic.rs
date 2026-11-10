@@ -180,7 +180,10 @@ fn check_clause(c: &Clause, s: &mut Scope) -> Result<()> {
                     ));
                 }
                 if matches!(e, Expr::HasLabels(..)) {
-                    return Err(err("InvalidDelete", "DELETE can't remove labels; use REMOVE"));
+                    return Err(err(
+                        "InvalidDelete",
+                        "DELETE can't remove labels; use REMOVE",
+                    ));
                 }
             }
         }
@@ -268,7 +271,10 @@ fn var(v: &str, s: &Scope) -> Result<()> {
     if s.has(v) {
         Ok(())
     } else {
-        Err(err("UndefinedVariable", format!("Variable `{v}` not defined")))
+        Err(err(
+            "UndefinedVariable",
+            format!("Variable `{v}` not defined"),
+        ))
     }
 }
 
@@ -287,14 +293,14 @@ fn bind_match(patterns: &[PathPattern], s: &mut Scope) -> Result<()> {
                 Kind::Any
             }
         });
-        let same = match (prev, k) {
-            (Kind::Any, _) => true,
-            (Kind::RelList, Kind::Rel) | (Kind::Rel, Kind::RelList) => true,
-            // A list of relationships matched as a variable-length one
-            // (deprecated, but openCypher allows it).
-            (Kind::Value, Kind::RelList) => true,
-            (a, b) => a == b,
-        };
+        // A list of relationships may be matched as a variable-length one
+        // (deprecated, but openCypher allows it).
+        let same = prev == Kind::Any
+            || prev == k
+            || matches!(
+                (prev, k),
+                (Kind::RelList, Kind::Rel) | (Kind::Rel | Kind::Value, Kind::RelList)
+            );
         if !same {
             return Err(err(
                 "VariableTypeConflict",
@@ -321,7 +327,9 @@ fn bind_match(patterns: &[PathPattern], s: &mut Scope) -> Result<()> {
                 if rels_here.contains(rv) {
                     return Err(err(
                         "RelationshipUniquenessViolation",
-                        format!("Cannot use the same relationship variable '{rv}' for multiple relationships"),
+                        format!(
+                            "Cannot use the same relationship variable '{rv}' for multiple relationships"
+                        ),
                     ));
                 }
                 rels_here.push(rv.clone());
@@ -373,13 +381,13 @@ fn bind_match(patterns: &[PathPattern], s: &mut Scope) -> Result<()> {
 fn bind_create(patterns: &[PathPattern], s: &mut Scope, what: &str) -> Result<()> {
     let bound = |n: &str, s: &Scope| s.vars.contains_key(n);
     for p in patterns {
-        if let Some(pv) = &p.var {
-            if bound(pv, s) {
-                return Err(err(
-                    "VariableAlreadyBound",
-                    format!("Variable `{pv}` already declared"),
-                ));
-            }
+        if let Some(pv) = &p.var
+            && bound(pv, s)
+        {
+            return Err(err(
+                "VariableAlreadyBound",
+                format!("Variable `{pv}` already declared"),
+            ));
         }
         if let Some(nv) = &p.start.var
             && bound(nv, s)
@@ -411,7 +419,9 @@ fn bind_create(patterns: &[PathPattern], s: &mut Scope, what: &str) -> Result<()
             {
                 return Err(err(
                     "VariableAlreadyBound",
-                    format!("Can't {what} `{nv}` with properties or labels here: it already exists"),
+                    format!(
+                        "Can't {what} `{nv}` with properties or labels here: it already exists"
+                    ),
                 ));
             }
             if let Some(rv) = &r.var {
@@ -652,10 +662,7 @@ fn expr(e: &Expr, s: &Scope) -> Result<()> {
             if matches!(op, BinOp::And | BinOp::Or | BinOp::Xor)
                 && (lit_not_bool(a) || lit_not_bool(b))
             {
-                return Err(err(
-                    "InvalidArgumentType",
-                    "AND, OR and XOR take booleans",
-                ));
+                return Err(err("InvalidArgumentType", "AND, OR and XOR take booleans"));
             }
             expr(a, s)?;
             expr(b, s)
@@ -758,7 +765,7 @@ mod tests {
             Err(e) => e
                 .message
                 .split(": ")
-                .nth(0)
+                .next()
                 .unwrap_or_default()
                 .trim_start_matches("[Neo.ClientError.Statement.SyntaxError] ")
                 .to_owned(),
@@ -770,17 +777,35 @@ mod tests {
         for (q, want) in [
             ("MATCH ()-[r]-() MATCH (r) RETURN r", "VariableTypeConflict"),
             ("WITH 1 AS n MATCH (n) RETURN n", "VariableTypeConflict"),
-            ("MATCH (n) WITH [n] AS u MATCH (u)-->(m) RETURN m", "VariableTypeConflict"),
-            ("MATCH (p)-[]-() MATCH p = ()-[]-() RETURN p", "VariableAlreadyBound"),
+            (
+                "MATCH (n) WITH [n] AS u MATCH (u)-->(m) RETURN m",
+                "VariableTypeConflict",
+            ),
+            (
+                "MATCH (p)-[]-() MATCH p = ()-[]-() RETURN p",
+                "VariableAlreadyBound",
+            ),
             ("MATCH p = (p)-[]-() RETURN p", "VariableAlreadyBound"),
-            ("MATCH (a)-[r]->()-[r]->(a) RETURN r", "RelationshipUniquenessViolation"),
+            (
+                "MATCH (a)-[r]->()-[r]->(a) RETURN r",
+                "RelationshipUniquenessViolation",
+            ),
             ("MATCH (a) CREATE (a)", "VariableAlreadyBound"),
             ("MATCH (a) CREATE (a {x: 1})", "VariableAlreadyBound"),
-            ("MATCH ()-[r]->() CREATE ()-[r:R]->()", "VariableAlreadyBound"),
+            (
+                "MATCH ()-[r]->() CREATE ()-[r:R]->()",
+                "VariableAlreadyBound",
+            ),
             ("MATCH (a) RETURN foo", "UndefinedVariable"),
             ("MATCH (n) WHERE (n)-[r]->(a) RETURN n", "UndefinedVariable"),
-            ("MATCH (a) WHERE count(a) > 10 RETURN a", "InvalidAggregation"),
-            ("MATCH (n) WITH n.a AS f ORDER BY max(n.b) RETURN f", "InvalidAggregation"),
+            (
+                "MATCH (a) WHERE count(a) > 10 RETURN a",
+                "InvalidAggregation",
+            ),
+            (
+                "MATCH (n) WITH n.a AS f ORDER BY max(n.b) RETURN f",
+                "InvalidAggregation",
+            ),
             ("RETURN 1 AND true", "InvalidArgumentType"),
             ("MATCH (n) RETURN length(n)", "InvalidArgumentType"),
             ("MATCH ()-[]-() DELETE 1 + 1", "InvalidArgumentType"),
@@ -789,16 +814,28 @@ mod tests {
             ("MATCH (a)-[r]->(b) MATCH (a)-[r]->(c) RETURN c", "ok"),
             ("MATCH (a) CREATE (a)-[:R]->(b) RETURN b", "ok"),
             ("MATCH (a) WITH a ORDER BY a.x RETURN a", "ok"),
-            ("MATCH (a) RETURN a.x AS x, count(*) AS c ORDER BY c DESC, x", "ok"),
+            (
+                "MATCH (a) RETURN a.x AS x, count(*) AS c ORDER BY c DESC, x",
+                "ok",
+            ),
             ("MATCH (a) WHERE (a)-->() RETURN [x IN [1] | x + 1]", "ok"),
             ("UNWIND [1, 2] AS x WITH x WHERE x > 1 RETURN x", "ok"),
             ("MATCH (a) RETURN DISTINCT a.name ORDER BY a.name", "ok"),
-            ("MATCH (a) RETURN DISTINCT a.name ORDER BY a.age", "UndefinedVariable"),
+            (
+                "MATCH (a) RETURN DISTINCT a.name ORDER BY a.age",
+                "UndefinedVariable",
+            ),
             ("MATCH (n) WHERE (n) RETURN n", "InvalidArgumentType"),
             ("CALL { MATCH (n) RETURN n } RETURN n", "ok"),
             ("MATCH (n) RETURN n {.a, b: 1}", "ok"),
-            ("MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE b.x = 1 } RETURN a", "ok"),
-            ("MATCH p = (a)-[*]->(b) RETURN length(p), size(nodes(p))", "ok"),
+            (
+                "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE b.x = 1 } RETURN a",
+                "ok",
+            ),
+            (
+                "MATCH p = (a)-[*]->(b) RETURN length(p), size(nodes(p))",
+                "ok",
+            ),
         ] {
             assert_eq!(rule(q), want, "{q}");
         }

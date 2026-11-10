@@ -646,7 +646,11 @@ impl PassSession {
             group: offsets::logic_group(req.source.binding_id),
             // A fan-in trigger's position is on the member's instance (R9).
             instance: req.instance_tenant,
-            stream: req.source.object_id,
+            stream: if req.instance_tenant == 0 {
+                req.source.object_id
+            } else {
+                req.instance_stream
+            },
             partition: r.partition,
             offset: r.offset + 1,
             epoch: None,

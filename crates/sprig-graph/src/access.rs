@@ -24,8 +24,7 @@ use sprig_common::Result;
 
 use crate::ast::{Dir, Schema};
 use crate::store::{
-    EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, NodeRow, Reach, Scan, SchemaCounts,
-    StoreStats,
+    EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, NodeRow, Reach, Scan, SchemaCounts, StoreStats,
 };
 
 /// What a reader may see: readable label and relationship type names.
@@ -112,7 +111,10 @@ impl<'s> FilteredStore<'s> {
 
     /// Keeps edges of readable types whose ends are visible.
     async fn visible_edges(&mut self, edges: Vec<EdgeRow>) -> Result<Vec<EdgeRow>> {
-        let edges: Vec<EdgeRow> = edges.into_iter().filter(|e| self.type_ok(e.rtype)).collect();
+        let edges: Vec<EdgeRow> = edges
+            .into_iter()
+            .filter(|e| self.type_ok(e.rtype))
+            .collect();
         let mut ends: Vec<u64> = edges.iter().flat_map(|e| [e.src, e.dst]).collect();
         ends.sort_unstable();
         ends.dedup();
@@ -391,7 +393,11 @@ mod tests {
                 ["b", "c"]
             );
             assert_eq!(
-                rows(&mut f, "MATCH (a {n: 'a'})-[*]->(y) RETURN count(DISTINCT y)").await,
+                rows(
+                    &mut f,
+                    "MATCH (a {n: 'a'})-[*]->(y) RETURN count(DISTINCT y)"
+                )
+                .await,
                 ["2"]
             );
             assert_eq!(

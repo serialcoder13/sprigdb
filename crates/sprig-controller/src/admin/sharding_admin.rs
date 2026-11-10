@@ -87,7 +87,11 @@ impl AdminService {
     ///
     /// # Errors
     /// 39902 and the loop's errors.
-    pub async fn show_graph(&self, tenant: &str, graph: &str) -> Result<crate::sharding::GraphView> {
+    pub async fn show_graph(
+        &self,
+        tenant: &str,
+        graph: &str,
+    ) -> Result<crate::sharding::GraphView> {
         let t = self.get_tenant(tenant).await?.tenant_id;
         self.sharding()?.graph_show(t, graph).await
     }

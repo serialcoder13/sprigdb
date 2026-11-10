@@ -67,6 +67,11 @@ pub struct GatewayLocator {
     /// When a tenant's home was last read again after its map turned
     /// `quarantined` (at most once a second).
     refreshed: Mutex<HashMap<TenantId, std::time::Instant>>,
+    /// Decoded maps by key and etcd revision: every statement reads its
+    /// tenant's map three times (holds, roles, RL14's token), and decoding
+    /// the record each time was a tenth of a MongoDB point read's gateway
+    /// CPU (R5 round 4).
+    decoded: Mutex<HashMap<String, (u64, Arc<ShardMap>)>>,
 }
 
 impl std::fmt::Debug for GatewayLocator {
@@ -88,6 +93,7 @@ impl GatewayLocator {
             global: None,
             routing: crate::dc::DcRouting::new(my_dc),
             refreshed: Mutex::new(HashMap::new()),
+            decoded: Mutex::new(HashMap::new()),
             dc,
             registry,
             backends,
@@ -141,16 +147,39 @@ impl GatewayLocator {
 
     /// `tenant`'s map in DC `dc`, from the mirror.
     fn mirrored_map(&self, dc: &DcId, tenant: TenantId) -> Option<ShardMap> {
+        self.mirrored_map_arc(dc, tenant).map(|m| (*m).clone())
+    }
+
+    fn mirrored_map_arc(&self, dc: &DcId, tenant: TenantId) -> Option<Arc<ShardMap>> {
         let key = ShardMap::catalog_key(&Tier::Dc(dc.clone()), tenant).ok()?;
         let kv = self.maps_of(dc).get(&key)?;
-        Record::<ShardMap>::decode(&kv.value).ok().map(|r| r.body)
+        self.decode_map(key.as_str(), kv.mod_revision, &kv.value)
+    }
+
+    /// The map record `value` at `key`, decoded once per revision.
+    fn decode_map(&self, key: &str, rev: u64, value: &[u8]) -> Option<Arc<ShardMap>> {
+        if let Some((r, m)) = self
+            .decoded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            && *r == rev
+        {
+            return Some(Arc::clone(m));
+        }
+        let m = Arc::new(Record::<ShardMap>::decode(value).ok()?.body);
+        self.decoded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.to_owned(), (rev, Arc::clone(&m)));
+        Some(m)
     }
 
     /// The role of the map this gateway follows for `tenant` (chapter 25:
     /// a `quarantined` map is a fenced copy); `None` until it has loaded.
     #[must_use]
     pub fn followed_role(&self, tenant: TenantId) -> Option<MapRole> {
-        self.mirrored_map(&self.home_of(tenant), tenant)
+        self.mirrored_map_arc(&self.home_of(tenant), tenant)
             .map(|m| m.role)
     }
 
@@ -173,12 +202,13 @@ impl GatewayLocator {
                     break;
                 }
                 sum = sum.wrapping_add(kv.mod_revision);
-                held |= Record::<ShardMap>::decode(&kv.value).is_ok_and(|m| {
-                    m.body
-                        .ranges
-                        .iter()
-                        .any(|r| r.state == sprig_catalog::placement::RangeState::Held)
-                });
+                held |= self
+                    .decode_map(k.as_str(), kv.mod_revision, &kv.value)
+                    .is_some_and(|m| {
+                        m.ranges
+                            .iter()
+                            .any(|r| r.state == sprig_catalog::placement::RangeState::Held)
+                    });
             }
             (sum, held)
         });
@@ -231,7 +261,7 @@ impl GatewayLocator {
     /// loaded.
     pub async fn placement_followed(&self, tenant: TenantId) -> Option<Placement> {
         let dc = self.home_of(tenant);
-        let map = self.mirrored_map(&dc, tenant);
+        let map = self.mirrored_map_arc(&dc, tenant);
         if map.as_ref().is_none_or(|m| m.role != MapRole::Home) && self.global.is_some() {
             self.refresh_home(tenant).await;
             let now = self.home_of(tenant);
@@ -243,7 +273,7 @@ impl GatewayLocator {
                 }
             }
         }
-        Placement::of(&map?).ok()
+        Placement::of(&*map?).ok()
     }
 
     /// Changes whenever a map in the DC `tenant` is followed in changes.

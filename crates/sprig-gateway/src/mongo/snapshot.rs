@@ -84,7 +84,11 @@ pub fn reads(name: &str, body: &Document) -> bool {
 /// The `atClusterTime` a command asks for, if any.
 #[must_use]
 pub fn at_of(body: &Document) -> Option<Timestamp> {
-    match body.get_document("readConcern").ok()?.get("atClusterTime")? {
+    match body
+        .get_document("readConcern")
+        .ok()?
+        .get("atClusterTime")?
+    {
         Bson::Timestamp(t) => Some(*t),
         _ => None,
     }
@@ -115,10 +119,7 @@ impl Snapshots {
         {
             let mut g = e.lock().await;
             if g.owner != *owner {
-                return Err(MongoError::new(
-                    13,
-                    "this snapshot belongs to another user",
-                ));
+                return Err(MongoError::new(13, "this snapshot belongs to another user"));
             }
             g.used = Instant::now();
         }

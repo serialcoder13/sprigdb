@@ -298,6 +298,12 @@ async fn run_inner(
             .reply);
     }
     let cfg = c.shared.settings();
+    // READ COMMITTED for the write and its record (R5 round 4): the
+    // record's locking read of a session's first write takes no gap lock,
+    // so concurrent first writes of many sessions don't deadlock on the
+    // records table; the document's own read-modify-write is checked by
+    // `_v` either way.
+    s.read_committed().await;
     let mut attempt = 0u32;
     let mut recreated = false;
     loop {
@@ -388,6 +394,14 @@ async fn run_inner(
             rollback(s).await;
             metrics::counter!("sprig_mongo_write_conflict_retries_total", "command" => name.to_owned())
                 .increment(1);
+            // A short random wait, growing with the attempts, so writers
+            // that collided don't collide again at once.
+            let spread = u64::from(attempt) * 5;
+            let jitter = u64::from(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos()))
+                % spread.max(1);
+            tokio::time::sleep(Duration::from_millis(1 + jitter)).await;
             continue;
         }
         let out = match (r, broken) {

@@ -165,8 +165,15 @@ fn mb(n: u64) -> usize {
     us(n).saturating_mul(1 << 20)
 }
 
-/// 75% of the cgroup's memory limit, when the process has one.
+/// 75% of the cgroup's memory limit, when the process has one: read once
+/// per process (every statement asks for the limits twice, and reading
+/// the file each time cost two `open` calls per statement; R5 round 4).
 fn cgroup_budget() -> Option<usize> {
+    static BUDGET: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(read_cgroup_budget)
+}
+
+fn read_cgroup_budget() -> Option<usize> {
     let raw = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
         .or_else(|_| std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
         .ok()?;

@@ -1535,6 +1535,11 @@ impl GatewayGraphs {
     ///
     /// # Errors
     /// 1062 naming the two elements; backend errors.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::many_single_char_names,
+        clippy::items_after_statements
+    )] // page, claim, check the holder
     async fn backfill_claims(&self, g: &GraphRef, d: &IndexDef) -> Result<()> {
         use sprig_graph::schema::{claim_key, claim_rk};
         let layout = &g.shards;
