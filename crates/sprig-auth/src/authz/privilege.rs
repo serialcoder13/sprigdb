@@ -291,6 +291,9 @@ pub enum Level {
     Object,
     /// `db.t (c)`: one column.
     Column,
+    /// One label or relationship type of a graph (chapter 43, R8):
+    /// `GRANT READ ON GRAPH db.g NODES L`.
+    GraphElement,
 }
 
 impl Level {
@@ -302,6 +305,7 @@ impl Level {
             Level::Database => "database",
             Level::Object => "object",
             Level::Column => "column",
+            Level::GraphElement => "graph_element",
         }
     }
 
@@ -315,6 +319,7 @@ impl Level {
             "database" => Some(Level::Database),
             "object" => Some(Level::Object),
             "column" => Some(Level::Column),
+            "graph_element" => Some(Level::GraphElement),
             _ => None,
         }
     }
@@ -424,6 +429,7 @@ pub const fn grantable_at(level: Level, object: ObjectType) -> ActionSet {
         (Level::Object, ObjectType::Table) => TABLE_ACTIONS,
         (Level::Object, _) => ROUTINE_ACTIONS,
         (Level::Column, _) => COLUMN_ACTIONS,
+        (Level::GraphElement, _) => ActionSet::of(&[Action::Select]),
     }
 }
 

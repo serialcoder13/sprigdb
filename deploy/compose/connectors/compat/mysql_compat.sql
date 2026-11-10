@@ -1,0 +1,26 @@
+-- Translator rules of R4 round 2 (chapter 28): SHOW ENGINES (gaps row 48),
+-- VERSION() inside stored code (row 53), WITH ROLLUP with ORDER BY and
+-- GROUPING() (step 9), user-level locks (step 14).
+SHOW ENGINES;
+DROP TABLE IF EXISTS c_mc_t;
+DROP PROCEDURE IF EXISTS c_mc_p;
+DROP FUNCTION IF EXISTS c_mc_f;
+CREATE TABLE c_mc_t (a INT, b VARCHAR(5), c INT);
+INSERT INTO c_mc_t VALUES (1,'x',10),(1,'y',20),(2,'x',30),(NULL,'z',5);
+SELECT a, SUM(c) FROM c_mc_t GROUP BY a WITH ROLLUP ORDER BY a DESC;
+SELECT a, b, SUM(c) AS s FROM c_mc_t GROUP BY a, b WITH ROLLUP ORDER BY s DESC, 1, 2 LIMIT 4;
+SELECT a, GROUPING(a), SUM(c) FROM c_mc_t GROUP BY a WITH ROLLUP;
+SELECT a, b, GROUPING(a, b), GROUPING(b) AS gb, SUM(c) FROM c_mc_t GROUP BY a, b WITH ROLLUP;
+SELECT IF(GROUPING(a), 'total', a) AS k, SUM(c) FROM c_mc_t GROUP BY a WITH ROLLUP;
+SELECT a, GROUPING(a), COUNT(*) FROM c_mc_t WHERE c > 100 GROUP BY a WITH ROLLUP;
+SELECT a, SUM(c) FROM c_mc_t GROUP BY a WITH ROLLUP HAVING GROUPING(a) = 1 OR SUM(c) > 20 ORDER BY 2;
+CREATE PROCEDURE c_mc_p(OUT v VARCHAR(255)) SELECT VERSION() INTO v;
+CREATE FUNCTION c_mc_f() RETURNS VARCHAR(255) DETERMINISTIC RETURN VERSION();
+CALL c_mc_p(@c_mc_v);
+SELECT @c_mc_v = VERSION(), c_mc_f() = VERSION();
+SELECT ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = DATABASE() AND ROUTINE_NAME = 'c_mc_f';
+SELECT GET_LOCK('c_mc_Lock', 0), IS_FREE_LOCK('c_mc_Lock'), IS_FREE_LOCK('c_mc_lock'), IS_USED_LOCK('c_mc_Lock') IS NOT NULL, IS_FREE_LOCK('c_mc_other');
+SELECT RELEASE_LOCK('c_mc_Lock'), RELEASE_LOCK('c_mc_Lock'), IS_FREE_LOCK('c_mc_Lock');
+DROP PROCEDURE c_mc_p;
+DROP FUNCTION c_mc_f;
+DROP TABLE c_mc_t;

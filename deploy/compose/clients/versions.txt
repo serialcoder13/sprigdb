@@ -8,3 +8,4 @@ mariadb-connector-j    https://github.com/mariadb-corporation/mariadb-connector-
 mysql-connector-j      https://github.com/mysql/mysql-connector-j.git          9.7.0
 php-mysqli             image:sprigdb-conn-php:dev                              8.4.14
 php-pdo-mysql          image:sprigdb-conn-php:dev                              8.4.14
+sqlalchemy             https://github.com/sqlalchemy/sqlalchemy.git            rel_2_0_36

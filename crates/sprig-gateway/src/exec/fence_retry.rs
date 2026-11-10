@@ -360,7 +360,7 @@ mod tests {
         let map = MemoryNameMap::new(TenantId(7)).with_db(1, "shop", 0, 0);
         let shop = SprigError::backend(1146, *b"42S02", "Table 'shop.orders' doesn't exist");
         assert!(known_db(&shop, &map));
-        let phys = SprigError::backend(1049, *b"42000", "Unknown database 't7_d1'");
+        let phys = SprigError::backend(1049, *b"42000", "Unknown database 't7_d1_g0_s0'");
         assert!(known_db(&phys, &map));
         let other = SprigError::backend(1146, *b"42S02", "Table 'nope.orders' doesn't exist");
         assert!(!known_db(&other, &map));

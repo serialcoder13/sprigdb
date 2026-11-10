@@ -7,8 +7,9 @@
 //! Where this differs from the book: chapter 16 runs the advisor as a
 //! worker job; there is no worker job runtime for it yet, so the DC leader
 //! runs the advisor's first design inside the tick, as the library loop
-//! does. Tenant-scope values stored in tenants' catalogs (not etcd) aren't
-//! read yet, as for the balancer.
+//! does. Tenant-scope values stored in tenants' catalogs are read through
+//! [`crate::tenant_scopes`] (RL3, r2harden): a tenant's own `sharding.*`,
+//! `advisor.*` and `mover.cutover_max_hold_ms` rows win over its DC's.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,17 +44,32 @@ impl ClusterPools for WriterPools {
     }
 }
 
+/// The tenant-rows cache, set once the controller has built it.
+type ScopesCell = Arc<std::sync::OnceLock<Arc<crate::tenant_scopes::TenantScopes>>>;
+
 /// Settings from the controller's live settings.
 pub struct LiveSource {
     live: Option<LiveSettings>,
     dc: DcId,
+    /// Tenants' own catalog rows (RL3), as cached.
+    scopes: ScopesCell,
 }
 
 impl LiveSource {
     /// Resolves in `dc` from `live` (defaults without it).
     #[must_use]
     pub fn new(live: Option<LiveSettings>, dc: DcId) -> Self {
-        Self { live, dc }
+        Self {
+            live,
+            dc,
+            scopes: Arc::default(),
+        }
+    }
+
+    /// The tenant's rows as cached (read in the background when missing
+    /// or stale); `None` without the cache.
+    fn rows(&self, tenant: TenantId) -> Option<Arc<sprig_settings::TenantSettings>> {
+        self.scopes.get().and_then(|s| s.cached(tenant))
     }
 }
 
@@ -65,10 +81,11 @@ impl SettingsSource for LiveSource {
         let snap = live.snapshot();
         let s: &MemSettings<'_> = &snap;
         let ctx = SettingCtx::process(&self.dc).for_tenant(tenant, &[]);
-        let m = sprig_mover::MoverSettings::resolve(s, &ctx);
+        let rows = self.rows(tenant);
+        let m = sprig_mover::MoverSettings::resolve_with(s, rows.as_deref(), &ctx);
         TenantSettings {
-            sharding: ShardingSettings::resolve(s, &ctx),
-            advisor: AdvisorSettings::resolve(s, &ctx),
+            sharding: ShardingSettings::resolve_with(s, rows.as_deref(), &ctx),
+            advisor: AdvisorSettings::resolve_with(s, rows.as_deref(), &ctx),
             max_hold: m.cutover_max_hold,
             txn_grace: m.txn_grace,
             hold_grace: m.hold_grace,
@@ -85,7 +102,7 @@ impl SettingsSource for LiveSource {
         let ctx = SettingCtx::process(&self.dc)
             .for_tenant(tenant, &[])
             .with_db(db);
-        ShardingSettings::resolve(s, &ctx).min_shards
+        ShardingSettings::resolve_with(s, self.rows(tenant).as_deref(), &ctx).min_shards
     }
 }
 
@@ -97,6 +114,8 @@ pub struct ShardingRuntime {
     settings: Arc<dyn SettingsSource>,
     /// Chapter 20's gateway write sketches (load splits).
     write_load: Arc<GatewayWriteLoad>,
+    /// [`LiveSource`]'s tenant-rows cache (RL3).
+    scopes: ScopesCell,
 }
 
 impl std::fmt::Debug for ShardingRuntime {
@@ -122,7 +141,9 @@ impl ShardingRuntime {
         live: Option<LiveSettings>,
         actor: &str,
     ) -> Self {
-        let settings: Arc<dyn SettingsSource> = Arc::new(LiveSource::new(live, dc.clone()));
+        let source = LiveSource::new(live, dc.clone());
+        let scopes = Arc::clone(&source.scopes);
+        let settings: Arc<dyn SettingsSource> = Arc::new(source);
         let write_load = Arc::new(GatewayWriteLoad::new(
             Arc::clone(&dc_store),
             Arc::clone(&clock),
@@ -143,7 +164,15 @@ impl ShardingRuntime {
             dc,
             settings,
             write_load,
+            scopes,
         }
+    }
+
+    /// The same loop reading tenants' own catalog rows (RL3, r2harden).
+    #[must_use]
+    pub fn with_tenant_scopes(self, s: Arc<crate::tenant_scopes::TenantScopes>) -> Self {
+        let _ = self.scopes.set(s);
+        self
     }
 
     /// The gateways' write sketches the loop reads (hot clusters come from

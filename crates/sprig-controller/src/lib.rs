@@ -386,6 +386,17 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             sprig_mover::JobStore::new(Arc::clone(&stores.dc), Arc::clone(&clock)),
         ))),
     );
+    // Decision RF3 (r2last): tenant, database and object scopes from the
+    // tenants' catalogs, for the loops below that decide per tenant (the balancer and
+    // the sharding loop too: RL3, r2harden).
+    let tenant_scopes = tenant_scopes::TenantScopes::new(
+        Arc::clone(&stores.global),
+        Arc::clone(&stores.dc),
+        Arc::new(
+            RegistryPools::new(registry_for_scopes, Some(Arc::clone(&monitor)))
+                .budget("tenant_settings", 4),
+        ),
+    )?;
     let balancer = Arc::new(balancer_loop::BalancerLoop::new(
         dc.clone(),
         ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?,
@@ -400,7 +411,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Arc::clone(&clock),
         Some(move_exec),
         cfg.node.id().clone(),
-    ));
+    )
+    .with_tenant_scopes(Arc::clone(&tenant_scopes)));
     // Chapters 16 and 20 (R1): the advisor's first design and automatic
     // split, merge and move, per tenant homed here.
     let sharding = Arc::new(
@@ -419,7 +431,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             Some(settings.live.clone()),
             &format!("controller:{}", cfg.node.id()),
         )
-        .with_publish(versioner.clone()),
+        .with_publish(versioner.clone())
+        .with_tenant_scopes(Arc::clone(&tenant_scopes)),
     );
     // Chapter 20: load splits need placement's hot clusters.
     sharding
@@ -439,16 +452,6 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Some(settings.live.clone()),
     )?);
     let tree_loop = TreeSettings::new(tree, dc.clone(), Some(settings.live.clone()))?;
-    // Decision RF3 (r2last): tenant, database and object scopes from the
-    // tenants' catalogs, for the loops below that decide per tenant.
-    let tenant_scopes = tenant_scopes::TenantScopes::new(
-        Arc::clone(&stores.global),
-        Arc::clone(&stores.dc),
-        Arc::new(
-            RegistryPools::new(registry_for_scopes, Some(Arc::clone(&monitor)))
-                .budget("tenant_settings", 4),
-        ),
-    )?;
     // Chapter 24: moves between DCs and traffic windows.
     let moves = Arc::new(
         migrate::DcMoves::new(

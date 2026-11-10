@@ -578,6 +578,46 @@ impl AccountCtx<'_> {
                     name.clone(),
                 ))
             }
+            GrantOn::GraphElement {
+                db,
+                graph,
+                rels,
+                name,
+            } => {
+                let db = match db {
+                    Some(d) => d.clone(),
+                    None => self.current()?,
+                };
+                self.grantable_db(&db)?;
+                let missing = || {
+                    SprigError::new(
+                        sprig_common::SprigCode::GraphNotFound,
+                        format!("Graph '{db}.{graph}' doesn't exist"),
+                    )
+                };
+                let row = self
+                    .snapshot
+                    .database(&self.db_key(&db))
+                    .filter(|d| d.state == DbState::Active)
+                    .ok_or_else(missing)?;
+                let key = object_key(ObjectKind::Graph, graph, self.lower_case_table_names);
+                let obj = self
+                    .snapshot
+                    .object(row.db_id, Namespace::Graph, &key)
+                    .filter(|o| o.state == ObjectState::Active && o.kind == ObjectKind::Graph)
+                    .ok_or_else(missing)?;
+                Ok((
+                    PrivTarget::GraphElement {
+                        db: row.db_id,
+                        graph: obj.object_id,
+                        rels: *rels,
+                        name: name.clone(),
+                    },
+                    ObjectType::Table,
+                    db,
+                    graph.clone(),
+                ))
+            }
         }
     }
 
@@ -592,6 +632,24 @@ impl AccountCtx<'_> {
     ) -> Result<(ActionSet, BTreeMap<String, ActionSet>)> {
         let mut set = ActionSet::EMPTY;
         let mut cols: BTreeMap<String, ActionSet> = BTreeMap::new();
+        if level == Level::GraphElement {
+            // Neo4j's graph privileges: READ (and MATCH, TRAVERSE) read
+            // the label or type; SELECT and ALL are accepted as their SQL
+            // names. Writes stay graph-wide (decision G42).
+            for it in items {
+                if !it.columns.is_empty() {
+                    return Err(illegal_grant());
+                }
+                match it.name.as_str() {
+                    "READ" | "MATCH" | "TRAVERSE" | "SELECT" | "ALL" | "ALL PRIVILEGES" => {
+                        set = set.with(Action::Select);
+                    }
+                    "USAGE" => {}
+                    _ => return Err(illegal_grant()),
+                }
+            }
+            return Ok((set, cols));
+        }
         for it in items {
             let actions = match parse_privilege(&it.name) {
                 PrivName::All => all_at(level, kind),
@@ -672,6 +730,13 @@ impl AccountCtx<'_> {
             PrivTarget::Named {
                 db_key, name_key, ..
             } => p.actions_on(Target::Named { db_key, name_key }),
+            // A graph's element grants need the graph-wide grant (or one
+            // above) with GRANT OPTION.
+            PrivTarget::GraphElement { db: d, graph, .. } => p.actions_on(Target::Object {
+                db_key: &self.db_key(db),
+                db: *d,
+                object: *graph,
+            }),
             PrivTarget::Object { db: d, object } | PrivTarget::Column { db: d, object, .. } => p
                 .actions_on(Target::Object {
                     db_key: &self.db_key(db),

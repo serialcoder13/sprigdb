@@ -20,11 +20,13 @@
 //! - [`pgq`]: SQL/PGQ `GRAPH_TABLE` in SQL statements.
 //! - [`gql`]: the GQL subset, rewritten into Cypher before parsing.
 //! - [`temporal`]: temporal and spatial values.
+//! - [`access`]: per-label and per-type read grants.
 
 // An interpreter: evaluator and executor functions are one match or one
 // step-by-step walk each, with the short names of the algorithms.
 #![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
+pub mod access;
 pub mod ast;
 pub mod bookmark;
 pub mod catalog;

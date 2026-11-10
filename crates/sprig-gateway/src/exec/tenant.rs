@@ -955,6 +955,24 @@ impl PassSession {
         {
             return Ok(step);
         }
+        // 3306: `WITH ROLLUP` with `ORDER BY` and `GROUPING()` (chapter
+        // 28 step 9, R4).
+        let rolled;
+        let text: &Bytes = match (self.persona == Persona::MySql84)
+            .then(|| {
+                sprig_sql::compat::rollup::rewrite(
+                    text,
+                    sprig_sql::compat::rollup::DEFAULT_MAX_COLUMNS,
+                )
+            })
+            .flatten()
+        {
+            Some(t) => {
+                rolled = Bytes::from(t);
+                &rolled
+            }
+            None => text,
+        };
         // 3306: MySQL's ONLY_FULL_GROUP_BY and ORDER BY rules (chapter
         // 28, R4).
         if let Some(e) = self.group_check(cx, text, &lex).await? {
@@ -1888,6 +1906,20 @@ impl PassSession {
             }
         } else {
             sql
+        };
+        // 3306: `WITH ROLLUP` with `ORDER BY` and `GROUPING()` (chapter
+        // 28 step 9, R4).
+        let sql = match (self.persona == Persona::MySql84)
+            .then(|| {
+                sprig_sql::compat::rollup::rewrite(
+                    &sql,
+                    sprig_sql::compat::rollup::DEFAULT_MAX_COLUMNS,
+                )
+            })
+            .flatten()
+        {
+            Some(t) => Bytes::from(t),
+            None => sql,
         };
         // 3306: MySQL checks ONLY_FULL_GROUP_BY when it prepares (chapter
         // 28, R4).

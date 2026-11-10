@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx};
+use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx, TenantSettings};
 
 use crate::settings::GB;
 
@@ -158,6 +158,24 @@ pub struct ShardingSettings {
     pub max_copies_per_cluster: u32,
 }
 
+/// One key over the etcd scopes and, when given, a tenant's own rows
+/// (RL3, r2harden).
+pub(crate) fn layered<T: sprig_settings::SettingValue>(
+    s: &MemSettings<'_>,
+    rows: Option<&TenantSettings>,
+    k: &Setting<T>,
+    ctx: &SettingCtx<'_>,
+) -> T {
+    match rows {
+        Some(t) => t
+            .resolve(s, k.key, ctx)
+            .ok()
+            .and_then(|r| T::from_value(&r.value))
+            .unwrap_or_else(|| k.default.clone()),
+        None => s.get(k, ctx),
+    }
+}
+
 fn hours(h: f64) -> Duration {
     Duration::from_secs_f64((h * 3600.0).max(0.0))
 }
@@ -175,18 +193,30 @@ impl ShardingSettings {
     /// Resolves the keys in `ctx` (a context with the tenant set).
     #[must_use]
     pub fn resolve(s: &MemSettings<'_>, ctx: &SettingCtx<'_>) -> Self {
+        Self::resolve_with(s, None, ctx)
+    }
+
+    /// [`Self::resolve`] with the tenant's own catalog rows (tenant,
+    /// database, ancestors) layered over the etcd scopes (RL3, r2harden):
+    /// what a gateway would resolve.
+    #[must_use]
+    pub fn resolve_with(
+        s: &MemSettings<'_>,
+        rows: Option<&TenantSettings>,
+        ctx: &SettingCtx<'_>,
+    ) -> Self {
         Self {
-            mode: ShardingMode::parse(&s.get(&MODE, ctx)),
-            split_bytes: s.get(&SPLIT_SIZE_GB, ctx) * GB,
-            split_write_share: f64::from(s.get(&SPLIT_WRITE_SHARE_PCT, ctx)) / 100.0,
-            sustain: Duration::from_secs(s.get(&SPLIT_SUSTAIN_MINUTES, ctx) * 60),
-            merge_bytes: s.get(&MERGE_SIZE_GB, ctx) * GB,
-            merge_cooldown: hours(s.get(&MERGE_COOLDOWN_HOURS, ctx)),
-            max_split_ways: s.get(&MAX_SPLIT_WAYS, ctx),
-            max_jobs_per_tenant: s.get(&MAX_JOBS_PER_TENANT, ctx),
-            check_interval: Duration::from_secs(s.get(&CHECK_INTERVAL_SECONDS, ctx)),
-            retire: hours(s.get(&RETIRE_HOURS, ctx)),
-            min_shards: s.get(&MIN_SHARDS, ctx),
+            mode: ShardingMode::parse(&layered(s, rows, &MODE, ctx)),
+            split_bytes: layered(s, rows, &SPLIT_SIZE_GB, ctx) * GB,
+            split_write_share: f64::from(layered(s, rows, &SPLIT_WRITE_SHARE_PCT, ctx)) / 100.0,
+            sustain: Duration::from_secs(layered(s, rows, &SPLIT_SUSTAIN_MINUTES, ctx) * 60),
+            merge_bytes: layered(s, rows, &MERGE_SIZE_GB, ctx) * GB,
+            merge_cooldown: hours(layered(s, rows, &MERGE_COOLDOWN_HOURS, ctx)),
+            max_split_ways: layered(s, rows, &MAX_SPLIT_WAYS, ctx),
+            max_jobs_per_tenant: layered(s, rows, &MAX_JOBS_PER_TENANT, ctx),
+            check_interval: Duration::from_secs(layered(s, rows, &CHECK_INTERVAL_SECONDS, ctx)),
+            retire: hours(layered(s, rows, &RETIRE_HOURS, ctx)),
+            min_shards: layered(s, rows, &MIN_SHARDS, ctx),
             max_copies_per_cluster: 2,
         }
         .banded()

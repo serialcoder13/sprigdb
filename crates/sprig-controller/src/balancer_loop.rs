@@ -36,8 +36,8 @@
 //! `recommend`.
 //!
 //! **Settings** are resolved at DC scope (and cluster scope for the
-//! per-cluster keys); tenant-scope values wait for the catalogs' settings
-//! to be read here, as in the other DC loops.
+//! per-cluster keys); each tenant's knobs also read its own catalog rows
+//! through [`crate::tenant_scopes`] (RL3, r2harden).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -95,6 +95,9 @@ pub struct BalancerLoop {
     log: Arc<CatalogDecisionLog>,
     recs: RecommendationStore,
     inner: Mutex<Inner>,
+    /// Tenants' own catalog rows (RL3, r2harden): a tenant's
+    /// `balancer.*` knobs win over its DC's.
+    scopes: Option<Arc<crate::tenant_scopes::TenantScopes>>,
 }
 
 impl std::fmt::Debug for BalancerLoop {
@@ -149,7 +152,15 @@ impl BalancerLoop {
             live,
             clock,
             exec,
+            scopes: None,
         }
+    }
+
+    /// The same loop reading tenants' own `balancer.*` rows (RL3).
+    #[must_use]
+    pub fn with_tenant_scopes(mut self, s: Arc<crate::tenant_scopes::TenantScopes>) -> Self {
+        self.scopes = Some(s);
+        self
     }
 
     fn settings(&self) -> BalancerSettings {
@@ -365,7 +376,10 @@ impl BalancerLoop {
             Some(l) => {
                 let snap = l.snapshot();
                 let ctx = SettingCtx::process(&self.dc).for_tenant(t, &[]);
-                resolve_knobs(&snap, &ctx)
+                // RL3: the tenant's own rows, as cached (read in the
+                // background when missing or stale).
+                let rows = self.scopes.as_ref().and_then(|s| s.cached(t));
+                TenantKnobs::resolve_with(&snap, rows.as_deref(), &ctx)
             }
             None => TenantKnobs::default(),
         }
@@ -765,10 +779,6 @@ fn resolve_balancer(s: &MemSettings<'_>, ctx: &SettingCtx<'_>) -> BalancerSettin
 
 fn resolve_limits(s: &MemSettings<'_>, ctx: &SettingCtx<'_>, slots: u32) -> ClusterLimits {
     ClusterLimits::resolve(s, ctx, slots)
-}
-
-fn resolve_knobs(s: &MemSettings<'_>, ctx: &SettingCtx<'_>) -> TenantKnobs {
-    TenantKnobs::resolve(s, ctx)
 }
 
 /// The loop's one key.

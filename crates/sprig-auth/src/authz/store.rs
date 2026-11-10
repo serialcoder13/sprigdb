@@ -194,6 +194,21 @@ pub enum PrivTarget {
         /// The column, lower case; `None` for the table itself.
         column: Option<String>,
     },
+    /// One label (`NODES L`) or relationship type (`RELATIONSHIPS T`) of a
+    /// graph (chapter 43, R8): a `graph_element` row with the graph in
+    /// `object_id`, bit 31 of `element` set for relationship types, and
+    /// the label or type's name in `name_pattern` (decision G42: by name,
+    /// so a grant may name a label no node carries yet, as in Neo4j).
+    GraphElement {
+        /// The database.
+        db: DbId,
+        /// The graph.
+        graph: ObjectId,
+        /// A relationship type (else a label).
+        rels: bool,
+        /// The label or type, case-sensitive.
+        name: String,
+    },
 }
 
 /// The columns [`AuthzStore::keep_by_name`] copies: grantee tenant, kind
@@ -247,6 +262,15 @@ impl PrivTarget {
             | PrivTarget::Named {
                 column: Some(_), ..
             } => Level::Column,
+            PrivTarget::GraphElement { .. } => Level::GraphElement,
+        }
+    }
+
+    /// The `element` column: bit 31 for a relationship type.
+    fn element(&self) -> u32 {
+        match self {
+            PrivTarget::GraphElement { rels: true, .. } => 1 << 31,
+            _ => 0,
         }
     }
 
@@ -276,6 +300,9 @@ impl PrivTarget {
                 column.clone().unwrap_or_default(),
                 named_pattern(db_key, name_key),
             ),
+            PrivTarget::GraphElement {
+                db, graph, name, ..
+            } => (db.0, graph.0, String::new(), name.clone()),
         }
     }
 }
@@ -424,10 +451,11 @@ impl AuthzStore {
         let privs: Vec<Row> = q
             .query(format!(
                 "SELECT priv_id, grantee_kind, grantee_id, level, db_id, object_id, column_name, \
-                 name_pattern, actions, restriction FROM {} \
+                 name_pattern, actions, restriction, element FROM {} \
                  WHERE grantee_tenant_id = 0 \
                  AND (restriction = 0 OR level = 'database') \
-                 AND level IN ('tenant','database','object','column') ORDER BY priv_id",
+                 AND level IN ('tenant','database','object','column','graph_element') \
+                 ORDER BY priv_id",
                 self.privileges
             ))
             .await
@@ -439,7 +467,7 @@ impl AuthzStore {
             let db = DbId(get(r, 4)?);
             let object = ObjectId(get(r, 5)?);
             let pattern: String = get(r, 7)?;
-            let named = if object.0 == 0 {
+            let named = if object.0 == 0 && level != "graph_element" {
                 parse_named(&pattern)
             } else {
                 None
@@ -463,6 +491,12 @@ impl AuthzStore {
                     db,
                     object,
                     column: get(r, 6)?,
+                },
+                (Some(Level::GraphElement), _) => PrivTarget::GraphElement {
+                    db,
+                    graph: object,
+                    rels: get::<u32>(r, 10)? & (1 << 31) != 0,
+                    name: pattern.clone(),
                 },
                 (None, _) => continue,
             };
@@ -514,6 +548,7 @@ impl AuthzStore {
                 Value::from(target.restriction()),
                 Value::from(actions.0),
                 Value::from(granted_by.map(|u| u.0)),
+                Value::from(target.element()),
             ],
         )
         .await
@@ -536,7 +571,7 @@ impl AuthzStore {
         let (db, object, column, pattern) = target.parts();
         let key = "grantee_tenant_id = 0 AND grantee_kind = ? AND grantee_id = ? AND level = ? \
                    AND db_id = ? AND object_id = ? AND column_name = ? AND kv_prefix = '' \
-                   AND element = 0 AND name_pattern = ? AND restriction = ?";
+                   AND element = ? AND name_pattern = ? AND restriction = ?";
         let params = || {
             vec![
                 Value::from(grantee.kind()),
@@ -545,6 +580,7 @@ impl AuthzStore {
                 Value::from(db),
                 Value::from(object),
                 Value::from(column.as_str()),
+                Value::from(target.element()),
                 Value::from(pattern.as_str()),
                 Value::from(target.restriction()),
             ]

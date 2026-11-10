@@ -1,0 +1,4 @@
+# SQLAlchemy (versions.txt) through run.sh: every outcome other than pass.
+# Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (summarize.py). Test ids are pytest's junit classname.name. The suite
+# runs its backend tests only (`-m backend`) through PyMySQL.

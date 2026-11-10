@@ -551,15 +551,45 @@ impl Default for TenantKnobs {
 impl TenantKnobs {
     /// Resolves the keys in `ctx` (a context with the tenant set).
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
     pub fn resolve(s: &MemSettings<'_>, ctx: &SettingCtx<'_>) -> Self {
+        Self::resolve_with(s, None, ctx)
+    }
+
+    /// [`Self::resolve`] with the tenant's own catalog rows layered over
+    /// the etcd scopes (RL3, r2harden).
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn resolve_with(
+        s: &MemSettings<'_>,
+        rows: Option<&sprig_settings::TenantSettings>,
+        ctx: &SettingCtx<'_>,
+    ) -> Self {
+        let r = rows;
         Self {
-            mode: BalancerMode::parse(&s.get(&MODE, ctx)),
-            shard_cooldown_secs: s.get(&SHARD_COOLDOWN_HOURS, ctx) * 3600,
-            max_moves_per_day: s.get(&MAX_MOVES_PER_TENANT_PER_DAY, ctx),
-            cowrite_min_per_hour: s.get(&COWRITE_MIN_PER_HOUR, ctx),
-            auto_size_limit_bytes: s.get(&AUTO_SIZE_LIMIT_GB, ctx) as f64 * GB,
-            max_cooldown_secs: s.get(&MAX_COOLDOWN_DAYS, ctx) * 86_400,
+            mode: BalancerMode::parse(&crate::shards::settings::layered(s, r, &MODE, ctx)),
+            shard_cooldown_secs: crate::shards::settings::layered(s, r, &SHARD_COOLDOWN_HOURS, ctx)
+                * 3600,
+            max_moves_per_day: crate::shards::settings::layered(
+                s,
+                r,
+                &MAX_MOVES_PER_TENANT_PER_DAY,
+                ctx,
+            ),
+            cowrite_min_per_hour: crate::shards::settings::layered(
+                s,
+                r,
+                &COWRITE_MIN_PER_HOUR,
+                ctx,
+            ),
+            auto_size_limit_bytes: crate::shards::settings::layered(
+                s,
+                r,
+                &AUTO_SIZE_LIMIT_GB,
+                ctx,
+            ) as f64
+                * GB,
+            max_cooldown_secs: crate::shards::settings::layered(s, r, &MAX_COOLDOWN_DAYS, ctx)
+                * 86_400,
         }
     }
 }

@@ -72,8 +72,15 @@ c_roles() {
 c_gis() { admin "$(corpus gis)"; }
 c_stored_mode() { admin "$(corpus stored_mode)"; }
 c_group_by() { admin "$(corpus group_by)"; }
+# Result metadata: each column's name and type (--column-type-info).
+c_int_meta() {
+  base_args "$SPRIG_USER" "$SPRIG_PASSWORD"
+  sed "s/@DB@/$DB/g" "$(corpus int_meta)" | mysql "${ARGS[@]}" --column-type-info --table 2>&1 |
+    grep -E '^(Field +[0-9]+:|Type:|ERROR)' | paste - - | sed -E 's/Field +[0-9]+: +//; s/[[:space:]]+Type: +/ /'
+}
+c_mysql_compat() { admin "$(corpus mysql_compat)"; }
 
-CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by"}
+CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat"}
 for check in $CHECKS; do
   if [[ $check == gis && $SPRIG_PERSONA != mysql ]]; then
     emit gis n/a "MySQL's SRID 4326 semantics are the MySQL persona's only"

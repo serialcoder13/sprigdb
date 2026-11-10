@@ -143,6 +143,8 @@ fn render_one(
     // and one on the live table merge into one line.
     let mut objects: BTreeMap<ObjKey, ActionSet> = BTreeMap::new();
     let mut columns: BTreeMap<ObjKey, BTreeMap<String, ActionSet>> = BTreeMap::new();
+    // Graph elements by (database, graph, relationship type?, name).
+    let mut elements: BTreeMap<(String, String, bool, String), ActionSet> = BTreeMap::new();
     let grantees =
         std::iter::once(grantee).chain(state.closure(extra).into_iter().map(Grantee::Role));
     for g in grantees {
@@ -165,6 +167,15 @@ fn render_one(
                     continue;
                 }
                 PrivTarget::Restriction(_) => continue,
+                PrivTarget::GraphElement {
+                    graph, rels, name, ..
+                } => {
+                    if let Some((db, g, _)) = live_key(cat, *graph) {
+                        let e = elements.entry((db, g, *rels, name.clone())).or_default();
+                        *e = e.union(p.actions);
+                    }
+                    continue;
+                }
                 PrivTarget::Object { object, .. } => (live_key(cat, *object), None),
                 PrivTarget::Column { object, column, .. } => (live_key(cat, *object), Some(column)),
                 PrivTarget::Named {
@@ -320,7 +331,20 @@ fn render_one(
             with_option(set)
         ));
     }
-    // Roles.
+    // Graph elements (chapter 43): Neo4j's form, `READ`.
+    for ((db, g, rels, name), set) in &elements {
+        if !set.has(Action::Select) {
+            continue;
+        }
+        out.push(format!(
+            "GRANT READ ON GRAPH {}.{} {} {} TO {to}",
+            q(db),
+            q(g),
+            if *rels { "RELATIONSHIPS" } else { "NODES" },
+            q(name)
+        ));
+    }
+        // Roles.
     let edges = state.edges_of(grantee);
     let role_acc = |r: RoleId| {
         state.role(r).map(|row| AccountRef {

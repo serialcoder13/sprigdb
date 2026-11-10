@@ -221,6 +221,69 @@ impl StandbyLoop {
         usize::try_from(n).unwrap_or(0)
     }
 
+    /// RL3 (r2harden): the global failover decision runs when the tenant's
+    /// home DC is lost, so it can't read the tenant's catalog. The
+    /// directory entry carries the tenant's own `failover.mode` and
+    /// `failover.rpo_seconds` (`failover {mode, rpo_seconds}`, which the
+    /// decision reads, chapter 25) whenever the tenant's rows (its own, or
+    /// an ancestor's) make them differ from the home DC's etcd scopes; the
+    /// copy is removed when they no longer do, so DC and global changes
+    /// apply at once. Checked every pass (10 s).
+    async fn copy_failover_settings(&self, tenant: TenantId, e: &HomeEntry) -> Result<()> {
+        use crate::failover::settings::{MODE, RPO_SECONDS};
+        let (Some(l), Some(sc)) = (self.live.as_ref(), self.scopes.as_ref()) else {
+            return Ok(());
+        };
+        let Some(rows) = sc.get(tenant).await else {
+            return Ok(()); // the catalog can't be read: keep the copy
+        };
+        let snap = l.snapshot();
+        let ctx = SettingCtx::process(&self.dc).for_tenant(tenant, &[]);
+        let tget = |r| crate::tenant_scopes::get(&snap, r, &MODE, &ctx).into_owned();
+        let (mode_t, mode_e) = (tget(Some(&*rows)), tget(None));
+        let rpo_t = crate::tenant_scopes::get(&snap, Some(&*rows), &RPO_SECONDS, &ctx);
+        let rpo_e = crate::tenant_scopes::get(&snap, None, &RPO_SECONDS, &ctx);
+        let want_mode = (mode_t != mode_e).then_some(mode_t);
+        let want_rpo = (rpo_t != rpo_e).then_some(rpo_t);
+        let have = |raw: &serde_json::Map<String, Value>| {
+            let fo = raw.get("failover");
+            (
+                fo.and_then(|f| f.get("mode"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                fo.and_then(|f| f.get("rpo_seconds")).and_then(Value::as_u64),
+            )
+        };
+        if have(&e.raw) == (want_mode.clone(), want_rpo) {
+            return Ok(());
+        }
+        let home = self.dc.clone();
+        home::update_home(&*self.global, tenant, |cur| {
+            if cur.home_dc != home || have(&cur.raw) == (want_mode.clone(), want_rpo) {
+                return Ok(false);
+            }
+            let mut fo = cur
+                .raw
+                .get("failover")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            match &want_mode {
+                Some(m) => fo.insert("mode".into(), json!(m)),
+                None => fo.remove("mode"),
+            };
+            match want_rpo {
+                Some(r) => fo.insert("rpo_seconds".into(), json!(r)),
+                None => fo.remove("rpo_seconds"),
+            };
+            cur.raw.insert("failover".into(), Value::Object(fo));
+            Ok(true)
+        })
+        .await?;
+        tracing::info!(%tenant, mode = ?want_mode, rpo_seconds = ?want_rpo, "tenant's own failover settings copied to its directory entry");
+        Ok(())
+    }
+
     /// One tenant (see the module docs).
     ///
     /// # Errors
@@ -242,6 +305,12 @@ impl StandbyLoop {
         // its maps are the home's now. Forget it, touching nothing.
         if sbs.remove(&e.home_dc).is_some() {
             self.forget(tenant, &e.home_dc).await?;
+        }
+        // RL3 (r2harden): the tenant's own failover.mode and rpo_seconds,
+        // copied where the global decision can read them without the
+        // home DC.
+        if let Err(err) = self.copy_failover_settings(tenant, &e).await {
+            tracing::debug!(%tenant, error = %err, "tenant failover settings not copied");
         }
         let home_tier = self.tier(&self.dc);
         let js = JobStore::new(Arc::clone(&home_tier), Arc::clone(&self.clock));

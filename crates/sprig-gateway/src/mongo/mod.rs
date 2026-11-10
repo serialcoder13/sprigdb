@@ -239,9 +239,10 @@ impl Shared {
     /// `mongo.test_commands`: the `failCommand` fail point is accepted.
     #[must_use]
     pub fn test_commands(&self) -> bool {
-        self.d.live.as_ref().is_some_and(|(l, dc)| {
-            l.get(&failpoint::TEST_COMMANDS, &SettingCtx::process(dc))
-        })
+        self.d
+            .live
+            .as_ref()
+            .is_some_and(|(l, dc)| l.get(&failpoint::TEST_COMMANDS, &SettingCtx::process(dc)))
     }
 
     /// The settings now.

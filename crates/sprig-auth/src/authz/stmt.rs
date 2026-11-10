@@ -107,6 +107,18 @@ pub enum GrantOn {
         /// What it is.
         kind: ObjectType,
     },
+    /// `GRAPH [db.]g NODES L` or `GRAPH [db.]g RELATIONSHIPS T` (chapter
+    /// 43, R8): one label or relationship type.
+    GraphElement {
+        /// The database; `None` for the current one.
+        db: Option<String>,
+        /// The graph.
+        graph: String,
+        /// A relationship type (else a label).
+        rels: bool,
+        /// The label or type.
+        name: String,
+    },
 }
 
 /// One privilege of a `GRANT` or `REVOKE` list.

@@ -92,6 +92,9 @@ pub struct CompiledPrivileges {
     /// that holds it at `*.*` restricts it there (MySQL: a role without
     /// the restriction gives it back).
     pub restricted: HashMap<String, ActionSet>,
+    /// Graph element grants (chapter 43, R8), by (graph, relationship
+    /// type?, label or type name).
+    pub elements: HashMap<(ObjectId, bool, String), ActionSet>,
 }
 
 /// The tenant-level actions cut from each database by partial revokes,
@@ -222,9 +225,35 @@ impl CompiledPrivileges {
                 *e = e.union(a);
                 self.dbs_with_objects.insert(*db);
             }
+            PrivTarget::GraphElement {
+                db,
+                graph,
+                rels,
+                name,
+            } => {
+                let e = self
+                    .elements
+                    .entry((*graph, *rels, name.clone()))
+                    .or_default();
+                *e = e.union(a);
+                self.dbs_with_objects.insert(*db);
+            }
             // Resolved by compile_at.
             PrivTarget::Named { .. } | PrivTarget::Restriction(_) => {}
         }
+    }
+
+    /// The element grants on `graph`: (relationship type?, name, actions).
+    #[must_use]
+    pub fn graph_elements(&self, graph: ObjectId) -> Vec<(bool, String, ActionSet)> {
+        let mut v: Vec<(bool, String, ActionSet)> = self
+            .elements
+            .iter()
+            .filter(|((g, _, _), _)| *g == graph)
+            .map(|((_, r, n), a)| (*r, n.clone(), *a))
+            .collect();
+        v.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        v
     }
 
     /// The actions held on `t`, levels above included (columns excluded).

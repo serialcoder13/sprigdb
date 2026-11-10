@@ -34,7 +34,10 @@
     clippy::many_single_char_names,
     clippy::needless_pass_by_value,
     clippy::large_enum_variant,
-    clippy::match_same_arms
+    clippy::match_same_arms,
+    clippy::format_push_string,
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
 )]
 
 use std::collections::{BTreeMap, HashMap};
@@ -65,7 +68,8 @@ fn env(var: &str) -> Option<String> {
 enum Verdict {
     Pass,
     Fail(String),
-    /// Not applicable to this deployment.
+    /// Not applicable to this deployment (why, for debugging).
+    #[allow(dead_code)]
     NotApplicable(String),
     /// Not runnable by this runner.
     Unsupported(String),
@@ -1409,7 +1413,7 @@ impl Runner<'_> {
             .cloned()
             .unwrap_or_default();
         self.create_entities(&list).await?;
-        for (_, e) in &self.entities {
+        for e in self.entities.values() {
             if let Entity::Client(_, ev, _) = e {
                 ev.lock().unwrap().clear();
             }

@@ -138,7 +138,7 @@ async fn setup(prefix: &str, shards: u32) -> Option<Live> {
     let pool = mysql_async::Pool::new(
         mysql_async::OptsBuilder::from_opts(opts).pool_opts(
             mysql_async::PoolOpts::new()
-                .with_constraints(mysql_async::PoolConstraints::new(0, 4).expect("pool"))
+                .with_constraints(mysql_async::PoolConstraints::new(0, 16).expect("pool"))
                 .with_inactive_connection_ttl(Duration::from_secs(30)),
         ),
     );

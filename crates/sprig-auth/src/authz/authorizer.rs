@@ -46,7 +46,7 @@ use sprig_common::{Result, SprigError};
 use super::account_sql::{self, AccountCtx, Outcome};
 use super::backend::{self, BackendState};
 use super::compile::{CompiledPrivileges, Target};
-use super::privilege::Action;
+use super::privilege::{Action, ActionSet};
 use super::state::AuthzState;
 use super::stmt::AccountStmt;
 use super::store::{AuthzStore, PrivTarget};
@@ -213,6 +213,15 @@ pub trait SessionGrants: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// Grants on single labels and relationship types of graph `graph`
+    /// (chapter 43, R8): (relationship type?, name, actions). The graph
+    /// layer reads them when the graph or its database doesn't give the
+    /// action, and hides what they don't cover.
+    fn graph_elements(&self, graph: ObjectId) -> Vec<(bool, String, ActionSet)> {
+        let _ = graph;
+        Vec::new()
+    }
+
     /// The engine's own type, for its account statements.
     fn as_any(&self) -> &dyn Any;
 }
@@ -294,6 +303,10 @@ impl SessionGrants for CompiledPrivileges {
 
     fn sees_database(&self, db_key: &str, db: Option<DbId>) -> bool {
         self.any_in_database(db_key, db)
+    }
+
+    fn graph_elements(&self, graph: ObjectId) -> Vec<(bool, String, ActionSet)> {
+        CompiledPrivileges::graph_elements(self, graph)
     }
 
     fn settings(&self, op: SettingsOp<'_>) -> std::result::Result<(), SettingsDenied> {

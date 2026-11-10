@@ -27,6 +27,7 @@ pub mod intmeta;
 pub mod keywords;
 pub mod locks;
 pub mod meta;
+pub mod rollup;
 pub mod rowsyntax;
 pub mod schema;
 pub mod setvar;

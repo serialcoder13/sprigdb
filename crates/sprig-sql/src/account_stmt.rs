@@ -551,7 +551,50 @@ fn priv_list(p: &mut P<'_>) -> R<Vec<PrivItem>> {
     }
 }
 
+/// `GRAPH [db.]g NODES L` / `GRAPH [db.]g RELATIONSHIPS T` (chapter 43,
+/// R8), when `GRAPH` is followed by a graph name and an element kind (so
+/// `ON graph TO ...` still names a table called `graph`).
+fn graph_target(p: &mut P<'_>) -> R<Option<GrantOn>> {
+    if !p.word("GRAPH") {
+        return Ok(None);
+    }
+    let save = p.at;
+    p.at += 1;
+    let parsed = (|| -> R<Option<GrantOn>> {
+        let first = p.name()?;
+        let (db, graph) = if p.eat_punct(".") {
+            (Some(first), p.name()?)
+        } else {
+            (None, first)
+        };
+        let rels = if p.eat_word("NODES") || p.eat_word("NODE") {
+            false
+        } else if p.eat_word("RELATIONSHIPS") || p.eat_word("RELATIONSHIP") {
+            true
+        } else {
+            return Ok(None);
+        };
+        let name = p.name()?;
+        Ok(Some(GrantOn::GraphElement {
+            db,
+            graph,
+            rels,
+            name,
+        }))
+    })();
+    match parsed {
+        Ok(Some(on)) => Ok(Some(on)),
+        Ok(None) | Err(_) => {
+            p.at = save;
+            Ok(None)
+        }
+    }
+}
+
 fn target(p: &mut P<'_>) -> R<GrantOn> {
+    if let Some(on) = graph_target(p)? {
+        return Ok(on);
+    }
     let kind = if p.eat_word("TABLE") {
         ObjectType::Table
     } else if p.eat_word("FUNCTION") {
@@ -748,6 +791,34 @@ mod tests {
                 on: GrantOn::Database(None),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn graph_element_targets() {
+        assert!(matches!(
+            parse_ok("GRANT READ ON GRAPH social.g NODES Person TO analyst"),
+            AccountStmt::Grant {
+                on: GrantOn::GraphElement { ref db, ref graph, rels: false, ref name },
+                ref privileges,
+                ..
+            } if db.as_deref() == Some("social") && graph == "g" && name == "Person"
+                && privileges[0].name == "READ"
+        ));
+        assert!(matches!(
+            parse_ok("REVOKE READ ON GRAPH g RELATIONSHIPS `KNOWS` FROM analyst"),
+            AccountStmt::Revoke {
+                on: GrantOn::GraphElement { db: None, rels: true, ref name, .. },
+                ..
+            } if name == "KNOWS"
+        ));
+        // A table called `graph` is still a table.
+        assert!(matches!(
+            parse_ok("GRANT SELECT ON graph TO u"),
+            AccountStmt::Grant {
+                on: GrantOn::Object { ref name, .. },
+                ..
+            } if name == "graph"
         ));
     }
 

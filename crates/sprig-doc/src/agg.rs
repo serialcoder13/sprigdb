@@ -197,7 +197,7 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                         None if op == "$getField" => {
                             vars.vars.get("CURRENT").cloned().unwrap_or(Bson::Null)
                         }
-                        None => return Err(loc(4161102, format!("{op} requires 'input'"))),
+                        None => return Err(loc(4_161_102, format!("{op} requires 'input'"))),
                     },
                     d.get("value").map(|v| eval(v, vars)).transpose()?,
                 ),
@@ -206,11 +206,11 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                     vars.vars.get("CURRENT").cloned().unwrap_or(Bson::Null),
                     None,
                 ),
-                _ => return Err(loc(4161101, format!("{op} requires an object argument"))),
+                _ => return Err(loc(4_161_101, format!("{op} requires an object argument"))),
             };
             let Bson::String(field) = field else {
                 return Err(loc(
-                    5654602,
+                    5_654_602,
                     format!("{op} requires 'field' to evaluate to a string"),
                 ));
             };
@@ -233,7 +233,7 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                 }
                 (_, other) => {
                     return Err(loc(
-                        4161105,
+                        4_161_105,
                         format!(
                             "{op} requires 'input' to evaluate to an object, got {}",
                             type_name(&other)

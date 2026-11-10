@@ -5,7 +5,9 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx};
+use sprig_settings::{
+    Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx, TenantSettings,
+};
 
 /// Tenant and global.
 const TENANT_GLOBAL: Scopes = Scopes(0b10_0100);
@@ -122,6 +124,24 @@ pub struct AdvisorSettings {
     pub max_moves: u32,
 }
 
+/// One key over the etcd scopes and, when given, a tenant's own rows
+/// (RL3, r2harden).
+fn layered<T: sprig_settings::SettingValue>(
+    s: &MemSettings<'_>,
+    rows: Option<&TenantSettings>,
+    k: &Setting<T>,
+    ctx: &SettingCtx<'_>,
+) -> T {
+    match rows {
+        Some(t) => t
+            .resolve(s, k.key, ctx)
+            .ok()
+            .and_then(|r| T::from_value(&r.value))
+            .unwrap_or_else(|| k.default.clone()),
+        None => s.get(k, ctx),
+    }
+}
+
 fn hours(h: f64) -> Duration {
     Duration::from_secs_f64((h * 3600.0).max(0.0))
 }
@@ -130,22 +150,34 @@ impl AdvisorSettings {
     /// Resolves the keys in `ctx` (a context with the tenant set).
     #[must_use]
     pub fn resolve(s: &MemSettings<'_>, ctx: &SettingCtx<'_>) -> Self {
+        Self::resolve_with(s, None, ctx)
+    }
+
+    /// [`Self::resolve`] with the tenant's own catalog rows (tenant,
+    /// database, ancestors) layered over the etcd scopes (RL3, r2harden):
+    /// what a gateway would resolve.
+    #[must_use]
+    pub fn resolve_with(
+        s: &MemSettings<'_>,
+        rows: Option<&TenantSettings>,
+        ctx: &SettingCtx<'_>,
+    ) -> Self {
         Self {
-            mode: match s.get(&MODE, ctx).as_ref() {
+            mode: match layered(s, rows, &MODE, ctx).as_ref() {
                 "recommend" => AdvisorMode::Recommend,
                 "off" => AdvisorMode::Off,
                 _ => AdvisorMode::On,
             },
-            window: hours(s.get(&WINDOW_DAYS, ctx) * 24.0),
-            min_observe: hours(s.get(&MIN_OBSERVE_HOURS, ctx)),
-            min_units: s.get(&MIN_UNITS, ctx),
-            min_confidence: s.get(&MIN_CONFIDENCE, ctx),
-            max_wait: hours(s.get(&MAX_WAIT_HOURS, ctx)),
-            txn_weight: s.get(&TXN_WEIGHT, ctx),
-            lookup_penalty: s.get(&LOOKUP_PENALTY, ctx),
-            min_ndv_per_shard: s.get(&MIN_NDV_PER_SHARD, ctx),
-            max_top_value: f64::from(s.get(&MAX_TOP_VALUE_PCT, ctx)) / 100.0,
-            max_moves: s.get(&MAX_MOVES, ctx),
+            window: hours(layered(s, rows, &WINDOW_DAYS, ctx) * 24.0),
+            min_observe: hours(layered(s, rows, &MIN_OBSERVE_HOURS, ctx)),
+            min_units: layered(s, rows, &MIN_UNITS, ctx),
+            min_confidence: layered(s, rows, &MIN_CONFIDENCE, ctx),
+            max_wait: hours(layered(s, rows, &MAX_WAIT_HOURS, ctx)),
+            txn_weight: layered(s, rows, &TXN_WEIGHT, ctx),
+            lookup_penalty: layered(s, rows, &LOOKUP_PENALTY, ctx),
+            min_ndv_per_shard: layered(s, rows, &MIN_NDV_PER_SHARD, ctx),
+            max_top_value: f64::from(layered(s, rows, &MAX_TOP_VALUE_PCT, ctx)) / 100.0,
+            max_moves: layered(s, rows, &MAX_MOVES, ctx),
         }
     }
 }

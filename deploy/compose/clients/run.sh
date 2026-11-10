@@ -6,7 +6,7 @@
 #   run.sh <suite> <host> <port> <persona>
 #
 # <suite>    go-sql-driver, mysql2, pymysql, mysqlclient, mariadb-connector-j,
-#            mysql-connector-j, php-mysqli or php-pdo-mysql (versions.txt
+#            mysql-connector-j, php-mysqli, php-pdo-mysql or sqlalchemy (versions.txt
 #            pins each to a release tag; the PHP suites come from the
 #            source tarball inside the connector matrix's PHP image)
 # <persona>  mysql or mariadb: which server the endpoint stands for
@@ -245,6 +245,27 @@ case $SUITE in
              mvn -B test -Dsurefire.excludesFile=/tmp/excludes -Dtestsuite.url="$url" -Dsurefire.timeout=1500 \
                ${FILTER:+-Dtest="$FILTER" -Dsurefire.failIfNoSpecifiedTests=false} > /out/mvn.log 2>&1;
              mkdir -p /out/junit && cp target/surefire-reports/*.xml /out/junit/ 2>/dev/null; true' ||
+      true
+    ;;
+  sqlalchemy)
+    # SQLAlchemy's own suite, its backend tests (`-m backend`, as upstream's
+    # backendonly tox legs) through PyMySQL: a database test and a
+    # test_schema (README.unittests.rst), pytest pinned below upstream's
+    # bound. The library runs from the source tree.
+    if [[ $setup == 1 ]]; then
+      sql -e "DROP DATABASE IF EXISTS test; DROP DATABASE IF EXISTS test_schema;
+              CREATE DATABASE test CHARSET utf8mb4; CREATE DATABASE test_schema CHARSET utf8mb4"
+    fi
+    FORMAT=junit
+    mkdir -p "$SRC_ROOT/.cache/pip"
+    suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -- "$PY_IMAGE" \
+      sh -c 'K=$FILTER; [ -n "$EXCLUDE_RE" ] && K="${K:+($K) and }not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))";
+             mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
+             pip install -q "pytest==8.1.1" "PyMySQL==1.1.1" "typing_extensions==4.12.2" "greenlet==3.1.1" > /out/pip.log 2>&1 &&
+             U=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1], safe=\"\"))" "$TARGET_USER") &&
+             P=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1], safe=\"\"))" "$TARGET_PASS") &&
+             PYTHONPATH=lib python -m pytest -p no:cacheprovider -q -m backend --junitxml=/out/junit.xml \
+               --dburi "mysql+pymysql://$U:$P@$TARGET_HOST:$TARGET_PORT/test?charset=utf8mb4" ${K:+-k "$K"} test > /out/pytest.log 2>&1; true' ||
       true
     ;;
   php-mysqli | php-pdo-mysql)

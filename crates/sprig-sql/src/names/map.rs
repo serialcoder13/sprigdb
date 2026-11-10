@@ -174,8 +174,8 @@ fn representatives(shards: &[SchemaName]) -> Vec<SchemaName> {
 /// lowest shard on that cluster, else its lowest shard.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupedTables {
-    /// Per database: one representative schema per group, each once, in
-    /// the order added.
+    /// Per database: one representative schema per group, each once,
+    /// sorted by name.
     schemas: HashMap<DbId, Vec<SchemaName>>,
     /// Per database and lowercase table name: its group's representative.
     tables: HashMap<(DbId, String), SchemaName>,
@@ -185,9 +185,11 @@ impl GroupedTables {
     /// Records that table `table` of `db` is read, for metadata, in
     /// `schema`.
     pub fn add(&mut self, db: DbId, table: &str, schema: SchemaName) {
+        // Sorted by name, so the order never depends on how they came.
         let v = self.schemas.entry(db).or_default();
-        if !v.contains(&schema) {
-            v.push(schema);
+        let key = schema.to_string();
+        if let Err(i) = v.binary_search_by(|s| s.to_string().cmp(&key)) {
+            v.insert(i, schema);
         }
         self.tables.insert((db, table.to_lowercase()), schema);
     }

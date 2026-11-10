@@ -698,3 +698,90 @@ pub(crate) fn cluster_ids(layout: &TenantLayout) -> Vec<ClusterId> {
         .filter_map(|c| ClusterId::new(c).ok())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sprig_router::topology::catalog::{CatalogGroup, CatalogTable, Membership, build};
+    use sprig_shard::{KeyClass, ShardMap};
+
+    fn layout(topo: StaticTopology) -> TenantLayout {
+        TenantLayout {
+            topo,
+            versions: HashMap::new(),
+            held: HashMap::new(),
+            clusters: BTreeSet::new(),
+            missing: Vec::new(),
+            epochs: HashMap::new(),
+            objects: HashMap::new(),
+            grouped: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Group 3 has shards 1 and 3 on c1 and shard 2 on c2: a session on
+    /// c2 reads shard 2, one on c1 shard 1, one on a cluster without a
+    /// shard the lowest; the reference table reads its schema.
+    #[test]
+    fn grouped_tables_prefer_the_sessions_cluster() {
+        let spec = KeySpec::new(vec![KeyClass::Numeric]).unwrap_or_else(|e| panic!("{e}"));
+        let c = |n: &str| ClusterId::new(n).unwrap_or_else(|e| panic!("{e}"));
+        let map = ShardMap::presplit(TenantId(7), GroupId(3), spec.digest, 3, &[c("c1"), c("c2")])
+            .unwrap_or_else(|e| panic!("{e}"));
+        let g = CatalogGroup {
+            id: 3,
+            spec,
+            map: Arc::new(map),
+        };
+        let sharded = |name: &str| CatalogTable {
+            object: 0,
+            db: 1,
+            default_schema: "t7_d1_g1_s1".into(),
+            name: name.into(),
+            member: Membership::Sharded {
+                group: 3,
+                key_columns: None,
+                create_sql: None,
+                lookups: Vec::new(),
+                fill_rk: false,
+                parent_fk: None,
+            },
+        };
+        let tables = vec![
+            sharded("Orders"),
+            sharded("items"),
+            CatalogTable {
+                object: 0,
+                db: 1,
+                default_schema: "t7_d1_g1_s1".into(),
+                name: "countries".into(),
+                member: Membership::Reference {
+                    clusters: vec!["c1".into(), "c2".into()],
+                },
+            },
+        ];
+        let l = layout(build(7, &[g], &tables));
+        let names = |cluster: &str| {
+            let g = l.grouped_tables(cluster);
+            let w = sprig_sql::names::WithGroups {
+                base: &sprig_sql::names::MemoryNameMap::new(TenantId(7)).with_db(1, "shop", 1, 1),
+                groups: &g,
+            };
+            use sprig_sql::names::{NameMap, Purpose};
+            let meta: Vec<String> = w
+                .physical("shop", Purpose::Metadata)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .0
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            let orders = w.table_schema(DbId(1), "orders").map(|s| s.to_string());
+            (meta, orders)
+        };
+        let (meta, orders) = names("c2");
+        assert_eq!(meta, ["t7_d1_g1_s1", "t7_d1_g3_s2", "t7_d1_ref"]);
+        assert_eq!(orders.as_deref(), Some("t7_d1_g3_s2"));
+        assert_eq!(names("c1").1.as_deref(), Some("t7_d1_g3_s1"));
+        assert_eq!(names("c9").1.as_deref(), Some("t7_d1_g3_s1"));
+        assert!(Arc::ptr_eq(&l.grouped_tables("c2"), &l.grouped_tables("c2")));
+    }
+}

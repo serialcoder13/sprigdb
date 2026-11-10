@@ -168,10 +168,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                     }
                     let mut cmd = cmd;
                     if !cmd.contains_key("$db") {
-                        let db = q
-                            .full_collection_name
-                            .trim_end_matches(".$cmd")
-                            .to_owned();
+                        let db = q.full_collection_name.trim_end_matches(".$cmd").to_owned();
                         cmd.insert("$db", db);
                     }
                     let r = match name.as_str() {
@@ -181,9 +178,9 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                             super::commands::run(&mut st, &name, &cmd).await
                         }
                         // Java 3.x reads its connection id this way.
-                        "getlasterror" | "getLastError" => Ok(
-                            doc! {"connectionId": st.id, "n": 0, "err": Bson::Null, "ok": 1.0},
-                        ),
+                        "getlasterror" | "getLastError" => {
+                            Ok(doc! {"connectionId": st.id, "n": 0, "err": Bson::Null, "ok": 1.0})
+                        }
                         _ => st.hello(&cmd, true).await,
                     };
                     let body = match r {
@@ -694,8 +691,22 @@ impl Conn {
                 // resume after.
                 if matches!(
                     c,
-                    6 | 7 | 63 | 89 | 91 | 133 | 150 | 189 | 234 | 262 | 9001 | 10107 | 11600
-                        | 11602 | 13388 | 13435 | 13436
+                    6 | 7
+                        | 63
+                        | 89
+                        | 91
+                        | 133
+                        | 150
+                        | 189
+                        | 234
+                        | 262
+                        | 9001
+                        | 10107
+                        | 11600
+                        | 11602
+                        | 13388
+                        | 13435
+                        | 13436
                 ) {
                     e = e.label("ResumableChangeStreamError");
                 }
@@ -747,7 +758,10 @@ impl Conn {
                 // Cluster time (chapter 30, "Cluster time"), unsigned for
                 // now: drivers gossip it and send `afterClusterTime` in
                 // causally consistent sessions; such reads go to writers.
-                if !matches!(name.as_str(), "hello" | "isMaster" | "ismaster" | "saslStart" | "saslContinue") {
+                if !matches!(
+                    name.as_str(),
+                    "hello" | "isMaster" | "ismaster" | "saslStart" | "saslContinue"
+                ) {
                     let ts = cluster_time();
                     d.insert("operationTime", ts);
                     d.insert(
