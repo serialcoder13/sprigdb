@@ -310,7 +310,9 @@ fn time_key(level: &str, t: &str, fsm: u8) -> Option<String> {
         "year" => format!("YEAR({t})"),
         "fiscal_year" => format!("YEAR({t} - INTERVAL {} MONTH)", fsm - 1),
         "quarter" => format!("(YEAR({t}) * 10 + QUARTER({t}))"),
-        "month" => format!("EXTRACT(YEAR_MONTH FROM {t})"),
+        // Not `EXTRACT(YEAR_MONTH ...)`: the router's parser can't read it,
+        // so a sharded fact's query would be refused (R6 round 4).
+        "month" => format!("(YEAR({t}) * 100 + MONTH({t}))"),
         "week" => format!("YEARWEEK({t}, 3)"),
         "day" => format!("DATE({t})"),
         "hour" => format!("DATE_FORMAT({t}, '%Y-%m-%d %H:00')"),
@@ -702,7 +704,7 @@ mod tests {
         assert_eq!(c.plan, "local");
         assert_eq!(
             c.sql,
-            "SELECT d1.`region` AS k1, EXTRACT(YEAR_MONTH FROM CONVERT_TZ(f.`sold_at`, '+00:00', 'Asia/Kolkata')) AS k2, \
+            "SELECT d1.`region` AS k1, (YEAR(CONVERT_TZ(f.`sold_at`, '+00:00', 'Asia/Kolkata')) * 100 + MONTH(CONVERT_TZ(f.`sold_at`, '+00:00', 'Asia/Kolkata'))) AS k2, \
              SUM(f.`amount`) AS p1, SUM(CASE WHEN f.`status` = 'paid' THEN f.`amount` END) AS p2 \
              FROM `shop`.`sales_line` AS f \
              LEFT JOIN `shop`.`store` FOR SYSTEM_TIME ALL AS d1 ON d1.`store_id` = f.`store_id` \

@@ -35,6 +35,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/factors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The caller's second factors (no secrets), recovery codes left, whether one is required */
+        get: operations["Factors.List"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/factors:confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Activates the pending factor with a code; recovery codes shown once; an enrol ticket also signs in */
+        post: operations["Factors.Confirm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/factors:enrol": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** A new TOTP seed, shown once; with a session or an enrol ticket */
+        post: operations["Factors.Enrol"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/factors:reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Removes every factor and ends every session: one's own with a code, or a user's as an administrator */
+        post: operations["Factors.Reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/impersonate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** A session as a user of one's tenant or a descendant, with a reason; no refresh token */
+        post: operations["Auth.Impersonate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/login": {
         parameters: {
             query?: never;
@@ -80,6 +165,23 @@ export interface paths {
         get: operations["Auth.WhoAmI"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/mfa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Completes a login's challenge with a TOTP code or a recovery code (cookie rules as login) */
+        post: operations["Auth.CompleteMfa"];
         delete?: never;
         options?: never;
         head?: never;
@@ -985,10 +1087,25 @@ export interface components {
             name?: string;
             sql: string;
         };
+        FactorRequest: {
+            code?: string;
+            enrol?: string;
+            host?: string;
+            /** @enum {string} */
+            refresh_transport?: "cookie" | "body";
+            user?: string;
+        };
         /** @description The GetModelRequest message as JSON (proto3 mapping) */
         GetModelRequest: Record<string, never>;
         /** @description The GetVectorIndexRequest message as JSON (proto3 mapping) */
         GetVectorIndexRequest: Record<string, never>;
+        ImpersonateRequest: {
+            host?: string;
+            minutes?: number;
+            reason: string;
+            tenant?: string;
+            user: string;
+        };
         IndexActionRequest: {
             reason?: string;
         };
@@ -1034,6 +1151,12 @@ export interface components {
         LogoutReply: {
             ended: boolean;
         };
+        MfaRequest: {
+            challenge: string;
+            code: string;
+            /** @enum {string} */
+            refresh_transport?: "cookie" | "body";
+        };
         /** @description The ModelInfo message as JSON (proto3 mapping) */
         ModelInfo: Record<string, never>;
         /** @description The ModelRequest message as JSON (proto3 mapping) */
@@ -1042,6 +1165,8 @@ export interface components {
         NameRequest: Record<string, never>;
         QueryRequest: {
             database?: string;
+            /** @enum {string} */
+            language?: "sql" | "cypher" | "gql" | "mongo";
             /** Format: uint64 */
             max_bytes?: string;
             /** Format: uint64 */
@@ -1248,6 +1373,167 @@ export interface operations {
             };
         };
     };
+    "Factors.List": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Factors.Confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FactorRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Factors.Enrol": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FactorRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Factors.Reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FactorRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Auth.Impersonate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImpersonateRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     "Auth.Login": {
         parameters: {
             query?: never;
@@ -1326,6 +1612,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WhoAmI"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Auth.CompleteMfa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MfaRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenReply"];
                 };
             };
             /** @description An error */

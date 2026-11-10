@@ -116,7 +116,7 @@ fn tokens(sql: &str) -> Option<Vec<Tok>> {
                 let start = i + 2;
                 let len = sql[start..].find('\'')?;
                 let hex = &b[start..start + len];
-                if hex.len() % 2 != 0 {
+                if !hex.len().is_multiple_of(2) {
                     return None;
                 }
                 let mut v = Vec::with_capacity(hex.len() / 2);

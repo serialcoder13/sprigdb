@@ -124,6 +124,10 @@ struct Live {
     exec: Box<dyn SessionExec>,
     proto: ProtoState,
     db: Option<String>,
+    /// A transaction handle holds the session: a statement whose client
+    /// went away is stopped (`KILL QUERY`) and the backend connection, with
+    /// the transaction, kept for the handle's next call (tui T3).
+    held: bool,
 }
 
 /// An open transaction handle.
@@ -277,6 +281,11 @@ pub struct SqlEngine {
     pub(crate) draining: Arc<AtomicBool>,
     /// Memory charges for buffered results (chapter 04 step 7).
     pub(crate) limiter: Option<Arc<crate::limits::Limiter>>,
+    /// The tenant catalogs, for settings at tenant and database scope
+    /// (`vector.*`, `analytics.*`; R6 round 4).
+    pub(crate) tenants: Option<Arc<crate::tenant::TenantServices>>,
+    /// The front ends `Sql.Query`'s other languages run through (tui T2).
+    pub(crate) languages: super::lang::Languages,
 }
 
 impl std::fmt::Debug for SqlEngine {
@@ -362,6 +371,7 @@ impl SqlEngine {
             exec,
             proto,
             db,
+            held: false,
         })
     }
 
@@ -372,15 +382,25 @@ impl SqlEngine {
             exec,
             proto,
             db,
+            held,
         } = live;
+        // The client went away mid-statement: an autocommit session ends
+        // (KILL QUERY, connection closed); a transaction's only stops the
+        // statement.
+        let left = if *held {
+            Abandon::Killed
+        } else {
+            Abandon::ClientGone
+        };
         session.begin_command("Query", Some(sql.chars().take(1024).collect()));
         let r = self
-            .statement_inner(session, exec, proto, db, sql, sink)
+            .statement_inner(session, exec, proto, db, sql, sink, left)
             .await;
         session.end_command();
         r
     }
 
+    #[allow(clippy::too_many_arguments)] // the session's parts, split for borrows
     async fn statement_inner(
         &self,
         session: &mut Session,
@@ -389,6 +409,7 @@ impl SqlEngine {
         db: &mut Option<String>,
         sql: String,
         sink: &mut ChannelSink,
+        left: Abandon,
     ) -> Result<()> {
         enum End {
             Done(Result<crate::pipeline::ExecSummary>),
@@ -448,12 +469,12 @@ impl SqlEngine {
         .await;
         match end {
             End::ReaderGone => {
-                exec.abandoned(&mut cx, Abandon::ClientGone).await;
+                exec.abandoned(&mut cx, left).await;
                 Ok(())
             }
             End::Done(Ok(summary)) => {
                 if sink.closed() {
-                    exec.abandoned(&mut cx, Abandon::ClientGone).await;
+                    exec.abandoned(&mut cx, left).await;
                 } else if !sink.finished() {
                     sink.error(&SprigError::new(
                         SprigCode::BackendProtocol,
@@ -469,7 +490,7 @@ impl SqlEngine {
             }
             End::Done(Err(e)) => {
                 if sink.closed() || sink.capped() {
-                    exec.abandoned(&mut cx, Abandon::ClientGone).await;
+                    exec.abandoned(&mut cx, left).await;
                     return Ok(());
                 }
                 if !sink.finished() {
@@ -669,6 +690,7 @@ impl SqlEngine {
             live.exec.close().await;
             return Err(e);
         }
+        live.held = true;
         let id = self.txns.next.fetch_add(1, Ordering::SeqCst) + 1;
         let handle = TxnHandle::new(&self.dc, &self.gateway_id, id)?;
         let now = Instant::now();

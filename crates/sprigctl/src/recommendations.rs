@@ -9,6 +9,8 @@
 //! - `comment ID TEXT`
 //! - `policy [--tenant T] [--db D] [--object O]`
 
+use std::fmt::Write as _;
+
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Value, json};
 use sprig_approvals::events::{parse_rfc3339, rfc3339};
@@ -236,7 +238,7 @@ pub(crate) fn list_text(r: &ListResponse) -> String {
         ["ID", "KIND", "LEVEL", "STATE", "TARGET", "AGE_H", "SUMMARY"],
         &rows,
     );
-    t.push_str(&format!("{} open\n", r.open));
+    let _ = writeln!(t, "{} open", r.open);
     t
 }
 
@@ -245,63 +247,65 @@ pub(crate) fn show_text(v: &RecView) -> String {
     let r = &v.rec;
     let mut o = String::new();
     let at = |u: Option<i64>| u.map_or_else(|| "-".to_owned(), rfc3339);
-    o.push_str(&format!(
-        "{}  {}  {}  ({} level, notifies {})\n",
+    let _ = writeln!(
+        o,
+        "{}  {}  {}  ({} level, notifies {})",
         r.id, r.kind, r.state, r.level, r.notify_level
-    ));
-    o.push_str(&format!("target:      {}\n", r.subject.display()));
-    o.push_str(&format!("summary:     {}\n", r.summary));
-    o.push_str(&format!("action:      {}\n", r.action.text));
-    o.push_str(&format!(
-        "mode from:   {}{}\n",
+    );
+    let _ = writeln!(o, "target:      {}", r.subject.display());
+    let _ = writeln!(o, "summary:     {}", r.summary);
+    let _ = writeln!(o, "action:      {}", r.action.text);
+    let _ = writeln!(
+        o,
+        "mode from:   {}{}",
         r.mode_source,
         if r.advisory { " (advice)" } else { "" }
-    ));
-    o.push_str(&format!(
-        "raised:      {} ({:.1} h ago, proposed {} more times)\n",
+    );
+    let _ = writeln!(
+        o,
+        "raised:      {} ({:.1} h ago, proposed {} more times)",
         rfc3339(r.created_at_us),
         v.age_hours,
         r.refreshes
-    ));
-    o.push_str(&format!(
-        "escalates:   {}\nauto-apply:  {}\n",
+    );
+    let _ = writeln!(
+        o,
+        "escalates:   {}\nauto-apply:  {}",
         at(r.escalate_at_us),
         at(r.auto_apply_at_us)
-    ));
+    );
     if let Some(w) = r.window {
-        o.push_str(&format!(
-            "window:      {} to {}\n",
+        let _ = writeln!(
+            o,
+            "window:      {} to {}",
             rfc3339(w.start_us),
             rfc3339(w.end_us)
-        ));
+        );
     }
     if let Some(d) = &r.decided_by {
-        o.push_str(&format!(
-            "decided by:  {d} ({})\n",
+        let _ = writeln!(
+            o,
+            "decided by:  {d} ({})",
             r.reason.clone().unwrap_or_default()
-        ));
+        );
     }
     if let Some(x) = &r.result {
-        o.push_str(&format!("result:      {x}\n"));
+        let _ = writeln!(o, "result:      {x}");
     }
-    o.push_str(&format!("evidence:    {}\n", r.evidence));
+    let _ = writeln!(o, "evidence:    {}", r.evidence);
     for h in &r.history {
-        o.push_str(&format!(
-            "  {}  {} -> {}  by {}  {}\n",
+        let _ = writeln!(
+            o,
+            "  {}  {} -> {}  by {}  {}",
             rfc3339(h.at_us),
             h.from,
             h.to,
             h.by,
             h.note
-        ));
+        );
     }
     for c in &r.comments {
-        o.push_str(&format!(
-            "  # {} {}: {}\n",
-            rfc3339(c.at_us),
-            c.author,
-            c.body
-        ));
+        let _ = writeln!(o, "  # {} {}: {}", rfc3339(c.at_us), c.author, c.body);
     }
     o
 }

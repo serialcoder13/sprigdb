@@ -95,8 +95,8 @@ test.describe.serial('Approvals inbox (chapter 52)', () => {
     const t = page.getByTestId('policy-table');
     await expect(t).toContainText('index.create');
     await expect(t).toContainText('dc.move');
-    await page.getByLabel('Database').fill('approvals_shop');
-    await page.getByLabel('Table').fill('orders');
+    await page.getByRole('textbox', { name: 'Database' }).fill('approvals_shop');
+    await page.getByRole('textbox', { name: 'Table' }).fill('orders');
     await expect(t.locator('tr', { hasText: 'index.create' })).toContainText('approve');
     await page.getByLabel('My address').fill('acme-app@example.com');
     await page.getByLabel('Delivery').selectOption('digest');

@@ -226,6 +226,7 @@ pub fn validation_settings(
         estimate_margin: policy.estimate_margin,
         canary_hours: n(k::CANARY_HOURS.key, 24.0).max(1.0) as u32,
         max_cover_columns: policy.generation.max_cover_columns,
+        vector_min_recall: n(k::VECTOR_MIN_RECALL.key, 0.95).clamp(0.0, 1.0),
         ..d
     }
 }

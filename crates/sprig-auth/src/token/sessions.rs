@@ -183,6 +183,19 @@ pub struct NewSession {
     pub expires_at: SystemTime,
     /// Now.
     pub now: SystemTime,
+    /// For an impersonation session (chapter 14 step 14): who acts, why.
+    pub impersonator: Option<Impersonator>,
+}
+
+/// The administrator behind an impersonation session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Impersonator {
+    /// The administrator's tenant id.
+    pub tenant_id: u64,
+    /// The administrator's user id.
+    pub user_id: u32,
+    /// The reason given (required).
+    pub reason: String,
 }
 
 /// What a refresh found.
@@ -517,8 +530,9 @@ impl CatalogSessions {
                 q,
                 format!(
                     "INSERT INTO {} (session_id, user_id, amr, refresh_sha256, expires_at, \
-                     client, last_used_at, created_at, changed_version) \
-                     VALUES (?, ?, ?, ?, {AT}, ?, {AT}, {AT}, ?)",
+                     client, last_used_at, created_at, changed_version, impersonator_tenant, \
+                     impersonator_user, reason) \
+                     VALUES (?, ?, ?, ?, {AT}, ?, {AT}, {AT}, ?, ?, ?, ?)",
                     table(&store)
                 ),
                 vec![
@@ -531,6 +545,13 @@ impl CatalogSessions {
                     Value::from(micros(s.now)),
                     Value::from(micros(s.now)),
                     Value::from(version),
+                    Value::from(s.impersonator.as_ref().map(|i| i.tenant_id)),
+                    Value::from(s.impersonator.as_ref().map(|i| i.user_id)),
+                    Value::from(
+                        s.impersonator
+                            .as_ref()
+                            .map(|i| i.reason.chars().take(256).collect::<String>()),
+                    ),
                 ],
             )
             .await

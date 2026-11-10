@@ -213,6 +213,12 @@ pub struct GatewayConfig {
     /// R0, and fail against a controller that wants one.
     #[serde(default)]
     pub controller_token_file: Option<PathBuf>,
+    /// A file holding the Admin API token Studio's operator mode uses
+    /// (chapter 44 step 17; decision ST34): calls from sessions whose login
+    /// is in `studio.operator_logins` go to the controller with it. Unset:
+    /// operator mode answers 503.
+    #[serde(default)]
+    pub operator_token_file: Option<PathBuf>,
 }
 
 /// `[gateway] login_mode`.

@@ -920,10 +920,8 @@ impl Conn<'_> {
                         arguments.insert("x-stream-offset", off);
                     }
                     if fan_in {
-                        arguments.insert(
-                            "x-sprig-fan-in",
-                            crate::v091::codec::FieldValue::Bool(true),
-                        );
+                        arguments
+                            .insert("x-sprig-fan-in", crate::v091::codec::FieldValue::Bool(true));
                     }
                     match self
                         .vhost

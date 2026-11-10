@@ -603,7 +603,14 @@ async fn a_refused_statement_rolls_back_without_a_version() {
         !env.exec.has_schema(&made),
         "the refused database's new schema {made} is dropped"
     );
-    assert!(env.exec.log().last().unwrap().sql.starts_with("DROP DATABASE IF EXISTS"));
+    assert!(
+        env.exec
+            .log()
+            .last()
+            .unwrap()
+            .sql
+            .starts_with("DROP DATABASE IF EXISTS")
+    );
     assert_eq!(env.intents(), 0);
 }
 

@@ -135,6 +135,7 @@ fn query_json(r: &QueryRequest) -> serde_json::Value {
         "database": r.database, "sql": r.sql, "transaction": r.transaction,
         "multi_statements": r.multi_statements,
         "max_rows": r.max_rows, "max_bytes": r.max_bytes, "timeout_ms": r.timeout_ms,
+        "language": r.language,
     })
 }
 
@@ -185,7 +186,12 @@ impl Sql for SqlSvc {
             multi: r.multi_statements,
         };
         let txn = (!r.transaction.is_empty()).then_some(r.transaction);
-        tokio::spawn(async move { engine.run_capped(&c, call, txn.as_deref(), caps, tx).await });
+        let language = r.language;
+        tokio::spawn(async move {
+            engine
+                .run_in(&c, &language, call, txn.as_deref(), caps, tx)
+                .await;
+        });
         let stream = futures::stream::unfold(Some(rx), |rx| async move {
             let mut rx = rx?;
             match rx.recv().await? {
@@ -217,7 +223,12 @@ impl Sql for SqlSvc {
             multi: r.multi_statements,
         };
         let txn = (!r.transaction.is_empty()).then_some(r.transaction);
-        tokio::spawn(async move { engine.run_capped(&c, call, txn.as_deref(), caps, tx).await });
+        let language = r.language;
+        tokio::spawn(async move {
+            engine
+                .run_in(&c, &language, call, txn.as_deref(), caps, tx)
+                .await;
+        });
         collect(rx, max, charge)
             .await
             .map(Response::new)

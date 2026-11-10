@@ -33,6 +33,8 @@ export interface SessionState {
   lastActivity: number;
   allowInsecureHttp: boolean;
   buildVersion: string;
+  /** An impersonation in this tab: who, by whom, until when. */
+  impersonating: { user: string; by: string; until: number } | null;
 }
 
 export const useSession = create<SessionState>(() => ({
@@ -45,6 +47,7 @@ export const useSession = create<SessionState>(() => ({
   lastActivity: Date.now(),
   allowInsecureHttp: false,
   buildVersion: '',
+  impersonating: null,
 }));
 
 const CHANNEL = 'sprig-studio-auth';
@@ -74,7 +77,8 @@ export function isLoopback(host: string): boolean {
 
 function applyToken(reply: TokenReply): void {
   const expiresAt = Date.now() + reply.expires_in * 1000;
-  useSession.setState({ token: reply.access_token, expiresAt });
+  // A refreshed token is always one's own session's.
+  useSession.setState({ token: reply.access_token, expiresAt, impersonating: null });
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => {
     void refresh();
@@ -86,7 +90,7 @@ function signedOut(reason: string | null, broadcast: boolean): void {
   if (idleTimer) clearInterval(idleTimer);
   refreshTimer = null;
   idleTimer = null;
-  useSession.setState({ status: 'signed_out', token: null, me: null, reason, idleWarning: false });
+  useSession.setState({ status: 'signed_out', token: null, me: null, reason, idleWarning: false, impersonating: null });
   if (broadcast) channel?.postMessage({ type: 'logout' });
   window.dispatchEvent(new CustomEvent('sprig-signed-out'));
 }
@@ -197,7 +201,25 @@ export function insecureLoginBlocked(loc: Location = window.location): boolean {
   return loc.protocol === 'http:' && !isLoopback(loc.hostname) && !useSession.getState().allowInsecureHttp;
 }
 
-export async function login(loginName: string, password: string): Promise<void> {
+/** What a password login needs next. */
+export type LoginStep =
+  | { kind: 'done' }
+  | { kind: 'challenge'; challenge: string; expiresIn: number }
+  | { kind: 'enrol'; ticket: string; expiresIn: number };
+
+interface LoginReply extends Partial<TokenReply> {
+  challenge?: string;
+  enrol?: string;
+  expires_in: number;
+}
+
+async function signedIn(reply: TokenReply): Promise<void> {
+  lastShared = { reply, at: 0 };
+  applyToken(reply);
+  await loadMe();
+}
+
+export async function login(loginName: string, password: string): Promise<LoginStep> {
   if (insecureLoginBlocked()) {
     throw new Error(
       'Signing in over plain HTTP from another computer is turned off: use https (8443) or ask an operator to set studio.allow_insecure_http.',
@@ -206,18 +228,121 @@ export async function login(loginName: string, password: string): Promise<void> 
   installHooks();
   useSession.setState({ status: 'authenticating' });
   try {
-    const reply = await json<TokenReply>('/v1/auth/login', {
+    const reply = await json<LoginReply>('/v1/auth/login', {
       body: { login: loginName, password, refresh_transport: 'cookie', client: 'studio' },
       headers: { 'x-sprig-csrf': '1' },
       auth: false,
     });
-    lastShared = { reply, at: 0 };
-    applyToken(reply);
-    await loadMe();
+    // A second factor (chapter 14): a challenge, or an enrolment first.
+    if (reply.challenge) {
+      useSession.setState({ status: 'signed_out' });
+      return { kind: 'challenge', challenge: reply.challenge, expiresIn: reply.expires_in };
+    }
+    if (reply.enrol) {
+      useSession.setState({ status: 'signed_out' });
+      return { kind: 'enrol', ticket: reply.enrol, expiresIn: reply.expires_in };
+    }
+    await signedIn(reply as TokenReply);
+    return { kind: 'done' };
   } catch (e) {
     useSession.setState({ status: 'signed_out' });
     throw e;
   }
+}
+
+/** Completes a login with a TOTP code or a recovery code. */
+export async function completeMfa(challenge: string, code: string): Promise<{ recoveryLeft?: number }> {
+  useSession.setState({ status: 'authenticating' });
+  try {
+    const reply = await json<TokenReply & { recovery_left?: number }>('/v1/auth/mfa', {
+      body: { challenge, code: code.trim(), refresh_transport: 'cookie' },
+      headers: { 'x-sprig-csrf': '1' },
+      auth: false,
+    });
+    await signedIn(reply);
+    return { recoveryLeft: reply.recovery_left };
+  } catch (e) {
+    useSession.setState({ status: 'signed_out' });
+    throw e;
+  }
+}
+
+export interface Enrolment {
+  secret: string;
+  otpauth_uri: string;
+}
+
+/** Starts a TOTP enrolment: with an enrol ticket at login, else for the
+ * signed-in user. */
+export function startEnrolment(ticket?: string): Promise<Enrolment> {
+  return json<Enrolment>('/v1/auth/factors:enrol', {
+    body: ticket ? { enrol: ticket } : {},
+    auth: !ticket,
+  });
+}
+
+/** Confirms an enrolment with a code; returns the recovery codes (shown
+ * once). With an enrol ticket it also signs in, once `finish` is called
+ * (after the codes were shown). */
+export async function confirmEnrolment(
+  code: string,
+  ticket?: string,
+): Promise<{ codes: string[]; finish: () => Promise<void> }> {
+  if (!ticket) {
+    const r = await json<{ recovery_codes: string[] }>('/v1/auth/factors:confirm', { body: { code } });
+    return { codes: r.recovery_codes, finish: () => Promise.resolve() };
+  }
+  const r = await json<TokenReply & { recovery_codes: string[] }>('/v1/auth/factors:confirm', {
+    body: { code, enrol: ticket, refresh_transport: 'cookie' },
+    headers: { 'x-sprig-csrf': '1' },
+    auth: false,
+  });
+  return { codes: r.recovery_codes, finish: () => signedIn(r) };
+}
+
+/** Starts an impersonation in this tab (chapter 14 step 14): the tab's
+ * token becomes the user's until it expires or "Stop impersonating". The
+ * administrator's own session stays in its cookie. */
+export async function impersonate(p: {
+  tenant?: string;
+  user: string;
+  host?: string;
+  reason: string;
+  minutes: number;
+}): Promise<void> {
+  const r = await json<TokenReply & { impersonating: string; by: string }>('/v1/auth/impersonate', { body: p });
+  if (refreshTimer) clearTimeout(refreshTimer);
+  const until = Date.now() + r.expires_in * 1000;
+  useSession.setState({ token: r.access_token, expiresAt: until, impersonating: { user: r.impersonating, by: r.by, until } });
+  // No refresh: the impersonation ends with its token.
+  refreshTimer = setTimeout(() => void stopImpersonating(), r.expires_in * 1000);
+  await loadMe();
+  window.dispatchEvent(new CustomEvent('sprig-identity-changed'));
+}
+
+/** Ends the impersonation session and returns to one's own. */
+export async function stopImpersonating(): Promise<void> {
+  const s = useSession.getState();
+  if (!s.impersonating) return;
+  try {
+    // Without the cookie: only the impersonation session ends.
+    await fetch('/v1/auth/logout', {
+      method: 'POST',
+      headers: { 'x-sprig-client': CLIENT_HEADER, ...(s.token ? { authorization: `Bearer ${s.token}` } : {}) },
+      credentials: 'omit',
+    });
+  } catch {
+    // It ends with its token anyway.
+  }
+  useSession.setState({ impersonating: null, token: null });
+  lastShared = null;
+  const t = await refresh();
+  if (!t) {
+    signedOut('Your session ended. Sign in again.', false);
+    return;
+  }
+  await loadMe();
+  window.dispatchEvent(new CustomEvent('sprig-identity-changed'));
 }
 
 export async function logout(reason: string | null = null): Promise<void> {

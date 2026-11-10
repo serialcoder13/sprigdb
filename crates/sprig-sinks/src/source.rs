@@ -399,13 +399,13 @@ pub trait FanInOpener: Send + Sync {
     /// partitions.
     async fn members(&self) -> Result<Vec<(FanInMember, Vec<u32>)>>;
     /// A source over `m`'s instance (positions in the sink's catalog).
-    async fn open(&self, m: &FanInMember, partitions: Vec<u32>) -> Result<StreamSource>;
+    async fn open(&self, m: &FanInMember, partitions: Vec<u32>) -> Result<Box<dyn SourceReader>>;
 }
 
 struct Child {
     member: FanInMember,
     packed: u64,
-    src: StreamSource,
+    src: Box<dyn SourceReader>,
     /// Nothing was there at the last read: not asked again before this.
     idle_until: Option<tokio::time::Instant>,
     idle_ms: u64,
@@ -417,6 +417,10 @@ struct Child {
 /// and their positions carry [`fanin_stream_id`].
 pub struct FanInSource {
     opener: Box<dyn FanInOpener>,
+    /// `CHANGES OF`: the tables' change topics of the sink's own tenant;
+    /// values are change envelopes, read into `op`, `before` and `after`,
+    /// and nothing is tagged with a tenant.
+    changes: bool,
     children: Vec<Child>,
     refresh: Duration,
     next_refresh: tokio::time::Instant,
@@ -440,8 +444,28 @@ impl FanInSource {
     pub async fn open(opener: Box<dyn FanInOpener>, refresh: Duration) -> Result<Self> {
         let mut s = Self {
             opener,
+            changes: false,
             children: Vec::new(),
             refresh,
+            next_refresh: tokio::time::Instant::now(),
+            turn: 0,
+        };
+        s.refresh_members().await?;
+        Ok(s)
+    }
+
+    /// A source over the sink's own tables' change topics (`CHANGES OF`):
+    /// the same reading, with each record's change envelope read into
+    /// `op`, `before` and `after`.
+    ///
+    /// # Errors
+    /// The first listing's.
+    pub async fn open_changes(opener: Box<dyn FanInOpener>) -> Result<Self> {
+        let mut s = Self {
+            opener,
+            changes: true,
+            children: Vec::new(),
+            refresh: Duration::from_secs(3600),
             next_refresh: tokio::time::Instant::now(),
             turn: 0,
         };
@@ -459,11 +483,19 @@ impl FanInSource {
         self.next_refresh = tokio::time::Instant::now() + self.refresh;
         let list = self.opener.members().await?;
         for (m, parts) in list {
-            if self.children.iter().any(|c| c.member.tenant == m.tenant) {
+            if self
+                .children
+                .iter()
+                .any(|c| c.member.tenant == m.tenant && c.member.stream == m.stream)
+            {
                 continue;
             }
             let Some(packed) = fanin_stream_id(m.tenant, m.stream) else {
-                tracing::warn!(member = m.tenant, stream = m.stream, "fan-in sink: member or stream id too large to read");
+                tracing::warn!(
+                    member = m.tenant,
+                    stream = m.stream,
+                    "fan-in sink: member or stream id too large to read"
+                );
                 continue;
             };
             match self.opener.open(&m, parts).await {
@@ -489,6 +521,26 @@ impl FanInSource {
     fn child_of(&mut self, packed: u64) -> Option<&mut Child> {
         self.children.iter_mut().find(|c| c.packed == packed)
     }
+}
+
+/// A change topic's record as a change record (`CHANGES OF`).
+fn change(mut r: SinkRecord, packed: u64) -> SinkRecord {
+    if let Position::Stream { stream, .. } = &mut r.pos {
+        *stream = packed;
+    }
+    if let Some(v) = r
+        .value
+        .as_deref()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+    {
+        r.op = v
+            .get("op")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::model::ChangeOp::parse);
+        r.before = v.get("before").filter(|x| !x.is_null()).cloned();
+        r.after = v.get("after").filter(|x| !x.is_null()).cloned();
+    }
+    r
 }
 
 fn tag(mut r: SinkRecord, c: &Child) -> SinkRecord {
@@ -541,7 +593,11 @@ impl SourceReader for FanInSource {
                 c.idle_until = None;
             }
             let c = &self.children[k];
-            out.extend(got.into_iter().map(|r| tag(r, c)));
+            if self.changes {
+                out.extend(got.into_iter().map(|r| change(r, c.packed)));
+            } else {
+                out.extend(got.into_iter().map(|r| tag(r, c)));
+            }
         }
         self.turn = self.turn.wrapping_add(1);
         if out.is_empty() {
@@ -587,5 +643,151 @@ impl SourceReader for FanInSource {
             c.src.seek_after(&p).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fan_in_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// One member's records, and what was settled.
+    struct Fake {
+        recs: Vec<SinkRecord>,
+        settled: Arc<Mutex<Vec<(u64, Position)>>>,
+        member: u64,
+    }
+
+    #[async_trait]
+    impl SourceReader for Fake {
+        async fn next_batch(
+            &mut self,
+            max: usize,
+            _b: u64,
+            _w: Duration,
+        ) -> Result<Vec<SinkRecord>> {
+            let n = max.min(self.recs.len());
+            Ok(self.recs.drain(..n).collect())
+        }
+        async fn settle(&mut self, done: &[Position]) -> Result<()> {
+            let mut s = self.settled.lock().unwrap();
+            for p in done {
+                s.push((self.member, p.clone()));
+            }
+            Ok(())
+        }
+        async fn seek_after(&mut self, _p: &Position) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Opener {
+        members: Vec<(u64, &'static str)>,
+        settled: Arc<Mutex<Vec<(u64, Position)>>>,
+    }
+
+    fn rec(stream: u64, offset: u64, header: Option<&str>) -> SinkRecord {
+        SinkRecord {
+            key: None,
+            value: Some(b"v".to_vec()),
+            headers: header
+                .map(|h| vec![(TENANT_HEADER.to_owned(), h.as_bytes().to_vec())])
+                .unwrap_or_default(),
+            op: None,
+            before: None,
+            after: None,
+            ts_ms: 0,
+            idem_key: stream_key(stream, 0, offset, 1),
+            pos: Position::Stream {
+                stream,
+                partition: 0,
+                offset,
+                epoch: 1,
+            },
+        }
+    }
+
+    #[async_trait]
+    impl FanInOpener for Opener {
+        async fn members(&self) -> Result<Vec<(FanInMember, Vec<u32>)>> {
+            Ok(self
+                .members
+                .iter()
+                .map(|(t, n)| {
+                    (
+                        FanInMember {
+                            tenant: *t,
+                            name: (*n).to_owned(),
+                            stream: 7,
+                        },
+                        vec![0],
+                    )
+                })
+                .collect())
+        }
+        async fn open(&self, m: &FanInMember, _p: Vec<u32>) -> Result<Box<dyn SourceReader>> {
+            // Both members' instances have stream id 7: positions must not
+            // collide.
+            Ok(Box::new(Fake {
+                recs: vec![rec(7, 0, None), rec(7, 1, Some("forged-stays"))],
+                settled: Arc::clone(&self.settled),
+                member: m.tenant,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn tags_remaps_and_settles_per_member() {
+        let settled = Arc::new(Mutex::new(Vec::new()));
+        let mut s = FanInSource::open(
+            Box::new(Opener {
+                members: vec![(11, "acme"), (12, "globex")],
+                settled: Arc::clone(&settled),
+            }),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.members(), vec![11, 12]);
+        let got = s.next_batch(100, 1 << 20, Duration::ZERO).await.unwrap();
+        assert_eq!(got.len(), 4);
+        // Tagged with their member, keys prefixed, positions packed.
+        let a: Vec<&SinkRecord> = got
+            .iter()
+            .filter(|r| r.idem_key.starts_with("11:"))
+            .collect();
+        assert_eq!(a.len(), 2);
+        let tag = |r: &SinkRecord| {
+            r.headers
+                .iter()
+                .find(|(k, _)| k == TENANT_HEADER)
+                .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+        };
+        assert_eq!(tag(a[0]).as_deref(), Some("acme"));
+        assert_eq!(a[0].to_json()["tenant"], "acme");
+        // A header the record already had is kept (inherited instances are
+        // stamped by the server).
+        assert_eq!(tag(a[1]).as_deref(), Some("forged-stays"));
+        let pa = fanin_stream_id(11, 7).unwrap();
+        let pb = fanin_stream_id(12, 7).unwrap();
+        assert_ne!(pa, pb);
+        assert!(matches!(a[0].pos, Position::Stream { stream, .. } if stream == pa));
+        // Settling goes back to each member with its own stream id.
+        let done: Vec<Position> = got.iter().map(|r| r.pos.clone()).collect();
+        s.settle(&done).await.unwrap();
+        let st = settled.lock().unwrap();
+        assert_eq!(st.len(), 4);
+        assert!(
+            st.iter()
+                .all(|(_, p)| matches!(p, Position::Stream { stream: 7, .. }))
+        );
+        assert_eq!(st.iter().filter(|(m, _)| *m == 11).count(), 2);
+    }
+
+    #[test]
+    fn packing_limits() {
+        assert!(fanin_stream_id(1 << 38, 1).is_none());
+        assert!(fanin_stream_id(1, 1 << 24).is_none());
+        assert_eq!(fanin_stream_id(3, 5), Some((1 << 62) | (3 << 24) | 5));
     }
 }

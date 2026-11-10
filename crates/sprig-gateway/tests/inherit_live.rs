@@ -2306,7 +2306,10 @@ async fn amqp_fan_in_consumer() {
     for m in &ms {
         publish_work(&sch, m, 0, 20).await;
     }
-    println!("60 targeted publishes (3 instances made): {:?}", t.elapsed());
+    println!(
+        "60 targeted publishes (3 instances made): {:?}",
+        t.elapsed()
+    );
     // Consuming the definition's name without the argument: 406.
     {
         let c = amqp(&amqp_addr, &e.system, "r9fq").await;
@@ -2424,7 +2427,10 @@ async fn amqp_fan_in_consumer() {
         let t = Instant::now();
         publish_work(&sch, &late, 0, 10).await;
         let got = read_fan_in(&mut consumer, 10, 60).await;
-        println!("late member {late}: 10 read {:?} after its first publish", t.elapsed());
+        println!(
+            "late member {late}: 10 read {:?} after its first publish",
+            t.elapsed()
+        );
         assert_eq!(got.len(), 10, "{got:?}");
         check(&got, &late, 0, 10);
     }
@@ -2436,7 +2442,10 @@ async fn amqp_fan_in_consumer() {
     for m in &ms {
         let c = amqp(&amqp_addr, m, "r9fq").await;
         let ch = c.create_channel().await.unwrap();
-        assert!(take_all(&ch, "work", 0, 1).await.is_empty(), "{m}: left over");
+        assert!(
+            take_all(&ch, "work", 0, 1).await.is_empty(),
+            "{m}: left over"
+        );
     }
     // Unacknowledged fan-in deliveries go back to their instances when
     // the reader's connection ends.
@@ -2444,6 +2453,7 @@ async fn amqp_fan_in_consumer() {
         publish_work(&sch, m, 30, 32).await;
     }
     {
+        use futures::StreamExt;
         let c = amqp(&amqp_addr, &e.system, "r9fq").await;
         let ch = c.create_channel().await.unwrap();
         ch.basic_qos(100, BasicQosOptions::default()).await.unwrap();
@@ -2456,7 +2466,6 @@ async fn amqp_fan_in_consumer() {
             )
             .await
             .unwrap();
-        use futures::StreamExt;
         let mut n = 0;
         while n < 6 {
             let d = tokio::time::timeout(Duration::from_secs(30), cons.next())
@@ -2504,7 +2513,7 @@ async fn hook_receiver(port: u16) -> Received {
             let g = g.clone();
             tokio::spawn(async move {
                 let mut buf = Vec::new();
-                let mut chunk = [0u8; 65536];
+                let mut chunk = vec![0u8; 65536];
                 loop {
                     let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
                         match s.read(&mut chunk).await {
@@ -2539,12 +2548,14 @@ async fn hook_receiver(port: u16) -> Received {
                             .filter_map(|l| serde_json::from_str(l).ok())
                             .collect();
                     }
-                    g.lock().unwrap().extend(recs);
-                    if s
-                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
-                        .await
-                        .is_err()
-                    {
+                    // A body with "poison" in it is refused for good (422).
+                    let reply: &[u8] = if text.contains("poison") {
+                        b"HTTP/1.1 422 Unprocessable Entity\r\ncontent-length: 2\r\n\r\n{}"
+                    } else {
+                        g.lock().unwrap().extend(recs);
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}"
+                    };
+                    if s.write_all(reply).await.is_err() {
                         return;
                     }
                 }
@@ -2604,6 +2615,23 @@ fn distinct_for(r: &[(String, String, String)], m: &str) -> std::collections::BT
         .collect()
 }
 
+/// [`distinct_for`] of values `fs-<m>-<i>` with `i` in `range`.
+fn distinct_in(
+    r: &[(String, String, String)],
+    m: &str,
+    range: std::ops::Range<u64>,
+) -> std::collections::BTreeSet<String> {
+    distinct_for(r, m)
+        .into_iter()
+        .filter(|v| {
+            v.rsplit('-')
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some_and(|n| range.contains(&n))
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn fan_in_sink_end_to_end() {
     let Some(e) = env("fan_in_sink_end_to_end") else {
@@ -2617,8 +2645,12 @@ async fn fan_in_sink_end_to_end() {
     let mut sys = conn(&e.addr, &e.system).await;
     let ms = e.members.clone();
     let _ = sql(&mut sys, "DROP SINK r9fsink.audit").await;
+    let _ = sql(&mut sys, "DROP SINK r9fsink.ch").await;
     let _ = sql(&mut sys, "DROP CONNECTION r9fsink.hook").await;
     let _ = sql(&mut sys, "DROP STREAM security.fs_events IMMEDIATE CASCADE").await;
+    // Tasks of an earlier run's sinks stop within a few seconds.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    got.lock().unwrap().clear();
     let _ = sql(&mut sys, "CREATE DATABASE IF NOT EXISTS security").await;
     let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fsink").await;
     ok(&mut sys, "CREATE DATABASE r9fsink").await;
@@ -2667,16 +2699,21 @@ async fn fan_in_sink_end_to_end() {
     }
     wait_received(
         &got,
-        |r| ms.iter().all(|m| distinct_for(r, m).len() >= 30),
+        |r| ms.iter().all(|m| distinct_in(r, m, 100..130).len() >= 30),
         90,
     )
     .await;
     let r = received(&got);
-    println!("first 90: {} records received in {:?}", r.len(), t.elapsed());
+    println!(
+        "first 90: {} records received in {:?}",
+        r.len(),
+        t.elapsed()
+    );
     for m in &ms {
-        let d = distinct_for(&r, m);
+        let d = distinct_in(&r, m, 100..130);
         assert_eq!(d.len(), 30, "{m}: {d:?}");
-        assert!(d.iter().all(|v| v.starts_with(&format!("fs-{m}-1"))), "{m}: {d:?}");
+        // m0's 5 records from before the sink never come.
+        assert!(distinct_in(&r, m, 0..5).is_empty(), "{m}");
     }
     // Idempotency keys start with the member's id.
     assert!(r.iter().all(|(_, _, k)| k.contains(':')), "{r:?}");
@@ -2684,21 +2721,37 @@ async fn fan_in_sink_end_to_end() {
     // least once, duplicates with the same idempotency key).
     got.lock().unwrap().clear();
     for m in &ms {
-        publish_fs(&mut sys, m, 1000, 1300).await;
+        publish_fs(&mut sys, m, 1000, 2000).await;
     }
-    wait_received(&got, |r| r.len() >= 200, 60).await;
+    wait_received(&got, |r| r.len() >= 100, 60).await;
     let killed = kill_worker(&e);
-    println!("worker killed: {killed} after {} records", received(&got).len());
+    println!(
+        "worker killed: {killed} after {} records",
+        received(&got).len()
+    );
     if killed {
         start_worker(&e);
     }
     wait_received(
         &got,
-        |r| ms.iter().all(|m| distinct_for(r, m).len() >= 300),
-        180,
+        |r| ms.iter().all(|m| distinct_for(r, m).len() >= 1000),
+        300,
     )
     .await;
-    let r = received(&got);
+    // Only this round's records (an earlier batch whose position the
+    // killed worker hadn't saved comes again: at least once).
+    let all = received(&got);
+    let again = all.len();
+    let r: Vec<(String, String, String)> = all
+        .into_iter()
+        .filter(|(_, v, _)| {
+            v.rsplit('-')
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some_and(|n| n >= 1000)
+        })
+        .collect();
+    println!("redelivered from before the kill: {}", again - r.len());
     let keys: std::collections::BTreeSet<&str> = r.iter().map(|(_, _, k)| k.as_str()).collect();
     println!(
         "through kill -9: {} deliveries, {} distinct idempotency keys, {} duplicates",
@@ -2707,9 +2760,9 @@ async fn fan_in_sink_end_to_end() {
         r.len() - keys.len()
     );
     for m in &ms {
-        assert_eq!(distinct_for(&r, m).len(), 300, "{m}");
+        assert_eq!(distinct_for(&r, m).len(), 1000, "{m}");
     }
-    assert_eq!(keys.len(), 900);
+    assert_eq!(keys.len(), 3000);
     // A member created now: its records arrive from its instance's start.
     if let Some(late) = e.late.clone() {
         create_tenant(&e, &late);
@@ -2717,7 +2770,10 @@ async fn fan_in_sink_end_to_end() {
         let t = Instant::now();
         publish_fs(&mut sys, &late, 0, 10).await;
         wait_received(&got, |r| distinct_for(r, &late).len() >= 10, 60).await;
-        println!("late member {late}: 10 delivered {:?} after its first publish", t.elapsed());
+        println!(
+            "late member {late}: 10 delivered {:?} after its first publish",
+            t.elapsed()
+        );
         assert_eq!(distinct_for(&received(&got), &late).len(), 10);
     }
     // m0's 5 records from before the sink never came.
@@ -2727,7 +2783,276 @@ async fn fan_in_sink_end_to_end() {
             .any(|(_, v, _)| v.starts_with(&format!("fs-{}-0", ms[0])) && v.len() < 12)
     );
     ok(&mut sys, "DROP SINK r9fsink.audit").await;
+    // CHANGES OF two tables, through their change topics.
+    ok(
+        &mut sys,
+        "CREATE TABLE r9fsink.orders (id INT PRIMARY KEY, st VARCHAR(16))",
+    )
+    .await;
+    ok(
+        &mut sys,
+        "CREATE TABLE r9fsink.items (id INT PRIMARY KEY, n INT)",
+    )
+    .await;
+    let (code, msg) = sql(
+        &mut sys,
+        "CREATE SINK r9fsink.ch FROM CHANGES OF orders, items TO WEBHOOK CONNECTION hook",
+    )
+    .await
+    .unwrap_err();
+    println!("CHANGES OF without change topics: {code} {msg}");
+    ok(
+        &mut sys,
+        "ALTER TABLE r9fsink.orders SPRIG SET (stream.change_topic = on)",
+    )
+    .await;
+    ok(
+        &mut sys,
+        "ALTER TABLE r9fsink.items SPRIG SET (stream.change_topic = on)",
+    )
+    .await;
+    ok(
+        &mut sys,
+        "CREATE SINK r9fsink.ch FROM CHANGES OF orders, items TO WEBHOOK CONNECTION hook \
+         WITH (batch_max_wait_ms = 100)",
+    )
+    .await;
+    got.lock().unwrap().clear();
+    let t = Instant::now();
+    ok(
+        &mut sys,
+        "INSERT INTO r9fsink.orders VALUES (1, 'new'), (2, 'new')",
+    )
+    .await;
+    ok(
+        &mut sys,
+        "UPDATE r9fsink.orders SET st = 'paid' WHERE id = 1",
+    )
+    .await;
+    ok(&mut sys, "DELETE FROM r9fsink.orders WHERE id = 2").await;
+    ok(&mut sys, "INSERT INTO r9fsink.items VALUES (7, 3)").await;
+    let end = Instant::now() + Duration::from_secs(90);
+    while got.lock().unwrap().len() < 5 && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let recs = got.lock().unwrap().clone();
+    println!(
+        "CHANGES OF: {} change records in {:?}",
+        recs.len(),
+        t.elapsed()
+    );
+    for r in &recs {
+        println!(
+            "  {} {} before={} after={}",
+            r["op"], r["key"], r["before"], r["after"]
+        );
+    }
+    let ops: Vec<String> = recs
+        .iter()
+        .map(|r| r["op"].as_str().unwrap_or("?").to_owned())
+        .collect();
+    assert_eq!(recs.len(), 5, "{recs:?}");
+    assert_eq!(ops.iter().filter(|o| *o == "c").count(), 3, "{ops:?}");
+    assert!(
+        ops.contains(&"u".to_owned()) && ops.contains(&"d".to_owned()),
+        "{ops:?}"
+    );
+    assert!(
+        recs.iter()
+            .any(|r| r["op"] == "u" && r["after"]["st"] == "paid" && r["before"]["st"] == "new")
+    );
+    ok(&mut sys, "DROP SINK r9fsink.ch").await;
+    // DEAD LETTER TO STREAM: a record the destination refuses for good
+    // lands in the dead-letter stream with its sprig.dl.* headers.
+    let _ = sql(&mut sys, "DROP SINK r9fsink.dl").await;
+    ok(&mut sys, "CREATE STREAM r9fsink.ev PARTITIONS 1").await;
+    ok(&mut sys, "CREATE STREAM r9fsink.dead PARTITIONS 1").await;
+    ok(
+        &mut sys,
+        "CREATE SINK r9fsink.dl FROM STREAM ev TO WEBHOOK CONNECTION hook \
+         DEAD LETTER TO STREAM dead WITH (batch_max_wait_ms = 100)",
+    )
+    .await;
+    got.lock().unwrap().clear();
+    for v in ["ok1", "poison1", "ok2"] {
+        ok(
+            &mut sys,
+            &format!("INSERT INTO r9fsink.ev (`key`, `value`) VALUES ('k', '{v}')"),
+        )
+        .await;
+    }
+    let n = wait_count(&mut sys, "SELECT COUNT(*) FROM r9fsink.dead", 1, 120).await;
+    let dl = ok(
+        &mut sys,
+        "SELECT CAST(`value` AS CHAR), JSON_UNQUOTE(JSON_EXTRACT(headers, '$.\"sprig.dl.class\"')) FROM r9fsink.dead",
+    )
+    .await;
+    println!("DEAD LETTER TO STREAM: {n} dead letter(s): {dl:?}");
+    assert_eq!(n, 1);
+    assert_eq!(dl[0][0].as_deref(), Some("poison1"));
+    wait_received(&got, |r| r.len() >= 2, 30).await;
+    let vals: Vec<String> = received(&got).into_iter().map(|(_, v, _)| v).collect();
+    assert!(
+        vals.contains(&"ok1".to_owned()) && vals.contains(&"ok2".to_owned()),
+        "{vals:?}"
+    );
+    ok(&mut sys, "DROP SINK r9fsink.dl").await;
     ok(&mut sys, "DROP CONNECTION r9fsink.hook").await;
     let _ = sql(&mut sys, "DROP STREAM security.fs_events IMMEDIATE CASCADE").await;
     ok(&mut sys, "DROP DATABASE r9fsink").await;
+}
+
+const QDL_TRIGGER: &str = r"
+CREATE TRIGGER r9fqdl.on_job ON QUEUE r9fqdl.jobs LANGUAGE javascript AS $$
+export default function (ctx) {
+  const v = String(ctx.message.body);
+  const t = v.startsWith('bad') ? 'r9fqdl.later' : 'r9fqdl.applied';
+  db.exec('INSERT INTO ' + t + ' (v) VALUES (?)', [v]);
+}
+$$";
+
+/// RC11 for queue triggers (r9final): a queue trigger's dead letters are
+/// replayed with `sprigctl logic dead-letters replay`, in order, once each
+/// (marking them again runs nothing), while new messages keep flowing.
+#[tokio::test]
+async fn queue_trigger_dead_letter_replay() {
+    let Some(e) = env("queue_trigger_dead_letter_replay") else {
+        return;
+    };
+    let (Some(ctl), Some(sys_id), Some(amqp_addr)) = (
+        var("SPRIG_TEST_SPRIGCTL"),
+        tenant_id_of(&e.system),
+        var("SPRIG_TEST_INHERIT_AMQP"),
+    ) else {
+        eprintln!(
+            "no SPRIG_TEST_SPRIGCTL, SPRIG_TEST_INHERIT_IDS or SPRIG_TEST_INHERIT_AMQP: skipped"
+        );
+        return;
+    };
+    let root = var("SPRIG_TEST_INHERIT_ROOT").expect("SPRIG_TEST_INHERIT_ROOT");
+    let mut sys = conn(&e.addr, &e.system).await;
+    let _ = sql(&mut sys, "DROP TRIGGER r9fqdl.on_job").await;
+    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fqdl").await;
+    ok(&mut sys, "CREATE DATABASE r9fqdl").await;
+    ok(
+        &mut sys,
+        "CREATE TABLE r9fqdl.applied (id BIGINT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(32))",
+    )
+    .await;
+    let c = amqp(&amqp_addr, &e.system, "r9fqdl").await;
+    let ch = c.create_channel().await.unwrap();
+    ch.queue_declare(
+        "jobs".into(),
+        QueueDeclareOptions {
+            durable: true,
+            ..QueueDeclareOptions::default()
+        },
+        FieldTable::default(),
+    )
+    .await
+    .unwrap();
+    ch.confirm_select(ConfirmSelectOptions::default())
+        .await
+        .unwrap();
+    ok(&mut sys, QDL_TRIGGER).await;
+    let vals = ["g1", "bad1", "g2", "bad2", "g3", "bad3", "g4"];
+    for v in vals {
+        assert!(publish(&ch, "", "jobs", v, None).await);
+    }
+    assert_eq!(
+        wait_count(&mut sys, "SELECT COUNT(*) FROM r9fqdl.applied", 4, 120).await,
+        4
+    );
+    let cat = format!("{root}/t{sys_id}_sprig");
+    let mut r = Conn::from_url(&cat).await.unwrap();
+    let end = Instant::now() + Duration::from_secs(120);
+    let binding: u64 = loop {
+        let b: Option<(u64, u64)> = r
+            .query_first(
+                "SELECT binding_id, COUNT(*) FROM logic_dead_letters WHERE state = 'dead' \
+                 GROUP BY binding_id ORDER BY binding_id DESC LIMIT 1",
+            )
+            .await
+            .unwrap();
+        if let Some((b, 3)) = b {
+            break b;
+        }
+        assert!(Instant::now() < end, "three dead letters: {b:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    // Nothing left in the queue: the dead letters were taken out of it.
+    assert!(take_all(&ch, "jobs", 0, 1).await.is_empty());
+    ok(
+        &mut sys,
+        "CREATE TABLE r9fqdl.later (id BIGINT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(32))",
+    )
+    .await;
+    let replay = || {
+        let out = std::process::Command::new(&ctl)
+            .args([
+                "logic",
+                "dead-letters",
+                "replay",
+                "--all",
+                "--binding",
+                &binding.to_string(),
+                "--catalog",
+                &cat,
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let t = Instant::now();
+    println!("sprigctl: {}", replay().trim());
+    assert_eq!(
+        wait_count(&mut sys, "SELECT COUNT(*) FROM r9fqdl.later", 3, 60).await,
+        3
+    );
+    println!("three queue dead letters replayed in {:?}", t.elapsed());
+    let order: Vec<String> = ok(&mut sys, "SELECT v FROM r9fqdl.later ORDER BY id")
+        .await
+        .into_iter()
+        .map(|r| r[0].clone().unwrap())
+        .collect();
+    assert_eq!(order, ["bad1", "bad2", "bad3"], "in order");
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        let n: Option<u64> = r
+            .exec_first(
+                "SELECT COUNT(*) FROM logic_dead_letters WHERE binding_id = ? AND state = \
+                 'replayed'",
+                (binding,),
+            )
+            .await
+            .unwrap();
+        if n == Some(3) || Instant::now() > end {
+            assert_eq!(n, Some(3));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    r.exec_drop(
+        "UPDATE logic_dead_letters SET state = 'replaying' WHERE binding_id = ?",
+        (binding,),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(
+        count(&mut sys, "SELECT COUNT(*) FROM r9fqdl.later").await,
+        3
+    );
+    // New messages still run through the trigger.
+    assert!(publish(&ch, "", "jobs", "g5", None).await);
+    assert_eq!(
+        wait_count(&mut sys, "SELECT COUNT(*) FROM r9fqdl.applied", 5, 60).await,
+        5
+    );
+    assert_eq!(
+        count(&mut sys, "SELECT COUNT(*) FROM r9fqdl.later").await,
+        3
+    );
+    let _ = sql(&mut sys, "DROP TRIGGER r9fqdl.on_job").await;
+    ok(&mut sys, "DROP DATABASE r9fqdl").await;
 }

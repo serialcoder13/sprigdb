@@ -283,6 +283,13 @@ impl std::fmt::Debug for MongoFrontend {
 }
 
 impl MongoFrontend {
+    /// The shared state, for `Sql.Query`'s `language: mongo` (chapter 37,
+    /// tui T2; added by bugfix4).
+    #[must_use]
+    pub fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
     /// Builds the front end and starts the cursor and transaction reaper,
     /// which stops on `stop`.
     #[must_use]

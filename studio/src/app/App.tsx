@@ -16,6 +16,9 @@ import { IndexingPage } from '../indexing/IndexingPage';
 import { InboxPage } from '../approvals/InboxPage';
 import { PolicyPage } from '../approvals/PolicyPage';
 import { AccessPage } from '../access/AccessPage';
+import { ShardsPage } from '../shards/ShardsPage';
+import { SecurityPage } from '../auth/SecurityPage';
+import { OpsPage } from '../ops/OpsPage';
 import { isApiError } from '../api/errors';
 
 export const queryClient = new QueryClient({
@@ -77,9 +80,19 @@ export const routes = [
       { path: 'inbox', element: <InboxPage /> },
       { path: 'inbox/policy', element: <PolicyPage /> },
       { path: 'settings', element: <SettingsPage /> },
+      { path: 'shards', element: <ShardsPage /> },
+      { path: 'security', element: <SecurityPage /> },
       { path: 'access/:area', element: <AccessPage /> },
       { path: 'access', element: <Navigate to="users" replace /> },
     ],
+  },
+  {
+    path: '/ops/:area?',
+    element: (
+      <RequireSession>
+        <OpsPage />
+      </RequireSession>
+    ),
   },
   { path: '*', element: <Navigate to="/" replace /> },
 ];
@@ -91,7 +104,12 @@ export function App() {
     void boot();
     const signedOut = () => queryClient.clear();
     window.addEventListener('sprig-signed-out', signedOut);
-    return () => window.removeEventListener('sprig-signed-out', signedOut);
+    // Impersonation started or stopped: another user's data.
+    window.addEventListener('sprig-identity-changed', signedOut);
+    return () => {
+      window.removeEventListener('sprig-signed-out', signedOut);
+      window.removeEventListener('sprig-identity-changed', signedOut);
+    };
   }, []);
   return (
     <IntlProvider locale="en" messages={en} defaultLocale="en">

@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { json } from '../api/client';
 import { execute, rows as fetchRows } from '../api/sql';
 import { errorText } from '../api/errors';
-import { useSession } from '../auth/session';
+import { impersonate, useSession } from '../auth/session';
 import { useDatabases } from '../catalog/snapshot';
 import { createUser, dropUser, grant, lockUser, PRIVILEGES, revoke, showGrants, unlockUser } from './statements';
 
@@ -70,6 +70,7 @@ function Users() {
   const [grants, setGrants] = useState<{ who: string; lines: string[] } | null>(null);
   const [nu, setNu] = useState({ user: '', host: '%', password: '' });
   const [pw, setPw] = useState<{ user: string; host: string; password: string } | null>(null);
+  const [imp, setImp] = useState<{ user: string; host: string; reason: string; minutes: string } | null>(null);
   const done = (text: string, ok: boolean) => {
     setPending(null);
     if (text) setMsg({ ok, text });
@@ -126,6 +127,18 @@ function Users() {
                       {u.account_locked ? 'Unlock' : 'Lock'}
                     </button>
                     <button
+                      onClick={() =>
+                        void json('/v1/auth/factors:reset', { body: { user: u.user, host: u.host } })
+                          .then(() => setMsg({ ok: true, text: `Second factors of ${u.user} removed; their sessions ended.` }))
+                          .catch((e: unknown) => setMsg({ ok: false, text: errorText(e) }))
+                      }
+                    >
+                      Reset factors
+                    </button>
+                    {me?.privileges.tenant_admin && u.user !== me.principal.user && (
+                      <button onClick={() => setImp({ user: u.user, host: u.host, reason: '', minutes: '15' })}>Impersonate</button>
+                    )}
+                    <button
                       className="danger"
                       onClick={() => {
                         const typed = window.prompt(`Type ${u.user} to drop the account`);
@@ -141,6 +154,47 @@ function Users() {
           ))}
         </tbody>
       </table>
+      {imp && (
+        <form
+          className="card stack"
+          aria-label={`Impersonate ${imp.user}`}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void impersonate({ user: imp.user, host: imp.host, reason: imp.reason, minutes: Number(imp.minutes) })
+              .then(() => setImp(null))
+              .catch((err: unknown) => setMsg({ ok: false, text: errorText(err) }));
+          }}
+        >
+          <h3>Impersonate {imp.user}</h3>
+          <p className="muted">
+            Every statement runs as {imp.user}; the audit log records you both. The session ends after the minutes you give
+            (auth.impersonation_max_minutes at most) or when you stop.
+          </p>
+          <label className="stack">
+            <span>Reason (recorded in the audit log)</span>
+            <input required value={imp.reason} onChange={(e) => setImp({ ...imp, reason: e.target.value })} />
+          </label>
+          <label className="stack">
+            <span>Minutes</span>
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              required
+              value={imp.minutes}
+              onChange={(e) => setImp({ ...imp, minutes: e.target.value })}
+            />
+          </label>
+          <div className="row">
+            <button className="primary" type="submit">
+              Start impersonating
+            </button>
+            <button type="button" onClick={() => setImp(null)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
       {grants && (
         <section className="card" aria-label={`Grants of ${grants.who}`}>
           <h3>Grants of {grants.who}</h3>

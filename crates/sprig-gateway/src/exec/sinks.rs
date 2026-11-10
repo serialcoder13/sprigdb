@@ -347,6 +347,20 @@ impl Host for GwHost<'_> {
             .collect())
     }
 
+    fn change_stream(&self, db: u32, table: u64) -> Option<(u64, u32)> {
+        let st = self
+            .cat
+            .ext
+            .get::<sprig_streams::StreamsState>(sprig_streams::MODULE)?;
+        st.all()
+            .find(|s| {
+                s.db.0 == db
+                    && s.kind == sprig_streams::model::StreamKind::Changes
+                    && s.source_object.is_some_and(|o| o.0 == table)
+            })
+            .map(|s| (s.id.0, s.partitions))
+    }
+
     fn fan_in(&self) -> bool {
         // Checked against the latest grants in `fan_in_stream`: the
         // session's snapshot may predate a GRANT or REVOKE it just ran.
@@ -392,7 +406,9 @@ impl Host for GwHost<'_> {
                 let id = crate::inherited::tenant_by_name(&svc, u)
                     .await?
                     .ok_or_else(|| crate::inherited::target_err(format!("no tenant '{u}'")))?;
-                let e = crate::inherited::dir_entry(&svc, id).await?.unwrap_or_default();
+                let e = crate::inherited::dir_entry(&svc, id)
+                    .await?
+                    .unwrap_or_default();
                 if id != me && !e.path_ids().contains(&me.0) {
                     return Err(crate::inherited::target_err(format!(
                         "tenant '{u}' isn't below this one"

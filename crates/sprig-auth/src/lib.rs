@@ -60,6 +60,7 @@ mod crypt;
 pub mod fast_cache;
 pub mod handoff;
 pub mod http;
+pub mod mfa;
 pub mod mysql;
 pub mod policy;
 pub mod portable;

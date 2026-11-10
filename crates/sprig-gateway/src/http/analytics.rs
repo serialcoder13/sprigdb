@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use sprig_common::{Result, SprigCode, SprigError};
+use sprig_dim::merge::OutRow;
 use sprig_dim::query::Query;
 use sprig_dim::store;
 use tonic::{Request, Response, Status};
@@ -87,36 +88,9 @@ pub async fn call(
             Ok(json!({"dropped": true}))
         }
         "Analytics.Query" => {
-            let q = Query::parse(body)?;
-            // Live `analytics.*` settings (R6 round 3).
-            let limits = super::model_settings::analytics(&engine.api);
-            let _admitted =
-                super::model_settings::admit(caller.principal.tenant.map_or(0, |t| t.0), limits)
-                    .await?;
-            let t = std::time::Instant::now();
-            let a = tokio::time::timeout(
-                limits.timeout,
-                store::query(&mut sql, &database, &q, limits.max_groups),
-            )
-            .await
-            .map_err(|_| {
-                SprigError::standard(
-                    3024,
-                    *b"HY000",
-                    "Query execution was interrupted, maximum statement execution time exceeded (analytics.query_timeout_seconds)",
-                )
-            })??;
-            metrics::counter!("sprig_dim_queries_total", "plan" => a.compiled.plan).increment(1);
-            metrics::histogram!("sprig_dim_query_duration_seconds")
-                .record(t.elapsed().as_secs_f64());
-            #[allow(clippy::cast_precision_loss)] // a group count, far below 2^52
-            metrics::histogram!("sprig_dim_merge_groups").record(a.rows.len() as f64);
-            let rows: Vec<Value> = a
-                .rows
-                .iter()
-                .map(|r| json!({"keys": r.keys, "values": r.values, "grouping": r.grouping}))
-                .collect();
-            Ok(json!({"rows": rows, "plan": a.compiled.plan}))
+            let (plan, rows) = answer(engine, caller, &mut sql, &database, body).await?;
+            let rows: Vec<Value> = rows.iter().map(row_json).collect();
+            Ok(json!({"rows": rows, "plan": plan}))
         }
         "Analytics.Explain" => {
             let q = Query::parse(body)?;
@@ -141,6 +115,122 @@ pub async fn call(
             Ok(out)
         }
         other => Err(bad(format!("no analytics call {other}"))),
+    }
+}
+
+fn row_json(r: &OutRow) -> Value {
+    json!({"keys": r.keys, "values": r.values, "grouping": r.grouping})
+}
+
+/// Runs `Analytics.Query` under admission control and the live limits:
+/// the plan and the rows (detail rows, subtotals, the grand total last).
+async fn answer(
+    engine: &Arc<SqlEngine>,
+    caller: &Caller,
+    sql: &mut SqlSession,
+    database: &str,
+    body: &Value,
+) -> Result<(&'static str, Vec<OutRow>)> {
+    let q = Query::parse(body)?;
+    // Live `analytics.*` settings (R6 round 3), at the tenant's and the
+    // database's scopes (R6 round 4).
+    let limits = super::model_settings::analytics_for(engine, caller, database);
+    let _admitted =
+        super::model_settings::admit(caller.principal.tenant.map_or(0, |t| t.0), limits).await?;
+    let t = std::time::Instant::now();
+    let a = tokio::time::timeout(
+        limits.timeout,
+        store::query(sql, database, &q, limits.max_groups),
+    )
+    .await
+    .map_err(|_| {
+        SprigError::standard(
+            3024,
+            *b"HY000",
+            "Query execution was interrupted, maximum statement execution time exceeded (analytics.query_timeout_seconds)",
+        )
+    })??;
+    metrics::counter!("sprig_dim_queries_total", "plan" => a.compiled.plan).increment(1);
+    metrics::histogram!("sprig_dim_query_duration_seconds").record(t.elapsed().as_secs_f64());
+    #[allow(clippy::cast_precision_loss)] // a group count, far below 2^52
+    metrics::histogram!("sprig_dim_merge_groups").record(a.rows.len() as f64);
+    Ok((a.compiled.plan, a.rows))
+}
+
+/// Rows per streamed message of `Analytics.Query` (gRPC messages, NDJSON
+/// lines).
+pub const STREAM_BATCH_ROWS: usize = 1000;
+
+/// One part of a streamed `Analytics.Query` answer.
+#[derive(Debug)]
+pub enum Part {
+    /// First: how the query ran.
+    Header {
+        /// `local` or `per_level`.
+        plan: &'static str,
+    },
+    /// Up to [`STREAM_BATCH_ROWS`] rows, in order.
+    Rows(Vec<OutRow>),
+    /// Last, after every row: how many there were.
+    End {
+        /// Rows sent.
+        rows: usize,
+    },
+    /// The query failed; nothing follows.
+    Error(SprigError),
+}
+
+/// `Analytics.Query` as a stream (chapter 37: gRPC server streaming, REST
+/// NDJSON): the merged answer goes out [`STREAM_BATCH_ROWS`] rows at a
+/// time, each batch turned into JSON or protobuf only when the receiver
+/// takes it. The merge itself holds every group (at most
+/// `analytics.max_groups`), since subtotals need them all.
+#[must_use]
+pub fn query_stream(
+    engine: Arc<SqlEngine>,
+    caller: Caller,
+    body: Value,
+) -> tokio::sync::mpsc::Receiver<Part> {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        let database = s(&body, "database");
+        let run = async {
+            let mut sql = open(&engine, &caller)?;
+            answer(&engine, &caller, &mut sql, &database, &body).await
+        };
+        match run.await {
+            Err(e) => {
+                let _ = tx.send(Part::Error(e)).await;
+            }
+            Ok((plan, mut rows)) => {
+                if tx.send(Part::Header { plan }).await.is_err() {
+                    return;
+                }
+                let n = rows.len();
+                while !rows.is_empty() {
+                    let rest = rows.split_off(rows.len().min(STREAM_BATCH_ROWS));
+                    if tx.send(Part::Rows(rows)).await.is_err() {
+                        return;
+                    }
+                    rows = rest;
+                }
+                let _ = tx.send(Part::End { rows: n }).await;
+            }
+        }
+    });
+    rx
+}
+
+/// A streamed part as one NDJSON line's value: `{"header": {"plan"}}`,
+/// `{"rows": [...]}`, `{"end": {"rows"}}`, or `{"error": ...}` (the
+/// caller renders errors).
+#[must_use]
+pub fn part_json(p: &Part) -> Option<Value> {
+    match p {
+        Part::Header { plan } => Some(json!({"header": {"plan": plan}})),
+        Part::Rows(rows) => Some(json!({"rows": rows.iter().map(row_json).collect::<Vec<_>>()})),
+        Part::End { rows } => Some(json!({"end": {"rows": rows}})),
+        Part::Error(_) => None,
     }
 }
 
@@ -322,28 +412,45 @@ impl pb::analytics_server::Analytics for AnalyticsSvc {
         Ok(Response::new(pb::DropModelResponse { dropped: true }))
     }
 
+    type QueryStream = std::pin::Pin<
+        Box<dyn futures::Stream<Item = std::result::Result<pb::AnalyticsResult, Status>> + Send>,
+    >;
+
     async fn query(
         &self,
         req: Request<pb::AnalyticsQuery>,
-    ) -> std::result::Result<Response<pb::AnalyticsResult>, Status> {
+    ) -> std::result::Result<Response<Self::QueryStream>, Status> {
+        metrics::counter!("sprig_api_requests_total", "service" => "sprig.v1.Analytics", "method" => "Query", "protocol" => "grpc").increment(1);
+        let c = super::grpc::caller(&self.0, &req).await?;
         let body = query_json(req.get_ref());
-        let v = self.run(&req, "Query", body).await?;
-        let rows = v
-            .get("rows")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|r| pb::AnalyticsRow {
-                keys: list(r.get("keys")),
-                values: list(r.get("values")),
-                grouping: u32::try_from(r.get("grouping").and_then(Value::as_u64).unwrap_or(0))
-                    .unwrap_or(0),
-            })
-            .collect();
-        Ok(Response::new(pb::AnalyticsResult {
-            rows,
-            plan: s(&v, "plan"),
-        }))
+        let rx = query_stream(Arc::clone(&self.0.engine), c, body);
+        let stream = futures::stream::unfold(Some(rx), |rx| async move {
+            let mut rx = rx?;
+            let item = match rx.recv().await? {
+                Part::Header { plan } => Ok(pb::AnalyticsResult {
+                    rows: Vec::new(),
+                    plan: plan.to_owned(),
+                }),
+                Part::Rows(rows) => Ok(pb::AnalyticsResult {
+                    rows: rows
+                        .iter()
+                        .map(|r| {
+                            let v = row_json(r);
+                            pb::AnalyticsRow {
+                                keys: list(v.get("keys")),
+                                values: list(v.get("values")),
+                                grouping: r.grouping,
+                            }
+                        })
+                        .collect(),
+                    plan: String::new(),
+                }),
+                Part::End { .. } => return None,
+                Part::Error(e) => return Some((Err(super::grpc::st(&e)), None)),
+            };
+            Some((item, Some(rx)))
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn explain(

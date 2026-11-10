@@ -80,6 +80,8 @@ def!(OPERATOR_MTLS: Cow<'static, str> = "studio.operator_mtls", Cow::Borrowed("o
     HardBounds::one_of(&["off", "required"]), "off or required: client certificate for operator mode");
 def!(OPERATOR_REQUIRE_MFA: bool = "studio.operator_require_mfa", false, GLOBAL, HardBounds::NONE,
     "Second factor for operator mode");
+def!(OPERATOR_LOGINS: Cow<'static, str> = "studio.operator_logins", Cow::Borrowed(""), GLOBAL, HardBounds::NONE,
+    "Logins (tenant.user) holding platform operator rights in Studio, comma-separated");
 def!(CURSOR_IDLE_SECONDS: u64 = "studio.cursor_idle_seconds", 60, Scopes::TREE, HardBounds::range(1, 3600),
     "Idle time before a cursor closes and its backend statement is killed");
 def!(CURSOR_MAX_OPEN: u64 = "studio.cursor_max_open", 4, TENANT_GLOBAL, HardBounds::range(1, 64),
@@ -322,6 +324,7 @@ mod tests {
             "studio.operator_require_mfa",
             "studio.cursor_idle_seconds",
             "studio.cursor_max_open",
+            "studio.operator_logins",
         ] {
             assert!(reg.get(k).is_some(), "{k}");
         }

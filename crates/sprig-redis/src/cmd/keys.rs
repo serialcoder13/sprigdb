@@ -543,7 +543,34 @@ pub async fn flushdb(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
 /// `FLUSHALL [ASYNC|SYNC]`.
 pub async fn flushall(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
     flush_opts(a)?;
+    // Only the databases that exist: a missing table's 1146 costs the
+    // gateway's fence check up to a second each (RL14).
+    // When that list can't be read, every database is flushed.
+    // A quoted name (not a hex literal), which the gateway's
+    // `information_schema` rewrite maps to the database's schemas.
+    let schema = cx.ns.database.replace('\\', "\\\\").replace('\'', "''");
+    let rows = cx
+        .q(&format!(
+            "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{schema}' \
+             AND TABLE_NAME REGEXP '^db[0-9]+$'"
+        ))
+        .await;
+    let have: Option<Vec<u32>> = rows.ok().map(|rows| {
+        rows.iter()
+            .filter_map(|r| r.first().cloned().flatten())
+            .filter_map(|t| {
+                std::str::from_utf8(&t)
+                    .ok()?
+                    .strip_prefix("db")?
+                    .parse()
+                    .ok()
+            })
+            .collect()
+    });
     for db in 0..cx.env.config().databases {
+        if have.as_ref().is_some_and(|h| !h.contains(&db)) {
+            continue;
+        }
         let ns = cx.ns_of(db);
         flush_ns(cx, &ns).await?;
     }

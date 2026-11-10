@@ -297,7 +297,11 @@ impl<'a> Ctx<'a> {
                     sprig_kv::api::key_pred(&ns, k, "")
                 ))
                 .await?;
-            self.now = cell_i64(rows.first().and_then(|r| r.first()).and_then(Option::as_ref));
+            self.now = cell_i64(
+                rows.first()
+                    .and_then(|r| r.first())
+                    .and_then(Option::as_ref),
+            );
         }
         Ok(self.now)
     }

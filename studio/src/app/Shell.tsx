@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { NavLink, Outlet, useParams } from 'react-router';
 import { FormattedMessage, useIntl } from 'react-intl';
-import { logout, touch, useSession } from '../auth/session';
+import { logout, stopImpersonating, touch, useSession } from '../auth/session';
 import { IdleDialog } from '../auth/IdleDialog';
 import { TenantSwitcher } from '../tenant/TenantSwitcher';
 import { Explorer } from '../catalog/Explorer';
@@ -12,6 +12,7 @@ import { useOpenCount } from '../approvals/InboxPage';
 export function Shell() {
   const { tenant = '' } = useParams();
   const me = useSession((s) => s.me);
+  const imp = useSession((s) => s.impersonating);
   const intl = useIntl();
   const firstTab = useTabs((s) => s.tabs[0]?.id ?? 'new');
   useEffect(() => {
@@ -30,6 +31,17 @@ export function Shell() {
       <a className="skip" href="#content">
         <FormattedMessage id="nav.skip" />
       </a>
+      {imp && (
+        <div className="banner impersonation" role="status" data-testid="impersonation-banner">
+          <FormattedMessage
+            id="imp.banner"
+            values={{ user: imp.user, by: imp.by, until: new Date(imp.until).toLocaleTimeString() }}
+          />{' '}
+          <button onClick={() => void stopImpersonating()}>
+            <FormattedMessage id="imp.stop" />
+          </button>
+        </div>
+      )}
       <header className="topbar">
         <span className="brand">SprigDB Studio</span>
         <nav aria-label="Main">
@@ -53,6 +65,17 @@ export function Shell() {
           <NavLink to={`${base}/inbox/policy`}>
             <FormattedMessage id="nav.policy" />
           </NavLink>
+          <NavLink to={`${base}/shards`}>
+            <FormattedMessage id="nav.shards" />
+          </NavLink>
+          <NavLink to={`${base}/security`}>
+            <FormattedMessage id="nav.security" />
+          </NavLink>
+          {me?.platform_roles.includes('operator') && (
+            <NavLink to="/ops/clusters" data-testid="nav-operator">
+              <FormattedMessage id="nav.operator" />
+            </NavLink>
+          )}
           <NavLink to={`${base}/settings`}>
             <FormattedMessage id="nav.settings" />
           </NavLink>

@@ -322,10 +322,10 @@ impl ControllerApprovals {
                 State::Approved if a.pushes() => match a.revalidate(r).await {
                     Ok(Some(why)) => self.hub.expire(&r.id, &why).await?,
                     Ok(None) => {
-                        if let Some(t) = self.hub.start(&r.id).await? {
-                            if let Err(e) = a.apply(r).await {
-                                self.finished(&t, false, &e.message).await;
-                            }
+                        if let Some(t) = self.hub.start(&r.id).await?
+                            && let Err(e) = a.apply(r).await
+                        {
+                            self.finished(&t, false, &e.message).await;
                         }
                     }
                     Err(e) => tracing::warn!(id = %r.id, error = %e, "approvals: revalidate"),

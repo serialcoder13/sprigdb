@@ -3,7 +3,12 @@
 //! `approvals_live_<pid>`, created bare (no catalog tables) so the store
 //! migrates the module on first use, and dropped afterwards.
 
-#![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    clippy::similar_names
+)]
 
 use std::sync::Arc;
 use std::time::Duration;

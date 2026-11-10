@@ -15,7 +15,9 @@ use sprig_auth::ScramKind;
 use sprig_auth::mysql::{LoginRequest, MysqlLogin};
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_proto_mongo::Compressor;
-use sprig_proto_mongo::codec::{self, FLAG_MORE_TO_COME, Frame, OpMsg, OpReply};
+use sprig_proto_mongo::codec::{
+    self, FLAG_EXHAUST_ALLOWED, FLAG_MORE_TO_COME, Frame, OpMsg, OpReply,
+};
 use sprig_proto_mongo::errors::MongoError;
 use sprig_proto_mongo::scram::{Credential, ScramServer};
 use sprig_proto_mysql::Persona;
@@ -128,11 +130,21 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
     };
     let close = conn.close_soon.clone();
     let mut next_id = 1i32;
+    // A streaming `hello` (exhaust; chapter 30, "Handshake as a
+    // `mongos`"): the request answered again, with `moreToCome`, and the
+    // last reply's id that the next one answers.
+    let mut again: Option<Vec<u8>> = None;
+    let mut last_reply: Option<i32> = None;
     let r: Result<()> = async {
         loop {
-            let msg = tokio::select! {
-                m = codec::read_message(&mut conn.stream) => m.map_err(|e| codec_err(&e))?,
-                () = close.cancelled() => return Ok(()),
+            let repeat = again.is_some();
+            let msg = if let Some(m) = again.take() {
+                Some(m)
+            } else {
+                tokio::select! {
+                    m = codec::read_message(&mut conn.stream) => m.map_err(|e| codec_err(&e))?,
+                    () = close.cancelled() => return Ok(()),
+                }
             };
             let Some(msg) = msg else { return Ok(()) };
             let (h, frame, comp) = codec::decode(&msg).map_err(|e| codec_err(&e))?;
@@ -206,6 +218,23 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                 }
                 Frame::Msg(m) => {
                     let more = m.flags & FLAG_MORE_TO_COME != 0;
+                    // Drivers' monitors stream `hello` when the server
+                    // reports a `topologyVersion`: with `exhaustAllowed`,
+                    // an awaitable `hello` is answered with `moreToCome`
+                    // and again after each wait, until the client hangs
+                    // up. (Answering once made the Node driver clear its
+                    // pool: "Server ended moreToCome unexpectedly".)
+                    let streaming = m.flags & FLAG_EXHAUST_ALLOWED != 0
+                        && matches!(
+                            m.body
+                                .iter()
+                                .next()
+                                .and_then(std::result::Result::ok)
+                                .map(|(k, _)| k),
+                            Some("hello" | "isMaster" | "ismaster")
+                        )
+                        && m.body.get("topologyVersion").ok().flatten().is_some()
+                        && m.body.get("maxAwaitTimeMS").ok().flatten().is_some();
                     let (name, body) = Box::pin(st.guarded_dispatch(m, msg.len())).await;
                     if st.close_now {
                         return Ok(());
@@ -220,9 +249,13 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                             )
                             .unwrap_or_default()
                         });
+                        let stream_on = streaming && body.get_f64("ok") == Ok(1.0);
+                        if stream_on {
+                            again = Some(msg.clone());
+                        }
                         (
                             Some(Frame::Msg(OpMsg {
-                                flags: 0,
+                                flags: if stream_on { FLAG_MORE_TO_COME } else { 0 },
                                 body: raw,
                                 sequences: Vec::new(),
                             })),
@@ -238,8 +271,12 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                 }
             };
             if let Some(f) = reply {
-                let bytes =
-                    codec::encode(next_id, h.request_id, &f, used).map_err(|e| codec_err(&e))?;
+                let to = match (repeat, last_reply) {
+                    (true, Some(prev)) => prev,
+                    _ => h.request_id,
+                };
+                let bytes = codec::encode(next_id, to, &f, used).map_err(|e| codec_err(&e))?;
+                last_reply = Some(next_id);
                 next_id = next_id.wrapping_add(1);
                 conn.stream.write_all(&bytes).await.map_err(|e| io(&e))?;
                 conn.stream.flush().await.map_err(|e| io(&e))?;

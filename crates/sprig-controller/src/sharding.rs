@@ -536,7 +536,7 @@ impl ShardingLoop {
     }
 
     /// Step 1: the advisor's first design when the first split is due.
-    #[allow(clippy::too_many_lines)] // the book's run, step by step
+    #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the book's run, step by step
     async fn first_design(
         &self,
         tenant: TenantId,

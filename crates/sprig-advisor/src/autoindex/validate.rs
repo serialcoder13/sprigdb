@@ -154,6 +154,9 @@ pub struct ValidationSettings {
     pub canary_replay: bool,
     /// `auto_index.max_cover_columns` (3), for the covering retry.
     pub max_cover_columns: usize,
+    /// `auto_index.vector_min_recall` (0.95): a vector candidate must find
+    /// at least this share of the true nearest neighbours (R6 round 4).
+    pub vector_min_recall: f64,
 }
 
 impl Default for ValidationSettings {
@@ -172,6 +175,7 @@ impl Default for ValidationSettings {
             explain_rows_tolerance: 0.5,
             canary_replay: true,
             max_cover_columns: 3,
+            vector_min_recall: 0.95,
         }
     }
 }
@@ -292,6 +296,22 @@ pub struct ValidationReport {
     pub node_check: NodeCheck,
     /// Estimate and canary: the canary under observation.
     pub canary: Option<CanaryState>,
+    /// A vector candidate's measured recall (R6 round 4).
+    pub recall: Option<Recall>,
+}
+
+/// A vector candidate's recall at `k` on the validation node: the share
+/// of the exact `k` nearest neighbours (the same `ORDER BY` with the index
+/// ignored) that the index's search returned, over `queries` of the
+/// table's own vectors (chapter 13, "Other models"; chapter 34, V3).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Recall {
+    /// Mean recall at `k`, 0 to 1.
+    pub recall: f64,
+    /// Query vectors tried.
+    pub queries: usize,
+    /// Neighbours per query.
+    pub k: usize,
 }
 
 impl ValidationReport {
@@ -314,6 +334,7 @@ impl ValidationReport {
             },
             "index_kept": self.index_kept,
             "node_check": self.node_check,
+            "recall": self.recall,
             "covering_hint": self.verdict.covering_hint,
         })
     }
@@ -399,6 +420,7 @@ pub(crate) fn report(plan: &ValidationPlan, method: Method, node: &NodeId) -> Va
             notes: Vec::new(),
         },
         canary: None,
+        recall: None,
     }
 }
 
@@ -436,12 +458,130 @@ pub(crate) async fn replay_on(
     }
     let statements = replay::select_statements(&plan.statements, s);
     let result = replay::replay(&mut conn, guard, &plan.replay_target(), &statements, s).await;
-    conn.close().await;
     r.replay_ms = Some(ms_since(started));
     r.verdict = replay::decide(&result.statements, &s.thresholds);
     if let Some(why) = result.aborted {
         abort(r, why);
     }
+    // An approximate index changes results: it must also find enough of
+    // the true neighbours (R6 round 4).
+    if r.verdict.kind == VerdictKind::Accepted
+        && plan.candidate.def.kind == super::model::IndexKind::Vector
+    {
+        match measure_recall(&mut conn, plan, RECALL_QUERIES, RECALL_K).await {
+            Ok(Some(m)) => {
+                r.recall = Some(m);
+                if m.recall < plan.settings.vector_min_recall {
+                    r.verdict.kind = VerdictKind::Rejected;
+                    r.verdict.reason = format!(
+                        "recall at {} is {:.2}, below auto_index.vector_min_recall {:.2}",
+                        m.k, m.recall, plan.settings.vector_min_recall
+                    );
+                }
+            }
+            Ok(None) => {
+                r.verdict.kind = VerdictKind::Inconclusive;
+                r.verdict.reason = "no vectors to measure recall with".into();
+            }
+            Err(e) => abort(r, format!("recall check: {e}")),
+        }
+    }
+    conn.close().await;
+}
+
+/// Query vectors a recall check tries.
+pub const RECALL_QUERIES: usize = 20;
+/// Neighbours per recall query.
+pub const RECALL_K: usize = 10;
+
+/// The statements of a vector candidate's recall check on its table:
+/// sampling `queries` stored vectors (as text), and for one query vector
+/// `?v` the nearest `k` keys with the index and without it. `None` for
+/// other kinds.
+#[must_use]
+pub fn recall_sql(
+    plan: &ValidationPlan,
+    queries: usize,
+    k: usize,
+) -> Option<(String, String, String)> {
+    let def = &plan.candidate.def;
+    if def.kind != super::model::IndexKind::Vector || plan.target.pk.is_empty() {
+        return None;
+    }
+    let col = sprig_common::names::quote(&def.parts.first()?.column);
+    let t = format!(
+        "{}.{}",
+        sprig_common::names::quote(&plan.target.schema),
+        sprig_common::names::quote(&plan.target.table)
+    );
+    let f = match def.options.0.get("distance").map(String::as_str) {
+        Some(d) if d.eq_ignore_ascii_case("cosine") => "VEC_DISTANCE_COSINE",
+        _ => "VEC_DISTANCE_EUCLIDEAN",
+    };
+    let key = format!(
+        "CONCAT_WS(0x1F, {})",
+        plan.target
+            .pk
+            .iter()
+            .map(|c| sprig_common::names::quote(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let sample = format!(
+        "SELECT VEC_ToText({col}) FROM {t} WHERE {col} IS NOT NULL ORDER BY RAND(7) LIMIT {queries}"
+    );
+    let ann = format!("SELECT {key} FROM {t} ORDER BY {f}({col}, VEC_FromText(?v)) LIMIT {k}");
+    let exact = format!(
+        "SELECT {key} FROM {t} IGNORE INDEX ({}) ORDER BY {f}({col}, VEC_FromText(?v)) LIMIT {k}",
+        sprig_common::names::quote(&plan.index_name())
+    );
+    Some((sample, ann, exact))
+}
+
+/// Recall at `k` of the plan's vector index on `conn`'s node.
+async fn measure_recall(
+    conn: &mut ProbeSession,
+    plan: &ValidationPlan,
+    queries: usize,
+    k: usize,
+) -> std::result::Result<Option<Recall>, sprig_cluster::sql::ProbeError> {
+    let Some((sample, ann, exact)) = recall_sql(plan, queries, k) else {
+        return Ok(None);
+    };
+    let keys = |rows: Vec<sprig_cluster::sql::TextRow>| -> std::collections::BTreeSet<String> {
+        rows.into_iter()
+            .filter_map(|r| r.into_iter().next().and_then(|(_, v)| v))
+            .collect()
+    };
+    let vectors: Vec<String> = conn
+        .rows(&sample)
+        .await?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().and_then(|(_, v)| v))
+        .collect();
+    if vectors.is_empty() {
+        return Ok(None);
+    }
+    let mut sum = 0.0;
+    for v in &vectors {
+        let lit = format!("'{}'", v.replace('\\', "\\\\").replace('\'', "''"));
+        let want = keys(conn.rows(&exact.replace("?v", &lit)).await?);
+        let got = keys(conn.rows(&ann.replace("?v", &lit)).await?);
+        if want.is_empty() {
+            sum += 1.0;
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            let share = want.intersection(&got).count() as f64 / want.len() as f64;
+            sum += share;
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let recall = sum / vectors.len() as f64;
+    Ok(Some(Recall {
+        recall,
+        queries: vectors.len(),
+        k,
+    }))
 }
 
 /// The covering variant of a candidate for the statement in `hint`: its

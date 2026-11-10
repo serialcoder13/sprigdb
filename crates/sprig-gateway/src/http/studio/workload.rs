@@ -60,18 +60,23 @@ fn query_str<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// The databases the caller may see workload of: `None` for all.
-async fn visible(core: &Arc<Core>, caller: &Caller) -> Result<Option<Vec<String>>, SprigError> {
+pub(super) async fn visible(
+    core: &Arc<Core>,
+    caller: &Caller,
+) -> Result<Option<Vec<String>>, SprigError> {
     let r = run_sql(core, caller, "-", "SHOW GRANTS".to_owned()).await?;
     let lines: Vec<String> = rows_of(&r)
         .into_iter()
         .filter_map(|row| row.into_iter().next().flatten())
         .collect();
     let privs = grants::Privileges::of(&lines);
-    if privs.tenant_admin || lines.iter().any(|l| l.contains(" ON *.* ")) {
+    // `GRANT USAGE ON *.*` (every account has it) grants nothing.
+    let global = |l: &String| l.contains(" ON *.* ") && !l.starts_with("GRANT USAGE ON ");
+    if privs.tenant_admin || lines.iter().any(global) {
         return Ok(None);
     }
     let mut dbs = Vec::new();
-    for l in &lines {
+    for l in lines.iter().filter(|l| !l.starts_with("GRANT USAGE ON ")) {
         if let Some((_, rest)) = l.split_once(" ON ")
             && let Some((db, _)) = rest.split_once('.')
         {

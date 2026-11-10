@@ -4,6 +4,7 @@
 //! the tenant, `SPRIG_TENANT_ADMIN`, and the `ALTER` and `INDEX` grants
 //! read from `SHOW GRANTS`.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -20,6 +21,7 @@ use crate::http::{ConnInfo, Core};
 /// The caller's `ALTER` and `INDEX` grants and administrator right, from
 /// `SHOW GRANTS` lines.
 #[must_use]
+#[allow(clippy::similar_names)] // privs, priv lists
 pub fn claims(lines: &[String]) -> (bool, Vec<GrantClaim>) {
     let mut admin = false;
     let mut out = Vec::new();
@@ -77,7 +79,7 @@ fn enc(s: &str) -> String {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
             o.push(char::from(b));
         } else {
-            o.push_str(&format!("%{b:02X}"));
+            let _ = write!(o, "%{b:02X}");
         }
     }
     o
@@ -87,6 +89,7 @@ fn enc(s: &str) -> String {
 ///
 /// # Errors
 /// 39792 for an unknown route; the controller's errors.
+#[allow(clippy::too_many_lines)] // one arm per route
 pub async fn handle(
     core: &Arc<Core>,
     info: &ConnInfo,

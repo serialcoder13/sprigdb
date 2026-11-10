@@ -483,7 +483,10 @@ impl Session {
             return Ok(f);
         }
         let write = spec.has('w');
-        let own = write && !in_txn;
+        // FLUSHALL and FLUSHDB empty tables statement by statement (not
+        // atomic across databases or shards, as on a Redis Cluster): a
+        // failure inside a gateway transaction would poison the rest.
+        let own = write && !in_txn && !matches!(name, "flushall" | "flushdb");
         let resp3 = self.resp3();
         let db = self.db;
         let mut attempt = 0;

@@ -41,10 +41,33 @@ fn basic(c: &str) -> String {
 }
 
 async fn http(addr: &str, auth: &str, method: &str, path: &str, body: Option<&J>) -> (u16, J) {
+    let (st, text) = http_text(addr, auth, method, path, body, "application/json").await;
+    (st, serde_json::from_str(&text).unwrap_or(J::String(text)))
+}
+
+/// NDJSON lines of a streamed reply (`Accept: application/x-ndjson`).
+async fn ndjson(addr: &str, auth: &str, path: &str, body: &J) -> (u16, Vec<J>) {
+    let (st, text) = http_text(addr, auth, "POST", path, Some(body), "application/x-ndjson").await;
+    let lines = text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    (st, lines)
+}
+
+async fn http_text(
+    addr: &str,
+    auth: &str,
+    method: &str,
+    path: &str,
+    body: Option<&J>,
+    accept: &str,
+) -> (u16, String) {
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     let b = body.map(ToString::to_string).unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {}\r\nContent-Type: application/json\r\nAccept: {accept}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
         basic(auth),
         b.len()
     );
@@ -76,10 +99,53 @@ async fn http(addr: &str, auth: &str, method: &str, path: &str, body: Option<&J>
     } else {
         rest.to_owned()
     };
-    (
-        status,
-        serde_json::from_str(&body).unwrap_or(J::String(body)),
-    )
+    (status, body)
+}
+
+/// A gRPC `Analytics.Query` stream: the plan, the rows as JSON arrays
+/// (keys then values), and how many messages came.
+async fn grpc_rows<S>(stream: S) -> (String, Vec<Vec<J>>, usize)
+where
+    S: futures::Stream<Item = Result<pb::AnalyticsResult, tonic::Status>> + Unpin,
+{
+    use futures::StreamExt as _;
+    let msgs: Vec<pb::AnalyticsResult> = stream.map(|m| m.unwrap()).collect().await;
+    let plan = msgs.first().map(|m| m.plan.clone()).unwrap_or_default();
+    let cell = |x: &prost_types::Value| match &x.kind {
+        Some(prost_types::value::Kind::StringValue(s)) => json!(s),
+        _ => J::Null,
+    };
+    let rows = msgs
+        .iter()
+        .flat_map(|m| &m.rows)
+        .map(|row| {
+            row.keys
+                .as_ref()
+                .unwrap()
+                .values
+                .iter()
+                .chain(&row.values.as_ref().unwrap().values)
+                .map(cell)
+                .collect()
+        })
+        .collect();
+    (plan, rows, msgs.len())
+}
+
+fn json_rows(rows: &J) -> Vec<Vec<J>> {
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(r["values"].as_array().unwrap())
+                .cloned()
+                .collect()
+        })
+        .collect()
 }
 
 async fn sql(addr: &str, auth: &str, text: &str) -> J {
@@ -250,25 +316,10 @@ async fn analytics_over_rest_and_grpc() {
         totals: true,
         ..pb::AnalyticsQuery::default()
     };
-    let r = ac.query(gq.clone()).await.unwrap().into_inner();
-    let grpc_rows: Vec<Vec<J>> = r
-        .rows
-        .iter()
-        .map(|row| {
-            row.keys
-                .as_ref()
-                .unwrap()
-                .values
-                .iter()
-                .chain(&row.values.as_ref().unwrap().values)
-                .map(|x| match &x.kind {
-                    Some(prost_types::value::Kind::StringValue(s)) => json!(s),
-                    _ => J::Null,
-                })
-                .collect()
-        })
-        .collect();
-    assert_eq!(grpc_rows, want);
+    // A stream since R6 round 4: the plan first, then the rows.
+    let (plan, got, _) = grpc_rows(ac.query(gq.clone()).await.unwrap().into_inner()).await;
+    assert_eq!(plan, "per_level");
+    assert_eq!(got, want);
     let ex = ac.explain(gq.clone()).await.unwrap().into_inner();
     assert_eq!(ex.plan, "per_level");
     assert_eq!(ex.sql.len(), 3);
@@ -302,6 +353,90 @@ async fn analytics_over_rest_and_grpc() {
         .map(|r| json!([r["keys"][0], r["values"][0]]))
         .collect();
     assert_eq!(have, want);
+
+    // Streaming (R6 round 4): 4,000 more sales over every day of 2025, by
+    // region and day: over 2,000 rows, so several messages and lines, the
+    // same rows as the one-reply JSON.
+    let mut more = Vec::new();
+    for i in 0..4000u32 {
+        more.push(format!(
+            "({}, {}, DATE_ADD('2025-01-01 08:00:00', INTERVAL {} DAY), {}.{:02}, {})",
+            10_000 + i,
+            i % 6 + 1,
+            (i * 7) % 365,
+            (i * 31) % 500,
+            (i * 17) % 100,
+            i % 5 + 1
+        ));
+    }
+    for chunk in more.chunks(1000) {
+        sql(
+            &addr,
+            &auth,
+            &format!("INSERT INTO sale VALUES {}", chunk.join(", ")),
+        )
+        .await;
+    }
+    let big = json!({"measures": ["revenue", "avg_qty"], "totals": true,
+        "dimensions": [{"dimension": "store", "level": "region"}, {"dimension": "date", "level": "day"}],
+        "filters": [{"dimension": "date", "level": "year", "op": "eq", "values": ["2025"]}]});
+    let (st, v) = http(
+        &addr,
+        &auth,
+        "POST",
+        &format!("{base}/sales:query"),
+        Some(&big),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    let one = json_rows(&v["rows"]);
+    assert!(one.len() > 2000, "{}", one.len());
+    let (st, lines) = ndjson(&addr, &auth, &format!("{base}/sales:query"), &big).await;
+    assert_eq!(st, 200);
+    assert_eq!(lines[0], json!({"header": {"plan": v["plan"]}}));
+    assert_eq!(lines.last().unwrap(), &json!({"end": {"rows": one.len()}}));
+    let mut streamed = Vec::new();
+    for l in &lines[1..lines.len() - 1] {
+        let rows = json_rows(&l["rows"]);
+        assert!(!rows.is_empty() && rows.len() <= 1000);
+        streamed.extend(rows);
+    }
+    assert_eq!(streamed, one);
+    assert_eq!(lines.len(), 2 + one.len().div_ceil(1000));
+    let mut gbig = gq.clone();
+    gbig.measures = vec!["revenue".into(), "avg_qty".into()];
+    gbig.dimensions[0].level = "region".into();
+    gbig.dimensions[1].level = "day".into();
+    gbig.filters = vec![pb::AnalyticsFilter {
+        dimension: "date".into(),
+        level: "year".into(),
+        op: "eq".into(),
+        values: Some(lv(&["2025"])),
+    }];
+    let (plan, rows, msgs) = grpc_rows(ac.query(gbig).await.unwrap().into_inner()).await;
+    assert_eq!(plan, v["plan"].as_str().unwrap());
+    assert_eq!(rows, one);
+    assert_eq!(msgs, 1 + one.len().div_ceil(1000));
+    eprintln!(
+        "streamed: {} rows, {} NDJSON lines, {msgs} gRPC messages",
+        one.len(),
+        lines.len()
+    );
+    // An error is the stream's only line or status.
+    let (st, lines) = ndjson(
+        &addr,
+        &auth,
+        &format!("{base}/sales:query"),
+        &json!({"measures": ["nope"]}),
+    )
+    .await;
+    assert_eq!((st, lines.len()), (200, 1));
+    assert_eq!(lines[0]["error"]["code"], 39751, "{lines:?}");
+    let mut bad = gq.clone();
+    bad.measures = vec!["nope".into()];
+    let mut s = ac.query(bad).await.unwrap().into_inner();
+    let e = futures::StreamExt::next(&mut s).await.unwrap().unwrap_err();
+    assert_eq!(e.code(), tonic::Code::InvalidArgument, "{e:?}");
 
     // Models: list, update, errors, drop.
     let (st, v) = http(&addr, &auth, "GET", base, None).await;

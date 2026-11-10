@@ -238,26 +238,25 @@ impl RecommendationsService {
         let f = Self::filter(q)?;
         let now = self.ctl.hub().now();
         let mut stores: Vec<Arc<dyn RecStore>> = Vec::new();
-        match &q.tenant {
-            Some(name) => stores.push(self.ctl.hub().stores().tenant(self.tenant_id(name).await?)),
-            None => {
-                if !caller.platform && caller.dc_operator.is_none() {
-                    return Err(invalid("name a tenant"));
+        if let Some(name) = &q.tenant {
+            stores.push(self.ctl.hub().stores().tenant(self.tenant_id(name).await?));
+        } else {
+            if !caller.platform && caller.dc_operator.is_none() {
+                return Err(invalid("name a tenant"));
+            }
+            for e in self.ctl.directory().list().await? {
+                let b = e.body();
+                if b.home_dc == *self.ctl.dc() && b.state == TenantState::Active {
+                    stores.push(self.ctl.hub().stores().tenant(b.tenant_id));
                 }
-                for e in self.ctl.directory().list().await? {
-                    let b = e.body();
-                    if b.home_dc == *self.ctl.dc() && b.state == TenantState::Active {
-                        stores.push(self.ctl.hub().stores().tenant(b.tenant_id));
-                    }
-                }
-                if let Some(s) = self.ctl.hub().stores().dc(self.ctl.dc()) {
-                    stores.push(s);
-                }
-                if caller.platform
-                    && let Some(s) = self.ctl.hub().stores().global()
-                {
-                    stores.push(s);
-                }
+            }
+            if let Some(s) = self.ctl.hub().stores().dc(self.ctl.dc()) {
+                stores.push(s);
+            }
+            if caller.platform
+                && let Some(s) = self.ctl.hub().stores().global()
+            {
+                stores.push(s);
             }
         }
         let min_age = q

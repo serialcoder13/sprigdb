@@ -1122,7 +1122,8 @@ async fn list_shards(
     UrlPath(name): UrlPath<String>,
 ) -> Response {
     let r = async {
-        authorize(&app, &headers)?;
+        // Studio's shards view reads maps over the gateway credential.
+        authorize_gateway(&app, &headers)?;
         app.svc.list_shards(&name).await
     };
     respond(r.await)
@@ -1155,7 +1156,7 @@ async fn advisor_show(
     uri: Uri,
 ) -> Response {
     let r = async {
-        authorize(&app, &headers)?;
+        authorize_gateway(&app, &headers)?;
         let q: AdvisorQuery = query(&uri)?;
         let run = q
             .run

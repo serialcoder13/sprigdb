@@ -211,16 +211,15 @@ async fn run_index(
             r = rx.recv() => {
                 let Some(r) = r else { return };
                 let k = (r.tenant, db_key(&r.db), r.queue.clone());
-                let def = match defs.get(&k) {
-                    Some(d) => *d,
-                    None => {
-                        let d = instance_def(&svc, r.tenant, &r.db, &r.queue).await;
-                        if defs.len() > 100_000 {
-                            defs.clear();
-                        }
-                        defs.insert(k, d);
-                        d
+                let def = if let Some(d) = defs.get(&k) {
+                    *d
+                } else {
+                    let d = instance_def(&svc, r.tenant, &r.db, &r.queue).await;
+                    if defs.len() > 100_000 {
+                        defs.clear();
                     }
+                    defs.insert(k, d);
+                    d
                 };
                 if let Some(def) = def {
                     known.insert((def, r.tenant), r.ready);
@@ -394,6 +393,8 @@ impl FanIn {
     }
 
     /// Settles deliveries of this consumer; returns the ones that aren't.
+    #[must_use]
+    #[allow(clippy::type_complexity)]
     pub fn settle(&self, s: Vec<(DeliveryId, Settlement)>) -> Vec<(DeliveryId, Settlement)> {
         let mut rest = Vec::new();
         let mut by: Vec<(Arc<dyn Vhost>, OpCtx, Vec<(DeliveryId, Settlement)>)> = Vec::new();
@@ -404,10 +405,7 @@ impl FanIn {
                     rest.push((id, st));
                     continue;
                 };
-                let real_id = DeliveryId {
-                    queue: *real,
-                    ..id
-                };
+                let real_id = DeliveryId { queue: *real, ..id };
                 if let Some(e) = by.iter_mut().find(|e| Arc::ptr_eq(&e.0, v)) {
                     e.2.push((real_id, st));
                 } else {
@@ -660,7 +658,11 @@ impl Task {
         let me = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let lease_key = store
             .tier()
-            .key(&format!("{}{}-{me}", fanin_prefix(self.def.key()), std::process::id()))
+            .key(&format!(
+                "{}{}-{me}",
+                fanin_prefix(self.def.key()),
+                std::process::id()
+            ))
             .ok();
         if let (Some(l), Some(k)) = (lease, lease_key.clone()) {
             let _ = store
@@ -732,13 +734,12 @@ impl Task {
                 if subs.get(t).is_some_and(|s| s.consumer.is_some()) {
                     continue;
                 }
-                let name = match names.get(t) {
-                    Some(n) => n.clone(),
-                    None => {
-                        let n = self.in_scope(*t).await;
-                        names.insert(*t, n.clone());
-                        n
-                    }
+                let name = if let Some(n) = names.get(t) {
+                    n.clone()
+                } else {
+                    let n = self.in_scope(*t).await;
+                    names.insert(*t, n.clone());
+                    n
                 };
                 let Some(tname) = name else {
                     if warned.insert(*t) {
@@ -867,10 +868,7 @@ impl Task {
         by_consumer: &HashMap<ConsumerId, TenantId>,
     ) {
         match ev {
-            Event::Deliver {
-                consumer,
-                delivery,
-            } => {
+            Event::Deliver { consumer, delivery } => {
                 let Some(t) = by_consumer.get(&consumer).copied() else {
                     return;
                 };
@@ -880,15 +878,14 @@ impl Task {
                 let mapped = {
                     let mut sh = lock(&self.fan.shared);
                     let real = delivery.id.queue;
-                    let id = match sh.rev.get(&(t, real)) {
-                        Some(id) => *id,
-                        None => {
-                            let id = FANIN_ID_BIT | NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                            sh.rev.insert((t, real), id);
-                            sh.ids
-                                .insert(id, (Arc::clone(&s.vhost), s.cx.clone(), real));
-                            id
-                        }
+                    let id = if let Some(id) = sh.rev.get(&(t, real)) {
+                        *id
+                    } else {
+                        let id = FANIN_ID_BIT | NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                        sh.rev.insert((t, real), id);
+                        sh.ids
+                            .insert(id, (Arc::clone(&s.vhost), s.cx.clone(), real));
+                        id
                     };
                     tag(delivery, id, &s.name)
                 };
@@ -933,7 +930,10 @@ impl Task {
         let mut sh = lock(&self.fan.shared);
         let mut live: Vec<TenantId> = ready
             .iter()
-            .filter(|t| subs.get(t).is_some_and(|s| s.consumer.is_some() && !s.draining))
+            .filter(|t| {
+                subs.get(t)
+                    .is_some_and(|s| s.consumer.is_some() && !s.draining)
+            })
             .copied()
             .collect();
         if sh.drain {
@@ -1022,7 +1022,10 @@ async fn watch_ready(
     };
     let parse = |k: &sprig_meta::Key| {
         let s = k.as_str().to_owned();
-        s.rsplit('/').next().and_then(|t| t.parse::<u64>().ok()).map(TenantId)
+        s.rsplit('/')
+            .next()
+            .and_then(|t| t.parse::<u64>().ok())
+            .map(TenantId)
     };
     'outer: while !stop.is_cancelled() {
         let Ok(page) = store
@@ -1060,13 +1063,19 @@ async fn watch_ready(
                 Some(Ok(WatchEvent::Put(kv))) => {
                     tracing::debug!(key = kv.key.as_str(), "fan-in: ready");
                     if let Some(t) = parse(&kv.key) {
-                        ready.lock().unwrap_or_else(PoisonError::into_inner).insert(t);
+                        ready
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(t);
                         wake.notify_one();
                     }
                 }
                 Some(Ok(WatchEvent::Delete { key, .. })) => {
                     if let Some(t) = parse(&key) {
-                        ready.lock().unwrap_or_else(PoisonError::into_inner).remove(&t);
+                        ready
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .remove(&t);
                         wake.notify_one();
                     }
                 }
@@ -1088,7 +1097,10 @@ mod tests {
         a.insert(FAN_IN_ARG, FieldValue::Bool(true));
         assert!(wants_fan_in(&a));
         let mut b = FieldTable::new();
-        b.insert(FAN_IN_ARG, FieldValue::LongStr(bytes::Bytes::from_static(b"TRUE")));
+        b.insert(
+            FAN_IN_ARG,
+            FieldValue::LongStr(bytes::Bytes::from_static(b"TRUE")),
+        );
         assert!(wants_fan_in(&b));
         let mut c = FieldTable::new();
         c.insert(FAN_IN_ARG, FieldValue::Bool(false));
@@ -1114,8 +1126,10 @@ mod tests {
         s.priority = 5;
         assert!(refuse_unsupported(&s).is_err());
         let mut s = base;
-        s.arguments
-            .insert("x-stream-offset", FieldValue::LongStr(bytes::Bytes::from_static(b"first")));
+        s.arguments.insert(
+            "x-stream-offset",
+            FieldValue::LongStr(bytes::Bytes::from_static(b"first")),
+        );
         assert!(refuse_unsupported(&s).is_err());
     }
 }

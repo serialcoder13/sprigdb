@@ -107,6 +107,8 @@ export interface WhoAmI {
   platform_roles: string[];
   studio: StudioSettings;
   gateway?: { id: string; dc: string; studio_build: string };
+  /** The administrator acting, in an impersonation session. */
+  impersonator?: string | null;
 }
 
 import type { components } from './gen/v1';

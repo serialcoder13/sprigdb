@@ -306,6 +306,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         txns: http::sql::TxnRegistry::default(),
         draining: lifecycle.flag(),
         limiter: Some(Arc::clone(&limiter)),
+        tenants: tenants.clone(),
+        languages: http::lang::Languages::default(),
     });
     let txn_reaper = tokio::spawn(Arc::clone(&engine).reap(stop.clone()));
     let drain_lc = lifecycle.clone();
@@ -332,6 +334,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
                 Some(Arc::clone(&stores.global)),
             )
             .with_tenants(tenants.clone())
+            .with_factor_keys(ctx.config.gateway.workload_key_file.as_deref())
+            .with_operator_token_file(ctx.config.gateway.operator_token_file.as_deref())
             .with_gateway(&gateway_id),
         ),
     });
@@ -436,16 +440,19 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     ));
     // Bolt on 7687 (chapter 43, R8): catalog logins only, since graphs
     // are a tenant's objects.
-    let bolt_fe = Arc::new(bolt::BoltFrontend::new(Arc::new(
-        bolt::BoltGraphService::new(
-            Arc::clone(&login),
-            tenants
-                .as_ref()
-                .map(|t| Arc::new(graphs::GatewayGraphs::new(Arc::clone(t)))),
-            live.clone(),
-            dc.clone(),
-        ),
-    )));
+    let bolt_svc = Arc::new(bolt::BoltGraphService::new(
+        Arc::clone(&login),
+        tenants
+            .as_ref()
+            .map(|t| Arc::new(graphs::GatewayGraphs::new(Arc::clone(t)))),
+        live.clone(),
+        dc.clone(),
+    ));
+    // Sql.Query's `language` (tui T2): Cypher and GQL through the graph
+    // service, MongoDB commands through the document engine's front end.
+    engine.languages.set_graphs(Arc::clone(&bolt_svc));
+    engine.languages.set_mongo(Arc::clone(mongo_fe.shared()));
+    let bolt_fe = Arc::new(bolt::BoltFrontend::new(bolt_svc));
     // Chapter 40's pub/sub hubs between gateways, on the peer service.
     let redis_peer = redis::hub::RedisPeerService::new(
         gateway_id.clone(),

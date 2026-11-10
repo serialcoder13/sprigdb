@@ -871,7 +871,7 @@ impl ClusterFailover {
             Step::FailOver { sources } => {
                 // Chapter 52: held only when the platform says so.
                 if let Some(why) =
-                    crate::approvals::failover_gate(&self.dc, c, &writer.to_string()).await
+                    crate::approvals::failover_gate(&self.dc, c, &writer.clone()).await
                 {
                     return self.blocked(cx, rec, &mut f, why).await;
                 }

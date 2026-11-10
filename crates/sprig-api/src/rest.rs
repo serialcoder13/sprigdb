@@ -824,7 +824,9 @@ fn schemas() -> Value {
     json!({
         "QueryRequest": s(json!({"database": string, "sql": string, "transaction": string,
                                  "multi_statements": {"type": "boolean"},
-                                 "max_rows": u64s, "max_bytes": u64s, "timeout_ms": u64s})),
+                                 "max_rows": u64s, "max_bytes": u64s, "timeout_ms": u64s,
+                                 "language": {"type": "string",
+                                     "enum": ["sql", "cypher", "gql", "mongo"]}})),
         "Column": s(json!({"name": string, "org_name": string, "table": string,
             "org_table": string, "database": string, "type": string,
             "mysql_type": {"type": "integer"}, "flags": {"type": "integer"},

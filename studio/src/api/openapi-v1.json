@@ -479,12 +479,61 @@
         ],
         "type": "object"
       },
+      "FactorRequest": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "enrol": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "refresh_transport": {
+            "enum": [
+              "cookie",
+              "body"
+            ],
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
       "GetModelRequest": {
         "description": "The GetModelRequest message as JSON (proto3 mapping)",
         "type": "object"
       },
       "GetVectorIndexRequest": {
         "description": "The GetVectorIndexRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "ImpersonateRequest": {
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "minutes": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "tenant": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "reason"
+        ],
         "type": "object"
       },
       "IndexActionRequest": {
@@ -600,6 +649,28 @@
         ],
         "type": "object"
       },
+      "MfaRequest": {
+        "properties": {
+          "challenge": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "refresh_transport": {
+            "enum": [
+              "cookie",
+              "body"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge",
+          "code"
+        ],
+        "type": "object"
+      },
       "ModelInfo": {
         "description": "The ModelInfo message as JSON (proto3 mapping)",
         "type": "object"
@@ -615,6 +686,15 @@
       "QueryRequest": {
         "properties": {
           "database": {
+            "type": "string"
+          },
+          "language": {
+            "enum": [
+              "sql",
+              "cypher",
+              "gql",
+              "mongo"
+            ],
             "type": "string"
           },
           "max_bytes": {
@@ -1076,6 +1156,201 @@
         ]
       }
     },
+    "/v1/auth/factors": {
+      "get": {
+        "operationId": "Factors.List",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The caller's second factors (no secrets), recovery codes left, whether one is required",
+        "tags": [
+          "sprig.v1.Factors"
+        ]
+      }
+    },
+    "/v1/auth/factors:confirm": {
+      "post": {
+        "operationId": "Factors.Confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FactorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Activates the pending factor with a code; recovery codes shown once; an enrol ticket also signs in",
+        "tags": [
+          "sprig.v1.Factors"
+        ]
+      }
+    },
+    "/v1/auth/factors:enrol": {
+      "post": {
+        "operationId": "Factors.Enrol",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FactorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A new TOTP seed, shown once; with a session or an enrol ticket",
+        "tags": [
+          "sprig.v1.Factors"
+        ]
+      }
+    },
+    "/v1/auth/factors:reset": {
+      "post": {
+        "operationId": "Factors.Reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FactorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Removes every factor and ends every session: one's own with a code, or a user's as an administrator",
+        "tags": [
+          "sprig.v1.Factors"
+        ]
+      }
+    },
+    "/v1/auth/impersonate": {
+      "post": {
+        "operationId": "Auth.Impersonate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImpersonateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A session as a user of one's tenant or a descendant, with a reason; no refresh token",
+        "tags": [
+          "sprig.v1.Auth"
+        ]
+      }
+    },
     "/v1/auth/login": {
       "post": {
         "operationId": "Auth.Login",
@@ -1174,6 +1449,47 @@
           }
         },
         "summary": "The principal, session, tenant tree, grants and studio.* settings",
+        "tags": [
+          "sprig.v1.Auth"
+        ]
+      }
+    },
+    "/v1/auth/mfa": {
+      "post": {
+        "operationId": "Auth.CompleteMfa",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Completes a login's challenge with a TOTP code or a recovery code (cookie rules as login)",
         "tags": [
           "sprig.v1.Auth"
         ]

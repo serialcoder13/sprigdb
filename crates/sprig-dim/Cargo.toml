@@ -16,6 +16,7 @@ sprig-kv = { path = "../sprig-kv" }
 [dev-dependencies]
 async-trait.workspace = true
 base64.workspace = true
+futures.workspace = true
 # The API's live test: REST over HTTP/1.1, gRPC over h2c.
 prost-types.workspace = true
 sprig-api.workspace = true

@@ -93,7 +93,9 @@ fn a_keyed_batch_goes_to_its_keys_shard() {
         assert_eq!(p.at.schema, schema);
         assert_eq!(p.sql.matches(&format!("`{schema}`.`db0`")).count(), 3);
         assert_eq!(
-            p.sql.matches(&format!("`{schema}`.`__sprig_ke_db0`")).count(),
+            p.sql
+                .matches(&format!("`{schema}`.`__sprig_ke_db0`"))
+                .count(),
             1
         );
         // Text inside a string literal is left alone.

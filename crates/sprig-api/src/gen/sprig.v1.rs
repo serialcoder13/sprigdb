@@ -30,6 +30,17 @@ pub struct QueryRequest {
     /// `studio.statement_timeout_ms`.
     #[prost(uint64, tag = "7")]
     pub timeout_ms: u64,
+    /// The language of `sql`: "sql" (or empty), "cypher", "gql" or "mongo"
+    /// (chapter 37, "Languages"). Cypher and GQL run on the graph executor
+    /// (chapter 43) with `database` as Bolt's `db` ("<database>.<graph>", or a
+    /// graph of `bolt.logical_database`; empty for `bolt.default_graph`).
+    /// "mongo" takes one MongoDB command document as JSON (Extended JSON v2)
+    /// and runs it through the document engine's command path (chapters 30
+    /// and 31) in `database`; a cursor's documents are drained, one row each.
+    /// Privileges are the native protocols'. Other languages than SQL take no
+    /// `transaction` and no `multi_statements` (39794).
+    #[prost(string, tag = "8")]
+    pub language: ::prost::alloc::string::String,
 }
 /// One column of a result.
 #[allow(clippy::all)]
@@ -3109,7 +3120,7 @@ pub struct AnalyticsRow {
 pub struct AnalyticsResult {
     #[prost(message, repeated, tag = "1")]
     pub rows: ::prost::alloc::vec::Vec<AnalyticsRow>,
-    /// local or per_level.
+    /// local or per_level (in the stream's first message).
     #[prost(string, tag = "2")]
     pub plan: ::prost::alloc::string::String,
 }
@@ -3336,12 +3347,14 @@ pub mod analytics_client {
             self.inner.unary(req, path, codec).await
         }
         /// Runs a query: detail rows, subtotals after their groups, the grand
-        /// total last (one reply in this release, not a stream).
+        /// total last. A stream of results of at most 1,000 rows each; the first
+        /// carries the plan (R6 round 4). REST returns one JSON reply, or NDJSON
+        /// lines with `Accept: application/x-ndjson`.
         pub async fn query(
             &mut self,
             request: impl tonic::IntoRequest<super::AnalyticsQuery>,
         ) -> std::result::Result<
-            tonic::Response<super::AnalyticsResult>,
+            tonic::Response<tonic::codec::Streaming<super::AnalyticsResult>>,
             tonic::Status,
         > {
             self.inner
@@ -3356,7 +3369,7 @@ pub mod analytics_client {
             let path = http::uri::PathAndQuery::from_static("/sprig.v1.Analytics/Query");
             let mut req = request.into_request();
             req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Analytics", "Query"));
-            self.inner.unary(req, path, codec).await
+            self.inner.server_streaming(req, path, codec).await
         }
         /// The compiled SQL and plan of a query.
         pub async fn explain(
@@ -3448,12 +3461,20 @@ pub mod analytics_server {
             tonic::Response<super::DropModelResponse>,
             tonic::Status,
         >;
+        /// Server streaming response type for the Query method.
+        type QueryStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::AnalyticsResult, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
         /// Runs a query: detail rows, subtotals after their groups, the grand
-        /// total last (one reply in this release, not a stream).
+        /// total last. A stream of results of at most 1,000 rows each; the first
+        /// carries the plan (R6 round 4). REST returns one JSON reply, or NDJSON
+        /// lines with `Accept: application/x-ndjson`.
         async fn query(
             &self,
             request: tonic::Request<super::AnalyticsQuery>,
-        ) -> std::result::Result<tonic::Response<super::AnalyticsResult>, tonic::Status>;
+        ) -> std::result::Result<tonic::Response<Self::QueryStream>, tonic::Status>;
         /// The compiled SQL and plan of a query.
         async fn explain(
             &self,
@@ -3769,11 +3790,14 @@ pub mod analytics_server {
                 "/sprig.v1.Analytics/Query" => {
                     #[allow(non_camel_case_types)]
                     struct QuerySvc<T: Analytics>(pub Arc<T>);
-                    impl<T: Analytics> tonic::server::UnaryService<super::AnalyticsQuery>
+                    impl<
+                        T: Analytics,
+                    > tonic::server::ServerStreamingService<super::AnalyticsQuery>
                     for QuerySvc<T> {
                         type Response = super::AnalyticsResult;
+                        type ResponseStream = T::QueryStream;
                         type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
+                            tonic::Response<Self::ResponseStream>,
                             tonic::Status,
                         >;
                         fn call(
@@ -3804,7 +3828,7 @@ pub mod analytics_server {
                                 max_decoding_message_size,
                                 max_encoding_message_size,
                             );
-                        let res = grpc.unary(method, req).await;
+                        let res = grpc.server_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

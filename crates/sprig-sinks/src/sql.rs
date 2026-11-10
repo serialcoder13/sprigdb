@@ -119,6 +119,11 @@ pub trait Host: Send {
     fn fan_in(&self) -> bool {
         false
     }
+    /// The change topic (`t.changes`) of table object `table` in `db`: its
+    /// stream id and partitions, when the table's change topic is on.
+    fn change_stream(&self, _db: u32, _table: u64) -> Option<(u64, u32)> {
+        None
+    }
     /// The inherited stream definition `db.name` a fan-in sink of this
     /// tenant may read (declared here or above, the tenant in reach of its
     /// members), with `UNDER t` resolved to a member below this tenant.
@@ -953,11 +958,38 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
             )));
         }
         grammar::SourceAst::Changes(ts) => {
-            let names: Vec<String> = ts.iter().map(|t| t.name.clone()).collect();
-            return Err(bad_option(format!(
-                "CHANGES OF {} isn't built yet; turn on the change topic (ALTER TABLE t SPRIG SET (stream.change_topic = on)) and sink FROM STREAM `t.changes`",
-                names.join(", ")
-            )));
+            // Read through each table's change topic (chapter 45), which
+            // must be on.
+            let mut objects = Vec::new();
+            for t in ts {
+                let (tdb, tdbname) = db_of(h, t.db.as_deref().or(Some(&dbname)))?;
+                let id = h.table(tdb, &t.name).ok_or_else(|| {
+                    sprig_common::SprigError::standard(
+                        1146,
+                        *b"42S02",
+                        format!("Table '{tdbname}.{}' doesn't exist", t.name),
+                    )
+                })?;
+                if !h.can_select(&tdbname, &t.name) {
+                    return Err(err(
+                        SprigCode::SinkPrivilege,
+                        format!("you need SELECT on table {}", t.name),
+                    ));
+                }
+                if h.change_stream(tdb, id).is_none() {
+                    return Err(bad_option(format!(
+                        "CHANGES OF {} reads the table's change topic, which is off: ALTER TABLE {} SPRIG SET (stream.change_topic = on)",
+                        t.name, t.name
+                    )));
+                }
+                objects.push((id, t.name.clone()));
+            }
+            if c.guarantee == Guarantee::ExactlyOnce && objects.len() > 1 {
+                return Err(bad_option(
+                    "EXACTLY ONCE with CHANGES OF more than one table isn't built yet",
+                ));
+            }
+            SourceSpec::Changes { objects }
         }
     };
     if c.transform.is_some() {
@@ -966,11 +998,38 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
             "TRANSFORM isn't built yet (chapter 51, build step 8)",
         ));
     }
-    if c.dead_letter.is_some() {
-        return Err(bad_option(
-            "DEAD LETTER TO isn't built yet: dead letters go to the catalog's sink_dead_letters (sprigctl sink dead-letters)",
-        ));
-    }
+    // DEAD LETTER TO STREAM d: a stream of this tenant (its events go
+    // there as well as to sink_dead_letters, which sprigctl replays from).
+    let dead_letter = match &c.dead_letter {
+        None => None,
+        Some(grammar::DeadAst::Stream(n)) => {
+            let (dl_db, dl_dbname, dl_name) = match n.split_once('.') {
+                Some((d, s)) => {
+                    let (dl_id, dl_nm) = db_of(h, Some(d))?;
+                    (dl_id, dl_nm, s.to_owned())
+                }
+                None => {
+                    let (dl_id, dl_nm) = db_of(h, Some(&dbname))?;
+                    (dl_id, dl_nm, n.clone())
+                }
+            };
+            let (stream_id, _) = h.stream(dl_db, &dl_name).ok_or_else(|| {
+                sprig_common::SprigError::new(
+                    SprigCode::StreamNotFound,
+                    format!("unknown dead-letter stream {dl_dbname}.{dl_name}"),
+                )
+            })?;
+            Some(crate::model::DeadLetter::Stream {
+                id: stream_id,
+                name: dl_name,
+            })
+        }
+        Some(_) => {
+            return Err(bad_option(
+                "DEAD LETTER TO QUEUE and EXCHANGE aren't built yet; DEAD LETTER TO STREAM is",
+            ));
+        }
+    };
     if let Some(f) = &c.filter {
         crate::filter::parse(f)?;
     }
@@ -1086,7 +1145,7 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
         target,
         connections: connections.into_iter().map(|(r, _)| r).collect(),
         guarantee: c.guarantee,
-        dead_letter: None,
+        dead_letter,
         start_at: c.start_at,
         owner_user_id: h.user_id().unwrap_or(0),
         state: SinkState::Running,

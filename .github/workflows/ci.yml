@@ -102,6 +102,60 @@ jobs:
           path: studio/dist
           if-no-files-found: error
 
+  # Studio end to end (chapter 44 step 14 onward): the Playwright suite with
+  # the runner's installed Google Chrome (no browser download) against a
+  # gateway built with Studio, on one MariaDB node. Harness:
+  # deploy/compose/studio/e2e.sh (setup: HTTP listener, operator login,
+  # advisor-sharded data, Admin API tokens; run: pnpm e2e).
+  studio-e2e:
+    name: S1 Studio end to end
+    needs: [studio]
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+        working-directory: studio
+      - uses: actions/download-artifact@v4
+        with:
+          name: studio-dist
+          path: studio/dist
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Compose (etcd + one node)
+        working-directory: deploy/compose
+        run: docker compose --profile single up -d --wait --wait-timeout 300
+      - run: SPRIG_STUDIO_DIST=$PWD/studio/dist cargo build --locked -p sprigdb -p sprigctl
+      - name: Start the gateway (catalog mode) and prepare Studio's fixtures
+        run: |
+          deploy/compose/gateway-dev.sh up
+          deploy/compose/studio/e2e.sh setup
+      - name: Playwright (installed Google Chrome)
+        run: deploy/compose/studio/e2e.sh run
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-e2e
+          path: |
+            deploy/compose/.gateway-dev/screenshots
+            deploy/compose/.gateway-dev/playwright-results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          deploy/compose/gateway-dev.sh down || true
+          docker compose --project-directory deploy/compose --profile single down -v --timeout 10
+
   deny:
     name: S0 cargo-deny
     runs-on: ubuntu-latest

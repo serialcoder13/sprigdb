@@ -24,7 +24,7 @@
 //! - **Streaming** ([`stream`]): reads whose rows don't depend on each
 //!   other stream to `PULL` with back-pressure; others are buffered.
 
-mod session;
+pub(crate) mod session;
 mod stream;
 
 use std::borrow::Cow;
@@ -447,6 +447,26 @@ impl BoltGraphService {
 
     fn sctx(&self) -> SettingCtx<'_> {
         SettingCtx::process(&self.dc)
+    }
+
+    /// A session for `principal` outside Bolt: `Sql.Query` with `language:
+    /// cypher` or `gql` over REST and gRPC (chapter 37; tui decision T2).
+    /// The same statements, graphs, privileges and budgets as a Bolt
+    /// login's; `None` without tenant catalogs.
+    #[must_use]
+    pub(crate) fn api_session(
+        &self,
+        principal: sprig_auth::mysql::Principal,
+    ) -> Option<session::GwSession> {
+        let graphs = self.graphs.clone()?;
+        let ctx = self.sctx();
+        Some(session::GwSession::new(
+            principal,
+            graphs,
+            self.dc.clone(),
+            self.live.get(&ADVERTISE_ADDRESS, &ctx).into_owned(),
+            self.live.get(&ROUTING_TTL_SECONDS, &ctx),
+        ))
     }
 }
 

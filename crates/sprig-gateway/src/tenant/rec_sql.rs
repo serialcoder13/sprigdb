@@ -106,6 +106,7 @@ fn caller_for(
     }
 }
 
+#[allow(clippy::unnecessary_wraps)] // a row cell: `None` is NULL
 fn text(s: &str) -> Option<Bytes> {
     Some(Bytes::from(s.to_owned()))
 }
@@ -115,6 +116,7 @@ fn text(s: &str) -> Option<Bytes> {
 /// # Errors
 /// 1046, 1049, 1146 for unknown names; 39972-39977 from the service;
 /// 39070 when the catalog or the controller is unreachable.
+#[allow(clippy::too_many_lines)] // one arm per statement
 pub async fn execute(
     ts: &TenantSession,
     cat: &Arc<TenantCatalog>,
@@ -195,11 +197,8 @@ pub async fn execute(
             }))
         }
         RecStmt::Approve { id, .. } | RecStmt::Ignore { id, .. } | RecStmt::Snooze { id, .. } => {
-            let rec = match recs.get(&mut conn, *id).await {
-                Ok(Some(r)) => r,
-                Ok(None) | Err(_) => {
-                    return Err(sprig_approvals::store::not_found(&id_of(*id)));
-                }
+            let Ok(Some(rec)) = recs.get(&mut conn, *id).await else {
+                return Err(sprig_approvals::store::not_found(&id_of(*id)));
             };
             let caller = caller_for(ts, cat, &*p, &rec);
             if !may_act(&rec, &caller, &[]) && rec.level <= Level::Tenant {

@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { Navigate, useSearchParams } from 'react-router';
 import { FormattedMessage, useIntl } from 'react-intl';
-import { insecureLoginBlocked, login, useSession } from './session';
+import { insecureLoginBlocked, login, useSession, type LoginStep } from './session';
+import { Enrol, SecondFactor } from './Factors';
 import { errorText } from '../api/errors';
 
 /** Sign-in (chapter 44, "Login and the session"). Paste and password
@@ -15,9 +16,10 @@ export function LoginPage() {
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [step, setStep] = useState<LoginStep>({ kind: 'done' });
   const blocked = insecureLoginBlocked();
   const next = params.get('next');
-  if (status === 'active' && me) {
+  if (status === 'active' && me && step.kind !== 'enrol') {
     const safeNext = next && next.startsWith('/t/') ? next : `/t/${encodeURIComponent(me.principal.tenant ?? '-')}`;
     return <Navigate to={safeNext} replace />;
   }
@@ -25,13 +27,20 @@ export function LoginPage() {
     e.preventDefault();
     setError(null);
     try {
-      await login(name.trim(), password);
+      const next = await login(name.trim(), password);
       setPassword('');
+      setStep(next);
     } catch (err) {
       setError(errorText(err));
     }
   };
   const busy = status === 'authenticating';
+  if (step.kind === 'challenge') {
+    return <SecondFactor challenge={step.challenge} onRestart={() => setStep({ kind: 'done' })} />;
+  }
+  if (step.kind === 'enrol') {
+    return <Enrol ticket={step.ticket} onDone={() => setStep({ kind: 'done' })} />;
+  }
   return (
     <main className="main" style={{ maxInlineSize: 420, marginInline: 'auto', paddingBlockStart: 64 }}>
       <h1>

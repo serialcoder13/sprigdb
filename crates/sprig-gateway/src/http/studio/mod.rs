@@ -9,12 +9,15 @@
 //! | `GET`/`HEAD` under `studio.path`, `POST <path>/_/errors` | Studio's files ([`sprig_studio::serve`]) |
 //! | `POST /v1/auth/login` | Password login: an access token, and the refresh token as an `HttpOnly` cookie |
 //! | `POST /v1/auth/refresh`, `/v1/auth/logout` | Rotate or end the session (cookie, `X-Sprig-CSRF`, same origin) |
+//! | `POST /v1/auth/mfa`, `/v1/auth/factors...`, `POST /v1/auth/impersonate` | Second factors and impersonation ([`mfa`]) |
 //! | `GET /v1/auth/me` | `Auth.WhoAmI`: the principal, the session, the tenant tree, grants, `studio.*` |
 //! | `POST /v1/exports:ticket`, `POST /v1/exports` | `Exports.CreateTicket`; the form post that streams the file |
 //! | `POST /v1/users:setPassword` | `Users.SetPassword`, so a password never enters statement text |
 //! | `GET /v1/users`, `GET`/`POST /v1/api-keys`, `POST /v1/api-keys/{id}:revoke` | Accounts and API keys ([`accounts`]) |
 //! | `/v1/indexing/...` | The caller's tenant's automatic indexes, recommendations, actions and explanations |
 //! | `POST /v1/databases/{db}/cursors`, `POST /v1/cursors/{h}:fetch`, `:close` | `Cursors` ([`cursors`]) |
+//! | `/v1/ops/...` | Operator mode: the Admin API for logins in `studio.operator_logins` ([`ops`]) |
+//! | `GET /v1/shards`, `/v1/shards/advisor[/{run}]` | The shards view: table groups, keys, maps, advisor runs ([`shards`]) |
 //! | `GET /v1/openapi.json` | The data API's document with these routes added |
 //!
 //! Anything else goes on to the REST router. Every call runs with the
@@ -35,9 +38,12 @@ pub mod catalog;
 pub mod cursors;
 pub mod exports;
 pub mod grants;
+pub mod mfa;
+pub mod ops;
 // Chapter 52: the approvals inbox.
 pub mod recommendations;
 pub mod session;
+pub mod shards;
 pub mod workload;
 
 use std::sync::Arc;
@@ -145,6 +151,12 @@ pub struct StudioState {
     tenants: Option<Arc<crate::tenant::TenantServices>>,
     /// Open cursors (decision ST30).
     pub cursors: Arc<cursors::CursorRegistry>,
+    /// Second factors in the tenant catalogs (chapter 14 step 13).
+    factors: Option<sprig_auth::mfa::FactorStore>,
+    /// The keys sealing TOTP seeds.
+    factor_keys: Option<Arc<dyn sprig_auth::mfa::FactorKeys>>,
+    /// The Admin API token operator mode forwards with (decision ST34).
+    operator_token: Option<String>,
 }
 
 impl std::fmt::Debug for StudioState {
@@ -194,6 +206,9 @@ impl StudioState {
             global,
             tenants: None,
             cursors: Arc::default(),
+            factors: None,
+            factor_keys: None,
+            operator_token: None,
         }
     }
 
@@ -207,8 +222,41 @@ impl StudioState {
             let store: Arc<dyn SessionStore> =
                 Arc::new(CatalogSessions::new(Arc::clone(login), t.catalog.clone()));
             self.tokens = Arc::new(Tokens::new(Arc::clone(self.tokens.keys()), store));
+            self.factors = Some(sprig_auth::mfa::FactorStore::new(t.catalog.clone()));
         }
         self.tenants = tenants;
+        self
+    }
+
+    /// With the Admin API token operator mode uses (`[gateway]
+    /// operator_token_file`); without it, operator calls answer 503.
+    #[must_use]
+    pub fn with_operator_token_file(mut self, path: Option<&std::path::Path>) -> Self {
+        self.operator_token = path.and_then(|p| match std::fs::read_to_string(p) {
+            Ok(t) if !t.trim().is_empty() => Some(t.trim().to_owned()),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %p.display(), "operator token not loaded");
+                None
+            }
+        });
+        self
+    }
+
+    /// With the keys that seal TOTP seeds, derived from the tenant-data-key
+    /// file (`[gateway] workload_key_file`); without one, second factors
+    /// answer 39301.
+    #[must_use]
+    pub fn with_factor_keys(mut self, path: Option<&std::path::Path>) -> Self {
+        self.factor_keys = path.and_then(|p| {
+            match sprig_workload::keyring::MasterKeyring::from_file(p) {
+                Ok(k) => Some(Arc::new(mfa::KeyringFactorKeys(k)) as Arc<dyn sprig_auth::mfa::FactorKeys>),
+                Err(e) => {
+                    tracing::warn!(error = %e, "second-factor keys not loaded");
+                    None
+                }
+            }
+        });
         self
     }
 
@@ -743,6 +791,13 @@ pub async fn handle(
         ("POST", "/v1/auth/login") => login(core, &cfg, info, req).await,
         ("POST", "/v1/auth/refresh") => refresh(st, &cfg, info, req).await,
         ("POST", "/v1/auth/logout") => logout(st, &cfg, info, &req).await,
+        ("POST", "/v1/auth/mfa") => mfa::complete(core, &cfg, info, req).await,
+        ("POST", "/v1/auth/impersonate") => mfa::impersonate(core, info, req).await,
+        ("GET", "/v1/auth/factors") => mfa::factors(core, &cfg, info, req, "").await,
+        ("POST", p) if p.starts_with("/v1/auth/factors:") => {
+            let verb = p.trim_start_matches("/v1/auth/factors:").to_owned();
+            mfa::factors(core, &cfg, info, req, &verb).await
+        }
         ("GET", "/v1/auth/me") => whoami(core, &cfg, info, req).await,
         ("POST", "/v1/exports:ticket") => exports::ticket(core, &cfg, info, req).await,
         ("POST", "/v1/exports") => exports::download(core, &cfg, info, req).await,
@@ -775,6 +830,16 @@ pub async fn handle(
                     Some((id, "series")) => workload::series(core, &caller, id, &query).await,
                     _ => Err(invalid(format!("no route GET {p}"))),
                 },
+            }
+        }
+        (_, p) if p == "/v1/ops" || p.starts_with("/v1/ops/") => ops::route(core, info, req).await,
+        ("GET", p) if p == "/v1/shards" || p.starts_with("/v1/shards/") => {
+            match core
+                .caller(info, hdr(&req, "authorization"), None, hdr(&req, "host"))
+                .await
+            {
+                Err(e) => Err(e),
+                Ok(caller) => shards::route(core, &caller, p).await,
             }
         }
         ("POST", p)
@@ -921,6 +986,10 @@ async fn login(
     } else {
         "studio"
     };
+    // A second factor, or its enrolment, comes before any token.
+    if let Some(r) = mfa::after_password(core, &caller, client).await? {
+        return Ok(r);
+    }
     let limits = st.limits_for(caller.principal.tenant);
     let issued = st
         .tokens
@@ -1099,6 +1168,7 @@ async fn whoami(
             },
         },
         "amr": s.claims.amr,
+        "impersonator": s.claims.act.as_ref().map(|a| a.sub.clone()),
         "session": {
             "id": s.claims.sid,
             "client": s.claims.cli,
@@ -1110,7 +1180,7 @@ async fn whoami(
         "tenants": tenants,
         "grants": grants,
         "privileges": privs.to_json(),
-        "platform_roles": [],
+        "platform_roles": ops::roles(core, &caller),
         "studio": core.studio.client_for(cfg, p.tenant),
         "gateway": {
             "id": core.engine.gateway_id,
@@ -1232,6 +1302,7 @@ async fn set_password(
     req: Request<Incoming>,
 ) -> Result<Response<Body>, SprigError> {
     let auth = hdr(&req, "authorization");
+    mfa::not_impersonating(auth.as_deref(), "change passwords")?;
     let host = hdr(&req, "host");
     let body = parse_json(&read_body(req).await?)?;
     let caller = core.caller(info, auth, None, host).await?;

@@ -482,7 +482,7 @@ impl LogicStore {
             Option<u64>,
             Option<String>,
         );
-        let r: Option<R> = c
+        let r: std::result::Result<Option<R>, mysql_async::Error> = c
             .exec_first(
                 format!(
                     "SELECT m.module_id, m.name, m.kind, m.runtime, CAST(m.exposure AS CHAR), \
@@ -495,8 +495,13 @@ impl LogicStore {
                 ),
                 (db_id, name),
             )
-            .await
-            .map_err(map_err)?;
+            .await;
+        let r = match r {
+            // A tenant that never deployed logic has no logic tables yet
+            // (they appear with its first module): nothing is callable.
+            Err(mysql_async::Error::Server(e)) if e.code == 1146 => None,
+            r => r.map_err(map_err)?,
+        };
         Ok(r.map(
             |(module_id, name, kind, runtime, exposure, signature, version, tier)| Callable {
                 module_id,

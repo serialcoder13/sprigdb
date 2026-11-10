@@ -76,6 +76,18 @@ pub struct Claims {
     pub iat: u64,
     /// Expires at, Unix seconds.
     pub exp: u64,
+    /// Impersonation (chapter 14 step 14): the administrator acting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<Act>,
+}
+
+/// The `act` claim of an impersonation session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Act {
+    /// The administrator, `<tenant>.<user>`.
+    pub sub: String,
+    /// The administrator's tenant id and user id, `<tenant_id>:<user_id>`.
+    pub id: String,
 }
 
 /// The idle and age limits in force.
@@ -239,6 +251,7 @@ impl Tokens {
             cli: client.to_owned(),
             iat,
             exp: iat + ttl.as_secs(),
+            act: None,
         }
     }
 
@@ -253,12 +266,33 @@ impl Tokens {
         limits: Limits,
         now: SystemTime,
     ) -> Result<Issued> {
+        self.issue(principal, client, limits, now, vec!["pwd".to_owned()], None)
+            .await
+    }
+
+    /// Starts a session with the methods `amr` (`pwd`, `otp`, `rec`), and
+    /// for an impersonation the administrator acting (chapter 14 steps 13
+    /// and 14). An impersonation session has no refresh token: its access
+    /// token lives `limits.access_ttl` (the impersonation's length) and the
+    /// session row is checked on every use, so it can still be revoked.
+    ///
+    /// # Errors
+    /// The store's.
+    pub async fn issue(
+        &self,
+        principal: Principal,
+        client: &str,
+        limits: Limits,
+        now: SystemTime,
+        amr: Vec<String>,
+        act: Option<(Act, sessions::Impersonator)>,
+    ) -> Result<Issued> {
         let sid_bytes: [u8; 16] = *uuid::Uuid::now_v7().as_bytes();
         let sid = URL_SAFE_NO_PAD.encode(sid_bytes);
         let tenant = principal.tenant_name.clone().unwrap_or_else(|| "-".into());
         let refresh_token = format!("{tenant}.{sid}.{}", URL_SAFE_NO_PAD.encode(random::<32>()?));
-        let amr = vec!["pwd".to_owned()];
-        let claims = Self::claims(
+        let (act, impersonator) = act.map_or((None, None), |(a, i)| (Some(a), Some(i)));
+        let mut claims = Self::claims(
             &tenant,
             principal.tenant.map_or(0, |t| t.0),
             principal.user_id.map_or(0, |u| u.0),
@@ -268,18 +302,31 @@ impl Tokens {
             now,
             limits.access_ttl,
         );
+        claims.act = act;
+        let kind = if impersonator.is_some() { "impersonation" } else { "login" };
+        let expires_at = if impersonator.is_some() {
+            now + limits.access_ttl
+        } else {
+            now + limits.max_age
+        };
+        let refresh_token = if impersonator.is_some() { String::new() } else { refresh_token };
         self.store
             .create(&NewSession {
                 sid: sid_bytes,
                 principal,
-                refresh_sha256: hash(&refresh_token),
+                refresh_sha256: hash(&if refresh_token.is_empty() {
+                    URL_SAFE_NO_PAD.encode(random::<32>()?)
+                } else {
+                    refresh_token.clone()
+                }),
                 amr,
                 client: client.to_owned(),
-                expires_at: now + limits.max_age,
+                expires_at,
                 now,
+                impersonator,
             })
             .await?;
-        metrics::counter!("sprig_auth_tokens_issued_total", "kind" => "login").increment(1);
+        metrics::counter!("sprig_auth_tokens_issued_total", "kind" => kind).increment(1);
         Ok(Issued {
             sid,
             access_token: self.access(&claims)?,

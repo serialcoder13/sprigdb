@@ -273,7 +273,21 @@ pub struct S3Target {
     epoch: Mutex<TaskEpoch>,
     /// Exactly once: each unit's last position in a manifest.
     done: Mutex<HashMap<u64, u64>>,
+    /// The hourly orphan sweep (task 0 only), stopped with the target.
+    sweep: Option<SweepGuard>,
 }
+
+/// Stops the orphan sweep when the target goes.
+struct SweepGuard(sprig_common::CancellationToken);
+
+impl Drop for SweepGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// How often the orphan sweep runs, and how old an upload must be.
+const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 
 impl std::fmt::Debug for S3Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -350,7 +364,45 @@ impl S3Target {
             task: ctx.task.task_no,
             epoch: Mutex::new(ctx.task.epoch),
             done: Mutex::new(HashMap::new()),
+            sweep: None,
         })
+    }
+
+    /// Starts the hourly orphan sweep in the background (chapter 51, "S3
+    /// target"): every hour it aborts this sink's multipart uploads older
+    /// than an hour. Only task 0 sweeps; the sweep covers every task's
+    /// uploads.
+    fn start_sweep(&mut self) {
+        if self.task != 0 || self.sweep.is_some() {
+            return;
+        }
+        let stop = sprig_common::CancellationToken::new();
+        let me = Sweeper {
+            client: Arc::clone(&self.client),
+            root: self.root.clone(),
+            sink: self.sink,
+            base: self.base(),
+        };
+        let st = stop.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = st.cancelled() => return,
+                    () = tokio::time::sleep(SWEEP_EVERY) => {}
+                }
+                match me.sweep(SWEEP_EVERY).await {
+                    Ok(n) => {
+                        metrics::counter!("sprig_sink_s3_orphans_aborted_total")
+                            .increment(n as u64);
+                        if n > 0 {
+                            tracing::info!(sink = me.sink, aborted = n, "S3 orphan sweep");
+                        }
+                    }
+                    Err(e) => tracing::warn!(sink = me.sink, error = %e, "S3 orphan sweep failed"),
+                }
+            }
+        });
+        self.sweep = Some(SweepGuard(stop));
     }
 
     /// The client (recovery tools and tests).
@@ -417,6 +469,27 @@ impl S3Target {
     /// # Errors
     /// The client's.
     pub async fn sweep_orphans(&self, older_than: Duration) -> Result<usize> {
+        Sweeper {
+            client: Arc::clone(&self.client),
+            root: self.root.clone(),
+            sink: self.sink,
+            base: self.base(),
+        }
+        .sweep(older_than)
+        .await
+    }
+}
+
+/// What the orphan sweep needs of a target.
+struct Sweeper {
+    client: Arc<S3Client>,
+    root: String,
+    sink: u64,
+    base: String,
+}
+
+impl Sweeper {
+    async fn sweep(&self, older_than: Duration) -> Result<usize> {
         let now = i64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -430,7 +503,7 @@ impl S3Target {
         let mut uploads = self.client.list_uploads(&self.root).await?;
         if let Some(b) = self
             .client
-            .get_object(&format!("{}pending.json", self.base()))
+            .get_object(&format!("{}pending.json", self.base))
             .await?
         {
             let p: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
@@ -453,7 +526,9 @@ impl S3Target {
         }
         Ok(n)
     }
+}
 
+impl S3Target {
     /// Finishes or undoes the batch a crashed task left in `pending.json`.
     async fn recover_pending(&self) -> Result<()> {
         let key = format!("{}pending.json", self.base());
@@ -523,6 +598,7 @@ impl Target for S3Target {
             .epoch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = task.epoch;
+        self.start_sweep();
         if !self.exactly_once {
             return Ok(Vec::new());
         }

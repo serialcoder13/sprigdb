@@ -166,7 +166,7 @@ fn maybe_auto(engine: &Arc<SqlEngine>, caller: &Caller, def: &IndexDef) {
         return;
     };
     let mut def = def.clone();
-    let settings = super::model_settings::vector(&engine.api);
+    let settings = super::model_settings::vector_for(engine, caller, &def.database);
     tokio::spawn(async move {
         match auto_ann(&mut sql, &mut def, &settings, 20, 10).await {
             Ok(Some(r)) => {
@@ -198,8 +198,9 @@ pub async fn call(
 ) -> Result<Value> {
     let database = s(body, "database");
     let name = s(body, "index");
-    // Live `vector.*` settings (R6 round 3).
-    let settings = super::model_settings::vector(&engine.api);
+    // Live `vector.*` settings (R6 round 3), at the tenant's and the
+    // database's scopes (R6 round 4).
+    let settings = super::model_settings::vector_for(engine, caller, &database);
     let mut sql = open(engine, caller)?;
     match rpc {
         "Vectors.CreateIndex" => {

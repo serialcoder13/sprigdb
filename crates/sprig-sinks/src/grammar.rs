@@ -1298,6 +1298,29 @@ mod tests {
     }
 
     #[test]
+    fn fan_in_sources() {
+        let Some(Stmt::CreateSink(c)) = parse(
+            "CREATE SINK all_events FROM STREAM security.user_events FAN IN UNDER client_x \
+             TO WEBHOOK CONNECTION h",
+        )
+        .unwrap() else {
+            panic!("not a sink");
+        };
+        assert!(matches!(
+            c.source,
+            SourceAst::FanIn { ref stream, ref under }
+                if stream.name == "user_events" && under.as_deref() == Some("client_x")
+        ));
+        let Some(Stmt::CreateSink(c)) =
+            parse("CREATE SINK a FROM STREAM s FAN IN TO WEBHOOK CONNECTION h").unwrap()
+        else {
+            panic!("not a sink");
+        };
+        assert!(matches!(c.source, SourceAst::FanIn { under: None, .. }));
+        assert!(parse("CREATE SINK a FROM QUEUE q FAN IN TO WEBHOOK CONNECTION h").is_err());
+    }
+
+    #[test]
     fn credentials_are_redacted() {
         let sql = "CREATE CONNECTION k TYPE KAFKA WITH (bootstrap = 'b:9093') CREDENTIALS (username = 'sprig', password = 'p''w\\'d')";
         let (r, v) = redact(sql).unwrap();

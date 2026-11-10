@@ -11,8 +11,9 @@
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <!-- Build output outside the source tree (git-ignored target/). -->
-    <sprig.build.dir>${project.basedir}/../../../../target/clients-mongo/spring-data-build</sprig.build.dir>
+    <!-- Build output: run.sh passes a directory under the repository's
+         git-ignored target/; spring-data/target/ is ignored too. -->
+    <sprig.build.dir>${project.basedir}/target</sprig.build.dir>
   </properties>
   <dependencies>
     <dependency>

@@ -1049,8 +1049,15 @@ impl InheritVhost {
                     .events
                     .clone()
                     .ok_or_else(|| MqError::not_implemented("fan-in consumers need the engine"))?;
-                let fan =
-                    f::start(&self.svc, self.tenant, &def, &self.db, spec, cx.channel, events)?;
+                let fan = f::start(
+                    &self.svc,
+                    self.tenant,
+                    &def,
+                    &self.db,
+                    spec,
+                    cx.channel,
+                    events,
+                )?;
                 self.fanins
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)

@@ -7,6 +7,7 @@
 //! in `sprig_approvals_notifications_total`.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -429,7 +430,8 @@ impl Notifier {
         }
         let mut body = format!("{} recommendations are waiting:\n\n", waiting.len());
         for r in &waiting {
-            body.push_str(&format!(
+            let _ = write!(
+                body,
                 "- {} {} ({}, {:.0} h): {}\n  {}\n",
                 r.id,
                 r.kind,
@@ -437,7 +439,7 @@ impl Notifier {
                 r.age_hours(now_us),
                 r.summary,
                 r.action.text
-            ));
+            );
         }
         let mail = Mail {
             to,
@@ -482,9 +484,8 @@ pub fn rfc2822(us: i64) -> String {
 impl Hook for Notifier {
     async fn event(&self, ev: &Event) {
         let studio = self.setting(keys::STUDIO_URL.key, None).await;
-        let body = match serde_json::to_vec(&Outbound::of(ev, &studio)) {
-            Ok(b) => b,
-            Err(_) => return,
+        let Ok(body) = serde_json::to_vec(&Outbound::of(ev, &studio)) else {
+            return;
         };
         self.streams(ev, &body).await;
         self.webhook(ev, Bytes::from(body)).await;

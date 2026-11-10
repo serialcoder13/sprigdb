@@ -333,8 +333,31 @@ impl DataClient {
         caps: Caps,
         sink: &mut dyn Sink,
     ) -> Result<()> {
+        self.query_in(database, "sql", sql, transaction, caps, sink)
+            .await
+    }
+
+    /// `Sql.Query` with its `language` (chapter 37, "Languages"):
+    /// `sql`, `cypher`, `gql`, or `mongo` with `text` a MongoDB command
+    /// document as JSON. Only SQL takes several statements and a handle.
+    ///
+    /// # Errors
+    /// The API's error (39794 for a language the gateway refuses).
+    pub async fn query_in(
+        &self,
+        database: Option<&str>,
+        language: &str,
+        sql: &str,
+        transaction: Option<&str>,
+        caps: Caps,
+        sink: &mut dyn Sink,
+    ) -> Result<()> {
         let db = database.filter(|d| !d.is_empty()).unwrap_or("-");
-        let mut body = json!({ "sql": sql, "multi_statements": true });
+        let mut body = if language == "sql" {
+            json!({ "sql": sql, "multi_statements": true })
+        } else {
+            json!({ "sql": sql, "language": language })
+        };
         if let Some(t) = transaction {
             body["transaction"] = Value::String(t.to_owned());
         }

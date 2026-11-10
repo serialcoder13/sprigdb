@@ -37,6 +37,8 @@ pub mod auth;
 pub mod functions;
 pub mod grpc;
 pub mod kv;
+/// `language` on `Sql.Query`: Cypher, GQL and MongoDB commands (tui T2).
+pub mod lang;
 /// Live `vector.*` and `analytics.*` settings (R6 round 3).
 pub mod model_settings;
 pub mod rest;

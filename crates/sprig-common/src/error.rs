@@ -398,6 +398,15 @@ sprig_codes! {
     /// The tenant, or a tenant above it in the tree, is suspended; logins
     /// are refused (chapter 14).
     TenantSuspended = 39303, "ER_SPRIG_TENANT_SUSPENDED", "SprigTenantSuspended", SQLSTATE_GENERAL, false;
+    /// The account must sign in with a second factor, or enrol one first
+    /// (chapter 14, `auth.mfa_required`); operator mode without one under
+    /// `studio.operator_require_mfa` is 39926.
+    MfaRequired = 39304, "ER_SPRIG_MFA_REQUIRED", "SprigMfaRequired", SQLSTATE_GENERAL, false;
+    /// Impersonation refused: not an administrator over the user's tenant,
+    /// the user administers the caller's tenant, `auth.impersonation` is
+    /// off, no reason, too long, or from an impersonation session (chapter
+    /// 14).
+    ImpersonationDenied = 39305, "ER_SPRIG_IMPERSONATION_DENIED", "SprigImpersonationDenied", SQLSTATE_GENERAL, false;
     /// The session's account was dropped or locked, or its tenant
     /// suspended, while it was connected; the session closes
     /// (`auth.close_sessions_on_revoke`, chapter 14).
@@ -699,6 +708,14 @@ sprig_codes! {
     /// An Admin API request has no valid credential (chapter 37). Not yet
     /// in Appendix E.
     AdminUnauthenticated = 39793, "ER_SPRIG_ADMIN_UNAUTHENTICATED", "SprigAdminUnauthenticated", SQLSTATE_GENERAL, false;
+    /// `Sql.Query`'s `language` is unknown, or a language other than SQL
+    /// came with a transaction handle, `multi_statements` or a command it
+    /// can't run (chapter 37, "Languages").
+    QueryLanguageInvalid = 39794, "ER_SPRIG_QUERY_LANGUAGE_INVALID", "SprigQueryLanguageInvalid", SQLSTATE_GENERAL, false;
+    /// A Cypher, GQL or MongoDB statement sent through `Sql.Query` failed
+    /// with an error of that language that has no SprigDB or MySQL number;
+    /// the message carries the language's own code (chapter 37).
+    LanguageStatementFailed = 39795, "ER_SPRIG_LANGUAGE_STATEMENT_FAILED", "SprigLanguageStatementFailed", SQLSTATE_GENERAL, false;
     /// A change feed start is older than all history the feed can read
     /// (chapter 38).
     FeedHistoryLost = 39800, "ER_SPRIG_FEED_HISTORY_LOST", "SprigFeedHistoryLost", SQLSTATE_GENERAL, false;
@@ -773,6 +790,15 @@ sprig_codes! {
     /// The token session is older than `studio.session_max_hours`
     /// (chapter 44).
     StudioSessionExpired = 39925, "ER_SPRIG_STUDIO_SESSION_EXPIRED", "SprigStudioSessionExpired", SQLSTATE_GENERAL, false;
+    /// Operator mode needs a session signed in with a second factor
+    /// (`studio.operator_require_mfa`; chapter 44).
+    StudioOperatorMfaRequired = 39926, "ER_SPRIG_STUDIO_OPERATOR_MFA_REQUIRED", "SprigStudioOperatorMfaRequired", SQLSTATE_GENERAL, false;
+    /// Operator mode needs a verified client certificate
+    /// (`studio.operator_mtls = required`; chapter 44).
+    StudioOperatorCertRequired = 39927, "ER_SPRIG_STUDIO_OPERATOR_CERT_REQUIRED", "SprigStudioOperatorCertRequired", SQLSTATE_GENERAL, false;
+    /// Operator mode is off (`studio.operator_mode`), or not open to this
+    /// account (`studio.operator_logins`; chapter 44).
+    StudioOperatorModeDisabled = 39928, "ER_SPRIG_STUDIO_OPERATOR_MODE_DISABLED", "SprigStudioOperatorModeDisabled", SQLSTATE_GENERAL, false;
     /// An export ticket is malformed, expired, or its session ended
     /// (chapter 44).
     StudioExportTicketInvalid = 39929, "ER_SPRIG_STUDIO_EXPORT_TICKET_INVALID", "SprigStudioExportTicketInvalid", SQLSTATE_GENERAL, false;
@@ -992,6 +1018,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SettingScopeNotAllowed
         | SprigCode::SettingBadValue
         | SprigCode::AdminRequestInvalid
+        | SprigCode::QueryLanguageInvalid
+        | SprigCode::LanguageStatementFailed
         | SprigCode::LogicSyntax
         | SprigCode::GraphSyntax
         | SprigCode::GraphDefinitionInvalid
@@ -1227,6 +1255,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StudioInsecureTransport
         | SprigCode::StudioOriginRejected
         | SprigCode::StudioCsrfHeaderMissing
+        | SprigCode::MfaRequired
+        | SprigCode::ImpersonationDenied
+        | SprigCode::StudioOperatorMfaRequired
+        | SprigCode::StudioOperatorCertRequired
+        | SprigCode::StudioOperatorModeDisabled
         | SprigCode::ApprovalDenied => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit
@@ -1285,7 +1318,7 @@ fn mysql_protocol(errno: u16, sqlstate: [u8; 5]) -> ProtocolError {
         1205 | 1213 => (Code::Aborted, 409),
         1062 => (Code::AlreadyExists, 409),
         1049 | 1146 => (Code::NotFound, 404),
-        1044 | 1142 | 1143 => (Code::PermissionDenied, 403),
+        1044 | 1142 | 1143 | 1227 => (Code::PermissionDenied, 403),
         1045 => (Code::Unauthenticated, 401),
         1064 => (Code::InvalidArgument, 400),
         _ if sqlstate == SQLSTATE_RETRY => (Code::Aborted, 409),

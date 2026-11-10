@@ -304,7 +304,12 @@ async fn run_local(
             let e2 = Arc::clone(engine);
             let c2 = caller.clone();
             let txn = (!transaction.is_empty()).then_some(transaction);
-            tokio::spawn(async move { e2.run_capped(&c2, call, txn.as_deref(), caps, tx).await });
+            // `language`: sql (default), cypher, gql or mongo (tui T2).
+            let language = s(body, "language");
+            tokio::spawn(async move {
+                e2.run_in(&c2, &language, call, txn.as_deref(), caps, tx)
+                    .await;
+            });
             if rpc == "Sql.Query" && ndjson {
                 return Ok((200, Local::Stream(ndjson_response(rx))));
             }
@@ -342,6 +347,15 @@ async fn run_local(
         r if r.starts_with("Vectors.") => {
             let v = super::vectors::call(engine, caller, r, &request_json(m, body)).await?;
             Ok((200, Local::Json(v)))
+        }
+        // R6 round 4: `Analytics.Query` streams as NDJSON when asked.
+        "Analytics.Query" if ndjson => {
+            let rx = super::analytics::query_stream(
+                Arc::clone(engine),
+                caller.clone(),
+                request_json(m, body),
+            );
+            Ok((200, Local::Stream(analytics_ndjson(rx))))
         }
         r if r.starts_with("Analytics.") => {
             let v = super::analytics::call(engine, caller, r, &request_json(m, body)).await?;
@@ -418,6 +432,38 @@ fn split_parts(r: &sprig_api::proto::v1::ExecuteResponse) -> Vec<Value> {
         }));
     }
     out
+}
+
+/// `Analytics.Query`'s parts as NDJSON: a header line, row lines, an end
+/// line, or an error line that ends the stream (R6 round 4).
+fn analytics_ndjson(rx: mpsc::Receiver<super::analytics::Part>) -> Response<Body> {
+    let stream = futures::stream::unfold(Some(rx), |rx| async move {
+        let mut rx = rx?;
+        let part = rx.recv().await?;
+        let (line, next) = match &part {
+            super::analytics::Part::Error(e) => {
+                let (_, body): (u16, ErrorBody) = status::to_rest(e);
+                (json!({ "error": body }), None)
+            }
+            p => (
+                super::analytics::part_json(p).unwrap_or(Value::Null),
+                Some(rx),
+            ),
+        };
+        let mut bytes = serde_json::to_vec(&line).unwrap_or_default();
+        bytes.push(b'\n');
+        Some((
+            Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from(bytes))),
+            next,
+        ))
+    })
+    .boxed();
+    let mut r = Response::new(Body::new(StreamBody::new(stream)));
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    r
 }
 
 fn ndjson_response(rx: mpsc::Receiver<Item>) -> Response<Body> {

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use sprig_testkit::sim::Sim;
 use sprig_testkit::sim::mover::{
-    run_idle_move, run_move, run_move_streams, run_move_triggers, run_move_xa, run_move_xa_no_drain,
-    xa,
+    run_idle_move, run_move, run_move_streams, run_move_triggers, run_move_xa,
+    run_move_xa_no_drain, xa,
 };
 
 #[test]

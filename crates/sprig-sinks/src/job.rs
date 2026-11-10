@@ -62,6 +62,14 @@ pub trait SinkEnv: Send + Sync {
     fn residency(&self, _tenant: TenantId) -> Box<dyn Residency> {
         Box::new(Unpinned)
     }
+    /// The tenant's residency policy as the directory holds it now (its
+    /// own and its ancestors' policies); by default [`SinkEnv::residency`].
+    ///
+    /// # Errors
+    /// The directory's.
+    async fn residency_of(&self, tenant: TenantId) -> Result<Box<dyn Residency>> {
+        Ok(self.residency(tenant))
+    }
     /// `sink.platform_secret_dir`.
     fn secret_dir(&self) -> PathBuf {
         PathBuf::from("/etc/sprigdb/platform-secrets")
@@ -223,11 +231,103 @@ struct CatalogDead {
     pool: Pool,
     store: SinksStore,
     sink: SinkId,
+    /// `DEAD LETTER TO STREAM d`: the stream, its outbox schema and a
+    /// pool on its cluster.
+    stream: Option<(Arc<sprig_streams::StreamDef>, String, Pool)>,
+}
+
+impl CatalogDead {
+    /// The dead-letter stream of `def` (`DEAD LETTER TO STREAM d`), if any.
+    async fn target(
+        env: &dyn SinkEnv,
+        tenant: TenantId,
+        pool: &Pool,
+        schema: &str,
+        def: &SinkDef,
+    ) -> Result<Option<(Arc<sprig_streams::StreamDef>, String, Pool)>> {
+        let Some(crate::model::DeadLetter::Stream { id, .. }) = &def.dead_letter else {
+            return Ok(None);
+        };
+        let mut c = pool.get_conn().await.map_err(|e| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
+        })?;
+        let d = sprig_streams::StreamsStore::new(schema)
+            .get(&mut c, sprig_streams::StreamId(*id))
+            .await?
+            .ok_or_else(|| {
+                err(
+                    SprigCode::SinkSourceLost,
+                    format!("dead-letter stream {id} is gone"),
+                )
+            })?;
+        let slot = d.outbox.first().ok_or_else(|| {
+            err(
+                SprigCode::SinkOptionInvalid,
+                "the dead-letter stream has no outbox",
+            )
+        })?;
+        let out_schema = slot.schema(tenant, d.db).to_string();
+        Ok(Some((
+            Arc::new(d),
+            out_schema,
+            env.shard_pool(tenant).await?,
+        )))
+    }
 }
 
 #[async_trait]
 impl DeadLetters for CatalogDead {
     async fn write(&self, rec: &crate::model::SinkRecord, info: &DeadInfo) -> Result<()> {
+        // The stream first: a crash between the two writes a duplicate
+        // dead letter, never loses one.
+        if let Some((d, schema, pool)) = &self.stream {
+            let mut h: Vec<(String, Option<Vec<u8>>)> = rec
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), Some(v.clone())))
+                .collect();
+            for (k, v) in [
+                ("sprig.dl.reason", info.reason.clone()),
+                ("sprig.dl.class", info.class.to_owned()),
+                ("sprig.dl.attempts", info.attempts.to_string()),
+                ("sprig.dl.sink", self.sink.0.to_string()),
+                ("sprig.dl.idempotency_key", rec.idem_key.clone()),
+                ("sprig.dl.position", rec.pos.text()),
+            ] {
+                h.push((k.to_owned(), Some(v.into_bytes())));
+            }
+            let p = sprig_streams::publish::Publish {
+                key: rec.key.clone(),
+                value: rec
+                    .value
+                    .clone()
+                    .or_else(|| rec.after.as_ref().map(|a| a.to_string().into_bytes())),
+                headers: sprig_streams::publish::headers_json(&h),
+                partition: None,
+                ts_ms: None,
+            };
+            if let Some(q) = sprig_streams::publish::outbox_insert(d, Some(schema), &[p]) {
+                let mut c = pool.get_conn().await.map_err(|e| {
+                    let mut x = SprigError::new(
+                        SprigCode::CatalogUnavailable,
+                        "dead-letter stream unavailable",
+                    )
+                    .with_source(e);
+                    x.retryable = true;
+                    x
+                })?;
+                c.query_drop(q).await.map_err(|e| {
+                    let mut x = SprigError::new(
+                        SprigCode::CatalogUnavailable,
+                        "dead-letter stream write failed",
+                    )
+                    .with_source(e);
+                    x.retryable = true;
+                    x
+                })?;
+                metrics::counter!("sprig_sink_dead_letters_total", "to" => "stream").increment(1);
+            }
+        }
         let mut c = self.pool.get_conn().await.map_err(|e| {
             SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
         })?;
@@ -430,7 +530,7 @@ async fn open_conn(
                 secrets: Arc::new(secrets),
                 dest: Arc::new(Destinations {
                     allow,
-                    residency: env.residency(tenant),
+                    residency: env.residency_of(tenant).await?,
                     platform_hosts: None,
                     metadata_allowed,
                 }),
@@ -488,7 +588,7 @@ async fn open_conn(
                 secrets: Arc::new(secrets),
                 dest: Arc::new(Destinations {
                     allow: Vec::new(),
-                    residency: env.residency(tenant),
+                    residency: env.residency_of(tenant).await?,
                     platform_hosts: Some(p.hosts.clone()),
                     metadata_allowed,
                 }),
@@ -548,7 +648,7 @@ pub async fn run_sink_task(
         def.target.kind(),
     )?;
     let per_task = u32::try_from(opts.u64("partitions_per_task", 4)?).unwrap_or(4);
-    if let SourceSpec::FanIn { .. } = &def.source {
+    if let SourceSpec::FanIn { .. } | SourceSpec::Changes { .. } = &def.source {
         return run_fan_in_task(env, tenant, sink, task_no, cancel, c, store, def, opts).await;
     }
     let (stream, partitions_n) = match &def.source {
@@ -653,6 +753,7 @@ pub async fn run_sink_task(
         pool: cat_pool.clone(),
         store: store.clone(),
         sink,
+        stream: CatalogDead::target(env.as_ref(), tenant, &cat_pool, &cat_schema, &def).await?,
     });
     tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, epoch = epoch.0, "sink task started");
     metrics::gauge!("sprig_sink_tasks", "state" => "running").increment(1.0);
@@ -784,7 +885,7 @@ impl crate::source::FanInOpener for EnvFanIn {
         &self,
         m: &crate::source::FanInMember,
         _partitions: Vec<u32>,
-    ) -> Result<crate::source::StreamSource> {
+    ) -> Result<Box<dyn crate::runtime::SourceReader>> {
         let t = TenantId(m.tenant);
         let (mpool, mschema) = self.env.catalog(t).await?;
         let (log_schema, partitions, created_ms) =
@@ -814,11 +915,93 @@ impl crate::source::FanInOpener for EnvFanIn {
             self.sink,
         )
         .await
+        .map(|s| Box::new(s) as Box<dyn crate::runtime::SourceReader>)
     }
 }
 
-/// A fan-in sink's task: one task reads every member instance in reach
-/// (see [`EnvFanIn`]).
+/// `CHANGES OF t, ...`: the tables' change topics (`t.changes`, chapter
+/// 45) of the sink's own tenant, read as one source.
+struct EnvChanges {
+    env: Arc<dyn SinkEnv>,
+    tenant: u64,
+    objects: Vec<u64>,
+    cat_pool: Pool,
+    cat_schema: String,
+    group: String,
+    start: crate::model::StartAt,
+    sink: SinkId,
+    sink_created_ms: u64,
+}
+
+#[async_trait]
+impl crate::source::FanInOpener for EnvChanges {
+    async fn members(&self) -> Result<Vec<(crate::source::FanInMember, Vec<u32>)>> {
+        let mut c = self.cat_pool.get_conn().await.map_err(|e| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
+        })?;
+        let st = sprig_streams::StreamsStore::new(&self.cat_schema)
+            .load(&mut c)
+            .await?;
+        let mut out = Vec::new();
+        for o in &self.objects {
+            let Some(s) = st.all().find(|s| {
+                s.kind == sprig_streams::model::StreamKind::Changes
+                    && s.source_object.is_some_and(|x| x.0 == *o)
+            }) else {
+                return Err(err(
+                    SprigCode::SinkSourceLost,
+                    format!(
+                        "table object {o} has no change topic (ALTER TABLE ... SPRIG SET \
+                         (stream.change_topic = on))"
+                    ),
+                ));
+            };
+            out.push((
+                crate::source::FanInMember {
+                    tenant: self.tenant,
+                    name: String::new(),
+                    stream: s.id.0,
+                },
+                Vec::new(),
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn open(
+        &self,
+        m: &crate::source::FanInMember,
+        _partitions: Vec<u32>,
+    ) -> Result<Box<dyn crate::runtime::SourceReader>> {
+        let t = TenantId(self.tenant);
+        let (log_schema, partitions, _) =
+            instance_stream(&self.cat_pool, &self.cat_schema, t, m.stream).await?;
+        let shard = self.env.shard_pool(t).await?;
+        let start = if self.start == crate::model::StartAt::Latest && self.sink_created_ms > 0 {
+            crate::model::StartAt::Timestamp {
+                ms: i64::try_from(self.sink_created_ms).unwrap_or(i64::MAX),
+            }
+        } else {
+            self.start
+        };
+        crate::source::StreamSource::open(
+            shard,
+            self.cat_pool.clone(),
+            self.cat_schema.clone(),
+            log_schema,
+            sprig_streams::StreamId(m.stream),
+            (0..partitions).collect(),
+            self.group.clone(),
+            start,
+            self.sink,
+        )
+        .await
+        .map(|s| Box::new(s) as Box<dyn crate::runtime::SourceReader>)
+    }
+}
+
+/// A fan-in sink's task (one task reads every member instance in reach,
+/// [`EnvFanIn`]), or a `CHANGES OF` sink's ([`EnvChanges`]).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_fan_in_task(
     env: Arc<dyn SinkEnv>,
@@ -831,15 +1014,6 @@ async fn run_fan_in_task(
     def: Arc<SinkDef>,
     opts: Opts,
 ) -> Result<TaskEnd> {
-    let SourceSpec::FanIn {
-        def_tenant,
-        def_object,
-        under,
-        ..
-    } = &def.source
-    else {
-        return Ok(TaskEnd::Stopped);
-    };
     let (cat_pool, cat_schema) = env.catalog(tenant).await?;
     let created: Option<i64> = c
         .exec_first(
@@ -859,7 +1033,7 @@ async fn run_fan_in_task(
             &mut c,
             sink,
             task_no,
-            &json!({"fan_in": format!("{def_tenant}.{def_object}")}),
+            &json!({"source": def.source.kind().as_str(), "multi": def.source.name()}),
             &env.worker_id(),
         )
         .await?;
@@ -894,22 +1068,49 @@ async fn run_fan_in_task(
     }
     let target = build_target(&ctx).await?;
     let refresh = Duration::from_secs(opts.u64("fanin_refresh_seconds", 30)?.max(1));
-    let source = crate::source::FanInSource::open(
-        Box::new(EnvFanIn {
-            env: Arc::clone(&env),
-            tenant: tenant.0,
-            def: (*def_tenant, *def_object),
-            under: *under,
-            cat_pool: cat_pool.clone(),
-            cat_schema: cat_schema.clone(),
-            group: def.group(),
-            start: def.start_at,
-            sink,
-            sink_created_ms: u64::try_from(created.unwrap_or(0)).unwrap_or(0),
-        }),
-        refresh,
-    )
-    .await?;
+    // Whole seconds: change topics' records carry their commit time in
+    // seconds, so a record committed in the sink's creation second counts.
+    let sink_created_ms = u64::try_from(created.unwrap_or(0)).unwrap_or(0) / 1000 * 1000;
+    let source = match &def.source {
+        SourceSpec::FanIn {
+            def_tenant,
+            def_object,
+            under,
+            ..
+        } => {
+            crate::source::FanInSource::open(
+                Box::new(EnvFanIn {
+                    env: Arc::clone(&env),
+                    tenant: tenant.0,
+                    def: (*def_tenant, *def_object),
+                    under: *under,
+                    cat_pool: cat_pool.clone(),
+                    cat_schema: cat_schema.clone(),
+                    group: def.group(),
+                    start: def.start_at,
+                    sink,
+                    sink_created_ms,
+                }),
+                refresh,
+            )
+            .await?
+        }
+        SourceSpec::Changes { objects } => {
+            crate::source::FanInSource::open_changes(Box::new(EnvChanges {
+                env: Arc::clone(&env),
+                tenant: tenant.0,
+                objects: objects.iter().map(|o| o.0).collect(),
+                cat_pool: cat_pool.clone(),
+                cat_schema: cat_schema.clone(),
+                group: def.group(),
+                start: def.start_at,
+                sink,
+                sink_created_ms,
+            }))
+            .await?
+        }
+        _ => return Ok(TaskEnd::Stopped),
+    };
     let prepare = SinkPrepare {
         condition: def
             .filter_sql
@@ -931,6 +1132,7 @@ async fn run_fan_in_task(
         pool: cat_pool.clone(),
         store: store.clone(),
         sink,
+        stream: CatalogDead::target(env.as_ref(), tenant, &cat_pool, &cat_schema, &def).await?,
     });
     tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, members = source.members().len(), "fan-in sink task started");
     metrics::gauge!("sprig_sink_tasks", "state" => "running").increment(1.0);

@@ -93,19 +93,96 @@ impl Runner {
         match lang {
             Lang::Sql => self.run_sql(stmt, sink).await,
             Lang::Redis => self.run_redis(stmt, sink).await,
-            Lang::Mongo | Lang::Cypher => Err(ShellError::shell(
-                ShellCode::LanguageUnsupported,
-                format!(
-                    "{} over the REST API needs chapter 37's Documents service or the \
-                     statement endpoint's language field, which aren't built yet; use \
-                     --protocol {}",
-                    lang.name(),
-                    if lang == Lang::Mongo { "mongo" } else { "bolt" }
-                ),
-            )),
+            Lang::Cypher => self.run_cypher(stmt, sink).await,
+            Lang::Mongo => self.run_mongo(stmt, sink).await,
         }
     }
 
+    /// Cypher (and GQL) over REST: `Sql.Query` with `language: cypher`,
+    /// the database as Bolt's `db` (`<database>.<graph>`).
+    async fn run_cypher(&mut self, stmt: &str, sink: &mut dyn Sink) -> Result<()> {
+        if self.txn.is_some() {
+            return Err(ShellError::shell(
+                ShellCode::LanguageUnsupported,
+                "a REST transaction holds SQL only: COMMIT or ROLLBACK first, or use \
+                 --protocol bolt for a graph transaction",
+            ));
+        }
+        let text = stmt.trim().trim_end_matches(';');
+        self.client
+            .query_in(
+                self.database.as_deref(),
+                "cypher",
+                text,
+                None,
+                self.caps,
+                sink,
+            )
+            .await
+    }
+
+    /// MongoDB over REST: the call becomes its command document (as for
+    /// `--protocol mongo`, never evaluated), sent as `Sql.Query` with
+    /// `language: mongo`; each returned row is one document.
+    async fn run_mongo(&mut self, stmt: &str, sink: &mut dyn Sink) -> Result<()> {
+        use crate::native::mongo::{Call, command, parse_call};
+        let call = parse_call(stmt)?;
+        if let Call::Use(db) = &call {
+            self.database = Some(db.clone());
+            return local(sink, &format!("switched to db {db}"));
+        }
+        let (cmd, _cursor) = command(&call)?;
+        let show_dbs = matches!(call, Call::ShowDbs);
+        let db = if show_dbs {
+            Some("admin")
+        } else {
+            self.database.as_deref()
+        };
+        let text = bson::Bson::Document(cmd).into_relaxed_extjson().to_string();
+        let mut docs = DocSink {
+            inner: sink,
+            expand: show_dbs.then_some("databases"),
+        };
+        self.client
+            .query_in(db, "mongo", &text, None, self.caps, &mut docs)
+            .await
+    }
+}
+
+/// Rows of a `language: mongo` result (one `document` column) as
+/// documents; `expand` lists an array of the reply instead (`show dbs`).
+struct DocSink<'a> {
+    inner: &'a mut dyn Sink,
+    expand: Option<&'static str>,
+}
+
+impl Sink for DocSink<'_> {
+    fn event(&mut self, ev: ResultEvent) -> std::io::Result<()> {
+        match ev {
+            ResultEvent::Header(_) => Ok(()),
+            ResultEvent::Rows(rows) => {
+                for cell in rows
+                    .into_iter()
+                    .filter_map(|r| r.into_iter().next().flatten())
+                {
+                    let v: Value = serde_json::from_str(&cell).unwrap_or(Value::String(cell));
+                    match self.expand.and_then(|k| v.get(k)).and_then(Value::as_array) {
+                        Some(items) => {
+                            for d in items {
+                                self.inner.event(ResultEvent::Doc(d.clone()))?;
+                            }
+                        }
+                        None => self.inner.event(ResultEvent::Doc(v))?,
+                    }
+                }
+                Ok(())
+            }
+            other => self.inner.event(other),
+        }
+    }
+}
+
+impl Runner {
     async fn run_sql(&mut self, stmt: &str, sink: &mut dyn Sink) -> Result<()> {
         let w = top_words(stmt, false);
         let word = |i: usize| w.get(i).map_or("", String::as_str);

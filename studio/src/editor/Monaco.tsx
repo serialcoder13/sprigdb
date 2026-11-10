@@ -48,6 +48,31 @@ function registerCompletion(): void {
   });
 }
 
+let themesDefined = false;
+
+/** Monaco's themes with SQL operators (CROSS JOIN, AND, LIKE) at 4.5:1
+ * contrast or more (WCAG 1.4.3); Monaco's own grey is 3.6:1 on white. */
+function defineThemes(): void {
+  if (themesDefined) return;
+  themesDefined = true;
+  monaco.editor.defineTheme('sprig-light', {
+    base: 'vs',
+    inherit: true,
+    rules: [{ token: 'operator.sql', foreground: '57606a' }],
+    colors: {},
+  });
+  monaco.editor.defineTheme('sprig-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [{ token: 'operator.sql', foreground: 'a8b3bf' }],
+    colors: {},
+  });
+}
+
+function themeName(): string {
+  return isDark() ? 'sprig-dark' : 'sprig-light';
+}
+
 export interface MonacoHandle {
   /** The selection's text, or '' without a selection. */
   selection(): string;
@@ -84,11 +109,12 @@ export default function Monaco({
   });
   useEffect(() => {
     registerCompletion();
+    defineThemes();
     if (!host.current) return;
     const e = monaco.editor.create(host.current, {
       value,
       language: 'mysql',
-      theme: isDark() ? 'vs-dark' : 'vs',
+      theme: themeName(),
       minimap: { enabled: false },
       automaticLayout: true,
       fontSize: 13,
@@ -134,7 +160,7 @@ export default function Monaco({
       focus: () => e.focus(),
     });
     // Follow the page's theme (the system's, or the user's choice).
-    const retheme = () => monaco.editor.setTheme(isDark() ? 'vs-dark' : 'vs');
+    const retheme = () => monaco.editor.setTheme(themeName());
     const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
     mq?.addEventListener('change', retheme);
     window.addEventListener('sprig-theme', retheme);

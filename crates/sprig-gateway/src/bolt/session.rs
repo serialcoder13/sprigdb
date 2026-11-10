@@ -85,7 +85,7 @@ struct Causal {
     last: Option<String>,
 }
 
-pub(super) struct GwSession {
+pub(crate) struct GwSession {
     principal: Principal,
     /// The gateway session table's entry (`SHOW PROCESSLIST`, `KILL`).
     reg: Option<crate::session::Session>,
@@ -235,7 +235,7 @@ fn lost_conn() -> SprigError {
 }
 
 impl GwSession {
-    pub(super) fn new(
+    pub(crate) fn new(
         principal: Principal,
         graphs: Arc<GatewayGraphs>,
         dc: DcId,
@@ -261,7 +261,7 @@ impl GwSession {
     }
 
     /// Joins the gateway's session table.
-    pub(super) fn attach(&mut self, s: crate::session::Session) {
+    pub(crate) fn attach(&mut self, s: crate::session::Session) {
         self.reg = Some(s);
     }
 

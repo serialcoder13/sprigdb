@@ -143,3 +143,30 @@ fn reports_render_the_validation_row() {
     r.node_check.bad("index still there");
     assert!(!r.node_check.restored);
 }
+
+#[test]
+fn vector_candidates_get_a_recall_check() {
+    // B-trees don't.
+    assert!(recall_sql(&plan(&["a"]), 20, 10).is_none());
+    let mut p = plan(&["emb"]);
+    p.candidate.def.kind = crate::autoindex::model::IndexKind::Vector;
+    p.candidate
+        .def
+        .options
+        .0
+        .insert("distance".into(), "cosine".into());
+    let (sample, ann, exact) = recall_sql(&p, 20, 10).unwrap();
+    assert_eq!(
+        sample,
+        "SELECT VEC_ToText(`emb`) FROM `s1`.`t` WHERE `emb` IS NOT NULL ORDER BY RAND(7) LIMIT 20"
+    );
+    assert_eq!(
+        ann,
+        "SELECT CONCAT_WS(0x1F, `id`) FROM `s1`.`t` ORDER BY VEC_DISTANCE_COSINE(`emb`, VEC_FromText(?v)) LIMIT 10"
+    );
+    assert!(
+        exact.contains(&format!("IGNORE INDEX (`{}`)", p.index_name())),
+        "{exact}"
+    );
+    assert_eq!(ValidationSettings::default().vector_min_recall, 0.95);
+}

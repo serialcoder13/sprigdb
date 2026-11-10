@@ -170,6 +170,10 @@ pub(super) async fn create_key(
     info: &ConnInfo,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, SprigError> {
+    super::mfa::not_impersonating(
+        super::hdr(&req, "authorization").as_deref(),
+        "create API keys",
+    )?;
     let (caller, privs, cat) = context(core, info, &req).await?;
     let body = parse_json(&read_body(req).await?)?;
     let auth = auth_of(&cat)?;

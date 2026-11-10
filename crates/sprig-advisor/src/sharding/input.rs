@@ -321,7 +321,10 @@ pub fn kv_followers(tables: &mut Vec<Table>, located: &mut Vec<Located>, pins: &
         if pins.iter().any(|p| p.object.0 == e.object) {
             continue;
         }
-        let key_pin = pins.iter().find(|p| p.object.0 == k.object).map(|p| &p.kind);
+        let key_pin = pins
+            .iter()
+            .find(|p| p.object.0 == k.object)
+            .map(|p| &p.kind);
         let kind = match key_pin {
             Some(PinKind::Unsharded | PinKind::Reference) => PinKind::Unsharded,
             Some(PinKind::ShardKey { columns }) => PinKind::Colocate {
@@ -570,7 +573,11 @@ mod tests {
             object,
             db: 1,
             name: name.into(),
-            columns: vec![col("k", b), col("g", Some(KeyClass::Numeric)), col("_sprig_dk", b)],
+            columns: vec![
+                col("k", b),
+                col("g", Some(KeyClass::Numeric)),
+                col("_sprig_dk", b),
+            ],
             pk: if name.starts_with("__") {
                 vec!["k".into(), "g".into(), "o".into(), "e".into()]
             } else {

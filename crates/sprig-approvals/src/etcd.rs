@@ -302,6 +302,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::many_single_char_names)]
     async fn tier_store_raises_refreshes_supersedes_and_writes_by_version() {
         let dc = DcId::new("mum1").unwrap();
         let meta: Arc<dyn MetaStore> = Arc::new(sprig_meta::MemStore::new(Tier::Dc(dc.clone())));

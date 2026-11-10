@@ -201,3 +201,36 @@ auth_key!(
     HardBounds::NONE,
     "Close sessions of dropped or locked users at their next safe point"
 );
+
+auth_key!(
+    /// `auth.mfa_required`: who must have a second factor for HTTP logins
+    /// (chapter 14 step 13): `off`, `admins` (holders of
+    /// `SPRIG_TENANT_ADMIN`) or `all`. A covered user without a factor
+    /// signs in only to enrol one.
+    MFA_REQUIRED: Cow<'static, str> = "auth.mfa_required", Cow::Borrowed("off"), Scopes::TREE,
+    HardBounds::one_of(&["off", "admins", "all"]),
+    "Second factor for HTTP logins: off, admins or all"
+);
+
+auth_key!(
+    /// `auth.mfa_challenge_seconds`: how long a second-factor challenge
+    /// lives.
+    MFA_CHALLENGE_SECONDS: u64 = "auth.mfa_challenge_seconds", 300, Scopes::TREE,
+    HardBounds::range(30, 3600),
+    "Life of a second-factor challenge"
+);
+
+auth_key!(
+    /// `auth.impersonation`: administrators above may impersonate users
+    /// here (chapter 14 step 14).
+    IMPERSONATION: Cow<'static, str> = "auth.impersonation", Cow::Borrowed("on"), Scopes::TREE,
+    HardBounds::one_of(&["on", "off"]),
+    "Allow administrators above to impersonate users here"
+);
+
+auth_key!(
+    /// `auth.impersonation_max_minutes`: the longest impersonation session.
+    IMPERSONATION_MAX_MINUTES: u64 = "auth.impersonation_max_minutes", 60, Scopes::TREE,
+    HardBounds::range(1, 1440),
+    "Longest impersonation session"
+);
