@@ -9,6 +9,8 @@
 
 pub mod source;
 pub mod sql;
+// Decision RF10 (r2last): standby copies are read-only for tenant accounts.
+pub mod standby;
 pub mod stream;
 pub mod target;
 
@@ -294,6 +296,9 @@ pub struct MysqlEnvFactory {
     /// [`Self::with_live_settings`]; without them every job gets
     /// `settings`.
     live: Option<(sprig_settings::LiveSettings, sprig_common::ids::DcId)>,
+    /// Tenants' catalog setting rows (decision RF3): set by
+    /// [`Self::with_tenant_rows`].
+    tenant_rows: Option<Arc<dyn crate::settings::TenantRows>>,
 }
 
 impl std::fmt::Debug for MysqlEnvFactory {
@@ -316,6 +321,7 @@ impl MysqlEnvFactory {
             group_store: None,
             drain: None,
             live: None,
+            tenant_rows: None,
         }
     }
 
@@ -331,6 +337,15 @@ impl MysqlEnvFactory {
         dc: sprig_common::ids::DcId,
     ) -> Self {
         self.live = Some((live, dc));
+        self
+    }
+
+    /// Each job's settings also layer its tenant's catalog rows (tenant,
+    /// database, object and ancestors' scopes) over the etcd scopes
+    /// (decision RF3, r2last).
+    #[must_use]
+    pub fn with_tenant_rows(mut self, rows: Arc<dyn crate::settings::TenantRows>) -> Self {
+        self.tenant_rows = Some(rows);
         self
     }
 
@@ -423,7 +438,11 @@ impl EnvFactory for MysqlEnvFactory {
             )
             .with_drain(self.drain.clone()),
         );
-        let target = Arc::new(MysqlTarget::new(tgt, rec.job_id, swap, source.clone()));
+        let mut target = MysqlTarget::new(tgt, rec.job_id, swap, source.clone());
+        if rec.spec.cutover == crate::api::CutoverMode::Continuous {
+            target = target.with_standby(rec.tenant_id);
+        }
+        let target = Arc::new(target);
         let from = sprig_cluster::registry::dc_of(&s.cluster);
         let to = sprig_cluster::registry::dc_of(&t.cluster);
         let maps: Arc<dyn crate::io::MapIo> = match (&self.home_store, from, to) {
@@ -443,12 +462,18 @@ impl EnvFactory for MysqlEnvFactory {
         let mut s = match &self.live {
             Some((live, dc)) => {
                 let snap = live.snapshot();
+                // The tenant's own catalog rows over the etcd scopes
+                // (decision RF3), when this worker can read them.
+                let rows = self
+                    .tenant_rows
+                    .as_ref()
+                    .and_then(|t| t.rows(rec.tenant_id));
                 let ctx = sprig_settings::SettingCtx::process(dc).for_tenant(rec.tenant_id, &[]);
                 let ctx = match rec.spec.source_cluster() {
                     Some(c) => ctx.with_cluster(c),
                     None => ctx,
                 };
-                MoverSettings::resolve(&snap, &ctx)
+                MoverSettings::resolve_with(&snap, rows.as_deref(), &ctx)
             }
             None => self.settings.clone(),
         };

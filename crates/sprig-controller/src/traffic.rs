@@ -155,6 +155,10 @@ pub struct TrafficView {
     pub candidate: Option<DcId>,
     /// `stay`, `candidate` or `no_signal`.
     pub decision: String,
+    /// R2 (r2last): the automatic decision loop's last evaluation of the
+    /// tenant and what it did (`crate::dc_migrate`), on its home leader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<serde_json::Value>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -346,6 +350,7 @@ impl TrafficWindows {
                     weighted_rtt_ms: measured,
                     candidate,
                     decision: decision.to_owned(),
+                    auto: None,
                 };
             }
             measured.clear();
@@ -376,6 +381,7 @@ impl TrafficWindows {
             weighted_rtt_ms: measured,
             candidate,
             decision: decision.to_owned(),
+            auto: None,
         }
     }
 }

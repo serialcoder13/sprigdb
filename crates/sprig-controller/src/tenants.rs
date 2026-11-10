@@ -365,34 +365,39 @@ where
                     self.dc
                 )));
             }
+            let now_ms = self
+                .clock
+                .wall()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            let parent_raw = match &parent {
+                Some(p) => {
+                    sprig_shard::home::read_home(&**self.directory.store(), p.body().tenant_id)
+                        .await?
+                        .map(|pe| pe.raw)
+                }
+                None => None,
+            };
+            // Chapter 24 (r2last): without a --cluster hint the tenant is
+            // homed in the least busy DC its parent's residency allows.
+            let home = match &req.cluster {
+                Some(_) => self.dc.clone(),
+                None => self.least_busy_home(parent_raw.as_ref(), now_ms).await?,
+            };
             // Chapter 26: a child's residency lies within its parent's;
             // its home must be one of the parent's allowed DCs.
-            let inherited = match &parent {
-                Some(p) => match sprig_shard::home::read_home(
-                    &**self.directory.store(),
-                    p.body().tenant_id,
-                )
-                .await?
-                {
-                    Some(pe) => crate::residency::child_block(
-                        &p.body().name,
-                        &pe.raw,
-                        &self.dc,
-                        self.clock
-                            .wall()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
-                    )?,
-                    None => None,
-                },
-                None => None,
+            let inherited = match (&parent, &parent_raw) {
+                (Some(p), Some(raw)) => {
+                    crate::residency::child_block(&p.body().name, raw, &home, now_ms)?
+                }
+                _ => None,
             };
             let ids = self.id_range();
             self.reserve_ids_past_tenant_schemas(ids).await?;
             let new = NewTenant {
                 name: req.name.clone(),
                 parent: parent_id,
-                home_dc: self.dc.clone(),
+                home_dc: home.clone(),
                 placement_hint: req.cluster.clone(),
             };
             let e = self
@@ -403,6 +408,11 @@ where
                 crate::residency::write_block(&**self.directory.store(), e.body().tenant_id, b)
                     .await?;
             }
+            if home != self.dc {
+                // That DC's leader bootstraps it (its `tenant_bootstrap`
+                // loop takes every `creating` tenant homed there).
+                return self.await_remote(e.body().tenant_id, &home).await;
+            }
             (e, true)
         };
         let done = self.bootstrap(entry.body().tenant_id, guard).await?;
@@ -412,6 +422,97 @@ where
             tenant,
             placement: Some(done.placement),
         })
+    }
+
+    /// The home of a new tenant without a `--cluster` hint (chapter 24,
+    /// "Least-busy placement"): the least busy active DC the parent's
+    /// residency allows, by the `dc-load` records; this DC when none has a
+    /// fresh record yet (a new deployment) and it is allowed.
+    ///
+    /// # Errors
+    /// 39525 when no allowed DC can take it; the store's errors.
+    async fn least_busy_home(
+        &self,
+        parent_raw: Option<&serde_json::Map<String, serde_json::Value>>,
+        now_ms: u64,
+    ) -> Result<DcId> {
+        let allowed = parent_raw.and_then(sprig_shard::home::allowed_dcs);
+        let ctx = SettingCtx::process(&self.dc);
+        let (weights, stability_min) = self.live.as_ref().map_or_else(
+            || {
+                (
+                    sprig_balancer::settings::LeastBusyWeights::default(),
+                    sprig_balancer::settings::RECOVERY_STABILITY_MINUTES.default,
+                )
+            },
+            |l| {
+                (
+                    sprig_balancer::settings::LeastBusyWeights::parse(
+                        &l.get(&sprig_balancer::settings::LEAST_BUSY_WEIGHTS, &ctx),
+                    ),
+                    l.get(&sprig_balancer::settings::RECOVERY_STABILITY_MINUTES, &ctx),
+                )
+            },
+        );
+        match crate::least_busy::place_new_tenant(
+            &**self.directory.store(),
+            allowed.as_ref(),
+            &weights,
+            stability_min.saturating_mul(60_000),
+            now_ms,
+        )
+        .await
+        {
+            Ok((dc, reason, scores)) => {
+                tracing::info!(home = %dc, reason, ?scores, "tenant.place: new tenant's home DC");
+                Ok(dc)
+            }
+            Err(e)
+                if e.code() == Some(SprigCode::NoDcCapacity)
+                    && allowed.as_ref().is_none_or(|a| a.contains(&self.dc)) =>
+            {
+                tracing::info!(home = %self.dc, error = %e, "tenant.place: no fresh dc-load; homed here");
+                Ok(self.dc.clone())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Waits until `id`, created here but homed in `home`, is bootstrapped
+    /// by that DC's leader (up to `catalog.bootstrap_timeout_minutes`).
+    async fn await_remote(&self, id: TenantId, home: &DcId) -> Result<CreateTenantResponse> {
+        let t0 = Instant::now();
+        let limit = self.bootstrap_timeout().min(Duration::from_secs(300));
+        loop {
+            match self.directory.get(id).await? {
+                Some(e) if e.body().state == TenantState::Active => {
+                    let tenant = self.show_id(e.body().tenant_id).await?;
+                    return Ok(CreateTenantResponse {
+                        created: true,
+                        tenant,
+                        placement: Some(format!("dc {home}: least busy allowed DC (chapter 24)")),
+                    });
+                }
+                Some(e) if e.body().state == TenantState::Failed => {
+                    return Err(placement_unavailable(format!(
+                        "tenant {id}'s bootstrap in dc {home} failed"
+                    )));
+                }
+                Some(_) if t0.elapsed() < limit => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Some(_) => {
+                    return Err(SprigError::new(
+                        SprigCode::TenantNotReady,
+                        format!(
+                            "tenant {id} is homed in dc {home}; its bootstrap hasn't finished                              after {:?} (it goes on there)",
+                            t0.elapsed()
+                        ),
+                    ));
+                }
+                None => return Err(SprigError::internal(format!("tenant {id} vanished"))),
+            }
+        }
     }
 
     /// Runs (or continues) `id`'s bootstrap; see the module docs.

@@ -46,6 +46,10 @@ pub struct Config {
     pub idle_timeout: Duration,
     /// `redis.client_output_buffer_pubsub_mb`, in bytes.
     pub pubsub_buffer_bytes: usize,
+    /// `redis.guarded_batches`: the hottest writes run as one compound
+    /// statement ([`crate::batch`]); `false` keeps every command on the
+    /// statement path.
+    pub guarded_batches: bool,
 }
 
 impl Default for Config {
@@ -67,6 +71,7 @@ impl Default for Config {
             max_command_bytes: 64 << 20,
             idle_timeout: Duration::ZERO,
             pubsub_buffer_bytes: 32 << 20,
+            guarded_batches: true,
         }
     }
 }
@@ -93,6 +98,9 @@ pub struct Env {
     /// The hubs across gateways (chapter 40); unset, pub/sub and wake-ups
     /// stay on this gateway.
     mesh: OnceLock<Arc<Mesh>>,
+    /// `FCALL` of logic-layer functions (chapter 41); unset, only Lua
+    /// library functions are found.
+    logic: OnceLock<Arc<dyn crate::logic::LogicCalls>>,
 }
 
 impl Default for Env {
@@ -115,7 +123,19 @@ impl Env {
             gateway_id: gateway_id.to_owned(),
             scripts: crate::lua::Running::default(),
             mesh: OnceLock::new(),
+            logic: OnceLock::new(),
         }
+    }
+
+    /// Installs the logic layer's `FCALL` hook (the gateway does, once).
+    pub fn set_logic(&self, l: Arc<dyn crate::logic::LogicCalls>) {
+        let _ = self.logic.set(l);
+    }
+
+    /// The logic layer's `FCALL` hook, when installed.
+    #[must_use]
+    pub fn logic(&self) -> Option<&Arc<dyn crate::logic::LogicCalls>> {
+        self.logic.get()
     }
 
     /// Joins the gateways' hubs ([`Mesh::attach`] calls this).

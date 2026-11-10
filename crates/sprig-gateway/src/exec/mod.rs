@@ -59,6 +59,8 @@ pub(crate) mod msg_trigger;
 mod offsets;
 // Chapter 28 (R4): ONLY_FULL_GROUP_BY on 3306.
 mod groupby;
+// Chapter 36 (R6 round 3): nearest neighbours with a growing radius on 3306.
+mod geo_knn;
 
 use std::sync::Arc;
 use std::time::Duration;

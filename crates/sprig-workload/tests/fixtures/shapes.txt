@@ -103,7 +103,7 @@ shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db
 in: SELECT * FROM products WHERE MATCH (name) AGAINST ('shoe')
 shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db":"shop","table":"products","db_id":1}],"predicates":[{"t":"products","col":"name","op":"fulltext"}],"joins":[],"order_by":[],"group_by":[],"select":{"products":["*"]},"limit":false,"writes":null,"or_groups":0}
 in: SELECT id FROM products ORDER BY VEC_DISTANCE_EUCLIDEAN(emb, VEC_FromText('[1,2]')) LIMIT 5
-shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db":"shop","table":"products","db_id":1}],"predicates":[{"t":"products","col":"emb","op":"vector","args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"products":["id"]},"limit":true,"writes":null,"or_groups":0,"order_by_expr":true,"limit_arg":1}
+shape: {"v":1,"type":"select","tables":[{"alias":"products","object_id":1210,"db":"shop","table":"products","db_id":1}],"predicates":[{"t":"products","col":"emb","op":"vector","args":[0]},{"t":"products","col":"emb","op":"unsargable","why":"function:VEC_DISTANCE_EUCLIDEAN"}],"joins":[],"order_by":[],"group_by":[],"select":{"products":["id"]},"limit":true,"writes":null,"or_groups":0,"order_by_expr":true,"limit_arg":1}
 in: SELECT * FROM orders WHERE (customer_id, status) IN ((1, 'a'), (2, 'b'))
 shape: {"v":1,"type":"select","tables":[{"alias":"orders","object_id":1201,"db":"shop","table":"orders","db_id":1}],"predicates":[{"t":"orders","col":"customer_id","op":"in","list":true,"args":[0]},{"t":"orders","col":"status","op":"in","list":true,"args":[0]}],"joins":[],"order_by":[],"group_by":[],"select":{"orders":["*"]},"limit":false,"writes":null,"or_groups":0}
 in: SELECT * FROM orders WHERE id = -5

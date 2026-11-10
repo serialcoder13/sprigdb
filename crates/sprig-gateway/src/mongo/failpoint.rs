@@ -127,7 +127,11 @@ impl FailPoints {
             mode,
             commands: data
                 .get_array("failCommands")
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default(),
             error_code: data
                 .get(if name == "onPrimaryTransactionalWrite" {
@@ -146,17 +150,14 @@ impl FailPoints {
                 .get_bool("closeConnection")
                 .unwrap_or(name == "onPrimaryTransactionalWrite"),
             write_concern_error: data.get_document("writeConcernError").ok().cloned(),
-            block: data
-                .get_bool("blockConnection")
-                .unwrap_or(false)
-                .then(|| {
-                    Duration::from_millis(
-                        data.get("blockTimeMS")
-                            .and_then(as_i64)
-                            .and_then(|n| u64::try_from(n).ok())
-                            .unwrap_or(0),
-                    )
-                }),
+            block: data.get_bool("blockConnection").unwrap_or(false).then(|| {
+                Duration::from_millis(
+                    data.get("blockTimeMS")
+                        .and_then(as_i64)
+                        .and_then(|n| u64::try_from(n).ok())
+                        .unwrap_or(0),
+                )
+            }),
             app_name: data.get_str("appName").ok().map(str::to_owned),
         };
         lock(&self.map).insert(key, fp);
@@ -247,10 +248,16 @@ mod tests {
         .unwrap();
         assert!(f.check(1, "find", Some("y")).is_none());
         assert!(f.check(1, "find", Some("x")).unwrap().close);
-        f.configure(1, &doc! {"configureFailPoint": "failCommand", "mode": "off"})
-            .unwrap();
+        f.configure(
+            1,
+            &doc! {"configureFailPoint": "failCommand", "mode": "off"},
+        )
+        .unwrap();
         assert!(f.check(1, "find", Some("x")).is_none());
-        assert!(f.configure(1, &doc! {"configureFailPoint": "other", "mode": "off"}).is_err());
+        assert!(
+            f.configure(1, &doc! {"configureFailPoint": "other", "mode": "off"})
+                .is_err()
+        );
         f.configure(
             1,
             &doc! {"configureFailPoint": "onPrimaryTransactionalWrite", "mode": {"times": 1}},

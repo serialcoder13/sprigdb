@@ -312,24 +312,28 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let core = Arc::new(http::Core {
         engine: Arc::clone(&engine),
         auth: Arc::new(http::auth::ChapterFourteen::new(Arc::clone(&login))),
-        admin: Arc::new(http::admin::AdminApi::new(
-            Arc::clone(&stores.dc),
-            gateway_id.clone(),
-            Some(Arc::clone(&peers)),
-            Arc::new(move |reason: &str| drain_lc.request_drain(reason)),
-        )
-        .with_internal_token_file(ctx.config.gateway.controller_token_file.as_deref())?),
+        admin: Arc::new(
+            http::admin::AdminApi::new(
+                Arc::clone(&stores.dc),
+                gateway_id.clone(),
+                Some(Arc::clone(&peers)),
+                Arc::new(move |reason: &str| drain_lc.request_drain(reason)),
+            )
+            .with_internal_token_file(ctx.config.gateway.controller_token_file.as_deref())?,
+        ),
         // Studio (chapter 44): files, browser sessions, API additions.
-        studio: Arc::new(http::studio::StudioState::new(
-            http::studio::StudioSource::Live {
-                live: live.clone(),
-                dc: dc.clone(),
-            },
-            Some(Arc::clone(&login)),
-            Some(Arc::clone(&stores.global)),
-        )
-        .with_tenants(tenants.clone())
-        .with_gateway(&gateway_id)),
+        studio: Arc::new(
+            http::studio::StudioState::new(
+                http::studio::StudioSource::Live {
+                    live: live.clone(),
+                    dc: dc.clone(),
+                },
+                Some(Arc::clone(&login)),
+                Some(Arc::clone(&stores.global)),
+            )
+            .with_tenants(tenants.clone())
+            .with_gateway(&gateway_id),
+        ),
     });
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
     // Kafka on 9092 (chapter 45, R9): catalog logins only, since topics are

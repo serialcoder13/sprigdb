@@ -171,9 +171,7 @@ pub fn classify(sql: &str) -> &'static str {
         "CREATE" | "ALTER" | "DROP" | "RENAME" if matches!(w1, "USER" | "ROLE") => "account",
         "SET" if matches!(w1, "PASSWORD" | "ROLE" | "DEFAULT") => "account",
         "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "RENAME" | "OPTIMIZE" | "ANALYZE" => "ddl",
-        "BEGIN" | "START" | "COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "XA" => {
-            "transaction"
-        }
+        "BEGIN" | "START" | "COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "XA" => "transaction",
         _ => "other",
     }
 }
@@ -244,6 +242,7 @@ fn error_fields(e: &SprigError) -> (u16, String) {
 }
 
 /// `Sql.Check`.
+#[allow(clippy::similar_names)] // start, end and stmt are the chapter's words
 pub(super) async fn check(
     core: &Arc<Core>,
     caller: &Caller,
@@ -271,9 +270,10 @@ pub(super) async fn check(
                         (Some((_, l, c)), 1064) => (offset_of(&s, *l, *c), s.end),
                         _ => (s.start, s.end),
                     };
+                    // Unavailability isn't the statement's fault: a warning.
                     let status = e.protocol().http_status;
                     diags.push(json!({
-                        "severity": if status >= 500 { "warning" } else { "error" },
+                        "severity": if matches!(status, 503 | 504) { "warning" } else { "error" },
                         "source": "server",
                         "code": code, "name": name, "message": e.message,
                         "start": start, "end": end,
@@ -309,7 +309,10 @@ fn etag(core: &Core, caller: &Caller, what: &str) -> Option<String> {
     let svc = core.studio.tenants.as_ref()?;
     let cat = svc.cache.cached(caller.principal.tenant?)?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&(what, &caller.principal.user, &caller.principal.host), &mut h);
+    std::hash::Hash::hash(
+        &(what, &caller.principal.user, &caller.principal.host),
+        &mut h,
+    );
     Some(format!(
         "\"c{}.a{}.{:x}\"",
         cat.version,
@@ -356,7 +359,10 @@ async fn objects(
         .map(|row| {
             cols.iter()
                 .cloned()
-                .zip(row.into_iter().map(|v| v.map_or(Value::Null, Value::String)))
+                .zip(
+                    row.into_iter()
+                        .map(|v| v.map_or(Value::Null, Value::String)),
+                )
                 .collect()
         })
         .collect())
@@ -566,6 +572,7 @@ pub(super) async fn object(
 
 /// Routes `/v1/catalog` and `/v1/databases/{db}/catalog...`,
 /// `/v1/databases/{db}/sql:check`; `None` for other paths.
+#[allow(clippy::items_after_statements)] // the route enum next to its match
 pub(super) async fn route(
     core: &Arc<Core>,
     info: &ConnInfo,
@@ -576,7 +583,7 @@ pub(super) async fn route(
     let seg: Vec<String> = path
         .trim_start_matches('/')
         .split('/')
-        .map(|p| percent_decode(p))
+        .map(percent_decode)
         .collect();
     let seg: Vec<&str> = seg.iter().map(String::as_str).collect();
     enum Op<'a> {
@@ -648,7 +655,10 @@ mod tests {
     #[test]
     fn classes() {
         assert_eq!(classify("select 1"), "read");
-        assert_eq!(classify("/* x */ WITH a AS (SELECT 1) SELECT * FROM a"), "read");
+        assert_eq!(
+            classify("/* x */ WITH a AS (SELECT 1) SELECT * FROM a"),
+            "read"
+        );
         assert_eq!(classify("update t set a = 1"), "write");
         assert_eq!(classify("CREATE TABLE t (a int)"), "ddl");
         assert_eq!(classify("CREATE USER u"), "account");

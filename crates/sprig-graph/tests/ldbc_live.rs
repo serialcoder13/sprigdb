@@ -126,7 +126,9 @@ fn val_text(v: &Value) -> String {
 const FIRST: &[&str] = &[
     "Ana", "Bo", "Chen", "Dara", "Eli", "Fay", "Gus", "Hana", "Ivo", "Jun", "Kai", "Lea",
 ];
-const LAST: &[&str] = &["Ito", "Khan", "Lopez", "Meyer", "Novak", "Okafor", "Park", "Rossi"];
+const LAST: &[&str] = &[
+    "Ito", "Khan", "Lopez", "Meyer", "Novak", "Okafor", "Park", "Rossi",
+];
 
 /// The data: statements with batched rows.
 struct Data {
@@ -168,10 +170,19 @@ fn generate(persons: i64, seed: u64) -> Data {
         let u = u64::try_from(i).unwrap_or(0);
         rows.push(V::M(vec![
             ("id", V::I(i)),
-            ("first", V::S(FIRST[(r.next() % FIRST.len() as u64) as usize].into())),
+            (
+                "first",
+                V::S(FIRST[(r.next() % FIRST.len() as u64) as usize].into()),
+            ),
             ("last", V::S(LAST[(u % LAST.len() as u64) as usize].into())),
-            ("born", V::I(1_970 + i64::try_from(r.below(35)).unwrap_or(0))),
-            ("created", V::I(1_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0))),
+            (
+                "born",
+                V::I(1_970 + i64::try_from(r.below(35)).unwrap_or(0)),
+            ),
+            (
+                "created",
+                V::I(1_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0)),
+            ),
             ("city", V::I(i64::try_from(r.below(20)).unwrap_or(0))),
         ]));
     }
@@ -196,7 +207,10 @@ fn generate(persons: i64, seed: u64) -> Data {
             rows.push(V::M(vec![
                 ("a", V::I(i64::try_from(x).unwrap_or(0))),
                 ("b", V::I(i64::try_from(y).unwrap_or(0))),
-                ("d", V::I(2_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0))),
+                (
+                    "d",
+                    V::I(2_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0)),
+                ),
             ]));
         }
     }
@@ -224,7 +238,10 @@ fn generate(persons: i64, seed: u64) -> Data {
         rows.push(V::M(vec![
             ("id", V::I(i)),
             ("creator", V::I(i64::try_from(r.skewed(pn)).unwrap_or(0))),
-            ("created", V::I(3_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0))),
+            (
+                "created",
+                V::I(3_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0)),
+            ),
             ("tag", V::I(i64::try_from(r.below(40)).unwrap_or(0))),
         ]));
     }
@@ -241,7 +258,10 @@ fn generate(persons: i64, seed: u64) -> Data {
             ("id", V::I(1_000_000 + i)),
             ("creator", V::I(i64::try_from(r.below(pn)).unwrap_or(0))),
             ("post", V::I(i64::try_from(r.skewed(pp)).unwrap_or(0))),
-            ("created", V::I(4_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0))),
+            (
+                "created",
+                V::I(4_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0)),
+            ),
         ]));
     }
     push(
@@ -255,7 +275,10 @@ fn generate(persons: i64, seed: u64) -> Data {
             rows.push(V::M(vec![
                 ("a", V::I(i64::try_from(a).unwrap_or(0))),
                 ("p", V::I(i64::try_from(r.below(pp)).unwrap_or(0))),
-                ("d", V::I(5_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0))),
+                (
+                    "d",
+                    V::I(5_000_000 + i64::try_from(r.below(1_000_000)).unwrap_or(0)),
+                ),
             ]));
         }
     }
@@ -264,7 +287,9 @@ fn generate(persons: i64, seed: u64) -> Data {
         rows,
         &mut batches,
     );
-    eprintln!("ldbc-shaped data: {persons} persons, {knows} KNOWS, {posts} posts, {comments} comments");
+    eprintln!(
+        "ldbc-shaped data: {persons} persons, {knows} KNOWS, {posts} posts, {comments} comments"
+    );
     Data {
         persons,
         posts,
@@ -367,7 +392,14 @@ async fn ldbc_shaped_workload() {
     c.query("MATCH (n) DETACH DELETE n", vec![], db.clone())
         .await
         .expect("clean");
-    for (l, p) in [("Person", "id"), ("Post", "id"), ("Comment", "id"), ("City", "id"), ("Tag", "id"), ("Person", "firstName")] {
+    for (l, p) in [
+        ("Person", "id"),
+        ("Post", "id"),
+        ("Comment", "id"),
+        ("City", "id"),
+        ("Tag", "id"),
+        ("Person", "firstName"),
+    ] {
         c.query(
             &format!("CREATE INDEX IF NOT EXISTS FOR (n:{l}) ON (n.{p})"),
             vec![],
@@ -377,7 +409,14 @@ async fn ldbc_shaped_workload() {
         .expect("index");
     }
     let mut mem = MemStore::new(4);
-    for (l, p) in [("Person", "id"), ("Post", "id"), ("Comment", "id"), ("City", "id"), ("Tag", "id"), ("Person", "firstName")] {
+    for (l, p) in [
+        ("Person", "id"),
+        ("Post", "id"),
+        ("Comment", "id"),
+        ("City", "id"),
+        ("Tag", "id"),
+        ("Person", "firstName"),
+    ] {
         execute(
             &mut mem,
             &format!("CREATE INDEX FOR (n:{l}) ON (n.{p})"),
@@ -429,9 +468,10 @@ async fn ldbc_shaped_workload() {
             let mut ps: Vec<(&str, V)> = Vec::new();
             for p in *params {
                 let v = match *p {
-                    "personId" | "person2Id" => {
-                        V::I(i64::try_from(r.below(u64::try_from(data.persons).unwrap_or(1))).unwrap_or(0))
-                    }
+                    "personId" | "person2Id" => V::I(
+                        i64::try_from(r.below(u64::try_from(data.persons).unwrap_or(1)))
+                            .unwrap_or(0),
+                    ),
                     "messageId" => V::I(
                         i64::try_from(r.below(u64::try_from(data.posts).unwrap_or(1))).unwrap_or(0),
                     ),
@@ -448,7 +488,11 @@ async fn ldbc_shaped_workload() {
             }
             let t = Instant::now();
             let got = c
-                .query(q, ps.iter().map(|(k, v)| (*k, v.pack())).collect(), db.clone())
+                .query(
+                    q,
+                    ps.iter().map(|(k, v)| (*k, v.pack())).collect(),
+                    db.clone(),
+                )
                 .await
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             times.push(t.elapsed());
@@ -472,7 +516,12 @@ async fn ldbc_shaped_workload() {
                 .collect();
             if a != b {
                 total_mismatch += 1;
-                eprintln!("MISMATCH {name} {:?}\n  sprig: {a:?}\n  mem:   {b:?}", ps.iter().map(|(k, v)| (*k, pack_text(&v.pack()))).collect::<Vec<_>>());
+                eprintln!(
+                    "MISMATCH {name} {:?}\n  sprig: {a:?}\n  mem:   {b:?}",
+                    ps.iter()
+                        .map(|(k, v)| (*k, pack_text(&v.pack())))
+                        .collect::<Vec<_>>()
+                );
             }
         }
         let mut t2 = times.clone();
@@ -486,7 +535,10 @@ async fn ldbc_shaped_workload() {
             max.as_secs_f64() * 1e3
         ));
     }
-    eprintln!("ldbc-shaped reads, {rounds} parameter sets each:\n{}", report.join("\n"));
+    eprintln!(
+        "ldbc-shaped reads, {rounds} parameter sets each:\n{}",
+        report.join("\n")
+    );
     let profile = c
         .query(
             &format!("PROFILE {}", READS[9].1),
@@ -498,6 +550,12 @@ async fn ldbc_shaped_workload() {
         )
         .await
         .expect("profile");
-    eprintln!("IC9 profile: {:?}", profile.summary.get("profile").map(pack_text));
-    assert_eq!(total_mismatch, 0, "answers differ from the in-memory executor");
+    eprintln!(
+        "IC9 profile: {:?}",
+        profile.summary.get("profile").map(pack_text)
+    );
+    assert_eq!(
+        total_mismatch, 0,
+        "answers differ from the in-memory executor"
+    );
 }

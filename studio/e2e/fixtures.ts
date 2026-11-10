@@ -4,7 +4,7 @@ export const LOGIN = process.env.STUDIO_LOGIN ?? 'acme.app';
 export const PASSWORD = process.env.STUDIO_PASSWORD ?? 'sprig-dev-app';
 /** Databases this suite creates and drops, by exact name. */
 export const DB = 'studio0_e2e';
-export const SHOTS = process.env.STUDIO_SHOTS ?? '../target/agent-studio0/screenshots';
+export const SHOTS = process.env.STUDIO_SHOTS ?? '../target/agent-studio1/screenshots';
 
 export async function signIn(page: Page, login = LOGIN, password = PASSWORD): Promise<void> {
   await page.goto('/studio/login');

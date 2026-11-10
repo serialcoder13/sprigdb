@@ -206,7 +206,7 @@ number!(
     OUTBOX_DRAIN_SECONDS,
     "inherit.outbox_drain_seconds",
     30,
-    TENANT_GLOBAL,
+    Scopes::DATA,
     0,
     3600,
     42,

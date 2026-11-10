@@ -18,7 +18,9 @@
 //!   runs them in order with the active version) and `dead-letters
 //!   discard <id>... | --all [--binding b]`.
 //!
-//! `rollback` is not implemented yet.
+//! - `rollback <name> --db <db> [--to-version n] [--procedure] --gateway
+//!   <url>`: sends `ALTER FUNCTION | PROCEDURE ... ROLLBACK [TO VERSION n]`
+//!   through a gateway (R7 close-out) and prints the notes.
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use mysql_async::prelude::Queryable;
@@ -43,15 +45,6 @@ pub(crate) fn group() -> Command {
             .long("catalog")
             .required(true)
             .help("The tenant's catalog: mysql://user:pass@host:port/t<tenant>_sprig")
-    };
-    let later = |name: &'static str| {
-        Command::new(name).arg(
-            Arg::new("args")
-                .num_args(0..)
-                .trailing_var_arg(true)
-                .allow_hyphen_values(true)
-                .help("Arguments (not parsed yet)"),
-        )
     };
     Command::new("logic")
         .about("Logic functions")
@@ -119,7 +112,30 @@ pub(crate) fn group() -> Command {
                 )
                 .arg(catalog()),
         )
-        .subcommand(later("rollback"))
+        .subcommand(
+            Command::new("rollback")
+                .about("Make an earlier version active again (ALTER FUNCTION f ROLLBACK [TO VERSION n])")
+                .arg(Arg::new("name").required(true).help("The function or procedure"))
+                .arg(Arg::new("db").long("db").required(true).help("The database"))
+                .arg(
+                    Arg::new("to-version")
+                        .long("to-version")
+                        .value_parser(clap::value_parser!(u64))
+                        .help("The version (default: the newest earlier one that deployed)"),
+                )
+                .arg(
+                    Arg::new("procedure")
+                        .long("procedure")
+                        .action(ArgAction::SetTrue)
+                        .help("It is a procedure"),
+                )
+                .arg(
+                    Arg::new("gateway")
+                        .long("gateway")
+                        .required(true)
+                        .help("mysql://tenant.user:password@host:port"),
+                ),
+        )
         .subcommand(
             Command::new("dead-letters")
                 .about("After-commit trigger events that kept failing")
@@ -179,7 +195,7 @@ fn dl_change(name: &'static str, about: &'static str) -> Command {
 pub(crate) fn implemented(name: &str) -> bool {
     matches!(
         name,
-        "compile" | "deploy" | "list" | "show" | "logs" | "dead-letters"
+        "compile" | "deploy" | "list" | "show" | "logs" | "dead-letters" | "rollback"
     )
 }
 
@@ -268,6 +284,38 @@ pub(crate) async fn run(sub: &ArgMatches, out: Output) -> Result<(), Failed> {
             let sql = format!(
                 "CREATE OR REPLACE PROCEDURE `{}`.`{}` LANGUAGE kirun SQL SECURITY {security} \
                  WITH (SPRIG_TIER = '{tier}') AS '{body}'",
+                db.replace('`', "``"),
+                name.replace('`', "``")
+            );
+            let url = m.get_one::<String>("gateway").cloned().unwrap_or_default();
+            let mut c = conn(&url).await?;
+            c.query_drop(&sql)
+                .await
+                .map_err(|e| Failed(e.to_string()))?;
+            let notes: Vec<(String, u32, String)> = c
+                .query("SHOW WARNINGS")
+                .await
+                .map_err(|e| Failed(e.to_string()))?;
+            for (_, _, msg) in notes {
+                println!("{msg}");
+            }
+            let _ = c.disconnect().await;
+            Ok(())
+        }
+        Some(("rollback", m)) => {
+            let name = m.get_one::<String>("name").cloned().unwrap_or_default();
+            let db = m.get_one::<String>("db").cloned().unwrap_or_default();
+            let kind = if m.get_flag("procedure") {
+                "PROCEDURE"
+            } else {
+                "FUNCTION"
+            };
+            let to = m
+                .get_one::<u64>("to-version")
+                .map(|v| format!(" TO VERSION {v}"))
+                .unwrap_or_default();
+            let sql = format!(
+                "ALTER {kind} `{}`.`{}` ROLLBACK{to}",
                 db.replace('`', "``"),
                 name.replace('`', "``")
             );
@@ -469,28 +517,32 @@ async fn dead_letters(m: &ArgMatches, out: Output) -> Result<(), Failed> {
                 return Err("name dead letter ids, or --all".to_owned().into());
             }
             let (mut c, store) = catalog(m).await?;
-            let to = if verb == "replay" {
-                "replaying"
-            } else {
-                "discarded"
-            };
-            let n = store
-                .set_dead_letters(
-                    &mut c,
-                    m.get_one::<u64>("binding").copied(),
-                    &ids,
-                    "dead",
-                    to,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
+            let binding = m.get_one::<u64>("binding").copied();
             if verb == "replay" {
+                // After-commit triggers' dead letters go back to their
+                // job; those of triggers on streams and queues stay dead
+                // (their replay isn't built), and the count says so.
+                let (n, left) = store
+                    .replay_dead_letters(&mut c, binding, &ids)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 println!(
                     "{n} dead letters queued for replay (the trigger's worker runs them in order)"
                 );
-            } else {
-                println!("{n} dead letters discarded");
+                if left > 0 {
+                    println!(
+                        "{left} dead letters of triggers on streams or queues stay dead: their \
+                         replay isn't built yet; discard them, or publish the record or message again"
+                    );
+                }
+                let _ = c.disconnect().await;
+                return Ok(());
             }
+            let n = store
+                .set_dead_letters(&mut c, binding, &ids, "dead", "discarded")
+                .await
+                .map_err(|e| e.to_string())?;
+            println!("{n} dead letters discarded");
             let _ = c.disconnect().await;
             Ok(())
         }

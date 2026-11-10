@@ -43,6 +43,8 @@ impl Vars {
         vars.insert("ROOT".to_owned(), Bson::Document(root.clone()));
         vars.insert("CURRENT".to_owned(), Bson::Document(root.clone()));
         vars.insert("NOW".to_owned(), Bson::DateTime(now));
+        // `$$REMOVE`: a missing value.
+        vars.insert("REMOVE".to_owned(), Bson::Undefined);
         Self { vars }
     }
 
@@ -154,6 +156,13 @@ pub fn eval(e: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                     ),
                 ));
             }
+            // `{$meta: "vectorSearchScore"}` (chapter 34, R6 round 3).
+            if op == "$meta" {
+                return Ok(crate::engine::models::meta_value(
+                    arg,
+                    vars.vars.get("ROOT"),
+                ));
+            }
             op_eval(op, arg, vars)
         }
         other => Ok(other.clone()),
@@ -178,6 +187,61 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
     };
     Ok(match op {
         "$literal" => arg.clone(),
+        // Fields by literal name, dots and `$` included (MongoDB 5.0+).
+        "$getField" | "$setField" | "$unsetField" => {
+            let (field, input, value) = match arg {
+                Bson::Document(d) if d.contains_key("field") => (
+                    eval(d.get("field").unwrap_or(&Bson::Null), vars)?,
+                    match d.get("input") {
+                        Some(i) => eval(i, vars)?,
+                        None if op == "$getField" => {
+                            vars.vars.get("CURRENT").cloned().unwrap_or(Bson::Null)
+                        }
+                        None => return Err(loc(4161102, format!("{op} requires 'input'"))),
+                    },
+                    d.get("value").map(|v| eval(v, vars)).transpose()?,
+                ),
+                f if op == "$getField" => (
+                    eval(f, vars)?,
+                    vars.vars.get("CURRENT").cloned().unwrap_or(Bson::Null),
+                    None,
+                ),
+                _ => return Err(loc(4161101, format!("{op} requires an object argument"))),
+            };
+            let Bson::String(field) = field else {
+                return Err(loc(
+                    5654602,
+                    format!("{op} requires 'field' to evaluate to a string"),
+                ));
+            };
+            match (op, input) {
+                ("$getField", Bson::Document(d)) => {
+                    d.get(&field).cloned().unwrap_or(Bson::Undefined)
+                }
+                ("$getField", _) => Bson::Undefined,
+                (_, Bson::Null | Bson::Undefined) => Bson::Null,
+                (_, Bson::Document(mut d)) => {
+                    match value {
+                        Some(v) if op == "$setField" && !missing(&v) => {
+                            d.insert(field, v);
+                        }
+                        _ => {
+                            d.remove(&field);
+                        }
+                    }
+                    Bson::Document(d)
+                }
+                (_, other) => {
+                    return Err(loc(
+                        4161105,
+                        format!(
+                            "{op} requires 'input' to evaluate to an object, got {}",
+                            type_name(&other)
+                        ),
+                    ));
+                }
+            }
+        }
         "$add" | "$multiply" => {
             let vs = evals(arg, vars)?;
             let mut acc: Option<Bson> = None;

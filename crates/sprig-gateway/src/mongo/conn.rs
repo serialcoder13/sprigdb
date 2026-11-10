@@ -143,16 +143,40 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                         .to_document()
                         .map_err(|e| codec_err(&codec::CodecError::Malformed(e.to_string())))?;
                     let name = cmd.keys().next().cloned().unwrap_or_default();
+                    // The handshake, and the authentication of drivers
+                    // from before MongoDB 6.0 (Java 3.x, as in YCSB), which
+                    // send `saslStart` and `saslContinue` this way.
                     if !q.full_collection_name.ends_with(".$cmd")
-                        || !matches!(name.as_str(), "hello" | "isMaster" | "ismaster")
+                        || !matches!(
+                            name.as_str(),
+                            "hello" | "isMaster" | "ismaster" | "saslStart" | "saslContinue"
+                        )
                     {
                         return Err(SprigError::new(
                             SprigCode::BackendProtocol,
                             "OP_QUERY is accepted only for the handshake",
                         ));
                     }
-                    let body = match st.hello(&cmd, true).await {
-                        Ok(d) => d,
+                    let mut cmd = cmd;
+                    if !cmd.contains_key("$db") {
+                        let db = q
+                            .full_collection_name
+                            .trim_end_matches(".$cmd")
+                            .to_owned();
+                        cmd.insert("$db", db);
+                    }
+                    let r = match name.as_str() {
+                        "saslStart" => st.sasl_start(&cmd).await,
+                        "saslContinue" => st.sasl_continue(&cmd).await,
+                        _ => st.hello(&cmd, true).await,
+                    };
+                    let body = match r {
+                        Ok(mut d) => {
+                            if !d.contains_key("ok") {
+                                d.insert("ok", 1.0);
+                            }
+                            d
+                        }
                         Err(e) => e.to_doc(),
                     };
                     let raw = RawDocumentBuf::from_document(&body)
@@ -620,10 +644,18 @@ impl Conn {
                         }
                     }
                     None => {
-                        let retryable = super::retry::applies(&name, &body)
-                            || matches!(name.as_str(), "commitTransaction" | "abortTransaction");
+                        // The labels a MongoDB server attaches itself.
+                        let ending =
+                            matches!(name.as_str(), "commitTransaction" | "abortTransaction");
+                        let in_txn = body.get_bool("autocommit") == Ok(false) && !ending;
+                        let retryable = super::retry::applies(&name, &body) || ending;
                         if retryable && super::retry::retryable_code(c) {
                             e = e.label("RetryableWriteError");
+                        }
+                        if (in_txn && (matches!(c, 112 | 251) || super::retry::retryable_code(c)))
+                            || (ending && c == 251)
+                        {
+                            e = e.label("TransientTransactionError");
                         }
                     }
                 }
@@ -640,11 +672,18 @@ impl Conn {
                     .named(tenant, "failGetMoreAfterCursorCheckout")
                     .and_then(|i| i.error_code)
             {
-                return (
-                    name,
-                    MongoError::new(c, "Failing getMore via failGetMoreAfterCursorCheckout")
-                        .to_doc(),
-                );
+                let mut e =
+                    MongoError::new(c, "Failing getMore via failGetMoreAfterCursorCheckout");
+                // A MongoDB 4.4+ server marks errors a change stream may
+                // resume after.
+                if matches!(
+                    c,
+                    6 | 7 | 63 | 89 | 91 | 133 | 150 | 189 | 234 | 262 | 9001 | 10107 | 11600
+                        | 11602 | 13388 | 13435 | 13436
+                ) {
+                    e = e.label("ResumableChangeStreamError");
+                }
+                return (name, e.to_doc());
             }
             if super::retry::applies(&name, &body)
                 && let Some(i) = self
@@ -653,8 +692,7 @@ impl Conn {
                     .named(tenant, "onPrimaryTransactionalWrite")
             {
                 if let Some(c) = i.error_code {
-                    let mut e =
-                        MongoError::new(c, "Failing write via onPrimaryTransactionalWrite");
+                    let mut e = MongoError::new(c, "Failing write via onPrimaryTransactionalWrite");
                     if super::retry::retryable_code(c) {
                         e = e.label("RetryableWriteError");
                     }
@@ -690,7 +728,33 @@ impl Conn {
                 if !d.contains_key("ok") {
                     d.insert("ok", 1.0);
                 }
+                // Cluster time (chapter 30, "Cluster time"), unsigned for
+                // now: drivers gossip it and send `afterClusterTime` in
+                // causally consistent sessions; such reads go to writers.
+                if !matches!(name.as_str(), "hello" | "isMaster" | "ismaster" | "saslStart" | "saslContinue") {
+                    let ts = cluster_time();
+                    d.insert("operationTime", ts);
+                    d.insert(
+                        "$clusterTime",
+                        doc! {"clusterTime": ts, "signature": {"hash": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![0; 20] }, "keyId": 0i64}},
+                    );
+                }
                 if let Some(w) = injected.and_then(|i| i.write_concern_error) {
+                    let code = w
+                        .get("code")
+                        .and_then(sprig_doc::filter::as_i64)
+                        .unwrap_or(0);
+                    let retryable = super::retry::applies(&name, &body)
+                        || matches!(name.as_str(), "commitTransaction" | "abortTransaction");
+                    if retryable
+                        && i32::try_from(code).is_ok_and(super::retry::retryable_code)
+                        && !w.contains_key("errorLabels")
+                    {
+                        d.insert("errorLabels", vec!["RetryableWriteError"]);
+                    }
+                    if let Ok(l) = w.get_array("errorLabels") {
+                        d.insert("errorLabels", l.clone());
+                    }
                     d.insert("writeConcernError", w);
                 }
                 d
@@ -698,6 +762,30 @@ impl Conn {
             Err(e) => e.to_doc(),
         };
         (name, doc)
+    }
+}
+
+static CLUSTER_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// This gateway's cluster time: wall-clock seconds and a counter, never
+/// going backwards (the HLC of chapter 30, without gossip between
+/// gateways yet).
+fn cluster_time() -> bson::Timestamp {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let wall = secs << 32;
+    let mut cur = CLUSTER_TIME.load(Ordering::SeqCst);
+    let v = loop {
+        let next = wall.max(cur + 1);
+        match CLUSTER_TIME.compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => break next,
+            Err(c) => cur = c,
+        }
+    };
+    bson::Timestamp {
+        time: u32::try_from(v >> 32).unwrap_or(u32::MAX),
+        increment: u32::try_from(v & 0xFFFF_FFFF).unwrap_or(0),
     }
 }
 

@@ -127,6 +127,14 @@ pub async fn ensure(
     cause: Cause,
 ) -> Result<StreamInstance> {
     let t = chain.member();
+    // A dropping definition takes no more publishes (39898); its instances
+    // still drain.
+    if def.state != DefState::Active && cause == Cause::Publish {
+        return Err(dropping(format!(
+            "stream {}.{} is being dropped",
+            def.db_name, def.name
+        )));
+    }
     let mut cat = catalog(svc, t).await?;
     if let Some((stream, db_name)) = found(&cat, def) {
         let si = StreamInstance {
@@ -262,10 +270,11 @@ pub async fn ensure(
                     tracing::info!(tenant = %t, def = %key, stream = id, ms = started.elapsed().as_millis(), "inherited stream instance created");
                     created = true;
                     // Chapter 42: inherit.broadcast_replay.
-                    let (svc2, def2) = (Arc::clone(svc), Arc::clone(def));
-                    tokio::spawn(async move {
-                        super::broadcast::replay(&svc2, &def2, t).await;
-                    });
+                    tokio::spawn(super::broadcast::replay(
+                        Arc::clone(svc),
+                        Arc::clone(def),
+                        t,
+                    ));
                 }
             }
         }

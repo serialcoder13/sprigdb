@@ -457,6 +457,46 @@ impl BoltService for BoltGraphService {
         info: &ConnInfo,
         auth: &PackValue,
     ) -> std::result::Result<Box<dyn BoltSession>, BoltFailure> {
+        Ok(Box::new(self.logon_session(info, auth).await?))
+    }
+}
+
+/// One connection's service: [`BoltGraphService`]'s logins, and the
+/// connection's entry in the gateway's session table (round 3), so Bolt
+/// sessions show in `SHOW PROCESSLIST` and `KILL` stops them.
+struct ConnService {
+    inner: Arc<BoltGraphService>,
+    session: std::sync::Mutex<Option<crate::session::Session>>,
+}
+
+#[async_trait]
+impl BoltService for ConnService {
+    async fn logon(
+        &self,
+        info: &ConnInfo,
+        auth: &PackValue,
+    ) -> std::result::Result<Box<dyn BoltSession>, BoltFailure> {
+        let mut gw = self.inner.logon_session(info, auth).await?;
+        let reg = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(mut s) = reg {
+            s.set_principal(gw.principal().clone());
+            s.set_state(crate::session::SessionState::Ready);
+            gw.attach(s);
+        }
+        Ok(Box::new(gw))
+    }
+}
+
+impl BoltGraphService {
+    async fn logon_session(
+        &self,
+        info: &ConnInfo,
+        auth: &PackValue,
+    ) -> std::result::Result<session::GwSession, BoltFailure> {
         let scheme = auth
             .get("scheme")
             .and_then(PackValue::as_str)
@@ -541,13 +581,13 @@ impl BoltService for BoltGraphService {
             }
         };
         let ctx = self.sctx();
-        Ok(Box::new(session::GwSession::new(
+        Ok(session::GwSession::new(
             principal,
             graphs,
             self.dc.clone(),
             self.live.get(&ADVERTISE_ADDRESS, &ctx).into_owned(),
             self.live.get(&ROUTING_TTL_SECONDS, &ctx),
-        )))
+        ))
     }
 }
 
@@ -598,21 +638,39 @@ impl Frontend for BoltFrontend {
         Protocol::Bolt
     }
 
-    async fn serve(&self, conn: ClientConn, _ctx: Arc<GatewayContext>) -> Result<()> {
+    async fn serve(&self, conn: ClientConn, ctx: Arc<GatewayContext>) -> Result<()> {
+        // The session table's entry: `SHOW PROCESSLIST` lists it, `KILL`
+        // stops its statement (`KILL QUERY`) or closes it.
+        let reg = ctx.sessions.open(&conn, Protocol::Bolt)?;
+        let close = conn.close_soon.child_token();
+        if let Some(h) = ctx.sessions.get(reg.id) {
+            let close = close.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = h.flags().killed() => close.cancel(),
+                    () = close.cancelled() => {}
+                }
+            });
+        }
+        let svc = ConnService {
+            inner: Arc::clone(&self.service),
+            session: std::sync::Mutex::new(Some(reg)),
+        };
         let tls = conn.stream.tls_info();
         let cfg = self.config(conn.listener.handshake_timeout);
         let peer = conn.peer;
-        match sprig_proto_bolt::server::serve(
+        let r = sprig_proto_bolt::server::serve(
             conn.stream,
             peer,
             tls.is_some(),
             tls.and_then(|t| t.sni),
-            self.service.as_ref(),
+            &svc,
             &cfg,
-            conn.close_soon.clone(),
+            close.clone(),
         )
-        .await
-        {
+        .await;
+        close.cancel();
+        match r {
             Ok(end) => tracing::debug!(%peer, ?end, "Bolt connection ended"),
             Err(e) => tracing::debug!(%peer, error = %e, "Bolt connection ended"),
         }

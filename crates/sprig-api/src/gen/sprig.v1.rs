@@ -1316,694 +1316,6 @@ pub mod functions_server {
 }
 #[allow(clippy::all)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvEntry {
-    #[prost(string, tag = "1")]
-    pub key: ::prost::alloc::string::String,
-    /// The value; `text` too when it is UTF-8.
-    #[prost(bytes = "vec", tag = "2")]
-    pub value: ::prost::alloc::vec::Vec<u8>,
-    #[prost(string, tag = "3")]
-    pub text: ::prost::alloc::string::String,
-    /// `string`, `hash`, `list`, `set` or `zset` (`Scan` lists every type).
-    #[prost(string, tag = "4")]
-    pub r#type: ::prost::alloc::string::String,
-    /// Changes on every write; for `if_version`.
-    #[prost(uint64, tag = "5")]
-    pub version: u64,
-    /// Expiry in ms since the epoch; 0 for none.
-    #[prost(int64, tag = "6")]
-    pub expires_at_ms: i64,
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvGetRequest {
-    #[prost(string, tag = "1")]
-    pub database: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub namespace: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub key: ::prost::alloc::string::String,
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvGetResponse {
-    /// Absent when the key is.
-    #[prost(message, optional, tag = "1")]
-    pub entry: ::core::option::Option<KvEntry>,
-    #[prost(bool, tag = "2")]
-    pub found: bool,
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvPutRequest {
-    #[prost(string, tag = "1")]
-    pub database: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub namespace: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub key: ::prost::alloc::string::String,
-    /// The value as bytes, or `text` as UTF-8 (one of the two).
-    #[prost(bytes = "vec", tag = "4")]
-    pub value: ::prost::alloc::vec::Vec<u8>,
-    #[prost(string, tag = "5")]
-    pub text: ::prost::alloc::string::String,
-    /// Write only when the key's version is this (0: the key must be absent).
-    #[prost(uint64, optional, tag = "6")]
-    pub if_version: ::core::option::Option<u64>,
-    /// Write only when the key is absent, or only when it exists.
-    #[prost(bool, tag = "7")]
-    pub if_absent: bool,
-    #[prost(bool, tag = "8")]
-    pub if_exists: bool,
-    /// Expire after this many ms; 0 for none.
-    #[prost(int64, tag = "9")]
-    pub ttl_ms: i64,
-}
-#[allow(clippy::all)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvPutResponse {
-    #[prost(uint64, tag = "1")]
-    pub version: u64,
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvDeleteRequest {
-    #[prost(string, tag = "1")]
-    pub database: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub namespace: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub key: ::prost::alloc::string::String,
-    #[prost(uint64, optional, tag = "4")]
-    pub if_version: ::core::option::Option<u64>,
-}
-#[allow(clippy::all)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvDeleteResponse {
-    #[prost(bool, tag = "1")]
-    pub deleted: bool,
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvScanRequest {
-    #[prost(string, tag = "1")]
-    pub database: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub namespace: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub prefix: ::prost::alloc::string::String,
-    /// The page token: the last key of the previous page.
-    #[prost(string, tag = "4")]
-    pub page_token: ::prost::alloc::string::String,
-    /// Keys per page, 1 to 1000 (default 100).
-    #[prost(uint32, tag = "5")]
-    pub limit: u32,
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct KvScanResponse {
-    #[prost(message, repeated, tag = "1")]
-    pub entries: ::prost::alloc::vec::Vec<KvEntry>,
-    /// Empty on the last page.
-    #[prost(string, tag = "2")]
-    pub next_page_token: ::prost::alloc::string::String,
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KvExecRequest {
-    #[prost(string, tag = "1")]
-    pub database: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub namespace: ::prost::alloc::string::String,
-    /// The command and its arguments, as text.
-    #[prost(string, repeated, tag = "3")]
-    pub command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct KvExecResponse {
-    /// The reply, RESP3 mapped to JSON: maps are objects (keys as text),
-    /// errors `{"error": "..."}`, doubles numbers, nulls null.
-    #[prost(message, optional, tag = "1")]
-    pub reply: ::core::option::Option<::prost_types::Value>,
-}
-/// Generated client implementations.
-pub mod key_value_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    /// Reads and writes key-value namespaces.
-    #[derive(Debug, Clone)]
-    pub struct KeyValueClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl<T> KeyValueClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> KeyValueClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            KeyValueClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        /// Reads a string key.
-        pub async fn get(
-            &mut self,
-            request: impl tonic::IntoRequest<super::KvGetRequest>,
-        ) -> std::result::Result<tonic::Response<super::KvGetResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Get");
-            let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Get"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Writes a string key, with an optional precondition and expiry.
-        pub async fn put(
-            &mut self,
-            request: impl tonic::IntoRequest<super::KvPutRequest>,
-        ) -> std::result::Result<tonic::Response<super::KvPutResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Put");
-            let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Put"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Deletes a key of any type.
-        pub async fn delete(
-            &mut self,
-            request: impl tonic::IntoRequest<super::KvDeleteRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::KvDeleteResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Delete");
-            let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Delete"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Lists keys in key order, by prefix, a page at a time.
-        pub async fn scan(
-            &mut self,
-            request: impl tonic::IntoRequest<super::KvScanRequest>,
-        ) -> std::result::Result<tonic::Response<super::KvScanResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Scan");
-            let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Scan"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Runs one Redis command on the namespace.
-        pub async fn exec(
-            &mut self,
-            request: impl tonic::IntoRequest<super::KvExecRequest>,
-        ) -> std::result::Result<tonic::Response<super::KvExecResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Exec");
-            let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Exec"));
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod key_value_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with KeyValueServer.
-    #[async_trait]
-    pub trait KeyValue: std::marker::Send + std::marker::Sync + 'static {
-        /// Reads a string key.
-        async fn get(
-            &self,
-            request: tonic::Request<super::KvGetRequest>,
-        ) -> std::result::Result<tonic::Response<super::KvGetResponse>, tonic::Status>;
-        /// Writes a string key, with an optional precondition and expiry.
-        async fn put(
-            &self,
-            request: tonic::Request<super::KvPutRequest>,
-        ) -> std::result::Result<tonic::Response<super::KvPutResponse>, tonic::Status>;
-        /// Deletes a key of any type.
-        async fn delete(
-            &self,
-            request: tonic::Request<super::KvDeleteRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::KvDeleteResponse>,
-            tonic::Status,
-        >;
-        /// Lists keys in key order, by prefix, a page at a time.
-        async fn scan(
-            &self,
-            request: tonic::Request<super::KvScanRequest>,
-        ) -> std::result::Result<tonic::Response<super::KvScanResponse>, tonic::Status>;
-        /// Runs one Redis command on the namespace.
-        async fn exec(
-            &self,
-            request: tonic::Request<super::KvExecRequest>,
-        ) -> std::result::Result<tonic::Response<super::KvExecResponse>, tonic::Status>;
-    }
-    /// Reads and writes key-value namespaces.
-    #[derive(Debug)]
-    pub struct KeyValueServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> KeyValueServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for KeyValueServer<T>
-    where
-        T: KeyValue,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/sprig.v1.KeyValue/Get" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetSvc<T: KeyValue>(pub Arc<T>);
-                    impl<T: KeyValue> tonic::server::UnaryService<super::KvGetRequest>
-                    for GetSvc<T> {
-                        type Response = super::KvGetResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::KvGetRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KeyValue>::get(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sprig.v1.KeyValue/Put" => {
-                    #[allow(non_camel_case_types)]
-                    struct PutSvc<T: KeyValue>(pub Arc<T>);
-                    impl<T: KeyValue> tonic::server::UnaryService<super::KvPutRequest>
-                    for PutSvc<T> {
-                        type Response = super::KvPutResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::KvPutRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KeyValue>::put(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = PutSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sprig.v1.KeyValue/Delete" => {
-                    #[allow(non_camel_case_types)]
-                    struct DeleteSvc<T: KeyValue>(pub Arc<T>);
-                    impl<T: KeyValue> tonic::server::UnaryService<super::KvDeleteRequest>
-                    for DeleteSvc<T> {
-                        type Response = super::KvDeleteResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::KvDeleteRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KeyValue>::delete(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = DeleteSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sprig.v1.KeyValue/Scan" => {
-                    #[allow(non_camel_case_types)]
-                    struct ScanSvc<T: KeyValue>(pub Arc<T>);
-                    impl<T: KeyValue> tonic::server::UnaryService<super::KvScanRequest>
-                    for ScanSvc<T> {
-                        type Response = super::KvScanResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::KvScanRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KeyValue>::scan(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ScanSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sprig.v1.KeyValue/Exec" => {
-                    #[allow(non_camel_case_types)]
-                    struct ExecSvc<T: KeyValue>(pub Arc<T>);
-                    impl<T: KeyValue> tonic::server::UnaryService<super::KvExecRequest>
-                    for ExecSvc<T> {
-                        type Response = super::KvExecResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::KvExecRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KeyValue>::exec(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ExecSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for KeyValueServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "sprig.v1.KeyValue";
-    impl<T> tonic::server::NamedService for KeyValueServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
-    }
-}
-#[allow(clippy::all)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateVectorIndexRequest {
     #[prost(string, tag = "1")]
     pub database: ::prost::alloc::string::String,
@@ -2854,6 +2166,817 @@ pub mod vectors_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "sprig.v1.Vectors";
     impl<T> tonic::server::NamedService for VectorsServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvEntry {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    /// The value; `text` too when it is UTF-8.
+    #[prost(bytes = "vec", tag = "2")]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub text: ::prost::alloc::string::String,
+    /// `string`, `hash`, `list`, `set` or `zset` (`Scan` lists every type).
+    #[prost(string, tag = "4")]
+    pub r#type: ::prost::alloc::string::String,
+    /// Changes on every write; for `if_version`.
+    #[prost(uint64, tag = "5")]
+    pub version: u64,
+    /// Expiry in ms since the epoch; 0 for none.
+    #[prost(int64, tag = "6")]
+    pub expires_at_ms: i64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvGetRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub key: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvGetResponse {
+    /// Absent when the key is.
+    #[prost(message, optional, tag = "1")]
+    pub entry: ::core::option::Option<KvEntry>,
+    #[prost(bool, tag = "2")]
+    pub found: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvPutRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub key: ::prost::alloc::string::String,
+    /// The value as bytes, or `text` as UTF-8 (one of the two).
+    #[prost(bytes = "vec", tag = "4")]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "5")]
+    pub text: ::prost::alloc::string::String,
+    /// Write only when the key's version is this (0: the key must be absent).
+    #[prost(uint64, optional, tag = "6")]
+    pub if_version: ::core::option::Option<u64>,
+    /// Write only when the key is absent, or only when it exists.
+    #[prost(bool, tag = "7")]
+    pub if_absent: bool,
+    #[prost(bool, tag = "8")]
+    pub if_exists: bool,
+    /// Expire after this many ms; 0 for none.
+    #[prost(int64, tag = "9")]
+    pub ttl_ms: i64,
+    /// The key's location (chapter 36); unset keeps none.
+    #[prost(message, optional, tag = "10")]
+    pub location: ::core::option::Option<LatLng>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvPutResponse {
+    #[prost(uint64, tag = "1")]
+    pub version: u64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvDeleteRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(uint64, optional, tag = "4")]
+    pub if_version: ::core::option::Option<u64>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvDeleteResponse {
+    #[prost(bool, tag = "1")]
+    pub deleted: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvScanRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub prefix: ::prost::alloc::string::String,
+    /// The page token: the last key of the previous page.
+    #[prost(string, tag = "4")]
+    pub page_token: ::prost::alloc::string::String,
+    /// Keys per page, 1 to 1000 (default 100).
+    #[prost(uint32, tag = "5")]
+    pub limit: u32,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvScanResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub entries: ::prost::alloc::vec::Vec<KvEntry>,
+    /// Empty on the last page.
+    #[prost(string, tag = "2")]
+    pub next_page_token: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvExecRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    /// The command and its arguments, as text.
+    #[prost(string, repeated, tag = "3")]
+    pub command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvExecResponse {
+    /// The reply, RESP3 mapped to JSON: maps are objects (keys as text),
+    /// errors `{"error": "..."}`, doubles numbers, nulls null.
+    #[prost(message, optional, tag = "1")]
+    pub reply: ::core::option::Option<::prost_types::Value>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvGeoSearchRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    /// A circle, box or polygon (`Vectors`' filter); unset with `near` for
+    /// the nearest keys anywhere.
+    #[prost(message, optional, tag = "3")]
+    pub region: ::core::option::Option<GeoFilter>,
+    /// Order by distance from here (a circle's center by default); alone,
+    /// the `limit` nearest keys.
+    #[prost(message, optional, tag = "4")]
+    pub near: ::core::option::Option<LatLng>,
+    /// Keys returned, 1 to 10000 (default 100).
+    #[prost(uint32, tag = "5")]
+    pub limit: u32,
+    /// With `near` alone: farthest distance in metres; 0 for none.
+    #[prost(double, tag = "6")]
+    pub max_distance_m: f64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvGeoHit {
+    #[prost(message, optional, tag = "1")]
+    pub entry: ::core::option::Option<KvEntry>,
+    #[prost(message, optional, tag = "2")]
+    pub location: ::core::option::Option<LatLng>,
+    /// Metres from `near` or the circle's center (WGS 84, Karney); 0 when
+    /// unordered.
+    #[prost(double, tag = "3")]
+    pub distance_m: f64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvGeoSearchResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub hits: ::prost::alloc::vec::Vec<KvGeoHit>,
+}
+/// Generated client implementations.
+pub mod key_value_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Reads and writes key-value namespaces.
+    #[derive(Debug, Clone)]
+    pub struct KeyValueClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> KeyValueClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> KeyValueClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            KeyValueClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Reads a string key.
+        pub async fn get(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvGetRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvGetResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Get");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Get"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Writes a string key, with an optional precondition and expiry.
+        pub async fn put(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvPutRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvPutResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Put");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Put"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Deletes a key of any type.
+        pub async fn delete(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvDeleteRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::KvDeleteResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Delete");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Delete"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Lists keys in key order, by prefix, a page at a time.
+        pub async fn scan(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvScanRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvScanResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Scan");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Scan"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Runs one Redis command on the namespace.
+        pub async fn exec(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvExecRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvExecResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Exec");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Exec"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Keys whose location is inside a circle, box or polygon, or the
+        /// nearest ones to a point (chapter 36; R6 round 3).
+        pub async fn geo_search(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvGeoSearchRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::KvGeoSearchResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.KeyValue/GeoSearch",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.KeyValue", "GeoSearch"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod key_value_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with KeyValueServer.
+    #[async_trait]
+    pub trait KeyValue: std::marker::Send + std::marker::Sync + 'static {
+        /// Reads a string key.
+        async fn get(
+            &self,
+            request: tonic::Request<super::KvGetRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvGetResponse>, tonic::Status>;
+        /// Writes a string key, with an optional precondition and expiry.
+        async fn put(
+            &self,
+            request: tonic::Request<super::KvPutRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvPutResponse>, tonic::Status>;
+        /// Deletes a key of any type.
+        async fn delete(
+            &self,
+            request: tonic::Request<super::KvDeleteRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::KvDeleteResponse>,
+            tonic::Status,
+        >;
+        /// Lists keys in key order, by prefix, a page at a time.
+        async fn scan(
+            &self,
+            request: tonic::Request<super::KvScanRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvScanResponse>, tonic::Status>;
+        /// Runs one Redis command on the namespace.
+        async fn exec(
+            &self,
+            request: tonic::Request<super::KvExecRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvExecResponse>, tonic::Status>;
+        /// Keys whose location is inside a circle, box or polygon, or the
+        /// nearest ones to a point (chapter 36; R6 round 3).
+        async fn geo_search(
+            &self,
+            request: tonic::Request<super::KvGeoSearchRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::KvGeoSearchResponse>,
+            tonic::Status,
+        >;
+    }
+    /// Reads and writes key-value namespaces.
+    #[derive(Debug)]
+    pub struct KeyValueServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> KeyValueServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for KeyValueServer<T>
+    where
+        T: KeyValue,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.v1.KeyValue/Get" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvGetRequest>
+                    for GetSvc<T> {
+                        type Response = super::KvGetResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvGetRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::get(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/Put" => {
+                    #[allow(non_camel_case_types)]
+                    struct PutSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvPutRequest>
+                    for PutSvc<T> {
+                        type Response = super::KvPutResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvPutRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::put(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PutSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/Delete" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvDeleteRequest>
+                    for DeleteSvc<T> {
+                        type Response = super::KvDeleteResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvDeleteRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::delete(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/Scan" => {
+                    #[allow(non_camel_case_types)]
+                    struct ScanSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvScanRequest>
+                    for ScanSvc<T> {
+                        type Response = super::KvScanResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvScanRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::scan(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ScanSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/Exec" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvExecRequest>
+                    for ExecSvc<T> {
+                        type Response = super::KvExecResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvExecRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::exec(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/GeoSearch" => {
+                    #[allow(non_camel_case_types)]
+                    struct GeoSearchSvc<T: KeyValue>(pub Arc<T>);
+                    impl<
+                        T: KeyValue,
+                    > tonic::server::UnaryService<super::KvGeoSearchRequest>
+                    for GeoSearchSvc<T> {
+                        type Response = super::KvGeoSearchResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvGeoSearchRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::geo_search(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GeoSearchSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for KeyValueServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.v1.KeyValue";
+    impl<T> tonic::server::NamedService for KeyValueServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

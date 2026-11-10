@@ -16,6 +16,8 @@ bson = "=2.15.0"
 regex = "1.11"
 serde_json.workspace = true
 sprig-proto-mongo = { path = "../sprig-proto-mongo" }
+# Geodesy and S2 for the geo operators (chapter 36, R6 round 3).
+sprig-geo = { path = "../sprig-geo" }
 
 [dev-dependencies]
 # The live test of the generated SQL, straight on MariaDB.

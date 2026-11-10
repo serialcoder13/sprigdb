@@ -37,8 +37,10 @@
 //! mover's own: it cuts over once lag stays under `mover.ready_max_lag_ms`
 //! for `mover.ready_sustain_seconds`, and aborts any attempt that would
 //! hold longer than the budget (three attempts, then it rolls back).
-//! `migration.write_pause_target_ms` resolves at the DC scope; tenant
-//! values wait for the catalog-backed resolution in controllers.
+//! `migration.write_pause_target_ms` resolves for the tenant at its home
+//! DC: its own catalog rows over the dc and global scopes (decision RF3,
+//! `crate::tenant_scopes`). Chapter 24's automatic moves
+//! (`crate::dc_migrate`) start through the same [`DcMoves::start_caused`].
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -140,6 +142,11 @@ pub struct DcMoves {
     pub traffic: Arc<TrafficWindows>,
     /// Tenants whose move from here the loop is watching.
     watching: Mutex<HashSet<TenantId>>,
+    /// Tenants' own catalog rows (decision RF3): tenant-scope
+    /// `migration.*` values win over the home DC's.
+    scopes: Option<Arc<crate::tenant_scopes::TenantScopes>>,
+    /// The automatic decision's soft state (`crate::dc_migrate`).
+    pub decisions: Arc<crate::dc_migrate::DecisionState>,
 }
 
 impl std::fmt::Debug for DcMoves {
@@ -173,7 +180,117 @@ impl DcMoves {
             live,
             traffic: Arc::new(TrafficWindows::default()),
             watching: Mutex::new(HashSet::new()),
+            scopes: None,
+            decisions: Arc::new(crate::dc_migrate::DecisionState::default()),
         }
+    }
+
+    /// The global tier.
+    #[must_use]
+    pub fn global(&self) -> Arc<dyn MetaStore> {
+        Arc::clone(&self.global)
+    }
+
+    /// This DC's tier (the one etcd).
+    #[must_use]
+    pub fn store(&self) -> &Arc<dyn MetaStore> {
+        &self.store
+    }
+
+    /// The clock.
+    #[must_use]
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
+    /// A float setting at this DC's scope.
+    pub fn setting_f64(&self, s: &'static Setting<f64>) -> f64 {
+        self.live
+            .as_ref()
+            .map_or(s.default, |l| l.get(s, &SettingCtx::process(&self.dc)))
+    }
+
+    /// A text setting at this DC's scope.
+    pub fn setting_str(&self, s: &'static Setting<std::borrow::Cow<'static, str>>) -> String {
+        self.live
+            .as_ref()
+            .map_or_else(
+                || s.default.clone(),
+                |l| l.get(s, &SettingCtx::process(&self.dc)),
+            )
+            .into_owned()
+    }
+
+    /// Whether chapter 11's pin (`sprigctl tenant pin`) holds `tenant` in
+    /// this DC.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn chapter11_pinned(&self, tenant: TenantId) -> Result<bool> {
+        Ok(sprig_balancer::pins::PinStore::new(Arc::clone(&self.store))
+            .get(tenant)
+            .await?
+            .is_some())
+    }
+
+    /// Moves between DCs in progress that touch `a`, and that touch `b`
+    /// (as source or target): `migration.max_concurrent_per_dc`'s count.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn moves_touching(&self, a: &DcId, b: &DcId) -> Result<(u64, u64)> {
+        let dir = crate::tree::Directory::new(Arc::clone(&self.global));
+        let (mut na, mut nb) = (0, 0);
+        for e in dir.list().await? {
+            if e.body().state != crate::tree::TenantState::Migrating {
+                continue;
+            }
+            let Some(h) = home::read_home(&*self.global, e.body().tenant_id).await? else {
+                continue;
+            };
+            if h.state != "migrating" {
+                continue;
+            }
+            let from = h.home_dc.clone();
+            let to = h.migration_to();
+            if from == *a || to.as_ref() == Some(a) {
+                na += 1;
+            }
+            if from == *b || to.as_ref() == Some(b) {
+                nb += 1;
+            }
+        }
+        Ok((na, nb))
+    }
+
+    /// Resolves tenant-scope keys with each tenant's own catalog rows too
+    /// (decision RF3).
+    #[must_use]
+    pub fn with_tenant_scopes(mut self, s: Arc<crate::tenant_scopes::TenantScopes>) -> Self {
+        self.scopes = Some(s);
+        self
+    }
+
+    /// `s` for `tenant` at this (its home) DC: its own catalog rows (tenant,
+    /// ancestors) over the dc and global scopes.
+    pub async fn tenant_setting<T: sprig_settings::SettingValue>(
+        &self,
+        tenant: TenantId,
+        s: &'static Setting<T>,
+    ) -> T {
+        let Some(l) = self.live.as_ref() else {
+            return s.default.clone();
+        };
+        let rows = match &self.scopes {
+            Some(sc) => sc.get(tenant).await,
+            None => None,
+        };
+        crate::tenant_scopes::get(
+            &l.snapshot(),
+            rows.as_deref(),
+            s,
+            &SettingCtx::process(&self.dc).for_tenant(tenant, &[]),
+        )
     }
 
     /// This controller's DC.
@@ -386,10 +503,11 @@ impl DcMoves {
                 e.allowed_dcs().as_ref(),
             )
             .await?;
-        let budget = req
-            .max_pause_ms
-            .unwrap_or_else(|| self.setting(&WRITE_PAUSE_TARGET_MS))
-            .clamp(200, 60_000);
+        let budget = match req.max_pause_ms {
+            Some(ms) => ms,
+            None => self.tenant_setting(tenant, &WRITE_PAUSE_TARGET_MS).await,
+        }
+        .clamp(200, 60_000);
         let id = uuid::Uuid::now_v7().simple().to_string();
         let migration = json!({
             "id": id, "from": self.dc.as_str(), "to": to.as_str(),
@@ -453,7 +571,7 @@ impl DcMoves {
         .await
         .unwrap_or(dir);
         tracing::info!(tenant = %name, from = %self.dc, %to, job = %job.0, budget_ms = budget, "tenant move started");
-        metrics::counter!("sprig_controller_migrations_total", "cause" => "operator", "result" => "started")
+        metrics::counter!("sprig_controller_migrations_total", "cause" => cause.to_owned(), "result" => "started")
             .increment(1);
         Ok(self.view(name, &dir, None).await)
     }

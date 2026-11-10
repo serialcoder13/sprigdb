@@ -424,8 +424,7 @@ impl MsgEnv {
                 version: l.version,
                 record: None,
                 max_attempts: self.opts.current().max_attempts,
-                lease_ms: 30_000
-                    .max(u64::try_from(budget.as_millis()).unwrap_or(30_000) + 5_000),
+                lease_ms: 30_000.max(u64::try_from(budget.as_millis()).unwrap_or(30_000) + 5_000),
                 budget_ms: u64::try_from(budget.as_millis()).unwrap_or(30_000),
             },
             version: Arc::new(AtomicU64::new(l.version)),

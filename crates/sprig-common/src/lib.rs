@@ -15,6 +15,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod cpu;
 pub mod error;
 pub mod ids;
 pub mod names;

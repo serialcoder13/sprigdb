@@ -246,8 +246,13 @@ pub async fn resolve_retention<Q: Queryable + Send>(
 /// The `stream.*` retention keys at the global scope of `etcd` (what a
 /// catalog row doesn't set falls back to), resolved in `dc`.
 #[must_use]
-pub fn global_retention(etcd: &sprig_settings::MemSettings<'_>, dc: &sprig_common::ids::DcId) -> Retention {
-    use crate::settings::{COMPACTION_LAG_MINUTES, RETENTION_BYTES, RETENTION_HOURS, TOMBSTONE_HOURS};
+pub fn global_retention(
+    etcd: &sprig_settings::MemSettings<'_>,
+    dc: &sprig_common::ids::DcId,
+) -> Retention {
+    use crate::settings::{
+        COMPACTION_LAG_MINUTES, RETENTION_BYTES, RETENTION_HOURS, TOMBSTONE_HOURS,
+    };
     let ctx = sprig_settings::SettingCtx::process(dc);
     Retention {
         hours: etcd.get(&RETENTION_HOURS, &ctx),

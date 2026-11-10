@@ -1211,8 +1211,9 @@ mod tests {
                 }
                 _ => None,
             })
-            // Chapter 18's redo marker table (a writer's internal grant).
-            .filter(|n| n != "__sprig_redo")
+            // Internal grants a writer gets in every shard schema: chapter
+            // 18's redo marker table and chapter 31's retry records.
+            .filter(|n| n != "__sprig_redo" && n != backend::DOC_SESSIONS_TABLE)
             .collect();
         assert_eq!(names, BTreeSet::from(["orders".to_owned()]));
     }

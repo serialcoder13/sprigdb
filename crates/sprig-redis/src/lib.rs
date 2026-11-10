@@ -10,7 +10,11 @@
 //! - [`ctx`]: a command's view of one Redis database: its key-value
 //!   namespace (chapter 33), the key row, elements, versions and expiry,
 //!   all as SQL through the caller's [`sprig_kv::SqlRunner`].
+//! - [`batch`]: the hottest writes (`SET`, `INCR`, `HSET`, pushes,
+//!   pops, `ZADD`) as one guarded compound statement (R6 round 3).
 //! - [`cmd`]: the commands, by type.
+//! - [`logic`]: `FCALL` of logic-layer functions (chapter 41), through
+//!   a hook the gateway installs.
 //! - [`lua`]: `EVAL`, `EVALSHA`, `SCRIPT`, `FUNCTION`, `FCALL` on SprigDB's
 //!   one Lua runtime (`sprig_logic_js::lua::Sandbox`).
 //! - [`pubsub`]: the gateway's subscribers and the wait table of blocking
@@ -44,12 +48,14 @@
     clippy::similar_names
 )]
 
+pub mod batch;
 pub mod cmd;
 pub mod conn;
 pub mod ctx;
 pub mod env;
 pub mod fabric;
 pub mod glob;
+pub mod logic;
 pub mod lua;
 pub mod pubsub;
 pub mod reply;

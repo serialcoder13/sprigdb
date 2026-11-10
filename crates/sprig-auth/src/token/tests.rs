@@ -64,7 +64,11 @@ async fn login_verify_refresh_and_reuse() {
     // Expired access token: refused; the session lives on.
     let later = now + Duration::from_secs(900 + 61);
     assert_eq!(
-        code(&t.verify(&i.access_token, ip(), false, later).await.unwrap_err()),
+        code(
+            &t.verify(&i.access_token, ip(), false, later)
+                .await
+                .unwrap_err()
+        ),
         1045
     );
     let r = t.refresh(&i.refresh_token, l, later).await.unwrap();
@@ -113,8 +117,14 @@ async fn idle_and_age_limits() {
 async fn any_gateway_verifies_through_the_published_key() {
     let global: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Global));
     let sessions: Arc<dyn SessionStore> = Arc::new(MemorySessions::default());
-    let a = Tokens::new(ring("gw-a", Some(Arc::clone(&global))), Arc::clone(&sessions));
-    let b = Tokens::new(ring("gw-b", Some(Arc::clone(&global))), Arc::clone(&sessions));
+    let a = Tokens::new(
+        ring("gw-a", Some(Arc::clone(&global))),
+        Arc::clone(&sessions),
+    );
+    let b = Tokens::new(
+        ring("gw-b", Some(Arc::clone(&global))),
+        Arc::clone(&sessions),
+    );
     a.keys().publish().await.unwrap();
     b.keys().publish().await.unwrap();
     let now = SystemTime::now();
@@ -153,7 +163,12 @@ async fn forged_and_foreign_tokens_are_refused() {
         .await
         .unwrap();
     // A key nobody published: unknown.
-    assert!(other.verify(&i.access_token, ip(), true, now).await.is_err());
+    assert!(
+        other
+            .verify(&i.access_token, ip(), true, now)
+            .await
+            .is_err()
+    );
     // A changed payload: the signature fails.
     let jws = i.access_token.strip_prefix(ACCESS_PREFIX).unwrap();
     let mut parts: Vec<String> = jws.split('.').map(str::to_owned).collect();
@@ -216,8 +231,14 @@ async fn logout_needs_the_real_refresh_token() {
 async fn tickets_verify_on_any_gateway() {
     let global: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Global));
     let sessions: Arc<dyn SessionStore> = Arc::new(MemorySessions::default());
-    let a = Tokens::new(ring("gw-a", Some(Arc::clone(&global))), Arc::clone(&sessions));
-    let b = Tokens::new(ring("gw-b", Some(Arc::clone(&global))), Arc::clone(&sessions));
+    let a = Tokens::new(
+        ring("gw-a", Some(Arc::clone(&global))),
+        Arc::clone(&sessions),
+    );
+    let b = Tokens::new(
+        ring("gw-b", Some(Arc::clone(&global))),
+        Arc::clone(&sessions),
+    );
     a.keys().publish().await.unwrap();
     let t = a
         .sign_ticket(&serde_json::json!({"sid": "x", "exp": 1}))
@@ -236,9 +257,14 @@ async fn tickets_verify_on_any_gateway() {
             .is_err()
     );
     assert!(
-        b.verify(&format!("{ACCESS_PREFIX}{t}"), ip(), true, SystemTime::now())
-            .await
-            .is_err()
+        b.verify(
+            &format!("{ACCESS_PREFIX}{t}"),
+            ip(),
+            true,
+            SystemTime::now()
+        )
+        .await
+        .is_err()
     );
 }
 

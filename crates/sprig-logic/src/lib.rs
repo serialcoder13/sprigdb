@@ -42,6 +42,7 @@ pub mod invoke;
 pub mod messages;
 pub mod msgrun;
 pub mod placement;
+pub mod rollback;
 pub mod schedule;
 pub mod service;
 pub mod settings;

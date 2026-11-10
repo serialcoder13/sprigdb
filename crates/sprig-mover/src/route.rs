@@ -865,6 +865,39 @@ mod tests {
         );
     }
 
+    /// G31: the decision table the source lists for a shard schema is
+    /// created in every new shard schema of a split.
+    #[test]
+    fn every_new_shard_schema_gets_the_decision_table() {
+        let r = ShardRoute::from_spec(&spec(
+            vec![(4, HashRange { lo: 0, hi: None })],
+            vec![
+                (
+                    6,
+                    HashRange {
+                        lo: 0,
+                        hi: Some(HALF),
+                    },
+                ),
+                (7, HashRange { lo: HALF, hi: None }),
+            ],
+        ))
+        .unwrap()
+        .unwrap();
+        let got = r.rewrite_statements(&[
+            "CREATE DATABASE IF NOT EXISTS `t42_d1_g3_s4`".into(),
+            "USE `t42_d1_g3_s4`".into(),
+            sprig_catalog::ddl::dtx_table_sql("t42_d1_g3_s4"),
+        ]);
+        for s in ["t42_d1_g3_s6", "t42_d1_g3_s7"] {
+            assert!(
+                got.contains(&sprig_catalog::ddl::dtx_table_sql(s)),
+                "no __sprig_dtx for {s}: {got:?}"
+            );
+        }
+        assert!(!got.iter().any(|q| q.contains("t42_d1_g3_s4")));
+    }
+
     fn rekey_spec() -> JobSpec {
         let c = ClusterId::new("dc-a-c1").unwrap();
         let key = sprig_shard::KeySpec::new(vec![sprig_shard::KeyClass::Numeric]).unwrap();

@@ -776,6 +776,11 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(CursorPlan::from_docs(ns.clone(), Vec::new()));
         };
+        // Chapter 36 (R6 round 3): `$near` sorts by distance.
+        models::check_near(&pred, true)?;
+        if let Some((path, near)) = models::near_of(&pred) {
+            return Box::pin(self.find_near(sql, ns, &spec, &pred, &path, &near, &m)).await;
+        }
         let sqlp = translate(&pred, &m);
         let remaining = (spec.limit > 0).then_some(spec.limit);
         let keyset = sort.is_empty() || (sort.len() == 1 && sort[0].0 == "_id");
@@ -1033,6 +1038,7 @@ impl Engine {
         limit: u64,
     ) -> Result<u64, MongoError> {
         let pred = filter::parse(filter_doc)?;
+        models::check_near(&pred, false)?;
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(0);
         };
@@ -1421,10 +1427,13 @@ impl Engine {
                     "Index keys cannot be empty.",
                 ));
             }
+            // Chapter 36 (R6 round 3): a single-path `2dsphere` index.
+            let geo_path = Self::geo_key(key)?;
             let mut pattern = Vec::new();
             for (p, v) in key {
                 let dir = match v {
                     Bson::String(t) if t == "hashed" => 1,
+                    Bson::String(t) if t == "2dsphere" => 1,
                     Bson::String(t) => {
                         return Err(MongoError::new(
                             code::SPRIG_DOC_FEATURE_UNSUPPORTED,
@@ -1497,6 +1506,10 @@ impl Engine {
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+            let mut extra = extra;
+            if geo_path.is_some() && !extra.contains_key("2dsphereIndexVersion") {
+                extra.insert("2dsphereIndexVersion", 3);
+            }
             let idx = IndexDef {
                 id: m.next_index,
                 name,
@@ -1511,6 +1524,13 @@ impl Engine {
                 },
                 extra,
             };
+            if let Some(p) = &geo_path {
+                self.create_geo_index(sql, ns, &m, &idx, p).await?;
+                m.indexes.push(idx);
+                m.next_index += 1;
+                self.catalog.save_indexes(sql, ns, &m).await?;
+                continue;
+            }
             for (p, _) in &pattern {
                 if !m.has_columns(p) {
                     sql.exec(&meta::add_columns_sql(&ns.db, &m.table, p))
@@ -1626,6 +1646,11 @@ impl Engine {
             sql.exec(&meta::drop_index_sql(&ns.db, &m.table, &idx))
                 .await
                 .map_err(|e| mongo_error(&e))?;
+            // Chapter 36 (R6 round 3): a `2dsphere` index's columns.
+            self.drop_geo_columns(sql, ns, &m, &idx).await?;
+            if crate::geo::is_2dsphere(&idx) {
+                continue;
+            }
             for (p, _) in &idx.key {
                 if !m.has_columns(p) {
                     sql.exec(&meta::drop_columns_sql(&ns.db, &m.table, p))
@@ -1701,9 +1726,22 @@ impl Engine {
             stage_bytes: self.cfg.agg_stage_bytes,
             now,
         };
-        let mut stages = pipeline;
+        // Chapters 34 and 36 (R6 round 3): `$geoNear`, `$vectorSearch` and
+        // `$listSearchIndexes` read the collection themselves.
+        let first = if ns.coll.is_empty() {
+            None
+        } else {
+            Box::pin(self.first_stage(sql, ns, pipeline)).await?
+        };
+        let mut stages = if first.is_some() {
+            &pipeline[1..]
+        } else {
+            pipeline
+        };
         let mut conds: Vec<Bson> = Vec::new();
-        while let Some(s) = stages.first() {
+        while first.is_none()
+            && let Some(s) = stages.first()
+        {
             match s.get_document("$match") {
                 Ok(m) if s.len() == 1 && !m.contains_key("$expr") => {
                     if !m.is_empty() {
@@ -1719,10 +1757,13 @@ impl Engine {
         } else {
             doc! {"$and": conds}
         };
-        let mut docs = if ns.coll.is_empty() {
+        let mut docs = if let Some(d) = first {
+            d
+        } else if ns.coll.is_empty() {
             Vec::new()
         } else {
             let pred = filter::parse(&leading)?;
+            models::check_near(&pred, false)?;
             match self.meta(sql, ns).await? {
                 Some(m) => {
                     let sqlp = translate(&pred, &m);
@@ -1783,6 +1824,7 @@ impl Engine {
                     docs
                 }
                 "$out" | "$merge" => {
+                    models::strip_scores(&mut docs);
                     let target = match s.get(name) {
                         Some(Bson::String(c)) => c.clone(),
                         Some(Bson::Document(d)) => d
@@ -1792,23 +1834,117 @@ impl Engine {
                             .to_owned(),
                         _ => String::new(),
                     };
+                    let tdb = match s.get(name) {
+                        Some(Bson::Document(d)) => match d.get("into") {
+                            Some(Bson::Document(i)) => i.get_str("db").ok().map(str::to_owned),
+                            _ => d.get_str("db").ok().map(str::to_owned),
+                        },
+                        _ => None,
+                    };
+                    let target = match s.get(name) {
+                        Some(Bson::Document(d)) => match d.get("into") {
+                            Some(Bson::Document(i)) => {
+                                i.get_str("coll").unwrap_or_default().to_owned()
+                            }
+                            _ => target,
+                        },
+                        _ => target,
+                    };
                     let tns = Ns {
-                        db: ns.db.clone(),
+                        db: tdb.unwrap_or_else(|| ns.db.clone()),
                         coll: target,
                     };
                     if name == "$out" {
                         self.drop(sql, &tns).await?;
-                    }
-                    let (_, errs) = self.insert(sql, &tns, docs, true).await?;
-                    if let Some((_, e)) = errs.into_iter().next() {
-                        return Err(e);
+                        let (_, errs) = self.insert(sql, &tns, docs, true).await?;
+                        if let Some((_, e)) = errs.into_iter().next() {
+                            return Err(e);
+                        }
+                    } else {
+                        let spec = s.get_document(name).cloned().unwrap_or_default();
+                        self.merge_into(sql, &tns, docs, &spec).await?;
                     }
                     Vec::new()
                 }
                 _ => agg::run_stage(docs, s, &lim)?,
             };
         }
+        models::strip_scores(&mut docs);
         Ok(docs)
+    }
+
+    /// `$merge` on `_id`: `whenMatched` `merge` (the default), `replace`,
+    /// `keepExisting` or `fail`; `whenNotMatched` `insert` (the default),
+    /// `discard` or `fail`.
+    async fn merge_into(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        docs: Vec<Document>,
+        spec: &Document,
+    ) -> Result<(), MongoError> {
+        let matched = spec.get_str("whenMatched").unwrap_or("merge");
+        let not_matched = spec.get_str("whenNotMatched").unwrap_or("insert");
+        if spec.get("on").is_some_and(|o| o.as_str() != Some("_id")) {
+            return Err(MongoError::new(
+                code::SPRIG_DOC_FEATURE_UNSUPPORTED,
+                "$merge 'on' fields other than _id are not supported in this release",
+            ));
+        }
+        for d in docs {
+            let id = d.get("_id").cloned().unwrap_or(Bson::Null);
+            let q = doc! {"_id": id.clone()};
+            let exists = self.count(sql, ns, &q, 0, 1).await? > 0;
+            match (exists, matched, not_matched) {
+                (true, "keepExisting", _) | (false, _, "discard") => {}
+                (true, "fail", _) => {
+                    return Err(MongoError::new(
+                        code::DUPLICATE_KEY,
+                        format!("$merge found an existing document with _id {id}"),
+                    ));
+                }
+                (false, _, "fail") => {
+                    return Err(MongoError::new(
+                        13113,
+                        "$merge could not find a matching document in the target collection",
+                    ));
+                }
+                (true, "replace", _) => {
+                    self.update(sql, ns, &q, &Bson::Document(d), false, false, &[], None)
+                        .await?;
+                }
+                (true, "merge", _) => {
+                    let mut set = d.clone();
+                    set.remove("_id");
+                    if !set.is_empty() {
+                        self.update(
+                            sql,
+                            ns,
+                            &q,
+                            &Bson::Document(doc! {"$set": set}),
+                            false,
+                            false,
+                            &[],
+                            None,
+                        )
+                        .await?;
+                    }
+                }
+                (true, other, _) => {
+                    return Err(MongoError::new(
+                        code::SPRIG_DOC_FEATURE_UNSUPPORTED,
+                        format!("$merge whenMatched {other} is not supported in this release"),
+                    ));
+                }
+                (false, _, _) => {
+                    let (_, errs) = self.insert(sql, ns, vec![d], true).await?;
+                    if let Some((_, e)) = errs.into_iter().next() {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn lookup(
@@ -1958,3 +2094,7 @@ fn dup_error(e: &SqlError, id: &Bson) -> MongoError {
 
 #[cfg(test)]
 mod tests;
+
+/// `$near`, `$geoNear`, `2dsphere` columns, search indexes and
+/// `$vectorSearch` (chapters 34 and 36, R6 round 3).
+pub mod models;

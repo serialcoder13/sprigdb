@@ -27,6 +27,8 @@
 //! publish in a member T into its own instance: the two headers stamped T, T
 //! ```
 
+#![allow(clippy::single_match_else)]
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
@@ -35,9 +37,9 @@ use base64::Engine as _;
 use bytes::Bytes;
 use mysql_async::prelude::Queryable;
 use serde_json::{Value, json};
+use sprig_catalog::CatalogLocator;
 use sprig_catalog::ddl::{database_key, shard_schemas};
 use sprig_catalog::version::VersionKind;
-use sprig_catalog::CatalogLocator;
 use sprig_common::ids::TenantId;
 use sprig_common::names::quote;
 use sprig_common::{Result, SprigCode, SprigError};
@@ -107,7 +109,10 @@ pub fn declared_in(chain: &Chain, db: &str) -> Vec<Arc<Definition>> {
 /// A queue instance's arguments: the definition's, with each overridable
 /// argument's nearest override (chapter 42, "Overrides").
 #[must_use]
-pub fn queue_arguments(chain: &Chain, def: &Definition) -> std::collections::BTreeMap<String, Value> {
+pub fn queue_arguments(
+    chain: &Chain,
+    def: &Definition,
+) -> std::collections::BTreeMap<String, Value> {
     let spec: QueueSpec = serde_json::from_value(def.definition.clone()).unwrap_or_default();
     let mut args = spec.arguments;
     for k in QUEUE_OVERRIDABLE {
@@ -142,7 +147,7 @@ fn signature(chain: &Chain, defs: &[Arc<Definition>]) -> String {
         for g in st.defs.values().filter(|d| d.kind == DefKind::Trigger) {
             let _ = write!(s, "t{}:{}:{}|", g.key(), g.def_version, g.state.as_str());
         }
-        for o in st.overrides.iter() {
+        for o in &st.overrides {
             if st
                 .defs
                 .values()
@@ -405,7 +410,9 @@ pub async fn ensure_vhost(
             if present {
                 binds.push(TopoChange::Unbind(b));
             }
-        } else if !present && exists("exchange", &spec.source) && exists(&spec.dest_kind, &spec.dest)
+        } else if !present
+            && exists("exchange", &spec.source)
+            && exists(&spec.dest_kind, &spec.dest)
         {
             binds.push(TopoChange::Bind(b));
         }
@@ -465,8 +472,7 @@ pub async fn ensure_vhost(
         )
         .await?;
         if d.kind == DefKind::Queue {
-            super::triggers::ensure_for_queue(svc, chain, d, (row.db_id.0, &row.name), *id)
-                .await?;
+            super::triggers::ensure_for_queue(svc, chain, d, (row.db_id.0, &row.name), *id).await?;
         }
     }
     applied_map()
@@ -475,10 +481,7 @@ pub async fn ensure_vhost(
         .insert((t, db_key(db)), sig);
     // Chapter 42: inherit.broadcast_replay, for instances made just now.
     for d in fresh {
-        let svc2 = Arc::clone(svc);
-        tokio::spawn(async move {
-            super::broadcast::replay(&svc2, &d, t).await;
-        });
+        tokio::spawn(super::broadcast::replay(Arc::clone(svc), d, t));
     }
     Ok(true)
 }
@@ -517,7 +520,9 @@ pub async fn remove(svc: &Arc<TenantServices>, t: TenantId, def: &Definition) ->
             let mut c = svc.catalog.change(t, VersionKind::Catalog).await?;
             let r = {
                 let (store, tx) = c.tx().parts();
-                MqStore::new(store.schema()).apply(tx, row.db_id.0, &ch, 0).await
+                MqStore::new(store.schema())
+                    .apply(tx, row.db_id.0, &ch, 0)
+                    .await
             };
             if let Err(e) = r {
                 let _ = c.rollback().await;
@@ -610,14 +615,19 @@ pub fn strip_key(key: &str) -> Option<(String, String)> {
 ///
 /// # Errors
 /// Properties that don't parse.
-pub fn stamp(m: &Message, key: &str, tenant: &str, origin: &str) -> std::result::Result<Message, MqError> {
-    use sprig_proto_amqp::v091::props::BasicProperties;
+pub fn stamp(
+    m: &Message,
+    key: &str,
+    tenant: &str,
+    origin: &str,
+) -> std::result::Result<Message, MqError> {
     use sprig_proto_amqp::v10::message::{
         Sections, application_properties_section, encode_sections,
     };
     use sprig_proto_amqp::v10::types::Value as V10;
+    use sprig_proto_amqp::v091::props::BasicProperties;
     let mut out = m.clone();
-    out.routing_key = key.to_owned();
+    key.clone_into(&mut out.routing_key);
     match m.format {
         MsgFormat::Amqp091 => {
             let mut p = BasicProperties::decode(&m.props)?;
@@ -638,11 +648,9 @@ pub fn stamp(m: &Message, key: &str, tenant: &str, origin: &str) -> std::result:
                 .collect();
             app.push((TENANT_HEADER.to_owned(), V10::String(tenant.to_owned())));
             app.push((ORIGIN_HEADER.to_owned(), V10::String(origin.to_owned())));
-            let mut b = encode_sections(&[
-                s.properties.to_value(),
-                application_properties_section(app),
-            ])
-            .to_vec();
+            let mut b =
+                encode_sections(&[s.properties.to_value(), application_properties_section(app)])
+                    .to_vec();
             b.extend_from_slice(&s.body_raw);
             out.body = Bytes::from(b);
             out.info.size = (out.props.len() + out.body.len()) as u64;
@@ -660,7 +668,10 @@ pub fn stamp(m: &Message, key: &str, tenant: &str, origin: &str) -> std::result:
 fn mq_err(e: &SprigError) -> MqError {
     match e.code() {
         Some(SprigCode::InheritInstanceUnavailable | SprigCode::CatalogUnavailable) => {
-            MqError::new(sprig_proto_amqp::error::MqCode::OwnerMoved, e.message.clone())
+            MqError::new(
+                sprig_proto_amqp::error::MqCode::OwnerMoved,
+                e.message.clone(),
+            )
         }
         _ => MqError::access_refused(e.message.clone()),
     }
@@ -755,9 +766,11 @@ pub async fn publish_into(
 ) -> Result<u32> {
     let t = tchain.member();
     ensure_vhost(svc, tchain, db, Cause::Publish).await?;
-    let engine = svc.mq.get().cloned().ok_or_else(|| {
-        super::unavailable("the queue engine isn't running on this gateway")
-    })?;
+    let engine = svc
+        .mq
+        .get()
+        .cloned()
+        .ok_or_else(|| super::unavailable("the queue engine isn't running on this gateway"))?;
     let name = super::tenant_name(svc, t).await?;
     let v = engine
         .sql_vhost(Arc::new(internal_principal(t, &name)), db, 0)
@@ -786,6 +799,10 @@ fn sql_mq(e: &MqError) -> SprigError {
 // The cross-tenant outbox's queue side.
 // ----------------------------------------------------------------------
 
+/// An outbox row as [`deliver_outbox`] takes it: id, routing key, body,
+/// [`xo_headers`].
+pub type OutboxRow = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Option<String>);
+
 /// What `__sprig_xo` keeps of a message for an exchange: `k` is the
 /// routing key, `v` the body, `headers` this.
 #[must_use]
@@ -809,13 +826,15 @@ pub async fn deliver_outbox(
     tchain: &Chain,
     db: &str,
     exchange: &str,
-    rows: &[(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Option<String>)],
+    rows: &[OutboxRow],
 ) -> Result<()> {
     let t = tchain.member();
     ensure_vhost(svc, tchain, db, Cause::Publish).await?;
-    let engine = svc.mq.get().cloned().ok_or_else(|| {
-        super::unavailable("the queue engine isn't running on this gateway")
-    })?;
+    let engine = svc
+        .mq
+        .get()
+        .cloned()
+        .ok_or_else(|| super::unavailable("the queue engine isn't running on this gateway"))?;
     let name = super::tenant_name(svc, t).await?;
     let v = engine
         .sql_vhost(Arc::new(internal_principal(t, &name)), db, 0)
@@ -845,8 +864,9 @@ pub async fn deliver_outbox(
                 .and_then(|p| base64::engine::general_purpose::STANDARD.decode(p).ok())
                 .unwrap_or_default();
             let key = key.clone().unwrap_or_default();
-            let dest = json!({"Exchange": {"name": exchange, "key": String::from_utf8_lossy(&key)}})
-                .to_string();
+            let dest =
+                json!({"Exchange": {"name": exchange, "key": String::from_utf8_lossy(&key)}})
+                    .to_string();
             format!(
                 "({}, 'publish', {}, {}, {fmt}, {}, {}, {}, {}, NULL)",
                 sprig_queues::sql::hex_literal(id),
@@ -962,6 +982,7 @@ impl InheritVhost {
 
     /// A targeted publish: resolved, the member's instance made, then
     /// published there; in this connection's publish order.
+    #[allow(clippy::too_many_arguments)]
     fn targeted(
         &self,
         cx: &OpCtx,
@@ -1175,7 +1196,10 @@ impl Vhost for InheritVhost {
         if let Some(def) = def {
             // An inherited binding: disabled for this member (an
             // override), then removed here.
-            let user = cx.principal.user_id.map_or(0, |u| u32::try_from(u).unwrap_or(0));
+            let user = cx
+                .principal
+                .user_id
+                .map_or(0, |u| u32::try_from(u).unwrap_or(0));
             disable_binding(&self.svc, self.tenant, def, user, true)
                 .await
                 .map_err(|e| mq_err(&e))?;
@@ -1355,7 +1379,9 @@ pub async fn before_open(svc: &Arc<TenantServices>, t: TenantId, db: &str) {
             return Ok(());
         }
         let chain = super::chain(svc, &cat).await?;
-        ensure_vhost(svc, &chain, db, Cause::Declare).await.map(|_| ())
+        ensure_vhost(svc, &chain, db, Cause::Declare)
+            .await
+            .map(|_| ())
     }
     .await;
     if let Err(e) = r {
@@ -1399,7 +1425,7 @@ mod tests {
         let m = msg("@cx:a.b", FieldTable::new());
         assert_eq!(target_of(&m), Some(("cx".into(), "a.b".into())));
         let mut h = FieldTable::new();
-        h.insert(TENANT_HEADER.into(), FieldValue::str("cy"));
+        h.insert(TENANT_HEADER.to_owned(), FieldValue::str("cy"));
         let m = msg("a.b", h.clone());
         assert_eq!(target_of(&m), Some(("cy".into(), "a.b".into())));
         // The header wins; a key prefix is still removed.
@@ -1411,18 +1437,26 @@ mod tests {
     #[test]
     fn stamping_overwrites_the_clients_headers() {
         let mut h = FieldTable::new();
-        h.insert(ORIGIN_HEADER.into(), FieldValue::str("forged"));
-        h.insert("app".into(), FieldValue::str("kept"));
+        h.insert(ORIGIN_HEADER.to_owned(), FieldValue::str("forged"));
+        h.insert("app".to_owned(), FieldValue::str("kept"));
         let m = stamp(&msg("@cx:a.b", h), "a.b", "cx", "sys").unwrap();
         assert_eq!(m.routing_key, "a.b");
         let p = BasicProperties::decode(&m.props).unwrap();
         let hs = p.headers.unwrap();
-        assert_eq!(hs.get(TENANT_HEADER).and_then(|v| v.as_str()).unwrap(), "cx");
-        assert_eq!(hs.get(ORIGIN_HEADER).and_then(|v| v.as_str()).unwrap(), "sys");
-        assert_eq!(hs.get("app").and_then(|v| v.as_str()).unwrap(), "kept");
-        assert_eq!(
-            m.info.headers.get(ORIGIN_HEADER).and_then(|v| v.as_str()).unwrap(),
-            "sys"
-        );
+        let get = |k: &str| {
+            hs.get(k)
+                .and_then(FieldValue::as_str)
+                .map(std::borrow::Cow::into_owned)
+        };
+        assert_eq!(get(TENANT_HEADER).as_deref(), Some("cx"));
+        assert_eq!(get(ORIGIN_HEADER).as_deref(), Some("sys"));
+        assert_eq!(get("app").as_deref(), Some("kept"));
+        let origin = m
+            .info
+            .headers
+            .get(ORIGIN_HEADER)
+            .and_then(FieldValue::as_str)
+            .map(std::borrow::Cow::into_owned);
+        assert_eq!(origin.as_deref(), Some("sys"));
     }
 }

@@ -851,6 +851,14 @@ impl PassSession {
         // 3306: `SET sql_mode` and `max_execution_time` as MySQL 8.4
         // reads them (chapter 28, R4).
         let set_rewritten;
+        // 3306: nearest neighbours (`ORDER BY ST_Distance(...) LIMIT k`)
+        // with a growing radius (chapter 36, R6 round 3).
+        if self.persona == Persona::MySql84
+            && let Some(step) =
+                Box::pin(self.tenant_geo_knn(cx, text, attrs, more, format, &lex, out)).await?
+        {
+            return Ok(step);
+        }
         // 3306: SRID 4326 as MySQL reads it (chapters 28 and 36, R4).
         let geo_rewritten;
         let text: &Bytes = if self.persona == Persona::MySql84 {
@@ -908,6 +916,12 @@ impl PassSession {
         }
         // Chapter 43 (R8): CREATE GRAPH and DROP GRAPH.
         if let Some(step) = Box::pin(self.tenant_graph_ddl(text, more, out)).await? {
+            return Ok(step);
+        }
+        // Chapter 43 (R8 round 3): GRAPH_TABLE, run and inlined.
+        if let Some(step) =
+            Box::pin(self.tenant_graph_table(cx, text, attrs, more, format, out)).await?
+        {
             return Ok(step);
         }
         // Chapter 42: spaces, shares and merged views of inheritable

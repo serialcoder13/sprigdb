@@ -535,6 +535,14 @@ pub fn check_property(key: &str, v: &Value) -> Result<()> {
     }
 }
 
+/// A value as JSON for SQL (`GRAPH_TABLE`): nodes, relationships and
+/// paths as their text form, temporal values as their stored text.
+#[must_use]
+pub fn to_json(v: &Value) -> Json {
+    let mut types = Map::new();
+    to_json_inner(v, "", &mut types)
+}
+
 fn to_json_inner(v: &Value, path: &str, types: &mut Map<String, Json>) -> Json {
     match v {
         Value::Null => Json::Null,

@@ -156,7 +156,17 @@ impl PassSession {
 
     #[allow(clippy::too_many_lines)] // the deploy, then the SELECT function
     async fn logic_deploy(&mut self, cx: &mut ExecCtx<'_>, text: &Bytes) -> Result<Vec<String>> {
-        let decl = sprig_logic::declare::parse(&String::from_utf8_lossy(text))?;
+        let text_s = String::from_utf8_lossy(text);
+        // `ALTER FUNCTION f ROLLBACK [TO VERSION n]` (R7 close-out): the
+        // declaration comes from the catalog once it is read (below).
+        let rollback = match sprig_logic::rollback::parse(&text_s) {
+            Some(r) => Some(r?),
+            None => None,
+        };
+        let decl = match &rollback {
+            Some(r) => r.placeholder(),
+            None => sprig_logic::declare::parse(&text_s)?,
+        };
         // R9: triggers ON STREAM and ON QUEUE (`exec::msg_trigger`).
         if decl.source.is_some() {
             return Box::pin(self.logic_deploy_message(cx, decl)).await;
@@ -190,14 +200,43 @@ impl PassSession {
             .ok_or_else(|| {
                 SprigError::standard(1049, *b"42000", format!("Unknown database '{db}'"))
             })?;
-        let schema = ts.schema_of(Some(&db)).ok_or_else(|| {
-            SprigError::new(
-                SprigCode::LogicUnsupported,
-                format!(
-                    "database {db} has more than one shard; logic deploys need chapter 21's engine"
-                ),
-            )
-        })?;
+        // Every shard of the database (chapter 21's layout; R7 close-out):
+        // a sharded database gets the routines on each, all or nothing.
+        let template = ts.schema_of(Some(&db));
+        let shard_list: Vec<(String, sprig_common::ids::ClusterId)> = {
+            let layout = super::router::ddl_layout(ts);
+            let first = template.clone().or_else(|| {
+                sprig_catalog::ddl::shard_schemas(ts.tenant, &row)
+                    .first()
+                    .map(ToString::to_string)
+            });
+            let from_layout = match (&layout, &first) {
+                (Some(l), Some(t)) => l(t, None),
+                _ => None,
+            };
+            // The session's own schema (the default group's shard, where
+            // a statement naming no table goes) first, then the groups'.
+            let from_layout = from_layout.map(|mut v| {
+                if let Some(t) = &template
+                    && !v.iter().any(|(s, _)| s == t)
+                {
+                    v.insert(0, (t.clone(), self.target.cluster.clone()));
+                }
+                v
+            });
+            match (from_layout.filter(|v| v.len() > 1), &template) {
+                (Some(v), _) => v,
+                (None, Some(t)) => vec![(t.clone(), self.target.cluster.clone())],
+                (None, None) => {
+                    return Err(SprigError::new(
+                        SprigCode::LogicUnsupported,
+                        format!("database {db} has no shard this gateway can find"),
+                    ));
+                }
+            }
+        };
+        let schema = shard_list[0].0.clone();
+        let single_shard = shard_list.len() == 1;
         let user = ts
             .principal
             .user_id
@@ -207,9 +246,14 @@ impl PassSession {
         {
             let grants = crate::tenant::authz::privileges(ts, &catalog);
             let db_key = sprig_catalog::ddl::database_key(&db, ts.lower_case_table_names());
+            let action = if rollback.is_some() {
+                sprig_auth::authz::Action::AlterRoutine
+            } else {
+                sprig_auth::authz::Action::CreateRoutine
+            };
             if !grants.unrestricted()
                 && !grants.allows(
-                    sprig_auth::authz::Action::CreateRoutine,
+                    action,
                     sprig_auth::authz::Target::Database { db_key: &db_key },
                 )
             {
@@ -247,7 +291,21 @@ impl PassSession {
             return Err(SprigError::internal("no backend session"));
         };
         let mut session = Bs(bs);
-        let outcome = service::deploy(
+        let (decl, fixed) = match &rollback {
+            Some(r) => {
+                let store = sprig_logic::LogicStore::new(ep.store.schema());
+                let (d, v) =
+                    sprig_logic::rollback::resolve(&store, &mut conn, row.db_id.0, r).await?;
+                (d, Some(v))
+            }
+            None => (decl, None),
+        };
+        let mut shards = (!single_shard).then(|| super::logic_bound::CtlShards {
+            list: shard_list.clone(),
+            conns: std::collections::HashMap::new(),
+            locator: Arc::clone(&svc.locator),
+        });
+        let outcome = service::deploy_at(
             &decl,
             Target {
                 catalog: &mut conn,
@@ -255,7 +313,7 @@ impl PassSession {
                 catalog_version: catalog.version,
                 db_id: row.db_id.0,
                 shard_schema: &schema,
-                single_shard: true,
+                single_shard,
                 user_id: user.0,
                 budget_ms: FUNCTION_BUDGET_MS,
                 max_loop_iterations: MAX_LOOP_ITERATIONS,
@@ -266,16 +324,31 @@ impl PassSession {
                 session: &mut ctl,
                 definer: definer.clone(),
             }),
+            service::At {
+                version: fixed,
+                shards: shards
+                    .as_mut()
+                    .map(|s| s as &mut dyn sprig_logic::deploy::ShardSessions),
+            },
         )
         .await?;
         let mut notes = outcome.notes();
+        if let Some(v) = fixed {
+            notes.insert(0, format!("{} rolled back to version {v}", decl.name));
+        }
+        if !single_shard {
+            notes.push(format!("deployed on {} shards", shard_list.len()));
+        }
         // R7 order 6: `SELECT db.f(args)` through a stored function, which
         // needs `SUPER` with the binary log on: created as `sprig_ctl`
         // with the deploying user as `DEFINER` (checked afterwards). A
         // failure leaves `CALL` working and says why.
         if let Some(sql) = outcome.select_fn {
             let plan = sprig_logic::deploy::plan_select(&schema, &decl.name, sql, &definer);
-            let r = sprig_logic::deploy::deploy(&mut ctl, &plan).await;
+            let r = match shards.as_mut() {
+                Some(sh) => sprig_logic::deploy::deploy_shards(sh, &plan).await,
+                None => sprig_logic::deploy::deploy(&mut ctl, &plan).await,
+            };
             match r {
                 Ok(_) => notes.push(format!("SELECT {}(...) is available", decl.name)),
                 Err(e) => {
@@ -288,8 +361,22 @@ impl PassSession {
             }
         } else if decl.kind == sprig_logic::declare::Kind::Function {
             // An earlier version's SELECT function would call old code.
-            let plan = sprig_logic::deploy::plan_select(&schema, &decl.name, String::new(), "");
-            sprig_logic::deploy::undo(&mut ctl, &plan).await;
+            match shards.as_mut() {
+                Some(sh) => {
+                    for (s, _) in &shard_list {
+                        let plan =
+                            sprig_logic::deploy::plan_select(s, &decl.name, String::new(), "");
+                        if let Ok(c) = sprig_logic::deploy::ShardSessions::session(sh, s).await {
+                            sprig_logic::deploy::undo(c, &plan).await;
+                        }
+                    }
+                }
+                None => {
+                    let plan =
+                        sprig_logic::deploy::plan_select(&schema, &decl.name, String::new(), "");
+                    sprig_logic::deploy::undo(&mut ctl, &plan).await;
+                }
+            }
             notes.push(format!(
                 "SELECT {}(...) isn't available: the function writes data; use CALL",
                 decl.name
@@ -1193,7 +1280,17 @@ impl PassSession {
         format: RowFormat,
         out: &mut dyn ResultSink,
     ) -> Result<Step> {
+        // A front end's own statements may run in internal mode (the
+        // document engine's, Redis's); the function's must not, so its
+        // code meets chapter 07's reserved-name check as any client does.
+        let internal = self
+            .tenant
+            .as_deref_mut()
+            .is_some_and(|ts| std::mem::replace(&mut ts.types.internal, false));
         let r = self.function_call(cx, &req).await;
+        if let Some(ts) = self.tenant.as_deref_mut() {
+            ts.types.internal = internal;
+        }
         match r {
             Ok((event, result)) => {
                 let charset = cx.proto.collation;
@@ -1245,8 +1342,10 @@ impl PassSession {
     ) -> Result<(String, serde_json::Value)> {
         let protocol = req.protocol.clone();
         let name = req.name.clone();
-        let db = self
-            .current_logical()
+        let db = req
+            .db
+            .clone()
+            .or_else(|| self.current_logical())
             .ok_or_else(|| SprigError::standard(1046, *b"3D000", "No database selected"))?;
         let Some(ts) = self.tenant.as_deref_mut() else {
             return Err(SprigError::internal("no tenant"));
@@ -1320,8 +1419,21 @@ impl PassSession {
         };
         let st = self.status();
         let own = st.contains(StatusFlags::AUTOCOMMIT) && !st.contains(StatusFlags::IN_TRANS);
+        if req.read_only && !own {
+            // Redis's FCALL_RO inside MULTI: the open transaction can't
+            // become read-only.
+            return Err(SprigError::new(
+                SprigCode::LogicSignatureMismatch,
+                format!("{name}: a read-only call can't join an open transaction"),
+            ));
+        }
         if own {
-            self.session_stmt(cx, "START TRANSACTION", wire).await?;
+            let start = if req.read_only {
+                "START TRANSACTION READ ONLY"
+            } else {
+                "START TRANSACTION"
+            };
+            self.session_stmt(cx, start, wire).await?;
         }
         let r = self
             .engine_db(

@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx};
+use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx, TenantSettings};
 
 /// "Ops": cluster, dc and global.
 const OPS: Scopes = Scopes::OPERATIONAL;
@@ -251,34 +251,72 @@ impl Default for MoverSettings {
     }
 }
 
+/// Where a worker finds a tenant's catalog setting rows (tenant, database,
+/// object and ancestors' scopes; decision RF3): `None` resolves over the
+/// etcd scopes only. Implemented by `sprig-controller::tenant_scopes`.
+pub trait TenantRows: Send + Sync {
+    /// The rows of `tenant` as currently cached; never waits.
+    fn rows(&self, tenant: sprig_common::ids::TenantId) -> Option<std::sync::Arc<TenantSettings>>;
+}
+
+/// One key over the etcd rows and, when given, the tenant's rows.
+fn layered<T: sprig_settings::SettingValue>(
+    s: &MemSettings<'_>,
+    t: Option<&TenantSettings>,
+    k: &Setting<T>,
+    ctx: &SettingCtx<'_>,
+) -> T {
+    match t {
+        Some(t) => t
+            .resolve(s, k.key, ctx)
+            .ok()
+            .and_then(|r| T::from_value(&r.value))
+            .unwrap_or_else(|| k.default.clone()),
+        None => s.get(k, ctx),
+    }
+}
+
 impl MoverSettings {
     /// Resolves every key for `ctx` (the job's tenant and source cluster).
     #[must_use]
     pub fn resolve(s: &MemSettings<'_>, ctx: &SettingCtx<'_>) -> Self {
+        Self::resolve_with(s, None, ctx)
+    }
+
+    /// [`Self::resolve`], with the tenant's own catalog rows layered over
+    /// the etcd scopes (decision RF3): a tenant's
+    /// `mover.cutover_max_hold_ms` wins over its cluster's.
+    #[must_use]
+    pub fn resolve_with(
+        s: &MemSettings<'_>,
+        tenant: Option<&TenantSettings>,
+        ctx: &SettingCtx<'_>,
+    ) -> Self {
+        let g = |k: &Setting<u64>| layered(s, tenant, k, ctx);
         Self {
-            cutover_max_hold: ms(s.get(&CUTOVER_MAX_HOLD_MS, ctx)),
-            ready_max_lag: ms(s.get(&READY_MAX_LAG_MS, ctx)),
-            ready_sustain: Duration::from_secs(s.get(&READY_SUSTAIN_SECONDS, ctx)),
-            copy_chunk_rows: usize_of(s.get(&COPY_CHUNK_ROWS, ctx)),
-            max_copies_per_cluster: u32_of(s.get(&MAX_COPIES_PER_CLUSTER, ctx)),
-            txn_grace: ms(s.get(&TXN_GRACE_MS, ctx)),
-            hold_grace: ms(s.get(&HOLD_GRACE_MS, ctx)),
-            flip_reserve: ms(s.get(&FLIP_RESERVE_MS, ctx)),
-            cutover_retry: Duration::from_secs(s.get(&CUTOVER_RETRY_SECONDS, ctx)),
-            max_cutover_attempts: u32_of(s.get(&MAX_CUTOVER_ATTEMPTS, ctx)),
-            apply_batch_rows: usize_of(s.get(&APPLY_BATCH_ROWS, ctx)),
-            apply_batch: ms(s.get(&APPLY_BATCH_MS, ctx)),
-            tick_interval: ms(s.get(&TICK_INTERVAL_MS, ctx)),
-            copy_max_rows_per_sec: s.get(&COPY_MAX_ROWS_PER_SEC, ctx),
-            copy_max_mb_per_sec: s.get(&COPY_MAX_MB_PER_SEC, ctx),
-            throttle_threads_running: s.get(&THROTTLE_THREADS_RUNNING, ctx),
-            throttle_replica_lag_ms: s.get(&THROTTLE_REPLICA_LAG_MS, ctx),
-            throttle_flow_control_pct: s.get(&THROTTLE_FLOW_CONTROL_PCT, ctx),
-            throttle_apply_lag: ms(s.get(&THROTTLE_APPLY_LAG_MS, ctx)),
-            verify_max_repairs: u32_of(s.get(&VERIFY_MAX_REPAIRS, ctx)),
-            job_lease: Duration::from_secs(s.get(&JOB_LEASE_SECONDS, ctx)),
-            source_retain: Duration::from_secs(s.get(&SOURCE_RETAIN_HOURS, ctx) * 3600),
-            server_id_base: u32_of(s.get(&SERVER_ID_BASE, ctx)),
+            cutover_max_hold: ms(g(&CUTOVER_MAX_HOLD_MS)),
+            ready_max_lag: ms(g(&READY_MAX_LAG_MS)),
+            ready_sustain: Duration::from_secs(g(&READY_SUSTAIN_SECONDS)),
+            copy_chunk_rows: usize_of(g(&COPY_CHUNK_ROWS)),
+            max_copies_per_cluster: u32_of(g(&MAX_COPIES_PER_CLUSTER)),
+            txn_grace: ms(g(&TXN_GRACE_MS)),
+            hold_grace: ms(g(&HOLD_GRACE_MS)),
+            flip_reserve: ms(g(&FLIP_RESERVE_MS)),
+            cutover_retry: Duration::from_secs(g(&CUTOVER_RETRY_SECONDS)),
+            max_cutover_attempts: u32_of(g(&MAX_CUTOVER_ATTEMPTS)),
+            apply_batch_rows: usize_of(g(&APPLY_BATCH_ROWS)),
+            apply_batch: ms(g(&APPLY_BATCH_MS)),
+            tick_interval: ms(g(&TICK_INTERVAL_MS)),
+            copy_max_rows_per_sec: g(&COPY_MAX_ROWS_PER_SEC),
+            copy_max_mb_per_sec: g(&COPY_MAX_MB_PER_SEC),
+            throttle_threads_running: g(&THROTTLE_THREADS_RUNNING),
+            throttle_replica_lag_ms: g(&THROTTLE_REPLICA_LAG_MS),
+            throttle_flow_control_pct: g(&THROTTLE_FLOW_CONTROL_PCT),
+            throttle_apply_lag: ms(g(&THROTTLE_APPLY_LAG_MS)),
+            verify_max_repairs: u32_of(g(&VERIFY_MAX_REPAIRS)),
+            job_lease: Duration::from_secs(g(&JOB_LEASE_SECONDS)),
+            source_retain: Duration::from_secs(g(&SOURCE_RETAIN_HOURS) * 3600),
+            server_id_base: u32_of(g(&SERVER_ID_BASE)),
         }
     }
 

@@ -185,6 +185,7 @@ impl GatewayData {
 
     /// A produce to a definition's topic: each record into the instance
     /// its `x-sprig-tenant` names (see the module docs).
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn append_by_tenant(
         &self,
         p: &Principal,

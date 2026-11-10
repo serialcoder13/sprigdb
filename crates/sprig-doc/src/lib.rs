@@ -5,7 +5,9 @@
 //! - [`json`]: JSON rendering, the type map and the way back to BSON;
 //! - [`keyenc`]: the order-preserving `_id` encoding and MongoDB's
 //!   comparison order;
-//! - [`sessions`]: retryable-write records (chapter 30).
+//! - [`sessions`]: retryable-write records (chapter 30);
+//! - [`geo`]: `$geoWithin`, `$geoIntersects`, `$near`, `$geoNear` and
+//!   `2dsphere` columns (chapter 36, R6 round 3).
 
 // MongoDB operator and type names fill the docs; the matcher and
 // translator mirror MongoDB's single-letter notation (p, v, d, k) and
@@ -21,6 +23,8 @@ pub mod agg;
 pub mod catalog;
 pub mod engine;
 pub mod filter;
+/// MongoDB's geospatial operators (chapter 36, R6 round 3).
+pub mod geo;
 pub mod json;
 pub mod keyenc;
 pub mod meta;

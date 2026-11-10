@@ -228,6 +228,7 @@ impl TenantServices {
         // left behind.
         crate::inherited::outbox::start_sweeper(&svc);
         crate::inherited::broadcast::start_fan_out(&svc);
+        crate::inherited::lifecycle::start_sweeper(&svc);
         Ok(svc)
     }
 }

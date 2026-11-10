@@ -293,12 +293,14 @@ async fn ensure_for(
             id
         };
         // A queue trigger takes its messages as sprig_inherited: it reads
-        // and deletes them (chapter 50's read right), granted with GRANTS.
+        // them and deletes their rows in the vhost's shard (chapter 50: an
+        // acknowledgement needs DELETE on the database), granted with
+        // GRANTS.
         let extra: Vec<GrantItem> = if src.kind == SourceKind::Queue {
             vec![GrantItem {
                 privileges: vec!["SELECT".into(), "DELETE".into()],
                 db: src.db_name.to_owned(),
-                name: src.name.to_owned(),
+                name: "*".to_owned(),
             }]
         } else {
             Vec::new()
@@ -357,7 +359,6 @@ async fn stream_positions(
     let t = si.tenant;
     {
         let conn = &mut *conn;
-        let schema = schema;
         let group = offsets::logic_group(binding);
         let have = offsets::positions(conn, schema, &group, si.stream.id.0).await?;
         if have.len() < si.stream.partitions as usize {

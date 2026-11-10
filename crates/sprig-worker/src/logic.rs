@@ -269,7 +269,7 @@ impl LogicTrigger {
                 pools: Arc::clone(&env.pools),
             }),
             versions,
-            budget: env.settings.trigger_budget(),
+            budget: env.settings.trigger_budget_for(tenant),
         });
         let out = Arc::new(CatalogOutcomes {
             locator: Arc::clone(&locator),
@@ -287,12 +287,19 @@ impl LogicTrigger {
         )
         .await;
         let stop = cx.cancel.clone();
+        // The tenant's own `logic.trigger_*` rows too (decision RF3); the
+        // env's options (tests' overrides) when no settings mirror runs.
+        let opts = if env.settings.live().is_some() {
+            env.settings.run_opts_for(tenant)
+        } else {
+            env.opts.clone()
+        };
         let run = triggers::run(
             Box::new(tail),
             &filter,
             Arc::clone(&apply) as Arc<dyn triggers::Apply>,
             Arc::clone(&out) as Arc<dyn triggers::Outcomes>,
-            &env.opts,
+            &opts,
             Arc::clone(&stats),
             &stop,
         );

@@ -181,6 +181,13 @@ pub static ROUTES: &[Route] = &[
         "KvExecRequest"
     ),
     r!(
+        "sprig.v1.KeyValue",
+        "GeoSearch",
+        "POST",
+        "/v1/databases/{database}/namespaces/{namespace}:geoSearch",
+        "KvGeoSearchRequest"
+    ),
+    r!(
         "sprig.v1.Vectors",
         "CreateIndex",
         "POST",
@@ -765,6 +772,7 @@ fn reply(r: &Route) -> &'static str {
         ("sprig.v1.KeyValue", "Delete") => "KvDeleteResponse",
         ("sprig.v1.KeyValue", "Scan") => "KvScanResponse",
         ("sprig.v1.KeyValue", "Exec") => "KvExecResponse",
+        ("sprig.v1.KeyValue", "GeoSearch") => "KvGeoSearchResponse",
         ("sprig.v1.Vectors", "CreateIndex" | "GetIndex") => "VectorIndex",
         ("sprig.v1.Vectors", "DropIndex") => "DropVectorIndexResponse",
         ("sprig.v1.Vectors", "Upsert") => "UpsertVectorsResponse",

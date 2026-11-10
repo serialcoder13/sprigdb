@@ -133,7 +133,7 @@ impl AdminService {
             .await
             .unwrap_or_default();
         let rtt = |a: &str, b: &str| matrix.rtt(a, b);
-        Ok(m.traffic.view_with_rtt(
+        let mut v = m.traffic.view_with_rtt(
             t.tenant_id,
             name,
             &t.home_dc,
@@ -143,6 +143,9 @@ impl AdminService {
             m.setting(&MIN_SIGNAL_REQUESTS),
             m.setting(&MIN_IMPROVEMENT_PCT),
             (!matrix.is_empty()).then_some(&rtt as &crate::traffic::RttFn<'_>),
-        ))
+        );
+        // R2 (r2last): what the automatic decision did last.
+        v.auto = m.decisions.last(t.tenant_id);
+        Ok(v)
     }
 }

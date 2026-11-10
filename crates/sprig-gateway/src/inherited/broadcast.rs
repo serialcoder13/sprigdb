@@ -29,6 +29,13 @@
 //!   the broadcasts still in the log
 //! ```
 
+#![allow(
+    clippy::many_single_char_names,
+    clippy::items_after_statements,
+    clippy::too_many_lines,
+    clippy::cast_precision_loss
+)]
+
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
@@ -119,12 +126,9 @@ impl Versioned for LogIndex {
     const V: u32 = 1;
 }
 
-fn lim(code: SprigCode, m: String) -> SprigError {
-    SprigError::new(code, format!("{}: {m}", code.name()))
-}
-
 fn limit_err(m: impl std::fmt::Display) -> SprigError {
-    lim(SprigCode::InheritBroadcastLimit, m.to_string())
+    let code = SprigCode::InheritBroadcastLimit;
+    SprigError::new(code, format!("{}: {m}", code.name()))
 }
 
 /// Where `def`'s log lives: the declarer's cluster and its database's first
@@ -304,9 +308,8 @@ pub async fn check_limits(
     {
         ctx = ctx.with_db(d.db_id);
     }
-    let get = |k: &'static sprig_settings::Setting<u64>| {
-        svc.settings.get(k, &ctx, Some(&dcat.settings))
-    };
+    let get =
+        |k: &'static sprig_settings::Setting<u64>| svc.settings.get(k, &ctx, Some(&dcat.settings));
     use sprig_inherit::msg::settings as s;
     let max_bytes = get(&s::BROADCAST_MAX_BYTES);
     if bytes as u64 > max_bytes {
@@ -464,8 +467,7 @@ fn logged(r: &mysql_async::Row) -> Logged {
     }
 }
 
-const COLS: &str =
-    "bid, publisher, committed_ms, form, under_tenant, next_tenant_id, delivered, skipped, k, v, \
+const COLS: &str = "bid, publisher, committed_ms, form, under_tenant, next_tenant_id, delivered, skipped, k, v, \
      CAST(headers AS CHAR)";
 
 /// Delivers broadcast `b` of `def` into member `t`'s instance. `false`:
@@ -556,7 +558,8 @@ async fn deliver(
             } else {
                 String::new()
             };
-            let key = String::from_utf8_lossy(b.rec.key.as_deref().unwrap_or_default()).into_owned();
+            let key =
+                String::from_utf8_lossy(b.rec.key.as_deref().unwrap_or_default()).into_owned();
             let m = sprig_queues::msg::rebuild(
                 fmt,
                 exchange.clone(),
@@ -576,7 +579,11 @@ async fn deliver(
             )];
             super::mq::deliver_outbox(svc, &tchain, &def.db_name, &exchange, &rows).await?;
         }
-        _ => return Err(SprigError::internal("a broadcast into a non-messaging kind")),
+        _ => {
+            return Err(SprigError::internal(
+                "a broadcast into a non-messaging kind",
+            ));
+        }
     }
     metrics::counter!("sprig_inherit_broadcast_deliveries_total", "result" => "delivered")
         .increment(1);
@@ -611,11 +618,9 @@ fn with_header(
             let mut app = s.application_properties.clone();
             app.retain(|(x, _)| x != k);
             app.push((k.to_owned(), V10::String(v.to_owned())));
-            let mut b = encode_sections(&[
-                s.properties.to_value(),
-                application_properties_section(app),
-            ])
-            .to_vec();
+            let mut b =
+                encode_sections(&[s.properties.to_value(), application_properties_section(app)])
+                    .to_vec();
             b.extend_from_slice(&s.body_raw);
             out.body = b.into();
         }
@@ -694,9 +699,7 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
         let all = members(svc, &def, b.publisher, b.form, b.committed_ms).await?;
         if all.len() as u64 > max_members {
             tx.exec_drop(
-                format!(
-                    "UPDATE {tbl} SET state = 'failed', error = ?, done_ms = ? WHERE bid = ?"
-                ),
+                format!("UPDATE {tbl} SET state = 'failed', error = ?, done_ms = ? WHERE bid = ?"),
                 (
                     format!(
                         "39244: {} members, over inherit.broadcast_max_members ({max_members})",
@@ -781,7 +784,15 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
 /// With `inherit.broadcast_replay = on` on `def`: the broadcasts still in
 /// its log, delivered into member `t`'s new instance (each once: the
 /// broadcast id is its event or out id).
-pub async fn replay(svc: &Arc<TenantServices>, def: &Definition, t: TenantId) {
+pub fn replay(
+    svc: Arc<TenantServices>,
+    def: Arc<Definition>,
+    t: TenantId,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move { replay_inner(&svc, &def, t).await })
+}
+
+async fn replay_inner(svc: &Arc<TenantServices>, def: &Definition, t: TenantId) {
     let r = async {
         let dcat = catalog(svc, def.declarer).await?;
         let mut ctx = dcat.object_ctx(&svc.dc, sprig_common::ids::ObjectId(def.object_id));
@@ -834,8 +845,12 @@ pub async fn replay(svc: &Arc<TenantServices>, def: &Definition, t: TenantId) {
     .await;
     match r {
         Ok(0) => {}
-        Ok(n) => tracing::info!(tenant = %t, def = %def.key(), replayed = n, "broadcasts replayed into a new instance"),
-        Err(e) => tracing::warn!(tenant = %t, def = %def.key(), error = %e, "broadcast replay failed"),
+        Ok(n) => {
+            tracing::info!(tenant = %t, def = %def.key(), replayed = n, "broadcasts replayed into a new instance");
+        }
+        Err(e) => {
+            tracing::warn!(tenant = %t, def = %def.key(), error = %e, "broadcast replay failed");
+        }
     }
 }
 
@@ -964,10 +979,10 @@ mod tests {
     #[test]
     fn rfc3339_times() {
         assert_eq!(rfc3339_ms("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(rfc3339_ms("2026-11-08T12:13:58Z"), Some(1_762_604_038_000));
+        assert_eq!(rfc3339_ms("2026-11-08T12:13:58Z"), Some(1_794_140_038_000));
         assert_eq!(
             rfc3339_ms("2026-11-08T12:13:58.25Z"),
-            Some(1_762_604_038_250)
+            Some(1_794_140_038_250)
         );
         assert_eq!(rfc3339_ms("2000-03-01T00:00:00Z"), Some(951_868_800_000));
         assert_eq!(rfc3339_ms("garbage"), None);

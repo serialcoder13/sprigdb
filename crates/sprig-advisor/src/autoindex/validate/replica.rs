@@ -37,7 +37,7 @@ use sprig_cluster::sql::{NodeEndpoint, ProbeError};
 use sprig_common::Result;
 
 use super::node::{
-    NodeSql, NodeWatch, StatsSnapshot, add_index_sql, analyze_sql, col, drop_index_sql,
+    NodeSql, NodeWatch, StatsSnapshot, add_def_sql, analyze_sql, col, drop_index_sql,
     own_new_gtids, run_watched,
 };
 use super::{
@@ -275,7 +275,7 @@ impl Validator for ReplicaValidator {
         match &mut ddl {
             Err(e) => abort(&mut r, format!("DDL session: {e}")),
             Ok(ddl) => {
-                let sql = add_index_sql(t, &name, &plan.candidate.def.ddl_columns(), true);
+                let sql = add_def_sql(t, &name, &plan.candidate.def, true);
                 let started = Instant::now();
                 let (res, killed) = run_watched(ddl, &mut watch, &sql, set.poll).await;
                 r.build_ms = Some(ms_since(started));

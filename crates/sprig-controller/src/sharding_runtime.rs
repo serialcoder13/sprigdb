@@ -75,6 +75,18 @@ impl SettingsSource for LiveSource {
             chunk_rows: m.copy_chunk_rows,
         }
     }
+
+    fn min_shards(&self, tenant: TenantId, db: sprig_common::ids::DbId) -> u32 {
+        let Some(live) = &self.live else {
+            return ShardingSettings::default().min_shards;
+        };
+        let snap = live.snapshot();
+        let s: &MemSettings<'_> = &snap;
+        let ctx = SettingCtx::process(&self.dc)
+            .for_tenant(tenant, &[])
+            .with_db(db);
+        ShardingSettings::resolve(s, &ctx).min_shards
+    }
 }
 
 /// The loop (module docs).

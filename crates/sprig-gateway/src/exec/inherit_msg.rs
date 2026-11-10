@@ -437,6 +437,10 @@ impl PassSession {
                 self.inherit_insert(cx, svc, cat, chain, own, sql, lex_opts)
                     .await
             }
+            "select" if inherited::fanin::find(sql, lex_opts).is_some() => self
+                .fan_in_select(svc, cat, chain, own, sql, lex_opts)
+                .await
+                .map(Some),
             "select" => Ok(empty_reads(
                 sql,
                 lex_opts,
@@ -841,11 +845,11 @@ impl PassSession {
             .filter_map(|j| word(j).map(|w| w.to_ascii_lowercase()))
             .collect();
         // A member's instance: only ALTER INHERITED changes it.
-        if let Some(i) = own
-            .instances
-            .values()
-            .find(|i| i.kind == kind && phys_name(i.physical.as_ref()) == Some((&db, &name)))
-        {
+        if let Some(i) = own.instances.values().find(|i| {
+            i.kind == kind
+                && i.state != sprig_inherit::msg::InstanceState::Detached
+                && phys_name(i.physical.as_ref()) == Some((&db, &name))
+        }) {
             let _ = i;
             return Err(inherited::not_overridable(format!(
                 "{} {db}.{name} is inherited; use ALTER INHERITED {} {db}.{name} ... (settings, \
@@ -855,8 +859,14 @@ impl PassSession {
             )));
         }
         let Some(def) = own.def(&db, kind, &name).cloned() else {
-            if drop && if_exists {
-                return Ok(None);
+            // No SQL statement drops an ordinary exchange or queue yet: a
+            // missing definition with IF EXISTS is a note, as MySQL answers
+            // a missing table (1051 as a note).
+            if drop && if_exists && matches!(kind, DefKind::Exchange | DefKind::Queue) {
+                return Ok(Some(Reply::Ok(
+                    0,
+                    vec![format!("{} {db}.{name} doesn't exist", kind.as_str())],
+                )));
             }
             return Ok(None);
         };
@@ -951,6 +961,7 @@ impl PassSession {
     /// the definition is `dropping` until `inherit.drop_grace_hours`.
     /// A trigger: its instances' jobs stop and it goes now (it holds no
     /// data).
+    #[allow(clippy::too_many_lines)]
     async fn drop_def(
         &mut self,
         svc: &Arc<TenantServices>,
@@ -1013,8 +1024,7 @@ impl PassSession {
                         .is_ok_and(|s| {
                             b.db_name.eq_ignore_ascii_case(&def.db_name)
                                 && (s.source == def.name
-                                    || (s.dest == def.name
-                                        && s.dest_kind == def.kind.as_str()))
+                                    || (s.dest == def.name && s.dest_kind == def.kind.as_str()))
                         })
                     })
                     .cloned()
@@ -1057,14 +1067,10 @@ impl PassSession {
                              privilege(s) for this operation (DROP ... IMMEDIATE)",
                         ));
                     }
-                    for e in inherited::instances_of(svc, def.key()).await? {
-                        if def.kind == DefKind::Stream {
-                            streams::remove(svc, e.tenant, def.key()).await?;
-                        } else {
-                            inherited::mq::remove(svc, e.tenant, def).await?;
-                        }
-                        removed += 1;
-                    }
+                    // Every instance, those stuck in 'creating' included.
+                    removed += inherited::lifecycle::remove_all(svc, def).await?;
+                    metrics::counter!("sprig_inherit_drops_total", "how" => "immediate")
+                        .increment(1);
                     deletes.push(def.object_id);
                 } else {
                     let grace = svc.settings.get(
@@ -1087,6 +1093,12 @@ impl PassSession {
         writes.extend(deletes.iter().map(|o| MsgWrite::DeleteDef(*o)));
         let v = inherited::commit(svc, cat.tenant, &writes).await?;
         self.after_own_change(v).await?;
+        // The grace's end: a gateway's pass removes the instances then.
+        for d in &writes_defs {
+            if let Some(at) = d.drop_after_ms {
+                inherited::lifecycle::list_dropping(svc, d.key(), at).await?;
+            }
+        }
         tracing::info!(tenant = %cat.tenant, def = %def.key(), immediate, removed, "inherited definition dropped");
         Ok(Reply::Ok(
             0,
@@ -1225,6 +1237,10 @@ async fn drop_trigger_instances(svc: &Arc<TenantServices>, g: DefKey) -> Result<
         .collect();
     let mut n = 0;
     for t in tenants {
+        // A member deleted since has nothing left to stop.
+        if inherited::dir_entry(svc, t).await?.is_none() {
+            continue;
+        }
         let ep = svc.locator.writer(t).await?;
         let mut conn = ep.pool.get_conn().await.map_err(|e| {
             SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
@@ -1264,7 +1280,7 @@ impl PassSession {
     /// `INSERT` into an inherited stream: a member's own publish, `FOR
     /// TENANT t`, or the `tenant` column. `None` when the target isn't
     /// one.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn inherit_insert(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -1312,6 +1328,14 @@ impl PassSession {
             }
             return Ok(None);
         };
+        if own
+            .instances
+            .get(&def.key())
+            .is_some_and(|i| i.state == sprig_inherit::msg::InstanceState::Detached)
+        {
+            // Detached: the member's own stream now.
+            return Ok(None);
+        }
         if def.declarer != cat.tenant {
             let ts = self
                 .tenant
@@ -1841,7 +1865,25 @@ impl PassSession {
                 ));
                 what_done = "body replaced".into();
             }
-            AlterOp::Detach => return Err(not_built("ALTER INHERITED ... DETACH yet")),
+            AlterOp::Detach => {
+                if !matches!(a.target, For::Own) {
+                    return Err(inherited::not_overridable(
+                        "DETACH is the member's own choice: run it in the member",
+                    ));
+                }
+                let stopped = inherited::lifecycle::detach(svc, me, &def).await?;
+                let v = cat.version + 1;
+                self.after_own_change(v).await.ok();
+                return Ok(Reply::Ok(
+                    0,
+                    vec![format!(
+                        "{} {db}.{} is now this tenant's own, with its data; {stopped} \
+                         inherited trigger(s) on it stopped",
+                        a.kind.as_str(),
+                        a.name
+                    )],
+                ));
+            }
         }
         let mut writes: Vec<MsgWrite<'_>> = puts.iter().map(MsgWrite::Override).collect();
         for w in &deletes {
@@ -1968,8 +2010,10 @@ impl PassSession {
                         Some(d.def_version.to_string()),
                         Some(d.state.as_str().to_owned()),
                         Some(
-                            if matches!(d.kind, DefKind::Stream | DefKind::Exchange | DefKind::Queue)
-                            {
+                            if matches!(
+                                d.kind,
+                                DefKind::Stream | DefKind::Exchange | DefKind::Queue
+                            ) {
                                 n.to_string()
                             } else {
                                 "-".into()
@@ -2710,6 +2754,7 @@ impl PassSession {
     /// `Some(routed)` when it was handled here (a targeted publish, or a
     /// refusal), `None` to go on with the ordinary path, with `m` stamped
     /// when it goes into this tenant's own instance.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn inherit_mq_publish(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -2855,7 +2900,7 @@ impl PassSession {
     /// `FOR TENANT '*'`): each row is one broadcast (chapter 42,
     /// "Broadcast"): its log row now, or, inside a transaction, a row of
     /// this tenant's cross-tenant outbox that becomes it at commit.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn inherit_broadcast(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -2920,7 +2965,9 @@ impl PassSession {
                 match c {
                     Col::Key => rec.key = v,
                     Col::Value => rec.value = v,
-                    Col::Headers => rec.headers = v.map(|h| String::from_utf8_lossy(&h).into_owned()),
+                    Col::Headers => {
+                        rec.headers = v.map(|h| String::from_utf8_lossy(&h).into_owned());
+                    }
                     Col::Partition | Col::Tenant => {}
                 }
             }
@@ -2971,6 +3018,62 @@ impl PassSession {
     }
 }
 
+impl PassSession {
+    /// `SELECT ... FROM s FAN IN ...` (chapter 42, "Fan-in"): the members'
+    /// instances as one derived table (see [`inherited::fanin`]).
+    async fn fan_in_select(
+        &mut self,
+        svc: &Arc<TenantServices>,
+        cat: &Arc<TenantCatalog>,
+        chain: &Chain,
+        own: &MsgState,
+        sql: &str,
+        lex_opts: &LexOptions,
+    ) -> Result<Reply> {
+        let (r, only) = inherited::fanin::find(sql, lex_opts)
+            .ok_or_else(|| SprigError::internal("no FAN IN"))?;
+        let db =
+            r.db.clone()
+                .or_else(|| self.current_logical())
+                .ok_or_else(|| SprigError::standard(1046, *b"3D000", "No database selected"))?;
+        let ts = self
+            .tenant
+            .as_deref()
+            .ok_or_else(|| SprigError::internal("no tenant"))?;
+        if !allows(ts, cat, Action::Select, &db, &r.name) {
+            return Err(denied(ts, "SELECT", &r.name));
+        }
+        let grants = crate::tenant::authz::privileges(ts, cat);
+        if !grants.unrestricted() && !grants.allows(Action::FanIn, Target::Tenant) {
+            return Err(SprigError::standard(
+                1227,
+                *b"42000",
+                "Access denied; you need (at least one of) the SPRIG_FAN_IN privilege(s) for this \
+                 operation (granted by name; GRANT ALL doesn't include it)",
+            ));
+        }
+        let def = inherited::fanin::definition(chain, own, &db, &r.name).ok_or_else(|| {
+            target_err(format!(
+                "{db}.{} isn't a FOR EACH TENANT stream this tenant declares or is a member of",
+                r.name
+            ))
+        })?;
+        let max = svc.settings.get(
+            &sprig_inherit::msg::settings::FAN_IN_SQL_MAX_TENANTS,
+            &cat.setting_ctx(&svc.dc),
+            Some(&cat.settings),
+        );
+        let (table, n) =
+            inherited::fanin::derived(svc, cat.tenant, &def, &only, max, &r.name).await?;
+        tracing::debug!(tenant = %cat.tenant, def = %def.key(), members = n, "fan-in read");
+        Ok(Reply::Forward(format!(
+            "{}{table}{}",
+            &sql[..r.range.start],
+            &sql[r.range.end..]
+        )))
+    }
+}
+
 /// Re-applies database `db`'s inherited exchanges, queues and bindings in
 /// every member of `declarer`'s definitions that has instances there, in
 /// the background (a new definition, an override); with `unbind`, also
@@ -2998,7 +3101,12 @@ async fn mq_rollout(
             inherited::mq::forget_applied(t, Some(&db));
             let r = async {
                 if let Some(b) = &unbind {
-                    inherited::mq::remove_binding(&svc, t, &db, b).await?;
+                    // Only the binding goes; the vhost's other instances are
+                    // applied at its next use (a drop is often followed by
+                    // more drops).
+                    return inherited::mq::remove_binding(&svc, t, &db, b)
+                        .await
+                        .map(|()| true);
                 }
                 let cat = inherited::catalog(&svc, t).await?;
                 let chain = inherited::chain(&svc, &cat).await?;

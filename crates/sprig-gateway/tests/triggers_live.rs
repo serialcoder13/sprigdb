@@ -32,6 +32,7 @@
     clippy::expect_used,
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
+    clippy::many_single_char_names,
     missing_docs
 )]
 

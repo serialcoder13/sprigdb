@@ -405,9 +405,20 @@ impl CostModel for Model {
             let Some((input, _)) = t.reads.get(fp) else {
                 continue;
             };
-            let (t_hat, entries) = t
-                .predict(&c.def.parts, *fp)
-                .unwrap_or((input.mean_ms, input.examined_per_run));
+            let (t_hat, entries) = if c.def.kind == super::model::IndexKind::BTree {
+                t.predict(&c.def.parts, *fp)
+                    .unwrap_or((input.mean_ms, input.examined_per_run))
+            } else {
+                // Spatial and vector indexes (R6 round 3): the run reads
+                // about the entries the generator expects instead of the
+                // rows it examines now; time scales with that share.
+                let entries = c
+                    .evidence
+                    .entries_per_run
+                    .unwrap_or(input.examined_per_run);
+                let share = (entries / input.examined_per_run.max(1.0)).min(1.0);
+                (input.mean_ms * share, entries)
+            };
             let per_hour = t.per_hour(*fp);
             benefit += per_hour * (input.mean_ms - t_hat).max(0.0);
             per_fp.push(FpEstimate {

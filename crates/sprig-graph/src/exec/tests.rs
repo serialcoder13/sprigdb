@@ -821,3 +821,39 @@ async fn temporal_and_spatial_values() {
     .await;
     assert_eq!(show(&o), ["2021-05-01|2"]);
 }
+
+/// Round 3: GQL's forms (labels with `IS`, `FILTER`, `LET`, `FOR`,
+/// `INSERT`, `NEXT`, `OFFSET`, `TRAIL`) answer as their Cypher.
+#[tokio::test]
+async fn gql_forms_answer_as_their_cypher() {
+    for shards in [1, 4] {
+        let mut s = social(shards).await;
+        let pairs = [
+            (
+                "MATCH (a IS Person)-[IS KNOWS]->(b IS Person) RETURN a.name, b.name ORDER BY a.name, b.name",
+                "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY a.name, b.name",
+            ),
+            (
+                "MATCH (p IS Person) FILTER p.age > 28 LET older = p.age + 1 RETURN p.name, older ORDER BY p.name",
+                "MATCH (p:Person) WITH * WHERE p.age > 28 WITH *, p.age + 1 AS older RETURN p.name, older ORDER BY p.name",
+            ),
+            (
+                "FOR x IN [3, 1, 2] RETURN x ORDER BY x OFFSET 1",
+                "UNWIND [3, 1, 2] AS x RETURN x ORDER BY x SKIP 1",
+            ),
+            (
+                "MATCH (p IS Person) RETURN p.name AS n NEXT RETURN count(n) AS c",
+                "MATCH (p:Person) WITH p.name AS n RETURN count(n) AS c",
+            ),
+            (
+                "MATCH TRAIL path = (a IS Person {name: 'Alice'})-[IS KNOWS]->{1,3}(b) RETURN length(path) AS l ORDER BY l",
+                "MATCH path = (a:Person {name: 'Alice'})-[:KNOWS]->{1,3}(b) RETURN length(path) AS l ORDER BY l",
+            ),
+        ];
+        for (g, c) in pairs {
+            assert_eq!(show(&q(&mut s, g).await), show(&q(&mut s, c).await), "{g}");
+        }
+        let o = q(&mut s, "INSERT (:Tag {name: 'gql'}) RETURN 1").await;
+        assert_eq!(o.stats.get("nodes-created"), Some(&1));
+    }
+}

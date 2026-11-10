@@ -240,6 +240,8 @@ fn field(path: &str, op: &FieldOp, m: &CollMeta) -> SqlPred {
             negate(&translate(&Pred::And(kids), m))
         }
         FieldOp::Type(_) | FieldOp::ElemMatch(_) | FieldOp::Mod(..) => SqlPred::t(),
+        // Chapter 36 (R6 round 3): a box on a `2dsphere` index's columns.
+        FieldOp::Geo(g) => SqlPred::sup(crate::geo::prefilter(path, g, m)),
     }
 }
 

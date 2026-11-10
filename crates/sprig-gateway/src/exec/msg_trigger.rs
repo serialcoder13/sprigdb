@@ -711,6 +711,17 @@ impl PassSession {
             }
         };
         let mut reply = with_id(RunReply::failed(&failure));
+        // Chapter 42 (R9): an inherited trigger whose sprig_inherited lost a
+        // privilege waits for the grant (39242, marked by `on_run`): its
+        // message goes back without counting, never to the dead letters.
+        if self
+            .tenant
+            .as_deref()
+            .is_some_and(|ts| ts.principal.user == crate::inherited::RUN_AS_USER)
+            && crate::inherited::triggers::is_privilege_error(&failure)
+        {
+            reply.transient = true;
+        }
         if reply.transient {
             // Not the code's fault: back as it was, without counting.
             v.nack(&t, true);

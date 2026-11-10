@@ -360,3 +360,101 @@ proptest! {
         }
     }
 }
+
+/// R6 round 3: spatial and vector candidates (chapter 13, "Other models").
+#[test]
+fn spatial_and_vector_candidates() {
+    use crate::autoindex::stats::ColumnInfo;
+    let mut t = TableStats {
+        schema: "t1_d1_g1_s1".into(),
+        table: "place".into(),
+        n_rows: Some(50_000),
+        cardinality: Some(50_000),
+        ..TableStats::default()
+    };
+    for (name, ty, nullable) in [
+        ("loc", "point", false),
+        ("area", "polygon", true),
+        ("emb", "vector", false),
+    ] {
+        t.columns.insert(
+            name.into(),
+            ColumnInfo {
+                name: name.into(),
+                data_type: ty.into(),
+                class: None,
+                charset: None,
+                collation: None,
+                nullable,
+                max_bytes: None,
+                lob: true,
+                generated: false,
+            },
+        );
+    }
+    let object = ObjectId(77);
+    let f = |preds: serde_json::Value, limit: bool| FpInput {
+        id: Fingerprint(7),
+        shape: crate::autoindex::fixtures::shape(&serde_json::json!({
+            "v": 1, "type": "select",
+            "tables": [{"alias": "p", "object_id": 77, "table": "place"}],
+            "predicates": preds, "joins": [], "order_by": [], "group_by": [],
+            "select": {"p": ["id"]}, "limit": limit, "writes": null, "or_groups": 0})),
+        runs: 1000,
+        mean_ms: 400.0,
+        p95_ms: 600.0,
+        examined_per_run: 50_000.0,
+        returned_per_run: 20.0,
+        affected_per_run: 0.0,
+        limit: Some(10),
+        in_list_max: None,
+        samples: Vec::new(),
+        fast_only: false,
+    };
+    // A geodesic distance on a NOT NULL point: a spatial index.
+    let c = model_candidates(
+        &f(serde_json::json!([{"t": "p", "col": "loc", "op": "unsargable", "why": "function:ST_DISTANCE"}]), false),
+        "p",
+        object,
+        &t,
+    );
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].def.kind, IndexKind::Spatial);
+    assert_eq!(
+        c[0].def.add_clause(),
+        format!("SPATIAL INDEX IF NOT EXISTS `{}` (`loc`)", c[0].def.name())
+    );
+    // A nullable polygon: none (it would need the companion box).
+    assert!(model_candidates(
+        &f(serde_json::json!([{"t": "p", "col": "area", "op": "spatial"}]), false),
+        "p",
+        object,
+        &t
+    )
+    .is_empty());
+    // Ordering by a cosine distance with a LIMIT: a cosine vector index.
+    let v = model_candidates(
+        &f(
+            serde_json::json!([
+                {"t": "p", "col": "emb", "op": "vector"},
+                {"t": "p", "col": "emb", "op": "unsargable", "why": "function:VEC_DISTANCE_COSINE"}]),
+            true,
+        ),
+        "p",
+        object,
+        &t,
+    );
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].def.kind, IndexKind::Vector);
+    assert!(v[0].def.add_clause().ends_with("(`emb`) M=8 DISTANCE=cosine"), "{}", v[0].def.add_clause());
+    // The cost model predicts the run reads about the rows it returns.
+    let ctx_inputs = vec![f(serde_json::json!([{"t": "p", "col": "loc", "op": "spatial"}]), false)];
+    let ctx = crate::autoindex::cost::TableContext::new(
+        object,
+        &t,
+        &ctx_inputs,
+        crate::autoindex::cost::CostParams::default(),
+    );
+    let e = crate::autoindex::cost::CostModel::estimate(&crate::autoindex::cost::Model, &c[0], &ctx);
+    assert!(e.benefit_ms_h > 0.0, "{e:?}");
+}

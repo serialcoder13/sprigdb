@@ -325,6 +325,10 @@ pub fn is_declaration(sql: &str) -> bool {
         .collect::<String>()
         .to_ascii_lowercase();
     let t = head.trim_start();
+    // `ALTER FUNCTION f ROLLBACK [TO VERSION n]` (R7 close-out).
+    if crate::rollback::is_rollback(t) {
+        return true;
+    }
     if !t.starts_with("create") {
         return false;
     }

@@ -103,6 +103,12 @@ fn var(name: &str) -> Option<String> {
 
 const TEST_DB: &str = "r6redis_kv";
 
+/// The in-process database: `SPRIG_TEST_KV_DB`, else [`TEST_DB`] (agents
+/// running the suite at once each set their own).
+fn test_db() -> String {
+    var("SPRIG_TEST_KV_DB").unwrap_or_else(|| TEST_DB.to_owned())
+}
+
 /// The SprigDB URL: a gateway, or an in-process server.
 async fn sprig_url() -> Option<String> {
     if let Some(u) = var("SPRIG_TEST_REDIS_SPRIG") {
@@ -111,7 +117,7 @@ async fn sprig_url() -> Option<String> {
     let mysql = var("SPRIG_TEST_KV_MYSQL")?;
     let env = Arc::new(Env::new(
         Config {
-            logical_database: TEST_DB.into(),
+            logical_database: test_db(),
             block_poll: Duration::from_millis(200),
             ..Config::default()
         },
@@ -145,7 +151,7 @@ async fn drop_test_db() {
         let mut c = mysql_async::Conn::new(mysql_async::Opts::from_url(&u).unwrap())
             .await
             .unwrap();
-        c.query_drop(format!("DROP DATABASE IF EXISTS {TEST_DB}"))
+        c.query_drop(format!("DROP DATABASE IF EXISTS {}", test_db()))
             .await
             .unwrap();
         c.disconnect().await.unwrap();
@@ -1417,4 +1423,155 @@ async fn wire_bytes_pubsub_and_blocking_match_redis() {
     eprintln!("wire: {} replies, {bad} mismatches", logs[0].len());
     drop_test_db().await;
     assert_eq!(bad, 0);
+}
+
+/// A random command of the guarded-batch set (R6 round 3, R23), with the
+/// options and values that reach every branch of the batches.
+fn random_batched(g: &mut Rng) -> Vec<String> {
+    let keys = ["b:s", "b:h", "b:l", "b:z", "b:x", "{b}:y"];
+    let k = g.pick(&keys).to_owned();
+    let vals = [
+        "1", "0", "-0", "007", "12\n", "-5", "x", "", "9223372036854775806",
+        "9223372036854775807", "-9223372036854775808", "18446744073709551616", "3.5",
+    ];
+    let v = |g: &mut Rng| g.pick(&vals).to_owned();
+    let s = |x: &str| x.to_owned();
+    match g.int(0, 21) {
+        0 | 1 => {
+            let mut c = vec![s("SET"), k, v(g)];
+            match g.int(0, 6) {
+                0 => c.push(s("NX")),
+                1 => c.push(s("XX")),
+                2 => c.push(s("GET")),
+                3 => c.extend([s("PX"), s(g.pick(&["30", "100000"]))]),
+                4 => c.push(s("KEEPTTL")),
+                5 => c.extend([s("EX"), s("100"), s("GET"), s("XX")]),
+                _ => {}
+            }
+            c
+        }
+        2 => vec![s("INCR"), k],
+        3 => vec![s("DECR"), k],
+        4 => vec![s("INCRBY"), k, s(g.pick(&["5", "-7", "9223372036854775807", "-9223372036854775808"]))],
+        5 => vec![s("DECRBY"), k, s(g.pick(&["3", "-9223372036854775807"]))],
+        6 | 7 => {
+            let mut c = vec![s(g.pick(&["HSET", "HMSET"])), k];
+            for _ in 0..g.int(1, 3) {
+                c.push(s(g.pick(&["f", "g", "h", ""])));
+                c.push(v(g));
+            }
+            c
+        }
+        8 | 9 => {
+            let mut c = vec![s(g.pick(&["LPUSH", "RPUSH", "LPUSHX", "RPUSHX"])), k];
+            for _ in 0..g.int(1, 3) {
+                c.push(v(g));
+            }
+            c
+        }
+        10 | 11 => {
+            let mut c = vec![s(g.pick(&["LPOP", "RPOP"])), k];
+            if g.int(0, 1) == 1 {
+                c.push(s(g.pick(&["0", "1", "2", "5"])));
+            }
+            c
+        }
+        12..=14 => {
+            let mut c = vec![s("ZADD"), k];
+            for f in ["NX", "XX", "GT", "LT", "CH"] {
+                if g.int(0, 4) == 0 {
+                    c.push(s(f));
+                }
+            }
+            let mut used = Vec::new();
+            for _ in 0..g.int(1, 3) {
+                let m = g.pick(&["a", "b", "c", ""]);
+                if used.contains(&m) {
+                    continue;
+                }
+                used.push(m);
+                c.push(s(g.pick(&["1", "2", "-1.5", "+inf", "-inf", "0", "-0", "1e300"])));
+                c.push(s(m));
+            }
+            c
+        }
+        15 => vec![s("PEXPIRE"), k, s(g.pick(&["20", "100000"]))],
+        16 => vec![s("TYPE"), k],
+        17 => vec![s("GET"), k],
+        18 => vec![s("LRANGE"), k, s("0"), s("-1")],
+        19 => vec![s("ZRANGE"), k, s("0"), s("-1"), s("WITHSCORES")],
+        20 => vec![s("HGETALL"), k],
+        _ => vec![s("DEL"), k],
+    }
+}
+
+/// The guarded batches (R6 round 3) against Redis: random commands of
+/// the batched set with every option, wrong types, expired keys and
+/// integer edge cases, then the final state; then 8 clients incrementing
+/// one counter and pushing to one list at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn batched_writes_match_redis() {
+    let (Some(refaddr), Some(url)) = (var("SPRIG_TEST_REDIS_REF"), sprig_url().await) else {
+        eprintln!("SPRIG_TEST_REDIS_REF or SprigDB not set: skipped");
+        return;
+    };
+    let ops: usize = var("SPRIG_TEST_OPS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
+    let mut r = conn(&format!("redis://{refaddr}")).await;
+    let mut s = conn(&url).await;
+    let mut total_bad = 0;
+    for seed in [11u64, 12, 13] {
+        run(&mut r, &["FLUSHALL"]).await.unwrap();
+        run(&mut s, &["FLUSHALL"]).await.unwrap();
+        let mut g = Rng(seed);
+        let mut bad = Vec::new();
+        for _ in 0..ops {
+            let c = random_batched(&mut g);
+            let refs: Vec<&str> = c.iter().map(String::as_str).collect();
+            bad.extend(compare(&mut s, &mut r, &[refs]).await);
+            // A short expiry (20-30 ms) passes on both servers before the
+            // next command, so they never race it.
+            if c.iter().any(|a| a == "20" || a == "30") {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+        }
+        let ds = dump(&mut s).await;
+        let dr = dump(&mut r).await;
+        if ds != dr {
+            bad.push(format!("final state differs:\n sprig {ds:?}\n redis {dr:?}"));
+        }
+        for b in bad.iter().take(20) {
+            eprintln!("seed {seed} MISMATCH {b}");
+        }
+        eprintln!("batched seed {seed}: {ops} ops, {} mismatches", bad.len());
+        total_bad += bad.len();
+    }
+    // Concurrency: 8 clients x 50 INCR and RPUSH on two new keys.
+    run(&mut s, &["FLUSHALL"]).await.unwrap();
+    let mut tasks = Vec::new();
+    for c in 0..8 {
+        let url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut s = conn(&url).await;
+            for i in 0..50 {
+                run(&mut s, &["INCR", "b:ctr"]).await.unwrap();
+                run(&mut s, &["RPUSH", "b:q", &format!("{c}-{i}")]).await.unwrap();
+                run(&mut s, &["ZADD", "b:zz", &i.to_string(), &format!("{c}-{i}")]).await.unwrap();
+            }
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    let ctr = show(&run(&mut s, &["GET", "b:ctr"]).await);
+    let len = show(&run(&mut s, &["LLEN", "b:q"]).await);
+    let zc = show(&run(&mut s, &["ZCARD", "b:zz"]).await);
+    eprintln!("concurrent: counter {ctr}, list {len}, zset {zc}");
+    if ctr != "$400" || len != ":400" || zc != ":400" {
+        total_bad += 1;
+    }
+    run(&mut s, &["FLUSHALL"]).await.unwrap();
+    drop_test_db().await;
+    assert_eq!(total_bad, 0, "{total_bad} differ");
 }

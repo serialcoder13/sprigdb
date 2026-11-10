@@ -459,6 +459,10 @@ impl Exec<'_> {
 
     /// Evaluates `e` over `row`, resolving pattern predicates in it first.
     pub(crate) async fn eval_full(&mut self, e: &Expr, row: &Row) -> Result<Value> {
+        // Per-row work gives the runtime back now and then, so one heavy
+        // statement never stalls the gateway's other tasks (its watchdog
+        // aborts a runtime stuck for 2 s).
+        tokio::task::consume_budget().await;
         let mut has_pattern = false;
         e.walk(&mut |x| has_pattern |= matches!(x, Expr::Pattern(_) | Expr::Subquery(..)));
         if !has_pattern {
@@ -1037,8 +1041,10 @@ impl Exec<'_> {
                 for (e, _) in &p.order {
                     // After aggregation, aggregates in ORDER BY must be
                     // projected items: match them by text.
+                    // So must expressions after DISTINCT (`RETURN DISTINCT
+                    // b.name ORDER BY b.name`), whose variables are gone.
                     let v = match items.iter().position(|(ie, _)| ie == e) {
-                        Some(i) if aggregating => vals[i].clone(),
+                        Some(i) if aggregating || p.distinct => vals[i].clone(),
                         _ => self.eval_full(e, &r).await?,
                     };
                     ks.push(v);

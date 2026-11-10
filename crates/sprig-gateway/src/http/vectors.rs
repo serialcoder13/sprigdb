@@ -16,7 +16,6 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_geo::region::Region;
-use sprig_vector::Settings;
 use sprig_vector::index::{self, AnnMode, IndexDef, Similarity};
 use sprig_vector::items::{self, Item};
 use sprig_vector::search::{GeoFilter, SearchSpec, auto_ann, search};
@@ -165,8 +164,9 @@ fn maybe_auto(engine: &Arc<SqlEngine>, caller: &Caller, def: &IndexDef) {
         return;
     };
     let mut def = def.clone();
+    let settings = super::model_settings::vector(&engine.api);
     tokio::spawn(async move {
-        match auto_ann(&mut sql, &mut def, &Settings::default(), 20, 10).await {
+        match auto_ann(&mut sql, &mut def, &settings, 20, 10).await {
             Ok(Some(r)) => {
                 tracing::info!(index = %def.name, recall = r, kept = def.ann_state == index::AnnState::Ready, "automatic vector graph validated")
             }
@@ -196,7 +196,8 @@ pub async fn call(
 ) -> Result<Value> {
     let database = s(body, "database");
     let name = s(body, "index");
-    let settings = Settings::default();
+    // Live `vector.*` settings (R6 round 3).
+    let settings = super::model_settings::vector(&engine.api);
     let mut sql = open(engine, caller)?;
     match rpc {
         "Vectors.CreateIndex" => {

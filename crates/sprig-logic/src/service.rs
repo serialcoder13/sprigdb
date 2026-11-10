@@ -187,6 +187,19 @@ pub fn script_sig(d: &Declaration) -> sprig_logic_js::ScriptSig {
     }
 }
 
+/// The JavaScript front end's signature of a declaration.
+#[must_use]
+pub fn js_signature(d: &Declaration) -> sprig_logic_compile::js::Signature {
+    sprig_logic_compile::js::Signature {
+        params: d
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), crate::declare::Param::ir_ty(&p.ty)))
+            .collect(),
+        returns: d.returns.as_deref().map(crate::declare::Param::ir_ty),
+    }
+}
+
 /// The engine's parameter type for an IR type.
 #[must_use]
 pub fn param_ty(t: sprig_logic_compile::ir::Ty) -> sprig_logic_js::ParamTy {
@@ -246,6 +259,32 @@ pub async fn deploy(
     session: &mut dyn Session,
     creator: Option<Creator<'_>>,
 ) -> Result<Outcome> {
+    deploy_at(d, t, session, creator, At::default()).await
+}
+
+/// Where and as what [`deploy_at`] deploys (R7 close-out).
+#[derive(Default)]
+pub struct At<'a> {
+    /// Re-deploy this existing version (a rollback) instead of adding
+    /// version n+1.
+    pub version: Option<u64>,
+    /// Every shard of a sharded database: the routines go on each, all or
+    /// nothing (chapter 21's rule), with the creator's definer.
+    pub shards: Option<&'a mut dyn ShardSessions>,
+}
+
+/// [`deploy`] at a fixed version and on several shards.
+///
+/// # Errors
+/// As [`deploy`].
+#[allow(clippy::too_many_lines)]
+pub async fn deploy_at(
+    d: &Declaration,
+    t: Target<'_>,
+    session: &mut dyn Session,
+    creator: Option<Creator<'_>>,
+    at: At<'_>,
+) -> Result<Outcome> {
     Migrator::new(&[LOGIC_MODULE])?
         .run(t.catalog, t.catalog_schema, &MigrateOpts::default())
         .await?;
@@ -292,7 +331,10 @@ pub async fn deploy(
             created_by: t.user_id,
         },
     };
-    let version = store.next_version(t.catalog, module.module_id).await?;
+    let version = match at.version {
+        Some(v) => v,
+        None => store.next_version(t.catalog, module.module_id).await?,
+    };
     let cols = columns(session, t.shard_schema).await?;
     let opts = Options {
         module_id: module.module_id,
@@ -301,22 +343,33 @@ pub async fn deploy(
         compile_max_cost: t.compile_max_cost,
         definer_security: d.definer_security,
     };
-    let mut compiled = compile(d.runtime, &d.body, &cols, &opts)?;
+    let mut compiled = if d.runtime == sprig_logic_compile::Runtime::Javascript {
+        // The JavaScript front end (R7 close-out): the declaration gives
+        // the parameters' types and `RETURNS`.
+        sprig_logic_compile::js::compile_with(&d.name, &d.body, &js_signature(d), &cols, &opts)?
+    } else {
+        compile(d.runtime, &d.body, &cols, &opts)?
+    };
     let script = matches!(
         d.runtime,
         sprig_logic_compile::Runtime::Javascript | sprig_logic_compile::Runtime::Lua
     );
-    if script {
-        // No compiler front end yet: the declaration gives the signature
-        // (parameters, `RETURNS`), and the version runs in the engine tier.
+    if script && !compiled.compilable() {
+        // The engine tier: the declaration gives the signature
+        // (parameters, `RETURNS`); a compiled version's comes from its
+        // source (every event it can raise).
         compiled.ir = Some(script_function(d));
     }
     let placed = placement::place(&compiled, d.tier, t.single_shard)?;
     if placed.tier == Tier::Engine && d.runtime == sprig_logic_compile::Runtime::Kirun {
         engine_check(d).await?;
     }
-    if script {
+    if script && placed.tier == Tier::Engine {
         script_check(d)?;
+    } else if script {
+        // Compiled: QuickJS must still accept it (the engine tier defines
+        // the language); `SQL SECURITY DEFINER` is fine in MariaDB.
+        sprig_logic_js::Program::new(d.runtime.as_str(), &d.name, &d.body, script_sig(d))?;
     }
     if store
         .module(t.catalog, t.db_id, kind, &d.name)
@@ -341,28 +394,36 @@ pub async fn deploy(
         })
     });
     if script {
+        // The declared SQL types, so a rollback rebuilds the same wrapper.
+        if let Some(ps) = signature["params"].as_array_mut() {
+            for (p, dp) in ps.iter_mut().zip(&d.params) {
+                p["sql"] = serde_json::Value::String(dp.ty.clone());
+            }
+        }
         signature["scalar"] = serde_json::Value::Bool(d.returns.is_some());
         if let Some(r) = &d.returns {
             signature["returns"] = serde_json::Value::String(r.clone());
         }
     }
     let plsql_text = compiled.plsql.as_ref().map(|p| p.statements.join(";\n\n"));
-    store
-        .add_version(
-            t.catalog,
-            module.module_id,
-            version,
-            &NewVersion {
-                source: &d.body,
-                signature,
-                catalog_version: t.catalog_version,
-                tier: placed.tier.as_str(),
-                placement: serde_json::to_value(&placed).unwrap_or_default(),
-                plsql: plsql_text,
-                created_by: t.user_id,
-            },
-        )
-        .await?;
+    if at.version.is_none() {
+        store
+            .add_version(
+                t.catalog,
+                module.module_id,
+                version,
+                &NewVersion {
+                    source: &d.body,
+                    signature,
+                    catalog_version: t.catalog_version,
+                    tier: placed.tier.as_str(),
+                    placement: serde_json::to_value(&placed).unwrap_or_default(),
+                    plsql: plsql_text,
+                    created_by: t.user_id,
+                },
+            )
+            .await?;
+    }
     let mut select_fn = None;
     let plan = match (&compiled.ir, placed.tier, &compiled.plsql) {
         (Some(f), tier, p) => {
@@ -404,17 +465,30 @@ pub async fn deploy(
         Some(c) => c.session,
         None => session,
     };
-    let definer = match &plan {
-        Some(plan) => match deploy::deploy(target, plan).await {
+    let definer = match (&plan, at.shards) {
+        (Some(plan), Some(shards)) => match deploy::deploy_shards(shards, plan).await {
             Ok(d) => d,
             Err(e) => {
-                let _ = store
-                    .set_version_state(t.catalog, module.module_id, version, "failed")
-                    .await;
+                if at.version.is_none() {
+                    let _ = store
+                        .set_version_state(t.catalog, module.module_id, version, "failed")
+                        .await;
+                }
                 return Err(e);
             }
         },
-        None => String::new(),
+        (Some(plan), None) => match deploy::deploy(target, plan).await {
+            Ok(d) => d,
+            Err(e) => {
+                if at.version.is_none() {
+                    let _ = store
+                        .set_version_state(t.catalog, module.module_id, version, "failed")
+                        .await;
+                }
+                return Err(e);
+            }
+        },
+        (None, _) => String::new(),
     };
     store
         .activate(t.catalog, module.module_id, version, t.catalog_version)

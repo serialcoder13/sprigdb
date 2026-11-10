@@ -8,26 +8,17 @@
 //! queries per tenant and `analytics.max_concurrent_per_gateway` (8) per
 //! gateway; a query waits up to 1 s for a slot, then gets 39780.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::Duration;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_dim::query::Query;
 use sprig_dim::store;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
 
 use super::sql::{Caller, SqlEngine};
 use crate::redis::SqlSession;
 
-/// `analytics.max_groups`.
-const MAX_GROUPS: usize = 1_000_000;
-/// `analytics.max_concurrent_per_tenant`.
-const PER_TENANT: usize = 2;
-/// `analytics.max_concurrent_per_gateway`.
-const PER_GATEWAY: usize = 8;
 
 fn s(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").to_owned()
@@ -47,40 +38,6 @@ fn open(engine: &Arc<SqlEngine>, caller: &Caller) -> Result<SqlSession> {
         caller.peer,
         caller.tls.clone(),
     )
-}
-
-/// Two permits: the gateway's and the tenant's.
-async fn admit(tenant: u64) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
-    static GATEWAY: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    static TENANTS: OnceLock<Mutex<HashMap<u64, Arc<Semaphore>>>> = OnceLock::new();
-    let g = Arc::clone(GATEWAY.get_or_init(|| Arc::new(Semaphore::new(PER_GATEWAY))));
-    let t = Arc::clone(
-        TENANTS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(tenant)
-            .or_insert_with(|| Arc::new(Semaphore::new(PER_TENANT))),
-    );
-    let busy = || {
-        metrics::counter!("sprig_dim_rejected_total", "reason" => "admission").increment(1);
-        let mut e = SprigError::new(
-            SprigCode::RateLimited,
-            "too many analytics queries running (analytics.max_concurrent_per_tenant, analytics.max_concurrent_per_gateway); retry",
-        );
-        e.retryable = true;
-        e
-    };
-    let wait = Duration::from_secs(1);
-    let tp = tokio::time::timeout(wait, t.acquire_owned())
-        .await
-        .map_err(|_| busy())?
-        .map_err(|_| busy())?;
-    let gp = tokio::time::timeout(wait, g.acquire_owned())
-        .await
-        .map_err(|_| busy())?
-        .map_err(|_| busy())?;
-    Ok((tp, gp))
 }
 
 fn info_json(database: &str, st: &store::Stored) -> Value {
@@ -132,12 +89,30 @@ pub async fn call(
         }
         "Analytics.Query" => {
             let q = Query::parse(body)?;
-            let _permits = admit(caller.principal.tenant.map_or(0, |t| t.0)).await?;
+            // Live `analytics.*` settings (R6 round 3).
+            let limits = super::model_settings::analytics(&engine.api);
+            let _admitted = super::model_settings::admit(
+                caller.principal.tenant.map_or(0, |t| t.0),
+                limits,
+            )
+            .await?;
             let t = std::time::Instant::now();
-            let a = store::query(&mut sql, &database, &q, MAX_GROUPS).await?;
+            let a = tokio::time::timeout(
+                limits.timeout,
+                store::query(&mut sql, &database, &q, limits.max_groups),
+            )
+            .await
+            .map_err(|_| {
+                SprigError::standard(
+                    3024,
+                    *b"HY000",
+                    "Query execution was interrupted, maximum statement execution time exceeded (analytics.query_timeout_seconds)",
+                )
+            })??;
             metrics::counter!("sprig_dim_queries_total", "plan" => a.compiled.plan).increment(1);
             metrics::histogram!("sprig_dim_query_duration_seconds")
                 .record(t.elapsed().as_secs_f64());
+            #[allow(clippy::cast_precision_loss)] // a group count, far below 2^52
             metrics::histogram!("sprig_dim_merge_groups").record(a.rows.len() as f64);
             let rows: Vec<Value> = a
                 .rows

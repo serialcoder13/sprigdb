@@ -464,6 +464,7 @@ fn failed(key: &str, yes: bool) -> Duration {
 }
 
 /// Writes `rows` into `dest`'s outbox (event id = out id).
+#[allow(clippy::too_many_lines)]
 async fn deliver(svc: &Arc<TenantServices>, dest: &Dest, rows: &[Row]) -> Result<()> {
     let (tenant, schema, stream) = match dest {
         Dest::Broadcast {
@@ -477,7 +478,9 @@ async fn deliver(svc: &Arc<TenantServices>, dest: &Dest, rows: &[Row]) -> Result
             let def = super::state_of(&cat)
                 .def_by_id(*def_object)
                 .cloned()
-                .ok_or_else(|| super::dropping(format!("the definition {a}.{def_object} is gone")))?;
+                .ok_or_else(|| {
+                    super::dropping(format!("the definition {a}.{def_object} is gone"))
+                })?;
             for r in rows {
                 // The outbox row's time is the transaction's: membership at
                 // commit is read from it.
@@ -697,7 +700,7 @@ pub async fn before_drop_database(
     }
     let wait = svc.settings.get(
         &sprig_inherit::msg::settings::OUTBOX_DRAIN_SECONDS,
-        &cat.setting_ctx(&svc.dc),
+        &cat.setting_ctx(&svc.dc).with_db(row.db_id),
         Some(&cat.settings),
     );
     drain_for_drop(svc, tenant, &row.name, &schemas, Duration::from_secs(wait)).await

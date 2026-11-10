@@ -338,6 +338,10 @@ impl sprig_api::proto::v1::key_value_server::KeyValue for KvSvc {
         if let Some(v) = r.if_version {
             body["if_version"] = serde_json::Value::String(v.to_string());
         }
+        if let Some(l) = &r.location {
+            body["location"] =
+                serde_json::json!({"latitude": l.latitude, "longitude": l.longitude});
+        }
         let v = self.run(&c, "Put", body).await?;
         Ok(Response::new(sprig_api::proto::v1::KvPutResponse {
             version: v
@@ -402,6 +406,53 @@ impl sprig_api::proto::v1::key_value_server::KeyValue for KvSvc {
             .await?;
         Ok(Response::new(sprig_api::proto::v1::KvExecResponse {
             reply: v.get("reply").map(super::functions::to_proto),
+        }))
+    }
+
+    async fn geo_search(
+        &self,
+        req: Request<sprig_api::proto::v1::KvGeoSearchRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::KvGeoSearchResponse> {
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let ll = |p: Option<&sprig_api::proto::v1::LatLng>| {
+            p.map(|p| serde_json::json!({"latitude": p.latitude, "longitude": p.longitude}))
+        };
+        let mut body = serde_json::json!({"database": r.database, "namespace": r.namespace,
+            "limit": r.limit, "max_distance_m": r.max_distance_m, "near": ll(r.near.as_ref())});
+        if let Some(g) = &r.region {
+            body["region"] = serde_json::json!({"center": ll(g.center.as_ref()), "radius_m": g.radius_m,
+                "south_west": ll(g.south_west.as_ref()), "north_east": ll(g.north_east.as_ref()),
+                "polygon": g.polygon.iter().map(|p| ll(Some(p))).collect::<Vec<_>>()});
+        }
+        let v = self.run(&c, "GeoSearch", body).await?;
+        let hits = v
+            .get("hits")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|h| {
+                let loc = h.get("location");
+                let f = |k: &str| {
+                    loc.and_then(|l| l.get(k))
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0)
+                };
+                sprig_api::proto::v1::KvGeoHit {
+                    entry: h.get("entry").map(kv_entry),
+                    location: Some(sprig_api::proto::v1::LatLng {
+                        latitude: f("latitude"),
+                        longitude: f("longitude"),
+                    }),
+                    distance_m: h
+                        .get("distance_m")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0),
+                }
+            })
+            .collect();
+        Ok(Response::new(sprig_api::proto::v1::KvGeoSearchResponse {
+            hits,
         }))
     }
 }

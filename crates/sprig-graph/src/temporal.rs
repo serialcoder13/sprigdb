@@ -615,6 +615,14 @@ pub fn construct(name: &str, args: &[Value]) -> Result<Option<Value>> {
                 zone: None,
             }))));
         }
+        "date.truncate"
+        | "localtime.truncate"
+        | "time.truncate"
+        | "localdatetime.truncate"
+        | "datetime.truncate" => {
+            let kind = name.trim_end_matches(".truncate");
+            return truncate(kind, args).map(Some);
+        }
         "datetime.fromepochmillis" => {
             let Some(Value::Int(ms)) = args.first() else {
                 return Err(bad("datetime.fromepochmillis(milliseconds)"));
@@ -645,6 +653,141 @@ pub fn construct(name: &str, args: &[Value]) -> Result<Option<Value>> {
             return Err(bad(format!("{name}() can't take a {}", v.type_name())));
         }
     }))
+}
+
+/// `<kind>.truncate(unit, value [, map])` (round 3): the value cut down to
+/// `unit` (`millennium`, `century`, `decade`, `year`, `weekYear`,
+/// `quarter`, `month`, `week`, `day`, `hour`, `minute`, `second`,
+/// `millisecond`, `microsecond`), then the map's fields on top, as Neo4j
+/// does.
+fn truncate(kind: &str, args: &[Value]) -> Result<Value> {
+    let (Some(Value::String(unit)), Some(v)) = (args.first(), args.get(1)) else {
+        if matches!(args.get(1), Some(Value::Null)) {
+            return Ok(Value::Null);
+        }
+        return Err(bad(format!("{kind}.truncate(unit, value [, map])")));
+    };
+    let extra = match args.get(2) {
+        Some(Value::Map(m)) => m.clone(),
+        None | Some(Value::Null) => BTreeMap::new(),
+        Some(o) => {
+            return Err(bad(format!(
+                "{kind}.truncate's third argument is a {}",
+                o.type_name()
+            )));
+        }
+    };
+    let (date, time, zone): (Option<NaiveDate>, Option<NaiveTime>, Option<String>) = match v {
+        Value::Date(d) => (Some(*d), None, None),
+        Value::LocalTime(t) => (None, Some(*t), None),
+        Value::Time(t, o) => (None, Some(*t), Some(offset_text(*o))),
+        Value::LocalDateTime(dt) => (Some(dt.date()), Some(dt.time()), None),
+        Value::DateTime(z) => (
+            Some(z.local.date()),
+            Some(z.local.time()),
+            Some(z.zone.clone().unwrap_or_else(|| offset_text(z.offset))),
+        ),
+        o => {
+            return Err(bad(format!(
+                "{kind}.truncate can't take a {}",
+                o.type_name()
+            )));
+        }
+    };
+    let needs_date = matches!(kind, "date" | "localdatetime" | "datetime");
+    if needs_date && date.is_none() {
+        return Err(bad(format!("{kind}.truncate needs a value with a date")));
+    }
+    let date_unit = matches!(
+        unit.as_str(),
+        "millennium"
+            | "century"
+            | "decade"
+            | "year"
+            | "weekYear"
+            | "quarter"
+            | "month"
+            | "week"
+            | "day"
+    );
+    if !needs_date && date_unit && unit != "day" {
+        return Err(bad(format!("{kind}.truncate can't truncate to {unit}")));
+    }
+    let mut m: BTreeMap<String, Value> = BTreeMap::new();
+    if let Some(d) = date {
+        let y = d.year();
+        let nd = match unit.as_str() {
+            "millennium" => NaiveDate::from_ymd_opt(y - y.rem_euclid(1000), 1, 1),
+            "century" => NaiveDate::from_ymd_opt(y - y.rem_euclid(100), 1, 1),
+            "decade" => NaiveDate::from_ymd_opt(y - y.rem_euclid(10), 1, 1),
+            "year" => NaiveDate::from_ymd_opt(y, 1, 1),
+            "weekYear" => NaiveDate::from_isoywd_opt(d.iso_week().year(), 1, chrono::Weekday::Mon),
+            "quarter" => NaiveDate::from_ymd_opt(y, (d.month0() / 3) * 3 + 1, 1),
+            "month" => NaiveDate::from_ymd_opt(y, d.month(), 1),
+            "week" => d.checked_sub_days(chrono::Days::new(u64::from(
+                d.weekday().num_days_from_monday(),
+            ))),
+            _ => Some(d),
+        }
+        .ok_or_else(|| bad("date out of range"))?;
+        // `dayOfWeek` on a week truncation counts from its Monday.
+        let nd = match (unit.as_str(), extra.get("dayOfWeek")) {
+            ("week" | "weekYear", Some(Value::Int(dow))) => nd
+                .checked_add_days(chrono::Days::new(u64::try_from(dow - 1).unwrap_or(0)))
+                .ok_or_else(|| bad("date out of range"))?,
+            _ => nd,
+        };
+        m.insert("year".into(), Value::Int(i64::from(nd.year())));
+        m.insert("month".into(), Value::Int(i64::from(nd.month())));
+        m.insert("day".into(), Value::Int(i64::from(nd.day())));
+    }
+    if let Some(t) = time {
+        let ns = i64::from(t.nanosecond());
+        let (h, mi, sec, nanos) = match unit.as_str() {
+            u if date_unit || u == "day" => (0, 0, 0, 0),
+            "hour" => (t.hour(), 0, 0, 0),
+            "minute" => (t.hour(), t.minute(), 0, 0),
+            "second" => (t.hour(), t.minute(), t.second(), 0),
+            "millisecond" => (t.hour(), t.minute(), t.second(), ns - ns % 1_000_000),
+            "microsecond" => (t.hour(), t.minute(), t.second(), ns - ns % 1000),
+            other => return Err(bad(format!("unit {other} isn't supported"))),
+        };
+        m.insert("hour".into(), Value::Int(i64::from(h)));
+        m.insert("minute".into(), Value::Int(i64::from(mi)));
+        m.insert("second".into(), Value::Int(i64::from(sec)));
+        m.insert("nanosecond".into(), Value::Int(nanos));
+    } else if !date_unit {
+        return Err(bad(format!(
+            "{kind}.truncate can't truncate a date to {unit}"
+        )));
+    }
+    if matches!(kind, "time" | "datetime")
+        && let Some(z) = zone
+    {
+        m.insert("timezone".into(), Value::String(z));
+    }
+    for (k, x) in extra {
+        if k == "dayOfWeek" {
+            continue;
+        }
+        // A finer field given replaces the truncated sub-second fields.
+        if matches!(k.as_str(), "millisecond" | "microsecond" | "nanosecond") {
+            let base = match m.get("nanosecond") {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            };
+            let add = match (&k[..], &x) {
+                ("millisecond", Value::Int(i)) => i * 1_000_000 - (base - base % 1_000_000),
+                ("microsecond", Value::Int(i)) => i * 1000 - (base % 1_000_000 - base % 1000),
+                ("nanosecond", Value::Int(i)) => *i - base % 1000,
+                _ => 0,
+            };
+            m.insert("nanosecond".into(), Value::Int(base + add));
+            continue;
+        }
+        m.insert(k, x);
+    }
+    temporal_from_map(kind, &m)
 }
 
 fn same_kind(k: &str, v: &Value) -> bool {

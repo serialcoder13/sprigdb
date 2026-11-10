@@ -298,6 +298,21 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
     // Transactions.
     let lsid = lsid_of(body);
     let autocommit_false = body.get_bool("autocommit") == Ok(false);
+    // Snapshot reads need one point in time across commands
+    // (`atClusterTime`), which SprigDB has only inside a transaction
+    // (chapter 30, "Read preference, write concern, read concern").
+    if !autocommit_false
+        && body
+            .get_document("readConcern")
+            .ok()
+            .and_then(|r| r.get_str("level").ok())
+            == Some("snapshot")
+    {
+        return Err(MongoError::new(
+            code::INVALID_OPTIONS,
+            "readConcern level snapshot is supported only in multi-document transactions",
+        ));
+    }
     let txn_number = i64_of(body, "txnNumber");
     if name == "commitTransaction" || name == "abortTransaction" {
         let (Some(l), Some(n)) = (lsid.as_ref(), txn_number) else {
@@ -407,6 +422,12 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
                 .ok()
                 .and_then(|r| r.get_str("level").ok())
                 == Some("snapshot");
+            // Conflicts fail fast inside transactions, as in MongoDB
+            // (`mongo.txn_lock_wait_seconds`, chapter 30): 1205 becomes
+            // 112 WriteConflict with TransientTransactionError.
+            if let Err(e) = s.exec("SET SESSION innodb_lock_wait_timeout = 1").await {
+                tracing::debug!(error = %e.message, "lock wait for a transaction not set");
+            }
             s.exec(if snapshot {
                 "START TRANSACTION WITH CONSISTENT SNAPSHOT"
             } else {
@@ -1061,6 +1082,10 @@ async fn exec(
         "collStats" => Ok(
             doc! {"ns": format!("{db}.{}", coll_of(body, "collStats")?), "count": i64::try_from(engine.count(sql, &ns_of("collStats")?, &doc! {}, 0, 0).await?).unwrap_or(i64::MAX), "size": 0i64, "ok": 1.0},
         ),
+        // Chapter 41 (R7): a logic-layer function exposed to `mongo`.
+        "sprigCall" => super::logic::sprig_call(sql, body, db).await,
+        // Chapter 34 (R6 round 3): Atlas's vector search index commands.
+        n if super::search::handles(n) => super::search::command(&engine, sql, n, body, db).await,
         other => Err(MongoError::new(
             code::COMMAND_NOT_FOUND,
             format!("no such command: '{other}'"),

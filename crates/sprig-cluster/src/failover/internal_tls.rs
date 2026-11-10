@@ -50,7 +50,8 @@ impl InternalTls {
     /// # Errors
     /// 39998 for an unreadable or invalid file.
     pub fn from_config(cfg: &sprig_common::config::TlsConfig) -> Result<Self> {
-        let read = |p: &std::path::Path| std::fs::read(p).map_err(|e| bad(&p.display().to_string(), e));
+        let read =
+            |p: &std::path::Path| std::fs::read(p).map_err(|e| bad(&p.display().to_string(), e));
         Self::from_pems(&read(&cfg.ca)?, &read(&cfg.cert)?, &read(&cfg.key)?)
     }
 
@@ -61,7 +62,9 @@ impl InternalTls {
     pub fn from_pems(ca: &[u8], cert: &[u8], key: &[u8]) -> Result<Self> {
         let mut roots = rustls::RootCertStore::empty();
         for c in CertificateDer::pem_slice_iter(ca) {
-            roots.add(c.map_err(|e| bad("ca", e))?).map_err(|e| bad("ca", e))?;
+            roots
+                .add(c.map_err(|e| bad("ca", e))?)
+                .map_err(|e| bad("ca", e))?;
         }
         if roots.is_empty() {
             return Err(bad("ca", "no certificate"));
@@ -116,12 +119,19 @@ impl InternalTls {
         host: &str,
         port: u16,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
-        let name = ServerName::try_from(host.trim_start_matches('[').trim_end_matches(']').to_owned())
-            .map_err(|e| SprigError::internal(format!("{host}: {e}")))?;
-        let tcp = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect((host.trim_start_matches('[').trim_end_matches(']'), port)))
-            .await
-            .map_err(|_| SprigError::internal(format!("{host}:{port}: connect timed out")))?
-            .map_err(|e| SprigError::internal(format!("{host}:{port}: {e}")))?;
+        let name = ServerName::try_from(
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_owned(),
+        )
+        .map_err(|e| SprigError::internal(format!("{host}: {e}")))?;
+        let tcp = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            TcpStream::connect((host.trim_start_matches('[').trim_end_matches(']'), port)),
+        )
+        .await
+        .map_err(|_| SprigError::internal(format!("{host}:{port}: connect timed out")))?
+        .map_err(|e| SprigError::internal(format!("{host}:{port}: {e}")))?;
         let _ = tcp.set_nodelay(true);
         tokio::time::timeout(
             HANDSHAKE_TIMEOUT,

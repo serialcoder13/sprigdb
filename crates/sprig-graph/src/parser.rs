@@ -245,6 +245,9 @@ fn utf8_len(b: u8) -> usize {
 /// # Errors
 /// 39900 with the offset.
 pub fn parse(src: &str) -> Result<Query> {
+    // GQL's forms become Cypher first (round 3, `crate::gql`).
+    let rewritten = crate::gql::rewrite(src)?;
+    let src = rewritten.as_str();
     let toks = lex(src)?;
     let mut p = Parser {
         src: src.to_owned(),
@@ -1323,8 +1326,13 @@ impl Parser {
         self.comparison()
     }
 
+    /// Comparisons (`=`, `<>`, `<`, `<=`, `>`, `>=`), chained as openCypher
+    /// says: `a < b <= c` is `a < b AND b <= c`. Their operands are the
+    /// string, list and null predicates, which bind tighter.
     fn comparison(&mut self) -> Result<Expr> {
-        let mut l = self.additive()?;
+        let first = self.predicate()?;
+        let mut operands = vec![first];
+        let mut ops = Vec::new();
         loop {
             let op = match self.peek() {
                 Tok::Sym("=") => BinOp::Eq,
@@ -1333,6 +1341,36 @@ impl Parser {
                 Tok::Sym("<=") => BinOp::Le,
                 Tok::Sym(">") => BinOp::Gt,
                 Tok::Sym(">=") => BinOp::Ge,
+                _ => break,
+            };
+            self.bump();
+            ops.push(op);
+            operands.push(self.predicate()?);
+        }
+        if ops.is_empty() {
+            return Ok(operands.pop().unwrap_or(Expr::Lit(Value::Null)));
+        }
+        let mut out: Option<Expr> = None;
+        for (i, op) in ops.into_iter().enumerate() {
+            let c = Expr::Binary(
+                op,
+                Box::new(operands[i].clone()),
+                Box::new(operands[i + 1].clone()),
+            );
+            out = Some(match out {
+                None => c,
+                Some(prev) => Expr::Binary(BinOp::And, Box::new(prev), Box::new(c)),
+            });
+        }
+        Ok(out.unwrap_or(Expr::Lit(Value::Null)))
+    }
+
+    /// `IN`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `=~` and `IS [NOT]
+    /// NULL` over additive expressions.
+    fn predicate(&mut self) -> Result<Expr> {
+        let mut l = self.additive()?;
+        loop {
+            let op = match self.peek() {
                 Tok::Sym("=~") => BinOp::Regex,
                 Tok::Ident(s) if s.eq_ignore_ascii_case("IN") => BinOp::In,
                 Tok::Ident(s) if s.eq_ignore_ascii_case("CONTAINS") => BinOp::Contains,

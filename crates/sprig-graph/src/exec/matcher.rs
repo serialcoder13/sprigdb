@@ -2,7 +2,7 @@
 //! paths (chapter 43, "From patterns to joins", "Variable-length paths",
 //! "Frontier expansion across shards", "Shortest paths").
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value as Json;
@@ -404,9 +404,45 @@ impl Exec<'_> {
                 pat.start.var.as_deref().unwrap_or_default()
             ));
         } else {
-            let Some(scan) = self.start_scan(&pat.start, conj).await? else {
+            let Some(mut scan) = self.start_scan(&pat.start, conj).await? else {
                 return Ok(Vec::new());
             };
+            // Properties that depend on the incoming rows (`UNWIND $rows AS
+            // r MATCH (n:L {k: r.k})`): one scan for every row's values, a
+            // superset each row rechecks (round 3).
+            if let Some(pe) = &pat.start.props
+                && !is_const(pe)
+                && scan.props_eq.is_empty()
+                && !rows.is_empty()
+                && rows.len() <= 10_000
+            {
+                let mut by_key: BTreeMap<String, Vec<Json>> = BTreeMap::new();
+                let mut ok = true;
+                for r in &rows {
+                    match eval(pe, r, self.params) {
+                        Ok(Value::Map(m)) => {
+                            for (k, v) in m {
+                                match scan_json(&v) {
+                                    Some(j) => {
+                                        let e = by_key.entry(k).or_default();
+                                        if !e.contains(&j) {
+                                            e.push(j);
+                                        }
+                                    }
+                                    None => ok = false,
+                                }
+                            }
+                        }
+                        _ => ok = false,
+                    }
+                    if !ok {
+                        break;
+                    }
+                }
+                if ok {
+                    scan.props_eq.extend(by_key);
+                }
+            }
             self.plan.push(format!(
                 "NodeScan {}: {}",
                 pat.start.var.as_deref().unwrap_or("(anonymous)"),
@@ -423,7 +459,14 @@ impl Exec<'_> {
             let found = self.store.scan(&scan).await?;
             self.check_rows(found.len())?;
             let nodes: Vec<Arc<Node>> = found.iter().map(|r| self.node_val(r)).collect();
+            let mut work = 0usize;
             for r in rows {
+                // Long in-gateway loops give the runtime back now and then.
+                work += nodes.len();
+                if work > 20_000 {
+                    work = 0;
+                    tokio::task::yield_now().await;
+                }
                 for n in &nodes {
                     if self.node_ok(&pat.start, n, &r)? {
                         let mut nr = r.clone();

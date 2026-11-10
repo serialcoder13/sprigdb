@@ -56,6 +56,124 @@
         },
         "type": "object"
       },
+      "CatalogDatabases": {
+        "properties": {
+          "databases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "databases"
+        ],
+        "type": "object"
+      },
+      "CatalogSnapshot": {
+        "properties": {
+          "columns": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "db": {
+            "type": "string"
+          },
+          "objects": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "db",
+          "objects",
+          "columns"
+        ],
+        "type": "object"
+      },
+      "CheckReply": {
+        "properties": {
+          "statements": {
+            "items": {
+              "properties": {
+                "checked": {
+                  "type": "string"
+                },
+                "class": {
+                  "type": "string"
+                },
+                "diagnostics": {
+                  "items": {
+                    "properties": {
+                      "code": {
+                        "type": "integer"
+                      },
+                      "end": {
+                        "type": "integer"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "severity": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "severity",
+                      "message",
+                      "start",
+                      "end"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "end": {
+                  "type": "integer"
+                },
+                "start": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start",
+                "end",
+                "class",
+                "diagnostics"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "statements"
+        ],
+        "type": "object"
+      },
+      "CheckRequest": {
+        "properties": {
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
       "Column": {
         "properties": {
           "binary": {
@@ -986,6 +1104,135 @@
         ]
       }
     },
+    "/v1/catalog": {
+      "get": {
+        "operationId": "Catalog.ListObjects",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogDatabases"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The logical databases the caller can see; ETag of the catalog and auth versions (If-None-Match gives 304)",
+        "tags": [
+          "sprig.v1.Catalog"
+        ]
+      }
+    },
+    "/v1/databases/{database}/catalog": {
+      "get": {
+        "operationId": "Catalog.Snapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogSnapshot"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Tables, views, routines and columns of one database, read with the caller's rights; ETag as ListObjects",
+        "tags": [
+          "sprig.v1.Catalog"
+        ]
+      }
+    },
+    "/v1/databases/{database}/catalog/{kind}/{name}": {
+      "get": {
+        "operationId": "Catalog.GetObject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One object (kind table, view, procedure or function): columns, indexes, definition",
+        "tags": [
+          "sprig.v1.Catalog"
+        ]
+      }
+    },
     "/v1/databases/{database}/functions/{name}:call": {
       "post": {
         "operationId": "Functions.Call",
@@ -1761,6 +2008,57 @@
         },
         "tags": [
           "sprig.v1.KeyValue"
+        ]
+      }
+    },
+    "/v1/databases/{database}/sql:check": {
+      "post": {
+        "operationId": "Sql.Check",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Each statement's class and its problems with positions (UTF-16 offsets), parsed and bound without running",
+        "tags": [
+          "sprig.v1.Sql"
         ]
       }
     },
@@ -2637,6 +2935,112 @@
         "summary": "ALTER USER ... IDENTIFIED BY, run as the caller, without the password in statement text",
         "tags": [
           "sprig.v1.Users"
+        ]
+      }
+    },
+    "/v1/workload/fingerprints": {
+      "get": {
+        "operationId": "Workload.ListFingerprints",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "hours",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The caller's tenant's top fingerprints by total time (hours, limit, source = all | client | studio)",
+        "tags": [
+          "sprig.v1.Workload"
+        ]
+      }
+    },
+    "/v1/workload/fingerprints/{id}/series": {
+      "get": {
+        "operationId": "Workload.Series",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One fingerprint per bucket: runs, p50, p95, total (days)",
+        "tags": [
+          "sprig.v1.Workload"
         ]
       }
     },

@@ -575,7 +575,10 @@ fn exchange_queue_and_binding_statements() {
         Some(MqDecl::Exchange { if_not_exists: true, internal: true, ref kind, .. })
             if kind == "x-delayed-message"
     ));
-    assert_eq!(grammar::mq_decl("CREATE TABLE t (a INT)", &opts()).unwrap(), None);
+    assert_eq!(
+        grammar::mq_decl("CREATE TABLE t (a INT)", &opts()).unwrap(),
+        None
+    );
     assert!(grammar::mq_decl("BIND QUEUE q INTO EXCHANGE e", &opts()).is_err());
     assert!(grammar::mq_decl("CREATE QUEUE q WITH (a 1)", &opts()).is_err());
     let b = BindingSpec {

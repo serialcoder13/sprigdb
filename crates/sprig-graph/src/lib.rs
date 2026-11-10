@@ -16,6 +16,9 @@
 //! - [`neo4j`]: Neo4j status codes for errors.
 //! - [`bookmark`]: signed Bolt bookmarks.
 //! - [`schema`]: indexes and uniqueness constraints.
+//! - [`mapped`]: mapped graphs (`CREATE PROPERTY GRAPH`) over existing tables.
+//! - [`pgq`]: SQL/PGQ `GRAPH_TABLE` in SQL statements.
+//! - [`gql`]: the GQL subset, rewritten into Cypher before parsing.
 //! - [`temporal`]: temporal and spatial values.
 
 // An interpreter: evaluator and executor functions are one match or one
@@ -27,10 +30,13 @@ pub mod bookmark;
 pub mod catalog;
 pub mod eval;
 pub mod exec;
+pub mod gql;
+pub mod mapped;
 pub mod maria;
 pub mod mem;
 pub mod neo4j;
 pub mod parser;
+pub mod pgq;
 pub mod schema;
 pub mod settings;
 pub mod store;

@@ -295,6 +295,138 @@ pub struct Skipped {
     pub reason: String,
 }
 
+/// Spatial functions whose predicates a `SPATIAL INDEX` serves: the MBR
+/// functions MariaDB reads the R-tree for, and the geodesic ones the
+/// MySQL persona narrows with a candidate box (chapter 36).
+const SPATIAL_FUNCTIONS: &[&str] = &[
+    "ST_DISTANCE",
+    "ST_DISTANCE_SPHERE",
+    "ST_CONTAINS",
+    "ST_WITHIN",
+    "ST_INTERSECTS",
+    "ST_OVERLAPS",
+    "ST_TOUCHES",
+    "ST_CROSSES",
+    "ST_EQUALS",
+];
+
+/// Rows a spatial or vector index reads per row it returns: an R-tree
+/// box holds about 4/π of a circle's points; an HNSW search reads its
+/// candidate list. A rough figure for the cost model.
+pub const MODEL_READ_FACTOR: f64 = 1.3;
+
+/// Chapter 13's "Other models" for SQL tables (R6 round 3):
+///
+/// - **Spatial:** a `SPATIAL INDEX` on a `NOT NULL` geometry column that
+///   a spatial predicate filters on (an MBR function, or a geodesic one
+///   the MySQL persona turns into an R-tree box). A nullable column would
+///   need chapter 36's companion box: no candidate.
+/// - **Vector:** a `VECTOR INDEX` on a `NOT NULL` vector column a query
+///   orders by `VEC_DISTANCE_*(col, ...)` with a `LIMIT`, with the
+///   queries' metric and `M` 8 below a million rows, 16 above. The
+///   evaluator recommends it unless `auto_index.vector_ann` is `on`.
+#[must_use]
+pub fn model_candidates(
+    f: &FpInput,
+    alias: &str,
+    object: ObjectId,
+    stats: &TableStats,
+) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
+    let on = |t: &Option<String>| t.as_deref() == Some(alias);
+    let not_null = |c: &str, ty: &[&str]| {
+        stats
+            .columns
+            .get(c)
+            .is_some_and(|i| !i.nullable && ty.iter().any(|t| i.data_type.contains(t)))
+    };
+    let mut add = |kind: IndexKind, col: &str, options: IndexOptions, note: &str| {
+        let def = IndexDef {
+            object,
+            kind,
+            parts: vec![KeyPart::col(col)],
+            options,
+        };
+        if out.iter().any(|c| c.def == def) {
+            return;
+        }
+        let returned = f.returned_per_run.max(1.0);
+        out.push(Candidate {
+            def,
+            covering: false,
+            serves: vec![(f.id, Role::Primary)],
+            evidence: Evidence {
+                parts: vec![PartSource::Range],
+                entries_per_run: Some(returned * MODEL_READ_FACTOR),
+                notes: vec![note.to_owned()],
+                ..Evidence::default()
+            },
+        });
+    };
+    let fn_of = |p: &sprig_workload::shape::Predicate| match &p.op {
+        PredOp::Unsargable {
+            why: sprig_workload::shape::Unsargable::Function(n),
+        } => Some(n.clone()),
+        _ => None,
+    };
+    let preds: Vec<_> = f
+        .shape
+        .predicates
+        .iter()
+        .filter(|p| on(&p.column.table))
+        .collect();
+    for p in &preds {
+        let col = p.column.col.to_ascii_lowercase();
+        let spatial = p.op == PredOp::Spatial
+            || fn_of(p).is_some_and(|n| SPATIAL_FUNCTIONS.contains(&n.as_str()));
+        if spatial
+            && not_null(
+                &col,
+                &["geometry", "point", "polygon", "linestring", "multi", "collection"],
+            )
+        {
+            add(
+                IndexKind::Spatial,
+                &col,
+                IndexOptions::default(),
+                "variant:spatial",
+            );
+        }
+    }
+    if f.shape.limit {
+        for p in preds.iter().filter(|p| p.op == PredOp::Vector) {
+            let col = p.column.col.to_ascii_lowercase();
+            if !not_null(&col, &["vector", "varbinary", "binary"]) {
+                continue;
+            }
+            let metric = preds.iter().find_map(|q| {
+                let n = fn_of(q)?;
+                (q.column.col.eq_ignore_ascii_case(&col) && n.starts_with("VEC_DISTANCE")).then(
+                    || {
+                        if n.ends_with("COSINE") {
+                            "cosine"
+                        } else {
+                            "euclidean"
+                        }
+                    },
+                )
+            });
+            let rows = stats.n_rows.or(stats.cardinality).unwrap_or(0);
+            let mut o = BTreeMap::new();
+            o.insert(
+                "distance".to_owned(),
+                metric.unwrap_or("euclidean").to_owned(),
+            );
+            o.insert(
+                "m".to_owned(),
+                if rows >= 1_000_000 { "16" } else { "8" }.to_owned(),
+            );
+            add(IndexKind::Vector, &col, IndexOptions(o), "variant:vector");
+        }
+    }
+    out
+}
+
 /// Candidates of one fingerprint, and the tables that got none.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Generated {
@@ -389,7 +521,9 @@ impl Generator {
                 continue;
             };
             let acc = access(f, &t.alias, object, stats);
-            let cands = self.for_table(&acc, stats);
+            let mut cands = self.for_table(&acc, stats);
+            // Chapter 13's other models (R6 round 3): spatial and vector.
+            cands.extend(model_candidates(f, &t.alias, object, stats));
             if cands.is_empty() {
                 let reason = acc
                     .unsargable

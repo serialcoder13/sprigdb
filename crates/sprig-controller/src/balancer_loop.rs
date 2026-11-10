@@ -487,6 +487,34 @@ impl BalancerLoop {
         Ok(report)
     }
 
+    /// The tenant's storage in the last fleet view (chapter 24's
+    /// `migration.auto_size_limit_gb` guard); `None` before a run or for a
+    /// tenant not homed here.
+    pub async fn tenant_storage_bytes(&self, t: TenantId) -> Option<f64> {
+        let g = self.inner.lock().await;
+        let v = g.last_view.as_ref()?;
+        let total: f64 = v
+            .shards
+            .values()
+            .filter(|s| s.key.tenant == t)
+            .map(|s| s.load.storage_bytes)
+            .sum();
+        Some(total)
+    }
+
+    /// Writes this DC's `dc-load` record from the last fleet view, when
+    /// due (chapter 24, "Least-busy placement").
+    async fn publish_dc_load(&self, global: &Arc<dyn sprig_meta::MetaStore>) {
+        let view = self.inner.lock().await.last_view.clone();
+        let Some(view) = view else {
+            return;
+        };
+        let now = secs(&*self.clock).saturating_mul(1000);
+        if let Err(e) = crate::least_busy::publish(global, &self.dc, &view, now).await {
+            tracing::warn!(error = %e, "dc-load not written");
+        }
+    }
+
     /// `sprigctl explain placement <tenant>`.
     ///
     /// # Errors
@@ -779,6 +807,9 @@ impl Reconciler for Arc<BalancerLoop> {
         if let Err(e) = self.run_once().await {
             tracing::warn!(error = %e, "balancer run failed");
         }
+        // Chapter 24 (r2last): this DC's spare capacity for least-busy
+        // placement and relief moves.
+        self.publish_dc_load(&cx.global).await;
         // Draining clusters whose shards have all moved away are drained
         // (r2opfix; chapter 09's cluster states).
         if let Ok(l) = cx.leader() {

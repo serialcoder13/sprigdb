@@ -297,7 +297,9 @@ async fn maria_and_memory_agree() {
     // A pushed-down boolean (not indexed) finds the node.
     let o = live.run("MATCH (n:Person {new: true}) RETURN n.name").await;
     assert_eq!(show(&o), ["Zed"]);
-    let o = live.run("MATCH (n:Person {new: false}) RETURN n.name").await;
+    let o = live
+        .run("MATCH (n:Person {new: false}) RETURN n.name")
+        .await;
     assert_eq!(show(&o), Vec::<String>::new());
 
     // A chain of 40 for the budgets: deep traversals are refused with
@@ -369,8 +371,19 @@ async fn numeric_keys(live: &Live) {
     drop(c);
     live.indexes.lock().expect("lock").push(def.clone());
     let values = [
-        "1", "1.5", "-0.0", "1e16", "-7", "123456789012", "0.1", "1e300", "2.5e-8",
-        "9007199254740993", "'1'", "true", "false",
+        "1",
+        "1.5",
+        "-0.0",
+        "1e16",
+        "-7",
+        "123456789012",
+        "0.1",
+        "1e300",
+        "2.5e-8",
+        "9007199254740993",
+        "'1'",
+        "true",
+        "false",
     ];
     for v in values {
         live.run(&format!("CREATE (:Num {{k: {v}}})")).await;
@@ -416,7 +429,10 @@ async fn numeric_keys(live: &Live) {
         .run("MATCH (n:Num) WHERE n.k IN [1e16, 1.5, 9007199254740992] RETURN count(n)")
         .await;
     assert_eq!(show(&o), ["3"]);
-    eprintln!("numeric keys: {} values agree with MariaDB's column", rows.len());
+    eprintln!(
+        "numeric keys: {} values agree with MariaDB's column",
+        rows.len()
+    );
 }
 
 /// Round 3: a graph over four shard schemas with mirrors gives the same
@@ -487,9 +503,15 @@ async fn four_shards_with_mirrors_agree_with_memory() {
         edges += e.unwrap_or(0);
         mirrors += m.unwrap_or(0);
         // Every row is in its own shard's range.
-        for (t, col) in [(&sh.tables.nodes, "_sprig_rk"), (&sh.tables.mirrors, "_sprig_rk")] {
+        for (t, col) in [
+            (&sh.tables.nodes, "_sprig_rk"),
+            (&sh.tables.mirrors, "_sprig_rk"),
+        ] {
             let lo = sh.lo;
-            let hi = live.layout.hi(i).map_or(String::new(), |h| format!(" OR _sprig_rk >= {h}"));
+            let hi = live
+                .layout
+                .hi(i)
+                .map_or(String::new(), |h| format!(" OR _sprig_rk >= {h}"));
             let bad: Option<u64> = c
                 .query_first(format!("SELECT COUNT(*) FROM {t} WHERE {col} < {lo}{hi}"))
                 .await
@@ -513,13 +535,19 @@ async fn four_shards_with_mirrors_agree_with_memory() {
     let m = execute(&mut mem, q, &Params::new(), &Budgets::default())
         .await
         .expect(q);
-    assert_eq!(o.stats["relationships-deleted"], m.stats["relationships-deleted"]);
+    assert_eq!(
+        o.stats["relationships-deleted"],
+        m.stats["relationships-deleted"]
+    );
     let q = "MATCH (a:R)-[r:NEXT]->(b:R) WHERE a.i = 7 DELETE r";
     live.run(q).await;
     execute(&mut mem, q, &Params::new(), &Budgets::default())
         .await
         .expect(q);
-    for q in extra.iter().chain(["MATCH ()-[r]->() RETURN count(r)"].iter()) {
+    for q in extra
+        .iter()
+        .chain(["MATCH ()-[r]->() RETURN count(r)"].iter())
+    {
         let a = show(&live.run(q).await);
         let b = show(
             &execute(&mut mem, q, &Params::new(), &Budgets::default())

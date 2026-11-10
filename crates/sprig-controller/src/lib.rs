@@ -64,11 +64,15 @@ pub mod balancer_loop;
 pub mod catalog_reconciler;
 pub mod catalogs;
 pub mod dc;
+// Chapter 24 steps 7 and 9 (r2last): automatic moves between DCs.
+pub mod dc_migrate;
 pub mod dispatch;
 pub mod drain;
 pub mod failover;
 pub mod inherit_loop;
 pub mod latency;
+// Chapter 24 step 8 (r2last): least-busy DC placement.
+pub mod least_busy;
 pub mod live;
 pub mod logic_loop;
 // Chapter 45 (R9): one sequencer job per stream.
@@ -88,6 +92,7 @@ pub mod streams_loop;
 pub mod kv_sweep_loop;
 // Chapter 51 (R9): sink tasks.
 pub mod sinks_loop;
+pub mod tenant_scopes;
 pub mod tenants;
 pub mod traffic;
 pub mod tree;
@@ -206,6 +211,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     let registry = ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?;
     let registry_for_balancer = registry.clone();
     let registry_for_sharding = registry.clone();
+    let registry_for_scopes = registry.clone();
     let monitor = Arc::new(ClusterMonitor::new(
         registry.clone(),
         settings.live.clone(),
@@ -433,14 +439,27 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Some(settings.live.clone()),
     )?);
     let tree_loop = TreeSettings::new(tree, dc.clone(), Some(settings.live.clone()))?;
-    // Chapter 24: moves between DCs and traffic windows.
-    let moves = Arc::new(migrate::DcMoves::new(
-        dc.clone(),
-        Arc::clone(&stores.dc),
+    // Decision RF3 (r2last): tenant, database and object scopes from the
+    // tenants' catalogs, for the loops below that decide per tenant.
+    let tenant_scopes = tenant_scopes::TenantScopes::new(
         Arc::clone(&stores.global),
-        Arc::clone(&clock),
-        Some(settings.live.clone()),
-    ));
+        Arc::clone(&stores.dc),
+        Arc::new(
+            RegistryPools::new(registry_for_scopes, Some(Arc::clone(&monitor)))
+                .budget("tenant_settings", 4),
+        ),
+    )?;
+    // Chapter 24: moves between DCs and traffic windows.
+    let moves = Arc::new(
+        migrate::DcMoves::new(
+            dc.clone(),
+            Arc::clone(&stores.dc),
+            Arc::clone(&stores.global),
+            Arc::clone(&clock),
+            Some(settings.live.clone()),
+        )
+        .with_tenant_scopes(Arc::clone(&tenant_scopes)),
+    );
     let rt = Runtime::new(stores.clone(), Arc::clone(&clock), me)
         .with_settings(settings.control.clone())
         .with_loop(Loop::new(dispatch::Dispatch))
@@ -453,6 +472,11 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(workload_rollup))
         .with_loop(Loop::new(Arc::clone(&balancer)))
         .with_loop(Loop::new(migrate::MigrationLoop::new(Arc::clone(&moves))))
+        // Chapter 24 steps 7-9 (r2last): tenants follow their traffic.
+        .with_loop(Loop::new(dc_migrate::MigrationDecider::new(
+            Arc::clone(&moves),
+            Some(Arc::clone(&balancer)),
+        )))
         .with_loop(Loop::from_arc(Arc::clone(&sharding)))
         // Chapter 18: in-doubt distributed transactions and decision rows.
         .with_loop(Loop::new(txn_resolver::ResolverLoop::for_controller(
@@ -474,13 +498,17 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     // Chapter 25 (r2final): job standbys, in single-etcd mode (the loop
     // writes the standby DC's tier through the one etcd).
     let rt = if single_etcd(&cfg.meta) {
-        rt.with_loop(Loop::new(standby::StandbyLoop::new(
-            dc.clone(),
-            Arc::clone(&stores.dc),
-            Arc::clone(&stores.global),
-            Arc::clone(&clock),
-            Some(settings.live.clone()),
-        )))
+        rt.with_loop(Loop::new(
+            standby::StandbyLoop::new(
+                dc.clone(),
+                Arc::clone(&stores.dc),
+                Arc::clone(&stores.global),
+                Arc::clone(&clock),
+                Some(settings.live.clone()),
+            )
+            .with_tenant_scopes(Arc::clone(&tenant_scopes))
+            .with_move_intents(Arc::clone(&moves.decisions)),
+        ))
     } else {
         rt
     };

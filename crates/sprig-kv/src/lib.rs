@@ -10,6 +10,7 @@
 //!   MariaDB's clock counts.
 //! - [`api`]: the `KeyValue` operations (get, put with preconditions,
 //!   delete, scan, transactions) over string keys.
+//! - [`geo`]: keys' locations and `GeoSearch` (chapter 36, R6 round 3).
 //!
 //! Redis command semantics live in `sprig-redis` (chapter 40), over the
 //! same tables.
@@ -26,6 +27,7 @@
 )]
 
 pub mod api;
+pub mod geo;
 pub mod layout;
 pub mod sql;
 pub mod sweep;

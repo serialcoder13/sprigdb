@@ -32,7 +32,7 @@ use sprig_cluster::sql::{NodeEndpoint, ProbeError};
 use sprig_common::Result;
 use sprig_common::ids::Fingerprint;
 
-use super::node::{NodeSql, NodeWatch, add_index_sql, drop_index_sql, run_watched};
+use super::node::{NodeSql, NodeWatch, add_def_sql, drop_index_sql, run_watched};
 use super::{
     CanaryState, Method, ValidationPlan, ValidationReport, Validator, abort, ms_since, now_ms,
     replay_on, report,
@@ -298,7 +298,7 @@ impl Validator for CanaryValidator {
         let started = Instant::now();
         let (res, killed) = match lock {
             Ok(()) => {
-                let sql = add_index_sql(t, &name, &plan.candidate.def.ddl_columns(), true);
+                let sql = add_def_sql(t, &name, &plan.candidate.def, true);
                 run_watched(&mut ddl, &mut watch, &sql, set.poll).await
             }
             Err(e) => (Err(e), None),

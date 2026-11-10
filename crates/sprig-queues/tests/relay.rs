@@ -78,7 +78,8 @@ impl ReplyRelay for Hop {
     fn relay(&self, slot: u32, name: &str, message: Message) {
         let to = self.0.lock().unwrap().get(&slot).cloned();
         if let Some(r) = to {
-            let _ = r.deliver(name, message);
+            // The relaying gateway checked the replier's tenant already.
+            let _ = r.deliver_relayed(name, message);
         }
     }
 }

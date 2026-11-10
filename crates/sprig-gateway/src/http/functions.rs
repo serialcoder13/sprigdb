@@ -49,6 +49,8 @@ pub async fn call(
         protocol: protocol.to_owned(),
         name: name.to_owned(),
         args,
+        db: None,
+        read_only: false,
     }
     .statement();
     let call = SqlCall {

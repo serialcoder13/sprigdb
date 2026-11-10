@@ -67,7 +67,11 @@ pub fn encode<T: Serialize>(
     };
     let h = serde_json::to_vec(&header).map_err(|e| SprigError::internal(e.to_string()))?;
     let p = serde_json::to_vec(payload).map_err(|e| SprigError::internal(e.to_string()))?;
-    let input = format!("{}.{}", URL_SAFE_NO_PAD.encode(h), URL_SAFE_NO_PAD.encode(p));
+    let input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(h),
+        URL_SAFE_NO_PAD.encode(p)
+    );
     let sig = sign(input.as_bytes());
     Ok(format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig)))
 }
@@ -82,11 +86,16 @@ pub fn parse(token: &str, want_typ: &str) -> Result<Parsed> {
         return Err(bad("the token is too long"));
     }
     let mut parts = token.split('.');
-    let (Some(h), Some(p), Some(s), None) = (parts.next(), parts.next(), parts.next(), parts.next())
+    let (Some(h), Some(p), Some(s), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
     else {
         return Err(bad("the token is malformed"));
     };
-    let dec = |x: &str| URL_SAFE_NO_PAD.decode(x).map_err(|_| bad("the token is malformed"));
+    let dec = |x: &str| {
+        URL_SAFE_NO_PAD
+            .decode(x)
+            .map_err(|_| bad("the token is malformed"))
+    };
     let header: Header =
         serde_json::from_slice(&dec(h)?).map_err(|_| bad("the token's header is malformed"))?;
     if header.alg != ALG {

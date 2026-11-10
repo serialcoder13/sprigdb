@@ -43,8 +43,8 @@ use subtle::ConstantTimeEq as _;
 
 use crate::cache::TenantAuth;
 use crate::mysql::{LoginService, LoginSource, Principal, locked, temp_locked};
-use sprig_proto_mysql::Persona;
 use crate::store::{AT, AuthStore, RequireTls, col, exec_count, map_err, micros, opt_time, time};
+use sprig_proto_mysql::Persona;
 
 /// `token_sessions` (chapter 14, Appendix C): the auth module's format 4.
 pub const DDL_TOKEN_SESSIONS: &str = "CREATE TABLE IF NOT EXISTS token_sessions (
@@ -102,7 +102,10 @@ const COLS: &str = "session_id, user_id, amr, client, \
     TIMESTAMPDIFF(MICROSECOND, '1970-01-01', created_at), changed_version";
 
 fn table(store: &AuthStore) -> String {
-    format!("{}.token_sessions", sprig_common::names::quote(store.schema()))
+    format!(
+        "{}.token_sessions",
+        sprig_common::names::quote(store.schema())
+    )
 }
 
 fn session_row(mut r: Row) -> Result<TokenSession> {
@@ -446,7 +449,10 @@ impl std::fmt::Debug for CatalogSessions {
 
 fn unavailable(what: &str, e: &SprigError) -> SprigError {
     tracing::warn!(error = %e, "token sessions: {what}");
-    SprigError::new(SprigCode::AuthUnavailable, "authentication unavailable; retry")
+    SprigError::new(
+        SprigCode::AuthUnavailable,
+        "authentication unavailable; retry",
+    )
 }
 
 impl CatalogSessions {
@@ -542,7 +548,12 @@ impl CatalogSessions {
         }
     }
 
-    async fn revoke_in_change(&self, tenant: TenantId, sid: [u8; 16], now: SystemTime) -> Result<bool> {
+    async fn revoke_in_change(
+        &self,
+        tenant: TenantId,
+        sid: [u8; 16],
+        now: SystemTime,
+    ) -> Result<bool> {
         let mut c = self
             .cat
             .change_with(tenant, VersionKind::Auth, ChangeOpts::default())
@@ -795,11 +806,7 @@ impl SessionStore for CatalogSessions {
             ));
         }
         if user.row.account_locked {
-            return Err(packet_error(locked(
-                Persona::MySql84,
-                name,
-                host,
-            )));
+            return Err(packet_error(locked(Persona::MySql84, name, host)));
         }
         let need_tls = user.row.require_tls != RequireTls::None || cl.require_tls(&catalog);
         if (need_tls && !who.tls) || user.row.require_tls == RequireTls::X509 {

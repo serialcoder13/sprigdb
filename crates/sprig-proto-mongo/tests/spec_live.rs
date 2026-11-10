@@ -303,10 +303,15 @@ impl Ctx<'_> {
                     return Err(format!("expected an array, got {actual}"));
                 };
                 if e.len() != a.len() {
-                    return Err(format!("expected {} elements, got {}: {actual}", e.len(), a.len()));
+                    return Err(format!(
+                        "expected {} elements, got {}: {actual}",
+                        e.len(),
+                        a.len()
+                    ));
                 }
                 for (i, (x, y)) in e.iter().zip(a).enumerate() {
-                    self.matches(x, y, false).map_err(|m| format!("[{i}]: {m}"))?;
+                    self.matches(x, y, false)
+                        .map_err(|m| format!("[{i}]: {m}"))?;
                 }
                 Ok(())
             }
@@ -456,12 +461,9 @@ fn err_view(e: &mongodb::error::Error) -> (Option<i32>, Option<String>, String, 
             c.message.clone(),
             false,
         ),
-        ErrorKind::Write(WriteFailure::WriteError(w)) => (
-            Some(w.code),
-            w.code_name.clone(),
-            w.message.clone(),
-            false,
-        ),
+        ErrorKind::Write(WriteFailure::WriteError(w)) => {
+            (Some(w.code), w.code_name.clone(), w.message.clone(), false)
+        }
         ErrorKind::Write(WriteFailure::WriteConcernError(w)) => (
             Some(w.code),
             Some(w.code_name.clone()),
@@ -597,7 +599,9 @@ impl Runner<'_> {
                             let v = match v {
                                 Bson::String(s) => s.clone(),
                                 Bson::Boolean(b) => b.to_string(),
-                                x => num(x).map_or_else(|| x.to_string(), |n| (n as i64).to_string()),
+                                x => {
+                                    num(x).map_or_else(|| x.to_string(), |n| (n as i64).to_string())
+                                }
                             };
                             if matches!(k.as_str(), "appname" | "appName") {
                                 app = Some(v);
@@ -613,32 +617,41 @@ impl Runner<'_> {
                     o.app_name = Some(app.unwrap_or_else(|| "r5mongo3-spec~dc-a".into()));
                     let events: Events = Arc::default();
                     let ev = Arc::clone(&events);
-                    o.command_event_handler = Some(EventHandler::callback(move |e: CommandEvent| {
-                        let x = match e {
-                            CommandEvent::Started(s) => Ev::Started {
-                                name: s.command_name,
-                                db: s.db,
-                                command: s.command,
-                            },
-                            CommandEvent::Succeeded(s) => Ev::Succeeded {
-                                name: s.command_name,
-                                reply: s.reply,
-                            },
-                            CommandEvent::Failed(f) => Ev::Failed {
-                                name: f.command_name,
-                            },
-                            _ => return,
-                        };
-                        ev.lock().unwrap().push(x);
-                    }));
+                    o.command_event_handler =
+                        Some(EventHandler::callback(move |e: CommandEvent| {
+                            let x = match e {
+                                CommandEvent::Started(s) => Ev::Started {
+                                    name: s.command_name,
+                                    db: s.db,
+                                    command: s.command,
+                                },
+                                CommandEvent::Succeeded(s) => Ev::Succeeded {
+                                    name: s.command_name,
+                                    reply: s.reply,
+                                },
+                                CommandEvent::Failed(f) => Ev::Failed {
+                                    name: f.command_name,
+                                },
+                                _ => return,
+                            };
+                            ev.lock().unwrap().push(x);
+                        }));
                     let cfg = ClientCfg {
                         observe: spec
                             .get_array("observeEvents")
-                            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_owned))
+                                    .collect()
+                            })
                             .unwrap_or_default(),
                         ignore: spec
                             .get_array("ignoreCommandMonitoringEvents")
-                            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_owned))
+                                    .collect()
+                            })
                             .unwrap_or_default(),
                         sensitive: spec.get_bool("observeSensitiveCommands").unwrap_or(false),
                     };
@@ -649,14 +662,12 @@ impl Runner<'_> {
                     let name = spec.get_str("databaseName").unwrap_or_default();
                     let mut o = mongodb::options::DatabaseOptions::default();
                     if let Ok(d) = spec.get_document("databaseOptions") {
-                        o.read_concern = d
-                            .get_document("readConcern")
-                            .ok()
-                            .and_then(|r| mongodb::bson::from_document::<ReadConcern>(r.clone()).ok());
-                        o.write_concern = d
-                            .get_document("writeConcern")
-                            .ok()
-                            .and_then(|r| mongodb::bson::from_document::<WriteConcern>(r.clone()).ok());
+                        o.read_concern = d.get_document("readConcern").ok().and_then(|r| {
+                            mongodb::bson::from_document::<ReadConcern>(r.clone()).ok()
+                        });
+                        o.write_concern = d.get_document("writeConcern").ok().and_then(|r| {
+                            mongodb::bson::from_document::<WriteConcern>(r.clone()).ok()
+                        });
                     }
                     Entity::Db(c.database_with_options(name, o))
                 }
@@ -668,29 +679,31 @@ impl Runner<'_> {
                     let name = spec.get_str("collectionName").unwrap_or_default();
                     let mut o = mongodb::options::CollectionOptions::default();
                     if let Ok(d) = spec.get_document("collectionOptions") {
-                        o.read_concern = d
-                            .get_document("readConcern")
-                            .ok()
-                            .and_then(|r| mongodb::bson::from_document::<ReadConcern>(r.clone()).ok());
-                        o.write_concern = d
-                            .get_document("writeConcern")
-                            .ok()
-                            .and_then(|r| mongodb::bson::from_document::<WriteConcern>(r.clone()).ok());
+                        o.read_concern = d.get_document("readConcern").ok().and_then(|r| {
+                            mongodb::bson::from_document::<ReadConcern>(r.clone()).ok()
+                        });
+                        o.write_concern = d.get_document("writeConcern").ok().and_then(|r| {
+                            mongodb::bson::from_document::<WriteConcern>(r.clone()).ok()
+                        });
                     }
                     Entity::Coll(db.collection_with_options(name, o))
                 }
                 "session" => {
                     let (c, _) = self.client_of(spec.get_str("client").unwrap_or_default())?;
-                    let so: Option<SessionOptions> = spec.get_document("sessionOptions").ok().map(|d| {
-                        let mut so = SessionOptions::default();
-                        so.default_transaction_options = d
-                            .get_document("defaultTransactionOptions")
-                            .ok()
-                            .and_then(|t| mongodb::bson::from_document::<TransactionOptions>(t.clone()).ok());
-                        so.causal_consistency = d.get_bool("causalConsistency").ok();
-                        so.snapshot = d.get_bool("snapshot").ok();
-                        so
-                    });
+                    let so: Option<SessionOptions> =
+                        spec.get_document("sessionOptions").ok().map(|d| {
+                            let mut so = SessionOptions::default();
+                            so.default_transaction_options = d
+                                .get_document("defaultTransactionOptions")
+                                .ok()
+                                .and_then(|t| {
+                                    mongodb::bson::from_document::<TransactionOptions>(t.clone())
+                                        .ok()
+                                });
+                            so.causal_consistency = d.get_bool("causalConsistency").ok();
+                            so.snapshot = d.get_bool("snapshot").ok();
+                            so
+                        });
                     let s = match so {
                         Some(o) => c.start_session().with_options(o).await,
                         None => c.start_session().await,
@@ -713,7 +726,10 @@ impl Runner<'_> {
         }
     }
 
-    fn take_session(&mut self, args: &Document) -> Result<Option<(String, ClientSession)>, StepErr> {
+    fn take_session(
+        &mut self,
+        args: &Document,
+    ) -> Result<Option<(String, ClientSession)>, StepErr> {
         let Ok(name) = args.get_str("session") else {
             return Ok(None);
         };
@@ -767,7 +783,10 @@ impl Runner<'_> {
             return Ok(match name {
                 "startTransaction" => {
                     let o: TransactionOptions = opts_of(args, &[])?;
-                    s.start_transaction().with_options(o).await.map(|()| Out::None)
+                    s.start_transaction()
+                        .with_options(o)
+                        .await
+                        .map(|()| Out::None)
                 }
                 "commitTransaction" => s.commit_transaction().await.map(|()| Out::None),
                 "abortTransaction" => s.abort_transaction().await.map(|()| Out::None),
@@ -817,11 +836,8 @@ impl Runner<'_> {
                         Err(e) => Err(e),
                     }
                 }
-                "listDatabases" | "listDatabaseNames" => {
-                    run!(c.list_databases(), sess).map(|v| {
-                        Out::Rows(v.into_iter().map(|d| doc! {"name": d.name}).collect())
-                    })
-                }
+                "listDatabases" | "listDatabaseNames" => run!(c.list_databases(), sess)
+                    .map(|v| Out::Rows(v.into_iter().map(|d| doc! {"name": d.name}).collect())),
                 "clientBulkWrite" => return self.client_bulk(&c, args, sess).await,
                 other => return Err(StepErr::Unsupported(format!("client.{other}"))),
             });
@@ -841,10 +857,8 @@ impl Runner<'_> {
                     let n = args.get_str("collection").unwrap_or_default();
                     run!(db.collection::<Document>(n).drop(), sess).map(|()| Out::None)
                 }
-                "listCollections" | "listCollectionNames" => {
-                    run!(db.list_collection_names(), sess)
-                        .map(|v| Out::Rows(v.into_iter().map(|n| doc! {"name": n}).collect()))
-                }
+                "listCollections" | "listCollectionNames" => run!(db.list_collection_names(), sess)
+                    .map(|v| Out::Rows(v.into_iter().map(|n| doc! {"name": n}).collect())),
                 "aggregate" => {
                     let pipeline: Vec<Document> = args
                         .get_array("pipeline")
@@ -852,7 +866,12 @@ impl Runner<'_> {
                         .unwrap_or_default();
                     let o: AggregateOptions = opts_of(args, &["pipeline"])?;
                     match sess.as_mut() {
-                        Some(s) => match db.aggregate(pipeline).with_options(o).session(&mut *s).await {
+                        Some(s) => match db
+                            .aggregate(pipeline)
+                            .with_options(o)
+                            .session(&mut *s)
+                            .await
+                        {
                             Ok(mut cur) => {
                                 let mut v = Vec::new();
                                 loop {
@@ -894,8 +913,11 @@ impl Runner<'_> {
         Ok(match name {
             "insertOne" => {
                 let o: InsertOneOptions = opts_of(args, &["document"])?;
-                run!(c.insert_one(get_doc(args, "document")).with_options(o), sess)
-                    .map(|r| Out::Root(doc! {"insertedId": r.inserted_id}))
+                run!(
+                    c.insert_one(get_doc(args, "document")).with_options(o),
+                    sess
+                )
+                .map(|r| Out::Root(doc! {"insertedId": r.inserted_id}))
             }
             "insertMany" => {
                 let docs: Vec<Document> = args
@@ -981,7 +1003,9 @@ impl Runner<'_> {
                 };
                 r.map(|v| {
                     if name == "findOne" {
-                        v.into_iter().next().map_or(Out::Value(Bson::Null), Out::Root)
+                        v.into_iter()
+                            .next()
+                            .map_or(Out::Value(Bson::Null), Out::Root)
                     } else {
                         Out::Rows(v)
                     }
@@ -1040,8 +1064,12 @@ impl Runner<'_> {
             }
             "findOneAndReplace" => {
                 let o: FindOneAndReplaceOptions = opts_of(args, &["filter", "replacement"])?;
-                run!(c.find_one_and_replace(filter, get_doc(args, "replacement")).with_options(o), sess)
-                    .map(|d| d.map_or(Out::Value(Bson::Null), Out::Root))
+                run!(
+                    c.find_one_and_replace(filter, get_doc(args, "replacement"))
+                        .with_options(o),
+                    sess
+                )
+                .map(|d| d.map_or(Out::Value(Bson::Null), Out::Root))
             }
             "findOneAndDelete" => {
                 let o: FindOneAndDeleteOptions = opts_of(args, &["filter"])?;
@@ -1063,10 +1091,13 @@ impl Runner<'_> {
                 run!(c.drop_index(n), sess).map(|()| Out::None)
             }
             "listIndexes" => match c.list_indexes().await {
-                Ok(cur) => cur
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map(|v| Out::Rows(v.into_iter().map(|m| mongodb::bson::to_document(&m).unwrap_or_default()).collect())),
+                Ok(cur) => cur.try_collect::<Vec<_>>().await.map(|v| {
+                    Out::Rows(
+                        v.into_iter()
+                            .map(|m| mongodb::bson::to_document(&m).unwrap_or_default())
+                            .collect(),
+                    )
+                }),
                 Err(e) => Err(e),
             },
             "drop" => run!(c.drop(), sess).map(|()| Out::None),
@@ -1125,13 +1156,49 @@ impl Runner<'_> {
             let af = v.get_array("arrayFilters").ok().cloned();
             let up = v.get_bool("upsert").ok();
             models.push(match k.as_str() {
-                "insertOne" => InsertOneModel::builder().namespace(n).document(get_doc(&v, "document")).build().into(),
-                "updateOne" => UpdateOneModel::builder().namespace(n).filter(f).update(update_mods(v.get("update").unwrap_or(&Bson::Null))?).array_filters(af).upsert(up).build().into(),
-                "updateMany" => UpdateManyModel::builder().namespace(n).filter(f).update(update_mods(v.get("update").unwrap_or(&Bson::Null))?).array_filters(af).upsert(up).build().into(),
-                "replaceOne" => ReplaceOneModel::builder().namespace(n).filter(f).replacement(get_doc(&v, "replacement")).upsert(up).build().into(),
-                "deleteOne" => DeleteOneModel::builder().namespace(n).filter(f).build().into(),
-                "deleteMany" => DeleteManyModel::builder().namespace(n).filter(f).build().into(),
-                other => return Err(StepErr::Unsupported(format!("clientBulkWrite model {other}"))),
+                "insertOne" => InsertOneModel::builder()
+                    .namespace(n)
+                    .document(get_doc(&v, "document"))
+                    .build()
+                    .into(),
+                "updateOne" => UpdateOneModel::builder()
+                    .namespace(n)
+                    .filter(f)
+                    .update(update_mods(v.get("update").unwrap_or(&Bson::Null))?)
+                    .array_filters(af)
+                    .upsert(up)
+                    .build()
+                    .into(),
+                "updateMany" => UpdateManyModel::builder()
+                    .namespace(n)
+                    .filter(f)
+                    .update(update_mods(v.get("update").unwrap_or(&Bson::Null))?)
+                    .array_filters(af)
+                    .upsert(up)
+                    .build()
+                    .into(),
+                "replaceOne" => ReplaceOneModel::builder()
+                    .namespace(n)
+                    .filter(f)
+                    .replacement(get_doc(&v, "replacement"))
+                    .upsert(up)
+                    .build()
+                    .into(),
+                "deleteOne" => DeleteOneModel::builder()
+                    .namespace(n)
+                    .filter(f)
+                    .build()
+                    .into(),
+                "deleteMany" => DeleteManyModel::builder()
+                    .namespace(n)
+                    .filter(f)
+                    .build()
+                    .into(),
+                other => {
+                    return Err(StepErr::Unsupported(format!(
+                        "clientBulkWrite model {other}"
+                    )));
+                }
             });
         }
         let o: mongodb::options::BulkWriteOptions = opts_of(args, &["models", "verboseResults"])?;
@@ -1202,8 +1269,11 @@ impl Runner<'_> {
             }
             // The driver keeps no public pinning or dirty state: these
             // assertions about driver internals can't be checked here.
-            "assertSessionPinned" | "assertSessionUnpinned" | "assertSessionDirty"
-            | "assertSessionNotDirty" | "assertSessionTransactionState" => Ok(Ok(Out::None)),
+            "assertSessionPinned"
+            | "assertSessionUnpinned"
+            | "assertSessionDirty"
+            | "assertSessionNotDirty"
+            | "assertSessionTransactionState" => Ok(Ok(Out::None)),
             "assertSameLsidOnLastTwoCommands" | "assertDifferentLsidOnLastTwoCommands" => {
                 let (_, ev) = self.client_of(args.get_str("client").unwrap_or_default())?;
                 let lsids: Vec<Option<Bson>> = ev
@@ -1211,7 +1281,9 @@ impl Runner<'_> {
                     .unwrap()
                     .iter()
                     .filter_map(|e| match e {
-                        Ev::Started { name, command, .. } if !SENSITIVE.contains(&name.as_str()) => {
+                        Ev::Started { name, command, .. }
+                            if !SENSITIVE.contains(&name.as_str()) =>
+                        {
                             Some(command.get("lsid").cloned())
                         }
                         _ => None,
@@ -1298,10 +1370,27 @@ impl Runner<'_> {
             .iter()
             .filter_map(Bson::as_document)
         {
-            let db = self.setup.database(d.get_str("databaseName").unwrap_or_default());
+            let db = self
+                .setup
+                .database(d.get_str("databaseName").unwrap_or_default());
             let cname = d.get_str("collectionName").unwrap_or_default();
             let c = db.collection::<Document>(cname);
-            let _ = c.drop().await;
+            // A drop refused while an earlier DDL job is unfinished (39071)
+            // is retried, as a client would.
+            let mut tries = 0;
+            loop {
+                match c.drop().await {
+                    Ok(()) => break,
+                    Err(e) if tries < 40 && e.to_string().contains("another DDL") => {
+                        tries += 1;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    Err(e) if e.to_string().contains("another DDL") => {
+                        return fail(format!("initialData drop of {cname}: {e}"));
+                    }
+                    Err(_) => break,
+                }
+            }
             let docs: Vec<Document> = d
                 .get_array("documents")
                 .map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect())
@@ -1315,7 +1404,10 @@ impl Runner<'_> {
             }
         }
         self.entities.clear();
-        let list = file.get_array("createEntities").cloned().unwrap_or_default();
+        let list = file
+            .get_array("createEntities")
+            .cloned()
+            .unwrap_or_default();
         self.create_entities(&list).await?;
         for (_, e) in &self.entities {
             if let Entity::Client(_, ev, _) = e {
@@ -1326,7 +1418,10 @@ impl Runner<'_> {
         for (i, op) in ops.iter().filter_map(Bson::as_document).enumerate() {
             let opname = op.get_str("name").unwrap_or_default().to_owned();
             if std::env::var_os("SPRIG_SPEC_TRACE").is_some() {
-                eprintln!("  op {i} {opname} {}", op.get_str("object").unwrap_or_default());
+                eprintln!(
+                    "  op {i} {opname} {}",
+                    op.get_str("object").unwrap_or_default()
+                );
             }
             let r = self.op(op).await?;
             // A stream created by this op: keep it under its result name.
@@ -1338,11 +1433,10 @@ impl Runner<'_> {
             }
             let ignore = op.get_bool("ignoreResultAndError").unwrap_or(false);
             match (r, op.get_document("expectError").ok()) {
-                (Err(e), Some(x)) => check_error(x, &e)
-                    .map_err(|m| match m {
-                        StepErr::Fail(m) => StepErr::Fail(format!("op {i} {opname}: {m}")),
-                        u => u,
-                    })?,
+                (Err(e), Some(x)) => check_error(x, &e).map_err(|m| match m {
+                    StepErr::Fail(m) => StepErr::Fail(format!("op {i} {opname}: {m}")),
+                    u => u,
+                })?,
                 (Err(_), None) if ignore => {}
                 (Err(e), None) => return fail(format!("op {i} {opname}: unexpected error {e}")),
                 (Ok(_), Some(x)) if !ignore => {
@@ -1367,7 +1461,9 @@ impl Runner<'_> {
                         let v = match out {
                             Out::None => Bson::Null,
                             Out::Value(v) => v,
-                            Out::Rows(r) => Bson::Array(r.into_iter().map(Bson::Document).collect()),
+                            Out::Rows(r) => {
+                                Bson::Array(r.into_iter().map(Bson::Document).collect())
+                            }
                             Out::Root(d) => Bson::Document(d),
                         };
                         self.entities.insert(n.to_owned(), Entity::Value(v));
@@ -1444,7 +1540,11 @@ impl Runner<'_> {
                             if r.is_ok()
                                 && let Ok(c) = wv.get_document("command")
                             {
-                                r = cx.matches(&Bson::Document(c.clone()), &Bson::Document(command.clone()), true);
+                                r = cx.matches(
+                                    &Bson::Document(c.clone()),
+                                    &Bson::Document(command.clone()),
+                                    true,
+                                );
                             }
                             r
                         }
@@ -1458,14 +1558,20 @@ impl Runner<'_> {
                             if r.is_ok()
                                 && let Ok(c) = wv.get_document("reply")
                             {
-                                r = cx.matches(&Bson::Document(c.clone()), &Bson::Document(reply.clone()), true);
+                                r = cx.matches(
+                                    &Bson::Document(c.clone()),
+                                    &Bson::Document(reply.clone()),
+                                    true,
+                                );
                             }
                             r
                         }
-                        ("commandFailedEvent", Ev::Failed { name }) => match wv.get_str("commandName") {
-                            Ok(n) if n != name => Err(format!("commandName {n}, got {name}")),
-                            _ => Ok(()),
-                        },
+                        ("commandFailedEvent", Ev::Failed { name }) => {
+                            match wv.get_str("commandName") {
+                                Ok(n) if n != name => Err(format!("commandName {n}, got {name}")),
+                                _ => Ok(()),
+                            }
+                        }
                         (k, g) => Err(format!("expected {k}, got {g:?}")),
                     };
                     r.map_err(|m| StepErr::Fail(format!("event {i}: {m}")))?;
@@ -1602,9 +1708,10 @@ async fn unified_spec_tests() {
                         entities: HashMap::new(),
                         setup: setup.clone(),
                     };
-                    let v = tokio::time::timeout(Duration::from_secs(test_secs), r.run_test(&file, t))
-                        .await
-                        .unwrap_or_else(|_| Verdict::Fail("timed out".into()));
+                    let v =
+                        tokio::time::timeout(Duration::from_secs(test_secs), r.run_test(&file, t))
+                            .await
+                            .unwrap_or_else(|_| Verdict::Fail("timed out".into()));
                     if t.to_string().contains("ailPoint") {
                         for fp in FAIL_POINTS {
                             let _ = setup
@@ -1624,6 +1731,9 @@ async fn unified_spec_tests() {
                     Verdict::Fail(m) => {
                         failed += 1;
                         report.push_str(&format!("FAIL {suite}/{fname}: {desc}\n    {m}\n"));
+                        if let Some(p) = env_report() {
+                            let _ = std::fs::write(&p, &report);
+                        }
                     }
                     Verdict::NotApplicable(_) => na += 1,
                     Verdict::Unsupported(m) => {
@@ -1648,7 +1758,11 @@ async fn unified_spec_tests() {
     let (p, f): (i32, i32) = totals.iter().fold((0, 0), |a, t| (a.0 + t.1, a.1 + t.2));
     eprintln!(
         "all suites: {p} passed, {f} failed ({:.1}%)",
-        if p + f == 0 { 0.0 } else { 100.0 * f64::from(p) / f64::from(p + f) }
+        if p + f == 0 {
+            0.0
+        } else {
+            100.0 * f64::from(p) / f64::from(p + f)
+        }
     );
     if let Some(path) = env_report() {
         std::fs::write(path, report).unwrap();

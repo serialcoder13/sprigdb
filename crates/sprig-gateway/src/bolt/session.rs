@@ -31,16 +31,16 @@ use sprig_auth::authz::Action;
 use sprig_auth::mysql::Principal;
 use sprig_catalog::{Freshness, TenantCatalog};
 use sprig_common::ids::{ClusterId, DcId, TenantId};
+use sprig_common::ids::{DbId, GroupId};
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_graph::ast::{Clause, Query};
 use sprig_graph::bookmark::{self, Bookmark};
-use sprig_common::ids::{DbId, GroupId};
 use sprig_graph::catalog::backend_error;
 use sprig_graph::eval::Params;
 use sprig_graph::maria::{GraphShards, MariaStore, ShardConns, check_deleted};
-use sprig_txn::{BeginOptions, TxnCoordinator};
 use sprig_proto_bolt::PackValue;
 use sprig_proto_bolt::server::{BoltFailure, BoltSession, QueryResult};
+use sprig_txn::{BeginOptions, TxnCoordinator};
 use tokio::sync::{mpsc, oneshot};
 
 use super::stream::{CHANNEL_ROWS, ChanSink, Msg, Start, summary};
@@ -85,6 +85,8 @@ struct Causal {
 
 pub(super) struct GwSession {
     principal: Principal,
+    /// The gateway session table's entry (`SHOW PROCESSLIST`, `KILL`).
+    reg: Option<crate::session::Session>,
     graphs: Arc<GatewayGraphs>,
     backend: Arc<GraphBackend>,
     dc: DcId,
@@ -200,6 +202,7 @@ impl GwSession {
     ) -> Self {
         Self {
             principal,
+            reg: None,
             backend: Arc::new(GraphBackend::new(Arc::clone(&graphs))),
             graphs,
             dc,
@@ -208,6 +211,16 @@ impl GwSession {
             advertise,
             ttl,
         }
+    }
+
+    /// The logged-in principal.
+    pub(super) fn principal(&self) -> &Principal {
+        &self.principal
+    }
+
+    /// Joins the gateway's session table.
+    pub(super) fn attach(&mut self, s: crate::session::Session) {
+        self.reg = Some(s);
     }
 
     fn tenant(&self) -> TenantId {
@@ -276,11 +289,7 @@ impl GwSession {
     async fn after_commit(&self) -> Result<String> {
         for (cluster, g) in self.backend.take_positions() {
             if let Ok(set) = GtidSet::parse(&g) {
-                self.causal()
-                    .gtids
-                    .entry(cluster)
-                    .or_default()
-                    .union(&set);
+                self.causal().gtids.entry(cluster).or_default().union(&set);
             }
         }
         let key = self.graphs.bookmark_key(self.tenant()).await?;
@@ -582,6 +591,39 @@ impl GwSession {
                 ));
             }
         }
+        if g.def.kind == "mapped" {
+            if has_writes(&q) {
+                return Err(SprigError::new(
+                    SprigCode::GraphReadOnlySource,
+                    format!(
+                        "graph '{}.{}' is mapped over tables: write them in SQL",
+                        g.db, g.name
+                    ),
+                ));
+            }
+            // An invoker's check on every source table (chapter 43,
+            // "Security notes").
+            let def = mapped_def(&g)?;
+            for (t, o) in self.graphs.mapped_sources(&cat, g.db_id, &def)? {
+                if !self.graphs.allows(
+                    grants.as_deref(),
+                    &cat,
+                    &g.db,
+                    g.db_id,
+                    Some(o),
+                    Action::Select,
+                ) {
+                    return Err(SprigError::standard(
+                        1142,
+                        *b"42000",
+                        format!(
+                            "SELECT command denied to user '{}' for table '{}.{t}' (a source of graph '{}')",
+                            self.principal.user, g.db, g.name
+                        ),
+                    ));
+                }
+            }
+        }
         let ctx = cat.setting_ctx(&self.dc).with_db(g.db_id);
         let settings = &self.graphs.svc.settings;
         let mut budgets =
@@ -614,7 +656,31 @@ impl GwSession {
             read_mode,
         } = pr;
         let writes = has_writes(&q);
-        let g = if writes { self.after_holds(g).await? } else { g };
+        if g.def.kind == "mapped" {
+            // Read-only SQL over the user's tables, on its own read-only
+            // transaction (also inside an explicit Bolt transaction).
+            let def = mapped_def(&g)?;
+            let mut rc = ReadConns::default();
+            if let Err(e) = self.open_reads(&mut rc, &g, read_mode, &cat).await {
+                rc.end().await;
+                return Err(e);
+            }
+            let r = match rc.conns.get_mut(g.cluster.as_str()) {
+                Some(conn) => {
+                    let mut store =
+                        sprig_graph::mapped::MappedStore::new(conn, g.graph_id, &g.schema, def);
+                    sprig_graph::exec::run(&mut store, &q, &p, &budgets).await
+                }
+                None => Err(SprigError::internal("no connection for a mapped graph")),
+            };
+            rc.end().await;
+            return Ok(StartOrResult::Result(self.result(r?, &g.name, &cat)?));
+        }
+        let g = if writes {
+            self.after_holds(g).await?
+        } else {
+            g
+        };
         let dict = self.graphs.dictionary(&g);
         let (labels, types) = self.graphs.names_of(&g);
         let ids = self.graphs.counters(&g).await?;
@@ -646,15 +712,9 @@ impl GwSession {
                     return Ok(StartOrResult::Stream(rx, g.name));
                 }
                 let r = {
-                    let mut store = MariaStore::new(
-                        &mut rc,
-                        Arc::clone(&g.shards),
-                        labels,
-                        types,
-                        dict,
-                        ids,
-                    )
-                    .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)));
+                    let mut store =
+                        MariaStore::new(&mut rc, Arc::clone(&g.shards), labels, types, dict, ids)
+                            .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)));
                     sprig_graph::exec::run(&mut store, &q, &p, &budgets).await
                 };
                 rc.end().await;
@@ -674,15 +734,9 @@ impl GwSession {
                     touched: &mut touched,
                 };
                 let r = {
-                    let mut store = MariaStore::new(
-                        &mut cc,
-                        Arc::clone(&g.shards),
-                        labels,
-                        types,
-                        dict,
-                        ids,
-                    )
-                    .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)));
+                    let mut store =
+                        MariaStore::new(&mut cc, Arc::clone(&g.shards), labels, types, dict, ids)
+                            .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)));
                     sprig_graph::exec::run(&mut store, &q, &p, &budgets).await
                 };
                 match r {
@@ -882,30 +936,56 @@ impl GwSession {
     }
 }
 
+/// Whether `e` says the statement used a shard map that changed under it.
+fn stale(e: &SprigError) -> bool {
+    match e.kind {
+        sprig_common::ErrorKind::Backend { errno, .. } => matches!(errno, 1146 | 1049),
+        _ => e.code() == Some(SprigCode::ShardMapChanged),
+    }
+}
+
+/// A mapped graph's definition.
+fn mapped_def(g: &GraphRef) -> Result<sprig_graph::mapped::MappedDef> {
+    serde_json::from_str(g.def.definition.as_deref().unwrap_or("{}"))
+        .map_err(|e| SprigError::internal(format!("mapped graph definition: {e}")))
+}
+
 /// What `execute` produced.
 enum StartOrResult {
     Result(QueryResult),
     Stream(mpsc::Receiver<Msg>, String),
 }
 
-#[async_trait]
-impl BoltSession for GwSession {
-    async fn run(
+impl GwSession {
+    /// A `RUN`: prepare and execute, again with a fresh map when the
+    /// statement met a shard that moved.
+    async fn run_inner(
         &mut self,
         query: &str,
         params: &PackValue,
         extra: &PackValue,
     ) -> std::result::Result<QueryResult, BoltFailure> {
         let started = Instant::now();
-        let pr = match self.prepare(query, params, extra).await {
-            Ok(Prep::Done(r)) => return Ok(r),
-            Ok(Prep::Run(p)) => *p,
-            Err(e) => return Err(failure(&e)),
-        };
-        let (rx, graph) = match self.execute(pr).await {
-            Ok(StartOrResult::Result(r)) => return Ok(r),
-            Ok(StartOrResult::Stream(rx, g)) => (rx, g),
-            Err(e) => return Err(failure(&e)),
+        let mut attempt = 0;
+        let (rx, graph) = loop {
+            let pr = match self.prepare(query, params, extra).await {
+                Ok(Prep::Done(r)) => return Ok(r),
+                Ok(Prep::Run(p)) => *p,
+                Err(e) => return Err(failure(&e)),
+            };
+            match self.execute(pr).await {
+                Ok(StartOrResult::Result(r)) => return Ok(r),
+                Ok(StartOrResult::Stream(rx, g)) => break (rx, g),
+                // An auto-commit statement that met a shard the mover just
+                // split, merged or moved (its schema or table is gone, or
+                // the map changed under it) runs again with the new map.
+                Err(e) if self.tx.is_none() && attempt < 5 && stale(&e) => {
+                    attempt += 1;
+                    metrics::counter!("sprig_graph_stale_map_retries_total").increment(1);
+                    tokio::time::sleep(Duration::from_millis(100 << attempt.min(4))).await;
+                }
+                Err(e) => return Err(failure(&e)),
+            }
         };
         let start = super::stream::start(rx).await?;
         let t_first = i64::try_from(started.elapsed().as_millis()).unwrap_or(0);
@@ -928,6 +1008,57 @@ impl BoltSession for GwSession {
                 ..QueryResult::default()
             },
         })
+    }
+}
+
+#[async_trait]
+impl BoltSession for GwSession {
+    async fn run(
+        &mut self,
+        query: &str,
+        params: &PackValue,
+        extra: &PackValue,
+    ) -> std::result::Result<QueryResult, BoltFailure> {
+        let handle = self.reg.as_ref().map(|s| {
+            s.begin_command("Query", Some(query.chars().take(1024).collect()));
+            s.set_db(
+                extra
+                    .get("db")
+                    .and_then(PackValue::as_str)
+                    .map(str::to_owned),
+            );
+            Arc::clone(s.handle())
+        });
+        let r = match handle {
+            // Guarded like a MySQL statement (G40, decision bugfix-1): a
+            // heavy statement moves to a blocking thread, and a stalled
+            // runtime names and stops it.
+            Some(h) => {
+                let threshold = usize::try_from(crate::offload::LARGE_STATEMENT_BYTES.default)
+                    .unwrap_or(usize::MAX);
+                Box::pin(crate::offload::run_for(&h, query.len(), threshold, async {
+                    tokio::select! {
+                        r = self.run_inner(query, params, extra) => r,
+                        () = h.flags().query_killed() => {
+                            h.flags().take_kill_query();
+                            // Whatever the statement held is dropped: its
+                            // connections close and roll back.
+                            self.abandon();
+                            Err(BoltFailure::new(
+                                "Neo.TransientError.Transaction.Terminated",
+                                "The transaction has been terminated (KILL)",
+                            ))
+                        }
+                    }
+                }))
+                .await
+            }
+            None => self.run_inner(query, params, extra).await,
+        };
+        if let Some(s) = &self.reg {
+            s.end_command();
+        }
+        r
     }
 
     async fn begin(&mut self, extra: &PackValue) -> std::result::Result<(), BoltFailure> {

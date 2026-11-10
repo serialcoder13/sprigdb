@@ -41,8 +41,8 @@ use sprig_common::{Result, SprigCode, SprigError};
 use crate::ast::{Dir, Entity, Schema};
 use crate::catalog::{Tables, backend_error};
 use crate::store::{
-    EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, NodeRow, Reach, Scan, SchemaCounts,
-    StoreStats, rk_of,
+    EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, NodeRow, Reach, Scan, SchemaCounts, StoreStats,
+    rk_of,
 };
 
 /// Labels and relationship types of a graph, and how new ones are made.
@@ -470,7 +470,12 @@ impl<'c> MariaStore<'c> {
         Ok(conn.affected_rows())
     }
 
-    async fn node_rows_at(&mut self, i: usize, sql: String, params: Params) -> Result<Vec<NodeRow>> {
+    async fn node_rows_at(
+        &mut self,
+        i: usize,
+        sql: String,
+        params: Params,
+    ) -> Result<Vec<NodeRow>> {
         let rows = self.rows_at(i, sql, params).await?;
         Ok(rows
             .into_iter()
@@ -728,7 +733,9 @@ impl GraphStore for MariaStore<'_> {
             return Ok(Vec::new());
         }
         if shard >= self.layout.shards.len() {
-            return Err(SprigError::internal("reach on a shard the graph doesn't have"));
+            return Err(SprigError::internal(
+                "reach on a shard the graph doesn't have",
+            ));
         }
         self.stats.cte_queries += 1;
         // Incoming over several shards recurses over the mirrors, whose
@@ -947,7 +954,9 @@ impl GraphStore for MariaStore<'_> {
         }
         let mut by: BTreeMap<usize, Vec<&EdgeRow>> = BTreeMap::new();
         for r in rows {
-            by.entry(self.layout.index_of(r.src_rk)).or_default().push(r);
+            by.entry(self.layout.index_of(r.src_rk))
+                .or_default()
+                .push(r);
         }
         for (i, part) in by {
             let mut sql = format!(
@@ -985,7 +994,9 @@ impl GraphStore for MariaStore<'_> {
         // Mirrors on the destinations' shards, in the same transaction.
         let mut by: BTreeMap<usize, Vec<&EdgeRow>> = BTreeMap::new();
         for r in rows {
-            by.entry(self.layout.index_of(r.dst_rk)).or_default().push(r);
+            by.entry(self.layout.index_of(r.dst_rk))
+                .or_default()
+                .push(r);
         }
         for (i, part) in by {
             let mut sql = format!(
@@ -1239,11 +1250,17 @@ pub async fn check_deleted(
             let at = &layout.shards[i];
             let l = ids_list(&part);
             let incoming = if many && layout.mirrors {
-                format!(" UNION SELECT dst FROM {} WHERE dst IN ({l})", at.tables.mirrors)
+                format!(
+                    " UNION SELECT dst FROM {} WHERE dst IN ({l})",
+                    at.tables.mirrors
+                )
             } else if many {
                 String::new()
             } else {
-                format!(" UNION SELECT dst FROM {} WHERE dst IN ({l})", at.tables.edges)
+                format!(
+                    " UNION SELECT dst FROM {} WHERE dst IN ({l})",
+                    at.tables.edges
+                )
             };
             let conn = conns.conn(at, false).await?;
             let h: Option<u64> = conn

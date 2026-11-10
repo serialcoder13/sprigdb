@@ -424,3 +424,138 @@ async fn throughput_sample() {
         }
     }
 }
+
+/// Key locations and `KeyValue.GeoSearch` over REST (chapters 33 and 36,
+/// R6 round 3): 400 keys with locations (and 20 without), then circles,
+/// boxes, polygons and nearest-k searches, each against brute force with
+/// WGS 84 distances (Karney). Uses database `r6three_kvgeo`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kv_geo_search() {
+    let (Some(u1), Some(http_addr)) = (var("SPRIG_TEST_REDIS_SPRIG"), var("SPRIG_TEST_KV_HTTP"))
+    else {
+        eprintln!("SPRIG_TEST_REDIS_SPRIG or SPRIG_TEST_KV_HTTP not set: skipped");
+        return;
+    };
+    let (user, pass) = creds(&u1);
+    let auth = format!("{user}:{pass}");
+    let base = "/v1/databases/r6three_kvgeo/namespaces/places";
+    let mut seed = 5u64;
+    let mut rnd = |lo: f64, hi: f64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        lo + (hi - lo) * ((seed >> 11) as f64 / (1u64 << 53) as f64)
+    };
+    let mut pts: Vec<(String, f64, f64)> = Vec::new();
+    for i in 0..420 {
+        let key = format!("p{i:03}");
+        let (lat, lng) = (rnd(18.8, 19.3), rnd(72.7, 73.1));
+        let mut body = json!({"key": key, "text": format!("v{i}")});
+        if i < 400 {
+            body["location"] = json!({"latitude": lat, "longitude": lng});
+            pts.push((key, lat, lng));
+        }
+        let (st, r) = http(&http_addr, &auth, &format!("{base}:put"), &body).await;
+        assert_eq!(st, 200, "{r}");
+    }
+    let dist = sprig_geo::region::distance_m;
+    let mut bad = Vec::new();
+    let mut checks = 0;
+    let keys_of = |r: &J| -> Vec<String> {
+        r["hits"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|h| h["entry"]["key"].as_str().unwrap_or("").to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for k in 0..8 {
+        let (clat, clng) = (rnd(18.9, 19.2), rnd(72.8, 73.0));
+        // A circle, ordered by distance from its center.
+        let r_m = rnd(1_000.0, 9_000.0);
+        let (st, r) = http(&http_addr, &auth, &format!("{base}:geoSearch"), &json!({
+            "region": {"center": {"latitude": clat, "longitude": clng}, "radius_m": r_m}, "limit": 1000})).await;
+        let mut want: Vec<(f64, String)> = pts
+            .iter()
+            .map(|(key, la, lo)| (dist(clat, clng, *la, *lo), key.clone()))
+            .filter(|(d, _)| *d <= r_m)
+            .collect();
+        want.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let want_keys: Vec<String> = want.iter().map(|w| w.1.clone()).collect();
+        checks += 1;
+        let close = r["hits"].as_array().is_some_and(|a| {
+            a.iter()
+                .zip(&want)
+                .all(|(h, w)| (h["distance_m"].as_f64().unwrap_or(-1.0) - w.0).abs() < 1e-3)
+        });
+        if st != 200 || keys_of(&r) != want_keys || !close {
+            bad.push(format!("circle {k}: {st} {} vs {}", keys_of(&r).len(), want_keys.len()));
+        }
+        // A box, in key order.
+        let (s, w) = (clat - 0.05, clng - 0.07);
+        let (n, e) = (clat + 0.04, clng + 0.06);
+        let (st, r) = http(&http_addr, &auth, &format!("{base}:geoSearch"), &json!({
+            "region": {"south_west": {"latitude": s, "longitude": w}, "north_east": {"latitude": n, "longitude": e}}, "limit": 1000})).await;
+        let mut want: Vec<String> = pts
+            .iter()
+            .filter(|(_, la, lo)| *la >= s && *la <= n && *lo >= w && *lo <= e)
+            .map(|p| p.0.clone())
+            .collect();
+        want.sort();
+        checks += 1;
+        if st != 200 || keys_of(&r) != want {
+            bad.push(format!("box {k}: {st} {:?} vs {want:?}", keys_of(&r)));
+        }
+        // A triangle, ordered from `near`.
+        let tri = [(clat - 0.05, clng - 0.05), (clat - 0.03, clng + 0.06), (clat + 0.06, clng)];
+        let (st, r) = http(&http_addr, &auth, &format!("{base}:geoSearch"), &json!({
+            "region": {"polygon": tri.iter().map(|(a, b)| json!({"latitude": a, "longitude": b})).collect::<Vec<_>>()},
+            "near": {"latitude": clat, "longitude": clng}, "limit": 1000})).await;
+        let region = sprig_geo::region::Region::Polygon(tri.to_vec());
+        let mut want: Vec<(f64, String)> = pts
+            .iter()
+            .filter(|(_, la, lo)| region.contains(*la, *lo))
+            .map(|(key, la, lo)| (dist(clat, clng, *la, *lo), key.clone()))
+            .collect();
+        want.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let want: Vec<String> = want.into_iter().map(|w| w.1).collect();
+        checks += 1;
+        if st != 200 || keys_of(&r) != want || want.is_empty() {
+            bad.push(format!("polygon {k}: {st} {:?} vs {want:?}", keys_of(&r)));
+        }
+        // The 10 nearest keys anywhere.
+        let (st, r) = http(&http_addr, &auth, &format!("{base}:geoSearch"), &json!({
+            "near": {"latitude": clat, "longitude": clng}, "limit": 10})).await;
+        let mut all: Vec<(f64, String)> = pts
+            .iter()
+            .map(|(key, la, lo)| (dist(clat, clng, *la, *lo), key.clone()))
+            .collect();
+        all.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let want: Vec<String> = all.into_iter().take(10).map(|w| w.1).collect();
+        checks += 1;
+        if st != 200 || keys_of(&r) != want {
+            bad.push(format!("nearest {k}: {st} {:?} vs {want:?}", keys_of(&r)));
+        }
+    }
+    // A bad region.
+    let (st, _) = http(&http_addr, &auth, &format!("{base}:geoSearch"), &json!({
+        "region": {"center": {"latitude": 95.0, "longitude": 0.0}, "radius_m": 10.0}})).await;
+    checks += 1;
+    if st != 400 {
+        bad.push(format!("bad region: {st}"));
+    }
+    for b in &bad {
+        eprintln!("MISMATCH {b}");
+    }
+    eprintln!("kv geo: {checks} checks, {} mismatches", bad.len());
+    if let Some(sql) = var("SPRIG_TEST_KV_SQL") {
+        let mut c = mysql_async::Conn::new(mysql_async::Opts::from_url(&sql).unwrap())
+            .await
+            .unwrap();
+        c.query_drop("DROP DATABASE IF EXISTS r6three_kvgeo").await.unwrap();
+        c.disconnect().await.unwrap();
+    }
+    assert!(bad.is_empty());
+}

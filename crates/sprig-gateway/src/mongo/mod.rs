@@ -16,6 +16,7 @@
 //! - [`publish`]: the publication wait for new array paths;
 //! - [`changes`]: change streams over the change feed;
 //! - [`users`]: user and role commands over chapter 29's accounts.
+//! - [`logic`]: `sprigCall`, logic-layer functions (chapter 41, R7).
 //!
 //! Interim scope (R5 interim, `decisions/r5-interim.md`): transactions on one executor
 //! session per `lsid`, and no `$clusterTime` signing.
@@ -26,8 +27,10 @@ pub mod commands;
 pub mod conn;
 pub mod cursors;
 pub mod failpoint;
+pub mod logic;
 pub mod publish;
 pub mod retry;
+pub mod search;
 pub mod sql;
 pub mod txn;
 pub mod users;

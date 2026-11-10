@@ -1407,9 +1407,20 @@ impl Ex<'_> {
             {
                 let s = scan(e);
                 let slots = self.slots(&s);
+                let name = last_name(&f.name);
                 for parts in &s.columns {
                     if let Some(c) = self.col(parts) {
                         self.pred(&c, PredOp::Vector, slots.clone());
+                        // The distance function, for chapter 13's vector
+                        // candidates (R6 round 3): which metric an index
+                        // would need.
+                        self.pred(
+                            &c,
+                            PredOp::Unsargable {
+                                why: Unsargable::Function(name.clone()),
+                            },
+                            Vec::new(),
+                        );
                     }
                 }
                 self.shape.order_by_expr = true;

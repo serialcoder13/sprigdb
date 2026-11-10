@@ -37,6 +37,8 @@ pub mod auth;
 pub mod functions;
 pub mod grpc;
 pub mod kv;
+/// Live `vector.*` and `analytics.*` settings (R6 round 3).
+pub mod model_settings;
 pub mod rest;
 pub mod settings;
 pub mod sink;

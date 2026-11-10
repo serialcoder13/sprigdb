@@ -87,12 +87,7 @@ impl SigningKey {
     ///
     /// # Errors
     /// `Internal` if the OS random source fails.
-    pub fn generate(
-        dc: &DcId,
-        gateway: &str,
-        now: SystemTime,
-        rotation: Duration,
-    ) -> Result<Self> {
+    pub fn generate(dc: &DcId, gateway: &str, now: SystemTime, rotation: Duration) -> Result<Self> {
         let rng = ring::rand::SystemRandom::new();
         let doc = Ed25519KeyPair::generate_pkcs8(&rng)
             .map_err(|_| SprigError::internal("can't make a token signing key"))?;

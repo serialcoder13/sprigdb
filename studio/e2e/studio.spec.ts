@@ -95,6 +95,11 @@ test.describe.serial('Studio R0', () => {
     await page.getByRole('button', { name: 'Run', exact: true }).click();
     await expect(page.getByTestId('truncated')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId('result-0')).toContainText('10,000 rows');
+    // Sql.Check marks an unknown column before anything runs (Monaco's
+    // squiggle, from the gateway's EXPLAIN bind).
+    await typeSql(page, 'SELECT nope FROM orders');
+    await expect(page.locator('.squiggly-error')).toHaveCount(1, { timeout: 10_000 });
+    await shot(page, 'query-check');
     // A syntax error shows its code and trace id.
     await typeSql(page, 'SELEC 1');
     await page.getByRole('button', { name: 'Run', exact: true }).click();
@@ -176,6 +181,16 @@ test.describe.serial('Studio R0', () => {
     await shot(page, 'indexing');
     await page.getByRole('tab', { name: 'Recommendations' }).click();
     await shot(page, 'indexing-recommendations');
+    // Workload.ListFingerprints: the statements this suite ran are there,
+    // Studio's marked as such; one fingerprint's series charts.
+    await page.getByRole('tab', { name: 'Fingerprints' }).click();
+    await expect(page.getByTestId('fingerprints').locator('tbody tr').first()).toBeVisible({ timeout: 90_000 });
+    await page.getByLabel('Source').selectOption('studio');
+    await expect(page.getByTestId('fingerprints').locator('tbody tr').first()).toContainText('Studio', { timeout: 30_000 });
+    await page.getByTestId('fingerprints').getByRole('button', { name: /Latency series/ }).first().click();
+    await expect(page.getByRole('region', { name: 'Latency series' }).locator('tbody tr').first()).toBeVisible();
+    await axe(page, 'indexing-fingerprints');
+    await shot(page, 'indexing-fingerprints');
   });
 
   test('another tenant sees none of this tenant\'s data', async ({ playwright, baseURL }) => {

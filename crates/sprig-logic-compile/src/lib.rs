@@ -233,7 +233,12 @@ pub fn compile(
     }
 }
 
-fn finish(f: Function, mut reasons: Vec<Reason>, lints: Vec<Reason>, opts: &Options) -> Compiled {
+pub(crate) fn finish(
+    f: Function,
+    mut reasons: Vec<Reason>,
+    lints: Vec<Reason>,
+    opts: &Options,
+) -> Compiled {
     let mut analysis = check::analyze(&f, opts);
     reasons.append(&mut analysis.reasons);
     analysis.reasons = reasons;

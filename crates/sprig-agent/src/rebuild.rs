@@ -950,7 +950,9 @@ impl TlsListener {
                         Ok(Err(e)) => {
                             tracing::warn!(%peer, error = %e, "internal service: TLS handshake refused");
                         }
-                        Err(_) => tracing::warn!(%peer, "internal service: TLS handshake timed out"),
+                        Err(_) => {
+                            tracing::warn!(%peer, "internal service: TLS handshake timed out");
+                        }
                     }
                 });
             }

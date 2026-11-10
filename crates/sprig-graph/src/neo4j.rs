@@ -26,9 +26,10 @@ pub fn status_code(e: &SprigError) -> String {
             SprigCode::BoltAuthScheme => "Neo.ClientError.Security.Unauthorized".into(),
             SprigCode::BoltImpersonation => "Neo.ClientError.Security.Forbidden".into(),
             SprigCode::BoltBookmarkInvalid => "Neo.ClientError.Transaction.InvalidBookmark".into(),
-            SprigCode::GatewayDraining | SprigCode::TenantNotReady => {
-                "Neo.TransientError.General.DatabaseUnavailable".into()
-            }
+            SprigCode::GatewayDraining
+            | SprigCode::TenantNotReady
+            | SprigCode::ShardMapChanged
+            | SprigCode::ShardMoved => "Neo.TransientError.General.DatabaseUnavailable".into(),
             other => {
                 let camel = other.mongo_code_name();
                 format!("Neo.ClientError.Statement.{camel}")

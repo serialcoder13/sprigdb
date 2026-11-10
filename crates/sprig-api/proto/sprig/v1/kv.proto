@@ -9,6 +9,7 @@ package sprig.v1;
 
 import "google/api/annotations.proto";
 import "google/protobuf/struct.proto";
+import "sprig/v1/vectors.proto";
 
 // Reads and writes key-value namespaces.
 service KeyValue {
@@ -44,6 +45,14 @@ service KeyValue {
   rpc Exec(KvExecRequest) returns (KvExecResponse) {
     option (google.api.http) = {
       post: "/v1/databases/{database}/namespaces/{namespace}:exec"
+      body: "*"
+    };
+  }
+  // Keys whose location is inside a circle, box or polygon, or the
+  // nearest ones to a point (chapter 36; R6 round 3).
+  rpc GeoSearch(KvGeoSearchRequest) returns (KvGeoSearchResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/namespaces/{namespace}:geoSearch"
       body: "*"
     };
   }
@@ -88,6 +97,8 @@ message KvPutRequest {
   bool if_exists = 8;
   // Expire after this many ms; 0 for none.
   int64 ttl_ms = 9;
+  // The key's location (chapter 36); unset keeps none.
+  LatLng location = 10;
 }
 
 message KvPutResponse {
@@ -132,4 +143,31 @@ message KvExecResponse {
   // The reply, RESP3 mapped to JSON: maps are objects (keys as text),
   // errors `{"error": "..."}`, doubles numbers, nulls null.
   google.protobuf.Value reply = 1;
+}
+
+message KvGeoSearchRequest {
+  string database = 1;
+  string namespace = 2;
+  // A circle, box or polygon (`Vectors`' filter); unset with `near` for
+  // the nearest keys anywhere.
+  GeoFilter region = 3;
+  // Order by distance from here (a circle's center by default); alone,
+  // the `limit` nearest keys.
+  LatLng near = 4;
+  // Keys returned, 1 to 10000 (default 100).
+  uint32 limit = 5;
+  // With `near` alone: farthest distance in metres; 0 for none.
+  double max_distance_m = 6;
+}
+
+message KvGeoHit {
+  KvEntry entry = 1;
+  LatLng location = 2;
+  // Metres from `near` or the circle's center (WGS 84, Karney); 0 when
+  // unordered.
+  double distance_m = 3;
+}
+
+message KvGeoSearchResponse {
+  repeated KvGeoHit hits = 1;
 }

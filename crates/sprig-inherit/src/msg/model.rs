@@ -744,7 +744,10 @@ impl BindingSpec {
     /// with the kind): `source>dest_kind:dest:key`.
     #[must_use]
     pub fn def_name(&self) -> String {
-        format!("{}>{}:{}:{}", self.source, self.dest_kind, self.dest, self.key)
+        format!(
+            "{}>{}:{}:{}",
+            self.source, self.dest_kind, self.dest, self.key
+        )
     }
 }
 
@@ -753,7 +756,7 @@ fn yes() -> bool {
 }
 
 /// The queue arguments a member may override (chapter 42, "What can be
-/// overridden"; the ones a RabbitMQ policy could set).
+/// overridden"; the ones a policy of the vhost could set).
 pub const QUEUE_OVERRIDABLE: &[&str] = &[
     "x-message-ttl",
     "x-expires",

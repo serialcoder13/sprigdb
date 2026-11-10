@@ -4,16 +4,20 @@
 //! JavaScript version on QuickJS and the Lua version on the shared Lua
 //! runtime (`sprig_logic_js::Program`), each on its own copy of the same
 //! tables, and compares the event, its fields (doubles to 1e-9), the error
-//! class and every table's rows afterwards.
+//! class and every table's rows afterwards. The JavaScript version is also
+//! compiled into MariaDB by the JavaScript front end (R7 close-out) and
+//! must agree too; further JavaScript-only cases compare the compiled
+//! JavaScript with QuickJS.
 //!
 //! Runs on the Compose single node; skipped without
-//! `SPRIG_TEST_MARIADB_SINGLE`. Works in `r7_lang_compiled`, `r7_lang_js`
-//! and `r7_lang_lua`, dropped afterwards.
+//! `SPRIG_TEST_MARIADB_SINGLE`. Works in `r7_lang_compiled`, `r7_lang_js`,
+//! `r7_lang_lua` and `r7_lang_jsc`, dropped afterwards.
 
 #![allow(
     clippy::unwrap_used,
     clippy::too_many_lines,
     clippy::float_cmp,
+    clippy::many_single_char_names,
     missing_docs
 )]
 
@@ -23,6 +27,7 @@ use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, Value as My};
 use serde_json::{Value as J, json};
 use sprig_common::{ErrorKind, Result, SprigError};
+use sprig_logic_compile::ir::Ty;
 use sprig_logic_compile::{Options, Runtime, StaticColumns, compile, plsql, sql};
 use sprig_logic_js::bridge::{self as eb, Column, DbBridge, DbOp, Reply, Shape};
 use sprig_logic_js::outbound::NoOutbound;
@@ -31,7 +36,9 @@ use sprig_logic_js::{Host, Limits, ParamTy, Program, ScriptSig};
 const COMPILED: &str = "r7_lang_compiled";
 const JS: &str = "r7_lang_js";
 const LUA: &str = "r7_lang_lua";
-const SCHEMAS: [&str; 3] = [COMPILED, JS, LUA];
+/// JavaScript compiled into MariaDB by the JavaScript front end.
+const JSC: &str = "r7_lang_jsc";
+const SCHEMAS: [&str; 4] = [COMPILED, JS, LUA, JSC];
 
 const SEED: &[&str] = &[
     "CREATE TABLE products (id BIGINT PRIMARY KEY, price DECIMAL(10,2) NOT NULL, stock INT NOT NULL)",
@@ -223,8 +230,57 @@ impl Suite {
         p.entry
     }
 
+    /// Compiles the JavaScript version with the JavaScript front end and
+    /// creates it in `JSC`; returns its entry routine.
+    fn deploy_js(&self, name: &str, js: &str, sig: &ScriptSig, module: u64) -> String {
+        let opts = Options {
+            module_id: module,
+            version: 1,
+            ..Options::default()
+        };
+        let jsig = sprig_logic_compile::js::Signature {
+            params: sig
+                .params
+                .iter()
+                .map(|(n, t)| {
+                    (
+                        n.clone(),
+                        match t {
+                            ParamTy::Int => Ty::Int,
+                            ParamTy::Float => Ty::Float,
+                            ParamTy::Bool => Ty::Bool,
+                            ParamTy::Json => Ty::Json,
+                            ParamTy::Str => Ty::Str,
+                        },
+                    )
+                })
+                .collect(),
+            returns: sig.scalar.then_some(Ty::Int),
+        };
+        let c =
+            sprig_logic_compile::js::compile_with(name, js, &jsig, &self.columns(), &opts).unwrap();
+        assert!(
+            c.compilable(),
+            "{name}: the JavaScript doesn't compile: {:#?}",
+            c.analysis.reasons
+        );
+        let mut conn = self.conn(Some(JSC));
+        self.rt
+            .block_on(conn.query_drop(format!("SET SESSION sql_mode = '{}'", plsql::SQL_MODE)))
+            .unwrap();
+        let p = c.plsql.unwrap();
+        for s in &p.statements {
+            self.rt.block_on(conn.query_drop(s.as_str())).unwrap();
+        }
+        p.entry
+    }
+
     fn compiled(&self, entry: &str, args: &[J]) -> Got {
-        let mut conn = self.conn(Some(COMPILED));
+        self.compiled_in(COMPILED, entry, args)
+    }
+
+    fn compiled_in(&self, schema: &str, entry: &str, args: &[J]) -> Got {
+        let mut conn = self.conn(Some(schema));
         let marks = vec!["?"; args.len()];
         let mut call = format!("CALL {entry}({}", marks.join(", "));
         call.push_str(if args.is_empty() {
@@ -302,14 +358,19 @@ impl Suite {
         out
     }
 
-    fn case(&mut self, t: &Trio, entry: &str, args: &[J]) {
+    fn case(&mut self, t: &Trio, entry: &str, js_entry: &str, args: &[J]) {
         self.cases += 1;
         self.reset();
         let want = self.compiled(entry, args);
         let js = self.engine("javascript", t, JS, args);
         let lua = self.engine("lua", t, LUA, args);
+        let jsc = self.compiled_in(JSC, js_entry, args);
         let label = format!("{}{args:?}", t.name);
-        for (lang, got, schema) in [("javascript", &js, JS), ("lua", &lua, LUA)] {
+        for (lang, got, schema) in [
+            ("javascript", &js, JS),
+            ("lua", &lua, LUA),
+            ("compiled javascript", &jsc, JSC),
+        ] {
             if !same(&want, got) {
                 self.failures
                     .push(format!("{label}: compiled {want:?} vs {lang} {got:?}"));
@@ -319,6 +380,27 @@ impl Suite {
                 self.failures
                     .push(format!("{label}: {lang} tables differ: {a:?} vs {b:?}"));
             }
+        }
+        println!("{label}: {want:?}");
+    }
+
+    /// A JavaScript-only case: compiled JavaScript against QuickJS.
+    fn js_case(&mut self, t: &Trio, js_entry: &str, args: &[J]) {
+        self.cases += 1;
+        self.reset();
+        let want = self.engine("javascript", t, JS, args);
+        let got = self.compiled_in(JSC, js_entry, args);
+        let label = format!("{}{args:?}", t.name);
+        if !same(&want, &got) {
+            self.failures.push(format!(
+                "{label}: quickjs {want:?} vs compiled javascript {got:?}"
+            ));
+        }
+        let (a, b) = (self.tables(JS), self.tables(JSC));
+        if a != b {
+            self.failures.push(format!(
+                "{label}: compiled javascript tables differ: {a:?} vs {b:?}"
+            ));
         }
         println!("{label}: {want:?}");
     }
@@ -383,6 +465,75 @@ if score == sprig.null then return sprig.event('error', { message = 'no score' }
 if score >= 90 then return { grade = 'A', bonus = score + 5 } end
 return { grade = score >= 50 and 'pass' or 'fail', bonus = 0 }";
 
+const TEXT_JS: &str = r"
+let s = `hi ${name}`;
+if (name !== null && name.startsWith('A')) s = s + '!';
+const up = name === null ? 'none' : name.toUpperCase();
+return {
+  s,
+  up,
+  len: name === null ? -1 : name.length,
+  idx: name === null ? -2 : name.indexOf('b'),
+  has: name !== null && name.includes('e'),
+  n2: n * 2 + 0.5,
+  empty: !name,
+  joined: 'n=' + n + '/' + (n > 1),
+};";
+
+const ROWS_JS: &str = r"
+for (let i = 0; i < 4; i++) {
+  if (i >= n) break;
+  db.exec('INSERT INTO orders (id, product_id, qty, note) VALUES (?, ?, ?, ?)',
+          [200 + i, 8, i + 1, i % 2 === 0 ? 'even' : null]);
+}
+let total = 0;
+let notes = '';
+let count = 0;
+for (const o of db.sql('SELECT qty, note FROM orders WHERE product_id = ? ORDER BY id', [8])) {
+  if (count >= limit) break;
+  total += o.qty;
+  notes = notes + o.note + ';';
+  count++;
+}
+const all = db.sql('SELECT id, qty FROM orders ORDER BY id', []);
+return { total, notes, count, all };";
+
+const NULLS_JS: &str = r"
+return {
+  s: a + b,
+  d: a - 1,
+  p: a * b,
+  q: b / 2,
+  lt: a < b,
+  m: Math.max(a, 3),
+  r: Math.round(b),
+  f: Math.floor(b * 10) / 10,
+  eq: a === 3,
+  ne: a !== null,
+  c: a ?? 42,
+  o: a || 9,
+  pw: 2 ** 3,
+  ab: Math.abs(a),
+};";
+
+const FACT_JS: &str = r"
+export default function (n) {
+  let f = 1;
+  for (let i = 1; i < 21; i++) {
+    if (i > n) break;
+    f = f * i;
+  }
+  return f;
+}";
+
+const ERRS_JS: &str = r"
+import { sprig } from 'sprig:db';
+export default function (x) {
+  if (x < 0) throw new Error('negative: ' + x);
+  if (x === 0) sprig.reject('zero is not allowed');
+  return { half: x / 2, kind: x === null ? 'none' : 'some' };
+}";
+
 #[test]
 fn kirun_javascript_and_lua_agree() {
     let Ok(url) = std::env::var("SPRIG_TEST_MARIADB_SINGLE") else {
@@ -426,8 +577,9 @@ fn kirun_javascript_and_lua_agree() {
             sig: sig(&[("productId", i), ("qty", i)]),
         };
         let e = s.deploy(&quote, 9101);
+        let j = s.deploy_js(quote.name, quote.js, &quote.sig, 9201);
         for a in [[7, 3], [7, 1000], [999, 1], [8, 2], [9, 1]] {
-            s.case(&quote, &e, &[json!(a[0]), json!(a[1])]);
+            s.case(&quote, &e, &j, &[json!(a[0]), json!(a[1])]);
         }
         let orders = Trio {
             name: "orders",
@@ -437,8 +589,9 @@ fn kirun_javascript_and_lua_agree() {
             sig: sig(&[("orderId", i), ("productId", i), ("qty", i)]),
         };
         let e = s.deploy(&orders, 9102);
+        let j = s.deploy_js(orders.name, orders.js, &orders.sig, 9202);
         for a in [[1, 7, 2], [2, 8, 3], [3, 8, 4], [4, 999, 1], [100, 7, 1]] {
-            s.case(&orders, &e, &[json!(a[0]), json!(a[1]), json!(a[2])]);
+            s.case(&orders, &e, &j, &[json!(a[0]), json!(a[1]), json!(a[2])]);
         }
         let branches = Trio {
             name: "branches",
@@ -448,13 +601,65 @@ fn kirun_javascript_and_lua_agree() {
             sig: sig(&[("score", i), ("vip", ParamTy::Bool)]),
         };
         let e = s.deploy(&branches, 9103);
+        let j = s.deploy_js(branches.name, branches.js, &branches.sig, 9203);
         for a in [
             [json!(95), json!(true)],
             [json!(60), json!(false)],
             [J::Null, json!(true)],
             [json!(40), json!(true)],
         ] {
-            s.case(&branches, &e, &a);
+            s.case(&branches, &e, &j, &a);
+        }
+        // JavaScript-only cases: compiled JavaScript against QuickJS.
+        let js_only = |name: &'static str, js: &'static str, sig: ScriptSig| Trio {
+            name,
+            kirun: String::new(),
+            js,
+            lua: "",
+            sig,
+        };
+        let f = ParamTy::Float;
+        let text = js_only("text", TEXT_JS, sig(&[("name", ParamTy::Str), ("n", i)]));
+        let j = s.deploy_js(text.name, text.js, &text.sig, 9204);
+        for a in [
+            [json!("Abba"), json!(2)],
+            [json!("zeb"), J::Null],
+            [J::Null, json!(1)],
+            [json!(""), json!(-3)],
+        ] {
+            s.js_case(&text, &j, &a);
+        }
+        let rows = js_only("rows", ROWS_JS, sig(&[("n", i), ("limit", i)]));
+        let j = s.deploy_js(rows.name, rows.js, &rows.sig, 9205);
+        for a in [[3, 10], [4, 2], [0, 5], [2, 0]] {
+            s.js_case(&rows, &j, &[json!(a[0]), json!(a[1])]);
+        }
+        let nulls = js_only("nulls", NULLS_JS, sig(&[("a", i), ("b", f)]));
+        let j = s.deploy_js(nulls.name, nulls.js, &nulls.sig, 9206);
+        for a in [
+            [J::Null, json!(2.5)],
+            [json!(3), J::Null],
+            [json!(4), json!(4.0)],
+            [json!(-7), json!(-2.5)],
+        ] {
+            s.js_case(&nulls, &j, &a);
+        }
+        let fact = js_only(
+            "fact",
+            FACT_JS,
+            ScriptSig {
+                params: vec![("n".to_owned(), i)],
+                scalar: true,
+            },
+        );
+        let j = s.deploy_js(fact.name, fact.js, &fact.sig, 9207);
+        for a in [json!(5), json!(0), J::Null, json!(12)] {
+            s.js_case(&fact, &j, &[a]);
+        }
+        let errs = js_only("errs", ERRS_JS, sig(&[("x", i)]));
+        let j = s.deploy_js(errs.name, errs.js, &errs.sig, 9208);
+        for a in [json!(-1), json!(0), json!(4), J::Null] {
+            s.js_case(&errs, &j, &[a]);
         }
     }));
     let elapsed = start.elapsed();

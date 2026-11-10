@@ -84,6 +84,30 @@ impl Default for TenantSettings {
 pub trait SettingsSource: Send + Sync {
     /// The settings of `tenant`, now.
     fn settings(&self, tenant: TenantId) -> TenantSettings;
+
+    /// `sharding.min_shards` for database `db` of `tenant` (the key has
+    /// database scope; G28). The default is the tenant's value.
+    fn min_shards(&self, tenant: TenantId, _db: DbId) -> u32 {
+        self.settings(tenant).sharding.min_shards
+    }
+}
+
+/// When a shard was born, for the merge cooldown (G28, decision
+/// bugfix-3): the commit of the job that made it, else its group's
+/// creation. A presplit shard (made with its group by the advisor's apply
+/// or by `CREATE GRAPH`) has no job; before, it counted as old, and the
+/// loop merged a presplit 4-shard group within minutes.
+#[must_use]
+pub fn shard_birth(job_born: Option<u64>, group_created_ms: Option<u64>) -> Option<u64> {
+    job_born.or(group_created_ms)
+}
+
+/// The `min_shards` a group's triggers use: the group's own value
+/// (`table_groups.min_shards`, which overrides the setting), else the
+/// largest `sharding.min_shards` among its databases (G28).
+#[must_use]
+pub fn group_min_shards(own: Option<u32>, per_db: impl IntoIterator<Item = u32>) -> Option<u32> {
+    own.or_else(|| per_db.into_iter().max())
 }
 
 /// Write load per shard, from the gateways' write sketches (chapter 20,
@@ -389,15 +413,19 @@ impl ShardingLoop {
         let (mut running, born) = self.follow(tenant).await?;
         let cat = SchemaName::catalog(tenant).to_string();
         sprig_shard::groups::migrate(&mut c, &cat).await?;
-        let groups: Vec<(u32, String, Option<u32>)> = mysql_async::prelude::Queryable::query(
-            &mut c,
-            format!(
-                "SELECT group_id, state, min_shards FROM `{cat}`.table_groups \
-                 WHERE kind = 'sharded' ORDER BY group_id"
-            ),
-        )
-        .await
-        .map_err(|e| SprigError::internal(format!("table groups: {e}")))?;
+        // `created_at` is UTC (every writer uses UTC_TIMESTAMP): as epoch
+        // milliseconds whatever the session's time zone.
+        let groups: Vec<(u32, String, Option<u32>, Option<u64>)> =
+            mysql_async::prelude::Queryable::query(
+                &mut c,
+                format!(
+                    "SELECT group_id, state, min_shards, \
+                     TIMESTAMPDIFF(MICROSECOND, '1970-01-01', created_at) DIV 1000 \
+                     FROM `{cat}`.table_groups WHERE kind = 'sharded' ORDER BY group_id"
+                ),
+            )
+            .await
+            .map_err(|e| SprigError::internal(format!("table groups: {e}")))?;
         if groups.is_empty() {
             self.first_design(tenant, &ts, &home, &mut c, &mut report, false)
                 .await?;
@@ -435,14 +463,14 @@ impl ShardingLoop {
         self.jobs
             .unlock_tenant(tenant, &Self::advisor_holder(tenant))
             .await?;
-        for (g, state, min_shards) in groups {
+        for (g, state, min_shards, created_ms) in groups {
             if state != "active" {
                 continue;
             }
             self.group_tick(
                 tenant,
                 GroupId(g),
-                min_shards,
+                (min_shards, created_ms),
                 &ts,
                 &born,
                 &mut running,
@@ -819,7 +847,7 @@ impl ShardingLoop {
         &self,
         tenant: TenantId,
         group: GroupId,
-        min_shards: Option<u32>,
+        (min_shards, created_ms): (Option<u32>, Option<u64>),
         ts: &TenantSettings,
         born: &BTreeMap<(u32, u32), u64>,
         running: &mut Vec<RunningJob>,
@@ -845,6 +873,10 @@ impl ShardingLoop {
             .await?;
         drop(cc);
         let dbs: Vec<DbId> = dbs.into_iter().map(DbId).collect();
+        let min_shards = group_min_shards(
+            min_shards,
+            dbs.iter().map(|d| self.settings.min_shards(tenant, *d)),
+        );
         let schemas = |s: ShardId| -> Vec<String> {
             dbs.iter()
                 .map(|d| shard_schema(tenant, *d, group, s))
@@ -884,7 +916,7 @@ impl ShardingLoop {
                     .write_load
                     .as_ref()
                     .is_some_and(|w| w.cluster_hot(&r.cluster)),
-                born_ms: born.get(&(group.0, r.shard.0)).copied(),
+                born_ms: shard_birth(born.get(&(group.0, r.shard.0)).copied(), created_ms),
                 busy: r.state == RangeState::Held || busy_shards.contains(&r.shard.0),
             });
         }
@@ -1202,5 +1234,68 @@ impl ShardingLoop {
             .settings_of(&mut cc, sprig_catalog::store::SettingScope::Tenant)
             .await?;
         Ok((!sprig_catalog::ddl::jobs_on_shards(&rows, &schemas).is_empty()).then_some("ddl"))
+    }
+}
+
+#[cfg(test)]
+mod birth_tests {
+    use super::*;
+
+    /// G28: a presplit 4-shard group (no job made its shards) on one
+    /// cluster, small and quiet, ten minutes after its creation.
+    fn presplit(created_ms: Option<u64>, min_shards: Option<u32>) -> GroupStat {
+        let quarter = 1u64 << 62;
+        GroupStat {
+            tenant: TenantId(42),
+            group: 7,
+            min_shards,
+            shards: (0..4u32)
+                .map(|i| ShardStat {
+                    shard: i + 1,
+                    lo: u64::from(i) * quarter,
+                    hi: (i < 3).then(|| u64::from(i + 1) * quarter),
+                    cluster: ClusterId::new("dc-a-c1").unwrap(),
+                    size_bytes: 1024.0,
+                    write_shares: Vec::new(),
+                    cluster_hot: false,
+                    born_ms: shard_birth(None, created_ms),
+                    busy: false,
+                })
+                .collect(),
+        }
+    }
+
+    fn merges(g: &GroupStat, now: u64) -> usize {
+        let s = ShardingSettings::default(); // 24 h merge cooldown
+        shards::evaluate(g, &s, now)
+            .iter()
+            .filter(|p| p.reason == Reason::Merge)
+            .count()
+    }
+
+    #[test]
+    fn a_presplit_group_is_not_merged_within_the_cooldown() {
+        let created = 1_800_000_000_000;
+        let now = created + 10 * 60 * 1000;
+        // Before: no birth time, so the shards counted as old and merged.
+        assert_eq!(merges(&presplit(None, None), now), 2);
+        // Born with the group: nothing merges within 24 hours.
+        assert_eq!(merges(&presplit(Some(created), None), now), 0);
+        // After the cooldown, merges may go on (the setting allows 1 shard).
+        let later = created + 25 * 3600 * 1000;
+        assert_eq!(merges(&presplit(Some(created), None), later), 2);
+    }
+
+    #[test]
+    fn min_shards_at_database_scope_is_never_merged_below() {
+        let created = 1_800_000_000_000;
+        let later = created + 25 * 3600 * 1000;
+        // `sharding.min_shards` 4 on one of the group's databases.
+        let min = group_min_shards(None, [1, 4]);
+        assert_eq!(min, Some(4));
+        assert_eq!(merges(&presplit(Some(created), min), later), 0);
+        // The group's own value overrides the setting (chapter 15).
+        assert_eq!(group_min_shards(Some(2), [4]), Some(2));
+        assert_eq!(merges(&presplit(Some(created), Some(2)), later), 2);
     }
 }

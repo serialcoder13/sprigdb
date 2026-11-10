@@ -16,8 +16,10 @@
 //!   fenced DC ([`GatedSink`]).
 //! - **Watchdog.** A plain OS thread watches a heartbeat the runtime
 //!   raises every 100 ms: a stall of `failover.watchdog_ms` fences the
-//!   gateway directly, twice that aborts the process. A process that was
-//!   paused as a whole (SIGSTOP, a frozen VM) only fences on resume.
+//!   gateway directly; at twice that the gateway stops the statements
+//!   holding a worker (`offload::on_stall`), and never aborts (G40,
+//!   decision bugfix-1). A process that was paused as a whole (SIGSTOP, a
+//!   frozen VM) only fences on resume.
 //! - **Opting out.** With `failover.self_fence = false` for the DC, the
 //!   gateway never refuses writes for a missing permit (chapter 25: such a
 //!   DC skips self-fencing and never fails over automatically).
@@ -118,17 +120,14 @@ pub fn start(
                 h2.force_fence();
             }
         }),
-        {
-            let k3 = Arc::clone(&keeper);
-            Box::new(move || {
-                if k3.armed() {
-                    tracing::error!(
-                        "the gateway's runtime is stuck: aborting (chapter 25 watchdog)"
-                    );
-                    std::process::abort();
-                }
-            })
-        },
+        // Still stuck after twice the stall: the gateway never aborts, which
+        // let one tenant's heavy statement take it down for everyone (G40).
+        // It names and stops the statements holding a worker, and logs and
+        // counts the stall (decision bugfix-1); writes stay fenced until the
+        // permit loop ticks again.
+        Box::new(move || {
+            crate::offload::on_stall(stall * 2, stall);
+        }),
     );
     let fence = Arc::new(GatewayFence {
         dc,

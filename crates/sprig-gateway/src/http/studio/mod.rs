@@ -292,7 +292,9 @@ impl StudioState {
         let name = sprig_auth::token::parse_refresh(token).map(|(t, _)| t.to_owned());
         let tid = match (name, &self.login) {
             (Some(n), Some(login)) => match login.source() {
-                LoginSource::Catalog(cl) => cl.tenants().lookup(&n).await.ok().flatten().map(|t| t.id),
+                LoginSource::Catalog(cl) => {
+                    cl.tenants().lookup(&n).await.ok().flatten().map(|t| t.id)
+                }
                 LoginSource::File(_) => None,
             },
             _ => None,
@@ -350,7 +352,9 @@ impl StudioState {
             return svc.settings.get(setting, &ctx, Some(&cat.settings));
         }
         match &self.source {
-            StudioSource::Live { live, dc } => live.snapshot().get(setting, &SettingCtx::process(dc)),
+            StudioSource::Live { live, dc } => {
+                live.snapshot().get(setting, &SettingCtx::process(dc))
+            }
             StudioSource::Fixed(..) => setting.default.clone(),
         }
     }
@@ -368,12 +372,18 @@ impl StudioState {
         let t = caller.principal.tenant;
         let rows = self.tenant_get(&sprig_studio::settings::MAX_RESULT_ROWS, t, Some(database));
         let mb = self.tenant_get(&sprig_studio::settings::MAX_RESULT_MB, t, None);
-        let ms = self.tenant_get(&sprig_studio::settings::STATEMENT_TIMEOUT_MS, t, Some(database));
+        let ms = self.tenant_get(
+            &sprig_studio::settings::STATEMENT_TIMEOUT_MS,
+            t,
+            Some(database),
+        );
         Caps {
             max_rows: Caps::clamp(asked.max_rows, rows),
             max_bytes: Caps::clamp(asked.max_bytes, mb.saturating_mul(1 << 20)),
             timeout: Some(Duration::from_millis(Caps::clamp(
-                asked.timeout.map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                asked
+                    .timeout
+                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
                 ms,
             ))),
         }
@@ -401,7 +411,6 @@ impl StudioState {
             .verify(token, client_ip, tls, SystemTime::now())
             .await
     }
-
 }
 
 /// Publishes this gateway's signing key (retrying until the global tier
@@ -412,12 +421,7 @@ async fn key_task(keys: std::sync::Weak<KeyRing>, source: StudioSource) {
     let mut ticks: u64 = 0;
     loop {
         let Some(k) = keys.upgrade() else { return };
-        if !published {
-            match k.publish().await {
-                Ok(()) => published = true,
-                Err(e) => tracing::warn!(error = %e, "token signing key not published yet; retrying"),
-            }
-        } else {
+        if published {
             let days = match &source {
                 StudioSource::Live { live, dc } => live
                     .snapshot()
@@ -431,7 +435,7 @@ async fn key_task(keys: std::sync::Weak<KeyRing>, source: StudioSource) {
             {
                 tracing::warn!(error = %e, "token signing key rotation failed; retried in an hour");
             }
-            if ticks % 6 == 0 {
+            if ticks.is_multiple_of(6) {
                 match k.sweep(now).await {
                     Ok(n) if n > 0 => tracing::info!(n, "retired token signing keys deleted"),
                     Ok(_) => {}
@@ -439,6 +443,13 @@ async fn key_task(keys: std::sync::Weak<KeyRing>, source: StudioSource) {
                 }
             }
             ticks += 1;
+        } else {
+            match k.publish().await {
+                Ok(()) => published = true,
+                Err(e) => {
+                    tracing::warn!(error = %e, "token signing key not published yet; retrying");
+                }
+            }
         }
         drop(k);
         let wait = if published { 3600 } else { 5 };
@@ -756,7 +767,11 @@ pub async fn handle(
                 },
             }
         }
-        (_, p) if p == "/v1/catalog" || (p.starts_with("/v1/databases/") && (p.contains("/catalog") || p.ends_with("/sql:check"))) => {
+        (_, p)
+            if p == "/v1/catalog"
+                || (p.starts_with("/v1/databases/")
+                    && (p.contains("/catalog") || p.ends_with("/sql:check"))) =>
+        {
             match catalog::route(core, info, req).await {
                 Ok(r) => r,
                 Err(req) => return Err(req),

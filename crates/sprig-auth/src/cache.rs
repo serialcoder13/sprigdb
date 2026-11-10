@@ -40,10 +40,10 @@ use sprig_common::ids::UserId;
 use crate::account::HostPattern;
 use crate::apikey::{ApiKey, ApiKeyRow};
 use crate::scram::{ScramKind, ScramVerifier};
-use crate::token::TokenSession;
 use crate::store::{
     AUTH_MIGRATIONS, AuthStore, MODULE, Slot, TempLock, UserRow, VerifierKind, VerifierRow,
 };
+use crate::token::TokenSession;
 use crate::verifier::{CachingSha2Verifier, NativeVerifier};
 
 /// A verifier usable at login, with its id (the fast cache's key) and
@@ -450,7 +450,8 @@ impl CatalogExtension for AuthExtension {
                 store.verifiers_of(conn, &ids).await?
             };
             let keys = crate::apikey::keys_since(&store, conn, Some(since)).await?;
-            let sessions = crate::token::sessions::sessions_since(&store, conn, Some(since)).await?;
+            let sessions =
+                crate::token::sessions::sessions_since(&store, conn, Some(since)).await?;
             prev.apply(users, &verifiers, locks)
                 .with_api_keys(keys, false)
                 .with_sessions(sessions, false)

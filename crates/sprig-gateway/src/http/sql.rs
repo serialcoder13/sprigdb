@@ -426,7 +426,7 @@ impl SqlEngine {
         let (size, threshold) = (req.size(), self.frontend.current().large_statement);
         // Sql.Query's timeout_ms (clamped for Studio, chapter 44).
         let timeout = sink.timeout();
-        let end = crate::offload::run(size, threshold, async {
+        let end = crate::offload::run_for(&handle, size, threshold, async {
             let deadline = async {
                 match timeout {
                     Some(t) => tokio::time::sleep(t).await,
@@ -509,8 +509,11 @@ impl SqlEngine {
         tx: mpsc::Sender<Item>,
     ) {
         let batch = self.settings().batch_rows;
-        let mut sink =
-            ChannelSink::new(tx.clone(), batch).with_caps(caps.max_rows, caps.max_bytes, caps.timeout);
+        let mut sink = ChannelSink::new(tx.clone(), batch).with_caps(
+            caps.max_rows,
+            caps.max_bytes,
+            caps.timeout,
+        );
         // Studio's statements are recorded with `caller = studio` (chapter 12).
         let wl_caller = (super::studio::session_client(caller.authorization.as_deref()).as_deref()
             == Some("studio"))

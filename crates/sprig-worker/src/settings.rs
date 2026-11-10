@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sprig_common::ids::DcId;
+use sprig_common::ids::{DcId, TenantId};
 use sprig_common::{CancellationToken, Result};
 use sprig_logic::triggers::{LiveRunOpts, RunOpts};
 use sprig_meta::MetaStore;
@@ -41,6 +41,8 @@ pub struct WorkerSettings {
     live: Option<LiveSettings>,
     dc: DcId,
     defaults: Snapshot,
+    /// Tenants' own catalog rows (decision RF3, r2last).
+    scopes: Option<Arc<sprig_controller::tenant_scopes::TenantScopes>>,
 }
 
 impl std::fmt::Debug for WorkerSettings {
@@ -48,7 +50,7 @@ impl std::fmt::Debug for WorkerSettings {
         f.debug_struct("WorkerSettings")
             .field("dc", &self.dc)
             .field("live", &self.live.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -75,6 +77,7 @@ impl WorkerSettings {
             live: Some(live),
             dc,
             defaults: Arc::new(MemSettings::new(registry)),
+            scopes: None,
         }))
     }
 
@@ -87,6 +90,7 @@ impl WorkerSettings {
             live: None,
             dc,
             defaults: Arc::new(MemSettings::new(Registry::global()?)),
+            scopes: None,
         })
     }
 
@@ -99,7 +103,25 @@ impl WorkerSettings {
             live: Some(live),
             dc,
             defaults: Arc::new(MemSettings::new(Registry::global()?)),
+            scopes: None,
         })
+    }
+
+    /// Jobs of one tenant also read its own catalog rows (tenant,
+    /// database, object and ancestors' scopes; decision RF3).
+    #[must_use]
+    pub fn with_tenant_scopes(
+        mut self,
+        s: Arc<sprig_controller::tenant_scopes::TenantScopes>,
+    ) -> Self {
+        self.scopes = Some(s);
+        self
+    }
+
+    /// The tenant-scope cache, when set.
+    #[must_use]
+    pub fn tenant_scopes(&self) -> Option<&Arc<sprig_controller::tenant_scopes::TenantScopes>> {
+        self.scopes.as_ref()
     }
 
     /// This worker's DC.
@@ -136,23 +158,51 @@ impl WorkerSettings {
     #[must_use]
     pub fn run_opts(&self) -> RunOpts {
         let me = self.clone();
-        let mut o = me.resolve_run_opts();
-        o.live = Some(LiveRunOpts(Arc::new(move || me.resolve_run_opts())));
+        let mut o = me.resolve_run_opts(None);
+        o.live = Some(LiveRunOpts(Arc::new(move || me.resolve_run_opts(None))));
         o
     }
 
-    fn resolve_run_opts(&self) -> RunOpts {
+    /// [`Self::run_opts`] for one tenant's trigger: its own catalog rows
+    /// (tenant, ancestors) over the global scope (decision RF3), read again
+    /// at every failure.
+    #[must_use]
+    pub fn run_opts_for(&self, tenant: TenantId) -> RunOpts {
+        let me = self.clone();
+        let mut o = me.resolve_run_opts(Some(tenant));
+        o.live = Some(LiveRunOpts(Arc::new(move || {
+            me.resolve_run_opts(Some(tenant))
+        })));
+        o
+    }
+
+    /// `setting` for `tenant`: its own catalog rows over the etcd scopes,
+    /// as cached now (a missing copy is read in the background).
+    #[must_use]
+    pub fn tenant_get<T: SettingValue>(&self, tenant: TenantId, setting: &Setting<T>) -> T {
+        let rows = self.scopes.as_ref().and_then(|s| s.cached(tenant));
+        sprig_controller::tenant_scopes::get(
+            &self.snapshot(),
+            rows.as_deref(),
+            setting,
+            &SettingCtx::process(&self.dc).for_tenant(tenant, &[]),
+        )
+    }
+
+    fn resolve_run_opts(&self, tenant: Option<TenantId>) -> RunOpts {
         use sprig_logic::settings as ls;
         let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
-        let snap = self.snapshot();
-        let ctx = SettingCtx::process(&self.dc);
-        let lanes = snap.get(&ls::TRIGGER_LANES, &ctx);
+        let get = |s: &Setting<u64>| match tenant {
+            Some(t) => self.tenant_get(t, s),
+            None => self.get(s),
+        };
+        let lanes = get(&ls::TRIGGER_LANES);
         let attempts = env("SPRIG_LOGIC_TRIGGER_MAX_ATTEMPTS")
-            .unwrap_or_else(|| snap.get(&ls::TRIGGER_MAX_ATTEMPTS, &ctx));
+            .unwrap_or_else(|| get(&ls::TRIGGER_MAX_ATTEMPTS));
         let initial = env("SPRIG_LOGIC_TRIGGER_RETRY_INITIAL_MS")
-            .unwrap_or_else(|| snap.get(&ls::TRIGGER_RETRY_INITIAL_MS, &ctx));
+            .unwrap_or_else(|| get(&ls::TRIGGER_RETRY_INITIAL_MS));
         let max = env("SPRIG_LOGIC_TRIGGER_RETRY_MAX_MS")
-            .unwrap_or_else(|| snap.get(&ls::TRIGGER_RETRY_MAX_MS, &ctx));
+            .unwrap_or_else(|| get(&ls::TRIGGER_RETRY_MAX_MS));
         RunOpts {
             lanes: usize::try_from(lanes).unwrap_or(8).max(1),
             max_attempts: u32::try_from(attempts).unwrap_or(u32::MAX).max(1),
@@ -166,6 +216,12 @@ impl WorkerSettings {
     #[must_use]
     pub fn trigger_budget(&self) -> Duration {
         Duration::from_millis(self.get(&sprig_logic::settings::TRIGGER_BUDGET_MS))
+    }
+
+    /// `logic.trigger_budget_ms` for `tenant` (its own rows too; RF3).
+    #[must_use]
+    pub fn trigger_budget_for(&self, tenant: TenantId) -> Duration {
+        Duration::from_millis(self.tenant_get(tenant, &sprig_logic::settings::TRIGGER_BUDGET_MS))
     }
 
     /// `logic.job_budget_ms` at the global scope.

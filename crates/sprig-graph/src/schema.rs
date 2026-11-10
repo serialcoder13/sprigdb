@@ -440,13 +440,19 @@ mod tests {
         assert_eq!(key(Json::from(-0.0)), "n0");
         assert_eq!(key(Json::from(1.5)), "n1.5");
         assert_eq!(key(Json::from(1e16)), "n10000000000000000");
-        assert_eq!(key(Json::from(1e16)), key(Json::from(10_000_000_000_000_000_i64)));
+        assert_eq!(
+            key(Json::from(1e16)),
+            key(Json::from(10_000_000_000_000_000_i64))
+        );
         assert_ne!(
             key(Json::from(9_007_199_254_740_992.0)),
             key(Json::from(9_007_199_254_740_993_i64))
         );
         assert_eq!(key(Json::from(1e300)), "n1e+300");
-        assert_eq!(key(Json::from(9.223_372_036_854_776e18)), "n9.223372036854776e+18");
+        assert_eq!(
+            key(Json::from(9.223_372_036_854_776e18)),
+            "n9.223372036854776e+18"
+        );
         assert_ne!(key(Json::from(1)), key(Json::from("1")));
         let long = "x".repeat(300);
         let v = index_value(&Json::from(long), IndexKind::Range).expect("long");

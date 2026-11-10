@@ -85,7 +85,10 @@ async fn agents_of_one_ca_talk_and_nothing_else_does() {
     let port = echo(ca.tls("agent-src", "agent-src.sprig")).await;
     // Another agent of the CA, dialling the address in the server's SANs.
     let target = ca.tls("agent-dst", "agent-dst.sprig");
-    assert_eq!(round_trip(&target, "127.0.0.1", port).await.unwrap(), b"hello");
+    assert_eq!(
+        round_trip(&target, "127.0.0.1", port).await.unwrap(),
+        b"hello"
+    );
     // A client certificate from another CA: the server refuses it (the
     // client sees the stream end without the echo, or an error).
     let rogue = Ca::new("someone else");
@@ -95,7 +98,10 @@ async fn agents_of_one_ca_talk_and_nothing_else_does() {
         InternalTls::from_pems(ca.pem.as_bytes(), c.as_bytes(), k.as_bytes()).unwrap()
     };
     let r = round_trip(&stranger, "127.0.0.1", port).await;
-    assert!(r.map_or(true, |b| b.is_empty()), "a foreign client got an answer");
+    assert!(
+        r.map_or(true, |b| b.is_empty()),
+        "a foreign client got an answer"
+    );
     // A server whose certificate doesn't name the address dialled.
     assert!(
         round_trip(&target, "localhost", port).await.is_err(),

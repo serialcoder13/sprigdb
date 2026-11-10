@@ -263,6 +263,39 @@ impl IndexDef {
         self.parts.iter().map(|p| p.column.as_str())
     }
 
+    /// The index clause after `ADD`, for this kind (chapter 13, "Other
+    /// models"; R6 round 3): `INDEX`, `SPATIAL INDEX` or `VECTOR INDEX`,
+    /// then `IF NOT EXISTS <name> (<columns>)` and, for vectors,
+    /// `M=<m> DISTANCE=<d>`.
+    #[must_use]
+    pub fn add_clause(&self) -> String {
+        self.add_clause_named(&self.name())
+    }
+
+    /// [`Self::add_clause`] under another name (validation copies).
+    #[must_use]
+    pub fn add_clause_named(&self, name: &str) -> String {
+        let kw = match self.kind {
+            IndexKind::Spatial => "SPATIAL INDEX",
+            IndexKind::Vector => "VECTOR INDEX",
+            _ => "INDEX",
+        };
+        let mut out = format!(
+            "{kw} IF NOT EXISTS {} ({})",
+            sprig_common::names::quote(name),
+            self.ddl_columns()
+        );
+        if self.kind == IndexKind::Vector {
+            if let Some(m) = self.options.0.get("m") {
+                let _ = write!(out, " M={m}");
+            }
+            if let Some(d) = self.options.0.get("distance") {
+                let _ = write!(out, " DISTANCE={d}");
+            }
+        }
+        out
+    }
+
     /// Whether `self`'s parts are a prefix of `other`'s (same columns,
     /// prefixes and directions).
     #[must_use]

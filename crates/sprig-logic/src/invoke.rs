@@ -364,16 +364,28 @@ pub struct FunctionCall {
     /// A list (by position), an object (by parameter name), one value,
     /// or `null` for none.
     pub args: Value,
+    /// The function's database when the front end names it (MongoDB's
+    /// `$db`, Redis's logical database or a `db.name` in `FCALL`);
+    /// `None` uses the session's current database.
+    pub db: Option<String>,
+    /// Redis's `FCALL_RO`: the call runs in a read-only transaction, so
+    /// a write fails (1792) whatever the tier.
+    pub read_only: bool,
 }
 
 impl FunctionCall {
     /// The statement a front end sends for this call.
     #[must_use]
     pub fn statement(&self) -> String {
-        format!(
-            "{CALL_PREFIX}{}",
-            serde_json::json!({"protocol": self.protocol, "name": self.name, "args": self.args})
-        )
+        let mut v =
+            serde_json::json!({"protocol": self.protocol, "name": self.name, "args": self.args});
+        if let Some(db) = &self.db {
+            v["db"] = Value::String(db.clone());
+        }
+        if self.read_only {
+            v["read_only"] = Value::Bool(true);
+        }
+        format!("{CALL_PREFIX}{v}")
     }
 
     /// The call in a statement text, if it is one.
@@ -385,11 +397,15 @@ impl FunctionCall {
             protocol: v["protocol"].as_str().unwrap_or("http").to_owned(),
             name: v["name"].as_str().unwrap_or_default().to_owned(),
             args: v["args"].clone(),
+            db: v["db"].as_str().map(str::to_owned),
+            read_only: v["read_only"].as_bool().unwrap_or(false),
         })
     }
 
-    /// MongoDB's `db.runCommand({sprigCall: "quote", args: [7, 3]})`
-    /// (chapter 30's front end calls this; not wired yet).
+    /// MongoDB's `db.runCommand({sprigCall: "quote", args: [7, 3]})`:
+    /// the function of the command's database (`$db`, when the command
+    /// carries it), by position (`args: [...]`) or by name
+    /// (`args: {...}`).
     ///
     /// # Errors
     /// 39860 when the command has no `sprigCall` name.
@@ -401,13 +417,16 @@ impl FunctionCall {
             protocol: "mongo".to_owned(),
             name: name.to_owned(),
             args: command.get("args").cloned().unwrap_or(Value::Null),
+            db: command["$db"].as_str().map(str::to_owned),
+            read_only: false,
         })
     }
 
     /// Redis's `FCALL name numkeys key... arg...` of a logic function
     /// exposed to `redis` (chapter 40's front end calls this after its own
-    /// Lua libraries miss; not wired yet): the keys bind the leading
-    /// parameters, then the arguments, all as text.
+    /// Lua libraries miss): the keys bind the leading parameters, then the
+    /// arguments, all as text. `name` may be `db.name`; otherwise the
+    /// front end sets [`Self::db`] to its logical database.
     ///
     /// # Errors
     /// 39874 for a bad `numkeys`.
@@ -422,9 +441,16 @@ impl FunctionCall {
         if numkeys > argv.len().saturating_sub(2) {
             return Err(bad());
         }
+        let full = String::from_utf8_lossy(name).into_owned();
+        let (db, name) = match full.split_once('.') {
+            Some((d, n)) if !d.is_empty() && !n.is_empty() => (Some(d.to_owned()), n.to_owned()),
+            _ => (None, full),
+        };
         Ok(Self {
             protocol: "redis".to_owned(),
-            name: String::from_utf8_lossy(name).into_owned(),
+            name,
+            db,
+            read_only: false,
             args: Value::Array(
                 argv[2..]
                     .iter()
@@ -864,13 +890,23 @@ mod tests {
             protocol: "http".into(),
             name: "quote".into(),
             args: json!({"qty": 3, "productId": 7}),
+            db: None,
+            read_only: false,
         };
         assert_eq!(FunctionCall::parse(c.statement().as_bytes()).unwrap(), c);
+        let ro = FunctionCall {
+            db: Some("shop".into()),
+            read_only: true,
+            ..c.clone()
+        };
+        assert_eq!(FunctionCall::parse(ro.statement().as_bytes()).unwrap(), ro);
         assert!(FunctionCall::parse(b"SELECT 1").is_none());
-        let m = FunctionCall::from_mongo(&json!({"sprigCall": "quote", "args": [7, 3]})).unwrap();
+        let m =
+            FunctionCall::from_mongo(&json!({"sprigCall": "quote", "args": [7, 3], "$db": "shop"}))
+                .unwrap();
         assert_eq!(
-            (m.protocol.as_str(), m.args.clone()),
-            ("mongo", json!([7, 3]))
+            (m.protocol.as_str(), m.args.clone(), m.db.as_deref()),
+            ("mongo", json!([7, 3]), Some("shop"))
         );
         let r = FunctionCall::from_redis_fcall(&[
             b"quote".to_vec(),
@@ -879,7 +915,12 @@ mod tests {
             b"3".to_vec(),
         ])
         .unwrap();
-        assert_eq!((r.name.as_str(), r.args), ("quote", json!(["7", "3"])));
+        assert_eq!(
+            (r.name.as_str(), r.db.as_deref(), r.args),
+            ("quote", None, json!(["7", "3"]))
+        );
+        let q = FunctionCall::from_redis_fcall(&[b"shop.quote".to_vec(), b"0".to_vec()]).unwrap();
+        assert_eq!((q.name.as_str(), q.db.as_deref()), ("quote", Some("shop")));
         assert!(FunctionCall::from_redis_fcall(&[b"q".to_vec(), b"5".to_vec()]).is_err());
     }
 

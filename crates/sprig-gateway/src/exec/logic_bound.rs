@@ -50,10 +50,10 @@ const MAX_LOOP_ITERATIONS: u64 = 100_000;
 const COMPILE_MAX_COST: u64 = 100_000;
 
 /// `sprig_ctl` connections to every shard a deploy reaches.
-struct CtlShards {
-    list: Vec<(String, ClusterId)>,
-    conns: HashMap<String, ConnSession>,
-    locator: Arc<crate::tenant::locator::GatewayLocator>,
+pub(super) struct CtlShards {
+    pub(super) list: Vec<(String, ClusterId)>,
+    pub(super) conns: HashMap<String, ConnSession>,
+    pub(super) locator: Arc<crate::tenant::locator::GatewayLocator>,
 }
 
 #[async_trait]
@@ -63,21 +63,24 @@ impl ShardSessions for CtlShards {
     }
 
     async fn session<'a>(&'a mut self, schema: &str) -> Result<&'a mut (dyn Session + 'static)> {
-        if !self.conns.contains_key(schema) {
-            let cluster = self
-                .list
-                .iter()
-                .find(|(s, _)| s == schema)
-                .map(|(_, c)| c.clone())
-                .ok_or_else(|| {
-                    SprigError::internal(format!("{schema} isn't a shard of this deploy"))
-                })?;
+        // One connection per cluster, not per shard schema: every routine
+        // names its schema, and a gateway's `sprig_ctl` pool is small
+        // (four), so a deploy over many shards of one cluster must not
+        // hold one connection each (it waited forever; R7 close-out).
+        let cluster = self
+            .list
+            .iter()
+            .find(|(s, _)| s == schema)
+            .map(|(_, c)| c.clone())
+            .ok_or_else(|| SprigError::internal(format!("{schema} isn't a shard of this deploy")))?;
+        let key = cluster.to_string();
+        if !self.conns.contains_key(&key) {
             let pool = self.locator.ctl_pool(&cluster).await?;
             let conn = pool.get_conn().await.map_err(conn_err)?;
-            self.conns.insert(schema.to_owned(), ConnSession(conn));
+            self.conns.insert(key.clone(), ConnSession(conn));
         }
         self.conns
-            .get_mut(schema)
+            .get_mut(&key)
             .map(|c| c as &mut (dyn Session + 'static))
             .ok_or_else(|| SprigError::internal("no shard session"))
     }
@@ -94,7 +97,7 @@ impl CtlShards {
         self.session(&schema).await?;
         let c = self
             .conns
-            .get_mut(&schema)
+            .get_mut(&cluster.to_string())
             .ok_or_else(|| SprigError::internal("no shard session"))?;
         let pos: Option<String> =
             c.0.query_first("SELECT @@gtid_binlog_pos")

@@ -674,9 +674,7 @@ fn mq_args(c: &mut Cur<'_>) -> Result<Vec<(String, serde_json::Value)>> {
                     .ok_or_else(|| syntax(text))?,
             ),
             TokenKind::Word if text.eq_ignore_ascii_case("true") => serde_json::Value::Bool(true),
-            TokenKind::Word if text.eq_ignore_ascii_case("false") => {
-                serde_json::Value::Bool(false)
-            }
+            TokenKind::Word if text.eq_ignore_ascii_case("false") => serde_json::Value::Bool(false),
             _ => match text.parse::<i64>() {
                 Ok(n) => serde_json::Value::from(if neg { -n } else { n }),
                 Err(_) => match text.parse::<f64>() {
@@ -776,7 +774,11 @@ pub fn mq_decl(sql: &str, opts: &LexOptions) -> Result<Option<MqDecl>> {
         return Err(syntax(&c.near()));
     }
     let (_, source) = c.qualified(false)?;
-    let key = if c.eat("key") { c.name()? } else { String::new() };
+    let key = if c.eat("key") {
+        c.name()?
+    } else {
+        String::new()
+    };
     let arguments = if c.eat("with") {
         mq_args(&mut c)?
     } else {

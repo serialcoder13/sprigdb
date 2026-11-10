@@ -128,6 +128,9 @@ pub enum FieldOp {
     Not(Vec<FieldOp>),
     /// `$mod [divisor, remainder]`.
     Mod(i64, i64),
+    /// `$geoWithin`, `$geoIntersects`, `$near`, `$nearSphere` (chapter
+    /// 36, R6 round 3).
+    Geo(Box<crate::geo::GeoOp>),
 }
 
 /// An `$in` element.
@@ -357,8 +360,17 @@ fn parse_ops(d: &Document) -> Result<Vec<FieldOp>, MongoError> {
                 FieldOp::Mod(dv, rm)
             }
             "$comment" => continue,
-            "$where" | "$text" | "$geoWithin" | "$geoIntersects" | "$near" | "$nearSphere"
-            | "$bitsAllSet" | "$bitsAnySet" | "$bitsAllClear" | "$bitsAnyClear" => {
+            // Chapter 36 (R6 round 3); `$maxDistance` and `$minDistance`
+            // belong to a sibling `$near`.
+            "$geoWithin" | "$within" | "$geoIntersects" | "$near" | "$nearSphere" => {
+                FieldOp::Geo(Box::new(crate::geo::parse(k, v, d)?))
+            }
+            "$maxDistance" | "$minDistance"
+                if d.contains_key("$near") || d.contains_key("$nearSphere") =>
+            {
+                continue;
+            }
+            "$where" | "$text" | "$bitsAllSet" | "$bitsAnySet" | "$bitsAllClear" | "$bitsAnyClear" => {
                 return Err(MongoError::new(
                     code::SPRIG_DOC_FEATURE_UNSUPPORTED,
                     format!("{k} is not supported in this release"),
@@ -650,6 +662,7 @@ impl FieldOp {
                 };
                 n.is_some_and(|n| n.wrapping_rem(*d) == *r)
             }),
+            Self::Geo(g) => g.eval(&vs.leaves),
         }
     }
 }

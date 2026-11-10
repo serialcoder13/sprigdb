@@ -40,8 +40,8 @@ use sprig_common::{Result, SprigCode, SprigError};
 
 pub use self::keys::KeyRing;
 pub use self::sessions::{
-    CatalogSessions, MemorySessions, NewSession, RefreshRules, Rotated, SessionStore,
-    TokenSession, Who,
+    CatalogSessions, MemorySessions, NewSession, RefreshRules, Rotated, SessionStore, TokenSession,
+    Who,
 };
 use crate::mysql::Principal;
 
@@ -256,10 +256,7 @@ impl Tokens {
         let sid_bytes: [u8; 16] = *uuid::Uuid::now_v7().as_bytes();
         let sid = URL_SAFE_NO_PAD.encode(sid_bytes);
         let tenant = principal.tenant_name.clone().unwrap_or_else(|| "-".into());
-        let refresh_token = format!(
-            "{tenant}.{sid}.{}",
-            URL_SAFE_NO_PAD.encode(random::<32>()?)
-        );
+        let refresh_token = format!("{tenant}.{sid}.{}", URL_SAFE_NO_PAD.encode(random::<32>()?));
         let amr = vec!["pwd".to_owned()];
         let claims = Self::claims(
             &tenant,
@@ -523,7 +520,11 @@ impl Tokens {
     ///
     /// # Errors
     /// 1045 for a bad signature or an unknown key.
-    pub async fn verify_ticket<T: DeserializeOwned>(&self, ticket: &str, now: SystemTime) -> Result<T> {
+    pub async fn verify_ticket<T: DeserializeOwned>(
+        &self,
+        ticket: &str,
+        now: SystemTime,
+    ) -> Result<T> {
         let p = jws::parse(ticket, jws::TYP_EXPORT)?;
         let Some(public) = self.keys.public_key(&p.header.kid, now).await? else {
             return Err(denied("the ticket's signing key is unknown"));

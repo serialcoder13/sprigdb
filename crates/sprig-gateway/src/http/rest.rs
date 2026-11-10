@@ -287,7 +287,9 @@ async fn run_local(
     match rpc {
         "Sql.Execute" | "Sql.Query" => {
             // Caps and timeout asked for, clamped for Studio (chapter 44).
-            let caps = core.studio.caps_for(caller, &database, super::studio::asked_caps(body));
+            let caps = core
+                .studio
+                .caps_for(caller, &database, super::studio::asked_caps(body));
             let call = SqlCall {
                 database,
                 sql: s(body, "sql"),

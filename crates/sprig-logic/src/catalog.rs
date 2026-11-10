@@ -1404,6 +1404,58 @@ impl LogicStore {
         Ok(c.affected_rows())
     }
 
+    /// `sprigctl logic dead-letters replay`: marks dead letters of
+    /// after-commit triggers `replaying` (their job runs them), and counts
+    /// those of triggers on streams and queues, which stay `dead`: their
+    /// replay isn't built (R7 close-out; chapter 41, "As built in R9").
+    /// Returns (queued, left dead).
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn replay_dead_letters(
+        &self,
+        c: &mut Conn,
+        binding_id: Option<u64>,
+        ids: &[u64],
+    ) -> Result<(u64, u64)> {
+        let list = if ids.is_empty() {
+            "TRUE".to_owned()
+        } else {
+            format!(
+                "d.dl_id IN ({})",
+                ids.iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        c.exec_drop(
+            format!(
+                "UPDATE {} d JOIN {} b ON b.binding_id = d.binding_id SET d.state = 'replaying' \
+                 WHERE d.state = 'dead' AND b.timing = 'after_commit' \
+                 AND (? IS NULL OR d.binding_id = ?) AND {list}",
+                self.dead, self.bindings
+            ),
+            (binding_id, binding_id),
+        )
+        .await
+        .map_err(map_err)?;
+        let queued = c.affected_rows();
+        let left: Option<u64> = c
+            .exec_first(
+                format!(
+                    "SELECT COUNT(*) FROM {} d JOIN {} b ON b.binding_id = d.binding_id \
+                     WHERE d.state = 'dead' AND b.timing <> 'after_commit' \
+                     AND (? IS NULL OR d.binding_id = ?) AND {list}",
+                    self.dead, self.bindings
+                ),
+                (binding_id, binding_id),
+            )
+            .await
+            .map_err(map_err)?;
+        Ok((queued, left.unwrap_or(0)))
+    }
+
     /// Appends to `logic_log` (best effort for callers: they log a
     /// failure and carry on).
     ///

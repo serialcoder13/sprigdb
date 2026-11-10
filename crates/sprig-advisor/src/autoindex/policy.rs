@@ -211,6 +211,9 @@ pub struct ObjectPolicy {
     pub recommend_validate: bool,
     /// `auto_index.recommend_ttl_days`.
     pub recommend_ttl_days: u32,
+    /// `auto_index.vector_ann`: whether vector (ANN) candidates are built
+    /// (`on`) or only recommended (R6 round 3).
+    pub vector_ann: Mode,
     /// Every value read, by key, with its source: the decision log's
     /// "resolved values they used".
     pub used: BTreeMap<&'static str, Used>,
@@ -305,6 +308,7 @@ impl ObjectPolicy {
         let estimate_margin = r.get(&k::ESTIMATE_MARGIN)?;
         let recommend_validate = r.get(&k::RECOMMEND_VALIDATE)?;
         let recommend_ttl_days = r.get(&k::RECOMMEND_TTL_DAYS)?;
+        let vector_ann = Mode::parse(&r.get(&k::VECTOR_ANN)?);
         Ok(Self {
             mode,
             trigger,
@@ -315,6 +319,7 @@ impl ObjectPolicy {
             estimate_margin,
             recommend_validate,
             recommend_ttl_days,
+            vector_ann,
             used: r.used,
         })
     }

@@ -475,6 +475,13 @@ impl Session {
                 }
             }
         }
+        // R6 round 3 (R23): the hottest writes as one guarded batch.
+        if !in_txn
+            && cfg.guarded_batches
+            && let Some(f) = self.batched(name, a).await
+        {
+            return Ok(f);
+        }
         let write = spec.has('w');
         let own = write && !in_txn;
         let resp3 = self.resp3();
@@ -551,6 +558,57 @@ impl Session {
                         }
                     }
                     return Ok(reply::backend(&e));
+                }
+            }
+        }
+    }
+
+    /// Runs `name` as one guarded batch ([`crate::batch`]) when the batch
+    /// path takes it, with the statement path's retries; `None` leaves it
+    /// to the statement path.
+    async fn batched(&mut self, name: &str, a: &[Bytes]) -> Option<Frame> {
+        let env = Arc::clone(&self.env);
+        let cfg = env.config();
+        let db = self.db;
+        let ns = self
+            .ns_override
+            .clone()
+            .unwrap_or_else(|| sprig_kv::Namespace::redis(&cfg.logical_database, db));
+        let plan = crate::batch::plan(&ns, name, a)?;
+        let login = self.login.as_mut()?;
+        let scope = login.scope.clone();
+        let mut attempt = 0;
+        let mut recreated = false;
+        loop {
+            match crate::batch::run_once(login.sql.as_mut(), &ns, &plan).await {
+                Ok((f, pushed)) => {
+                    if pushed {
+                        env.wake(&scope, db, plan.key());
+                    }
+                    return Some(f);
+                }
+                Err(e) => {
+                    // A lost race for a new key's row (1062) reruns too.
+                    let again = e.retryable() || e.errno == Some(1062);
+                    if again && attempt < cfg.write_retries {
+                        attempt += 1;
+                        backoff(attempt).await;
+                        continue;
+                    }
+                    if again {
+                        return Some(reply::tryagain());
+                    }
+                    if e.errno == Some(1146) && !recreated {
+                        recreated = true;
+                        let mut cx = Ctx::new(login.sql.as_mut(), &env, &scope, db, false);
+                        cx.ns = ns.clone();
+                        let key = cx.ensure_key(&ns);
+                        env.forget_ensured(&key);
+                        if cx.ensure(&ns).await.is_ok() {
+                            continue;
+                        }
+                    }
+                    return Some(reply::backend(&e));
                 }
             }
         }
@@ -1732,7 +1790,9 @@ impl Session {
         let fname = String::from_utf8_lossy(&a[1]).into_owned();
         let (lib, flags) = match self.script_get("function", fname.as_bytes()).await {
             Ok(Some(x)) => x,
-            Ok(None) => return Ok(vec![Frame::err("Function not found")]),
+            // Not a Lua library function: a logic-layer function exposed
+            // to Redis, if there is one (chapter 41; Lua functions first).
+            Ok(None) => return Ok(vec![self.logic_fcall(name, &a[1], &keys, &args).await]),
             Err(e) => return Ok(vec![reply::backend(&e)]),
         };
         let no_writes = flags.split(',').any(|f| f == "no-writes");
@@ -1761,6 +1821,32 @@ impl Session {
             )
             .await?;
         Ok(vec![out])
+    }
+
+    /// `FCALL` of a logic-layer function, through the gateway's hook.
+    async fn logic_fcall(
+        &mut self,
+        cmd: &str,
+        fname: &[u8],
+        keys: &[Bytes],
+        args: &[Bytes],
+    ) -> Frame {
+        let env = Arc::clone(&self.env);
+        let (Some(hook), Some(login)) = (env.logic(), self.login.as_mut()) else {
+            return Frame::err("Function not found");
+        };
+        let database = env.config().logical_database;
+        hook.fcall(
+            login.sql.as_mut(),
+            crate::logic::Fcall {
+                name: fname,
+                keys,
+                args,
+                read_only: cmd == "fcall_ro",
+                database: &database,
+            },
+        )
+        .await
     }
 
     #[allow(clippy::too_many_lines)]

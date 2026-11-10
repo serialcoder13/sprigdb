@@ -20,7 +20,7 @@
 # on the shared dev cluster dc-a-c1, tenant r4close. `flaky` lines are tests
 # that met the shared cluster's outages during that run; rerun them.
 gateway-mysql fail *bug55283.phpt* :: not investigated (r4close): --
-gateway-mysql fail *gh8058.phpt* :: fixed after the run (1065 for an empty prepared statement); not yet rerun
+gateway-mysql flaky *gh8058.phpt* :: fixed after the run (1065 for an empty prepared statement); not yet rerun
 gateway-mysql fail *mysqli_change_user.phpt* :: tenant login: USER() shows the user's name (app), not the login (r4close.app)
 gateway-mysql fail *mysqli_change_user_set_names.phpt* :: collation defaults after COM_CHANGE_USER
 gateway-mysql flaky *mysqli_connect.phpt* :: shared dev cluster unavailable during the run (39030 'no usable writer' / 39500 etcd timeouts / 39071 a DDL left pending by them; r4close, 10 November); rerun
@@ -48,7 +48,7 @@ gateway-mysql fail *mysqli_field_seek.phpt* :: not investigated (r4close): --
 gateway-mysql fail *mysqli_get_client_stats.phpt* :: tenant model: the test's DROP TABLE of a FEDERATED table needs FEDERATED ADMIN
 gateway-mysql fail *mysqli/tests/mysqli_info.phpt* :: not investigated (r4close): 001+ [010] Expecting string/any_non_empty, got NULL/
 gateway-mysql fail *mysqli_more_results.phpt* :: not investigated (r4close): [004]
-gateway-mysql fail *mysqli_prepare_no_object.phpt* :: fixed after the run (1065), as gh8058
+gateway-mysql flaky *mysqli_prepare_no_object.phpt* :: fixed after the run (1065), as gh8058
 gateway-mysql flaky *mysqli_real_connect.phpt* :: shared dev cluster unavailable during the run (39030 'no usable writer' / 39500 etcd timeouts / 39071 a DDL left pending by them; r4close, 10 November); rerun
 gateway-mysql flaky *mysqli_real_connect_pconn.phpt* :: shared dev cluster unavailable during the run (39030 'no usable writer' / 39500 etcd timeouts / 39071 a DDL left pending by them; r4close, 10 November); rerun
 gateway-mysql fail *mysqli_report.phpt* :: not investigated (r4close): 001- Warning: mysqli_multi_query(): (%d/%d): You have an error in your SQL syntax; check the manual that corresponds to your %s server version for the
@@ -61,7 +61,7 @@ gateway-mysql fail *mysqli_thread_id.phpt* :: KILL of another session's id (gaps
 gateway-mariadb fail *bug34810.phpt* :: not investigated (r4close): --
 gateway-mariadb fail *bug55283.phpt* :: not investigated (r4close): --
 gateway-mariadb fail *mysqli_fetch_all_data_types_variation.phpt* :: not investigated (r4close): 001+ another DDL statement is running on 'phptest.test_mysqli_fetch_all_data_types_variation'; retry
-gateway-mariadb fail *gh8058.phpt* :: fixed after the run (1065 for an empty prepared statement); not yet rerun
+gateway-mariadb flaky *gh8058.phpt* :: fixed after the run (1065 for an empty prepared statement); not yet rerun
 gateway-mariadb fail *mysqli_change_user.phpt* :: tenant login: USER() shows the user's name (app), not the login (r4close.app)
 gateway-mariadb fail *mysqli_change_user_old.phpt* :: not investigated (r4close): 001+ [015] Expecting user r4close.app, got user() app@127.0.0.1
 *-mariadb fail *mysqli_change_user_set_names.phpt* :: fails on plain MariaDB 11.8.9 too: 001+ [015] Expecting collation to be utf8mb4_uca1400_ai_ci got utf8mb4_general_ci
@@ -79,7 +79,7 @@ gateway-mariadb fail *mysqli_fetch_array.phpt* :: not investigated (r4close): 00
 gateway-mariadb fail *mysqli_get_client_stats.phpt* :: tenant model: the test's DROP TABLE of a FEDERATED table needs FEDERATED ADMIN
 gateway-mariadb fail *mysqli/tests/mysqli_info.phpt* :: not investigated (r4close): 001+ [010] Expecting string/any_non_empty, got NULL/
 gateway-mariadb fail *mysqli_more_results.phpt* :: not investigated (r4close): [004]
-gateway-mariadb fail *mysqli_prepare_no_object.phpt* :: fixed after the run (1065), as gh8058
+gateway-mariadb flaky *mysqli_prepare_no_object.phpt* :: fixed after the run (1065), as gh8058
 gateway-mariadb flaky *mysqli_real_connect.phpt* :: shared dev cluster unavailable during the run (39030 'no usable writer' / 39500 etcd timeouts / 39071 a DDL left pending by them; r4close, 10 November); rerun
 gateway-mariadb flaky *mysqli_real_connect_pconn.phpt* :: shared dev cluster unavailable during the run (39030 'no usable writer' / 39500 etcd timeouts / 39071 a DDL left pending by them; r4close, 10 November); rerun
 gateway-mariadb fail *mysqli_report.phpt* :: not investigated (r4close): 001- Warning: mysqli_multi_query(): (%d/%d): You have an error in your SQL syntax; check the manual that corresponds to your %s server version for the

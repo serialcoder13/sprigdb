@@ -1236,7 +1236,14 @@ async fn execute_inner<'a, 'b: 'a, 'c: 'a>(
     metrics::counter!("sprig_router_analytics_rows_total")
         .increment(rows_read.load(AtomicOrdering::Relaxed));
     // 7. The answer.
-    let rows = match render(&batches, &out, budget) {
+    // Rendering many rows runs off the runtime's worker (G40, decision
+    // bugfix-1). DataFusion itself stays on the runtime: its operators
+    // yield per batch (`cooperative`), and `KILL QUERY` must still drop it.
+    let n: usize = batches
+        .iter()
+        .map(datafusion::arrow::array::RecordBatch::num_rows)
+        .sum();
+    let rows = match sprig_common::cpu::heavy(n, || render(&batches, &out, budget)) {
         Ok(r) => r,
         Err(why) => return refused(why),
     };

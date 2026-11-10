@@ -38,6 +38,9 @@ pub struct MysqlTarget {
     /// A hash-range job's routing (chapter 20): target schemas are new
     /// shard schemas, rows go by `_sprig_rk`.
     route: Option<Arc<ShardRoute>>,
+    /// A job standby's tenant: its copy stays read-only for the tenant's
+    /// accounts ([`super::standby`]).
+    standby: Option<sprig_common::ids::TenantId>,
 }
 
 impl std::fmt::Debug for MysqlTarget {
@@ -81,7 +84,16 @@ impl MysqlTarget {
             swap,
             source,
             route: None,
+            standby: None,
         }
+    }
+
+    /// The target of a job standby (`Continuous`) of `tenant`: its copy is
+    /// read-only for the tenant's accounts until the promotion (RF10).
+    #[must_use]
+    pub fn with_standby(mut self, tenant: sprig_common::ids::TenantId) -> Self {
+        self.standby = Some(tenant);
+        self
     }
 
     /// Routes rows of a hash-range job (split, merge, shard move) into
@@ -369,14 +381,24 @@ impl TargetIo for MysqlTarget {
                 }
             }
             if failed.is_empty() {
-                return Ok(());
+                pending = failed;
+                break;
             }
             pending = failed;
         }
-        tracing::warn!(
-            left = pending.len(),
-            "some views, routines or grants couldn't be created on the target"
-        );
+        if !pending.is_empty() {
+            tracing::warn!(
+                left = pending.len(),
+                "some views, routines or grants couldn't be created on the target"
+            );
+        }
+        // A standby's copy is read-only for the tenant's accounts until its
+        // promotion (decision RF10): the grants just created lose their
+        // write privileges, recorded for the promotion to restore.
+        if let Some(tenant) = self.standby {
+            let (revoked, killed) = super::standby::fence(&mut c, tenant).await?;
+            tracing::info!(job = %self.job.0, %tenant, revoked, killed, "standby copy read-only for the tenant's accounts");
+        }
         Ok(())
     }
 
@@ -812,6 +834,10 @@ impl TargetIo for MysqlTarget {
             }
         }
         let _ = keep_schemas; // a restarted copy recreates the schemas in preparing
+        if let Some(tenant) = self.standby {
+            let mut c = self.conn().await?;
+            super::standby::forget(&mut c, tenant).await?;
+        }
         self.forget(job).await
     }
 

@@ -79,10 +79,8 @@ async fn standby_jobs(
     tier: &Arc<dyn MetaStore>,
     tenant: Option<TenantId>,
 ) -> Result<Vec<sprig_mover::JobRecord>> {
-    let js = sprig_mover::JobStore::new(
-        Arc::clone(tier),
-        Arc::new(sprig_common::time::SystemClock),
-    );
+    let js =
+        sprig_mover::JobStore::new(Arc::clone(tier), Arc::new(sprig_common::time::SystemClock));
     Ok(js
         .all()
         .await?
@@ -306,6 +304,65 @@ impl ClusterHooks {
         Ok(applied)
     }
 
+    /// Gives a job standby's copy back the write privileges its target
+    /// revoked from the tenant's accounts (decision RF10, r2last; the
+    /// record is on the copy: `sprig_mover::mysql::standby`), on each
+    /// target cluster's writable node; replicas get the grants through
+    /// the binlog. Idempotent: a restored record is forgotten. Returns the
+    /// grants restored.
+    ///
+    /// # Errors
+    /// 39512 when a cluster has no writable node that takes the grants.
+    async fn restore_standby_grants(
+        &self,
+        tenant: TenantId,
+        tier: &Arc<dyn MetaStore>,
+        targets: &BTreeSet<ClusterId>,
+    ) -> Result<usize> {
+        use mysql_async::prelude::Queryable;
+        let mut total = 0;
+        for id in targets {
+            let Some(rec) = cluster(&self.global, tier, id).await? else {
+                continue;
+            };
+            let mut why = format!("no writable node of {id} answered");
+            let mut done = false;
+            for ep in ctl_endpoints(&rec)? {
+                let Ok(Ok(mut c)) =
+                    tokio::time::timeout(NODE_TIMEOUT, mysql_async::Conn::new(ep.opts.clone()))
+                        .await
+                else {
+                    continue;
+                };
+                let ro: Option<u64> = c.query_first("SELECT @@read_only").await.ok().flatten();
+                if ro != Some(0) {
+                    let _ = c.disconnect().await;
+                    continue;
+                }
+                let r = sprig_mover::mysql::standby::restore(&mut c, tenant).await;
+                let _ = c.disconnect().await;
+                match r {
+                    Ok(n) => {
+                        if n > 0 {
+                            tracing::info!(%tenant, cluster = %id, node = %ep.node, grants = n, "standby copy writable for the tenant's accounts again");
+                        }
+                        total += n;
+                        done = true;
+                        break;
+                    }
+                    Err(e) => why = e.to_string(),
+                }
+            }
+            if !done {
+                return Err(SprigError::new(
+                    sprig_common::SprigCode::FailoverBlocked,
+                    format!("standby {id} of tenant {tenant}: write grants not restored: {why}"),
+                ));
+            }
+        }
+        Ok(total)
+    }
+
     async fn standby_nodes(
         &self,
         tenant: TenantId,
@@ -360,7 +417,18 @@ impl PromoteHooks for ClusterHooks {
         let tier = (self.dc_tier)(to);
         let jobs = standby_jobs(&tier, Some(tenant)).await?;
         if !jobs.is_empty() {
-            return self.stop_job_standbys(tenant, &tier, jobs).await;
+            let targets: BTreeSet<ClusterId> = jobs
+                .iter()
+                .filter_map(|r| r.spec.target_cluster().cloned())
+                .collect();
+            let applied = self.stop_job_standbys(tenant, &tier, jobs).await?;
+            // RF10: the copies take writes again before the maps turn
+            // `home` (step 3), so no routed write meets a revoked grant.
+            // Step 4 retries if a node didn't answer here.
+            if let Err(e) = self.restore_standby_grants(tenant, &tier, &targets).await {
+                tracing::warn!(%tenant, error = %e, "standby grants not restored yet; step 4 retries");
+            }
+            return Ok(applied);
         }
         let mut applied = BTreeMap::new();
         for (id, ep) in self.standby_nodes(tenant, to).await? {
@@ -411,12 +479,17 @@ impl PromoteHooks for ClusterHooks {
 
     async fn make_writable(&self, tenant: TenantId, to: &DcId) -> Result<()> {
         // A job standby's copy is on a primary of `to` already, which its
-        // agent keeps writable: nothing to reset.
-        let job_targets: BTreeSet<ClusterId> = standby_jobs(&(self.dc_tier)(to), Some(tenant))
+        // agent keeps writable: nothing to reset, but its accounts get
+        // their write privileges back (RF10; done at step 2 already unless
+        // a node didn't answer then).
+        let tier = (self.dc_tier)(to);
+        let job_targets: BTreeSet<ClusterId> = standby_jobs(&tier, Some(tenant))
             .await?
             .iter()
             .filter_map(|r| r.spec.target_cluster().cloned())
             .collect();
+        self.restore_standby_grants(tenant, &tier, &job_targets)
+            .await?;
         for (id, ep) in self.standby_nodes(tenant, to).await? {
             if job_targets.contains(&id) {
                 continue;

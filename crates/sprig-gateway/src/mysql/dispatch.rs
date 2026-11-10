@@ -527,7 +527,7 @@ impl CommandLoop {
         // blocking thread, with its KILL and hang-up watches (chapter 04,
         // "Large statements").
         let (exec, watch) = (&mut self.exec, &self.watch);
-        let end = crate::offload::run(size, self.settings.large_statement, async {
+        let end = crate::offload::run_for(&handle, size, self.settings.large_statement, async {
             tokio::select! {
                 biased;
                 r = exec.execute(&mut cx, req, &mut sink) => End::Done(r),

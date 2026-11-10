@@ -96,8 +96,15 @@ impl IndexDef {
     #[must_use]
     pub fn key_doc(&self) -> Document {
         let mut d = Document::new();
+        // A `2dsphere` index (chapter 36, R6 round 3) keys its one path
+        // by the type's name.
+        let geo = crate::geo::is_2dsphere(self);
         for (p, dir) in &self.key {
-            d.insert(p.clone(), *dir);
+            if geo {
+                d.insert(p.clone(), "2dsphere");
+            } else {
+                d.insert(p.clone(), *dir);
+            }
         }
         d
     }
@@ -236,6 +243,7 @@ impl CollMeta {
     pub fn has_columns(&self, path: &str) -> bool {
         self.indexes
             .iter()
+            .filter(|i| !crate::geo::is_2dsphere(i))
             .any(|i| i.key.iter().any(|(p, _)| p == path))
     }
 

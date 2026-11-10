@@ -13,6 +13,8 @@
 //! database (any grant naming it, or `*.*`) or is a tenant administrator:
 //! normalized text carries no literals, but names other databases' tables.
 
+#![allow(clippy::cast_precision_loss)] // milliseconds for display
+
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,12 +25,18 @@ use sprig_workload::store::WorkloadTables;
 use sprig_workload::window::FpWindowStats;
 use tonic::body::Body;
 
-use super::super::sql::Caller;
 use super::super::Core;
+use super::super::sql::Caller;
 use super::{grants, json_response, rows_of, run_sql};
 
 /// Fingerprints listed at most.
 pub const MAX_LIMIT: usize = 500;
+
+fn ms_text(t: SystemTime) -> String {
+    t.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .to_string()
+}
 
 fn secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
@@ -103,7 +111,14 @@ fn round(x: f64) -> f64 {
 async fn tables(
     core: &Arc<Core>,
     caller: &Caller,
-) -> Result<(mysql_async::Conn, WorkloadTables, Arc<sprig_catalog::TenantCatalog>), SprigError> {
+) -> Result<
+    (
+        mysql_async::Conn,
+        WorkloadTables,
+        Arc<sprig_catalog::TenantCatalog>,
+    ),
+    SprigError,
+> {
     let (Some(svc), Some(tid)) = (&core.studio.tenants, caller.principal.tenant) else {
         return Err(super::invalid("workload views need a tenant login"));
     };
@@ -136,7 +151,10 @@ pub(super) async fn list(
     let seen = visible(core, caller).await?;
     let (mut conn, t, cat) = tables(core, caller).await?;
     let to = SystemTime::now() + Duration::from_secs(3600);
-    let from = SystemTime::now() - Duration::from_secs(hours * 3600);
+    // From the start of the hour: older buckets are rolled up to hours
+    // (chapter 12), so a window cut mid-hour would miss them.
+    let from_s = secs(SystemTime::now()).saturating_sub(hours * 3600) / 3600 * 3600;
+    let from = UNIX_EPOCH + Duration::from_secs(from_s);
     let window = t.window(&mut conn, cat.tenant, from, to).await?;
     let ids: Vec<_> = window.iter().map(|w| w.id).collect();
     let rows: std::collections::HashMap<u64, _> = t
@@ -180,8 +198,8 @@ pub(super) async fn list(
                     "rows_returned": w.stats.rows_returned,
                     "examined_per_returned": w.examined_per_returned().map(round),
                     "unsargable": unsargable(w),
-                    "first_seen_ms": row.first_seen.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64).to_string(),
-                    "last_seen_ms": row.last_seen.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64).to_string(),
+                    "first_seen_ms": ms_text(row.first_seen),
+                    "last_seen_ms": ms_text(row.last_seen),
                 }),
             ))
         })
@@ -230,13 +248,17 @@ pub(super) async fn series(
         }
     }
     let to = secs(SystemTime::now()) + 3600;
-    let from = to.saturating_sub(days * 86_400 + 3600);
+    let from = to.saturating_sub(days * 86_400 + 3600) / 3600 * 3600;
     let buckets: Vec<Value> = t
         .series(&mut conn, fid, from, to)
         .await?
         .into_iter()
         .map(|(start, s)| {
-            let q = |x: f64| s.latency_hist.quantile_us(x).map_or(0.0, |us| round(us as f64 / 1000.0));
+            let q = |x: f64| {
+                s.latency_hist
+                    .quantile_us(x)
+                    .map_or(0.0, |us| round(us as f64 / 1000.0))
+            };
             json!({
                 "start": start,
                 "runs": s.exec_count,

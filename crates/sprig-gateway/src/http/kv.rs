@@ -221,13 +221,19 @@ pub async fn call(
                 _ => Pre::None,
             };
             let ttl = int_of(body, "ttl_ms");
-            let v = api::put(
+            // Chapter 36 (R6 round 3): a location, with its columns.
+            let loc = lat_lng(body.get("location"));
+            if loc.is_some() {
+                ensure_geo(&mut sql, env, &key, &ns).await?;
+            }
+            let v = api::put_at(
                 &mut sql,
                 &ns,
                 &key_bytes,
                 &value,
                 pre,
                 (ttl > 0).then_some(ttl),
+                loc,
             )
             .await?;
             Ok(json!({"version": v.to_string()}))
@@ -292,9 +298,72 @@ pub async fn call(
             };
             Ok(json!({"reply": frame_json(&f)}))
         }
+        "KeyValue.GeoSearch" => {
+            let limit = usize::try_from(int_of(body, "limit"))
+                .ok()
+                .filter(|l| *l > 0)
+                .unwrap_or(100)
+                .min(10_000);
+            let near = lat_lng(body.get("near"));
+            let region = body
+                .get("region")
+                .filter(|r| r.is_object())
+                .map(super::vectors::region_of)
+                .transpose()?
+                .flatten();
+            let hits = match (region, near) {
+                (Some(r), n) => sprig_kv::geo::search(&mut sql, &ns, &r, n, limit).await?,
+                (None, Some((la, lo))) => {
+                    let max = body
+                        .get("max_distance_m")
+                        .and_then(Value::as_f64)
+                        .filter(|m| *m > 0.0);
+                    sprig_kv::geo::nearest(&mut sql, &ns, la, lo, limit, max).await?
+                }
+                (None, None) => {
+                    return Err(SprigError::new(
+                        SprigCode::GeoInvalid,
+                        "GeoSearch needs a region or a point to search near",
+                    ));
+                }
+            };
+            Ok(json!({"hits": hits.iter().map(|h| json!({
+                "entry": entry_json(&h.entry),
+                "location": {"latitude": h.lat, "longitude": h.lng},
+                "distance_m": h.distance_m.unwrap_or(0.0),
+            })).collect::<Vec<_>>()}))
+        }
         other => Err(SprigError::new(
             SprigCode::AdminRequestInvalid,
             format!("no key-value call {other}"),
         )),
     }
+}
+
+/// `{latitude, longitude}`.
+fn lat_lng(v: Option<&Value>) -> Option<(f64, f64)> {
+    let v = v?;
+    Some((
+        v.get("latitude")?.as_f64()?,
+        v.get("longitude")?.as_f64()?,
+    ))
+}
+
+/// The namespace's location columns, once per gateway (chapter 36, R6
+/// round 3).
+async fn ensure_geo(
+    sql: &mut crate::redis::SqlSession,
+    env: &sprig_redis::Env,
+    key: &str,
+    ns: &Namespace,
+) -> Result<()> {
+    let gkey = format!("{key}#geo");
+    if env.is_ensured(&gkey) {
+        return Ok(());
+    }
+    sprig_kv::SqlRunner::exec(sql, &sprig_kv::geo::ddl(ns))
+        .await
+        .map_err(|e| SprigError::standard(e.errno.unwrap_or(1105), *b"HY000", &e.message))?;
+    env.set_ensured(&gkey);
+    Ok(())
 }

@@ -13,9 +13,10 @@
 //!                                     delete Y's standby maps, forget it
 //!   want = failover.standby_dcs (tenant ctx at this DC's scopes)
 //!   fewer: one new standby per pass:
-//!     Y = an active, non-witness DC, not home, allowed by residency, holding
-//!         no map of the tenant (no replica-cluster standby, no quarantined
-//!         copy of an earlier home), preferring another `region` tag, then
+//!     Y = an active, non-witness DC, not home, allowed by residency, whose
+//!         maps of the tenant name none of its own clusters (no replica-cluster
+//!         standby, no quarantined copy of an earlier home; a move's
+//!         forwarding record is fine), preferring another `region` tag, then
 //!         the lowest measured RTT from home (chapter 24's matrix), then id
 //!     C = Y's active cluster with the lowest id that residency allows
 //!     submit move_shard(home cluster -> C, Continuous) in Y's tier
@@ -92,10 +93,7 @@ pub fn job_standbys(raw: &serde_json::Map<String, Value>) -> BTreeMap<DcId, JobS
         .map(|m| {
             m.iter()
                 .filter_map(|(dc, v)| {
-                    Some((
-                        DcId::new(dc).ok()?,
-                        serde_json::from_value(v.clone()).ok()?,
-                    ))
+                    Some((DcId::new(dc).ok()?, serde_json::from_value(v.clone()).ok()?))
                 })
                 .collect()
         })
@@ -131,6 +129,12 @@ pub struct StandbyLoop {
     global: Arc<dyn MetaStore>,
     clock: Arc<dyn Clock>,
     live: Option<LiveSettings>,
+    /// Tenants' own catalog rows (decision RF3): a tenant's
+    /// `failover.standby_dcs` wins over its home DC's.
+    scopes: Option<Arc<crate::tenant_scopes::TenantScopes>>,
+    /// Automatic moves about to start (chapter 24): no standby goes to
+    /// their target meanwhile.
+    intents: Option<Arc<crate::dc_migrate::DecisionState>>,
 }
 
 impl std::fmt::Debug for StandbyLoop {
@@ -158,7 +162,24 @@ impl StandbyLoop {
             global,
             clock,
             live,
+            scopes: None,
+            intents: None,
         }
+    }
+
+    /// Keeps standbys out of DCs an automatic move is about to go to.
+    #[must_use]
+    pub fn with_move_intents(mut self, d: Arc<crate::dc_migrate::DecisionState>) -> Self {
+        self.intents = Some(d);
+        self
+    }
+
+    /// Resolves `failover.standby_dcs` with each tenant's own catalog rows
+    /// too (decision RF3).
+    #[must_use]
+    pub fn with_tenant_scopes(mut self, s: Arc<crate::tenant_scopes::TenantScopes>) -> Self {
+        self.scopes = Some(s);
+        self
     }
 
     fn tier(&self, dc: &DcId) -> Arc<dyn MetaStore> {
@@ -180,13 +201,23 @@ impl StandbyLoop {
         .unwrap_or(u64::MAX)
     }
 
-    fn want(&self, tenant: TenantId) -> usize {
-        let n = self.live.as_ref().map_or(STANDBY_DCS.default, |l| {
-            l.get(
-                &STANDBY_DCS,
-                &SettingCtx::process(&self.dc).for_tenant(tenant, &[]),
-            )
-        });
+    /// `failover.standby_dcs` of `tenant` at its home DC (this one): the
+    /// tenant's own rows (tenant, ancestors) over the dc and global
+    /// scopes.
+    async fn want(&self, tenant: TenantId) -> usize {
+        let Some(l) = self.live.as_ref() else {
+            return usize::try_from(STANDBY_DCS.default).unwrap_or(0);
+        };
+        let rows = match &self.scopes {
+            Some(s) => s.get(tenant).await,
+            None => None,
+        };
+        let n = crate::tenant_scopes::get(
+            &l.snapshot(),
+            rows.as_deref(),
+            &STANDBY_DCS,
+            &SettingCtx::process(&self.dc).for_tenant(tenant, &[]),
+        );
         usize::try_from(n).unwrap_or(0)
     }
 
@@ -230,7 +261,10 @@ impl StandbyLoop {
             let why = if !e.residency_allows(y) {
                 Some("outside the tenant's residency".to_owned())
             } else if sb.source != source {
-                Some(format!("the home cluster is {source} now, not {}", sb.source))
+                Some(format!(
+                    "the home cluster is {source} now, not {}",
+                    sb.source
+                ))
             } else {
                 match self.mover_in(y).status(&sb.job).await {
                     Ok(st) if matches!(st.state, JobState::RolledBack | JobState::Done) => {
@@ -245,7 +279,7 @@ impl StandbyLoop {
                 sbs.remove(y);
             }
         }
-        let want = self.want(tenant);
+        let want = self.want(tenant).await;
         if sbs.len() < want {
             if let Some((y, sb)) = self.create(tenant, &e, &source, &sbs).await? {
                 sbs.insert(y, sb);
@@ -273,7 +307,11 @@ impl StandbyLoop {
     }
 
     /// The tenant's maps in `dc`'s tier.
-    async fn maps_in(&self, dc: &DcId, tenant: TenantId) -> Result<Vec<(sprig_meta::Key, Record<ShardMap>)>> {
+    async fn maps_in(
+        &self,
+        dc: &DcId,
+        tenant: TenantId,
+    ) -> Result<Vec<(sprig_meta::Key, Record<ShardMap>)>> {
         let tier = self.tier(dc);
         let page = tier
             .list(
@@ -286,6 +324,16 @@ impl StandbyLoop {
             .into_iter()
             .filter_map(|kv| Some((kv.key, Record::<ShardMap>::decode(&kv.value).ok()?)))
             .collect())
+    }
+
+    /// Whether `dc`'s maps of the tenant name a cluster of `dc`.
+    async fn holds_copy(&self, dc: &DcId, tenant: TenantId) -> Result<bool> {
+        Ok(self.maps_in(dc, tenant).await?.iter().any(|(_, m)| {
+            m.body
+                .ranges
+                .iter()
+                .any(|r| sprig_cluster::registry::dc_of(&r.cluster_id).as_ref() == Some(dc))
+        }))
     }
 
     /// Picks a DC and a cluster and starts one standby; `None` when no DC
@@ -310,12 +358,19 @@ impl StandbyLoop {
                 || d.dc_id == self.dc
                 || have.contains_key(&d.dc_id)
                 || !e.residency_allows(&d.dc_id)
+                || self
+                    .intents
+                    .as_ref()
+                    .is_some_and(|i| i.intends(tenant, &d.dc_id, self.now_ms()))
             {
                 continue;
             }
-            // A DC holding any map of the tenant (a replica-cluster
-            // standby, a quarantined copy of an earlier home) gets no job.
-            if !self.maps_in(&d.dc_id, tenant).await?.is_empty() {
+            // A DC whose maps of the tenant name one of its own clusters
+            // holds a copy already (a replica-cluster standby, the
+            // quarantined copy of a home it failed over from): no job.
+            // A move's forwarding record names the new home's cluster and
+            // doesn't count.
+            if self.holds_copy(&d.dc_id, tenant).await? {
                 continue;
             }
             let same_region = home_region.is_some() && d.tags.get("region") == home_region.as_ref();
@@ -441,39 +496,86 @@ impl StandbyLoop {
         sb: &JobStandby,
         why: &str,
     ) -> Result<()> {
-        tracing::warn!(%tenant, dc = %y, job = %sb.job, why, "standby dropped");
-        if let Err(e) = self.mover_in(y).cancel(&sb.job, why).await {
-            tracing::debug!(%tenant, job = %sb.job, error = %e, "standby job not cancelled");
-        }
-        let ytier = self.tier(y);
-        for (k, m) in self.maps_in(y, tenant).await? {
-            if m.body.role == MapRole::Standby {
-                del(&*ytier, k).await?;
-            }
-        }
-        self.forget(tenant, y).await?;
-        metrics::counter!("sprig_controller_standbys_total", "result" => "dropped").increment(1);
-        Ok(())
+        drop_one(&self.store, &self.global, &self.clock, tenant, y, sb, why).await
     }
 
     /// Removes `y` from the entry's `standby_jobs` and `standby_dcs`.
     async fn forget(&self, tenant: TenantId, y: &DcId) -> Result<()> {
-        home::update_home(&*self.global, tenant, |cur| {
-            let mut changed = false;
-            if let Some(Value::Object(m)) = cur.raw.get_mut(FIELD) {
-                changed |= m.remove(y.as_str()).is_some();
-            }
-            let list = standby_dcs(&cur.raw);
-            let keep: Vec<String> = list.iter().filter(|d| *d != y.as_str()).cloned().collect();
-            if keep.len() != list.len() {
-                cur.raw.insert("standby_dcs".into(), json!(keep));
-                changed = true;
-            }
-            Ok(changed)
-        })
-        .await?;
-        Ok(())
+        forget_in(&self.global, tenant, y).await
     }
+}
+
+async fn drop_one(
+    store: &Arc<dyn MetaStore>,
+    global: &Arc<dyn MetaStore>,
+    clock: &Arc<dyn Clock>,
+    tenant: TenantId,
+    y: &DcId,
+    sb: &JobStandby,
+    why: &str,
+) -> Result<()> {
+    tracing::warn!(%tenant, dc = %y, job = %sb.job, why, "standby dropped");
+    let ytier = TierView::over(store, Tier::Dc(y.clone()));
+    let mover = MetaMover::new(JobStore::new(Arc::clone(&ytier), Arc::clone(clock)));
+    if let Err(e) = mover.cancel(&sb.job, why).await {
+        tracing::debug!(%tenant, job = %sb.job, error = %e, "standby job not cancelled");
+    }
+    let page = ytier
+        .list(
+            &ytier.tier().key(&format!("shardmaps/{tenant}/"))?,
+            ListOpts::default(),
+        )
+        .await?;
+    for kv in page.kvs {
+        if Record::<ShardMap>::decode(&kv.value).is_ok_and(|m| m.body.role == MapRole::Standby) {
+            del(&*ytier, kv.key).await?;
+        }
+    }
+    forget_in(global, tenant, y).await?;
+    metrics::counter!("sprig_controller_standbys_total", "result" => "dropped").increment(1);
+    Ok(())
+}
+
+async fn forget_in(global: &Arc<dyn MetaStore>, tenant: TenantId, y: &DcId) -> Result<()> {
+    home::update_home(&**global, tenant, |cur| {
+        let mut changed = false;
+        if let Some(Value::Object(m)) = cur.raw.get_mut(FIELD) {
+            changed |= m.remove(y.as_str()).is_some();
+        }
+        let list = standby_dcs(&cur.raw);
+        let keep: Vec<String> = list.iter().filter(|d| *d != y.as_str()).cloned().collect();
+        if keep.len() != list.len() {
+            cur.raw.insert("standby_dcs".into(), json!(keep));
+            changed = true;
+        }
+        Ok(changed)
+    })
+    .await?;
+    Ok(())
+}
+
+/// Drops `tenant`'s job standby in `y`, if the directory records one:
+/// cancels its job (the copy is dropped), deletes its standby maps and
+/// forgets it. Chapter 24's automatic move calls it before moving the
+/// tenant into `y` (decision RF11).
+///
+/// # Errors
+/// The stores' errors.
+pub async fn drop_job_standby(
+    store: &Arc<dyn MetaStore>,
+    global: Arc<dyn MetaStore>,
+    clock: &Arc<dyn Clock>,
+    tenant: TenantId,
+    y: &DcId,
+    why: &str,
+) -> Result<()> {
+    let Some(e) = home::read_home(&*global, tenant).await? else {
+        return Ok(());
+    };
+    let Some(sb) = job_standbys(&e.raw).remove(y) else {
+        return Ok(());
+    };
+    drop_one(store, &global, clock, tenant, y, &sb, why).await
 }
 
 #[async_trait::async_trait]

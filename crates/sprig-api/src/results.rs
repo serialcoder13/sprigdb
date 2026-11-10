@@ -352,10 +352,7 @@ pub fn query_part_from_json(v: &Value) -> QueryResponse {
                     .get("more_results")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                truncated: e
-                    .get("truncated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                truncated: e.get("truncated").and_then(Value::as_bool).unwrap_or(false),
             })
         })
     };

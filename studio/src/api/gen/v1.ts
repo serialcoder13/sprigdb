@@ -103,6 +103,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The logical databases the caller can see; ETag of the catalog and auth versions (If-None-Match gives 304) */
+        get: operations["Catalog.ListObjects"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Tables, views, routines and columns of one database, read with the caller's rights; ETag as ListObjects */
+        get: operations["Catalog.Snapshot"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/catalog/{kind}/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One object (kind table, view, procedure or function): columns, indexes, definition */
+        get: operations["Catalog.GetObject"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/databases/{database}/functions/{name}:call": {
         parameters: {
             query?: never;
@@ -273,6 +324,23 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["KeyValue.Scan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/sql:check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Each statement's class and its problems with positions (UTF-16 offsets), parsed and bound without running */
+        post: operations["Sql.Check"];
         delete?: never;
         options?: never;
         head?: never;
@@ -544,6 +612,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/workload/fingerprints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The caller's tenant's top fingerprints by total time (hours, limit, source = all | client | studio) */
+        get: operations["Workload.ListFingerprints"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workload/fingerprints/{id}/series": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One fingerprint per bucket: runs, p50, p95, total (days) */
+        get: operations["Workload.Series"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/{transaction}:commit": {
         parameters: {
             query?: never;
@@ -602,6 +704,38 @@ export interface components {
         CallResponse: {
             event?: string;
             result?: Record<string, never>;
+        };
+        CatalogDatabases: {
+            databases: string[];
+        };
+        CatalogSnapshot: {
+            columns: {
+                [key: string]: unknown;
+            };
+            db: string;
+            objects: {
+                [key: string]: unknown;
+            }[];
+        };
+        CheckReply: {
+            statements: {
+                checked?: string;
+                class: string;
+                diagnostics: {
+                    code?: number;
+                    end: number;
+                    message: string;
+                    name?: string;
+                    severity: string;
+                    source?: string;
+                    start: number;
+                }[];
+                end: number;
+                start: number;
+            }[];
+        };
+        CheckRequest: {
+            sql: string;
         };
         Column: {
             binary?: boolean;
@@ -1038,6 +1172,99 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TokenReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Catalog.ListObjects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogDatabases"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Catalog.Snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogSnapshot"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Catalog.GetObject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                kind: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
                 };
             };
             /** @description An error */
@@ -1534,6 +1761,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["KvScanResponse"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Sql.Check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckReply"];
                 };
             };
             /** @description An error */
@@ -2130,6 +2392,72 @@ export interface operations {
                 "application/json": components["schemas"]["SetPasswordRequest"];
             };
         };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Workload.ListFingerprints": {
+        parameters: {
+            query?: {
+                hours?: string;
+                limit?: string;
+                source?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Workload.Series": {
+        parameters: {
+            query?: {
+                days?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description OK */
             200: {

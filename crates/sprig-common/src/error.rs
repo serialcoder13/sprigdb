@@ -448,6 +448,10 @@ sprig_codes! {
     /// A VM cluster can't be created: too few free hosts in the data
     /// center (chapter 27).
     ProvisionNoHosts = 39513, "ER_SPRIG_PROVISION_NO_HOSTS", "SprigProvisionNoHosts", SQLSTATE_GENERAL, true;
+    /// No data center the new tenant's residency allows is active, stable
+    /// and has a cluster that can take it (chapter 24, "Least-busy
+    /// placement").
+    NoDcCapacity = 39525, "ER_SPRIG_NO_DC_CAPACITY", "SprigNoDcCapacity", SQLSTATE_GENERAL, true;
     /// The provisioner doesn't support the operation (chapter 27).
     ProvisionerUnsupported = 39510, "ER_SPRIG_PROVISIONER_UNSUPPORTED", "SprigProvisionerUnsupported", SQLSTATE_GENERAL, false;
     /// The tenant's home DC holds no valid DC lease (its permit lapsed or
@@ -1207,7 +1211,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::InheritBroadcastLimit
         | SprigCode::DimTooManyGroups
         | SprigCode::RateLimited => (Code::ResourceExhausted, 429),
-        SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts => {
+        SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts | SprigCode::NoDcCapacity => {
             (Code::ResourceExhausted, 503)
         }
         SprigCode::RequestTooLarge

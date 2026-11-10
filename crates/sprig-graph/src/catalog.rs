@@ -4,12 +4,11 @@
 //! text, and the physical tables of a native graph (step 3).
 //!
 //! **As built:**
-//! - Native graphs only. `CREATE PROPERTY GRAPH` (mapped graphs) and
-//!   `ALTER GRAPH ... PARTITION BY` answer 39901.
-//! - A native graph's tables live in its database's first shard schema
-//!   (one shard, like queues and streams today); `part`, `_sprig_rk` and
-//!   `dst_rk` are filled, so placing them in a table group later needs no
-//!   data change.
+//! - `CREATE PROPERTY GRAPH` makes a mapped graph (round 3, see
+//!   [`crate::mapped`]); `ALTER GRAPH ... PARTITION BY` answers 39901.
+//! - Since round 3 a native graph is a sharded table group (`group_id`,
+//!   mirrors `ready`); graphs from rounds 1 and 2 keep their tables in the
+//!   database's first shard schema.
 //! - `node_seq` and `edge_seq` are NULL: ids come from a counter table
 //!   `__sprig_gq_<graph>` in the same schema, handed out in blocks.
 //! - A graph is an `objects` row of kind `graph` in namespace `graph`.
@@ -165,6 +164,8 @@ pub struct GraphDef {
     pub group_id: Option<u32>,
     /// Mirror rows are kept for every edge (`ready`).
     pub mirrors: bool,
+    /// A mapped graph's definition ([`crate::mapped::MappedDef`] as JSON).
+    pub definition: Option<String>,
     /// Label ids to names.
     pub labels: BTreeMap<u32, String>,
     /// Type ids to names.
@@ -250,16 +251,25 @@ impl GraphCatalog {
     /// # Errors
     /// A backend error.
     pub async fn load<Q: Queryable + Send>(&self, q: &mut Q) -> Result<GraphState> {
-        let rows: Vec<(u64, u32, String, String, Option<u32>, String)> = q
+        type GraphRow = (
+            u64,
+            u32,
+            String,
+            String,
+            Option<u32>,
+            String,
+            Option<String>,
+        );
+        let rows: Vec<GraphRow> = q
             .query(format!(
-                "SELECT graph_id, db_id, kind, state, group_id, mirror_state FROM {}",
+                "SELECT graph_id, db_id, kind, state, group_id, mirror_state, definition FROM {}",
                 self.t("graphs")
             ))
             .await
             .map_err(map_err)?;
         let mut graphs: HashMap<u64, GraphDef> = rows
             .into_iter()
-            .map(|(g, d, k, s, group, m)| {
+            .map(|(g, d, k, s, group, m, definition)| {
                 (
                     g,
                     GraphDef {
@@ -269,6 +279,7 @@ impl GraphCatalog {
                         state: s,
                         group_id: group,
                         mirrors: m == "ready",
+                        definition,
                         labels: BTreeMap::new(),
                         types: BTreeMap::new(),
                         indexes: Vec::new(),
@@ -509,6 +520,30 @@ impl GraphCatalog {
         db: u32,
     ) -> Result<()> {
         self.insert_native_in(q, graph, db, None).await
+    }
+
+    /// Inserts a mapped graph's row with its definition (JSON).
+    ///
+    /// # Errors
+    /// A backend error.
+    pub async fn insert_mapped<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        graph: u64,
+        db: u32,
+        definition: &str,
+    ) -> Result<()> {
+        q.exec_drop(
+            format!(
+                "INSERT INTO {} (graph_id, db_id, kind, definition, state, def_version, \
+                 created_at, updated_at) \
+                 VALUES (?, ?, 'mapped', ?, 'active', 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))",
+                self.t("graphs")
+            ),
+            (graph, db, definition),
+        )
+        .await
+        .map_err(map_err)
     }
 
     /// Inserts a native graph's row with its table group (`None`: one
@@ -902,6 +937,8 @@ pub enum GraphDdl {
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
     },
+    /// `CREATE [OR REPLACE] PROPERTY GRAPH ...` (a mapped graph).
+    CreateProperty(Box<crate::mapped::CreatePropertyGraph>),
     /// `DROP GRAPH [IF EXISTS] [db.]name`.
     Drop {
         /// The database, if named.
@@ -988,8 +1025,8 @@ fn qualified(s: &str) -> Result<(Option<String>, String)> {
 /// Recognizes graph DDL in a SQL text: `None` if it isn't graph DDL.
 ///
 /// # Errors
-/// 39900 for malformed graph DDL; 39901 for `CREATE PROPERTY GRAPH` and
-/// `ALTER GRAPH`, which this build doesn't have.
+/// 39900 for malformed graph DDL; 39908 for a mapped graph this build
+/// can't map; 39901 for `ALTER GRAPH`.
 pub fn parse_ddl(sql: &str) -> Result<Option<GraphDdl>> {
     let w = words(sql);
     let up: Vec<String> = w.iter().map(|x| x.to_ascii_uppercase()).collect();
@@ -1002,10 +1039,9 @@ pub fn parse_ddl(sql: &str) -> Result<Option<GraphDdl>> {
     };
     match u.as_slice() {
         ["CREATE", "PROPERTY", "GRAPH", ..]
-        | ["CREATE", "OR", "REPLACE", "PROPERTY", "GRAPH", ..] => Err(SprigError::new(
-            SprigCode::GraphUnsupported,
-            "CREATE PROPERTY GRAPH (mapped graphs) is not supported yet; use CREATE GRAPH for a native graph",
-        )),
+        | ["CREATE", "OR", "REPLACE", "PROPERTY", "GRAPH", ..] => {
+            Ok(crate::mapped::parse_create(sql)?.map(|c| GraphDdl::CreateProperty(Box::new(c))))
+        }
         ["ALTER", "GRAPH", ..] => Err(SprigError::new(
             SprigCode::GraphUnsupported,
             "ALTER GRAPH (partitioning) is not supported yet",
@@ -1089,10 +1125,14 @@ mod tests {
         assert_eq!(parse_ddl("SELECT 1").expect("ok"), None);
         assert_eq!(
             parse_ddl("CREATE PROPERTY GRAPH shop VERTEX TABLES (x)")
-                .expect_err("mapped")
+                .expect_err("no key")
                 .code(),
-            Some(SprigCode::GraphUnsupported)
+            Some(SprigCode::GraphDefinitionInvalid)
         );
+        assert!(matches!(
+            parse_ddl("CREATE PROPERTY GRAPH shop VERTEX TABLES (x KEY (id))"),
+            Ok(Some(GraphDdl::CreateProperty(_)))
+        ));
         assert_eq!(
             parse_ddl("CREATE GRAPH __sprig_x")
                 .expect_err("reserved")
@@ -1105,6 +1145,8 @@ mod tests {
         );
         let t = Tables::of("t1_d2_g3_s1", 901);
         assert!(t.nodes.ends_with("`__sprig_gn_901`"));
-        assert_eq!(t.create_ddl().len(), 5);
+        assert_eq!(t.create_ddl().len(), 6);
+        assert_eq!(t.shard_ddl().len(), 4);
+        assert!(t.mirrors.ends_with("`__sprig_gm_901`"));
     }
 }

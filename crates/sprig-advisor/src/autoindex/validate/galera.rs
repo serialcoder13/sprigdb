@@ -38,7 +38,7 @@ use sprig_cluster::sql::{NodeEndpoint, ProbeError};
 use sprig_common::Result;
 
 use super::node::{
-    NodeSql, NodeWatch, StatsSnapshot, add_index_sql, analyze_sql, drop_index_sql, own_new_gtids,
+    NodeSql, NodeWatch, StatsSnapshot, add_def_sql, analyze_sql, drop_index_sql, own_new_gtids,
     run_watched,
 };
 use super::replica::drop_with_retries;
@@ -360,7 +360,7 @@ impl Validator for RsuValidator {
         match &mut ddl {
             Err(e) => abort(&mut r, format!("DDL session: {e}")),
             Ok(d) => {
-                let sql = add_index_sql(t, &name, &plan.candidate.def.ddl_columns(), false);
+                let sql = add_def_sql(t, &name, &plan.candidate.def, false);
                 let (res, took, synced, why) = rsu_statement(d, &mut watch, &sql, plan).await;
                 r.build_ms = Some(took);
                 r.resync_ms = synced;

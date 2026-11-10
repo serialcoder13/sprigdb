@@ -31,8 +31,8 @@ use hyper::header::{self, HeaderValue};
 use hyper::{Request, Response};
 use serde_json::{Map, Value, json};
 use sprig_api::proto::v1::query_response::Part;
-use sprig_common::{SprigCode, SprigError};
 use sprig_auth::token::{Tokens, Who};
+use sprig_common::{SprigCode, SprigError};
 use sprig_studio::StudioConfig;
 use tokio::sync::mpsc;
 use tonic::body::Body;
@@ -257,6 +257,7 @@ fn encode(fmt: Format, part: &Part, columns: &mut Vec<String>, done: &mut bool) 
 }
 
 /// The form post: checks the ticket and streams the file.
+#[allow(clippy::too_many_lines)] // the ticket's checks, then the stream
 pub(super) async fn download(
     core: &Arc<Core>,
     cfg: &StudioConfig,

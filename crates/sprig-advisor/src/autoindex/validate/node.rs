@@ -204,6 +204,26 @@ pub(crate) fn add_index_sql(t: &IndexTarget, name: &str, columns: &str, online: 
     )
 }
 
+/// [`add_index_sql`] for any kind of `def`, as `name` (chapter 13,
+/// "Other models"; R6 round 3): spatial and vector indexes are added
+/// without `ALGORITHM=INPLACE, LOCK=NONE`, which MariaDB refuses for them.
+pub(crate) fn add_def_sql(
+    t: &IndexTarget,
+    name: &str,
+    def: &crate::autoindex::model::IndexDef,
+    online: bool,
+) -> String {
+    if def.kind == crate::autoindex::model::IndexKind::BTree {
+        return add_index_sql(t, name, &def.ddl_columns(), online);
+    }
+    format!(
+        "ALTER TABLE {}.{} ADD {}",
+        quote(&t.schema),
+        quote(&t.table),
+        def.add_clause_named(name)
+    )
+}
+
 /// `ALTER TABLE ... DROP INDEX IF EXISTS name`.
 pub(crate) fn drop_index_sql(t: &IndexTarget, name: &str) -> String {
     format!(

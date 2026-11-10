@@ -85,7 +85,7 @@ use sprig_workload::window::{FpWindowStats, SampleValue, SampledLiterals, Sample
 
 use super::candidates::{FpInput, Generator, Literal, Skipped, covered_by, merge};
 use super::cost::{AutoOnTable, CostModel, Estimate, Model, Pooled, TableContext, select};
-use super::model::{Candidate, IndexInfo, Origin, Role};
+use super::model::{Candidate, IndexInfo, IndexKind, Origin, Role};
 use super::policy::{
     Damped, Dampers, DayCaps, Mode, ObjectPolicy, Route, SettingSource, record_churn, route,
 };
@@ -1178,8 +1178,19 @@ impl Evaluator {
             let advise = c
                 .primaries()
                 .all(|f| quals.get(&f).is_some_and(|q| advise_by_stats(q)));
+            // An ANN index changes results: `auto_index.vector_ann` decides
+            // (chapter 13, "Other models"; R6 round 3).
+            let mode = if c.def.kind == IndexKind::Vector {
+                match (policy.mode, policy.vector_ann) {
+                    (Mode::Off, _) | (_, Mode::Off) => Mode::Off,
+                    (Mode::On, Mode::On) => Mode::On,
+                    _ => Mode::Recommend,
+                }
+            } else {
+                policy.mode
+            };
             let r = route(
-                policy.mode,
+                mode,
                 advise,
                 policy.recommend_validate,
                 t.meta.validation_node,
@@ -1464,7 +1475,11 @@ impl Evaluator {
                 index_id: super::model::AutoIndexId(0),
                 object: t.object,
                 name: name.clone(),
-                model: DataModel::Sql,
+                model: match f.candidate.def.kind {
+                    IndexKind::Vector => DataModel::Vector,
+                    IndexKind::Spatial | IndexKind::S2 => DataModel::Geo,
+                    _ => DataModel::Sql,
+                },
                 kind: StoredKind::from(f.candidate.def.kind),
                 definition: Definition::of(&f.candidate.def),
                 state,

@@ -341,7 +341,9 @@ fn malformed_definitions_are_syntax_errors() {
 }
 
 #[test]
-fn javascript_goes_to_the_engine_tier_for_now() {
+fn javascript_needs_its_signature() {
+    // Without the declaration's parameter types (`js::compile_with`), the
+    // engine tier.
     let c = compile(
         Runtime::Javascript,
         "export default () => 1",
@@ -349,7 +351,7 @@ fn javascript_goes_to_the_engine_tier_for_now() {
         &opts(),
     )
     .unwrap();
-    assert_eq!(c.analysis.reasons[0].code, "js.front_end");
+    assert_eq!(c.analysis.reasons[0].code, "js.signature");
 }
 
 #[test]

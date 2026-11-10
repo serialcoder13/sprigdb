@@ -18,9 +18,15 @@
 //!   `/metrics` URL) it also checks that `mode: "r"` reads wait on a
 //!   replica for the session's bookmark.
 //!
+//! - Round 3: `sharded_graph_split_and_move` (also `SPRIG_TEST_SPRIGCTL`
+//!   and `SPRIGCTL_ENDPOINT`: two splits and two moves across clusters
+//!   under concurrent writes), `mapped_graphs_graph_table_and_gql` (mapped
+//!   graphs, `GRAPH_TABLE`, GQL forms), `bolt_sessions_in_processlist_and_kill`;
+//!   `SPRIG_TEST_BOLT_DIFF_DB` points the differential at another graph.
+//!
 //! Without the variables the tests skip.
 
-#![allow(clippy::many_single_char_names)]
+#![allow(clippy::many_single_char_names, clippy::items_after_statements)]
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -161,7 +167,16 @@ const CORPUS: &[&str] = &[
     "MATCH (p:Person) OPTIONAL MATCH (p)-[b:BOUGHT]->(x) RETURN p.name, x.name, b.qty ORDER BY p.name, x.name",
     "MATCH (p:Product) RETURN sum(p.price) AS s, avg(p.price) AS a, min(p.name) AS mn, max(p.price) AS mx",
     "MATCH (p:Product) RETURN collect(p.name) AS names",
-    "MATCH (p:Person)-[b:BOUGHT]->(x) RETURN x.name, sum(b.qty) AS q, collect(DISTINCT p.name) AS who ORDER BY q DESC, x.name",
+    // Round 3: GQL's `IS` labels, chained comparisons and their
+    // precedence, `truncate`, `ORDER BY` after `DISTINCT`.
+    "MATCH (n IS Person)-[IS KNOWS]->(m IS Person) RETURN n.name, m.name ORDER BY n.name",
+    "MATCH (p:Person) WHERE 20 < p.age <= 35 RETURN p.name ORDER BY p.name",
+    "RETURN false = true IS NULL AS a, 1 < 2 = true AS b, 2 IN [1, 2] = true AS c",
+    "RETURN date.truncate('month', date('2020-05-17')) AS d, toString(datetime.truncate('hour', datetime('2020-05-17T10:35:12+02:00'))) AS t, toString(localtime.truncate('minute', localtime('10:35:12.5'))) AS l",
+    "MATCH (p:Person)-[:BOUGHT]->(x) RETURN DISTINCT x.name ORDER BY x.name",
+    // `collect` keeps its input's order, which is storage order unless
+    // sorted first (Neo4j reuses ids, so its order drifts between runs).
+    "MATCH (p:Person)-[b:BOUGHT]->(x) WITH p, b, x ORDER BY p.name RETURN x.name, sum(b.qty) AS q, collect(DISTINCT p.name) AS who ORDER BY q DESC, x.name",
     "UNWIND [3, 1, 2, 1] AS x WITH DISTINCT x ORDER BY x DESC RETURN collect(x) AS xs",
     "UNWIND range(1, 10) AS x WITH x WHERE x % 3 = 0 RETURN x SKIP 1 LIMIT 1",
     "MATCH (p:Person) WITH p.age IS NULL AS missing, count(*) AS c RETURN missing, c ORDER BY missing",
@@ -1010,11 +1025,32 @@ fn sprigctl(bin: &str, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null)
 }
 
+/// `sprigctl -o json <args>`, `None` on a failure (etcd under load).
+fn sprigctl_try(bin: &str, args: &[&str]) -> Option<serde_json::Value> {
+    let out = std::process::Command::new(bin)
+        .arg("-o")
+        .arg("json")
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        eprintln!(
+            "sprigctl {args:?} (retried): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
 /// Waits for mover job `id` to commit (or fails the test).
 async fn wait_job(bin: &str, id: &str) -> Duration {
     let t = Instant::now();
     loop {
-        let j = sprigctl(bin, &["job", "show", id]);
+        let Some(j) = sprigctl_try(bin, &["job", "show", id]) else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
         let state = j["state"].as_str().unwrap_or_default().to_owned();
         if ["post_cutover", "retaining", "cleaning", "done"].contains(&state.as_str()) {
             return t.elapsed();
@@ -1023,7 +1059,10 @@ async fn wait_job(bin: &str, id: &str) -> Duration {
             !["rolling_back", "rolled_back", "failed", "cancelled"].contains(&state.as_str()),
             "job {id}: {j}"
         );
-        assert!(t.elapsed() < Duration::from_secs(600), "job {id} stuck: {j}");
+        assert!(
+            t.elapsed() < Duration::from_secs(600),
+            "job {id} stuck: {j}"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
@@ -1123,10 +1162,12 @@ async fn sharded_graph_split_and_move() {
         "MATCH (a:R {i: 1}), (b:R {i: 151}) MATCH p = shortestPath((a)-[:NEXT*]->(b)) RETURN length(p)",
         "MATCH (a:R)-[:NEXT]->(b:R) WHERE a.i < 20 RETURN a.i, collect(b.i) ORDER BY a.i",
     ];
-    let snapshot = |rows: &Rows| rows_text(rows, true);
     let mut before = Vec::new();
     for q in corpus {
-        before.push(snapshot(&c.query(q, vec![], db.clone()).await.expect(q)));
+        before.push(rows_text(
+            &c.query(q, vec![], db.clone()).await.expect(q),
+            true,
+        ));
     }
     // Writes throughout: nodes and an edge between consecutive ones.
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1140,10 +1181,7 @@ async fn sharded_graph_split_and_move() {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let q = "MERGE (a:W {k: $k}) WITH a OPTIONAL MATCH (p:W {k: $k - 1}) FOREACH (_ IN CASE WHEN p IS NULL THEN [] ELSE [1] END | CREATE (p)-[:THEN]->(a))";
                 loop {
-                    match w
-                        .query(q, vec![("k", PackValue::Int(k))], db.clone())
-                        .await
-                    {
+                    match w.query(q, vec![("k", PackValue::Int(k))], db.clone()).await {
                         Ok(_) => break,
                         Err(e) if e.code.starts_with("Neo.TransientError") => {
                             retried += 1;
@@ -1163,29 +1201,31 @@ async fn sharded_graph_split_and_move() {
     let gid = gid.to_string();
     assert_eq!(shards.len(), 1, "a new graph starts with one shard");
     let mut steps = Vec::new();
-    let check = |c: &mut Client, label: String| {
-        let db = db.clone();
-        let before = before.clone();
-        async move {
-            for (q, want) in corpus.iter().zip(&before) {
-                let got = c.query(q, vec![], db.clone()).await.expect(q);
-                assert_eq!(&snapshot(&got), want, "{label}: {q}");
-            }
+    async fn same(
+        c: &mut Client,
+        db: &[(&str, PackValue)],
+        corpus: &[&str],
+        before: &[Vec<String>],
+        label: &str,
+    ) {
+        for (q, want) in corpus.iter().zip(before) {
+            let got = c.query(q, vec![], db.to_vec()).await.expect(q);
+            assert_eq!(&rows_text(&got, true), want, "{label}: {q}");
         }
-    };
+    }
     // Split shard 1, then the larger child again.
     let first = shards[0].0.to_string();
     let j = sprigctl(&ctl, &["shard", "split", &tenant, &gid, &first]);
     let id = j["id"].as_str().expect("job id").to_owned();
     steps.push(("split 1 -> 2", wait_job(&ctl, &id).await));
-    check(&mut c, "after the first split".into()).await;
+    same(&mut c, &db, &corpus, &before, "after the first split").await;
     let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
     assert_eq!(shards.len(), 2, "{shards:?}");
     let s = shards[1].0.to_string();
     let j = sprigctl(&ctl, &["shard", "split", &tenant, &gid, &s]);
     let id = j["id"].as_str().expect("job id").to_owned();
     steps.push(("split 2 -> 3", wait_job(&ctl, &id).await));
-    check(&mut c, "after the second split".into()).await;
+    same(&mut c, &db, &corpus, &before, "after the second split").await;
     // Move two shards to the other clusters.
     let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
     assert_eq!(shards.len(), 3, "{shards:?}");
@@ -1193,9 +1233,13 @@ async fn sharded_graph_split_and_move() {
         let s = s.to_string();
         let j = sprigctl(&ctl, &["shard", "move", &tenant, &gid, &s, "--to", to]);
         let id = j["id"].as_str().expect("job id").to_owned();
-        let label = if to == "dc-a-c2" { "move to c2" } else { "move to c3" };
+        let label = if to == "dc-a-c2" {
+            "move to c2"
+        } else {
+            "move to c3"
+        };
         steps.push((label, wait_job(&ctl, &id).await));
-        check(&mut c, format!("after {label}")).await;
+        same(&mut c, &db, &corpus, &before, label).await;
     }
     let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
     let clusters: std::collections::BTreeSet<&str> =
@@ -1245,4 +1289,283 @@ async fn sharded_graph_split_and_move() {
         .await
         .expect("after detach");
     assert_eq!(count(&o), all - touching);
+}
+
+/// Round 3: a mapped graph over SQL tables (`CREATE PROPERTY GRAPH`),
+/// read through Bolt and through `GRAPH_TABLE` in SQL; `GRAPH_TABLE` over a
+/// native graph; GQL's forms through Bolt. Answers are checked against the
+/// same question in plain SQL.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // tables, graph, Bolt, SQL
+async fn mapped_graphs_graph_table_and_gql() {
+    let (Some(addr), Some(user), Some(pw), Some(sql)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_SQL_ADDR"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* / SPRIG_TEST_SQL_ADDR not set");
+        return;
+    };
+    let (host, port) = sql.split_once(':').expect("host:port");
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host)
+        .tcp_port(port.parse().expect("port"))
+        .user(Some(user.clone()))
+        .pass(Some(pw.clone()))
+        .db_name(Some("r8g3_mapped"))
+        .ssl_opts(Some(
+            mysql_async::SslOpts::default()
+                .with_danger_accept_invalid_certs(true)
+                .with_danger_skip_domain_validation(true),
+        ));
+    {
+        let mut c = mysql_async::Conn::new(opts.clone().db_name(None::<String>))
+            .await
+            .expect("sql login");
+        c.query_drop("CREATE DATABASE IF NOT EXISTS r8g3_mapped")
+            .await
+            .expect("db");
+        c.disconnect().await.expect("bye");
+    }
+    let mut s = mysql_async::Conn::new(opts).await.expect("sql login");
+    for q in [
+        "DROP GRAPH IF EXISTS shop",
+        "DROP GRAPH IF EXISTS social",
+        "DROP TABLE IF EXISTS orders, customers, products",
+        "CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(40), email VARCHAR(80), joined DATE)",
+        "CREATE TABLE products (sku INT PRIMARY KEY, name VARCHAR(40), price DECIMAL(8,2))",
+        "CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, sku INT, qty INT, placed_at DATETIME)",
+        "INSERT INTO customers VALUES (1, 'Alice', 'alice@example.com', '2020-01-02'), (2, 'Bob', 'bob@example.com', '2021-03-04'), (3, 'Carol', NULL, NULL)",
+        "INSERT INTO products VALUES (10, 'Lamp', 10.50), (11, 'Desk', 100.00), (12, 'Pen', 1.25)",
+        "INSERT INTO orders VALUES (100, 1, 10, 2, '2024-01-01 10:00:00'), (101, 1, 12, 10, '2024-01-02 11:00:00'), (102, 2, 11, 1, '2024-02-01 09:30:00'), (103, 2, 12, 3, '2024-02-03 08:00:00'), (104, 3, 10, 1, '2024-03-01 12:00:00')",
+        "CREATE PROPERTY GRAPH shop
+           VERTEX TABLES (
+             customers KEY (id) LABEL Person PROPERTIES (id, name, email, joined),
+             products KEY (sku) LABEL Product PROPERTIES (sku, name, price))
+           EDGE TABLES (
+             orders KEY (id)
+               SOURCE KEY (customer_id) REFERENCES customers (id)
+               DESTINATION KEY (sku) REFERENCES products (sku)
+               LABEL BOUGHT PROPERTIES (qty, placed_at))",
+        "CREATE GRAPH social",
+    ] {
+        s.query_drop(q).await.unwrap_or_else(|e| panic!("{q}: {e}"));
+    }
+    // Errors: a missing table, a composite key, a write.
+    let e = s
+        .query_drop("CREATE PROPERTY GRAPH bad VERTEX TABLES (nope KEY (id))")
+        .await
+        .expect_err("missing table");
+    assert!(e.to_string().contains("doesn't exist"), "{e}");
+    let mut c = connect(&addr, &user, &pw).await.expect("login");
+    let shop = vec![("db", PackValue::str("r8g3_mapped.shop"))];
+    let rows = |r: &Rows| rows_text(r, true);
+    // Bolt over the mapped graph.
+    let got = c
+        .query(
+            "MATCH (c:Person)-[o:BOUGHT]->(p:Product) RETURN c.name, p.name, o.qty ORDER BY c.name, p.name",
+            vec![],
+            shop.clone(),
+        )
+        .await
+        .expect("mapped match");
+    assert_eq!(
+        rows(&got),
+        [
+            "'Alice' | 'Lamp' | 2",
+            "'Alice' | 'Pen' | 10",
+            "'Bob' | 'Desk' | 1",
+            "'Bob' | 'Pen' | 3",
+            "'Carol' | 'Lamp' | 1"
+        ],
+        "{:?}",
+        rows(&got)
+    );
+    let got = c
+        .query(
+            "MATCH (p:Product {name: 'Pen'})<-[:BOUGHT]-(c) RETURN c.name, c.joined ORDER BY c.name",
+            vec![],
+            shop.clone(),
+        )
+        .await
+        .expect("incoming");
+    assert_eq!(got.records.len(), 2);
+    let got = c
+        .query(
+            "MATCH (a:Person {name: 'Alice'})-[:BOUGHT]->(:Product)<-[:BOUGHT]-(b:Person) WHERE a <> b RETURN DISTINCT b.name AS n ORDER BY n",
+            vec![],
+            shop.clone(),
+        )
+        .await
+        .expect("two hops");
+    assert_eq!(rows(&got), ["'Bob'", "'Carol'"]);
+    let e = c
+        .query("CREATE (:Person {id: 9})", vec![], shop.clone())
+        .await
+        .expect_err("read-only");
+    assert!(e.code.contains("SprigGraphReadOnlySource"), "{e:?}");
+    // GQL forms through Bolt.
+    let got = c
+        .query(
+            "MATCH (c IS Person)-[o IS BOUGHT]->(p IS Product) FILTER o.qty >= 2 LET t = o.qty * p.price RETURN c.name AS n, t ORDER BY n, t",
+            vec![],
+            shop.clone(),
+        )
+        .await
+        .expect("gql");
+    assert_eq!(got.records.len(), 3, "{:?}", rows(&got));
+    // GRAPH_TABLE in SQL, the chapter's example, against plain SQL.
+    let pgq: Vec<(String, f64)> = s
+        .query(
+            "SELECT g.name, SUM(g.total) AS spent FROM GRAPH_TABLE (shop
+               MATCH (c IS Person)-[o IS BOUGHT]->(p IS Product)
+               WHERE c.email = 'alice@example.com'
+               COLUMNS (p.name AS name, o.qty * p.price AS total)) AS g
+             GROUP BY g.name ORDER BY g.name",
+        )
+        .await
+        .expect("graph_table");
+    let plain: Vec<(String, f64)> = s
+        .query(
+            "SELECT p.name, SUM(o.qty * p.price) FROM customers c JOIN orders o ON o.customer_id = c.id
+             JOIN products p ON p.sku = o.sku WHERE c.email = 'alice@example.com' GROUP BY p.name ORDER BY p.name",
+        )
+        .await
+        .expect("plain");
+    assert_eq!(pgq, plain);
+    // GRAPH_TABLE joins with tables, and reads native graphs too.
+    let social = vec![("db", PackValue::str("r8g3_mapped.social"))];
+    c.query(
+        "CREATE (:P {cid: 1})-[:FOLLOWS]->(:P {cid: 2}), (:P {cid: 3})-[:FOLLOWS]->(:P {cid: 1})",
+        vec![],
+        social.clone(),
+    )
+    .await
+    .expect("native data");
+    let j: Vec<(String, String)> = s
+        .query(
+            "SELECT a.name, b.name FROM GRAPH_TABLE (social MATCH (x IS P)-[IS FOLLOWS]->(y IS P)
+               COLUMNS (x.cid AS f, y.cid AS t)) AS g
+             JOIN customers a ON a.id = g.f JOIN customers b ON b.id = g.t ORDER BY a.name",
+        )
+        .await
+        .expect("join");
+    assert_eq!(
+        j,
+        [
+            ("Alice".to_owned(), "Bob".to_owned()),
+            ("Carol".to_owned(), "Alice".to_owned())
+        ]
+    );
+    let empty: Vec<(i64,)> = s
+        .query("SELECT COUNT(*) FROM GRAPH_TABLE (social MATCH (x IS Nobody) COLUMNS (x.cid AS c)) AS g")
+        .await
+        .expect("empty");
+    assert_eq!(empty, [(0,)]);
+    for q in [
+        "DROP GRAPH shop",
+        "DROP GRAPH social",
+        "DROP TABLE orders, customers, products",
+    ] {
+        s.query_drop(q).await.expect(q);
+    }
+    s.disconnect().await.expect("bye");
+}
+
+/// Round 3: a Bolt session shows in `SHOW PROCESSLIST` with its running
+/// statement; `KILL QUERY` stops the statement (`Terminated`) and the
+/// session carries on; `KILL` closes the connection.
+#[tokio::test]
+async fn bolt_sessions_in_processlist_and_kill() {
+    let (Some(addr), Some(user), Some(pw), Some(sql)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_SQL_ADDR"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* / SPRIG_TEST_SQL_ADDR not set");
+        return;
+    };
+    let (host, port) = sql.split_once(':').expect("host:port");
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host)
+        .tcp_port(port.parse().expect("port"))
+        .user(Some(user.clone()))
+        .pass(Some(pw.clone()))
+        .ssl_opts(Some(
+            mysql_async::SslOpts::default()
+                .with_danger_accept_invalid_certs(true)
+                .with_danger_skip_domain_validation(true),
+        ));
+    let mut s = mysql_async::Conn::new(opts).await.expect("sql login");
+    s.query_drop("CREATE DATABASE IF NOT EXISTS r8g3_kill")
+        .await
+        .expect("db");
+    s.query_drop("CREATE GRAPH IF NOT EXISTS r8g3_kill.g")
+        .await
+        .expect("graph");
+    let db = vec![("db", PackValue::str("r8g3_kill.g"))];
+    // Slow but within the budgets: a subquery per row.
+    let slow = "UNWIND range(1, 4000) AS a CALL { WITH a UNWIND range(1, 900) AS b RETURN count(*) AS c } RETURN sum(c) AS s";
+    let find = |rows: &[(u64, Option<String>, Option<String>)]| {
+        rows.iter()
+            .find(|r| r.2.as_deref().is_some_and(|i| i.contains("range(1, 4000)")))
+            .map(|r| r.0)
+    };
+    for kill_conn in [false, true] {
+        let mut c = connect(&addr, &user, &pw).await.expect("login");
+        let db2 = db.clone();
+        let run = tokio::spawn(async move {
+            let r = c.query(slow, vec![], db2.clone()).await;
+            let after = c.query("RETURN 1 AS one", vec![], db2).await;
+            (r, after)
+        });
+        let mut id = None;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let rows: Vec<(u64, Option<String>, Option<String>)> = s
+                .query("SHOW FULL PROCESSLIST")
+                .await
+                .expect("processlist")
+                .into_iter()
+                .map(|r: mysql_async::Row| {
+                    let mut r = r;
+                    (
+                        r.take::<u64, _>(0).unwrap_or(0),
+                        r.take::<Option<String>, _>(4).flatten(),
+                        r.take::<Option<String>, _>(7).flatten(),
+                    )
+                })
+                .collect();
+            id = find(&rows);
+            if id.is_some() {
+                break;
+            }
+        }
+        let id = id.expect("the Bolt statement in SHOW PROCESSLIST");
+        let stmt = if kill_conn {
+            format!("KILL {id}")
+        } else {
+            format!("KILL QUERY {id}")
+        };
+        s.query_drop(&stmt).await.expect("kill");
+        let (r, after) = run.await.expect("join");
+        let e = r.expect_err("killed");
+        assert_eq!(e.code, "Neo.TransientError.Transaction.Terminated", "{e:?}");
+        if kill_conn {
+            assert!(after.is_err(), "the connection is closed after KILL");
+        } else {
+            assert!(
+                after.is_ok(),
+                "the session carries on after KILL QUERY: {after:?}"
+            );
+        }
+        eprintln!(
+            "{stmt}: statement stopped; connection {}",
+            if kill_conn { "closed" } else { "kept" }
+        );
+    }
+    s.query_drop("DROP GRAPH r8g3_kill.g").await.expect("drop");
+    s.disconnect().await.expect("bye");
 }

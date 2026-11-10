@@ -25,7 +25,6 @@ use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
 use sprig_common::ids::{ClusterId, DbId, GroupId, ShardId, TenantId};
 use sprig_common::{Result, SprigCode, SprigError};
-use sprig_graph::catalog::backend_error;
 use sprig_graph::maria::{GraphShards, ShardConns, ShardLoc};
 use sprig_txn::mysql::{MyAdmin, PoolSource, db_error};
 use sprig_txn::{
@@ -104,9 +103,9 @@ impl GraphBranch {
     /// # Errors
     /// 39001-class when the connection broke earlier.
     pub(crate) fn raw(&mut self) -> Result<&mut Conn> {
-        self.conn.as_mut().ok_or_else(|| {
-            SprigError::new(SprigCode::BackendLost, "lost the backend connection")
-        })
+        self.conn
+            .as_mut()
+            .ok_or_else(|| SprigError::new(SprigCode::BackendLost, "lost the backend connection"))
     }
 }
 
@@ -205,7 +204,10 @@ impl GraphBackend {
 
     /// The isolation level of branches opened from now on.
     pub(crate) fn set_isolation(&self, level: &'static str) {
-        *self.isolation.lock().unwrap_or_else(PoisonError::into_inner) = level;
+        *self
+            .isolation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = level;
     }
 
     /// Learns `cluster`'s capability profile (chapter 09's `derived.xa`).
@@ -247,7 +249,12 @@ impl GraphBackend {
 
     /// Commit positions gathered since the last call.
     pub(crate) fn take_positions(&self) -> Vec<(String, String)> {
-        std::mem::take(&mut *self.positions.lock().unwrap_or_else(PoisonError::into_inner))
+        std::mem::take(
+            &mut *self
+                .positions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 }
 
@@ -271,7 +278,10 @@ impl TxnBackend for GraphBackend {
             .await
             .map_err(|e| DbError::lost(e.to_string()))?;
         let mut c = pool.get_conn().await.map_err(|e| db_error(&e))?;
-        let level = *self.isolation.lock().unwrap_or_else(PoisonError::into_inner);
+        let level = *self
+            .isolation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         c.query_drop(format!("SET SESSION TRANSACTION ISOLATION LEVEL {level}"))
             .await
             .map_err(|e| db_error(&e))?;
@@ -388,9 +398,9 @@ impl ShardConns for ReadConns {
                 "a write in a read transaction (mode: \"r\")",
             ));
         }
-        self.conns.get_mut(&at.cluster).ok_or_else(|| {
-            SprigError::internal(format!("no read connection to {}", at.cluster))
-        })
+        self.conns
+            .get_mut(&at.cluster)
+            .ok_or_else(|| SprigError::internal(format!("no read connection to {}", at.cluster)))
     }
 }
 
@@ -415,11 +425,4 @@ pub(crate) fn check_epochs(touched: &[Touched], now: &GraphShards) -> Result<()>
         }
     }
     Ok(())
-}
-
-/// Maps a backend error of a statement to a [`SprigError`] (kept for the
-/// store's own statements).
-#[must_use]
-pub(crate) fn map_err(e: mysql_async::Error) -> SprigError {
-    backend_error(e)
 }

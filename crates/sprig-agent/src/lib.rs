@@ -88,9 +88,15 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .as_ref()
             .map(sprig_cluster::failover::internal_tls::InternalTls::from_config)
             .transpose()?;
-        let scheme = if internal_tls.is_some() { "https" } else { "http" };
+        let scheme = if internal_tls.is_some() {
+            "https"
+        } else {
+            "http"
+        };
         if internal_tls.is_none() {
-            tracing::warn!("no [tls]: the internal service (backup streams) is plain HTTP; development only");
+            tracing::warn!(
+                "no [tls]: the internal service (backup streams) is plain HTTP; development only"
+            );
         }
         let url = cfg
             .agent

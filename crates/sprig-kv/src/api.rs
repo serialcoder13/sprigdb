@@ -65,6 +65,17 @@ fn version() -> u64 {
     (r & (u64::MAX >> 1)).max(1)
 }
 
+/// `k = <key> AND _sprig_dk = <its distribution key>` on alias `p`
+/// (`t.` or empty): one shard's rows on a sharded namespace.
+#[must_use]
+pub fn key_pred(ns: &Namespace, k: &[u8], p: &str) -> String {
+    format!(
+        "{p}k = {} AND {p}_sprig_dk = {}",
+        lit(k),
+        lit(ns.dist_key(k))
+    )
+}
+
 /// The key row: `(type, value, version, g, expiry, now)`.
 type KeyRow = (KeyType, Vec<u8>, u64, u64, Option<i64>);
 
@@ -74,13 +85,15 @@ async fn read_row(
     k: &[u8],
     lock: bool,
 ) -> Result<(i64, Option<KeyRow>), SprigError> {
+    // One table, the key and its distribution key in the condition, so a
+    // sharded namespace's router sends it to one shard (R6 round 3); an
+    // absent key returns no row, and expiries are computed in SQL.
     let rows = s
         .query(&format!(
-            "SELECT {NOW_MS_SQL}, t.type, t.v, t._v, t.g, {} FROM (SELECT 1 AS one) AS d \
-             LEFT JOIN {} AS t ON t.k = {} AND {}{}",
+            "SELECT {NOW_MS_SQL}, t.type, t.v, t._v, t.g, {} FROM {} AS t WHERE {} AND {}{}",
             ms_sql("t.expires_at"),
             ns.keys(),
-            lit(k),
+            key_pred(ns, k, "t."),
             live("t"),
             if lock { " FOR UPDATE" } else { "" }
         ))
@@ -188,7 +201,28 @@ pub async fn put(
     pre: Pre,
     ttl_ms: Option<i64>,
 ) -> Result<u64, SprigError> {
+    put_at(s, ns, k, value, pre, ttl_ms, None).await
+}
+
+/// [`put`] that also sets the key's location `(lat, lng)` in the same
+/// transaction (R6 round 3; the namespace's location columns must exist,
+/// [`crate::geo::ddl`]).
+///
+/// # Errors
+/// As [`put`]; 39765 for a location out of range.
+pub async fn put_at(
+    s: &mut dyn SqlRunner,
+    ns: &Namespace,
+    k: &[u8],
+    value: &[u8],
+    pre: Pre,
+    ttl_ms: Option<i64>,
+    loc: Option<(f64, f64)>,
+) -> Result<u64, SprigError> {
     check_key(k)?;
+    if let Some((la, lo)) = loc {
+        crate::geo::check(la, lo)?;
+    }
     if value.len() > ns.max_value_bytes {
         return Err(SprigError::new(
             SprigCode::KvValueInvalid,
@@ -228,7 +262,17 @@ pub async fn put(
                 ));
             }
             let ver = version();
-            let exp = ttl_ms.map_or_else(|| "NULL".to_owned(), |t| datetime_lit(now.saturating_add(t)));
+            let exp = ttl_ms.map_or_else(
+                || "NULL".to_owned(),
+                |t| match row {
+                    Some(_) => datetime_lit(now.saturating_add(t)),
+                    // No row read, so no clock read: MariaDB's, in SQL.
+                    None => format!(
+                        "TIMESTAMPADD(MICROSECOND, {} * 1000, UTC_TIMESTAMP(3))",
+                        t.clamp(0, crate::time::MAX_MS / 2)
+                    ),
+                },
+            );
             if let Some((t, _, _, g, _)) = row {
                 // A collection is replaced: its elements go now.
                 let g = if t == KeyType::String {
@@ -238,19 +282,19 @@ pub async fn put(
                     ver
                 };
                 s.exec(&format!(
-                    "UPDATE {} SET type = 'string', v = {}, n = 0, lh = 0, lt = 0, g = {g}, _v = {ver}, expires_at = {exp} WHERE k = {}",
+                    "UPDATE {} SET type = 'string', v = {}, n = 0, lh = 0, lt = 0, g = {g}, _v = {ver}, expires_at = {exp} WHERE {}",
                     ns.keys(),
                     lit(&value),
-                    lit(&k)
+                    key_pred(&ns, &k, "")
                 ))
                 .await
                 .map_err(|e| sql(&e))?;
             } else {
                 // An expired row may still be there: replace it.
                 s.exec(&format!(
-                    "DELETE FROM {} WHERE k = {}",
+                    "DELETE FROM {} WHERE {}",
                     ns.keys(),
-                    lit(&k)
+                    key_pred(&ns, &k, "")
                 ))
                 .await
                 .map_err(|e| sql(&e))?;
@@ -262,6 +306,16 @@ pub async fn put(
                     lit(&value),
                     lit(ns.dist_key(&k)),
                     ns.routing_hash(&k)
+                ))
+                .await
+                .map_err(|e| sql(&e))?;
+            }
+            if loc.is_some() {
+                s.exec(&format!(
+                    "UPDATE {} SET {} WHERE {}",
+                    ns.keys(),
+                    crate::geo::set_sql(loc),
+                    key_pred(&ns, &k, "")
                 ))
                 .await
                 .map_err(|e| sql(&e))?;
@@ -299,7 +353,11 @@ pub async fn delete(
             let Some((t, _, _, g, _)) = row else {
                 return Ok(false);
             };
-            s.exec(&format!("DELETE FROM {} WHERE k = {}", ns.keys(), lit(&k)))
+            s.exec(&format!(
+                "DELETE FROM {} WHERE {}",
+                ns.keys(),
+                key_pred(&ns, &k, "")
+            ))
                 .await
                 .map_err(|e| sql(&e))?;
             drop_elements(s, &ns, &k, t, g).await?;

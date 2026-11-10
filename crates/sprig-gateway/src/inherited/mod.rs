@@ -21,6 +21,8 @@
 //! stream reader finds it as before.
 
 pub mod broadcast;
+pub mod fanin;
+pub mod lifecycle;
 pub mod mq;
 pub mod outbox;
 pub mod streams;

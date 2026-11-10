@@ -890,23 +890,29 @@ async fn run_read(
         .checked_sub(plan.hidden)
         .ok_or_else(|| SprigError::internal("fewer columns than hidden ones"))?;
     let at = |c: ColRef| c.index(ncols, plan.hidden);
-    let rows = match plan.kind {
-        ReadKind::Scatter => window(rows, plan.offset, plan.limit),
-        ReadKind::Merge => {
-            let classes = key_classes(plan.order.iter().map(|k| &k.cols), &columns, &rows, &at)?;
-            let mut rows = rows;
-            rows.sort_by(|a, b| cmp_rows(a, b, &plan.order, &classes, &at));
-            window(rows, plan.offset, plan.limit)
-        }
-        ReadKind::Aggregate => {
-            let agg = plan
-                .agg
-                .as_ref()
-                .ok_or_else(|| SprigError::internal("aggregate plan without aggregates"))?;
-            let rows = aggregate(agg, rows, &columns, &at)?;
-            window(rows, plan.offset, plan.limit)
-        }
-    };
+    // A sort or group-by of many rows runs off the runtime's worker (G40,
+    // decision bugfix-1): `router.max_statement_memory_mb` allows millions.
+    let n = rows.len();
+    let rows = sprig_common::cpu::heavy(n, || -> Result<Vec<Row>> {
+        Ok(match plan.kind {
+            ReadKind::Scatter => window(rows, plan.offset, plan.limit),
+            ReadKind::Merge => {
+                let classes =
+                    key_classes(plan.order.iter().map(|k| &k.cols), &columns, &rows, &at)?;
+                let mut rows = rows;
+                rows.sort_by(|a, b| cmp_rows(a, b, &plan.order, &classes, &at));
+                window(rows, plan.offset, plan.limit)
+            }
+            ReadKind::Aggregate => {
+                let agg = plan
+                    .agg
+                    .as_ref()
+                    .ok_or_else(|| SprigError::internal("aggregate plan without aggregates"))?;
+                let rows = aggregate(agg, rows, &columns, &at)?;
+                window(rows, plan.offset, plan.limit)
+            }
+        })
+    })?;
     Ok((columns, rows, visible, warnings))
 }
 

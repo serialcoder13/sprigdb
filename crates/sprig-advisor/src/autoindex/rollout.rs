@@ -716,9 +716,6 @@ pub fn unix_ms(t: SystemTime) -> u64 {
 /// The `ADD INDEX` clause of `def`: `ADD INDEX IF NOT EXISTS x (...)`.
 #[must_use]
 pub fn add_index_clause(def: &IndexDef) -> String {
-    format!(
-        "ADD INDEX IF NOT EXISTS {} ({})",
-        sprig_common::names::quote(&def.name()),
-        def.ddl_columns()
-    )
+    // `SPATIAL INDEX` and `VECTOR INDEX` too (R6 round 3).
+    format!("ADD {}", def.add_clause())
 }

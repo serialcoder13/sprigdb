@@ -107,17 +107,29 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     ));
     // Moves between DCs (chapter 24) commit on the one etcd of R0's
     // single-etcd mode: this DC's tier reaches the others.
-    let mut factory =
-        MysqlEnvFactory::new(registry, TenantMaps::new(dc.clone()), settings.clone())
-            .with_home_changes(dc.clone())
-            // Splits, merges and shard moves (chapter 20) cut over on the
-            // table groups' maps in this DC's tier.
-            .with_group_maps(dc.clone())
-            .with_drain(drain);
+    let mut factory = MysqlEnvFactory::new(registry, TenantMaps::new(dc.clone()), settings.clone())
+        .with_home_changes(dc.clone())
+        // Splits, merges and shard moves (chapter 20) cut over on the
+        // table groups' maps in this DC's tier.
+        .with_group_maps(dc.clone())
+        .with_drain(drain);
     // Each job's `mover.*` from the live settings, followed while it runs.
     if let Some(l) = live.live() {
         factory = factory.with_live_settings(l.clone(), cfg.node.dc.clone());
     }
+    // ...and from its tenant's own catalog rows (decision RF3, r2last).
+    let tenant_scopes = sprig_controller::tenant_scopes::TenantScopes::new(
+        Arc::clone(&global),
+        dc.clone(),
+        Arc::new(
+            sprig_controller::catalogs::RegistryPools::new(registry_logic.clone(), None)
+                .budget("tenant_settings", 2),
+        ),
+    )?;
+    factory = factory.with_tenant_rows(Arc::new(sprig_controller::tenant_scopes::MoverRows(
+        Arc::clone(&tenant_scopes),
+    )));
+    let live = live.with_tenant_scopes(Arc::clone(&tenant_scopes));
     let factory = Arc::new(factory);
     let store = JobStore::new(dc, Arc::new(SystemClock));
     let worker = cfg

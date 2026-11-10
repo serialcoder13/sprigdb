@@ -356,6 +356,7 @@ impl MysqlSource {
     /// Creation statements of the schemas' views and routines, and the
     /// tenant's backend accounts with their grants (until chapter 29's
     /// reconciler creates them on the target).
+    #[allow(clippy::too_many_lines)]
     async fn object_statements(&self, schemas: &[String]) -> Result<Vec<String>> {
         let mut out = Vec::new();
         for s in schemas {
@@ -370,6 +371,18 @@ impl MysqlSource {
             return Ok(out);
         }
         for s in schemas {
+            // Chapter 18: every shard schema anchors the decisions of the
+            // coordinated transactions that start on it, so each new shard
+            // schema (a move, split, merge, re-key or standby, on any
+            // cluster) gets `__sprig_dtx` before it serves (G31, decision
+            // bugfix-2). Its rows aren't copied.
+            if matches!(
+                s.parse::<sprig_common::names::SchemaName>(),
+                Ok(sprig_common::names::SchemaName::Shard { .. })
+            ) {
+                out.push(format!("USE {}", quote(s)));
+                out.push(sprig_catalog::ddl::dtx_table_sql(s));
+            }
             let p = vec![Value::Bytes(s.as_bytes().to_vec())];
             let views = self
                 .rows(

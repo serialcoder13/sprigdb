@@ -14,6 +14,7 @@
 //!   reserved-name check.
 
 pub mod hub;
+pub mod logic;
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -147,6 +148,13 @@ key!(
 );
 
 key!(
+    /// `redis.guarded_batches`: the hottest writes as one compound
+    /// statement (chapter 40, "Guarded batches"; R6 round 3).
+    GUARDED_BATCHES: bool = "redis.guarded_batches", true, HardBounds::NONE,
+    "Run SET, INCR, HSET, pushes, pops and ZADD as one guarded batch"
+);
+
+key!(
     /// `redis.sharded_pubsub_hubs`: hubs for sharded channels.
     SHARDED_PUBSUB_HUBS: u64 = "redis.sharded_pubsub_hubs", 8, HardBounds::range(1, 1024),
     "Hubs for sharded channels"
@@ -180,6 +188,7 @@ fn read_config(live: &LiveSettings, dc: &DcId) -> sprig_redis::Config {
         lua_undeclared_same_shard: live.get(&LUA_UNDECLARED_KEYS, &cx) == "same_shard",
         max_bulk_bytes: us(live.get(&MAX_BULK_BYTES, &cx)),
         max_command_bytes: us(live.get(&MAX_COMMAND_BYTES, &cx)),
+        guarded_batches: live.get(&GUARDED_BATCHES, &cx),
         ..sprig_redis::Config::default()
     }
 }
@@ -220,6 +229,8 @@ impl RedisFrontend {
             read_config(&d.live, &d.dc),
             &d.gateway_id,
         ));
+        // FCALL of logic-layer functions (chapter 41, R7).
+        env.set_logic(Arc::new(logic::GatewayLogic));
         Self {
             d: Arc::new(d),
             env,

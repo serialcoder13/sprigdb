@@ -1159,15 +1159,26 @@ async fn tls_checks(d: &Deployment, cluster: &str) {
     let stranger =
         InternalTls::from_pems(&read("ca.pem"), &read("rogue.pem"), &read("rogue-key.pem"))
             .expect("tls");
-    let agents = d.store.list(&key(&format!("/sprig/dc/{DC}/agents/")), sprig_meta::ListOpts::default()).await.expect("agents");
+    let agents = d
+        .store
+        .list(
+            &key(&format!("/sprig/dc/{DC}/agents/")),
+            sprig_meta::ListOpts::default(),
+        )
+        .await
+        .expect("agents");
     let mut urls = Vec::new();
     for kv in agents.kvs {
         let v: Value = serde_json::from_slice(&kv.value).unwrap_or_default();
-        let body = if v.get("body").is_some() { v["body"].clone() } else { v };
-        if body["cluster_id"] == cluster || body["cluster"] == cluster {
-            if let Some(u) = body["internal_url"].as_str() {
-                urls.push(u.to_owned());
-            }
+        let body = if v.get("body").is_some() {
+            v["body"].clone()
+        } else {
+            v
+        };
+        if (body["cluster_id"] == cluster || body["cluster"] == cluster)
+            && let Some(u) = body["internal_url"].as_str()
+        {
+            urls.push(u.to_owned());
         }
     }
     assert!(!urls.is_empty(), "no agent registrations with a service");
@@ -1178,11 +1189,16 @@ async fn tls_checks(d: &Deployment, cluster: &str) {
             "GET /internal/v1/backup?job=x&token=y HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\n\r\n"
         );
         // Plain HTTP: the TLS server answers no HTTP.
-        let mut plain = tokio::net::TcpStream::connect((host.as_str(), port)).await.expect("tcp");
+        let mut plain = tokio::net::TcpStream::connect((host.as_str(), port))
+            .await
+            .expect("tcp");
         let _ = plain.write_all(req.as_bytes()).await;
         let mut buf = Vec::new();
         let _ = tokio::time::timeout(Duration::from_secs(5), plain.read_to_end(&mut buf)).await;
-        assert!(!buf.starts_with(b"HTTP/1.1"), "plain HTTP got an answer from {url}");
+        assert!(
+            !buf.starts_with(b"HTTP/1.1"),
+            "plain HTTP got an answer from {url}"
+        );
         // A certificate from another CA: refused at the handshake.
         let r = match stranger.connect(&host, port).await {
             Ok(mut t) => {
@@ -1193,7 +1209,10 @@ async fn tls_checks(d: &Deployment, cluster: &str) {
             }
             Err(_) => Vec::new(),
         };
-        assert!(!r.starts_with(b"HTTP/1.1"), "a foreign certificate got an answer from {url}");
+        assert!(
+            !r.starts_with(b"HTTP/1.1"),
+            "a foreign certificate got an answer from {url}"
+        );
         // The internal CA's: in, and the token still guards the stream.
         let mut t = mine.connect(&host, port).await.expect("mutual TLS");
         t.write_all(req.as_bytes()).await.expect("write");
@@ -1201,6 +1220,9 @@ async fn tls_checks(d: &Deployment, cluster: &str) {
         let _ = tokio::time::timeout(Duration::from_secs(5), t.read_to_end(&mut b)).await;
         let head = String::from_utf8_lossy(&b[..b.len().min(40)]).to_string();
         assert!(head.starts_with("HTTP/1.1 4"), "{url}: {head}");
-        eprintln!("{url}: plain HTTP and a foreign certificate refused; the CA's certificate in, a bad token answered {}", &head[..12.min(head.len())]);
+        eprintln!(
+            "{url}: plain HTTP and a foreign certificate refused; the CA's certificate in, a bad token answered {}",
+            &head[..12.min(head.len())]
+        );
     }
 }
