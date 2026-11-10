@@ -147,6 +147,8 @@ base64 = "0.22"
 # sprig-balancer (chapter 11, M0.6): placement, the decision log, the fleet
 # simulator's planner.
 sprig-balancer = { path = "crates/sprig-balancer" }
+# Approvals and recommendations (chapter 52).
+sprig-approvals = { path = "crates/sprig-approvals" }
 # The logic layer's fallback tier (chapter 41, R7 order 4): sprig-logic-js
 # runs KIRun on `kirun`, Modlix's open-source KIRun runtime for Rust (MIT;
 # the only Modlix part SprigDB uses). It turns on serde_json's

@@ -604,6 +604,7 @@ impl Conn<'_> {
                 target,
                 coordinator,
                 initial_delivery_count,
+                properties,
                 ..
             } => {
                 if self.session(ch).links.contains_key(&handle) {
@@ -647,7 +648,8 @@ impl Conn<'_> {
                     )
                     .await;
                 } else {
-                    self.attach_out(ch, name, handle, snd_settle_mode, source, target)
+                    let fan_in = fan_in_property(properties.as_ref());
+                    self.attach_out(ch, name, handle, snd_settle_mode, source, target, fan_in)
                         .await;
                 }
                 Ok(())
@@ -863,7 +865,9 @@ impl Conn<'_> {
         self.send_link_flow(ch, handle);
     }
 
-    /// The client receives from us: a consuming link.
+    /// The client receives from us: a consuming link. `fan_in`: the link
+    /// property `x-sprig-fan-in` was true (chapter 50, "Fan-in consumers").
+    #[allow(clippy::too_many_arguments)]
     async fn attach_out(
         &mut self,
         ch: u16,
@@ -872,6 +876,7 @@ impl Conn<'_> {
         snd_settle_mode: u8,
         source: Option<Source>,
         target: Option<Target>,
+        fan_in: bool,
     ) {
         let settled = snd_settle_mode == snd_settle::SETTLED;
         let mut src = source.clone().unwrap_or_default();
@@ -913,6 +918,12 @@ impl Conn<'_> {
                     let mut arguments = crate::v091::codec::FieldTable::new();
                     if let Some(off) = stream_offset(src.filter.as_ref()) {
                         arguments.insert("x-stream-offset", off);
+                    }
+                    if fan_in {
+                        arguments.insert(
+                            "x-sprig-fan-in",
+                            crate::v091::codec::FieldValue::Bool(true),
+                        );
                     }
                     match self
                         .vhost
@@ -1592,6 +1603,22 @@ impl Conn<'_> {
         self.svc.replies.unregister_conn(self.key);
         self.vhost.connection_closed(self.key).await;
     }
+}
+
+/// Whether a link's properties hold `x-sprig-fan-in` = true (a boolean,
+/// or the string `true`).
+fn fan_in_property(p: Option<&Value>) -> bool {
+    let Some(Value::Map(m)) = p else {
+        return false;
+    };
+    m.iter().any(|(k, v)| {
+        matches!(k, Value::Symbol(s) | Value::String(s) if s == "x-sprig-fan-in")
+            && match v {
+                Value::Bool(b) => *b,
+                Value::String(s) | Value::Symbol(s) => s.eq_ignore_ascii_case("true"),
+                _ => false,
+            }
+    })
 }
 
 /// `rabbitmq:stream-offset-spec` from a source filter, as the 0-9-1

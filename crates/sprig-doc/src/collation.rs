@@ -211,7 +211,11 @@ impl Keys {
                 secondary.push(l);
                 if !is_combining_mark(l) {
                     primary.push(l);
-                    case.push(upper);
+                    // Only letters have a case (digits, with
+                    // `numericOrdering`, may differ in number).
+                    if l.is_alphabetic() {
+                        case.push(upper);
+                    }
                 }
             }
         }

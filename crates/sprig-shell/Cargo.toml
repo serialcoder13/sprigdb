@@ -1,0 +1,53 @@
+[package]
+name = "sprig-shell"
+description = "SprigDB: the `sprig` terminal shell, a TUI and a scriptable CLI (chapter 53)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sprig"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+clap.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "io-std", "process", "fs", "rt"] }
+tokio-rustls.workspace = true
+toml.workspace = true
+# Native protocols (chapter 53, "--protocol"): mysql_async for MySQL, the
+# workspace's own OP_MSG/BSON/SCRAM and Bolt client for MongoDB and Bolt
+# (RESP is parsed here: sprig-proto-redis is server-side only).
+mysql_async.workspace = true
+sprig-proto-mongo = { path = "../sprig-proto-mongo" }
+sprig-proto-bolt = { path = "../sprig-proto-bolt" }
+bytes.workspace = true
+bson = "=2.15.0"
+getrandom.workspace = true
+# Chapter 53's new crates, pinned (brief rule 14): ratatui (MIT) and
+# crossterm (MIT) for the TUI; keyring (MIT OR Apache-2.0) for the OS
+# keychain (macOS keychain, Windows credential manager, Linux kernel
+# keyring; no D-Bus); rustls-native-certs (Apache-2.0 OR ISC OR MIT) for the
+# platform's trust roots on https. rustyline was left out: on Windows it
+# needs clipboard-win (BSL-1.0); the TUI has its own editor.
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache", "std"] }
+crossterm = "=0.29.0"
+keyring = { version = "=3.6.3", features = ["apple-native", "windows-native", "linux-native"] }
+rustls-native-certs = "=0.8.3"
+# Display widths of table cells (MIT OR Apache-2.0; already in the tree).
+unicode-width = "=0.2.3"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

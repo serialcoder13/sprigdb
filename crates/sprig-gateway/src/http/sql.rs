@@ -394,6 +394,7 @@ impl SqlEngine {
             Done(Result<crate::pipeline::ExecSummary>),
             Killed,
             TimedOut,
+            ReaderGone,
         }
         let bytes = Bytes::from(sql);
         if let Some(l) = local::classify(&bytes) {
@@ -426,6 +427,7 @@ impl SqlEngine {
         let (size, threshold) = (req.size(), self.frontend.current().large_statement);
         // Sql.Query's timeout_ms (clamped for Studio, chapter 44).
         let timeout = sink.timeout();
+        let gone = sink.reader_gone();
         let end = crate::offload::run_for(&handle, size, threshold, async {
             let deadline = async {
                 match timeout {
@@ -438,10 +440,17 @@ impl SqlEngine {
                 r = exec.execute(&mut cx, req, &mut *sink) => End::Done(r),
                 () = handle.flags().query_killed() => End::Killed,
                 () = deadline => End::TimedOut,
+                // The reader left (client gone, cursor closed) while the
+                // backend was still working.
+                () = gone => End::ReaderGone,
             }
         })
         .await;
         match end {
+            End::ReaderGone => {
+                exec.abandoned(&mut cx, Abandon::ClientGone).await;
+                Ok(())
+            }
             End::Done(Ok(summary)) => {
                 if sink.closed() {
                     exec.abandoned(&mut cx, Abandon::ClientGone).await;

@@ -7,6 +7,7 @@ import { TenantSwitcher } from '../tenant/TenantSwitcher';
 import { Explorer } from '../catalog/Explorer';
 import { setTheme, currentTheme, type Theme } from './theme';
 import { useTabs } from '../editor/tabs';
+import { useOpenCount } from '../approvals/InboxPage';
 
 export function Shell() {
   const { tenant = '' } = useParams();
@@ -23,6 +24,7 @@ export function Shell() {
     };
   }, []);
   const base = `/t/${encodeURIComponent(tenant)}`;
+  const openCount = useOpenCount();
   return (
     <div className="shell">
       <a className="skip" href="#content">
@@ -39,6 +41,17 @@ export function Shell() {
           </NavLink>
           <NavLink to={`${base}/indexing`}>
             <FormattedMessage id="nav.indexing" />
+          </NavLink>
+          <NavLink to={`${base}/inbox`} end>
+            <FormattedMessage id="nav.inbox" />
+            {openCount > 0 && (
+              <span className="badge" data-testid="inbox-badge" aria-label={`${openCount} waiting`}>
+                {openCount}
+              </span>
+            )}
+          </NavLink>
+          <NavLink to={`${base}/inbox/policy`}>
+            <FormattedMessage id="nav.policy" />
           </NavLink>
           <NavLink to={`${base}/settings`}>
             <FormattedMessage id="nav.settings" />

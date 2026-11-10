@@ -1032,10 +1032,6 @@ async fn drop_database_forwards_the_outbox_first() {
     let (code, msg) = sql(&mut sys, "DROP DATABASE obx").await.unwrap_err();
     assert_eq!(code, 39895, "{msg}");
     assert!(msg.contains("stream obx.drop_events"), "{msg}");
-    ok(&mut sys, "DROP STREAM obx.drop_events IMMEDIATE").await;
-    let t = Instant::now();
-    ok(&mut sys, "DROP DATABASE obx").await;
-    println!("DROP DATABASE after the outbox emptied: {:?}", t.elapsed());
     let vals = ok(
         &mut c0,
         "SELECT CAST(value AS CHAR) FROM obx.drop_events ORDER BY value",
@@ -1049,6 +1045,10 @@ async fn drop_database_forwards_the_outbox_first() {
             vec![Some("v0".into())]
         ]
     );
+    ok(&mut sys, "DROP STREAM obx.drop_events IMMEDIATE").await;
+    let t = Instant::now();
+    ok(&mut sys, "DROP DATABASE obx").await;
+    println!("DROP DATABASE after the outbox emptied: {:?}", t.elapsed());
     let _ = sql(&mut c0, "DROP DATABASE IF EXISTS obx").await;
 }
 
@@ -1774,7 +1774,9 @@ async fn broadcast_retry_and_the_drop_database_guard() {
     let m1 = ms[1].0.clone();
     ok(
         &mut sys,
-        &format!("INSERT INTO security.rt_events FOR TENANT {m1} (key, value) VALUES ('k', 'first')"),
+        &format!(
+            "INSERT INTO security.rt_events FOR TENANT {m1} (key, value) VALUES ('k', 'first')"
+        ),
     )
     .await;
     let q = "SELECT COUNT(*) FROM security.rt_events";
@@ -1843,7 +1845,9 @@ async fn broadcast_retry_and_the_drop_database_guard() {
     for v in ["b1", "b2", "b3"] {
         ok(
             &mut sys,
-            &format!("INSERT INTO security.rt_events FOR ALL TENANTS (key, value) VALUES ('k', '{v}')"),
+            &format!(
+                "INSERT INTO security.rt_events FOR ALL TENANTS (key, value) VALUES ('k', '{v}')"
+            ),
         )
         .await;
     }
@@ -1853,20 +1857,29 @@ async fn broadcast_retry_and_the_drop_database_guard() {
         }
         assert_eq!(wait_count(c, q, 3, 60).await, 3, "{m}");
     }
-    println!("the other members had the three broadcasts in {:?}", t.elapsed());
+    println!(
+        "the other members had the three broadcasts in {:?}",
+        t.elapsed()
+    );
     // Pending for m1, in the log.
     let end = Instant::now() + Duration::from_secs(30);
     let log = loop {
-        let log = ok(&mut sys, "SHOW INHERITED BROADCASTS FOR STREAM security.rt_events").await;
-        if log.iter().all(|r| r[5].as_deref() == Some("delivered"))
-            || Instant::now() > end
-        {
+        let log = ok(
+            &mut sys,
+            "SHOW INHERITED BROADCASTS FOR STREAM security.rt_events",
+        )
+        .await;
+        if log.iter().all(|r| r[5].as_deref() == Some("delivered")) || Instant::now() > end {
             break log;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
     println!("broadcast log while m1 fails: {log:?}");
     assert_eq!(log.len(), 3);
+    let before: Vec<u64> = log
+        .iter()
+        .map(|r| r[6].as_deref().unwrap_or("0").parse().unwrap())
+        .collect();
     for row in &log {
         assert_eq!(row[5].as_deref(), Some("delivered"));
         assert_eq!(row[9].as_deref(), Some("1"), "one member pending: {row:?}");
@@ -1898,11 +1911,21 @@ async fn broadcast_retry_and_the_drop_database_guard() {
         };
         assert_eq!(vals, want, "{m}: exactly once, in broadcast order");
     }
-    let log = ok(&mut sys, "SHOW INHERITED BROADCASTS FOR STREAM security.rt_events").await;
+    let log = ok(
+        &mut sys,
+        "SHOW INHERITED BROADCASTS FOR STREAM security.rt_events",
+    )
+    .await;
     println!("broadcast log after the retries: {log:?}");
-    for row in &log {
+    for (row, b) in log.iter().zip(&before) {
         assert_eq!(row[9].as_deref(), Some("0"), "{row:?}");
-        assert_eq!(row[6].as_deref(), Some(ms.len().to_string().as_str()), "{row:?}");
+        // The retried member counted as delivered (other members of the
+        // system tenant, made by earlier tests, count too).
+        assert_eq!(
+            row[6].as_deref(),
+            Some((b + 1).to_string().as_str()),
+            "{row:?}"
+        );
     }
     ok(&mut sys, "DROP STREAM security.rt_events IMMEDIATE CASCADE").await;
 }
@@ -1959,8 +1982,14 @@ async fn fan_in_trigger_end_to_end() {
         "CREATE STREAM security.fi_events FOR EACH TENANT PARTITIONS 2",
     )
     .await;
-    // Before the trigger: m0's instance and 5 records it never sees.
+    // Before the trigger: m0's instance and 5 records it never sees (in
+    // m0's log before the trigger: its start is the log's high watermark).
     publish_fi(&mut sys, &ms[0], 0, 5).await;
+    let mut c0 = conn(&e.addr, &ms[0]).await;
+    assert_eq!(
+        wait_count(&mut c0, "SELECT COUNT(*) FROM security.fi_events", 5, 60).await,
+        5
+    );
     // SPRIG_FAN_IN is needed.
     let _ = sql(&mut sys, "REVOKE SPRIG_FAN_IN ON *.* FROM app").await;
     let (code, msg) = sql(&mut sys, FAN_IN_AUDIT).await.unwrap_err();
@@ -2018,7 +2047,9 @@ async fn fan_in_trigger_end_to_end() {
     if e.create.is_some() {
         let late = format!(
             "{}fi",
-            e.late.clone().unwrap_or_else(|| format!("{}late", e.system))
+            e.late
+                .clone()
+                .unwrap_or_else(|| format!("{}late", e.system))
         );
         create_tenant(&e, &late);
         let t = Instant::now();
@@ -2030,7 +2061,10 @@ async fn fan_in_trigger_end_to_end() {
             90,
         )
         .await;
-        println!("{late} (new): {n} of 10 runs, {:?} after its first publish", t.elapsed());
+        println!(
+            "{late} (new): {n} of 10 runs, {:?} after its first publish",
+            t.elapsed()
+        );
         assert_eq!(n, 10);
     }
     let _ = sql(&mut sys, "DROP TRIGGER r9naudit.fi_audit").await;
@@ -2049,7 +2083,7 @@ fn tenant_id_of(name: &str) -> Option<u64> {
         .filter_map(|l| l.split_once(' '))
         .filter(|(n, _)| *n == name)
         .filter_map(|(_, id)| id.trim().parse().ok())
-        .last()
+        .next_back()
 }
 
 const DL_TRIGGER: &str = r"
@@ -2187,4 +2221,513 @@ async fn stream_trigger_dead_letter_replay() {
     );
     assert_eq!(count(&mut sys, "SELECT COUNT(*) FROM r9ndl.later").await, 3);
     ok(&mut sys, "DROP DATABASE r9ndl").await;
+}
+
+// ---------------------------------------------------------------------------
+// R9 final (r9final): AMQP fan-in consumers and the ready index.
+// ---------------------------------------------------------------------------
+
+fn delivery_header(d: &lapin::message::Delivery, k: &str) -> Option<String> {
+    match d.properties.headers().as_ref()?.inner().get(k)? {
+        AMQPValue::LongString(s) => Some(s.to_string()),
+        AMQPValue::ShortString(s) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+/// Reads `want` deliveries of `consumer` (acknowledging each), at most
+/// `secs`: (x-sprig-tenant, body).
+async fn read_fan_in(
+    consumer: &mut lapin::Consumer,
+    want: usize,
+    secs: u64,
+) -> Vec<(String, String)> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    let end = Instant::now() + Duration::from_secs(secs);
+    while out.len() < want {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let Ok(Some(Ok(d))) = tokio::time::timeout(left, consumer.next()).await else {
+            break;
+        };
+        let t = delivery_header(&d, "x-sprig-tenant").unwrap_or_default();
+        out.push((t, String::from_utf8_lossy(&d.data).into_owned()));
+        d.ack(lapin::options::BasicAckOptions::default())
+            .await
+            .unwrap();
+    }
+    out
+}
+
+/// Publishes `n` messages for member `m` (`@m:work` by the default
+/// exchange, bodies `<m>-<i>`).
+async fn publish_work(ch: &lapin::Channel, m: &str, from: usize, to: usize) {
+    for i in from..to {
+        assert!(
+            publish(ch, "", &format!("@{m}:work"), &format!("{m}-{i}"), None).await,
+            "publish {m}-{i}"
+        );
+    }
+}
+
+fn fan_in_args() -> FieldTable {
+    let mut a = FieldTable::default();
+    a.insert("x-sprig-fan-in".into(), AMQPValue::Boolean(true));
+    a
+}
+
+#[tokio::test]
+async fn amqp_fan_in_consumer() {
+    use lapin::options::{BasicConsumeOptions, BasicQosOptions};
+    let Some(e) = env("amqp_fan_in_consumer") else {
+        return;
+    };
+    let Some(amqp_addr) = var("SPRIG_TEST_INHERIT_AMQP") else {
+        eprintln!("no SPRIG_TEST_INHERIT_AMQP: skipped");
+        return;
+    };
+    let mut sys = conn(&e.addr, &e.system).await;
+    let ms = e.members.clone();
+    let _ = sql(&mut sys, "DROP QUEUE r9fq.work IMMEDIATE CASCADE").await;
+    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fq").await;
+    ok(&mut sys, "CREATE DATABASE r9fq").await;
+    ok(&mut sys, "CREATE QUEUE r9fq.work FOR EACH TENANT").await;
+    let sc = amqp(&amqp_addr, &e.system, "r9fq").await;
+    let sch = sc.create_channel().await.unwrap();
+    sch.confirm_select(ConfirmSelectOptions::default())
+        .await
+        .unwrap();
+    // 20 messages wait in each member's instance before any fan-in
+    // consumer exists (the attach scan finds them).
+    let t = Instant::now();
+    for m in &ms {
+        publish_work(&sch, m, 0, 20).await;
+    }
+    println!("60 targeted publishes (3 instances made): {:?}", t.elapsed());
+    // Consuming the definition's name without the argument: 406.
+    {
+        let c = amqp(&amqp_addr, &e.system, "r9fq").await;
+        let ch = c.create_channel().await.unwrap();
+        let r = ch
+            .basic_consume(
+                "work".into(),
+                "plain".into(),
+                BasicConsumeOptions::default(),
+                FieldTable::default(),
+            )
+            .await;
+        println!("consume without x-sprig-fan-in: {r:?}");
+        assert!(format!("{r:?}").contains("PRECONDITION"), "{r:?}");
+    }
+    // Without SPRIG_FAN_IN: 403; exclusive or x-priority: 406.
+    let _ = sql(&mut sys, "REVOKE SPRIG_FAN_IN ON *.* FROM app").await;
+    {
+        let c = amqp(&amqp_addr, &e.system, "r9fq").await;
+        let ch = c.create_channel().await.unwrap();
+        let r = ch
+            .basic_consume(
+                "work".into(),
+                "nogrant".into(),
+                BasicConsumeOptions::default(),
+                fan_in_args(),
+            )
+            .await;
+        println!("fan-in without SPRIG_FAN_IN: {r:?}");
+        assert!(format!("{r:?}").contains("ACCESS"), "{r:?}");
+    }
+    ok(&mut sys, "GRANT SPRIG_FAN_IN ON *.* TO app").await;
+    {
+        let c = amqp(&amqp_addr, &e.system, "r9fq").await;
+        let ch = c.create_channel().await.unwrap();
+        let r = ch
+            .basic_consume(
+                "work".into(),
+                "excl".into(),
+                BasicConsumeOptions {
+                    exclusive: true,
+                    ..BasicConsumeOptions::default()
+                },
+                fan_in_args(),
+            )
+            .await;
+        assert!(format!("{r:?}").contains("PRECONDITION"), "{r:?}");
+        let ch = c.create_channel().await.unwrap();
+        let mut a = fan_in_args();
+        a.insert("x-priority".into(), AMQPValue::LongInt(5));
+        let r = ch
+            .basic_consume(
+                "work".into(),
+                "prio".into(),
+                BasicConsumeOptions::default(),
+                a,
+            )
+            .await;
+        assert!(format!("{r:?}").contains("PRECONDITION"), "{r:?}");
+    }
+    // The fan-in consumer, prefetch 10.
+    let fc = amqp(&amqp_addr, &e.system, "r9fq").await;
+    let fch = fc.create_channel().await.unwrap();
+    fch.basic_qos(10, BasicQosOptions::default()).await.unwrap();
+    let t = Instant::now();
+    let mut consumer = fch
+        .basic_consume(
+            "work".into(),
+            "audit".into(),
+            BasicConsumeOptions::default(),
+            fan_in_args(),
+        )
+        .await
+        .unwrap();
+    let got = read_fan_in(&mut consumer, 60, 60).await;
+    println!("fan-in read the waiting 60 in {:?}", t.elapsed());
+    let check = |got: &[(String, String)], m: &str, from: usize, to: usize| {
+        let mine: Vec<&String> = got.iter().filter(|(t, _)| t == m).map(|(_, b)| b).collect();
+        let want: Vec<String> = (from..to).map(|i| format!("{m}-{i}")).collect();
+        assert_eq!(
+            mine.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            want.iter().map(String::as_str).collect::<Vec<_>>(),
+            "{m}: in order, once each"
+        );
+    };
+    assert_eq!(got.len(), 60, "{got:?}");
+    for m in &ms {
+        check(&got, m, 0, 20);
+    }
+    // While attached: 10 more each, through the ready index.
+    let t = Instant::now();
+    for m in &ms {
+        publish_work(&sch, m, 20, 30).await;
+    }
+    let got = read_fan_in(&mut consumer, 30, 60).await;
+    println!("30 published while attached, read in {:?}", t.elapsed());
+    assert_eq!(got.len(), 30, "{got:?}");
+    for m in &ms {
+        check(&got, m, 20, 30);
+    }
+    // A member's own publish (no target) is tagged with its name.
+    {
+        let c = amqp(&amqp_addr, &ms[0], "r9fq").await;
+        let ch = c.create_channel().await.unwrap();
+        ch.confirm_select(ConfirmSelectOptions::default())
+            .await
+            .unwrap();
+        assert!(publish(&ch, "", "work", &format!("{}-own", ms[0]), None).await);
+        let got = read_fan_in(&mut consumer, 1, 30).await;
+        assert_eq!(got, vec![(ms[0].clone(), format!("{}-own", ms[0]))]);
+    }
+    // A member created now: its first message reaches the consumer.
+    if let Some(late) = e.late.clone() {
+        create_tenant(&e, &late);
+        let t = Instant::now();
+        publish_work(&sch, &late, 0, 10).await;
+        let got = read_fan_in(&mut consumer, 10, 60).await;
+        println!("late member {late}: 10 read {:?} after its first publish", t.elapsed());
+        assert_eq!(got.len(), 10, "{got:?}");
+        check(&got, &late, 0, 10);
+    }
+    // Nothing more, and nothing left in the instances (all acknowledged).
+    let extra = read_fan_in(&mut consumer, 1, 3).await;
+    assert!(extra.is_empty(), "{extra:?}");
+    drop(consumer);
+    fc.close(0, "done".into()).await.unwrap();
+    for m in &ms {
+        let c = amqp(&amqp_addr, m, "r9fq").await;
+        let ch = c.create_channel().await.unwrap();
+        assert!(take_all(&ch, "work", 0, 1).await.is_empty(), "{m}: left over");
+    }
+    // Unacknowledged fan-in deliveries go back to their instances when
+    // the reader's connection ends.
+    for m in &ms {
+        publish_work(&sch, m, 30, 32).await;
+    }
+    {
+        let c = amqp(&amqp_addr, &e.system, "r9fq").await;
+        let ch = c.create_channel().await.unwrap();
+        ch.basic_qos(100, BasicQosOptions::default()).await.unwrap();
+        let mut cons = ch
+            .basic_consume(
+                "work".into(),
+                "noack-then-close".into(),
+                BasicConsumeOptions::default(),
+                fan_in_args(),
+            )
+            .await
+            .unwrap();
+        use futures::StreamExt;
+        let mut n = 0;
+        while n < 6 {
+            let d = tokio::time::timeout(Duration::from_secs(30), cons.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!d.redelivered);
+            n += 1;
+        }
+        c.close(0, "unacked".into()).await.unwrap();
+    }
+    for m in &ms {
+        let c = amqp(&amqp_addr, m, "r9fq").await;
+        let ch = c.create_channel().await.unwrap();
+        let back = take_all(&ch, "work", 2, 10).await;
+        assert_eq!(back.len(), 2, "{m}: requeued {back:?}");
+    }
+    let _ = sql(&mut sys, "DROP QUEUE r9fq.work IMMEDIATE CASCADE").await;
+    ok(&mut sys, "DROP DATABASE r9fq").await;
+}
+
+// ---------------------------------------------------------------------------
+// R9 final (r9final): fan-in sinks.
+//
+//   SPRIG_TEST_INHERIT_HOOK_PORT=29881   # a webhook receiver the test runs
+// ---------------------------------------------------------------------------
+
+type Received = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+/// A webhook receiver on `port`: every record of every POST (JSON array
+/// or NDJSON), answered 200.
+async fn hook_receiver(port: u16) -> Received {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let got: Received = std::sync::Arc::default();
+    let l = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let g = got.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = l.accept().await else {
+                return;
+            };
+            let g = g.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 65536];
+                loop {
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        match s.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    while buf.len() < end + 4 + len {
+                        match s.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let body: Vec<u8> = buf[end + 4..end + 4 + len].to_vec();
+                    buf.drain(..end + 4 + len);
+                    let text = String::from_utf8_lossy(&body);
+                    let mut recs = Vec::new();
+                    if text.trim_start().starts_with('[') {
+                        if let Ok(serde_json::Value::Array(a)) = serde_json::from_str(&text) {
+                            recs = a;
+                        }
+                    } else {
+                        recs = text
+                            .lines()
+                            .filter_map(|l| serde_json::from_str(l).ok())
+                            .collect();
+                    }
+                    g.lock().unwrap().extend(recs);
+                    if s
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    got
+}
+
+/// Received records per tenant: (tenant, value text, idempotency key).
+fn received(got: &Received) -> Vec<(String, String, String)> {
+    got.lock()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["tenant"].as_str().unwrap_or_default().to_owned(),
+                match &r["value"] {
+                    serde_json::Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                },
+                r["idempotencyKey"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+async fn wait_received(got: &Received, f: impl Fn(&[(String, String, String)]) -> bool, secs: u64) {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while !f(&received(got)) && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Publishes `fs-<m>-<i>` for member `m`, i in `from..to`.
+async fn publish_fs(c: &mut Conn, m: &str, from: u64, to: u64) {
+    let mut v = Vec::new();
+    for i in from..to {
+        v.push(format!("('k{i}', 'fs-{m}-{i}')"));
+    }
+    for chunk in v.chunks(100) {
+        ok(
+            c,
+            &format!(
+                "INSERT INTO security.fs_events FOR TENANT {m} (`key`, `value`) VALUES {}",
+                chunk.join(", ")
+            ),
+        )
+        .await;
+    }
+}
+
+fn distinct_for(r: &[(String, String, String)], m: &str) -> std::collections::BTreeSet<String> {
+    r.iter()
+        .filter(|(t, _, _)| t == m)
+        .map(|(_, v, _)| v.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn fan_in_sink_end_to_end() {
+    let Some(e) = env("fan_in_sink_end_to_end") else {
+        return;
+    };
+    let Some(port) = var("SPRIG_TEST_INHERIT_HOOK_PORT").and_then(|p| p.parse::<u16>().ok()) else {
+        eprintln!("no SPRIG_TEST_INHERIT_HOOK_PORT: skipped");
+        return;
+    };
+    let got = hook_receiver(port).await;
+    let mut sys = conn(&e.addr, &e.system).await;
+    let ms = e.members.clone();
+    let _ = sql(&mut sys, "DROP SINK r9fsink.audit").await;
+    let _ = sql(&mut sys, "DROP CONNECTION r9fsink.hook").await;
+    let _ = sql(&mut sys, "DROP STREAM security.fs_events IMMEDIATE CASCADE").await;
+    let _ = sql(&mut sys, "CREATE DATABASE IF NOT EXISTS security").await;
+    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fsink").await;
+    ok(&mut sys, "CREATE DATABASE r9fsink").await;
+    ok(&mut sys, "GRANT SPRIG_SINK_ADMIN ON *.* TO app").await;
+    ok(
+        &mut sys,
+        "CREATE STREAM security.fs_events FOR EACH TENANT PARTITIONS 2",
+    )
+    .await;
+    // m0's instance with 5 records before the sink: START AT LATEST (the
+    // default) skips them.
+    publish_fs(&mut sys, &ms[0], 0, 5).await;
+    let mut c0 = conn(&e.addr, &ms[0]).await;
+    assert_eq!(
+        wait_count(&mut c0, "SELECT COUNT(*) FROM security.fs_events", 5, 60).await,
+        5
+    );
+    ok(
+        &mut sys,
+        &format!("CREATE CONNECTION r9fsink.hook TYPE WEBHOOK WITH (url = 'http://127.0.0.1:{port}', format = 'ndjson', signature = 'none')"),
+    )
+    .await;
+    let create = "CREATE SINK r9fsink.audit FROM STREAM security.fs_events FAN IN \
+                  TO WEBHOOK CONNECTION hook PATH '/in' \
+                  WITH (batch_max_wait_ms = 100, fanin_refresh_seconds = 2)";
+    // SPRIG_FAN_IN is needed; EXACTLY ONCE isn't built for fan-in.
+    let _ = sql(&mut sys, "REVOKE SPRIG_FAN_IN ON *.* FROM app").await;
+    let (code, msg) = sql(&mut sys, create).await.unwrap_err();
+    println!("fan-in sink without SPRIG_FAN_IN: {code} {msg}");
+    assert!(msg.contains("SPRIG_FAN_IN"), "{msg}");
+    ok(&mut sys, "GRANT SPRIG_FAN_IN ON *.* TO app").await;
+    let (code, msg) = sql(
+        &mut sys,
+        "CREATE SINK r9fsink.eo FROM STREAM security.fs_events FAN IN \
+         TO WEBHOOK CONNECTION hook GUARANTEE EXACTLY ONCE",
+    )
+    .await
+    .unwrap_err();
+    println!("fan-in sink EXACTLY ONCE: {code} {msg}");
+    let t = Instant::now();
+    ok(&mut sys, create).await;
+    println!("fan-in sink created: {:?}", t.elapsed());
+    // Instances of m1 and m2 are made after the sink: from their start.
+    for m in &ms {
+        publish_fs(&mut sys, m, 100, 130).await;
+    }
+    wait_received(
+        &got,
+        |r| ms.iter().all(|m| distinct_for(r, m).len() >= 30),
+        90,
+    )
+    .await;
+    let r = received(&got);
+    println!("first 90: {} records received in {:?}", r.len(), t.elapsed());
+    for m in &ms {
+        let d = distinct_for(&r, m);
+        assert_eq!(d.len(), 30, "{m}: {d:?}");
+        assert!(d.iter().all(|v| v.starts_with(&format!("fs-{m}-1"))), "{m}: {d:?}");
+    }
+    // Idempotency keys start with the member's id.
+    assert!(r.iter().all(|(_, _, k)| k.contains(':')), "{r:?}");
+    // kill -9 of the worker mid-stream: every record still arrives (at
+    // least once, duplicates with the same idempotency key).
+    got.lock().unwrap().clear();
+    for m in &ms {
+        publish_fs(&mut sys, m, 1000, 1300).await;
+    }
+    wait_received(&got, |r| r.len() >= 200, 60).await;
+    let killed = kill_worker(&e);
+    println!("worker killed: {killed} after {} records", received(&got).len());
+    if killed {
+        start_worker(&e);
+    }
+    wait_received(
+        &got,
+        |r| ms.iter().all(|m| distinct_for(r, m).len() >= 300),
+        180,
+    )
+    .await;
+    let r = received(&got);
+    let keys: std::collections::BTreeSet<&str> = r.iter().map(|(_, _, k)| k.as_str()).collect();
+    println!(
+        "through kill -9: {} deliveries, {} distinct idempotency keys, {} duplicates",
+        r.len(),
+        keys.len(),
+        r.len() - keys.len()
+    );
+    for m in &ms {
+        assert_eq!(distinct_for(&r, m).len(), 300, "{m}");
+    }
+    assert_eq!(keys.len(), 900);
+    // A member created now: its records arrive from its instance's start.
+    if let Some(late) = e.late.clone() {
+        create_tenant(&e, &late);
+        got.lock().unwrap().clear();
+        let t = Instant::now();
+        publish_fs(&mut sys, &late, 0, 10).await;
+        wait_received(&got, |r| distinct_for(r, &late).len() >= 10, 60).await;
+        println!("late member {late}: 10 delivered {:?} after its first publish", t.elapsed());
+        assert_eq!(distinct_for(&received(&got), &late).len(), 10);
+    }
+    // m0's 5 records from before the sink never came.
+    assert!(
+        !received(&got)
+            .iter()
+            .any(|(_, v, _)| v.starts_with(&format!("fs-{}-0", ms[0])) && v.len() < 12)
+    );
+    ok(&mut sys, "DROP SINK r9fsink.audit").await;
+    ok(&mut sys, "DROP CONNECTION r9fsink.hook").await;
+    let _ = sql(&mut sys, "DROP STREAM security.fs_events IMMEDIATE CASCADE").await;
+    ok(&mut sys, "DROP DATABASE r9fsink").await;
 }

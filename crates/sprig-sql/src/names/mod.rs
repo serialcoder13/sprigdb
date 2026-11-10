@@ -37,6 +37,7 @@ pub mod infoschema;
 pub mod map;
 pub mod output;
 pub mod plan;
+pub mod remote;
 pub mod result;
 pub mod rewrite;
 pub mod show;
@@ -55,6 +56,7 @@ pub use output::{
     physical_name_leaks,
 };
 pub use plan::{Action, Plan, PlanCtx, StmtPlan, plan};
+pub use remote::{RemoteBranches, WithRemote, inline_rows};
 pub use result::{LocalAnswer, ResultMapper, TextRow};
 pub use rewrite::{
     AccountInfo, Edit, EditKind, Engine, RewriteCtx, Rewritten, StatementInfo, StmtKind, SystemRef,

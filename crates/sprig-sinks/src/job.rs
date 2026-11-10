@@ -548,6 +548,9 @@ pub async fn run_sink_task(
         def.target.kind(),
     )?;
     let per_task = u32::try_from(opts.u64("partitions_per_task", 4)?).unwrap_or(4);
+    if let SourceSpec::FanIn { .. } = &def.source {
+        return run_fan_in_task(env, tenant, sink, task_no, cancel, c, store, def, opts).await;
+    }
     let (stream, partitions_n) = match &def.source {
         SourceSpec::Stream { id, partitions, .. } => (*id, *partitions),
         other => {
@@ -671,6 +674,315 @@ pub async fn run_sink_task(
     metrics::gauge!("sprig_sink_tasks", "state" => "running").decrement(1.0);
     tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, end = ?end, "sink task ended");
     end
+}
+
+/// Lists and opens a fan-in sink's member instances (chapter 51,
+/// "Fan-in sinks"): the DC's `inherit-instances/` index, members below the
+/// sink's tenant (and `UNDER t`), members whose residency sets
+/// `deny_remote_access` left out.
+struct EnvFanIn {
+    env: Arc<dyn SinkEnv>,
+    tenant: u64,
+    def: (u64, u64),
+    under: Option<u64>,
+    cat_pool: Pool,
+    cat_schema: String,
+    group: String,
+    start: crate::model::StartAt,
+    sink: SinkId,
+    /// When the sink was created (ms): instances made later start at
+    /// their beginning, so the records that made them aren't missed.
+    sink_created_ms: u64,
+}
+
+#[async_trait]
+impl crate::source::FanInOpener for EnvFanIn {
+    async fn members(&self) -> Result<Vec<(crate::source::FanInMember, Vec<u32>)>> {
+        let dc = self.env.dc();
+        let prefix = dc.tier().key("inherit-instances/")?;
+        let page = dc
+            .list(
+                &prefix,
+                sprig_meta::ListOpts {
+                    limit: 1_000_000,
+                    ..sprig_meta::ListOpts::default()
+                },
+            )
+            .await?;
+        let mut out = Vec::new();
+        for kv in &page.kvs {
+            let Ok(v) = serde_json::from_slice::<Value>(&kv.value) else {
+                continue;
+            };
+            let def = (
+                v.pointer("/def/tenant").and_then(Value::as_u64),
+                v.pointer("/def/object").and_then(Value::as_u64),
+            );
+            if def != (Some(self.def.0), Some(self.def.1))
+                || v.get("kind").and_then(Value::as_str) != Some("stream")
+            {
+                continue;
+            }
+            let (Some(member), Some(stream)) = (
+                v.get("tenant").and_then(Value::as_u64),
+                v.get("instance_id").and_then(Value::as_u64),
+            ) else {
+                continue;
+            };
+            let Some(global) = self.env.global() else {
+                continue;
+            };
+            let Some(e) = global
+                .get(
+                    &global.tier().key(&format!("tenants/{member}"))?,
+                    sprig_meta::Consistency::Serializable,
+                )
+                .await?
+                .and_then(|kv| serde_json::from_slice::<Value>(&kv.value).ok())
+            else {
+                continue;
+            };
+            let path: Vec<u64> = e
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .split('/')
+                .filter_map(|x| x.parse().ok())
+                .collect();
+            if member != self.tenant && !path.contains(&self.tenant) {
+                continue;
+            }
+            if self.under.is_some_and(|u| !path.contains(&u)) {
+                continue;
+            }
+            if e.pointer("/residency/deny_remote_access")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                metrics::counter!("sprig_inherit_fanin_skipped_total", "reason" => "residency")
+                    .increment(1);
+                continue;
+            }
+            let name = e
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            out.push((
+                crate::source::FanInMember {
+                    tenant: member,
+                    name,
+                    stream,
+                },
+                Vec::new(),
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn open(
+        &self,
+        m: &crate::source::FanInMember,
+        _partitions: Vec<u32>,
+    ) -> Result<crate::source::StreamSource> {
+        let t = TenantId(m.tenant);
+        let (mpool, mschema) = self.env.catalog(t).await?;
+        let (log_schema, partitions, created_ms) =
+            instance_stream(&mpool, &mschema, t, m.stream).await?;
+        let shard = self.env.shard_pool(t).await?;
+        // LATEST means from the sink's creation (not from the task's first
+        // start, which comes a moment later).
+        let start = if created_ms > self.sink_created_ms {
+            crate::model::StartAt::Earliest
+        } else if self.start == crate::model::StartAt::Latest && self.sink_created_ms > 0 {
+            crate::model::StartAt::Timestamp {
+                ms: i64::try_from(self.sink_created_ms).unwrap_or(i64::MAX),
+            }
+        } else {
+            self.start
+        };
+        crate::source::StreamSource::open_instance(
+            shard,
+            self.cat_pool.clone(),
+            self.cat_schema.clone(),
+            log_schema,
+            m.tenant,
+            sprig_streams::StreamId(m.stream),
+            (0..partitions).collect(),
+            self.group.clone(),
+            start,
+            self.sink,
+        )
+        .await
+    }
+}
+
+/// A fan-in sink's task: one task reads every member instance in reach
+/// (see [`EnvFanIn`]).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_fan_in_task(
+    env: Arc<dyn SinkEnv>,
+    tenant: TenantId,
+    sink: SinkId,
+    task_no: TaskNo,
+    cancel: Cancel,
+    mut c: mysql_async::Conn,
+    store: SinksStore,
+    def: Arc<SinkDef>,
+    opts: Opts,
+) -> Result<TaskEnd> {
+    let SourceSpec::FanIn {
+        def_tenant,
+        def_object,
+        under,
+        ..
+    } = &def.source
+    else {
+        return Ok(TaskEnd::Stopped);
+    };
+    let (cat_pool, cat_schema) = env.catalog(tenant).await?;
+    let created: Option<i64> = c
+        .exec_first(
+            format!(
+                "SELECT CAST(UNIX_TIMESTAMP(created_at) * 1000 AS SIGNED) FROM {}.sinks \
+                 WHERE sink_id = ?",
+                sprig_common::names::quote(&cat_schema)
+            ),
+            (sink.0,),
+        )
+        .await
+        .map_err(|e| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
+        })?;
+    let epoch = store
+        .claim_task(
+            &mut c,
+            sink,
+            task_no,
+            &json!({"fan_in": format!("{def_tenant}.{def_object}")}),
+            &env.worker_id(),
+        )
+        .await?;
+    let mut conns = Vec::new();
+    for r in &def.connections {
+        conns.push(open_conn(env.as_ref(), tenant, &mut c, &store, r, &opts).await?);
+    }
+    drop(c);
+    let info = TaskInfo {
+        tenant: tenant.0,
+        sink: sink.0,
+        task_no: task_no.0,
+        epoch,
+    };
+    let (conn, extra) = if def.target.kind() == TargetKind::Script {
+        (None, conns)
+    } else {
+        let mut it = conns.into_iter();
+        (it.next(), it.collect())
+    };
+    let ctx = TargetCtx {
+        task: info.clone(),
+        sink: Arc::clone(&def),
+        conn,
+        extra,
+        opts: opts.clone(),
+        db_name: opts.get("__db_name").unwrap_or("").to_owned(),
+    };
+    let mut settings = run_settings(&opts, &def)?;
+    if def.target.kind() == TargetKind::S3 {
+        crate::target::s3::run_settings_override(&opts, &mut settings)?;
+    }
+    let target = build_target(&ctx).await?;
+    let refresh = Duration::from_secs(opts.u64("fanin_refresh_seconds", 30)?.max(1));
+    let source = crate::source::FanInSource::open(
+        Box::new(EnvFanIn {
+            env: Arc::clone(&env),
+            tenant: tenant.0,
+            def: (*def_tenant, *def_object),
+            under: *under,
+            cat_pool: cat_pool.clone(),
+            cat_schema: cat_schema.clone(),
+            group: def.group(),
+            start: def.start_at,
+            sink,
+            sink_created_ms: u64::try_from(created.unwrap_or(0)).unwrap_or(0),
+        }),
+        refresh,
+    )
+    .await?;
+    let prepare = SinkPrepare {
+        condition: def
+            .filter_sql
+            .as_deref()
+            .map(crate::filter::parse)
+            .transpose()?,
+        projection: def.projection.clone(),
+    };
+    let control = Arc::new(CatalogControl {
+        pool: cat_pool.clone(),
+        store: store.clone(),
+        sink,
+        task: task_no,
+        epoch,
+        definition_ver: def.definition_ver,
+        delivered: AtomicU64::new(0),
+    });
+    let dead = Arc::new(CatalogDead {
+        pool: cat_pool.clone(),
+        store: store.clone(),
+        sink,
+    });
+    tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, members = source.members().len(), "fan-in sink task started");
+    metrics::gauge!("sprig_sink_tasks", "state" => "running").increment(1.0);
+    let end = run_task(
+        TaskParts {
+            info,
+            source: Box::new(source),
+            target,
+            dead,
+            control,
+            prepare: Arc::new(prepare),
+            settings,
+            seed: None,
+            reject_via_source: false,
+        },
+        cancel,
+    )
+    .await;
+    metrics::gauge!("sprig_sink_tasks", "state" => "running").decrement(1.0);
+    tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, end = ?end, "fan-in sink task ended");
+    end
+}
+
+/// A member's instance stream: its log shard schema, partitions and
+/// creation time (ms).
+async fn instance_stream(
+    pool: &Pool,
+    catalog: &str,
+    tenant: TenantId,
+    stream: u64,
+) -> Result<(String, u32, u64)> {
+    let mut c = pool.get_conn().await.map_err(|e| {
+        SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
+    })?;
+    let def = sprig_streams::StreamsStore::new(catalog)
+        .get(&mut c, sprig_streams::StreamId(stream))
+        .await?
+        .ok_or_else(|| {
+            err(
+                SprigCode::SinkSourceLost,
+                format!("instance stream {stream} of tenant {tenant} is gone"),
+            )
+        })?;
+    let log = def
+        .log
+        .first()
+        .ok_or_else(|| err(SprigCode::SinkSourceLost, "the instance has no log shard"))?;
+    Ok((
+        log.slot.schema(tenant, def.db).to_string(),
+        def.partitions,
+        def.created_at_ms,
+    ))
 }
 
 /// The log shard schema of stream `stream` (its first log shard).

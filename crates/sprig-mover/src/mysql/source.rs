@@ -130,8 +130,13 @@ pub const MOVED_INTERNAL: &[&str] = &[
 /// edges (`__sprig_ge_`), label rows (`__sprig_gl_`) and mirrors
 /// (`__sprig_gm_`), routed by `_sprig_rk` like a group's tables, and the id
 /// counter (`__sprig_gq_`, copied whole with its default-group schema),
-/// and the uniqueness claims (`__sprig_gu_`, routed by the claim's hash).
+/// and the uniqueness claims (`__sprig_gu_`, routed by the claim's hash);
+/// and chapter 33's key-value element tables (`__sprig_ke_<ns>`,
+/// `__sprig_kz_<ns>`), grouped with their key table on `_sprig_dk`, every
+/// row carrying its key's `_sprig_rk`.
 pub const MOVED_INTERNAL_PREFIXES: &[&str] = &[
+    "__sprig_ke_",
+    "__sprig_kz_",
     "__sprig_eo_",
     "__sprig_sl_",
     "__sprig_gn_",
@@ -369,7 +374,10 @@ impl MysqlSource {
             .await?;
         for n in names.into_iter().filter_map(|r| r.get::<String, _>(0)) {
             let rows = self
-                .rows(&format!("SHOW CREATE EVENT {}", qualified(s, &n)), Vec::new())
+                .rows(
+                    &format!("SHOW CREATE EVENT {}", qualified(s, &n)),
+                    Vec::new(),
+                )
                 .await?;
             let Some(r) = rows.into_iter().next() else {
                 continue;

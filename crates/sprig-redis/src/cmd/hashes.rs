@@ -48,7 +48,7 @@ pub(crate) async fn lookup(
             .q(&format!(
                 "SELECT e, v FROM {} WHERE {} AND ({})",
                 cx.ns.elems(),
-                Ctx::kg(row),
+                cx.kg(row),
                 elem_pred(chunk)
             ))
             .await?;
@@ -71,10 +71,10 @@ async fn all_live(
     let rows = cx
         .q(&format!(
             "SELECT t.type, e.e, e.v FROM {} AS t LEFT JOIN {} AS e ON e.k = t.k AND e.g = t.g \
-             WHERE t.k = {} AND {} ORDER BY e.o, e.e",
+             AND e._sprig_dk = t._sprig_dk WHERE {} AND {} ORDER BY e.o, e.e",
             cx.ns.keys(),
             cx.ns.elems(),
-            lit(k),
+            cx.kp(k, "t."),
             live("t")
         ))
         .await?;
@@ -135,7 +135,7 @@ pub(crate) async fn remove(cx: &mut Ctx<'_>, row: &KeyRow, items: &[&[u8]]) -> R
         cx.x(&format!(
             "DELETE FROM {} WHERE {} AND ({})",
             cx.ns.elems(),
-            Ctx::kg(row),
+            cx.kg(row),
             elem_pred(chunk)
         ))
         .await?;
@@ -152,7 +152,7 @@ pub(crate) async fn elems_of(cx: &mut Ctx<'_>, row: &KeyRow) -> R<Vec<(Vec<u8>, 
         .q(&format!(
             "SELECT e, v FROM {} WHERE {} ORDER BY o, e",
             cx.ns.elems(),
-            Ctx::kg(row)
+            cx.kg(row)
         ))
         .await?;
     Ok(rows
@@ -237,12 +237,12 @@ async fn read_fields(
     };
     let rows = cx
         .q(&format!(
-            "SELECT t.type, e.e, e.v FROM {} AS t LEFT JOIN {} AS e ON e.k = t.k AND e.g = t.g AND ({}) \
-             WHERE t.k = {} AND {}",
+            "SELECT t.type, e.e, e.v FROM {} AS t LEFT JOIN {} AS e ON e.k = t.k AND e.g = t.g \
+             AND e._sprig_dk = t._sprig_dk AND ({}) WHERE {} AND {}",
             cx.ns.keys(),
             cx.ns.elems(),
             cond,
-            lit(k),
+            cx.kp(k, "t."),
             live("t")
         ))
         .await?;
@@ -528,7 +528,7 @@ pub async fn escan(cx: &mut Ctx<'_>, a: &[Bytes], t: KeyType) -> R<Frame> {
             .q(&format!(
                 "SELECT e, v, o FROM {} WHERE {} AND o >= {cursor} ORDER BY o, e LIMIT {count}",
                 cx.ns.elems(),
-                Ctx::kg(&row)
+                cx.kg(&row)
             ))
             .await?;
         let full = rows.len() == count;
@@ -546,7 +546,7 @@ pub async fn escan(cx: &mut Ctx<'_>, a: &[Bytes], t: KeyType) -> R<Frame> {
                     .q(&format!(
                         "SELECT e, v FROM {} WHERE {} AND o = {o} AND e > {} ORDER BY e",
                         cx.ns.elems(),
-                        Ctx::kg(&row),
+                        cx.kg(&row),
                         lit(&e)
                     ))
                     .await?;

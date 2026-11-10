@@ -42,6 +42,7 @@
 
 pub mod analytics;
 pub mod collation;
+pub mod compound;
 pub mod exec;
 pub mod fk;
 pub mod gather;
@@ -61,8 +62,8 @@ pub use exec::{
 pub use gather::{GatherLimits, GatherPlan, Scratch};
 pub use plan::{Plan, ShardAt, Target};
 pub use planner::{
-    ParamLit, PlanCtx, PreparedPlan, Template, parse_template, plan, plan_gathered, plan_prepared,
-    render_params,
+    ParamLit, PlanCtx, PreparedPlan, Template, metadata_sql, parse_template, plan, plan_gathered,
+    plan_prepared, render_params,
 };
 pub use reject::{Reason, Rejection};
 pub use settings::RouterConfig;

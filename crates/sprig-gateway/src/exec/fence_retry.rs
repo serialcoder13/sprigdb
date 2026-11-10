@@ -25,6 +25,11 @@
 //!   fence, attempts used (3, or 10 s)   -> 1205
 //! ```
 //!
+//! A DC failover fences the old home by revoking the tenant's write
+//! privileges there (RL13); a write a lagging gateway still sent there gets
+//! 1142, handled the same way (the database check is skipped and the wait
+//! for the watch is 300 ms).
+//!
 //! Running an autocommit statement again is safe here: 1146 and 1049 are
 //! raised when the statement opens its tables, before it changes
 //! anything, and the request is retried only when its first answer was
@@ -55,6 +60,9 @@ pub(super) const MAX_TOTAL: Duration = Duration::from_secs(10);
 /// How long the gateway waits for its watch to show the move that a 1146
 /// suggests before it treats the error as the table's own.
 const SETTLE: Duration = Duration::from_secs(1);
+/// The same for a 1142 (the old home fenced by a failover, RL13): the
+/// maps were quarantined before the fence, so the watch rarely lags.
+const REVOKED_SETTLE: Duration = Duration::from_millis(300);
 
 /// The tenant's maps as seen before a request: the DC they are followed
 /// in, the sum of their revisions, and whether a range was held.
@@ -66,9 +74,11 @@ fn copy(e: &SprigError) -> SprigError {
     SprigError::backend(p.mysql_errno, p.sqlstate, e.message.clone())
 }
 
-/// Whether `e` is an error a fence can cause.
+/// Whether `e` is an error a fence can cause: the mover's rename fence
+/// (1146, and 1049 once a source is dropped) or a failover's fence of the
+/// old home, which revokes the tenant's write privileges there (1142).
 pub(super) fn fence_code(e: &SprigError) -> bool {
-    matches!(e.protocol().mysql_errno, 1146 | 1049)
+    matches!(e.protocol().mysql_errno, 1146 | 1049 | 1142)
 }
 
 /// The database a 1146 (`Table 'db.t' doesn't exist`) or 1049 (`Unknown
@@ -103,12 +113,16 @@ pub(super) async fn met_fence(
     before: &Token,
     e: &SprigError,
 ) -> bool {
-    if !known_db(e, map) {
+    // 1142 names an account and a table, not a database; a privilege a
+    // tenant really lacks is answered after a short look at its maps.
+    let revoked = e.protocol().mysql_errno == 1142;
+    if !revoked && !known_db(e, map) {
         return false;
     }
     if before.2 {
         return true; // it ran under a hold (a transaction running on)
     }
+    let settle = if revoked { REVOKED_SETTLE } else { SETTLE };
     let t0 = Instant::now();
     loop {
         // Follows the tenant to another DC when its map there was left.
@@ -117,7 +131,7 @@ pub(super) async fn met_fence(
         if now.2 || now != *before {
             return true;
         }
-        if t0.elapsed() >= SETTLE {
+        if t0.elapsed() >= settle {
             return false;
         }
         let mut changes = locator.placement_changes_for(tenant);
@@ -355,6 +369,8 @@ mod tests {
         assert_eq!(named_db(&e).as_deref(), Some("t7_d1"));
         assert!(fence_code(&e));
         let e = SprigError::backend(1142, *b"42000", "INSERT command denied");
+        assert!(fence_code(&e));
+        let e = SprigError::backend(1062, *b"23000", "Duplicate entry");
         assert!(!fence_code(&e));
     }
 

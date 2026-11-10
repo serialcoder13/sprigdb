@@ -13,11 +13,13 @@
 //! The prologue every batch shares:
 //!
 //! ```sql
+//! DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END;
 //! START TRANSACTION;
 //! SELECT now_ms, t.type, t.v, IFNULL(t.n,0), IFNULL(t.lh,0), IFNULL(t.lt,0), t.g,
 //!        t.expires_at, (t.expires_at IS NOT NULL AND t.expires_at <= UTC_TIMESTAMP(3))
 //!   INTO @now, @t, @sv, @n, @lh, @lt, @g, @e, @x
-//!   FROM (SELECT 1 AS one) AS d LEFT JOIN <keys> AS t ON t.k = :k FOR UPDATE;
+//!   FROM (SELECT 1 AS one) AS d LEFT JOIN <keys> AS t
+//!     ON t.k = :k AND t._sprig_dk = :dk FOR UPDATE;
 //! IF @x THEN <delete the key row and its elements>; <reset to absent>; END IF;
 //! ```
 //!
@@ -27,9 +29,10 @@
 //! 2 = `WRONGTYPE`, 3 = not an integer, 4 = overflow), so a refused
 //! command changes nothing. A new key is a plain `INSERT`: two clients
 //! creating one key meet on its primary key (1062) and the loser reruns
-//! the whole batch, as on the statement path. On any error the caller
-//! sends `ROLLBACK` (a statement error inside a compound statement leaves
-//! the transaction open).
+//! the whole batch, as on the statement path. On any error the exit
+//! handler rolls back and re-raises the error (the caller still sends
+//! `ROLLBACK`, a no-op). On a sharded database the gateway routes the
+//! statement by its `_sprig_dk` literal (`sprig_router::compound`).
 
 // The batches are SQL text built piece by piece.
 #![allow(clippy::format_push_string)]
@@ -337,14 +340,18 @@ pub fn plan(ns: &Namespace, name: &str, a: &[Bytes]) -> Option<Plan> {
 
 /// The prologue: lock the key row, clear an expired key. `sv`: read the
 /// string value into `@sv`.
-fn prologue(ns: &Namespace, k: &str, sv: bool) -> String {
+fn prologue(ns: &Namespace, key: &[u8], sv: bool) -> String {
     let keys = ns.keys();
+    let k = lit(key);
+    // `_sprig_dk` names the key's shard on a sharded database: the gateway
+    // routes the whole compound statement by it (R6 round 4).
+    let dk = lit(ns.dist_key(key));
     format!(
         "START TRANSACTION; \
          SELECT {NOW_MS_SQL}, t.type, {v}, IFNULL(t.n, 0), IFNULL(t.lh, 0), IFNULL(t.lt, 0), t.g, t.expires_at, \
          (t.expires_at IS NOT NULL AND t.expires_at <= UTC_TIMESTAMP(3)) \
          INTO @now, @t, @sv, @n, @lh, @lt, @g, @e, @x \
-         FROM (SELECT 1 AS one) AS d LEFT JOIN {keys} AS t ON t.k = {k} FOR UPDATE; \
+         FROM (SELECT 1 AS one) AS d LEFT JOIN {keys} AS t ON t.k = {k} AND t._sprig_dk = {dk} FOR UPDATE; \
          IF @x THEN DELETE FROM {keys} WHERE k = {k}; \
          IF @t = 'zset' THEN DELETE FROM {zs} WHERE k = {k} AND g = @g; \
          ELSEIF @t <> 'string' THEN DELETE FROM {el} WHERE k = {k} AND g = @g; END IF; \
@@ -412,7 +419,12 @@ impl Plan {
         let k = lit(key);
         let keys = ns.keys();
         let mut s = String::with_capacity(1024);
-        s.push_str("BEGIN NOT ATOMIC ");
+        // An error rolls the transaction back inside the statement, so no
+        // connection is left with it open (the shard's connection may not
+        // be the session's own, R6 round 4); RESIGNAL keeps the error.
+        s.push_str(
+            "BEGIN NOT ATOMIC DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END; ",
+        );
         match self {
             Self::Set {
                 v,
@@ -422,7 +434,7 @@ impl Plan {
                 ttl,
                 ..
             } => {
-                s.push_str(&prologue(ns, &k, *get));
+                s.push_str(&prologue(ns, key, *get));
                 let go = if *nx {
                     "@t IS NULL"
                 } else if *xx {
@@ -453,7 +465,7 @@ impl Plan {
                 ));
             }
             Self::Incr { by, .. } => {
-                s.push_str(&prologue(ns, &k, true));
+                s.push_str(&prologue(ns, key, true));
                 s.push_str(&format!(
                     "SET @r = NULL; \
                      IF @t IS NOT NULL AND @t <> 'string' THEN SET @rc = 2; \
@@ -478,7 +490,7 @@ impl Plan {
                 ));
             }
             Self::Hset { pairs, .. } => {
-                s.push_str(&prologue(ns, &k, false));
+                s.push_str(&prologue(ns, key, false));
                 let pred = pairs
                     .iter()
                     .map(|(f, _)| format!("(o = {} AND e = {})", crc(f), lit(f)))
@@ -513,7 +525,7 @@ impl Plan {
                 only_existing,
                 ..
             } => {
-                s.push_str(&prologue(ns, &k, false));
+                s.push_str(&prologue(ns, key, false));
                 let route = format!("{}, {}", lit(ns.dist_key(key)), ns.routing_hash(key));
                 let m = items.len();
                 let vals = items
@@ -549,7 +561,7 @@ impl Plan {
                 ));
             }
             Self::Pop { count, end, .. } => {
-                s.push_str(&prologue(ns, &k, false));
+                s.push_str(&prologue(ns, key, false));
                 let c = count.unwrap_or(1);
                 let (range, order, bounds) = match end {
                     End::Left => ("@lo = @lh, @hi = @lh + @c", "ASC", "@lh = @lh + @c"),
@@ -580,7 +592,7 @@ impl Plan {
                 lt,
                 ..
             } => {
-                s.push_str(&prologue(ns, &k, false));
+                s.push_str(&prologue(ns, key, false));
                 let route = format!("{}, {}", lit(ns.dist_key(key)), ns.routing_hash(key));
                 let derived = pairs
                     .iter()
@@ -798,7 +810,12 @@ mod tests {
             let name = String::from_utf8_lossy(&a[0]).into_owned();
             let p = plan(&ns, &name, &a).unwrap();
             let s = p.sql(&ns);
-            assert!(s.starts_with("BEGIN NOT ATOMIC START TRANSACTION;"), "{s}");
+            assert!(
+                s.starts_with(
+                    "BEGIN NOT ATOMIC DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END; START TRANSACTION;"
+                ),
+                "{s}"
+            );
             assert!(s.ends_with(" END"), "{s}");
             assert!(s.contains("COMMIT;"), "{s}");
             assert!(s.is_ascii());

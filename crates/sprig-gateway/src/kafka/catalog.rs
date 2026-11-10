@@ -639,10 +639,10 @@ impl GroupStore for CatalogGroups {
                     } else {
                         super::data::fanin_id(o.instance_tenant, o.stream.0)?
                     },
-                partition: i32::try_from(o.partition.0).unwrap_or(i32::MAX),
-                offset: i64::try_from(o.offset).unwrap_or(i64::MAX),
-                leader_epoch: o.leader_epoch.and_then(|e| i32::try_from(e).ok()),
-                metadata: o.metadata,
+                    partition: i32::try_from(o.partition.0).unwrap_or(i32::MAX),
+                    offset: i64::try_from(o.offset).unwrap_or(i64::MAX),
+                    leader_epoch: o.leader_epoch.and_then(|e| i32::try_from(e).ok()),
+                    metadata: o.metadata,
                 })
             })
             .filter(|c| only.is_none_or(|k| k.contains(&(c.stream_id, c.partition))))

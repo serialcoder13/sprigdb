@@ -77,16 +77,17 @@ macro_rules! key {
     };
 }
 
-/// `migration.mode`: `auto`, `recommend` (the dry run) or `off`.
+/// `migration.mode`: `auto`, `approve` (held for approval, chapter 52),
+/// `recommend` (the dry run) or `off`.
 pub static MODE: Setting<Cow<'static, str>> = Setting {
     key: "migration.mode",
     default: Cow::Borrowed("auto"),
     scopes: TDG,
-    hard: HardBounds::one_of(&["auto", "recommend", "off"]),
+    hard: HardBounds::one_of(&["auto", "approve", "recommend", "off"]),
     apply: Apply::Live,
     operator_only: true,
     owner: 24,
-    doc: "auto, recommend (dry run) or off",
+    doc: "auto, approve (chapter 52), recommend (dry run) or off",
 };
 sprig_settings::register!(MODE);
 
@@ -378,6 +379,8 @@ pub struct MigrationDecider {
     moves: Arc<DcMoves>,
     /// Tenants' sizes (chapter 11's fleet view).
     balancer: Option<Arc<crate::balancer_loop::BalancerLoop>>,
+    /// Chapter 52: `migration.mode = approve` holds moves for approval.
+    approvals: Option<Arc<crate::approvals::ControllerApprovals>>,
 }
 
 impl std::fmt::Debug for MigrationDecider {
@@ -405,7 +408,80 @@ impl MigrationDecider {
         moves: Arc<DcMoves>,
         balancer: Option<Arc<crate::balancer_loop::BalancerLoop>>,
     ) -> Self {
-        Self { moves, balancer }
+        Self {
+            moves,
+            balancer,
+            approvals: None,
+        }
+    }
+
+    /// Chapter 52: hold moves for approval under `migration.mode = approve`
+    /// (and record advice under `recommend`).
+    #[must_use]
+    pub fn with_approvals(mut self, a: Arc<crate::approvals::ControllerApprovals>) -> Self {
+        self.approvals = Some(a);
+        self
+    }
+
+    /// Chapter 52's gate for a qualifying move: `None` to go ahead
+    /// (`auto`, or approved), `Some(why)` to hold.
+    async fn approval_gate(
+        &self,
+        tenant: TenantId,
+        name: &str,
+        mode: &str,
+        ev: &Evaluation,
+        best: &DcId,
+    ) -> Option<(Option<sprig_approvals::Ticket>, String)> {
+        use sprig_approvals::{Action, Kind, Proposal, Verdict};
+        let a = self.approvals.as_ref()?;
+        if !matches!(mode, "approve" | "recommend") {
+            return None;
+        }
+        let policy = a.policy(Kind::DcMove, Some(tenant), None, None, None).await;
+        let improvement = ev
+            .latency_ms
+            .get(ev.home.as_str())
+            .filter(|h| **h > 0.0)
+            .map_or(0.0, |h| ev.gain_ms / h * 100.0);
+        let p = Proposal {
+            kind: Kind::DcMove,
+            subject: a.subject(tenant).await,
+            target: format!("t{tenant}/home"),
+            action: Action {
+                text: format!("sprigctl tenant move {name} --to {best}"),
+                machine: serde_json::json!({ "to": best.to_string() }),
+            },
+            evidence: serde_json::json!({
+                "decision": ev.decision,
+                "home": ev.home.to_string(),
+                "to": best.to_string(),
+                "weighted_total": ev.weighted_total,
+                "latency_ms": ev.latency_ms,
+                "gain_ms": ev.gain_ms,
+                "improvement_pct": improvement,
+                "scores": ev.scores,
+            }),
+            score: if ev.decision == "relief" { 100.0 } else { improvement },
+            summary: if ev.decision == "relief" {
+                format!("move {name} from {} to {best}: capacity relief", ev.home)
+            } else {
+                format!(
+                    "move {name} from {} to {best}: {:.0}% lower traffic-weighted latency ({:.1} ms)",
+                    ev.home, improvement, ev.gain_ms
+                )
+            },
+            // Relief moves free a DC running out of room (chapter 52,
+            // "Safety rules").
+            emergency: ev.decision == "relief",
+        };
+        match a.gate(&p, &policy).await {
+            Verdict::Proceed(t) => Some((Some(t), String::new())),
+            Verdict::Wait(id) => Some((None, format!("held for approval as {id}"))),
+            Verdict::Advice(id) => Some((None, format!("recommended as {id}"))),
+            Verdict::Suppressed(id) => Some((None, format!("ignored ({id})"))),
+            Verdict::Off => Some((None, "approvals unavailable; holding".into())),
+        }
     }
 
     fn state(&self) -> &DecisionState {
@@ -572,7 +648,15 @@ impl MigrationDecider {
                 .set(1.0);
             return Ok(Outcome::RequeueAfter(period));
         }
-        if mode != "auto" {
+        let mut ticket = None;
+        if let Some((t, why)) = self.approval_gate(tenant, &name, &mode, &ev, &best).await {
+            if t.is_none() {
+                self.record(tenant, Some(&ev), "awaiting_approval", &why);
+                return Ok(Outcome::RequeueAfter(period));
+            }
+            ticket = t;
+        }
+        if mode != "auto" && ticket.is_none() {
             self.record(
                 tenant,
                 Some(&ev),
@@ -641,6 +725,9 @@ impl MigrationDecider {
                 // Refused (39550), or the target still holds the dropped
                 // standby's lock: the next pass tries again.
                 let why = format!("the move didn't start: {err}");
+                if let (Some(a), Some(t)) = (&self.approvals, &ticket) {
+                    a.finished(t, false, &why).await;
+                }
                 tracing::warn!(tenant = %name, to = %best, error = %err, refused = (err.code() == Some(SprigCode::TenantMoveRefused)), "automatic DC move not started");
                 self.record(tenant, Some(&ev), "refused", &why);
             }

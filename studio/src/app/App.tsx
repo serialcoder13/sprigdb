@@ -13,6 +13,8 @@ import { DatabasePage } from '../catalog/DatabasePage';
 import { QueryPage } from '../editor/QueryPage';
 import { SettingsPage } from '../settings/SettingsPage';
 import { IndexingPage } from '../indexing/IndexingPage';
+import { InboxPage } from '../approvals/InboxPage';
+import { PolicyPage } from '../approvals/PolicyPage';
 import { AccessPage } from '../access/AccessPage';
 import { isApiError } from '../api/errors';
 
@@ -72,6 +74,8 @@ export const routes = [
       { path: 'db/:db/obj/:kind/:name', element: <ObjectPage /> },
       { path: 'q/:tab', element: <QueryPage /> },
       { path: 'indexing', element: <IndexingPage /> },
+      { path: 'inbox', element: <InboxPage /> },
+      { path: 'inbox/policy', element: <PolicyPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: 'access/:area', element: <AccessPage /> },
       { path: 'access', element: <Navigate to="users" replace /> },

@@ -346,6 +346,69 @@ impl Host for GwHost<'_> {
             .map(|(c, _)| c)
             .collect())
     }
+
+    fn fan_in(&self) -> bool {
+        // Checked against the latest grants in `fan_in_stream`: the
+        // session's snapshot may predate a GRANT or REVOKE it just ran.
+        true
+    }
+
+    async fn fan_in_stream(
+        &mut self,
+        db: &str,
+        name: &str,
+        under: Option<&str>,
+    ) -> Result<Option<sprig_sinks::sql::FanInDef>> {
+        let svc = Arc::clone(
+            self.ts()
+                .ok_or_else(|| SprigError::internal("no tenant"))?
+                .services(),
+        );
+        let me = self.cat.tenant;
+        let fresh = crate::inherited::catalog(&svc, me).await?;
+        let user = self.ts().and_then(|t| t.principal.user_id);
+        let g = crate::tenant::authz::grants_of(&svc, &fresh, user);
+        if !g.unrestricted() && !g.allows(Action::FanIn, Target::Tenant) {
+            return Err(SprigError::new(
+                SprigCode::SinkPrivilege,
+                "Access denied; you need (at least one of) the SPRIG_FAN_IN privilege(s) for a \
+                 fan-in sink",
+            ));
+        }
+        let chain = crate::inherited::chain(&svc, &self.cat).await?;
+        let own = crate::inherited::state_of(&self.cat);
+        let Some(d) = crate::inherited::fanin::definition(&chain, &own, db, name) else {
+            return Ok(None);
+        };
+        let partitions = d
+            .definition
+            .get("partitions")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|p| u32::try_from(p).ok())
+            .unwrap_or(1);
+        let under = match under {
+            None => None,
+            Some(u) => {
+                let id = crate::inherited::tenant_by_name(&svc, u)
+                    .await?
+                    .ok_or_else(|| crate::inherited::target_err(format!("no tenant '{u}'")))?;
+                let e = crate::inherited::dir_entry(&svc, id).await?.unwrap_or_default();
+                if id != me && !e.path_ids().contains(&me.0) {
+                    return Err(crate::inherited::target_err(format!(
+                        "tenant '{u}' isn't below this one"
+                    )));
+                }
+                Some(id.0)
+            }
+        };
+        let k = d.key();
+        Ok(Some(sprig_sinks::sql::FanInDef {
+            def_tenant: k.tenant.0,
+            def_object: k.object,
+            partitions,
+            under,
+        }))
+    }
 }
 
 fn change_name(c: &Change) -> &'static str {

@@ -1,0 +1,16 @@
+ 1 sql shop │ Dashboard │ Admin │ Inbox
+┌ Views ─────────┐┌ clusters · not polled yet · r refresh ─────────────────────────────────────────┐
+│1 sessions      ││operators only: add admin_url (and admin_token_file) to the profile             │
+│2 fingerprints  ││                                                                                │
+│3 clusters      ││                                                                                │
+│4 shards        ││                                                                                │
+│5 dcs           ││                                                                                │
+│6 messaging     ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+└────────────────┘└────────────────────────────────────────────────────────────────────────────────┘
+ dev  127.0.0.1:8080 db shop  F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit

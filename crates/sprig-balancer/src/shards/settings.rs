@@ -46,11 +46,11 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     key: "sharding.mode",
     default: Cow::Borrowed("on"),
     scopes: TENANT_OPS,
-    hard: HardBounds::one_of(&["on", "recommend", "off"]),
+    hard: HardBounds::one_of(&["on", "approve", "recommend", "off"]),
     apply: Apply::Live,
     operator_only: true,
     owner: 20,
-    doc: "Automatic split, merge and move: on, recommend (log only) or off",
+    doc: "Automatic split, merge and move: on, approve (chapter 52), recommend (log only) or off",
 };
 sprig_settings::register!(MODE);
 
@@ -113,6 +113,8 @@ pub enum ShardingMode {
     On,
     /// Proposals are logged as recommendations; nothing runs.
     Recommend,
+    /// Proposals wait for an approval (chapter 52), then run as under `on`.
+    Approve,
     /// Nothing is evaluated.
     Off,
 }
@@ -123,6 +125,7 @@ impl ShardingMode {
     pub fn parse(s: &str) -> Self {
         match s {
             "recommend" => Self::Recommend,
+            "approve" => Self::Approve,
             "off" => Self::Off,
             _ => Self::On,
         }

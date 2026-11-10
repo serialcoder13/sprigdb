@@ -221,6 +221,11 @@ impl GatewayQueues {
                 e.shutdown();
             });
         }
+        // Fan-in consumers' ready index (chapter 42, "Fan-in").
+        engine.set_ready_hook(crate::inherited::fanin_mq::ReadyIndex::start(
+            Arc::clone(&tenants),
+            stop.clone(),
+        ));
         tokio::spawn(leases.keep(stop));
         let _ = tenants.mq.set(Arc::clone(&engine));
         let mut g = Self::new(Some(tenants), live, dc);
@@ -261,9 +266,9 @@ impl QueueBackend for GatewayQueues {
             if let Some(t) = &self.tenants {
                 crate::inherited::mq::before_open(t, TenantId(principal.tenant_id), &db).await;
             }
-            let v = e.open_vhost(principal, vhost, conn, events).await?;
+            let v = e.open_vhost(principal, vhost, conn, events.clone()).await?;
             if let Some(t) = &self.tenants {
-                return crate::inherited::mq::wrap_vhost(t, principal, &db, v).await;
+                return crate::inherited::mq::wrap_vhost(t, principal, &db, v, Some(events)).await;
             }
             return Ok(v);
         }

@@ -36,6 +36,9 @@
 #   SPRIG_CLIENTS_FILTER      run only matching tests (go -run, pytest -k,
 #                             Maven -Dtest, a poku path)
 #   SPRIG_CLIENTS_VERBOSE=1   also list unexpected skips
+#   SPRIG_CLIENTS_PATHS       sqlalchemy: the test directories to run
+#                             (default test; through a gateway the whole
+#                             suite takes longer than one heavy-job hold)
 #   SPRIG_CLIENTS_PREFIX      container name prefix (default sprig-clients)
 #
 # Expected files can `exclude` tests per target. They keep statements of
@@ -258,14 +261,14 @@ case $SUITE in
     fi
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/pip"
-    suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -- "$PY_IMAGE" \
+    suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -e PATHS="${SPRIG_CLIENTS_PATHS:-test}" -- "$PY_IMAGE" \
       sh -c 'K=$FILTER; [ -n "$EXCLUDE_RE" ] && K="${K:+($K) and }not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))";
              mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
              pip install -q "pytest==8.1.1" "PyMySQL==1.1.1" "typing_extensions==4.12.2" "greenlet==3.1.1" > /out/pip.log 2>&1 &&
              U=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1], safe=\"\"))" "$TARGET_USER") &&
              P=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1], safe=\"\"))" "$TARGET_PASS") &&
              PYTHONPATH=lib python -m pytest -p no:cacheprovider -q -m backend --junitxml=/out/junit.xml \
-               --dburi "mysql+pymysql://$U:$P@$TARGET_HOST:$TARGET_PORT/test?charset=utf8mb4" ${K:+-k "$K"} test > /out/pytest.log 2>&1; true' ||
+               --dburi "mysql+pymysql://$U:$P@$TARGET_HOST:$TARGET_PORT/test?charset=utf8mb4" ${K:+-k "$K"} $PATHS > /out/pytest.log 2>&1; true' ||
       true
     ;;
   php-mysqli | php-pdo-mysql)

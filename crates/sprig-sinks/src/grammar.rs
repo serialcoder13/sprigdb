@@ -318,6 +318,13 @@ pub enum SourceAst {
     Queue(QName),
     /// `FROM CHANGES OF t, ...`.
     Changes(Vec<QName>),
+    /// `FROM STREAM s FAN IN [UNDER t]`.
+    FanIn {
+        /// The inherited stream's name.
+        stream: QName,
+        /// `UNDER t`.
+        under: Option<String>,
+    },
 }
 
 /// `TO ...` as written.
@@ -929,12 +936,26 @@ fn create_sink(p: &mut P<'_>) -> Result<Stmt> {
     } else {
         return Err(p.unexpected("expected STREAM, QUEUE or CHANGES OF"));
     };
-    if p.kws(&["FAN", "IN"]) {
-        return Err(err(
-            SprigCode::SinkOptionInvalid,
-            "fan-in sinks are not built yet (chapter 51, build step 21)",
-        ));
-    }
+    let source = if p.kws(&["FAN", "IN"]) {
+        match source {
+            SourceAst::Stream(q) => {
+                let under = if p.kw("UNDER") {
+                    Some(p.qname()?.name)
+                } else {
+                    None
+                };
+                SourceAst::FanIn { stream: q, under }
+            }
+            _ => {
+                return Err(err(
+                    SprigCode::SinkOptionInvalid,
+                    "FAN IN is built for stream sources only (QUEUE q FAN IN comes with queue sources)",
+                ));
+            }
+        }
+    } else {
+        source
+    };
     let mut filter = None;
     if p.kw("WHERE") {
         let start = p.peek().map_or(p.sql.len(), |t| t.range.start);

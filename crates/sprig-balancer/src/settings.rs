@@ -45,11 +45,11 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     key: "balancer.mode",
     default: Cow::Borrowed("auto"),
     scopes: TENANT_OPS,
-    hard: HardBounds::one_of(&["auto", "recommend", "dry_run", "off"]),
+    hard: HardBounds::one_of(&["auto", "approve", "recommend", "dry_run", "off"]),
     apply: Apply::Live,
     operator_only: true,
     owner: 11,
-    doc: "auto, recommend, dry_run or off",
+    doc: "auto, approve (chapter 52), recommend, dry_run or off",
 };
 sprig_settings::register!(MODE);
 
@@ -271,6 +271,9 @@ pub enum BalancerMode {
     Auto,
     /// Plans are written as `recommended` decisions; no job.
     Recommend,
+    /// Plans wait for an approval (chapter 52); the controller turns an
+    /// approved tenant's moves into `auto` for one run.
+    Approve,
     /// Plans are written as `dry_run` decisions; nothing runs.
     DryRun,
     /// No planning.
@@ -284,6 +287,7 @@ impl BalancerMode {
         match s {
             "auto" => Self::Auto,
             "recommend" => Self::Recommend,
+            "approve" => Self::Approve,
             "dry_run" => Self::DryRun,
             _ => Self::Off,
         }
@@ -295,6 +299,7 @@ impl BalancerMode {
         match self {
             Self::Auto => "auto",
             Self::Recommend => "recommend",
+            Self::Approve => "approve",
             Self::DryRun => "dry_run",
             Self::Off => "off",
         }

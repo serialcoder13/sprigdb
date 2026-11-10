@@ -31,6 +31,8 @@ sprig-inherit = { path = "../sprig-inherit" }
 sprig-logic = { path = "../sprig-logic" }
 sprig-logic-compile = { path = "../sprig-logic-compile" }
 sprig-controller.workspace = true
+# Chapter 52: recommendation ids and times.
+sprig-approvals.workspace = true
 sprig-meta.workspace = true
 # `sprigctl shard move` and `sprigctl job` (chapter 10).
 sprig-mover.workspace = true

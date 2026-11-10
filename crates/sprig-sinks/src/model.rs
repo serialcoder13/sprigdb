@@ -280,6 +280,23 @@ pub enum SourceSpec {
         /// `(object id, name)` per table.
         objects: Vec<(u64, String)>,
     },
+    /// `FROM STREAM s FAN IN [UNDER t]`: every member's instance of an
+    /// inherited stream definition below the sink's tenant (chapter 51,
+    /// "Fan-in sinks").
+    FanIn {
+        /// The declaring tenant.
+        def_tenant: u64,
+        /// The definition's object id there.
+        def_object: u64,
+        /// The database name of the instances.
+        db: String,
+        /// The stream's name.
+        name: String,
+        /// Partitions of each instance.
+        partitions: u32,
+        /// `UNDER t`: only that tenant's subtree.
+        under: Option<u64>,
+    },
 }
 
 impl SourceSpec {
@@ -287,7 +304,7 @@ impl SourceSpec {
     #[must_use]
     pub fn kind(&self) -> SourceKind {
         match self {
-            SourceSpec::Stream { .. } => SourceKind::Stream,
+            SourceSpec::Stream { .. } | SourceSpec::FanIn { .. } => SourceKind::Stream,
             SourceSpec::Queue { .. } => SourceKind::Queue,
             SourceSpec::Changes { .. } => SourceKind::Changes,
         }
@@ -299,6 +316,7 @@ impl SourceSpec {
         match self {
             SourceSpec::Stream { id, .. } | SourceSpec::Queue { id, .. } => vec![*id],
             SourceSpec::Changes { objects } => objects.iter().map(|o| o.0).collect(),
+            SourceSpec::FanIn { def_object, .. } => vec![*def_object],
         }
     }
 
@@ -306,7 +324,9 @@ impl SourceSpec {
     #[must_use]
     pub fn name(&self) -> String {
         match self {
-            SourceSpec::Stream { name, .. } | SourceSpec::Queue { name, .. } => name.clone(),
+            SourceSpec::Stream { name, .. }
+            | SourceSpec::Queue { name, .. }
+            | SourceSpec::FanIn { name, .. } => name.clone(),
             SourceSpec::Changes { objects } => objects
                 .iter()
                 .map(|o| o.1.as_str())
@@ -706,6 +726,10 @@ impl SinkRecord {
             m.insert("after".into(), self.after.clone().unwrap_or(Value::Null));
         }
         m.insert("ts".into(), json!(self.ts_ms));
+        // A member's record (fan-in sinks, inherited streams): its tenant.
+        if let Some((_, t)) = self.headers.iter().find(|(k, _)| k == "x-sprig-tenant") {
+            m.insert("tenant".into(), json!(String::from_utf8_lossy(t)));
+        }
         m.insert("idempotencyKey".into(), json!(self.idem_key));
         m.insert("position".into(), json!(self.pos.text()));
         Value::Object(m)

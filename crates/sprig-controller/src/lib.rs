@@ -55,6 +55,8 @@
 //! the decision log (chapter 11), and the Admin API's other services.
 
 pub mod admin;
+// Chapter 52: approvals and recommendations for every automatic decision.
+pub mod approvals;
 pub mod autoindex_admin;
 pub mod autoindex_env;
 pub mod autoindex_loop;
@@ -436,6 +438,62 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_publish(versioner.clone())
         .with_tenant_scopes(Arc::clone(&tenant_scopes)),
     );
+    // Chapter 52: approvals and recommendations. Items about a tenant live
+    // in its catalog; cluster failovers in this DC's tier, DC failovers in
+    // the global tier.
+    let read_secret = |p: Option<&std::path::Path>| -> Result<Option<String>> {
+        p.map(|p| {
+            std::fs::read_to_string(p)
+                .map(|s| s.trim().to_owned())
+                .map_err(|e| SprigError::new(SprigCode::ConfigInvalid, format!("{}: {e}", p.display())))
+        })
+        .transpose()
+    };
+    let notifier = Arc::new(approvals::notify::Notifier::new(
+        Arc::new(locator.clone()),
+        approvals::notify::Secrets {
+            smtp_password: read_secret(cfg.controller.smtp_password_file.as_deref())?,
+            webhook_secret: read_secret(cfg.controller.approvals_webhook_secret_file.as_deref())?,
+        },
+    ));
+    let approvals = {
+        let stores_ = sprig_approvals::LocatorStores::new(Arc::new(locator.clone()))
+            .with_dc(dc.clone(), Arc::clone(&stores.dc))
+            .with_global(Arc::clone(&stores.global));
+        let hub = sprig_approvals::Approvals::new(Arc::new(stores_), Arc::clone(&clock)).with_hook(
+            Arc::new(approvals::DecisionHook::new(
+                Arc::new(sprig_balancer::decisions::CatalogDecisionLog::new(Arc::new(
+                    locator.clone(),
+                ))),
+                dc.clone(),
+            )),
+        )
+        .with_hook(Arc::clone(&notifier) as Arc<dyn sprig_approvals::Hook>);
+        let a = Arc::new(
+            approvals::ControllerApprovals::new(
+                Arc::new(hub),
+                dc.clone(),
+                Directory::new(Arc::clone(&stores.global)),
+                Some(settings.live.clone()),
+            )
+            .with_tenant_scopes(Arc::clone(&tenant_scopes))
+            .with_locator(Arc::new(locator.clone())),
+        );
+        let ix = Arc::new(approvals::index::IndexApprovals::new(Arc::clone(&indexes)));
+        a.register_producer(ix.clone());
+        a.register(sprig_approvals::Kind::IndexCreate, ix);
+        a.register(
+            sprig_approvals::Kind::DcMove,
+            Arc::new(approvals::DcMoveProgress::new(Directory::new(Arc::clone(
+                &stores.global,
+            )))),
+        );
+        a
+    };
+    let _ = sharding.sharding().approvals.set(Arc::clone(&approvals));
+    let _ = balancer.approvals.set(Arc::clone(&approvals));
+    approvals::install(Arc::clone(&approvals));
+    notifier.bind(Arc::clone(&approvals));
     // Chapter 20: load splits need placement's hot clusters.
     sharding
         .write_load()
@@ -478,10 +536,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(Arc::clone(&balancer)))
         .with_loop(Loop::new(migrate::MigrationLoop::new(Arc::clone(&moves))))
         // Chapter 24 steps 7-9 (r2last): tenants follow their traffic.
-        .with_loop(Loop::new(dc_migrate::MigrationDecider::new(
-            Arc::clone(&moves),
-            Some(Arc::clone(&balancer)),
-        )))
+        .with_loop(Loop::new(
+            dc_migrate::MigrationDecider::new(Arc::clone(&moves), Some(Arc::clone(&balancer)))
+                .with_approvals(Arc::clone(&approvals)),
+        ))
         .with_loop(Loop::from_arc(Arc::clone(&sharding)))
         // Chapter 18: in-doubt distributed transactions and decision rows.
         .with_loop(Loop::new(txn_resolver::ResolverLoop::for_controller(
@@ -499,6 +557,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             dc.clone(),
         )))))
         .with_loop(Loop::new(sinks_loop::SinksLoop::default()))
+        // Chapter 52: escalation, auto-apply, appliers, expiry, gauges.
+        .with_loop(Loop::new(
+            approvals::ApprovalsLoop::new(Arc::clone(&approvals)).with_notifier(Arc::clone(&notifier)),
+        ))
         .global_candidate(cfg.controller.global_candidate);
     // Chapter 25 (r2final): job standbys, in single-etcd mode (the loop
     // writes the standby DC's tier through the one etcd).
@@ -512,7 +574,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
                 Some(settings.live.clone()),
             )
             .with_tenant_scopes(Arc::clone(&tenant_scopes))
-            .with_move_intents(Arc::clone(&moves.decisions)),
+            .with_move_intents(Arc::clone(&moves.decisions))
+            .with_approvals(Arc::clone(&approvals)),
         ))
     } else {
         rt
@@ -580,7 +643,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         AdminService::new(stores, monitor, rt.status(), Arc::clone(&clock))
             .with_tenants(tenants)
             .with_users(users)
-            .with_settings(settings_admin)
+            .with_settings(Arc::clone(&settings_admin) as Arc<dyn settings_admin::SettingsAdmin>)
             .with_indexes(indexes)
             .with_placement(balancer)
             .with_moves(moves)
@@ -588,9 +651,27 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             .with_failover(Arc::clone(&failover))
             .with_residency(residency),
     );
+    // Chapter 52: the `Recommendations` service beside the Admin API.
+    let dc_token = cfg
+        .controller
+        .dc_operator_token_file
+        .as_deref()
+        .map(http::load_token)
+        .transpose()?;
+    let recs = approvals::http::router(Arc::new(approvals::http::RecApp::new(
+        Arc::new(approvals::service::RecommendationsService::new(
+            Arc::clone(&approvals),
+            Some(Arc::clone(&settings_admin) as Arc<dyn settings_admin::SettingsAdmin>),
+        )),
+        Some(Arc::clone(&svc)),
+        token.clone(),
+        gateway_token.clone(),
+        dc_token,
+        dc.clone(),
+    )));
     let admin = tokio::spawn(http::serve(
         listener,
-        http::router_with(svc, token, gateway_token),
+        http::router_with(svc, token, gateway_token).merge(recs),
         ctx.shutdown.clone(),
     ));
     // Gateways find the leader's Admin API here (chapter 37 step 4).

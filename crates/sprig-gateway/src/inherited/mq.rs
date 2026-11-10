@@ -541,6 +541,9 @@ pub async fn remove(svc: &Arc<TenantServices>, t: TenantId, def: &Definition) ->
         .delete_instance(&mut conn, def.key())
         .await?;
     super::delete_index(svc, t, def.key()).await?;
+    if def.kind == DefKind::Queue {
+        super::fanin_mq::forget_ready(svc, def.key(), t).await;
+    }
     forget_applied(t, Some(&def.db_name));
     Ok(())
 }
@@ -934,10 +937,16 @@ pub struct InheritVhost {
     /// The end of the previous targeted publish's hand-off: targeted
     /// publishes of a connection reach their instances in publish order.
     order: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// The connection's events (fan-in consumers deliver into them).
+    events: Option<sprig_proto_amqp::backend::EventSender>,
+    /// Fan-in consumers of the connection (chapter 50, "Fan-in
+    /// consumers"), ended or not: their deliveries stay settleable.
+    fanins: Mutex<HashMap<ConsumerId, Arc<super::fanin_mq::FanIn>>>,
 }
 
 impl InheritVhost {
-    /// Wraps `inner`, the vhost of database `db` of the chain's member.
+    /// Wraps `inner`, the vhost of database `db` of the chain's member;
+    /// `events` are the connection's (for fan-in consumers).
     #[must_use]
     pub fn new(
         inner: Arc<dyn Vhost>,
@@ -945,6 +954,7 @@ impl InheritVhost {
         chain: Chain,
         tenant_name: String,
         db: String,
+        events: Option<sprig_proto_amqp::backend::EventSender>,
     ) -> Self {
         let mut names = Names::default();
         for d in defs_in(&chain, &db) {
@@ -973,7 +983,82 @@ impl InheritVhost {
             vhost,
             names: Mutex::new(names),
             order: Mutex::new(None),
+            events,
+            fanins: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn fanin(&self, c: ConsumerId) -> Option<Arc<super::fanin_mq::FanIn>> {
+        self.fanins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&c)
+            .cloned()
+    }
+
+    /// `basic.consume` with `x-sprig-fan-in` on a queue definition's name
+    /// (chapter 50, "Fan-in consumers"); `None` when the consume isn't
+    /// one.
+    async fn fan_in_consume(
+        &self,
+        cx: &OpCtx,
+        spec: &ConsumeSpec,
+    ) -> Option<std::result::Result<(), MqError>> {
+        use super::fanin_mq as f;
+        let def = {
+            let n = self.names();
+            n.chain
+                .as_ref()
+                .and_then(|c| f::queue_definition(c, &self.db, &spec.queue))
+        };
+        let wants = f::wants_fan_in(&spec.arguments);
+        let Some(def) = def else {
+            return wants.then(|| {
+                Err(MqError::precondition(format!(
+                    "x-sprig-fan-in: '{}' isn't a FOR EACH TENANT queue in reach",
+                    spec.queue
+                )))
+            });
+        };
+        if !wants {
+            // Consuming a definition's name without the argument, in a
+            // tenant without an instance: refused, so an application
+            // can't drain other tenants' queues by mistake.
+            return (!self.inherited(DefKind::Queue, &spec.queue)).then(|| {
+                Err(MqError::precondition(format!(
+                    "queue '{}' is a FOR EACH TENANT definition; consume it with \
+                     x-sprig-fan-in = true to read every member's instance",
+                    spec.queue
+                )))
+            });
+        }
+        Some(
+            async {
+                f::refuse_unsupported(spec)?;
+                let cat = catalog(&self.svc, self.tenant)
+                    .await
+                    .map_err(|e| mq_err(&e))?;
+                if !f::allowed(&self.svc, &cat, &cx.principal, &self.db, &spec.queue) {
+                    return Err(MqError::access_refused(format!(
+                        "1227 Access denied; you need (at least one of) the SPRIG_FAN_IN \
+                         privilege(s), and SELECT and DELETE on '{}', for a fan-in consumer",
+                        spec.queue
+                    )));
+                }
+                let events = self
+                    .events
+                    .clone()
+                    .ok_or_else(|| MqError::not_implemented("fan-in consumers need the engine"))?;
+                let fan =
+                    f::start(&self.svc, self.tenant, &def, &self.db, spec, cx.channel, events)?;
+                self.fanins
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(spec.consumer, fan);
+                Ok(())
+            }
+            .await,
+        )
     }
 
     fn names(&self) -> std::sync::MutexGuard<'_, Names> {
@@ -1253,14 +1338,25 @@ impl Vhost for InheritVhost {
     }
 
     async fn consume(&self, cx: &OpCtx, spec: ConsumeSpec) -> std::result::Result<(), MqError> {
+        if let Some(r) = self.fan_in_consume(cx, &spec).await {
+            return r;
+        }
         self.inner.consume(cx, spec).await
     }
 
     async fn cancel(&self, cx: &OpCtx, consumer: ConsumerId) {
+        if let Some(f) = self.fanin(consumer) {
+            f.cancel();
+            return;
+        }
         self.inner.cancel(cx, consumer).await;
     }
 
     fn credit(&self, consumer: ConsumerId, credit: u32, drain: bool) {
+        if let Some(f) = self.fanin(consumer) {
+            f.credit(credit, drain);
+            return;
+        }
         self.inner.credit(consumer, credit, drain);
     }
 
@@ -1274,6 +1370,24 @@ impl Vhost for InheritVhost {
     }
 
     fn settle(&self, cx: &OpCtx, s: Vec<(DeliveryId, Settlement)>) {
+        let mut s = s;
+        if s.iter()
+            .any(|(id, _)| id.queue & super::fanin_mq::FANIN_ID_BIT != 0 && id.queue >> 63 == 0)
+        {
+            let fans: Vec<_> = self
+                .fanins
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect();
+            for f in fans {
+                s = f.settle(s);
+                if s.is_empty() {
+                    return;
+                }
+            }
+        }
         self.inner.settle(cx, s);
     }
 
@@ -1305,6 +1419,16 @@ impl Vhost for InheritVhost {
     }
 
     async fn connection_closed(&self, conn: ConnKey) {
+        let fans: Vec<_> = self
+            .fanins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+            .map(|(_, f)| f)
+            .collect();
+        for f in fans {
+            f.close().await;
+        }
         self.inner.connection_closed(conn).await;
     }
 }
@@ -1348,6 +1472,7 @@ pub async fn wrap_vhost(
     principal: &Principal,
     db: &str,
     inner: Arc<dyn Vhost>,
+    events: Option<sprig_proto_amqp::backend::EventSender>,
 ) -> std::result::Result<Arc<dyn Vhost>, MqError> {
     let t = TenantId(principal.tenant_id);
     let Ok(cat) = catalog(svc, t).await else {
@@ -1370,6 +1495,7 @@ pub async fn wrap_vhost(
         chain,
         principal.tenant.clone(),
         db.to_owned(),
+        events,
     )))
 }
 

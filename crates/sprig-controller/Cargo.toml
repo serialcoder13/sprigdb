@@ -24,6 +24,8 @@ serde_json.workspace = true
 # Chapter 13: the automatic-indexing store behind `sprigctl index` and
 # `sprigctl explain query` (autoindex_admin).
 sprig-advisor.workspace = true
+# Chapter 52: approvals and recommendations.
+sprig-approvals.workspace = true
 sprig-auth.workspace = true
 # Chapter 11's balancer loop, decision log and explain calls.
 sprig-balancer.workspace = true

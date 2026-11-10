@@ -253,12 +253,10 @@ pub fn fanin_source_id(declarer: u64, object: u64) -> Option<u64> {
 /// `(declarer, object)` of a fan-in trigger's source id.
 #[must_use]
 pub fn fanin_source_parts(id: u64) -> Option<(u64, u64)> {
-    (id & FANIN_SOURCE_FLAG != 0 && id & (1 << 63) == 0).then(|| {
-        (
-            (id & !FANIN_SOURCE_FLAG) >> FANIN_OBJECT_BITS,
-            id & ((1 << FANIN_OBJECT_BITS) - 1),
-        )
-    })
+    (id & FANIN_SOURCE_FLAG != 0 && id & (1 << 63) == 0).then_some((
+        (id & !FANIN_SOURCE_FLAG) >> FANIN_OBJECT_BITS,
+        id & ((1 << FANIN_OBJECT_BITS) - 1),
+    ))
 }
 
 /// `logic-fanin/<P>/<binding>/<member>`: one instance a fan-in trigger reads.
@@ -292,10 +290,11 @@ impl Versioned for FanInTrigger {
     const V: u32 = 1;
 }
 
-async fn put_rec<T: Versioned + Serialize>(store: &dyn MetaStore, key: Key, v: &T) -> Result<()>
-where
-    T: Clone,
-{
+async fn put_rec<T: Versioned + Serialize + Clone>(
+    store: &dyn MetaStore,
+    key: Key,
+    v: &T,
+) -> Result<()> {
     store
         .txn(sprig_meta::Txn {
             when: Vec::new(),
@@ -346,7 +345,11 @@ pub async fn fanin_triggers(store: &dyn MetaStore, def: (u64, u64)) -> Result<Ve
     Ok(page
         .kvs
         .iter()
-        .filter_map(|kv| Record::<FanInTrigger>::decode(&kv.value).ok().map(|r| r.body))
+        .filter_map(|kv| {
+            Record::<FanInTrigger>::decode(&kv.value)
+                .ok()
+                .map(|r| r.body)
+        })
         .collect())
 }
 
@@ -386,7 +389,11 @@ pub async fn fanin_members(
     Ok(page
         .kvs
         .iter()
-        .filter_map(|kv| Record::<FanInMember>::decode(&kv.value).ok().map(|r| r.body))
+        .filter_map(|kv| {
+            Record::<FanInMember>::decode(&kv.value)
+                .ok()
+                .map(|r| r.body)
+        })
         .collect())
 }
 
@@ -403,10 +410,11 @@ pub async fn delete_fanin(
 ) -> Result<()> {
     let mut ops = Vec::new();
     for m in fanin_members(store, tenant, binding).await? {
-        ops.push(sprig_meta::Op::Delete(store.tier().key(&format!(
-            "logic-fanin/{tenant}/{binding}/{}",
-            m.member
-        ))?));
+        ops.push(sprig_meta::Op::Delete(
+            store
+                .tier()
+                .key(&format!("logic-fanin/{tenant}/{binding}/{}", m.member))?,
+        ));
     }
     ops.push(sprig_meta::Op::Delete(store.tier().key(&format!(
         "inherit-fanin-triggers/{}.{}/{tenant}.{binding}",

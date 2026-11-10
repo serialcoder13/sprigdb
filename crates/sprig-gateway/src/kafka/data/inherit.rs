@@ -434,12 +434,10 @@ pub(crate) fn fanin_id(member: u64, stream: u64) -> Option<u64> {
 /// `(member, stream)` of a fan-in topic's stream id.
 #[must_use]
 pub(crate) fn fanin_parts(id: u64) -> Option<(u64, u64)> {
-    (id & FANIN_FLAG != 0 && id & DEF_FLAG == 0).then(|| {
-        (
-            (id & !FANIN_FLAG) >> FANIN_STREAM_BITS,
-            id & ((1 << FANIN_STREAM_BITS) - 1),
-        )
-    })
+    (id & FANIN_FLAG != 0 && id & DEF_FLAG == 0).then_some((
+        (id & !FANIN_FLAG) >> FANIN_STREAM_BITS,
+        id & ((1 << FANIN_STREAM_BITS) - 1),
+    ))
 }
 
 /// `__t.<tenant>.<db>.<stream>`.
@@ -692,7 +690,7 @@ mod fanin_tests {
         assert_eq!(fanin_parts(id), Some((26_306_000_003, 41)));
         assert!(id & DEF_FLAG == 0, "never a definition's topic");
         assert_eq!(fanin_parts(41), None);
-        assert_eq!(fanin_parts(DEF_FLAG | 41), None);
+        assert_eq!(fanin_parts(DEF_FLAG | 0x29), None);
         assert_eq!(fanin_id(1 << 38, 1), None);
         assert_eq!(fanin_id(1, 1 << 24), None);
         let n = fanin_name("client_x", "security", "user_events");

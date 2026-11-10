@@ -440,8 +440,10 @@ impl<'c> MariaStore<'c> {
     /// 19's `claim` with Pre joined to Main): insert the claim row; when
     /// one is there, share-lock it (the duplicate-key error already holds
     /// a shared lock, so writers queued on one key never deadlock taking
-    /// it exclusively) and check its owner with a locking read on
-    /// the owner's shard (which waits for an in-flight commit of it); a
+    /// it exclusively) and check its owner with an exclusive read on
+    /// the owner's shard (which waits for an in-flight commit of it, and
+    /// lets one loser at a time go on to `MERGE`'s `ON MATCH SET` on the
+    /// holder: a shared lock there deadlocks two losers upgrading it); a
     /// live owner with the same key is a duplicate (1062), anything else
     /// (an orphan) is taken over.
     async fn claim(
@@ -491,14 +493,14 @@ impl<'c> MariaStore<'c> {
             return Ok(());
         }
         let live = match d.entity {
-            Entity::Node => self.lock_nodes(&[o0], false).await?.into_iter().any(|n| {
+            Entity::Node => self.lock_nodes(&[o0], true).await?.into_iter().any(|n| {
                 n.labels.contains(&d.token_id)
                     && crate::schema::claim_key(d, &n.props).as_deref() == Some(key)
             }),
             Entity::Relationship => {
                 let j = self.layout.index_of(rk0);
                 let sql = format!(
-                    "SELECT {EDGE_COLS} FROM {} e WHERE e.id = {o0} LOCK IN SHARE MODE",
+                    "SELECT {EDGE_COLS} FROM {} e WHERE e.id = {o0} FOR UPDATE",
                     self.t(j).edges
                 );
                 self.write_rows_at(j, sql, Params::Empty)

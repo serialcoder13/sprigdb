@@ -265,6 +265,114 @@
         ],
         "type": "object"
       },
+      "CursorClosed": {
+        "properties": {
+          "closed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "closed"
+        ],
+        "type": "object"
+      },
+      "CursorFetchRequest": {
+        "properties": {
+          "rows": {
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "CursorOpenRequest": {
+        "properties": {
+          "page_rows": {
+            "type": "integer"
+          },
+          "skip": {
+            "type": "integer"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "CursorOpened": {
+        "properties": {
+          "columns": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "end": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "idle_seconds": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "position": {
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "items": {
+                "nullable": true,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "columns",
+          "rows",
+          "position",
+          "done"
+        ],
+        "type": "object"
+      },
+      "CursorPage": {
+        "properties": {
+          "done": {
+            "type": "boolean"
+          },
+          "position": {
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "items": {
+                "nullable": true,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "rows",
+          "position",
+          "done"
+        ],
+        "type": "object"
+      },
       "DeleteVectorsRequest": {
         "description": "The DeleteVectorsRequest message as JSON (proto3 mapping)",
         "type": "object"
@@ -1143,6 +1251,98 @@
         ]
       }
     },
+    "/v1/cursors/{cursor}:close": {
+      "post": {
+        "operationId": "Cursors.Close",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cursor",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorClosed"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Closes the cursor and kills its statement",
+        "tags": [
+          "sprig.v1.Cursors"
+        ]
+      }
+    },
+    "/v1/cursors/{cursor}:fetch": {
+      "post": {
+        "operationId": "Cursors.Fetch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cursor",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CursorFetchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorPage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The next page; done closes the cursor (39934 unknown, 39935 expired)",
+        "tags": [
+          "sprig.v1.Cursors"
+        ]
+      }
+    },
     "/v1/databases/{database}/catalog": {
       "get": {
         "operationId": "Catalog.Snapshot",
@@ -1238,6 +1438,57 @@
         "summary": "One object (kind table, view, procedure or function): columns, indexes, definition",
         "tags": [
           "sprig.v1.Catalog"
+        ]
+      }
+    },
+    "/v1/databases/{database}/cursors": {
+      "post": {
+        "operationId": "Cursors.Open",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CursorOpenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorOpened"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Runs a read and keeps its stream for paging (first result only): skip rows, then the first page; the stream waits between fetches and closes after studio.cursor_idle_seconds",
+        "tags": [
+          "sprig.v1.Cursors"
         ]
       }
     },
@@ -2929,6 +3180,239 @@
         "summary": "Recommendations awaiting approval",
         "tags": [
           "sprig.v1.Indexing"
+        ]
+      }
+    },
+    "/v1/recommendations": {
+      "get": {
+        "operationId": "Recommendations.ListRecommendations",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Chapter 52's approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table)",
+        "tags": [
+          "sprig.admin.v1.Recommendations"
+        ]
+      }
+    },
+    "/v1/recommendations/{id}": {
+      "get": {
+        "operationId": "Recommendations.GetRecommendation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One recommendation with its evidence, history and comments",
+        "tags": [
+          "sprig.admin.v1.Recommendations"
+        ]
+      },
+      "post": {
+        "operationId": "Recommendations.ActOnRecommendation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "{id}:approve, :ignore, :snooze, :reopen or :comment, as the caller",
+        "tags": [
+          "sprig.admin.v1.Recommendations"
+        ]
+      }
+    },
+    "/v1/recommendations:bulk": {
+      "post": {
+        "operationId": "Recommendations.BulkAct",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One action on up to 200 recommendations",
+        "tags": [
+          "sprig.admin.v1.Recommendations"
+        ]
+      }
+    },
+    "/v1/recommendations:policy": {
+      "get": {
+        "operationId": "Recommendations.GetApprovalPolicy",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Every kind's mode, level and timers at the tenant, a database (db) or a table (object)",
+        "tags": [
+          "sprig.admin.v1.Recommendations"
+        ]
+      }
+    },
+    "/v1/recommendations:subscriptions": {
+      "get": {
+        "operationId": "Recommendations.ListSubscriptions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The tenant's approval email subscriptions",
+        "tags": [
+          "sprig.admin.v1.Recommendations"
+        ]
+      },
+      "post": {
+        "operationId": "Recommendations.SetSubscription",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The caller's own address and delivery (immediate, digest or off)",
+        "tags": [
+          "sprig.admin.v1.Recommendations"
         ]
       }
     },

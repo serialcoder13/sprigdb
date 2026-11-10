@@ -335,6 +335,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .with_gateway(&gateway_id),
         ),
     });
+    // Chapter 52: SQL's SPRIG APPROVE|IGNORE|SNOOZE RECOMMENDATION.
+    tenant::rec_sql::install(Arc::clone(&core.admin));
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
     // Kafka on 9092 (chapter 45, R9): catalog logins only, since topics are
     // a tenant's streams.

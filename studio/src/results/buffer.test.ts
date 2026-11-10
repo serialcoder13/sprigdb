@@ -29,4 +29,24 @@ describe('ResultBuffer', () => {
     expect(b.bytes).toBeGreaterThanOrEqual(200);
     expect(b.rowCount).toBeLessThan(100);
   });
+  it('slides a window of maxRows rows for a cursor', () => {
+    const b = new ResultBuffer(cols, 4, 1e9);
+    b.push([['1', 'a'], ['2', 'b'], ['3', 'c'], ['4', 'd']]);
+    b.slide([['5', 'e'], ['6', 'f']]);
+    expect(b.rowCount).toBe(4);
+    expect(b.offset).toBe(2);
+    expect(b.cell(0, 0)).toBe('3');
+    expect(b.cell(3, 1)).toBe('f');
+    const bytes = b.bytes;
+    b.slide([['7', 'g']]);
+    expect(b.bytes).toBe(bytes);
+    expect(b.offset).toBe(3);
+  });
+  it('drops rows from the front to stay under the byte cap', () => {
+    const b = new ResultBuffer(cols, 1000, 400);
+    for (let i = 0; i < 20; i++) b.slide([[String(i), 'x'.repeat(20)]]);
+    expect(b.bytes).toBeLessThan(400);
+    expect(b.offset + b.rowCount).toBe(20);
+    expect(b.cell(b.rowCount - 1, 0)).toBe('19');
+  });
 });

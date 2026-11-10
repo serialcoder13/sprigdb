@@ -1,0 +1,16 @@
+ 1 sql shop │ Dashboard │ Admin │ Inbox
+┌ Views ─────────┐┌ sessions · not polled yet · r refresh ─────────────────────────────────────────┐
+│1 sessions      ││Id User       db   Command Time Info                                            │
+│2 fingerprints  ││41 acme.alice shop Query   3    SELECT SLEEP(30)                                │
+│3 clusters      ││42 acme.bob   shop Sleep   120                                                  │
+│4 shards        ││                                                                                │
+│5 dcs           ││                                                                                │
+│6 messaging     ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+│                ││                                                                                │
+└────────────────┘└────────────────────────────────────────────────────────────────────────────────┘
+ dev  127.0.0.1:8080 db shop  F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit

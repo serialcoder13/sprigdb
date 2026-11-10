@@ -1,8 +1,7 @@
 //! The `sink.*` settings (chapter 51, "Configuration"), registered here.
 //! `WITH (...)` on a sink sets a key at the sink's object scope.
 //!
-//! Not registered: `sink.region_tags` (the built-in table is used),
-//! `sink.fanin_*` (fan-in sinks aren't built).
+//! Not registered: `sink.region_tags` (the built-in table is used).
 
 use std::borrow::Cow;
 
@@ -63,6 +62,18 @@ key!(
     /// `sink.partitions_per_task`.
     PARTITIONS_PER_TASK: u64 = "sink.partitions_per_task", 4, Scopes::DATA,
     HardBounds::range(1, 1024), false, "Source partitions or shards one task reads"
+);
+key!(
+    /// `sink.fanin_refresh_seconds`: how often a fan-in sink's task looks
+    /// for new member instances.
+    FANIN_REFRESH_SECONDS: u64 = "sink.fanin_refresh_seconds", 30, Scopes::DATA,
+    HardBounds::range(1, 3600), false, "How often a fan-in sink looks for new member instances"
+);
+key!(
+    /// `sink.fanin_instances_per_task`: member instance partitions one
+    /// fan-in task reads.
+    FANIN_INSTANCES_PER_TASK: u64 = "sink.fanin_instances_per_task", 256, Scopes::DATA,
+    HardBounds::range(1, 100_000), false, "Member instance partitions one fan-in sink task reads"
 );
 key!(
     /// `sink.lanes`.
@@ -258,6 +269,8 @@ pub fn bool_key(name: &str) -> Option<&'static Setting<bool>> {
 pub static U64_KEYS: &[&Setting<u64>] = &[
     &MAX_PER_TENANT,
     &PARTITIONS_PER_TASK,
+    &FANIN_REFRESH_SECONDS,
+    &FANIN_INSTANCES_PER_TASK,
     &LANES,
     &BATCH_MAX_RECORDS,
     &BATCH_MAX_BYTES,

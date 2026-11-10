@@ -39,8 +39,17 @@ class Board:
         self.uid, self.title, self.description = uid, title, description
         self.variables = list(variables)
         self.panels = []
+        self.annotations = []
         self.x = self.y = 0
         self.row_h = 0
+
+    def annotation(self, name, expr, title, text, color="#73BF69"):
+        """A Prometheus annotation query: a marker wherever `expr` has a value."""
+        self.annotations.append({
+            "name": name, "enable": True, "iconColor": color, "datasource": DS,
+            "expr": expr, "step": "60s", "titleFormat": title, "textFormat": text,
+            "useValueForTime": False,
+        })
 
     def row(self, title):
         if self.x:
@@ -107,7 +116,7 @@ class Board:
             "time": {"from": "now-6h", "to": "now"},
             "timezone": "utc",
             "templating": {"list": templating},
-            "annotations": {"list": []},
+            "annotations": {"list": self.annotations},
             "links": [{"type": "dashboards", "tags": ["sprigdb"], "asDropdown": True,
                        "title": "SprigDB"}],
             "panels": self.panels,
@@ -337,7 +346,42 @@ def movement():
     return b
 
 
+def approvals():
+    b = Board("sprig-approvals", "SprigDB approvals",
+              "Chapter 52: recommendations waiting for approval, decisions, escalations, "
+              "auto-applies, applied changes and notifications.", [DC_VAR])
+    sel = 'dc=~"$dc"'
+    b.annotation("Approved changes applied",
+                 f'sum by (kind, result) (increase(sprig_approvals_applied_total{{{sel}}}[2m])) > 0',
+                 "{{kind}} applied", "result {{result}}")
+    b.annotation("Emergencies",
+                 f'sum by (kind) (increase(sprig_approvals_actions_total{{{sel},action="emergency"}}[2m])) > 0',
+                 "{{kind}} emergency", "applied without waiting", color="#F2495C")
+    b.row("Waiting")
+    b.panel("Waiting recommendations", [(
+        f'sum by (kind, level) (sprig_approvals_open{{{sel}}})', "{{kind}} {{level}}")], w=12)
+    b.panel("Oldest waiting", [(
+        f'max by (kind) (sprig_approvals_oldest_open_seconds{{{sel}}})', "{{kind}}")], unit="s", w=12,
+        thresholds=GREEN_RED(3 * 86400))
+    b.row("Decisions")
+    b.panel("Raised", [(f'sum by (kind) (increase(sprig_approvals_raised_total{{{sel}}}[1h]))', "{{kind}}")])
+    b.panel("Actions", [(
+        f'sum by (action) (increase(sprig_approvals_actions_total{{{sel}}}[1h]))', "{{action}}")])
+    b.panel("Time to decision p90", [(
+        f'histogram_quantile(0.9, sum by (le, kind) (rate(sprig_approvals_decision_seconds_bucket{{{sel}}}[1d])))',
+        "{{kind}}")], unit="s")
+    b.panel("Suppressed by an ignore", [(
+        f'sum by (kind) (increase(sprig_approvals_suppressed_total{{{sel}}}[1h]))', "{{kind}}")])
+    b.panel("Applied", [(
+        f'sum by (kind, result) (increase(sprig_approvals_applied_total{{{sel}}}[1h]))', "{{kind}} {{result}}")])
+    b.panel("Notifications", [(
+        f'sum by (channel, result) (increase(sprig_approvals_notifications_total{{{sel}}}[1h]))',
+        "{{channel}} {{result}}")])
+    return b
+
+
 BOARDS = {
+    "approvals.json": approvals,
     "fleet.json": fleet,
     "dc.json": dc,
     "cluster.json": cluster,

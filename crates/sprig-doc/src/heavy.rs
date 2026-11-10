@@ -80,7 +80,8 @@ mod tests {
                 tokio::spawn(async move {
                     let mut total = 0;
                     for _ in 0..3 {
-                        let d = docs(60_000 + seed);
+                        // Building the input is heavy too: off the worker.
+                        let d = run(HEAVY_DOCS, || docs(40_000 + seed));
                         let sorted = run(d.len(), || {
                             run_stage(d, &doc! {"$sort": {"k": -1, "_id": 1}}, &lim)
                         })

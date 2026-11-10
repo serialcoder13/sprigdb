@@ -98,6 +98,8 @@ pub struct BalancerLoop {
     /// Tenants' own catalog rows (RL3, r2harden): a tenant's
     /// `balancer.*` knobs win over its DC's.
     scopes: Option<Arc<crate::tenant_scopes::TenantScopes>>,
+    /// Chapter 52: `balancer.mode = approve` holds a tenant's moves.
+    pub approvals: std::sync::OnceLock<Arc<crate::approvals::ControllerApprovals>>,
 }
 
 impl std::fmt::Debug for BalancerLoop {
@@ -153,7 +155,56 @@ impl BalancerLoop {
             clock,
             exec,
             scopes: None,
+            approvals: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Chapter 52: the tenants under `approve` whose planned move is
+    /// approved now (their moves run as under `auto` this run).
+    async fn approved_moves(
+        &self,
+        report: &sprig_balancer::plan::PlanReport,
+        mode_of: &(dyn Fn(TenantId) -> BalancerMode + Send + Sync),
+    ) -> BTreeMap<TenantId, sprig_approvals::Ticket> {
+        use sprig_approvals::{Action, Kind, Proposal, Verdict};
+        let mut out = BTreeMap::new();
+        let Some(a) = self.approvals.get() else {
+            return out;
+        };
+        for m in &report.moves {
+            if mode_of(m.tenant) != BalancerMode::Approve {
+                continue;
+            }
+            let policy = a.policy(Kind::BalancerMove, Some(m.tenant), None, None, None).await;
+            let p = Proposal {
+                kind: Kind::BalancerMove,
+                subject: a.subject(m.tenant).await,
+                target: format!("t{}/cluster", m.tenant),
+                action: Action {
+                    text: format!("move tenant {} from cluster {} to {}", m.tenant, m.from, m.to),
+                    machine: serde_json::json!({ "to": m.to.to_string() }),
+                },
+                evidence: serde_json::json!({
+                    "from": m.from.to_string(),
+                    "to": m.to.to_string(),
+                    "reason": format!("{:?}", m.reason),
+                    "gain": m.gain,
+                    "value": m.value,
+                    "size_bytes": m.size_bytes,
+                    "shards": m.shards.len(),
+                }),
+                score: m.gain.max(0.0),
+                summary: format!(
+                    "move tenant {} from cluster {} to {} ({:?})",
+                    m.tenant, m.from, m.to, m.reason
+                ),
+                emergency: false,
+            };
+            if let Verdict::Proceed(t) = a.gate(&p, &policy).await {
+                out.insert(m.tenant, t);
+            }
+        }
+        out
     }
 
     /// The same loop reading tenants' own `balancer.*` rows (RL3).
@@ -458,7 +509,7 @@ impl BalancerLoop {
             .iter()
             .map(|(t, v)| (*t, v.knobs.mode))
             .collect();
-        let mode_of = move |t: TenantId| {
+        let base = move |t: TenantId| {
             let m = match (dc_mode, knobs.get(&t).copied().unwrap_or(dc_mode)) {
                 (BalancerMode::Off, _) | (_, BalancerMode::Off) => BalancerMode::Off,
                 (_, m) => m,
@@ -469,11 +520,31 @@ impl BalancerLoop {
                 m
             }
         };
+        let approved = self.approved_moves(&report, &base).await;
+        let approved_now = approved.clone();
+        let mode_of = move |t: TenantId| match base(t) {
+            BalancerMode::Approve if approved.contains_key(&t) && has_mover => BalancerMode::Auto,
+            m => m,
+        };
         if dc_mode != BalancerMode::Off {
             let max = settings.max_concurrent_moves_per_dc as usize;
-            g.scheduler
+            let scheduled = g
+                .scheduler
                 .schedule(&report, &view, &mode_of, max, exec, &log, now)
                 .await;
+            // Chapter 52: an approved tenant's item is applied once its
+            // move is submitted; until then the next run re-enters it.
+            if let Some(a) = self.approvals.get() {
+                for (t, ticket) in &approved_now {
+                    if let Some(s) = scheduled
+                        .iter()
+                        .find(|s| s.planned.tenant == *t && s.ticket.is_some())
+                    {
+                        a.finished(ticket, true, &format!("move to {} submitted", s.planned.to))
+                            .await;
+                    }
+                }
+            }
         }
         let changes = g.book.observe(&view, &report, now);
         if let Err(e) = self.recs.apply(&changes).await {

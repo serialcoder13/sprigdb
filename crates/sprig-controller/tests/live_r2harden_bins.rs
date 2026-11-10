@@ -524,6 +524,8 @@ struct Tally {
     ack_ms: Vec<(u64, u64)>,
     /// (when, ms; code) per failed write.
     err_ms: Vec<(u64, String)>,
+    /// The first message per error code (bugfix3: what a code meant).
+    first: BTreeMap<String, String>,
 }
 
 fn code(e: &mysql_async::Error) -> String {
@@ -1046,12 +1048,10 @@ async fn paced_g(
             )
             .await;
             if let Ok(Err(e)) = r {
-                *tally
-                    .lock()
-                    .expect("lock")
-                    .errors
-                    .entry(format!("read {}", code(&e)))
-                    .or_default() += 1;
+                let mut t = tally.lock().expect("lock");
+                let k = format!("read {}", code(&e));
+                t.first.entry(k.clone()).or_insert_with(|| e.to_string());
+                *t.errors.entry(k).or_default() += 1;
             }
             continue;
         }
@@ -1071,6 +1071,7 @@ async fn paced_g(
                 t.ack_ms.push((now_ms(), 0));
             }
             Ok(Err(e)) => {
+                t.first.entry(code(&e)).or_insert_with(|| e.to_string());
                 *t.errors.entry(code(&e)).or_default() += 1;
                 t.err_ms.push((now_ms(), code(&e)));
                 t.unknown += 1;
@@ -1559,11 +1560,10 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         "2. RL3: G's tenant-scope sharding.min_shards = 2, advisor.mode = off and advisor.min_ndv_per_shard = 0: group {gid} has shards {first:?} {:?} after the set",
         set_at.elapsed()
     );
-    // G's load and splits run only with `R2HARDEN_SPLITS` set: in this
-    // deployment gateways don't route a tenant the sharding loop's first
-    // design sharded (1146 on its moved tables from every gateway, before
-    // any split), and a split of it then stuck in its cutover; both are
-    // R1's (decision H9, r2-failover.md).
+    // G's load and splits run only with `R2HARDEN_SPLITS` set. They were
+    // off while every prepared statement of a tenant the sharding loop's
+    // first design had regrouped got 1146 (decision H9, r2-failover.md);
+    // bugfix3 fixed that (bugfix-7, bugfix-interim.md).
     let splits = std::env::var_os("R2HARDEN_SPLITS").is_some();
     // One statement of G through each gateway before the load.
     for d in DCS {
@@ -1679,10 +1679,11 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         tt.errors
     );
     eprintln!(
-        "2. G: {} acknowledged appends, {} unknown; errors {:?}",
+        "2. G: {} acknowledged appends, {} unknown; errors {:?}; first of each {:?}",
         gt.acked.values().map(Vec::len).sum::<usize>(),
         gt.unknown,
-        gt.errors
+        gt.errors,
+        gt.first
     );
     eprintln!("2. gateways' fence handling: {fence_lines:?}");
     assert!(

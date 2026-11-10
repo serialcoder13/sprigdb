@@ -34,6 +34,39 @@ fn with_params(mut o: Value, params: &[Value]) -> Value {
 /// The paths, `{path: {method: operation}}`.
 #[must_use]
 pub fn paths() -> Value {
+    let mut v = core_paths();
+    if let (Value::Object(m), Value::Object(r)) = (&mut v, recommendation_paths()) {
+        m.extend(r);
+    }
+    v
+}
+
+/// Chapter 52's approvals inbox.
+fn recommendation_paths() -> Value {
+    let p = |name: &str| json!({"name": name, "in": "path", "required": true, "schema": {"type": "string"}});
+    json!({
+        "/v1/recommendations": {"get": op("Recommendations.ListRecommendations", "sprig.admin.v1.Recommendations",
+            "Chapter 52's approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table)",
+            None, "JsonReply")},
+        "/v1/recommendations/{id}": {
+            "get": with_params(op("Recommendations.GetRecommendation", "sprig.admin.v1.Recommendations",
+                "One recommendation with its evidence, history and comments", None, "JsonReply"), &[p("id")]),
+            "post": with_params(op("Recommendations.ActOnRecommendation", "sprig.admin.v1.Recommendations",
+                "{id}:approve, :ignore, :snooze, :reopen or :comment, as the caller", None, "JsonReply"), &[p("id")])},
+        "/v1/recommendations:bulk": {"post": op("Recommendations.BulkAct", "sprig.admin.v1.Recommendations",
+            "One action on up to 200 recommendations", None, "JsonReply")},
+        "/v1/recommendations:policy": {"get": op("Recommendations.GetApprovalPolicy", "sprig.admin.v1.Recommendations",
+            "Every kind's mode, level and timers at the tenant, a database (db) or a table (object)", None, "JsonReply")},
+        "/v1/recommendations:subscriptions": {
+            "get": op("Recommendations.ListSubscriptions", "sprig.admin.v1.Recommendations",
+                "The tenant's approval email subscriptions", None, "JsonReply"),
+            "post": op("Recommendations.SetSubscription", "sprig.admin.v1.Recommendations",
+                "The caller's own address and delivery (immediate, digest or off)", None, "JsonReply")}
+    })
+}
+
+#[allow(clippy::too_many_lines)] // one entry per route
+fn core_paths() -> Value {
     let q = |name: &str| json!({"name": name, "in": "query", "required": false, "schema": {"type": "string"}});
     let p = |name: &str| json!({"name": name, "in": "path", "required": true, "schema": {"type": "string"}});
     let mut list = op(
@@ -128,6 +161,14 @@ pub fn paths() -> Value {
             None, "JsonReply"), &[q("hours"), q("limit"), q("source")])},
         "/v1/workload/fingerprints/{id}/series": {"get": with_params(op("Workload.Series", "sprig.v1.Workload",
             "One fingerprint per bucket: runs, p50, p95, total (days)", None, "JsonReply"), &[p("id"), q("days")])},
+        "/v1/databases/{database}/cursors": {"post": with_params(op("Cursors.Open", "sprig.v1.Cursors",
+            "Runs a read and keeps its stream for paging (first result only): skip rows, then the first page; the stream waits between fetches and closes after studio.cursor_idle_seconds",
+            Some("CursorOpenRequest"), "CursorOpened"), &[p("database")])},
+        "/v1/cursors/{cursor}:fetch": {"post": with_params(op("Cursors.Fetch", "sprig.v1.Cursors",
+            "The next page; done closes the cursor (39934 unknown, 39935 expired)",
+            Some("CursorFetchRequest"), "CursorPage"), &[p("cursor")])},
+        "/v1/cursors/{cursor}:close": {"post": with_params(op("Cursors.Close", "sprig.v1.Cursors",
+            "Closes the cursor and kills its statement", None, "CursorClosed"), &[p("cursor")])},
     })
 }
 
@@ -185,6 +226,16 @@ pub fn schemas() -> Value {
                 "code": int, "name": string, "message": string, "start": int, "end": int}),
                 &["severity", "message", "start", "end"])}}), &["start", "end", "class", "diagnostics"])}}),
             &["statements"]),
+        "CursorOpenRequest": s(json!({"sql": string, "skip": int, "page_rows": int}), &["sql"]),
+        "CursorFetchRequest": s(json!({"rows": int}), &[]),
+        "CursorPage": s(json!({"rows": {"type": "array", "items": {"type": "array",
+            "items": {"type": "string", "nullable": true}}}, "position": string, "done": boolean}),
+            &["rows", "position", "done"]),
+        "CursorOpened": s(json!({"name": string, "columns": {"type": "array", "items": obj},
+            "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string", "nullable": true}}},
+            "position": string, "done": boolean, "idle_seconds": int, "end": obj}),
+            &["name", "columns", "rows", "position", "done"]),
+        "CursorClosed": s(json!({"closed": boolean}), &["closed"]),
     })
 }
 

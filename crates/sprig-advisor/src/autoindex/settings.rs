@@ -24,8 +24,8 @@ use sprig_settings::{Apply, HardBounds, Scopes, Setting};
 
 type Text = Cow<'static, str>;
 
-/// `on`, `recommend` or `off`.
-pub const MODES: &[&str] = &["on", "recommend", "off"];
+/// `on`, `approve` (chapter 52), `recommend` or `off`.
+pub const MODES: &[&str] = &["on", "approve", "recommend", "off"];
 
 /// The key of `auto_index.max_builds_per_cluster`.
 pub const MAX_BUILDS_PER_CLUSTER_KEY: &str = "auto_index.max_builds_per_cluster";
@@ -83,7 +83,7 @@ const fn f(min: f64, max: f64) -> HardBounds {
 keys! {
     /// `auto_index.mode`.
     MODE: Text = "auto_index.mode", Cow::Borrowed("on"), Scopes::ALL,
-        HardBounds::one_of(MODES), "on, recommend or off";
+        HardBounds::one_of(MODES), "on, approve, recommend or off";
     /// `auto_index.window_hours`.
     WINDOW_HOURS: u32 = "auto_index.window_hours", 24, Scopes::ALL,
         HardBounds::range(1, 720), "Trigger window";

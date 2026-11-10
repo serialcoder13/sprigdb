@@ -397,10 +397,11 @@ async fn run_inner(
             // A short random wait, growing with the attempts, so writers
             // that collided don't collide again at once.
             let spread = u64::from(attempt) * 5;
-            let jitter = u64::from(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.subsec_nanos()))
-                % spread.max(1);
+            let jitter = u64::from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.subsec_nanos()),
+            ) % spread.max(1);
             tokio::time::sleep(Duration::from_millis(1 + jitter)).await;
             continue;
         }

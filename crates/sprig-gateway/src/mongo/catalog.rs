@@ -1234,6 +1234,17 @@ impl super::changes::TableNames for CatalogDocs {
             .map(|m| m.name.clone())
     }
 
+    async fn uuid(&self, tenant: TenantId, db: &str, table: &str) -> Option<[u8; 16]> {
+        let cat = self.snapshot(tenant).await.ok()?;
+        let lctn = self.lctn(&cat);
+        let row = cat.database(&database_key(db, lctn))?;
+        cat.ext
+            .get::<DocState>(MODULE)?
+            .of(row.db_id.0)
+            .find(|m| m.table == table)
+            .map(|m| m.uuid)
+    }
+
     async fn images(&self, tenant: TenantId, db: &str, table: &str) -> bool {
         let Ok(cat) = self.snapshot(tenant).await else {
             return false;

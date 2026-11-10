@@ -184,6 +184,13 @@ proptest! {
     #[test]
     fn reparse_changes_only_schemas(shape in 0usize..5, d in "[a-z]{1,8}", t in "[a-z]{1,8}") {
         prop_assume!(!sprig_common::names::is_reserved_database(&d));
+        // A reserved word (`on`, `in`, ...) isn't a bare identifier.
+        let reserved = |w: &str| {
+            sprig_sql::compat::keywords::MYSQL84
+                .iter()
+                .any(|(k, r)| *r && k.eq_ignore_ascii_case(w))
+        };
+        prop_assume!(!reserved(&d) && !reserved(&t));
         let sql = match shape {
             0 => format!("SELECT a FROM {d}.{t} JOIN {d}.x ON {t}.a = x.a WHERE a IN (SELECT b FROM {d}.y)"),
             1 => format!("INSERT INTO {d}.{t} (a) SELECT a FROM {d}.y"),

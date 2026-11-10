@@ -469,6 +469,12 @@ pub async fn forwarded(core: &Arc<Core>, req: ForwardRequest) -> ForwardReply {
         })?;
         let auth = (!req.authorization.is_empty()).then(|| req.authorization.clone());
         let caller = core.caller(&info, auth, None, None).await?;
+        // Studio's cursors (chapter 44) aren't in the route table.
+        if let Some(r) =
+            super::studio::cursors::forwarded(core, &caller, &req.method, &body).await
+        {
+            return r;
+        }
         let route = routes::by_name(&req.method).ok_or_else(|| {
             SprigError::new(
                 SprigCode::AdminRequestInvalid,
@@ -495,8 +501,7 @@ pub async fn forwarded(core: &Arc<Core>, req: ForwardRequest) -> ForwardReply {
         let m = Matched { route, vars };
         let (status_code, out) = run_local(core, &caller, &req.method, &m, &body, false).await?;
         match out {
-            Local::Json(v) => Ok((status_code, v)),
-            Local::Rows(v, _) => Ok((status_code, v)),
+            Local::Json(v) | Local::Rows(v, _) => Ok((status_code, v)),
             Local::Stream(_) => Err(SprigError::internal("a forwarded call can't stream")),
         }
     }

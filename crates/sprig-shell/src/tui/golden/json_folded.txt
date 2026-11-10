@@ -1,0 +1,16 @@
+ 1 cypher - │ Dashboard │ Admin │ Inbox
+┌ Explorer ──────────────────┐┌ Editor [cypher] ───────────────────────────────────────────────────┐
+│▾ shop                      ││ 1 SELECT order_id, status                                          │
+│  ▾ tables 2                ││ 2 FROM orders                                                      │
+│    ▸ orders ~3 rows        ││ 3 WHERE status = 'paid';                                           │
+│      order_items           │└────────────────────────────────────────────────────────────────────┘
+│  ▸ views 1                 │┌ Results [json] · 2 rows · 3 ms ────────────────────────────────────┐
+│  ▸ streams 1               ││▾ {                                                                 │
+│▸ hr                        ││    _id: [ObjectId] 65a1f0                                          │
+│                            ││  ▸ addr: {…1 key}                                                  │
+│                            ││    qty: [Int64] 3                                                  │
+│                            ││  ▾ tags: [                                                         │
+│                            ││      "a"                                                           │
+│                            ││      "b"                                                           │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
+ dev  bolt://127.0.0.1:7687  F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit

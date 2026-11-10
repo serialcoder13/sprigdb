@@ -272,6 +272,7 @@ impl PassSession {
         }))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn commit_offset_call(&mut self, cx: &mut ExecCtx<'_>, args: &[String]) -> Result<()> {
         if !(4..=5).contains(&args.len()) {
             return Err(arg_error());

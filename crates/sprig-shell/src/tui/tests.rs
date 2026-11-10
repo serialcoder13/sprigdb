@@ -1,0 +1,398 @@
+//! Screen snapshots with ratatui's `TestBackend` (chapter 53, "Testing"),
+//! and key behaviour. Set `SPRIG_UPDATE_GOLDEN=1` to rewrite the screens
+//! after a deliberate change; they live in `src/tui/golden/`.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use serde_json::json;
+
+use super::app::{App, DataTab, Dialog, Effect, Fixed, Focus, Msg};
+use crate::dash::Panel;
+use crate::history::History;
+use crate::lang::Lang;
+use crate::model::{Column, EndInfo, ResultEvent};
+use crate::profile::Confirm;
+
+fn app() -> App {
+    let mut t = DataTab::new(
+        1,
+        Lang::Sql,
+        "127.0.0.1:8080 db shop".into(),
+        Some("shop".into()),
+    );
+    t.editor
+        .insert_str("SELECT order_id, status\nFROM orders\nWHERE status = 'paid';");
+    let mut a = App::new(
+        "dev",
+        t,
+        History::load(None, "dev", 100),
+        Confirm::Destructive,
+        false,
+    );
+    a.on_msg(Msg::Catalog(Ok(json!({"databases": ["shop", "hr"]}))));
+    a.on_msg(Msg::Db(
+        "shop".into(),
+        Ok(json!({"db": "shop", "objects": [
+            {"name": "orders", "kind": "table", "rows": 3},
+            {"name": "order_items", "kind": "table"},
+            {"name": "v_paid", "kind": "view"}],
+          "columns": {"orders": [{"name": "order_id", "type": "bigint"}, {"name": "status", "type": "varchar(16)"}]}})),
+        vec!["order_events".into()],
+        vec![],
+    ));
+    a
+}
+
+fn col(n: &str, t: &str) -> Column {
+    Column {
+        name: n.into(),
+        type_name: t.into(),
+        binary: false,
+    }
+}
+
+fn with_rows(a: &mut App) {
+    a.on_msg(Msg::Events(
+        1,
+        vec![
+            ResultEvent::Header(vec![
+                col("order_id", "BIGINT"),
+                col("status", "VARCHAR"),
+                col("note", "TEXT"),
+            ]),
+            ResultEvent::Rows(vec![
+                vec![Some("7001".into()), Some("paid".into()), None],
+                vec![
+                    Some("7002".into()),
+                    Some("paid".into()),
+                    Some("gift, wrap it".into()),
+                ],
+                vec![
+                    Some("17".into()),
+                    Some("paid".into()),
+                    Some(
+                        "a very long note that goes on and on past the column cap of forty".into(),
+                    ),
+                ],
+            ]),
+            ResultEvent::End(EndInfo::default()),
+        ],
+    ));
+    a.on_msg(Msg::Done {
+        tab: 1,
+        error: None,
+        elapsed_ms: 12,
+        describe: "127.0.0.1:8080 db shop".into(),
+        database: Some("shop".into()),
+        in_txn: false,
+    });
+}
+
+fn screen(a: &mut App, w: u16, h: u16) -> String {
+    let mut term = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+    term.draw(|f| a.draw(f)).expect("draw");
+    let buf = term.backend().buffer().clone();
+    let mut out = String::new();
+    for y in 0..h {
+        let mut line = String::new();
+        for x in 0..w {
+            line.push_str(buf[(x, y)].symbol());
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+fn golden(name: &str, got: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/tui/golden")
+        .join(name);
+    if std::env::var_os("SPRIG_UPDATE_GOLDEN").is_some() {
+        let _ = std::fs::create_dir_all(path.parent().expect("dir"));
+        std::fs::write(&path, got).expect("write golden");
+        return;
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(
+        got,
+        want,
+        "{} differs; SPRIG_UPDATE_GOLDEN=1 rewrites it",
+        path.display()
+    );
+}
+
+fn key(c: KeyCode) -> KeyEvent {
+    KeyEvent::from(c)
+}
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+#[test]
+fn data_tab_with_grid() {
+    let mut a = app();
+    with_rows(&mut a);
+    golden("data_grid.txt", &screen(&mut a, 110, 26));
+}
+
+#[test]
+fn completion_menu() {
+    let mut a = app();
+    a.tabs[0].editor = super::editor::Editor::with_text("SELECT * FROM ord");
+    let fx = a.on_key(key(KeyCode::Tab));
+    assert!(fx.is_empty());
+    assert_eq!(a.completion.as_ref().map(|c| c.items.len()), Some(3));
+    golden("completion.txt", &screen(&mut a, 110, 20));
+    a.on_key(key(KeyCode::Down));
+    a.on_key(key(KeyCode::Enter));
+    assert_eq!(a.tabs[0].editor.text(), "SELECT * FROM order_items");
+}
+
+#[test]
+fn json_tree_and_graph_views() {
+    let mut a = app();
+    a.tabs[0].lang = Lang::Cypher;
+    a.on_msg(Msg::Events(1, vec![
+        // Keys in sorted order, so the screens are the same with or without
+        // serde_json's preserve_order (another crate may turn it on).
+        ResultEvent::Doc(json!({"_id": {"$oid": "65a1f0"}, "addr": {"city": "Pune"}, "qty": {"$numberLong": "3"}, "tags": ["a", "b"]})),
+        ResultEvent::Doc(json!({"p": {"$path": [
+            {"$node": {"id": 1, "labels": ["Person"], "props": {"name": "Asha"}}},
+            {"$rel": {"end": 2, "id": 9, "props": {}, "start": 1, "type": "KNOWS"}},
+            {"$node": {"id": 2, "labels": ["Person"], "props": {"name": "Ravi"}}}]}})),
+        ResultEvent::End(EndInfo::default()),
+    ]));
+    a.on_msg(Msg::Done {
+        tab: 1,
+        error: None,
+        elapsed_ms: 3,
+        describe: "bolt://127.0.0.1:7687".into(),
+        database: None,
+        in_txn: false,
+    });
+    a.on_key(key(KeyCode::F(3)));
+    golden("json_tree.txt", &screen(&mut a, 100, 30));
+    a.focus = Focus::Results;
+    a.on_key(key(KeyCode::Down));
+    a.on_key(key(KeyCode::Down));
+    a.on_key(key(KeyCode::Enter));
+    assert!(a.tabs[0].results.folded.contains("0.addr"), "folded addr");
+    golden("json_folded.txt", &screen(&mut a, 100, 16));
+    a.on_key(key(KeyCode::F(3)));
+    golden("graph.txt", &screen(&mut a, 100, 24));
+}
+
+#[test]
+fn destructive_statement_asks_first() {
+    let mut a = app();
+    a.tabs[0].editor = super::editor::Editor::with_text("DROP TABLE orders;");
+    let fx = a.on_key(key(KeyCode::Enter));
+    assert!(fx.is_empty());
+    assert!(matches!(a.dialog, Some(Dialog::Confirm(..))));
+    golden("confirm.txt", &screen(&mut a, 100, 24));
+    let fx = a.on_key(key(KeyCode::Char('y')));
+    assert_eq!(
+        fx,
+        vec![Effect::Run(1, vec!["DROP TABLE orders".into()], Lang::Sql)]
+    );
+    assert!(a.tabs[0].running);
+    assert_eq!(a.on_key(ctrl('c')), vec![Effect::Cancel(1)]);
+}
+
+#[test]
+fn enter_runs_complete_statements_and_keeps_history() {
+    let mut a = app();
+    a.tabs[0].editor = super::editor::Editor::with_text("SELECT 1; SELECT 2;");
+    let fx = a.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        fx,
+        vec![Effect::Run(
+            1,
+            vec!["SELECT 1".into(), "SELECT 2".into()],
+            Lang::Sql
+        )]
+    );
+    assert!(a.tabs[0].editor.is_empty());
+    a.on_msg(Msg::Done {
+        tab: 1,
+        error: None,
+        elapsed_ms: 1,
+        describe: String::new(),
+        database: Some("shop".into()),
+        in_txn: false,
+    });
+    a.tabs[0].editor = super::editor::Editor::with_text("CREATE USER bob IDENTIFIED BY 'pw'");
+    let fx = a.on_key(key(KeyCode::F(5)));
+    assert_eq!(fx.len(), 1);
+    a.on_msg(Msg::Done {
+        tab: 1,
+        error: None,
+        elapsed_ms: 1,
+        describe: String::new(),
+        database: Some("shop".into()),
+        in_txn: false,
+    });
+    a.tabs[0].editor = super::editor::Editor::default();
+    a.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    assert_eq!(
+        a.tabs[0].editor.text(),
+        "CREATE USER bob IDENTIFIED BY '***'"
+    );
+    // An unfinished statement gets a new line instead.
+    a.tabs[0].editor = super::editor::Editor::with_text("SELECT 'a;");
+    assert!(a.on_key(key(KeyCode::Enter)).is_empty());
+    assert_eq!(a.tabs[0].editor.line_count(), 2);
+}
+
+#[test]
+fn error_and_explorer_browse() {
+    let mut a = app();
+    a.on_msg(Msg::Done {
+        tab: 1,
+        error: Some(crate::error::ShellError::server(
+            1146,
+            "",
+            "Table 'shop.nope' doesn't exist",
+        )),
+        elapsed_ms: 4,
+        describe: "127.0.0.1:8080 db shop".into(),
+        database: Some("shop".into()),
+        in_txn: true,
+    });
+    a.focus = Focus::Explorer;
+    golden("error.txt", &screen(&mut a, 100, 20));
+    a.on_key(key(KeyCode::Down));
+    a.on_key(key(KeyCode::Down));
+    let fx = a.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        fx,
+        vec![Effect::Run(
+            1,
+            vec!["SELECT * FROM `shop`.`orders` LIMIT 100".into()],
+            Lang::Sql
+        )]
+    );
+}
+
+#[test]
+fn dashboard_sessions() {
+    let mut a = app();
+    let fx = a.show(Fixed::Dash);
+    assert_eq!(fx, vec![Effect::DashRefresh("sessions".into())]);
+    a.on_msg(Msg::Dash(Panel {
+        view: "sessions".into(),
+        columns: vec![
+            "Id".into(),
+            "User".into(),
+            "db".into(),
+            "Command".into(),
+            "Time".into(),
+            "Info".into(),
+        ],
+        rows: vec![
+            vec![
+                "41".into(),
+                "acme.alice".into(),
+                "shop".into(),
+                "Query".into(),
+                "3".into(),
+                "SELECT SLEEP(30)".into(),
+            ],
+            vec![
+                "42".into(),
+                "acme.bob".into(),
+                "shop".into(),
+                "Sleep".into(),
+                "120".into(),
+                String::new(),
+            ],
+        ],
+        note: None,
+    }));
+    a.dash.polled = None;
+    golden("dash_sessions.txt", &screen(&mut a, 100, 16));
+    a.on_key(key(KeyCode::Char('q')));
+    assert!(matches!(&a.dialog, Some(Dialog::Confirm(q, _)) if q.contains("41")));
+    assert_eq!(
+        a.on_key(key(KeyCode::Char('y'))),
+        vec![Effect::Kill("41".into(), true)]
+    );
+    a.on_key(key(KeyCode::Char('3')));
+    a.on_msg(Msg::Dash(Panel {
+        view: "clusters".into(),
+        note: Some("operators only: add admin_url (and admin_token_file) to the profile".into()),
+        ..Panel::default()
+    }));
+    a.dash.polled = None;
+    golden("dash_clusters.txt", &screen(&mut a, 100, 16));
+}
+
+#[test]
+fn admin_tab() {
+    let mut a = app();
+    a.show(Fixed::Admin);
+    for c in "tenant delete acme".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    let fx = a.on_key(key(KeyCode::Enter));
+    assert!(fx.is_empty(), "asks first");
+    let fx = a.on_key(key(KeyCode::Char('y')));
+    assert_eq!(
+        fx,
+        vec![Effect::Admin(vec![
+            "tenant".into(),
+            "delete".into(),
+            "acme".into(),
+            "--yes".into()
+        ])]
+    );
+    a.on_msg(Msg::Admin(
+        vec!["tenant".into(), "list".into()],
+        Ok(crate::admin::Captured {
+            code: 0,
+            stdout: "NAME   STATE   CLUSTER\nacme   active  dev-c1\n".into(),
+            stderr: String::new(),
+        }),
+    ));
+    golden("admin.txt", &screen(&mut a, 100, 16));
+    for c in "tenant list".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(
+        a.on_key(key(KeyCode::Enter)),
+        vec![Effect::Admin(vec!["tenant".into(), "list".into()])]
+    );
+}
+
+#[test]
+fn inbox_tab() {
+    let mut a = app();
+    assert_eq!(a.show(Fixed::Inbox), vec![Effect::InboxRefresh]);
+    a.on_msg(Msg::Inbox(Ok(json!({"source": "admin", "items": [
+        {"id": "t42.17", "kind": "index_create", "level": "table", "state": "open", "target": "shop.orders",
+         "age_hours": 5, "summary": "Index orders(status, created_at)",
+         "action": {"text": "CREATE INDEX sprig_auto_1 ON orders (status, created_at)"},
+         "evidence": {"fingerprint": "9c41d2e0", "p95_ms": 840, "rows_examined_per_row": 1200}},
+        {"id": "dc.mum1.3", "kind": "dc_move", "level": "dc", "state": "open", "target": "acme",
+         "age_hours": 30, "summary": "Move acme to pune"}]}))));
+    golden("inbox.txt", &screen(&mut a, 110, 24));
+    a.on_key(key(KeyCode::Char('i')));
+    for c in "30".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    let fx = a.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(&fx[..], [Effect::InboxAct(x)] if x.id == "t42.17" && x.input.as_deref() == Some("30"))
+    );
+}
+
+#[test]
+fn small_terminal_and_help() {
+    let mut a = app();
+    golden("too_small.txt", &screen(&mut a, 50, 10));
+    a.on_key(key(KeyCode::F(1)));
+    golden("help.txt", &screen(&mut a, 100, 28));
+}

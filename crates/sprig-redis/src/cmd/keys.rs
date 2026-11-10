@@ -43,19 +43,19 @@ pub async fn exists(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
 
 /// The live keys among `keys`, in one statement.
 async fn live_keys(cx: &mut Ctx<'_>, keys: &[Bytes]) -> R<Vec<Vec<u8>>> {
-    let list: Vec<String> = keys
+    let list: Vec<&[u8]> = keys
         .iter()
         .filter(|k| k.len() <= 1024)
-        .map(|k| lit(k))
+        .map(|k| &k[..])
         .collect();
     if list.is_empty() {
         return Ok(Vec::new());
     }
     let rows = cx
         .q(&format!(
-            "SELECT k FROM {} WHERE k IN ({}) AND {}",
+            "SELECT k FROM {} WHERE {} AND {}",
             cx.ns.keys(),
-            list.join(", "),
+            cx.keys_in(&list),
             live("")
         ))
         .await?;
@@ -206,7 +206,7 @@ async fn copy_elems(
             dst.zset(),
             lit(to),
             src.zset(),
-            Ctx::kg(row)
+            cx.kg(row)
         ),
         _ => format!(
             "INSERT INTO {} (k, g, o, e, v, _sprig_dk, _sprig_rk) \
@@ -214,7 +214,7 @@ async fn copy_elems(
             dst.elems(),
             lit(to),
             src.elems(),
-            Ctx::kg(row)
+            cx.kg(row)
         ),
     };
     cx.x(&sql).await?;
@@ -618,7 +618,7 @@ async fn encoding(cx: &mut Ctx<'_>, r: &KeyRow) -> R<&'static str> {
                 .q(&format!(
                     "SELECT e FROM {} WHERE {} LIMIT 513",
                     cx.ns.elems(),
-                    Ctx::kg(r)
+                    cx.kg(r)
                 ))
                 .await?;
             let ints = rows
@@ -637,7 +637,7 @@ async fn encoding(cx: &mut Ctx<'_>, r: &KeyRow) -> R<&'static str> {
                 .q(&format!(
                     "SELECT COALESCE(MAX(LENGTH(m)), 0) FROM {} WHERE {}",
                     cx.ns.zset(),
-                    Ctx::kg(r)
+                    cx.kg(r)
                 ))
                 .await?;
             let ml = rows
@@ -657,7 +657,7 @@ async fn max_len(cx: &mut Ctx<'_>, r: &KeyRow, col: &str) -> R<i64> {
         .q(&format!(
             "SELECT COALESCE(MAX(LENGTH({col})), 0) FROM {} WHERE {}",
             cx.ns.elems(),
-            Ctx::kg(r)
+            cx.kg(r)
         ))
         .await?;
     Ok(rows

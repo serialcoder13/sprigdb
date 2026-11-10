@@ -17,6 +17,7 @@
 //! - [`changes`]: change streams over the change feed;
 //! - [`users`]: user and role commands over chapter 29's accounts.
 //! - [`logic`]: `sprigCall`, logic-layer functions (chapter 41, R7).
+//! - [`snapshot`]: snapshot reads outside transactions (R5 round 4).
 //!
 //! Interim scope (R5 interim, `decisions/r5-interim.md`): transactions on one executor
 //! session per `lsid`, and no `$clusterTime` signing.

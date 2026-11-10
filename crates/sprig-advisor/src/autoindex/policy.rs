@@ -105,6 +105,9 @@ pub enum Mode {
     On,
     /// Run everything up to validation; stop at `recommended`.
     Recommend,
+    /// As `Recommend`, and the row waits in chapter 52's approvals inbox;
+    /// an approval rolls it out.
+    Approve,
     /// No evaluation; existing automatic indexes are kept as they are.
     Off,
 }
@@ -116,6 +119,7 @@ impl Mode {
     pub fn parse(s: &str) -> Self {
         match s {
             "recommend" => Mode::Recommend,
+            "approve" => Mode::Approve,
             "off" => Mode::Off,
             _ => Mode::On,
         }
@@ -394,7 +398,7 @@ pub fn route(mode: Mode, advise: bool, recommend_validate: bool, validation_node
     match (mode, advise) {
         (Mode::Off, _) => Route::Skip,
         (Mode::On, false) => Route::ValidateThenRollOut,
-        (Mode::Recommend, _) | (Mode::On, true) => {
+        (Mode::Recommend | Mode::Approve, _) | (Mode::On, true) => {
             if recommend_validate && validation_node {
                 Route::ValidateThenRecommend
             } else {

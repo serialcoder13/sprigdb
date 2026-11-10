@@ -552,7 +552,7 @@ pub async fn object_pass<Q: Queryable + Send>(
                 let evidence = serde_json::json!({"usage": us.last, "settings": {
                     "auto_index.usage_sample_reads": cx.rules.usage_sample_reads,
                     "auto_index.min_usage_ratio": cx.rules.min_usage_ratio,
-                    "auto_index.retire_user_indexes": match mode { Mode::On => "on", Mode::Recommend => "recommend", Mode::Off => "off" },
+                    "auto_index.retire_user_indexes": match mode { Mode::On => "on", Mode::Recommend => "recommend", Mode::Approve => "approve", Mode::Off => "off" },
                 }});
                 match (&step, r.state) {
                     (UserStep::Retiring, from) => {

@@ -206,7 +206,7 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response {
         .unwrap_or_default()
 }
 
-fn error_response(e: &SprigError) -> Response {
+pub(crate) fn error_response(e: &SprigError) -> Response {
     let p = e.protocol();
     let name = match e.kind {
         ErrorKind::Sprig(code) => code.name().to_owned(),
@@ -230,7 +230,7 @@ fn error_response(e: &SprigError) -> Response {
     )
 }
 
-fn respond<T: Serialize>(r: Result<T>) -> Response {
+pub(crate) fn respond<T: Serialize>(r: Result<T>) -> Response {
     match r {
         Ok(v) => json_response(StatusCode::OK, &v),
         Err(e) => error_response(&e),
@@ -238,7 +238,7 @@ fn respond<T: Serialize>(r: Result<T>) -> Response {
 }
 
 /// Constant-time comparison of a presented token with `want`.
-fn token_matches(headers: &HeaderMap, want: &str) -> bool {
+pub(crate) fn token_matches(headers: &HeaderMap, want: &str) -> bool {
     let got = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -252,7 +252,7 @@ fn token_matches(headers: &HeaderMap, want: &str) -> bool {
     diff == 0
 }
 
-fn unauthenticated() -> SprigError {
+pub(crate) fn unauthenticated() -> SprigError {
     SprigError::new(
         SprigCode::AdminUnauthenticated,
         "a valid bearer token is required",
@@ -771,7 +771,7 @@ fn percent_decode(s: &str) -> Result<String> {
 
 /// The query string as `T`: each `name=value` a string field; empty values
 /// are left out. 39792 when it doesn't fit.
-fn query<T: DeserializeOwned>(uri: &Uri) -> Result<T> {
+pub(crate) fn query<T: DeserializeOwned>(uri: &Uri) -> Result<T> {
     let mut m = serde_json::Map::new();
     for part in uri.query().unwrap_or_default().split('&') {
         if part.is_empty() {

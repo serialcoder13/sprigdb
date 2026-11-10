@@ -29,13 +29,13 @@ fn groups() -> GroupedTables {
 }
 
 fn sql_on(text: &str, persona: Persona, grouped: bool) -> String {
-    let m = base();
-    let g = groups();
-    let w = WithGroups {
-        base: &m,
-        groups: &g,
+    let catalog = base();
+    let grouped_tables = groups();
+    let with = WithGroups {
+        base: &catalog,
+        groups: &grouped_tables,
     };
-    let map: &dyn crate::names::NameMap = if grouped { &w } else { &m };
+    let map: &dyn crate::names::NameMap = if grouped { &with } else { &catalog };
     let reg = ColumnRegistry::mariadb_11_8();
     let rctx = RewriteCtx::new(map, persona)
         .current_db(Some("billing"))
@@ -189,4 +189,60 @@ fn information_schema_reads_every_group() {
         true,
     );
     reads_every_group(&s);
+}
+
+/// bugfix-8: a group whose schema is on another cluster: the first pass
+/// asks for that branch only, with its cluster; the second appends the
+/// rows read there to that branch, for lists and `information_schema`.
+#[test]
+fn remote_groups_are_read_on_their_cluster_and_inlined() {
+    let catalog = base();
+    let mut grouped_tables = groups();
+    let g3 = SchemaName::shard(TenantId(42), DbId(1), GroupId(3), ShardId(2));
+    grouped_tables.set_remote(g3, "c2");
+    let with = WithGroups {
+        base: &catalog,
+        groups: &grouped_tables,
+    };
+    let reg = ColumnRegistry::mariadb_11_8();
+    let run = |branches: &crate::names::RemoteBranches, text: &str| {
+        let far = crate::names::WithRemote {
+            inner: &with,
+            groups: &grouped_tables,
+            branches,
+        };
+        let rctx = RewriteCtx::new(&far, Persona::MariaDb).current_db(Some("billing"));
+        let p = plan(text.as_bytes(), &PlanCtx::new(rctx, &reg)).unwrap();
+        match p.statements.into_iter().next().unwrap().action {
+            Action::Forward { sql, .. } => String::from_utf8(sql).unwrap(),
+            a => panic!("{a:?}"),
+        }
+    };
+    for text in [
+        "SHOW TABLES",
+        "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'billing'",
+    ] {
+        let mut branches = crate::names::RemoteBranches::default();
+        let first = run(&branches, text);
+        let wanted = branches.take_wanted();
+        assert_eq!(wanted.len(), 1, "{wanted:?}");
+        let (cluster, branch) = &wanted[0];
+        assert_eq!(cluster, "c2");
+        assert!(
+            branch.starts_with("SELECT ") && branch.contains("= 't42_d1_g3_s2'"),
+            "{branch}"
+        );
+        assert!(
+            !branch.contains("t42_d1_g1_s1") && !branch.contains("UNION"),
+            "{branch}"
+        );
+        assert!(first.contains(branch.as_str()), "{first}");
+        branches.insert(branch.clone(), " UNION ALL SELECT 1".into());
+        let second = run(&branches, text);
+        assert!(
+            second.contains(&format!("{branch} UNION ALL SELECT 1")),
+            "{second}"
+        );
+        assert!(branches.take_wanted().is_empty());
+    }
 }

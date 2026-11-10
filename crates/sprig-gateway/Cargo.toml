@@ -37,6 +37,8 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sprig-auth.workspace = true
+# Chapter 52: recommendations in SQL.
+sprig-approvals.workspace = true
 # Chapter 11's load report and chapter 20's write sketches.
 sprig-balancer.workspace = true
 # Logic declarations (chapter 41, R7).

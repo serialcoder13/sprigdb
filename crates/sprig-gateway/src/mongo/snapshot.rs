@@ -157,6 +157,21 @@ impl Snapshots {
         e
     }
 
+    /// Closes every snapshot of `tenant`: a DDL command is about to run,
+    /// and an open snapshot transaction holds the metadata lock of each
+    /// table it read, which would make the DDL wait (MongoDB ends older
+    /// snapshots of a collection at DDL too).
+    pub async fn close_tenant(&self, tenant: u64) {
+        let gone: Vec<Entry> = {
+            let mut m = self.map.lock().await;
+            let keys: Vec<(u64, u64)> = m.keys().filter(|k| k.0 == tenant).copied().collect();
+            keys.into_iter().filter_map(|k| m.remove(&k)).collect()
+        };
+        for e in gone {
+            close(&e).await;
+        }
+    }
+
     /// Closes snapshots idle past [`IDLE`].
     pub async fn reap(&self) {
         let old: Vec<Entry> = {

@@ -152,6 +152,15 @@ pub trait TempRegistry: Send + Sync + 'static {
     fn others(&self, v: &VhostRef) -> Option<Arc<TempSet>>;
 }
 
+/// Told when a queue's owner on this gateway finds the queue went from
+/// empty to holding ready messages, or back, and once when the owner
+/// starts: the ready index of fan-in consumers (chapter 42, "Fan-in").
+/// Must not block.
+pub trait ReadyHook: Send + Sync + 'static {
+    /// Queue `queue` (`id`) of vhost `v` has ready messages, or none.
+    fn ready(&self, v: &VhostRef, queue: &str, id: u64, ready: bool);
+}
+
 /// No other gateways.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoTemps;
@@ -956,6 +965,16 @@ impl VShared {
                         tokio::spawn(async move { v.drop_queue(&q).await });
                     }
                 }
+                OwnerEvent::Ready { queue, ready } => {
+                    // Temporary queues (top bit) are never instances.
+                    if queue >> 63 == 0
+                        && let Some(e) = self.engine.upgrade()
+                        && let Some(h) = e.ready_hook.get()
+                        && let Some(q) = self.queue_by_id(queue)
+                    {
+                        h.ready(&self.r, &q.name, queue, ready);
+                    }
+                }
             }
         }
     }
@@ -1028,6 +1047,8 @@ pub(crate) struct Inner {
     vhosts: Mutex<HashMap<(u64, u32), Arc<VShared>>>,
     temp_ids: AtomicU64,
     stop: CancellationToken,
+    /// Told of queues becoming ready or empty (fan-in's ready index).
+    ready_hook: std::sync::OnceLock<Arc<dyn ReadyHook>>,
 }
 
 impl Inner {
@@ -1062,8 +1083,15 @@ impl QueueEngine {
                 vhosts: Mutex::new(HashMap::new()),
                 temp_ids: AtomicU64::new(1),
                 stop: CancellationToken::new(),
+                ready_hook: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Sets the hook told of queues becoming ready or empty (once; later
+    /// calls are ignored).
+    pub fn set_ready_hook(&self, hook: Arc<dyn ReadyHook>) {
+        let _ = self.inner.ready_hook.set(hook);
     }
 
     /// Stops every owner and forwarder (the gateway is stopping); their

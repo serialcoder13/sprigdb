@@ -2,7 +2,6 @@
 
 use bytes::Bytes;
 use sprig_kv::layout::{KeyType, live};
-use sprig_kv::sql::lit;
 use sprig_proto_redis::Frame;
 use sprig_proto_redis::num::{ld2string_human, parse_f64, parse_i64};
 
@@ -133,7 +132,12 @@ pub async fn set(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         true
     };
     if go {
-        let exp = resolve(ttl, cx.now, row.as_ref().and_then(|r| r.exp));
+        let now = if matches!(ttl, Ttl::In(_)) {
+            cx.clock(&a[1]).await?
+        } else {
+            cx.now
+        };
+        let exp = resolve(ttl, now, row.as_ref().and_then(|r| r.exp));
         put(cx, &a[1], row, a[2].to_vec(), exp).await?;
     }
     Ok(if getf {
@@ -161,7 +165,7 @@ pub async fn setex(cx: &mut Ctx<'_>, a: &[Bytes], unit: i64, name: &str) -> R<Fr
     let ms = ttl_amount(&a[2], unit, name)?;
     cx.check_value(&a[3])?;
     let row = cx.lock(&a[1]).await?;
-    let exp = Some(cx.now.saturating_add(ms));
+    let exp = Some(cx.clock(&a[1]).await?.saturating_add(ms));
     put(cx, &a[1], row, a[3].to_vec(), exp).await?;
     Ok(Frame::ok())
 }
@@ -240,16 +244,16 @@ pub async fn mget(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
     let list = keys
         .iter()
         .filter(|k| k.len() <= 1024)
-        .map(|k| lit(k))
-        .collect::<Vec<_>>();
+        .map(|k| &k[..])
+        .collect::<Vec<&[u8]>>();
     let mut found: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
         std::collections::HashMap::new();
     if !list.is_empty() {
         let rows = cx
             .q(&format!(
-                "SELECT k, v FROM {} WHERE k IN ({}) AND type = 'string' AND {}",
+                "SELECT k, v FROM {} WHERE {} AND type = 'string' AND {}",
                 cx.ns.keys(),
-                list.join(", "),
+                cx.keys_in(&list),
                 live("")
             ))
             .await?;

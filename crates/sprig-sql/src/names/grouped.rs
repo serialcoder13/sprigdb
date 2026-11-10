@@ -24,6 +24,8 @@
 //! columns, as MariaDB evaluates it. Databases with nothing grouped keep
 //! MariaDB's own statements.
 
+use std::fmt::Write as _;
+
 use sprig_common::names::quote;
 use sprig_proto_mysql::packets::Persona;
 
@@ -107,6 +109,7 @@ fn filter_text<'s>(text: &'s [u8], info: &ShowInfo) -> Option<&'s [u8]> {
 /// # Errors
 ///
 /// The inline view's ([`rewrite_information_schema`]).
+#[allow(clippy::too_many_lines)] // one select list per `SHOW`
 pub(super) fn listing(
     info: &ShowInfo,
     text: &[u8],
@@ -187,7 +190,7 @@ pub(super) fn listing(
         lit(&logical)
     );
     if let Some(p) = &like {
-        inner.push_str(&format!(" AND {} LIKE BINARY {p}", quote(name_col)));
+        let _ = write!(inner, " AND {} LIKE BINARY {p}", quote(name_col));
     }
     let outer_cols = if info.kind == ShowKind::Triggers {
         TRIGGERS

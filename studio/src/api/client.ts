@@ -32,6 +32,8 @@ export interface RequestOptions {
   auth?: boolean;
   /** Extra headers. */
   headers?: Record<string, string>;
+  /** Let the request outlive the page (closing a cursor on pagehide). */
+  keepalive?: boolean;
 }
 
 async function errorFrom(r: Response, traceId: string): Promise<ApiError> {
@@ -64,6 +66,7 @@ export async function request(path: string, opts: RequestOptions = {}): Promise<
       signal: opts.signal,
       credentials: 'same-origin',
       cache: 'no-store',
+      ...(opts.keepalive ? { keepalive: true } : {}),
     });
     return { r, traceId: tp.traceId };
   };

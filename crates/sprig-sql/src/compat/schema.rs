@@ -676,6 +676,54 @@ pub fn show_engines_sql(lit: Lit<'_>) -> Vec<u8> {
     .into_bytes()
 }
 
+/// `SHOW COLLATION [LIKE 'p' | WHERE e]` on 3306 as a query over the
+/// MySQL-shaped `COLLATIONS` view ([`local_view`]), ordered by name as
+/// MySQL lists them, with MySQL's seven columns. MariaDB's own `SHOW
+/// COLLATION` also lists its 184 bare `uca1400_*` names with a `NULL` id,
+/// which MySQL Connector/J reads as a number (`ResultSetTest.testPadding`;
+/// gaps row 54). `None` when `text` isn't such a statement.
+#[must_use]
+pub fn show_collation_sql(text: &[u8], lit: Lit<'_>) -> Option<Vec<u8>> {
+    let t = text.trim_ascii();
+    let t = t.strip_suffix(b";").unwrap_or(t).trim_ascii_end();
+    let word = |b: &[u8], w: &[u8]| {
+        b.len() >= w.len()
+            && b[..w.len()].eq_ignore_ascii_case(w)
+            && b.get(w.len()).is_none_or(u8::is_ascii_whitespace)
+    };
+    if !word(t, b"SHOW") {
+        return None;
+    }
+    let rest = t[4..].trim_ascii_start();
+    if !word(rest, b"COLLATION") {
+        return None;
+    }
+    let rest = rest[9..].trim_ascii_start();
+    let filter: Vec<u8> = if rest.is_empty() {
+        Vec::new()
+    } else if word(rest, b"LIKE") {
+        let mut f = b" WHERE `Collation` LIKE ".to_vec();
+        f.extend_from_slice(rest[4..].trim_ascii_start());
+        f
+    } else if word(rest, b"WHERE") {
+        let mut f = b" ".to_vec();
+        f.extend_from_slice(rest);
+        f
+    } else {
+        return None;
+    };
+    let view = local_view("COLLATIONS", Persona::MySql84, lit)?;
+    let mut sql = format!(
+        "SELECT * FROM (SELECT `COLLATION_NAME` AS `Collation`, `CHARACTER_SET_NAME` AS `Charset`, \
+         `ID` AS `Id`, `IS_DEFAULT` AS `Default`, `IS_COMPILED` AS `Compiled`, `SORTLEN` AS `Sortlen`, \
+         `PAD_ATTRIBUTE` AS `Pad_attribute` FROM ({view}) AS `_c`) AS `COLLATIONS`"
+    )
+    .into_bytes();
+    sql.extend_from_slice(&filter);
+    sql.extend_from_slice(b" ORDER BY `Collation`");
+    Some(sql)
+}
+
 /// `SHOW INDEX` on 3306 rewritten over `STATISTICS` (see
 /// [`show_index_sql`]); `None` leaves the statement to MariaDB.
 #[must_use]

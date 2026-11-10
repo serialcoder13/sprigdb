@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SprigDB's Spring Data MongoDB smoke suite (chapter 46, tier 1 clients; R5).
+     Versions are pinned; run.sh runs it against one MongoDB endpoint. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>dev.sprigdb</groupId>
+  <artifactId>spring-data-mongodb-smoke</artifactId>
+  <version>0.0.1</version>
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Build output outside the source tree (git-ignored target/). -->
+    <sprig.build.dir>${project.basedir}/../../../../target/clients-mongo/spring-data-build</sprig.build.dir>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.data</groupId>
+      <artifactId>spring-data-mongodb</artifactId>
+      <version>5.1.2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.mongodb</groupId>
+      <artifactId>mongodb-driver-sync</artifactId>
+      <version>5.8.1</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <directory>${sprig.build.dir}</directory>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <configuration>
+          <mainClass>dev.sprigdb.smoke.SpringDataSmoke</mainClass>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

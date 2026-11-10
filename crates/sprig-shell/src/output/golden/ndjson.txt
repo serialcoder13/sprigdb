@@ -1,0 +1,7 @@
+{"id":1,"name":"Asha","note":null,"raw":"AAH/","name_2":"x"}
+{"id":22,"name":"Zoë, \"the\" 2nd","note":"line1\nline2\ttab","raw":null,"name_2":""}
+{"id":333,"name":"","note":"back\\slash","raw":"","name_2":null}
+{"affected_rows":3,"last_insert_id":41,"info":"Records: 3  Duplicates: 0  Warnings: 0"}
+{"n":7}
+{"_id":{"$oid":"65a1"},"tags":["a","b"]}
+{"affected_rows":0}

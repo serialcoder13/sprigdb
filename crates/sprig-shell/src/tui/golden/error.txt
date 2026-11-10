@@ -1,0 +1,20 @@
+ 1 sql shop │ Dashboard │ Admin │ Inbox
+┌ Explorer ──────────────────┐┌ Editor [sql] ──────────────────────────────────────────────────────┐
+│▾ shop                      ││ 1 SELECT order_id, status                                          │
+│  ▾ tables 2                ││ 2 FROM orders                                                      │
+│    ▸ orders ~3 rows        ││ 3 WHERE status = 'paid';                                           │
+│      order_items           │└────────────────────────────────────────────────────────────────────┘
+│  ▸ views 1                 │┌ Results [grid] · error · 4 ms ─────────────────────────────────────┐
+│  ▸ streams 1               ││1146: Table 'shop.nope' doesn't exist                               │
+│▸ hr                        ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
+ dev  127.0.0.1:8080 db shop  TXN  F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit

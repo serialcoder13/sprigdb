@@ -17,7 +17,7 @@ use sprig_common::ids::{DbId, TenantId};
 use sprig_common::names::SchemaName;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_shard::KeyClass;
-use sprig_shard::pins::PinStore;
+use sprig_shard::pins::{Pin, PinKind, PinStore};
 use sprig_workload::fingerprint::FpKind;
 use sprig_workload::shape::{JoinOp, PredOp, Shape, WriteKind};
 use sprig_workload::store::WorkloadTables;
@@ -192,7 +192,9 @@ pub async fn tables(
             .await
             .map_err(|e| db_err("foreign keys", &e))?;
         for (name, bytes) in tbls {
-            if sprig_common::names::is_internal_object(&name) {
+            // Chapter 33's element tables follow their key table
+            // ([`kv_followers`]); other internal tables stay out.
+            if sprig_common::names::is_internal_object(&name) && kv_key_table(&name).is_none() {
                 continue;
             }
             let Some(object) = obj(*db, &name) else {
@@ -275,6 +277,86 @@ pub async fn tables(
         fks.extend(by_name.into_values());
     }
     Ok((tables, fks, located))
+}
+
+/// The key table of one of chapter 33's element tables (`__sprig_ke_<t>`,
+/// `__sprig_kz_<t>`): `<t>`.
+#[must_use]
+pub fn kv_key_table(name: &str) -> Option<&str> {
+    ["__sprig_ke_", "__sprig_kz_"].iter().find_map(|p| {
+        (name.len() > p.len() && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes()))
+            .then(|| &name[p.len()..])
+    })
+}
+
+/// The distribution-key column of chapter 33's tables.
+const KV_DK: &str = "_sprig_dk";
+
+/// Chapter 33's element tables in the same group as their key table, on
+/// the same key (R6 round 4). Clients can't pin `__sprig_` tables, so the
+/// pins are implied:
+///
+/// - an element table whose key table isn't in the input leaves it;
+/// - a key table pinned `UNSHARDED` or `REFERENCE` keeps its element tables
+///   unsharded;
+/// - otherwise each element table is `COLOCATE WITH` its key table on the
+///   key table's pinned key, `_sprig_dk` when it has no pin (the key table
+///   then gets `SHARD KEY (_sprig_dk)`: hash-tagged keys and their
+///   elements stay together, as Redis Cluster keeps them in one slot).
+pub fn kv_followers(tables: &mut Vec<Table>, located: &mut Vec<Located>, pins: &mut Vec<Pin>) {
+    use sprig_common::ids::ObjectId;
+    let mut drop: Vec<Obj> = Vec::new();
+    let mut add: Vec<Pin> = Vec::new();
+    for e in tables.iter() {
+        let Some(key_name) = kv_key_table(&e.name) else {
+            continue;
+        };
+        let Some(k) = tables
+            .iter()
+            .find(|t| t.db == e.db && t.name.eq_ignore_ascii_case(key_name))
+        else {
+            drop.push(e.object);
+            continue;
+        };
+        if pins.iter().any(|p| p.object.0 == e.object) {
+            continue;
+        }
+        let key_pin = pins.iter().find(|p| p.object.0 == k.object).map(|p| &p.kind);
+        let kind = match key_pin {
+            Some(PinKind::Unsharded | PinKind::Reference) => PinKind::Unsharded,
+            Some(PinKind::ShardKey { columns }) => PinKind::Colocate {
+                parent: ObjectId(k.object),
+                columns: columns.clone(),
+            },
+            Some(PinKind::Colocate { .. }) => continue,
+            None => {
+                if !k.columns.iter().any(|c| c.name == KV_DK) {
+                    continue;
+                }
+                if !add.iter().any(|p| p.object.0 == k.object) {
+                    add.push(Pin {
+                        object: ObjectId(k.object),
+                        db: DbId(k.db),
+                        kind: PinKind::ShardKey {
+                            columns: vec![KV_DK.to_owned()],
+                        },
+                    });
+                }
+                PinKind::Colocate {
+                    parent: ObjectId(k.object),
+                    columns: vec![KV_DK.to_owned()],
+                }
+            }
+        };
+        add.push(Pin {
+            object: ObjectId(e.object),
+            db: DbId(e.db),
+            kind,
+        });
+    }
+    tables.retain(|t| !drop.contains(&t.object));
+    located.retain(|l| !drop.contains(&l.object));
+    pins.extend(add);
 }
 
 /// Which equality a fingerprint kind's joins use (chapter 22, "Comparison
@@ -415,7 +497,7 @@ pub async fn assemble(
     window: Duration,
     split_bytes: f64,
 ) -> Result<Assembled> {
-    let (tables, fks, located) = tables(c, tenant).await?;
+    let (mut tables, fks, mut located) = tables(c, tenant).await?;
     let store = WorkloadTables::for_tenant(tenant);
     let from = now.checked_sub(window).unwrap_or(SystemTime::UNIX_EPOCH);
     let fps = store
@@ -437,7 +519,8 @@ pub async fn assemble(
     }
     let catalog = SchemaName::catalog(tenant).to_string();
     // Chapter 16's pins (empty before the `sharding` module's format 3).
-    let pins = PinStore.load(c, &catalog).await?;
+    let mut pins = PinStore.load(c, &catalog).await?;
+    kv_followers(&mut tables, &mut located, &mut pins);
     let version: Option<String> = c
         .query_first(format!(
             "SELECT CAST(value AS CHAR) FROM `{catalog}`.settings WHERE scope_kind = 'tenant' \
@@ -460,4 +543,102 @@ pub async fn assemble(
             .and_then(|v| v.trim_matches('"').parse().ok())
             .unwrap_or(0),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::sharding::design::{Routing, structural};
+    use crate::sharding::settings::AdvisorSettings;
+    use sprig_common::ids::ObjectId;
+
+    fn col(n: &str, class: Option<KeyClass>) -> Column {
+        Column {
+            name: n.into(),
+            class,
+            ndv: None,
+            top_share: None,
+            sql: None,
+        }
+    }
+
+    fn kv(object: Obj, name: &str) -> Table {
+        let b = Some(KeyClass::Binary);
+        Table {
+            object,
+            db: 1,
+            name: name.into(),
+            columns: vec![col("k", b), col("g", Some(KeyClass::Numeric)), col("_sprig_dk", b)],
+            pk: if name.starts_with("__") {
+                vec!["k".into(), "g".into(), "o".into(), "e".into()]
+            } else {
+                vec!["k".into()]
+            },
+            uniques: Vec::new(),
+            size_bytes: 1e6,
+        }
+    }
+
+    fn at(t: &Table) -> Located {
+        Located {
+            object: t.object,
+            db: DbId(t.db),
+            schema: "t1_d1_g1_s1".into(),
+            name: t.name.clone(),
+        }
+    }
+
+    #[test]
+    fn element_tables_follow_their_key_table() {
+        let mut tables = vec![
+            kv(1, "db0"),
+            kv(2, "__sprig_ke_db0"),
+            kv(3, "__sprig_kz_db0"),
+            kv(4, "__sprig_ke_gone"),
+        ];
+        let mut located: Vec<Located> = tables.iter().map(at).collect();
+        let mut pins = Vec::new();
+        kv_followers(&mut tables, &mut located, &mut pins);
+        assert_eq!(tables.len(), 3);
+        assert_eq!(located.len(), 3);
+        let input = Input {
+            tables,
+            pins,
+            ..Input::default()
+        };
+        let (d, why) = structural(&input, &AdvisorSettings::default());
+        assert_eq!(d.groups.len(), 1, "{d:?} {why:?}");
+        let g = &d.groups[0];
+        assert_eq!(g.key, vec![KeyClass::Binary]);
+        let mut objs: Vec<Obj> = g.members.iter().map(|m| m.object).collect();
+        objs.sort_unstable();
+        assert_eq!(objs, vec![1, 2, 3]);
+        for m in &g.members {
+            assert_eq!(
+                m.routing,
+                Routing::Columns {
+                    columns: vec!["_sprig_dk".into()]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn element_tables_of_an_unsharded_key_table_stay_unsharded() {
+        let mut tables = vec![kv(1, "kvs"), kv(2, "__sprig_ke_kvs")];
+        let mut located: Vec<Located> = tables.iter().map(at).collect();
+        let mut pins = vec![Pin {
+            object: ObjectId(1),
+            db: DbId(1),
+            kind: PinKind::Unsharded,
+        }];
+        kv_followers(&mut tables, &mut located, &mut pins);
+        assert_eq!(pins.len(), 2);
+        assert_eq!(pins[1].kind, PinKind::Unsharded);
+        assert_eq!(kv_key_table("__sprig_kz_x"), Some("x"));
+        assert_eq!(kv_key_table("__sprig_doc_x"), None);
+        assert_eq!(kv_key_table("__sprig_ke_"), None);
+    }
 }

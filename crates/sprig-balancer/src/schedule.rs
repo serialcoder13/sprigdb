@@ -307,6 +307,13 @@ impl Scheduler {
                 out.push(sch);
                 continue;
             }
+            if mode == BalancerMode::Approve {
+                // Held in chapter 52's approvals inbox; the item is the
+                // record, so no decision is written here.
+                sch.blocked = Some("awaiting_approval".to_owned());
+                out.push(sch);
+                continue;
+            }
             let forced = matches!(m.reason, MoveReason::ResidencyChange | MoveReason::Drain);
             if mode == BalancerMode::Auto && self.in_flight.len() >= max_active {
                 self.block("concurrency");
@@ -436,7 +443,7 @@ impl Scheduler {
             let mode = match mode_of(c.tenant) {
                 BalancerMode::Off => continue,
                 BalancerMode::Auto => Mode::Applied,
-                BalancerMode::Recommend => Mode::Recommended,
+                BalancerMode::Recommend | BalancerMode::Approve => Mode::Recommended,
                 BalancerMode::DryRun => Mode::DryRun,
             };
             let key = (c.shard, c.to.clone());
@@ -486,7 +493,7 @@ impl Scheduler {
             let mode = match mode_of(p.tenant) {
                 BalancerMode::Off => continue,
                 BalancerMode::Auto => Mode::Applied,
-                BalancerMode::Recommend => Mode::Recommended,
+                BalancerMode::Recommend | BalancerMode::Approve => Mode::Recommended,
                 BalancerMode::DryRun => Mode::DryRun,
             };
             let key = (p.shard, p.cluster.clone());

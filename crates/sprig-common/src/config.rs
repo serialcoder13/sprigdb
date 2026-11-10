@@ -295,6 +295,17 @@ pub struct ControllerConfig {
     /// bound address (an unspecified IP becomes the hostname).
     #[serde(default)]
     pub internal_advertise: Option<String>,
+    /// Chapter 52: a file holding the token of this DC's operators
+    /// (`dc_operator`): it opens the `Recommendations` service for items
+    /// at the `dc` level of this DC. Unset: no DC operator credential.
+    #[serde(default)]
+    pub dc_operator_token_file: Option<PathBuf>,
+    /// Chapter 52: the SMTP password for `approvals.smtp_username`.
+    #[serde(default)]
+    pub smtp_password_file: Option<PathBuf>,
+    /// Chapter 52: the secret that signs `approvals.webhook_url` events.
+    #[serde(default)]
+    pub approvals_webhook_secret_file: Option<PathBuf>,
 }
 
 impl Default for ControllerConfig {
@@ -310,6 +321,9 @@ impl Default for ControllerConfig {
             autoindex_test_clock_file: None,
             internal_addr: default_internal_addr(),
             internal_advertise: None,
+            dc_operator_token_file: None,
+            smtp_password_file: None,
+            approvals_webhook_secret_file: None,
         }
     }
 }

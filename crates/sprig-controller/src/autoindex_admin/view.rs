@@ -917,6 +917,9 @@ pub fn route_text(p: &ObjectPolicy) -> String {
                                                     exists, then stop at recommended"
             .into(),
         Mode::Recommend => "recommend: stop at recommended without validating".into(),
+        Mode::Approve => "approve: stop at recommended and wait in the approvals inbox \
+                          (chapter 52); an approval rolls it out"
+            .into(),
     }
 }
 
@@ -945,6 +948,7 @@ pub fn policy_view(db: &str, table: &str, p: &ObjectPolicy) -> PolicyView {
         mode: match p.mode {
             Mode::On => "on",
             Mode::Recommend => "recommend",
+            Mode::Approve => "approve",
             Mode::Off => "off",
         }
         .to_owned(),

@@ -1,0 +1,1533 @@
+//! The TUI's state, keys and drawing (chapter 53, "The TUI").
+//!
+//! [`App`] is pure: keys change state and return [`Effect`]s, which the
+//! runtime in [`crate::tui`] carries out, sending [`Msg`]s back. That keeps
+//! every screen testable with ratatui's `TestBackend`.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph, Row, Table, Tabs, Wrap};
+use serde_json::Value;
+
+use crate::admin::Captured;
+use crate::dash::{Panel, VIEW_NAMES};
+use crate::error::ShellError;
+use crate::history::History;
+use crate::inbox::{Inbox, InboxAction};
+use crate::lang::{Class, Lang, classify_sql, destructive, split};
+use crate::model::ResultEvent;
+use crate::output::Format;
+use crate::profile::Confirm;
+use crate::redact::redact;
+use crate::tui::complete::{Catalog, complete};
+use crate::tui::editor::Editor;
+use crate::tui::explorer::{Explorer, ExplorerAction};
+use crate::tui::results::{Results, View};
+
+/// A data tab's id.
+pub type TabId = u64;
+
+/// One data tab: a connection, an editor and its results.
+#[derive(Debug)]
+pub struct DataTab {
+    /// Stable id.
+    pub id: TabId,
+    /// The language typed in the editor.
+    pub lang: Lang,
+    /// The editor.
+    pub editor: Editor,
+    /// The last run's results.
+    pub results: Results,
+    /// Whether a statement runs.
+    pub running: bool,
+    /// The connection, for the status bar.
+    pub describe: String,
+    /// The current database, for completion.
+    pub database: Option<String>,
+    /// A transaction is open.
+    pub in_txn: bool,
+    /// When the running statement started (for the status bar).
+    pub started: Option<std::time::Instant>,
+}
+
+impl DataTab {
+    /// A new tab.
+    #[must_use]
+    pub fn new(id: TabId, lang: Lang, describe: String, database: Option<String>) -> Self {
+        Self {
+            id,
+            lang,
+            editor: Editor::default(),
+            results: Results::default(),
+            running: false,
+            describe,
+            database,
+            in_txn: false,
+            started: None,
+        }
+    }
+}
+
+/// Which pane has the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// The explorer tree.
+    Explorer,
+    /// The editor.
+    Editor,
+    /// The results.
+    Results,
+}
+
+/// The fixed screens after the data tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fixed {
+    /// Live dashboards.
+    Dash,
+    /// `sprigctl` commands.
+    Admin,
+    /// Approvals.
+    Inbox,
+}
+
+const FIXED: [Fixed; 3] = [Fixed::Dash, Fixed::Admin, Fixed::Inbox];
+
+/// What waits for a yes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    /// Statements to run in a tab.
+    Run(TabId, Vec<String>, Lang),
+    /// A `sprigctl` command (with `--yes` added).
+    Admin(Vec<String>),
+    /// `KILL [QUERY] id`.
+    Kill(String, bool),
+    /// An inbox action.
+    Inbox(InboxAction),
+}
+
+/// A popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dialog {
+    /// A yes/no question.
+    Confirm(String, Pending),
+    /// The keys.
+    Help,
+    /// A cell's full value.
+    Cell(String),
+    /// Choose an export format.
+    Export,
+    /// A line of text for an inbox action (days, a window, a comment).
+    Input(String, String, InboxAction),
+}
+
+/// The completion menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// What the word becomes.
+    pub items: Vec<String>,
+    /// The highlighted item.
+    pub selected: usize,
+    /// The typed word's length in characters.
+    pub word_len: usize,
+}
+
+/// Something for the runtime to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// Run statements in a tab, in order, stopping at an error.
+    Run(TabId, Vec<String>, Lang),
+    /// Cancel a tab's statement.
+    Cancel(TabId),
+    /// Open a new data tab like the current one.
+    NewTab(Lang),
+    /// Close a tab's connection.
+    CloseTab(TabId),
+    /// Read the database list.
+    LoadCatalog,
+    /// Read one database's objects.
+    LoadDb(String),
+    /// Poll a dashboard view now.
+    DashRefresh(String),
+    /// `KILL [QUERY] id`.
+    Kill(String, bool),
+    /// Run `sprigctl` with these arguments.
+    Admin(Vec<String>),
+    /// Write the shown result to a file.
+    Export(TabId, Format),
+    /// Refresh the inbox.
+    InboxRefresh,
+    /// Act on a recommendation.
+    InboxAct(InboxAction),
+    /// Quit.
+    Quit,
+}
+
+/// Something that happened in the runtime.
+#[derive(Debug)]
+pub enum Msg {
+    /// Streamed results.
+    Events(TabId, Vec<ResultEvent>),
+    /// A run ended.
+    Done {
+        /// The tab.
+        tab: TabId,
+        /// The first error.
+        error: Option<ShellError>,
+        /// Milliseconds.
+        elapsed_ms: u128,
+        /// The connection afterwards.
+        describe: String,
+        /// The database afterwards.
+        database: Option<String>,
+        /// A transaction is open afterwards.
+        in_txn: bool,
+    },
+    /// A new tab connected.
+    TabOpened(DataTab),
+    /// The database list.
+    Catalog(Result<Value, ShellError>),
+    /// A database's snapshot, streams and sinks.
+    Db(String, Result<Value, ShellError>, Vec<String>, Vec<String>),
+    /// A dashboard poll.
+    Dash(Panel),
+    /// A `sprigctl` run's output.
+    Admin(Vec<String>, Result<Captured, ShellError>),
+    /// The inbox.
+    Inbox(Result<Value, ShellError>),
+    /// A line for the status bar.
+    Status(String),
+}
+
+/// The Dashboard screen's state.
+#[derive(Debug, Default)]
+pub struct DashState {
+    /// The view shown.
+    pub view: usize,
+    /// The last poll of each view.
+    pub panels: Vec<Option<Panel>>,
+    /// Selected row.
+    pub row: usize,
+    /// When the shown view was last polled.
+    pub polled: Option<std::time::Instant>,
+}
+
+/// The Admin screen's state.
+#[derive(Debug, Default)]
+pub struct AdminState {
+    /// The command line.
+    pub input: Editor,
+    /// Output lines, newest last.
+    pub output: Vec<Line<'static>>,
+    /// Lines scrolled up from the bottom.
+    pub scroll: usize,
+    /// Commands run, for Up and Down.
+    pub history: Vec<String>,
+    /// Position in `history`.
+    pub pos: usize,
+    /// A command runs.
+    pub running: bool,
+}
+
+/// `sprigctl` commands that change or remove things the TUI confirms
+/// before adding `--yes` (sprigctl asks on a terminal, and the Admin tab
+/// gives it none).
+const ADMIN_DESTRUCTIVE: &[&[&str]] = &[
+    &["tenant", "delete"],
+    &["tenant", "failover"],
+    &["tenant", "move"],
+    &["cluster", "retire"],
+    &["cluster", "drain"],
+    &["dc", "failover"],
+    &["job", "cancel"],
+    &["job", "cutover"],
+    &["shard", "move"],
+    &["index", "drop"],
+    &["sink", "drop"],
+    &["sink", "delete"],
+    &["txn", "resolve"],
+    &["settings", "reset"],
+];
+
+/// Whether a `sprigctl` command is one the TUI confirms.
+#[must_use]
+pub fn admin_destructive(args: &[String]) -> bool {
+    let words: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(String::as_str)
+        .collect();
+    ADMIN_DESTRUCTIVE
+        .iter()
+        .any(|d| words.len() >= d.len() && words[..d.len()] == **d)
+}
+
+/// The whole TUI.
+#[derive(Debug)]
+pub struct App {
+    /// Data tabs.
+    pub tabs: Vec<DataTab>,
+    /// The screen: an index into the data tabs, then the fixed screens.
+    pub screen: usize,
+    /// Which pane has the keys on a data tab.
+    pub focus: Focus,
+    /// The explorer.
+    pub explorer: Explorer,
+    /// What completion knows.
+    pub catalog: Catalog,
+    /// History of the profile.
+    pub history: History,
+    /// A popup.
+    pub dialog: Option<Dialog>,
+    /// The completion menu.
+    pub completion: Option<Completion>,
+    /// The status line.
+    pub status: String,
+    /// When to ask before running.
+    pub confirm: Confirm,
+    /// The profile's name.
+    pub profile: String,
+    /// Dashboards.
+    pub dash: DashState,
+    /// The Admin tab.
+    pub admin: AdminState,
+    /// The approvals inbox.
+    pub inbox: Inbox,
+    /// The user can use operator views (an admin profile).
+    pub operator: bool,
+    /// Next tab id.
+    pub next_id: TabId,
+    /// Quit after this frame.
+    pub quit: bool,
+}
+
+fn ctrl(k: &KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn alt(k: &KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::ALT)
+}
+
+impl App {
+    /// An app with one data tab.
+    #[must_use]
+    pub fn new(
+        profile: &str,
+        first: DataTab,
+        history: History,
+        confirm: Confirm,
+        operator: bool,
+    ) -> Self {
+        Self {
+            next_id: first.id + 1,
+            tabs: vec![first],
+            screen: 0,
+            focus: Focus::Editor,
+            explorer: Explorer {
+                note: Some("loading...".to_owned()),
+                ..Explorer::default()
+            },
+            catalog: Catalog::default(),
+            history,
+            dialog: None,
+            completion: None,
+            status: "F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit".to_owned(),
+            confirm,
+            profile: profile.to_owned(),
+            dash: DashState {
+                panels: vec![None; VIEW_NAMES.len()],
+                ..DashState::default()
+            },
+            admin: AdminState::default(),
+            inbox: Inbox::default(),
+            operator,
+            quit: false,
+        }
+    }
+
+    /// The fixed screen shown, if any.
+    #[must_use]
+    pub fn fixed(&self) -> Option<Fixed> {
+        self.screen
+            .checked_sub(self.tabs.len())
+            .and_then(|i| FIXED.get(i).copied())
+    }
+
+    /// Shows a fixed screen.
+    pub fn show(&mut self, f: Fixed) -> Vec<Effect> {
+        let i = FIXED.iter().position(|x| *x == f).unwrap_or(0);
+        self.screen = self.tabs.len() + i;
+        self.entered()
+    }
+
+    fn entered(&mut self) -> Vec<Effect> {
+        match self.fixed() {
+            Some(Fixed::Dash) => vec![Effect::DashRefresh(VIEW_NAMES[self.dash.view].to_owned())],
+            Some(Fixed::Inbox) => vec![Effect::InboxRefresh],
+            _ => Vec::new(),
+        }
+    }
+
+    fn tab_mut(&mut self) -> Option<&mut DataTab> {
+        if self.screen < self.tabs.len() {
+            self.tabs.get_mut(self.screen)
+        } else {
+            None
+        }
+    }
+
+    /// The tab with `id`.
+    pub fn tab_by_id(&mut self, id: TabId) -> Option<&mut DataTab> {
+        self.tabs.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Handles one key.
+    pub fn on_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        if k.kind == KeyEventKind::Release {
+            return Vec::new();
+        }
+        if let Some(d) = self.dialog.clone() {
+            return self.dialog_key(&d, k);
+        }
+        // Global keys.
+        match k.code {
+            KeyCode::Char('q') if ctrl(&k) => {
+                self.quit = true;
+                return vec![Effect::Quit];
+            }
+            KeyCode::F(1) => {
+                self.dialog = Some(Dialog::Help);
+                return Vec::new();
+            }
+            KeyCode::F(6) => return self.switch(-1),
+            KeyCode::F(7) => return self.switch(1),
+            KeyCode::Char(c @ '1'..='9') if alt(&k) => {
+                let i = (c as usize) - ('1' as usize);
+                if i < self.tabs.len() + FIXED.len() {
+                    self.screen = i;
+                    self.completion = None;
+                    return self.entered();
+                }
+                return Vec::new();
+            }
+            KeyCode::Char('t') if ctrl(&k) => {
+                let lang = self.tabs.get(self.screen).map_or(Lang::Sql, |t| t.lang);
+                self.status = String::from("opening a tab...");
+                return vec![Effect::NewTab(lang)];
+            }
+            KeyCode::Char('w')
+                if ctrl(&k) && self.screen < self.tabs.len() && self.tabs.len() > 1 =>
+            {
+                let t = self.tabs.remove(self.screen);
+                self.screen = self.screen.min(self.tabs.len() - 1);
+                return vec![Effect::CloseTab(t.id)];
+            }
+            _ => {}
+        }
+        match self.fixed() {
+            Some(Fixed::Dash) => self.dash_key(k),
+            Some(Fixed::Admin) => self.admin_key(k),
+            Some(Fixed::Inbox) => self.inbox_key(k),
+            None => self.data_key(k),
+        }
+    }
+
+    fn switch(&mut self, d: isize) -> Vec<Effect> {
+        let n = self.tabs.len() + FIXED.len();
+        self.screen = (self.screen + n).saturating_add_signed(d) % n;
+        self.completion = None;
+        self.entered()
+    }
+
+    fn dialog_key(&mut self, d: &Dialog, k: KeyEvent) -> Vec<Effect> {
+        match d {
+            Dialog::Confirm(_, pending) => match k.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.dialog = None;
+                    let p = pending.clone();
+                    match p {
+                        Pending::Run(tab, stmts, lang) => self.start_run(tab, stmts, lang),
+                        Pending::Admin(mut args) => {
+                            args.push("--yes".to_owned());
+                            self.admin.running = true;
+                            vec![Effect::Admin(args)]
+                        }
+                        Pending::Kill(id, q) => vec![Effect::Kill(id, q)],
+                        Pending::Inbox(a) => vec![Effect::InboxAct(a)],
+                    }
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    self.dialog = None;
+                    self.status = String::from("not run");
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            },
+            Dialog::Export => {
+                let f = match k.code {
+                    KeyCode::Char('c') => Some(Format::Csv),
+                    KeyCode::Char('j') => Some(Format::Json),
+                    KeyCode::Char('n') => Some(Format::Ndjson),
+                    KeyCode::Char('t') => Some(Format::Tsv),
+                    _ => None,
+                };
+                self.dialog = None;
+                match (f, self.tabs.get(self.screen)) {
+                    (Some(f), Some(t)) => vec![Effect::Export(t.id, f)],
+                    _ => Vec::new(),
+                }
+            }
+            Dialog::Input(title, text, action) => {
+                let mut text = text.clone();
+                match k.code {
+                    KeyCode::Enter => {
+                        self.dialog = None;
+                        return vec![Effect::InboxAct(action.clone().with_input(&text))];
+                    }
+                    KeyCode::Esc => {
+                        self.dialog = None;
+                        return Vec::new();
+                    }
+                    KeyCode::Backspace => {
+                        text.pop();
+                    }
+                    KeyCode::Char(c) => text.push(c),
+                    _ => {}
+                }
+                self.dialog = Some(Dialog::Input(title.clone(), text, action.clone()));
+                Vec::new()
+            }
+            Dialog::Help | Dialog::Cell(_) => {
+                self.dialog = None;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Checks statements and starts them, or asks first.
+    pub fn submit(&mut self, stmts: Vec<String>) -> Vec<Effect> {
+        let Some(tab) = self.tabs.get(self.screen) else {
+            return Vec::new();
+        };
+        let (id, lang) = (tab.id, tab.lang);
+        if tab.running {
+            self.status = String::from("a statement is running; Ctrl-C cancels it");
+            return Vec::new();
+        }
+        if stmts.is_empty() {
+            return Vec::new();
+        }
+        let why: Vec<String> = stmts
+            .iter()
+            .filter_map(|s| {
+                let d = destructive(s, lang);
+                match self.confirm {
+                    Confirm::Off => None,
+                    Confirm::Destructive => d,
+                    Confirm::Writes => d.or_else(|| {
+                        (lang == Lang::Sql
+                            && matches!(
+                                classify_sql(s),
+                                Class::Write | Class::Ddl | Class::Account
+                            ))
+                        .then(|| "a write".to_owned())
+                    }),
+                }
+            })
+            .collect();
+        if !why.is_empty() {
+            let shown: Vec<String> = stmts.iter().map(|s| redact(s, lang)).collect();
+            self.dialog = Some(Dialog::Confirm(
+                format!(
+                    "{} — run it?\n\n{}",
+                    why.join(", "),
+                    crate::tui::clip(&shown.join(";\n"), 600)
+                ),
+                Pending::Run(id, stmts, lang),
+            ));
+            return Vec::new();
+        }
+        self.start_run(id, stmts, lang)
+    }
+
+    fn start_run(&mut self, id: TabId, stmts: Vec<String>, lang: Lang) -> Vec<Effect> {
+        for s in &stmts {
+            self.history.add(s, lang);
+        }
+        let Some(tab) = self.tab_by_id(id) else {
+            return Vec::new();
+        };
+        let shown = redact(stmts.last().map_or("", String::as_str), lang);
+        tab.results.start(shown);
+        tab.running = true;
+        tab.started = Some(std::time::Instant::now());
+        vec![Effect::Run(id, stmts, lang)]
+    }
+
+    fn data_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        // Keys for every pane of a data tab.
+        match k.code {
+            KeyCode::Char('c') if ctrl(&k) => {
+                let Some(t) = self.tab_mut() else {
+                    return Vec::new();
+                };
+                if t.running {
+                    let id = t.id;
+                    return vec![Effect::Cancel(id)];
+                }
+                t.editor = Editor::default();
+                self.completion = None;
+                return Vec::new();
+            }
+            KeyCode::F(2) => {
+                self.focus = match self.focus {
+                    Focus::Explorer => Focus::Editor,
+                    Focus::Editor => Focus::Results,
+                    Focus::Results => Focus::Explorer,
+                };
+                self.completion = None;
+                return Vec::new();
+            }
+            KeyCode::F(3) => {
+                if let Some(t) = self.tab_mut() {
+                    t.results.view = t.results.view.next();
+                    t.results.row = 0;
+                    t.results.top = 0;
+                }
+                return Vec::new();
+            }
+            KeyCode::F(4) => {
+                if let Some(t) = self.tab_mut() {
+                    t.lang = match t.lang {
+                        Lang::Sql => Lang::Redis,
+                        Lang::Redis => Lang::Cypher,
+                        Lang::Cypher => Lang::Mongo,
+                        Lang::Mongo => Lang::Sql,
+                    };
+                    let l = t.lang.name();
+                    self.status = format!("language: {l}");
+                }
+                return Vec::new();
+            }
+            KeyCode::F(5) => return self.run_at_cursor(),
+            KeyCode::Char('r') if ctrl(&k) => return self.run_at_cursor(),
+            KeyCode::Char('e') if ctrl(&k) => {
+                if self
+                    .tabs
+                    .get(self.screen)
+                    .is_some_and(|t| t.results.set().is_some())
+                {
+                    self.dialog = Some(Dialog::Export);
+                }
+                return Vec::new();
+            }
+            KeyCode::Char('o') if ctrl(&k) => return vec![Effect::LoadCatalog],
+            KeyCode::Esc => {
+                if self.completion.take().is_none() {
+                    self.focus = Focus::Editor;
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
+        match self.focus {
+            Focus::Editor => self.editor_key(k),
+            Focus::Explorer => self.explorer_key(k),
+            Focus::Results => {
+                self.results_key(k);
+                Vec::new()
+            }
+        }
+    }
+
+    fn run_at_cursor(&mut self) -> Vec<Effect> {
+        let Some(t) = self.tabs.get(self.screen) else {
+            return Vec::new();
+        };
+        let s = t.editor.statement_at_cursor(t.lang);
+        self.completion = None;
+        if s.trim().is_empty() {
+            return Vec::new();
+        }
+        self.submit(vec![s])
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn editor_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        // The completion menu takes Up, Down, Enter and Tab first.
+        if let Some(c) = &mut self.completion {
+            match k.code {
+                KeyCode::Up => {
+                    c.selected = c.selected.saturating_sub(1);
+                    return Vec::new();
+                }
+                KeyCode::Down => {
+                    c.selected = (c.selected + 1).min(c.items.len().saturating_sub(1));
+                    return Vec::new();
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    let (n, item) = (c.word_len, c.items[c.selected].clone());
+                    self.completion = None;
+                    if let Some(t) = self.tab_mut() {
+                        t.editor.replace_before_cursor(n, &item);
+                    }
+                    return Vec::new();
+                }
+                _ => self.completion = None,
+            }
+        }
+        let screen = self.screen;
+        let Some(t) = self.tabs.get_mut(screen) else {
+            return Vec::new();
+        };
+        let e = &mut t.editor;
+        match k.code {
+            KeyCode::Enter if alt(&k) => e.newline(),
+            KeyCode::Enter => {
+                if e.complete_at_end(t.lang) {
+                    let text = e.text();
+                    let stmts: Vec<String> = match split(&text, t.lang) {
+                        Ok(s) => s.into_iter().map(|s| s.text).collect(),
+                        Err(err) => {
+                            self.status = err.to_string();
+                            return Vec::new();
+                        }
+                    };
+                    let fx = self.submit(stmts);
+                    if !fx.is_empty()
+                        && let Some(t) = self.tabs.get_mut(screen)
+                    {
+                        t.editor = Editor::default();
+                    }
+                    return fx;
+                }
+                e.newline();
+            }
+            KeyCode::Tab => {
+                let word = e.word_before_cursor();
+                if word.is_empty() {
+                    e.insert_str("  ");
+                    return Vec::new();
+                }
+                let stmt = {
+                    let text = e.text();
+                    text[..e.cursor_offset()].to_owned()
+                };
+                let items = complete(&self.catalog, t.lang, t.database.as_deref(), &stmt, &word);
+                match items.len() {
+                    0 => self.status = String::from("no completions"),
+                    1 => e.replace_before_cursor(word.chars().count(), &items[0]),
+                    _ => {
+                        self.completion = Some(Completion {
+                            items,
+                            selected: 0,
+                            word_len: word.chars().count(),
+                        });
+                    }
+                }
+            }
+            KeyCode::Up if ctrl(&k) || alt(&k) => {
+                if let Some(h) = self.history.older() {
+                    let h = h.to_owned();
+                    t.editor.set_text(&h);
+                }
+            }
+            KeyCode::Down if ctrl(&k) || alt(&k) => {
+                let h = self.history.newer().map(str::to_owned);
+                t.editor.set_text(&h.unwrap_or_default());
+            }
+            KeyCode::Left if ctrl(&k) || alt(&k) => e.word_left(),
+            KeyCode::Right if ctrl(&k) || alt(&k) => e.word_right(),
+            KeyCode::Left => e.left(),
+            KeyCode::Right => e.right(),
+            KeyCode::Up => {
+                e.up();
+            }
+            KeyCode::Down => {
+                e.down();
+            }
+            KeyCode::Home => e.home(),
+            KeyCode::End => e.end(),
+            KeyCode::Backspace => e.backspace(),
+            KeyCode::Delete => e.delete(),
+            KeyCode::Char('a') if ctrl(&k) => e.home(),
+            KeyCode::Char('u') if ctrl(&k) => e.kill_to_start(),
+            KeyCode::Char('k') if ctrl(&k) => e.kill_to_end(),
+            KeyCode::Char('l') if ctrl(&k) => t.editor = Editor::default(),
+            KeyCode::Char(c) if !ctrl(&k) => e.insert(c),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn explorer_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        let a = match k.code {
+            KeyCode::Up => {
+                self.explorer.move_by(-1);
+                ExplorerAction::None
+            }
+            KeyCode::Down => {
+                self.explorer.move_by(1);
+                ExplorerAction::None
+            }
+            KeyCode::PageUp => {
+                self.explorer.move_by(-10);
+                ExplorerAction::None
+            }
+            KeyCode::PageDown => {
+                self.explorer.move_by(10);
+                ExplorerAction::None
+            }
+            KeyCode::Right => self.explorer.activate(false),
+            KeyCode::Enter => self.explorer.activate(true),
+            KeyCode::Left => {
+                self.explorer.close();
+                ExplorerAction::None
+            }
+            _ => ExplorerAction::None,
+        };
+        match a {
+            ExplorerAction::None => Vec::new(),
+            ExplorerAction::Load(db) => vec![Effect::LoadDb(db)],
+            ExplorerAction::Insert(s) => {
+                if let Some(t) = self.tab_mut() {
+                    t.editor.insert_str(&s);
+                }
+                self.focus = Focus::Editor;
+                Vec::new()
+            }
+            ExplorerAction::Run(sql) => {
+                if let Some(t) = self.tab_mut() {
+                    if t.lang != Lang::Sql {
+                        t.lang = Lang::Sql;
+                    }
+                    t.editor = Editor::with_text(&sql);
+                }
+                self.focus = Focus::Results;
+                self.submit(vec![sql.trim_end_matches(';').to_owned()])
+            }
+        }
+    }
+
+    fn results_key(&mut self, k: KeyEvent) {
+        let Some(t) = self.tab_mut() else { return };
+        let r = &mut t.results;
+        match k.code {
+            KeyCode::Up => r.move_rows(-1),
+            KeyCode::Down => r.move_rows(1),
+            KeyCode::PageUp => r.move_rows(-20),
+            KeyCode::PageDown => r.move_rows(20),
+            KeyCode::Home => r.row = 0,
+            KeyCode::End => r.move_rows(isize::MAX / 2),
+            KeyCode::Left => r.move_cols(-1),
+            KeyCode::Right => r.move_cols(1),
+            KeyCode::Char('[') => r.cycle_result(false),
+            KeyCode::Char(']') => r.cycle_result(true),
+            KeyCode::Enter => {
+                if r.view == View::Json {
+                    r.toggle_fold();
+                } else if let Some(c) = r.selected_cell() {
+                    self.dialog = Some(Dialog::Cell(c));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn dash_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        let n = VIEW_NAMES.len();
+        let view = |d: &DashState| VIEW_NAMES[d.view].to_owned();
+        match k.code {
+            KeyCode::Left => {
+                self.dash.view = (self.dash.view + n - 1) % n;
+                self.dash.row = 0;
+                vec![Effect::DashRefresh(view(&self.dash))]
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                self.dash.view = (self.dash.view + 1) % n;
+                self.dash.row = 0;
+                vec![Effect::DashRefresh(view(&self.dash))]
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                let i = (c as usize) - ('1' as usize);
+                if i < n {
+                    self.dash.view = i;
+                    self.dash.row = 0;
+                    return vec![Effect::DashRefresh(view(&self.dash))];
+                }
+                Vec::new()
+            }
+            KeyCode::Up => {
+                self.dash.row = self.dash.row.saturating_sub(1);
+                Vec::new()
+            }
+            KeyCode::Down => {
+                self.dash.row += 1;
+                Vec::new()
+            }
+            KeyCode::Char('r') => vec![Effect::DashRefresh(view(&self.dash))],
+            KeyCode::Char(c @ ('k' | 'q')) if VIEW_NAMES[self.dash.view] == "sessions" => {
+                let Some(Some(p)) = self.dash.panels.get(self.dash.view) else {
+                    return Vec::new();
+                };
+                let Some(row) = p.rows.get(self.dash.row) else {
+                    return Vec::new();
+                };
+                let id = row.first().cloned().unwrap_or_default();
+                let what = if c == 'q' {
+                    "the statement of session"
+                } else {
+                    "session"
+                };
+                self.dialog = Some(Dialog::Confirm(
+                    format!("Kill {what} {id}?"),
+                    Pending::Kill(id, c == 'q'),
+                ));
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn admin_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        let a = &mut self.admin;
+        match k.code {
+            KeyCode::Enter => {
+                let line = a.input.text().trim().to_owned();
+                if line.is_empty() || a.running {
+                    return Vec::new();
+                }
+                let line = line.strip_prefix("sprigctl ").unwrap_or(&line).to_owned();
+                let args = match crate::admin::split_args(&line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.status = e.to_string();
+                        return Vec::new();
+                    }
+                };
+                a.history.push(line.clone());
+                a.pos = a.history.len();
+                a.input = Editor::default();
+                a.scroll = 0;
+                if admin_destructive(&args) && !args.iter().any(|x| x == "--yes") {
+                    self.dialog = Some(Dialog::Confirm(
+                        format!("sprigctl {line}\n\nThis changes the platform. Run it?"),
+                        Pending::Admin(args),
+                    ));
+                    return Vec::new();
+                }
+                a.running = true;
+                vec![Effect::Admin(args)]
+            }
+            KeyCode::Up => {
+                if a.pos > 0 {
+                    a.pos -= 1;
+                    let h = a.history[a.pos].clone();
+                    a.input.set_text(&h);
+                }
+                Vec::new()
+            }
+            KeyCode::Down => {
+                if a.pos + 1 < a.history.len() {
+                    a.pos += 1;
+                    let h = a.history[a.pos].clone();
+                    a.input.set_text(&h);
+                } else {
+                    a.pos = a.history.len();
+                    a.input = Editor::default();
+                }
+                Vec::new()
+            }
+            KeyCode::PageUp => {
+                a.scroll = (a.scroll + 10).min(a.output.len());
+                Vec::new()
+            }
+            KeyCode::PageDown => {
+                a.scroll = a.scroll.saturating_sub(10);
+                Vec::new()
+            }
+            KeyCode::Left => {
+                a.input.left();
+                Vec::new()
+            }
+            KeyCode::Right => {
+                a.input.right();
+                Vec::new()
+            }
+            KeyCode::Backspace => {
+                a.input.backspace();
+                Vec::new()
+            }
+            KeyCode::Char('l') if ctrl(&k) => {
+                a.output.clear();
+                Vec::new()
+            }
+            KeyCode::Char('u') if ctrl(&k) => {
+                a.input = Editor::default();
+                Vec::new()
+            }
+            KeyCode::Char(c) if !ctrl(&k) => {
+                a.input.insert(c);
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn inbox_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        match self.inbox.on_key(k) {
+            crate::inbox::KeyOutcome::None => Vec::new(),
+            crate::inbox::KeyOutcome::Refresh => vec![Effect::InboxRefresh],
+            crate::inbox::KeyOutcome::Act(a) => vec![Effect::InboxAct(a)],
+            crate::inbox::KeyOutcome::Confirm(q, a) => {
+                self.dialog = Some(Dialog::Confirm(q, Pending::Inbox(a)));
+                Vec::new()
+            }
+            crate::inbox::KeyOutcome::Ask(q, a) => {
+                self.dialog = Some(Dialog::Input(q, String::new(), a));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Handles a runtime message.
+    #[allow(clippy::too_many_lines)]
+    pub fn on_msg(&mut self, m: Msg) -> Vec<Effect> {
+        match m {
+            Msg::Events(id, evs) => {
+                if let Some(t) = self.tab_by_id(id) {
+                    t.results.push(evs);
+                }
+            }
+            Msg::Done {
+                tab,
+                error,
+                elapsed_ms,
+                describe,
+                database,
+                in_txn,
+            } => {
+                let db_changed;
+                if let Some(t) = self.tab_by_id(tab) {
+                    t.running = false;
+                    t.started = None;
+                    t.results.running = None;
+                    db_changed = t.database != database;
+                    t.describe = describe;
+                    t.database = database;
+                    t.in_txn = in_txn;
+                    let rows: usize = t
+                        .results
+                        .sets
+                        .iter()
+                        .map(|s| s.rows.len().max(s.docs.len()))
+                        .sum();
+                    let truncated = t
+                        .results
+                        .sets
+                        .iter()
+                        .any(|s| s.end.as_ref().is_some_and(|e| e.truncated));
+                    t.results.note = match &error {
+                        Some(e) if e.is(crate::error::ShellCode::Cancelled) => {
+                            "cancelled".to_owned()
+                        }
+                        Some(_) => format!("error · {elapsed_ms} ms"),
+                        None => format!(
+                            "{rows} row{}{} · {elapsed_ms} ms",
+                            if rows == 1 { "" } else { "s" },
+                            if truncated { " (cut at the cap)" } else { "" }
+                        ),
+                    };
+                    t.results.error = error;
+                    if db_changed {
+                        return vec![Effect::LoadCatalog];
+                    }
+                }
+            }
+            Msg::TabOpened(t) => {
+                self.next_id = self.next_id.max(t.id + 1);
+                self.tabs.push(t);
+                self.screen = self.tabs.len() - 1;
+                self.status = String::from("new tab");
+            }
+            Msg::Catalog(r) => match r {
+                Ok(v) => {
+                    self.catalog.databases = v
+                        .get("databases")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    self.explorer.set_databases(&v);
+                    // Load the current database so completion knows it.
+                    if let Some(db) = self.tabs.get(self.screen).and_then(|t| t.database.clone())
+                        && !self.catalog.objects.contains_key(&db)
+                    {
+                        return vec![Effect::LoadDb(db)];
+                    }
+                }
+                Err(e) => self.explorer.note = Some(format!("catalog: {e}")),
+            },
+            Msg::Db(db, r, streams, sinks) => match r {
+                Ok(v) => {
+                    self.catalog.set_snapshot(&db, &v, &streams);
+                    self.explorer.set_database(&db, &v, &streams, &sinks);
+                }
+                Err(e) => self.explorer.set_error(&db, &e.to_string()),
+            },
+            Msg::Dash(p) => {
+                if let Some(i) = VIEW_NAMES.iter().position(|v| *v == p.view) {
+                    self.dash.panels[i] = Some(p);
+                    if i == self.dash.view {
+                        self.dash.polled = Some(std::time::Instant::now());
+                    }
+                }
+            }
+            Msg::Admin(args, r) => {
+                self.admin.running = false;
+                self.admin.output.push(Line::styled(
+                    format!("sprigctl {}", args.join(" ")),
+                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ));
+                match r {
+                    Ok(c) => {
+                        for l in c.stdout.lines() {
+                            self.admin.output.push(Line::from(l.to_owned()));
+                        }
+                        for l in c.stderr.lines() {
+                            self.admin
+                                .output
+                                .push(Line::styled(l.to_owned(), Style::new().fg(Color::Red)));
+                        }
+                        if c.code != 0 {
+                            self.admin.output.push(Line::styled(
+                                format!("(exit {})", c.code),
+                                Style::new().fg(Color::Red),
+                            ));
+                        }
+                    }
+                    Err(e) => self
+                        .admin
+                        .output
+                        .push(Line::styled(e.to_string(), Style::new().fg(Color::Red))),
+                }
+                let keep = 5000;
+                if self.admin.output.len() > keep {
+                    let d = self.admin.output.len() - keep;
+                    self.admin.output.drain(..d);
+                }
+            }
+            Msg::Inbox(r) => self.inbox.set(r),
+            Msg::Status(s) => self.status = s,
+        }
+        Vec::new()
+    }
+
+    /// Effects of the refresh timer: the visible dashboard view.
+    #[must_use]
+    pub fn tick(&self, refresh: std::time::Duration) -> Vec<Effect> {
+        match self.fixed() {
+            Some(Fixed::Dash) if self.dash.polled.is_none_or(|t| t.elapsed() >= refresh) => {
+                vec![Effect::DashRefresh(VIEW_NAMES[self.dash.view].to_owned())]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Draws everything.
+    pub fn draw(&mut self, f: &mut Frame<'_>) {
+        let area = f.area();
+        if area.width < 60 || area.height < 16 {
+            f.render_widget(
+                Paragraph::new(format!(
+                    "The terminal is {}x{}; sprig needs at least 60x16.",
+                    area.width, area.height
+                ))
+                .wrap(Wrap { trim: true }),
+                area,
+            );
+            return;
+        }
+        let [top, body, bottom] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        self.draw_tabs(f, top);
+        match self.fixed() {
+            None => self.draw_data(f, body),
+            Some(Fixed::Dash) => self.draw_dash(f, body),
+            Some(Fixed::Admin) => self.draw_admin(f, body),
+            Some(Fixed::Inbox) => self.inbox.draw(f, body),
+        }
+        self.draw_status(f, bottom);
+        self.draw_dialog(f, area);
+    }
+
+    fn draw_tabs(&self, f: &mut Frame<'_>, area: Rect) {
+        let mut titles: Vec<Line<'_>> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let db = t.database.as_deref().unwrap_or("-");
+                let busy = if t.running { " …" } else { "" };
+                Line::from(format!("{} {} {db}{busy}", i + 1, t.lang.name()))
+            })
+            .collect();
+        titles.push(Line::from("Dashboard"));
+        titles.push(Line::from("Admin"));
+        titles.push(Line::from(match self.inbox.count() {
+            Some(n) if n > 0 => format!("Inbox ({n})"),
+            _ => "Inbox".to_owned(),
+        }));
+        f.render_widget(
+            Tabs::new(titles)
+                .select(self.screen)
+                .highlight_style(Style::new().fg(Color::Black).bg(Color::Cyan))
+                .divider("│"),
+            area,
+        );
+    }
+
+    fn pane(title: String, focused: bool) -> Block<'static> {
+        let style = if focused {
+            Style::new().fg(Color::Cyan)
+        } else {
+            Style::new().fg(Color::DarkGray)
+        };
+        Block::bordered().border_style(style).title(title)
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    fn draw_data(&mut self, f: &mut Frame<'_>, area: Rect) {
+        let show_explorer = area.width >= 90;
+        let [left, right] = if show_explorer {
+            Layout::horizontal([Constraint::Length(30), Constraint::Min(30)]).areas(area)
+        } else {
+            [Rect::default(), area]
+        };
+        if show_explorer {
+            let block = Self::pane(" Explorer ".to_owned(), self.focus == Focus::Explorer);
+            let inner = block.inner(left);
+            let lines = self
+                .explorer
+                .lines(inner.height as usize, self.focus == Focus::Explorer);
+            f.render_widget(Paragraph::new(lines).block(block), left);
+        }
+        let screen = self.screen;
+        let focus = self.focus;
+        let Some(t) = self.tabs.get_mut(screen) else {
+            return;
+        };
+        let ed_h = (u16::try_from(t.editor.line_count()).unwrap_or(u16::MAX) + 2)
+            .clamp(5, (right.height / 2).max(5));
+        let [ed_area, res_area] =
+            Layout::vertical([Constraint::Length(ed_h), Constraint::Min(3)]).areas(right);
+        let block = Self::pane(
+            format!(" Editor [{}] ", t.lang.name()),
+            focus == Focus::Editor,
+        );
+        let inner = block.inner(ed_area);
+        t.editor.scroll_to_cursor(inner.height as usize);
+        let lines = t.editor.render_lines(t.lang, inner.height as usize);
+        f.render_widget(Paragraph::new(lines).block(block), ed_area);
+        if focus == Focus::Editor && self.dialog.is_none() {
+            let x = inner.x
+                + u16::try_from(t.editor.gutter() + t.editor.cursor_display_col()).unwrap_or(0);
+            let y =
+                inner.y + u16::try_from(t.editor.row.saturating_sub(t.editor.scroll)).unwrap_or(0);
+            if x < inner.right() && y < inner.bottom() {
+                f.set_cursor_position((x, y));
+            }
+            if let Some(c) = &self.completion {
+                let h = u16::try_from(c.items.len().min(8)).unwrap_or(8) + 2;
+                let w = u16::try_from(c.items.iter().map(String::len).max().unwrap_or(4) + 4)
+                    .unwrap_or(40)
+                    .min(40);
+                let popup = Rect {
+                    x: x.min(area.right().saturating_sub(w)),
+                    y: (y + 1).min(area.bottom().saturating_sub(h)),
+                    width: w,
+                    height: h,
+                };
+                let first = c.selected.saturating_sub(7);
+                let items: Vec<Line<'_>> = c
+                    .items
+                    .iter()
+                    .enumerate()
+                    .skip(first)
+                    .take(8)
+                    .map(|(i, s)| {
+                        let st = if i == c.selected {
+                            Style::new().fg(Color::Black).bg(Color::Cyan)
+                        } else {
+                            Style::new()
+                        };
+                        Line::styled(s.clone(), st)
+                    })
+                    .collect();
+                f.render_widget(Clear, popup);
+                f.render_widget(Paragraph::new(items).block(Block::bordered()), popup);
+            }
+        }
+        let title = t.results.title();
+        let block = Self::pane(title, focus == Focus::Results);
+        t.results.draw(f, res_area, block);
+    }
+
+    fn draw_dash(&mut self, f: &mut Frame<'_>, area: Rect) {
+        let [left, right] =
+            Layout::horizontal([Constraint::Length(18), Constraint::Min(30)]).areas(area);
+        let views: Vec<Line<'_>> = VIEW_NAMES
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let st = if i == self.dash.view {
+                    Style::new().fg(Color::Black).bg(Color::Cyan)
+                } else {
+                    Style::new()
+                };
+                Line::styled(format!("{} {v}", i + 1), st)
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(views).block(Block::bordered().title(" Views ")),
+            left,
+        );
+        let name = VIEW_NAMES[self.dash.view];
+        let age = self.dash.polled.map_or_else(
+            || "not polled yet".to_owned(),
+            |t| format!("{} s ago", t.elapsed().as_secs()),
+        );
+        let block = Block::bordered().title(format!(" {name} · {age} · r refresh "));
+        let inner = block.inner(right);
+        f.render_widget(block, right);
+        let Some(Some(p)) = self.dash.panels.get(self.dash.view).cloned() else {
+            f.render_widget(Paragraph::new("loading..."), inner);
+            return;
+        };
+        let [note_area, table_area] = if p.note.is_some() {
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner)
+        } else {
+            [Rect::default(), inner]
+        };
+        if let Some(n) = &p.note {
+            f.render_widget(
+                Paragraph::new(Line::styled(n.clone(), Style::new().fg(Color::Yellow)))
+                    .wrap(Wrap { trim: true }),
+                note_area,
+            );
+        }
+        if p.columns.is_empty() {
+            return;
+        }
+        self.dash.row = self.dash.row.min(p.rows.len().saturating_sub(1));
+        let widths: Vec<Constraint> = p
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let w = p
+                    .rows
+                    .iter()
+                    .take(100)
+                    .filter_map(|r| r.get(i))
+                    .map(|v| v.chars().count())
+                    .chain([c.chars().count()])
+                    .max()
+                    .unwrap_or(4)
+                    .min(36);
+                Constraint::Length(u16::try_from(w).unwrap_or(36))
+            })
+            .collect();
+        let h = table_area.height.saturating_sub(1) as usize;
+        let first = self.dash.row.saturating_sub(h.saturating_sub(1));
+        let rows = p.rows.iter().enumerate().skip(first).take(h).map(|(i, r)| {
+            let row = Row::new(r.iter().map(|c| crate::tui::clip(c, 36)));
+            if i == self.dash.row {
+                row.style(Style::new().add_modifier(Modifier::REVERSED))
+            } else {
+                row
+            }
+        });
+        let header = Row::new(p.columns.clone()).style(Style::new().add_modifier(Modifier::BOLD));
+        f.render_widget(
+            Table::new(rows, widths).header(header).column_spacing(1),
+            table_area,
+        );
+    }
+
+    fn draw_admin(&self, f: &mut Frame<'_>, area: Rect) {
+        let [out_area, in_area] =
+            Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(area);
+        let block = Block::bordered().title(" Admin · sprigctl output · PgUp/PgDn ");
+        let inner = block.inner(out_area);
+        let h = inner.height as usize;
+        let end = self.admin.output.len().saturating_sub(self.admin.scroll);
+        let start = end.saturating_sub(h);
+        let lines: Vec<Line<'static>> = if self.admin.output.is_empty() {
+            vec![
+                Line::from(
+                    "Type a sprigctl command without \"sprigctl\": tenant list, cluster show c1,",
+                ),
+                Line::from("settings get gateway.max_connections --scope global, job list ..."),
+                Line::styled(
+                    if self.operator {
+                        "Commands run as sprigctl with this profile's admin_url and admin_token_file."
+                    } else {
+                        "This profile has no admin_url: sprigctl uses its own defaults (127.0.0.1:7480)."
+                    },
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ]
+        } else {
+            self.admin.output[start..end].to_vec()
+        };
+        f.render_widget(Paragraph::new(lines).block(block), out_area);
+        let title = if self.admin.running {
+            " sprigctl (running) "
+        } else {
+            " sprigctl "
+        };
+        let block = Block::bordered()
+            .title(title)
+            .border_style(Style::new().fg(Color::Cyan));
+        let inner = block.inner(in_area);
+        f.render_widget(
+            Paragraph::new(self.admin.input.text()).block(block),
+            in_area,
+        );
+        if self.dialog.is_none() {
+            let x = inner.x + u16::try_from(self.admin.input.cursor_display_col()).unwrap_or(0);
+            f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
+        }
+    }
+
+    fn draw_status(&self, f: &mut Frame<'_>, area: Rect) {
+        let mut spans = Vec::new();
+        if let Some(t) = self
+            .tabs
+            .get(self.screen.min(self.tabs.len().saturating_sub(1)))
+        {
+            spans.push(Span::styled(
+                format!(" {} ", self.profile),
+                Style::new().fg(Color::Black).bg(Color::Cyan),
+            ));
+            spans.push(Span::raw(format!(" {} ", t.describe)));
+            if t.in_txn {
+                spans.push(Span::styled(
+                    " TXN ",
+                    Style::new().fg(Color::Black).bg(Color::Yellow),
+                ));
+            }
+            if let Some(s) = t.started {
+                spans.push(Span::raw(format!(
+                    " running {} ms ",
+                    s.elapsed().as_millis()
+                )));
+            }
+        }
+        if let Some(n) = self.inbox.count().filter(|n| *n > 0) {
+            spans.push(Span::styled(
+                format!(" ⚑ {n} to approve "),
+                Style::new().fg(Color::Black).bg(Color::Magenta),
+            ));
+        }
+        spans.push(Span::styled(
+            format!(" {}", self.status),
+            Style::new().fg(Color::DarkGray),
+        ));
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    fn draw_dialog(&self, f: &mut Frame<'_>, area: Rect) {
+        let Some(d) = &self.dialog else { return };
+        let (title, body): (&str, Vec<Line<'_>>) = match d {
+            Dialog::Confirm(q, _) => {
+                let mut l: Vec<Line<'_>> = q.lines().map(|s| Line::from(s.to_owned())).collect();
+                l.push(Line::from(""));
+                l.push(Line::styled(
+                    "y: run it    n or Esc: don't",
+                    Style::new().fg(Color::Yellow),
+                ));
+                (" Confirm ", l)
+            }
+            Dialog::Help => (" Keys ", help_lines()),
+            Dialog::Cell(s) => (
+                " Value · any key closes ",
+                s.lines().map(|l| Line::from(l.to_owned())).collect(),
+            ),
+            Dialog::Export => (
+                " Export the shown result ",
+                vec![Line::from(
+                    "c: CSV   j: JSON   n: NDJSON   t: TSV   Esc: cancel",
+                )],
+            ),
+            Dialog::Input(q, text, _) => (
+                " Inbox ",
+                vec![
+                    Line::from(q.clone()),
+                    Line::from(format!("> {text}")),
+                    Line::styled(
+                        "Enter: send   Esc: cancel",
+                        Style::new().fg(Color::DarkGray),
+                    ),
+                ],
+            ),
+        };
+        let w = area.width.saturating_sub(10).min(84);
+        let h = (u16::try_from(body.len()).unwrap_or(20) + 2).min(area.height.saturating_sub(4));
+        let r = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 2,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, r);
+        f.render_widget(
+            Paragraph::new(body).wrap(Wrap { trim: false }).block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(Style::new().fg(Color::Yellow)),
+            ),
+            r,
+        );
+    }
+}
+
+fn help_lines() -> Vec<Line<'static>> {
+    [
+        "F5, Ctrl-R    run the statement at the cursor",
+        "Enter         after ';' at the end: run everything typed",
+        "Alt-Enter     new line",
+        "Tab           complete (Up/Down, Enter)",
+        "Ctrl-Up/Down  history (secrets are stored redacted)",
+        "Ctrl-C        cancel the running statement, else clear",
+        "F2            focus: explorer, editor, results",
+        "F3            results as grid, JSON tree or graph",
+        "F4            language: sql, redis, cypher, mongo",
+        "[ ]           previous or next result",
+        "Enter         (results) show a value / fold JSON",
+        "Ctrl-E        export the result: CSV, JSON, NDJSON, TSV",
+        "Ctrl-O        reload the explorer",
+        "Ctrl-T, Ctrl-W  new tab, close tab",
+        "F6, F7, Alt-n previous or next tab, tab n",
+        "Dashboard     1-6 or Left/Right views, r refresh, k kill, q kill query",
+        "Admin         sprigctl commands; Up/Down history",
+        "Inbox         a approve, w window, i ignore, s snooze, c comment",
+        "Ctrl-Q        quit",
+    ]
+    .into_iter()
+    .map(Line::from)
+    .collect()
+}

@@ -60,6 +60,8 @@
 //! (trigger evaluation, step 2, records only fingerprints that did).
 
 pub mod view;
+// Chapter 52: recommended rows for the approvals gate.
+pub mod held;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

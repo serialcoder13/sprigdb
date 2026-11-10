@@ -714,7 +714,7 @@ async fn route(
         Validated::Accepted { .. } => {
             let bytes = table_bytes(o).await;
             let method = choose_method(&o.view, bytes, &o.rollout.galera, hooks.mover.is_some());
-            if o.mode == Mode::Recommend || advise || r.kind.is_advice() {
+            if matches!(o.mode, Mode::Recommend | Mode::Approve) || advise || r.kind.is_advice() {
                 (IndexState::Recommended, "recommend".to_owned())
             } else if let BuildMethod::Recommend(why) = method {
                 (IndexState::Recommended, why)

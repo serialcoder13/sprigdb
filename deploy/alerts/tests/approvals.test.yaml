@@ -1,0 +1,36 @@
+rule_files:
+  - ../sprig-approvals.rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'sprig_approvals_oldest_open_seconds{kind="dc.move",level="tenant"}'
+        values: '259000+60x30'
+      - series: 'sprig_approvals_applied_total{kind="index.create",result="failed"}'
+        values: '0 1 1 1 1 1 1 1 1 1'
+      - series: 'sprig_approvals_notifications_total{channel="email",result="failed"}'
+        values: '0+1x100'
+      - series: 'sprig_approvals_notifications_total{channel="email",result="sent"}'
+        values: '0x100'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SprigApprovalsWaitingLong
+        exp_alerts:
+          - exp_labels: { severity: ticket, kind: dc.move, level: tenant }
+            exp_annotations:
+              summary: A recommendation has waited more than 3 days for a decision
+              runbook: chapter 52 (approve, ignore or snooze it; or set approvals.escalate_after)
+      - eval_time: 8m
+        alertname: SprigApprovalsApplyFailing
+        exp_alerts:
+          - exp_labels: { severity: ticket, kind: index.create }
+            exp_annotations:
+              summary: An approved change failed to apply
+              runbook: chapter 52 (sprigctl recommendations show <id>; the component's own job)
+      - eval_time: 70m
+        alertname: SprigApprovalsNotifyFailing
+        exp_alerts:
+          - exp_labels: { severity: ticket, channel: email }
+            exp_annotations:
+              summary: Approval notifications on a channel fail and none get through
+              runbook: chapter 52 (approvals.smtp_url, approvals.webhook_url, the stream's database)

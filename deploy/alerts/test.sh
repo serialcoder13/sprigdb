@@ -10,6 +10,6 @@ if command -v promtool >/dev/null; then
 else
     img=prom/prometheus:v3.5.0
     run() { docker run --rm -v "$PWD:/alerts:ro" -w /alerts --entrypoint promtool "$img" "$@"; }
-    run check rules sprig-slo.rules.yaml sprig-ops.rules.yaml
-    run test rules tests/slo.test.yaml tests/ops.test.yaml
+    run check rules sprig-slo.rules.yaml sprig-ops.rules.yaml sprig-approvals.rules.yaml
+    run test rules tests/slo.test.yaml tests/ops.test.yaml tests/approvals.test.yaml
 fi

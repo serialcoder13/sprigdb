@@ -1773,7 +1773,7 @@ pub const fn route_text(r: Route) -> &'static str {
 const fn mode_text(m: Mode) -> &'static str {
     match m {
         Mode::On => "applied",
-        Mode::Recommend | Mode::Off => "recommended",
+        Mode::Recommend | Mode::Approve | Mode::Off => "recommended",
     }
 }
 

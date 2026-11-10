@@ -775,6 +775,54 @@ impl PassSession {
             };
         }
 
+        // Chapter 52: SHOW SPRIG RECOMMENDATIONS, SPRIG APPROVE|IGNORE|
+        // SNOOZE RECOMMENDATION.
+        if let Some(parsed) = sprig_sql::rec_stmt::parse(text, &lex) {
+            if sandbox {
+                return self.fail(out, &must_reset()).await;
+            }
+            let stmt = match parsed {
+                Ok(s) => s,
+                Err(e) => return self.fail(out, &e.into()).await,
+            };
+            let current = self.current_logical();
+            let Some(ts) = self.tenant.as_deref_mut() else {
+                return Err(SprigError::internal("no tenant"));
+            };
+            let cat = match ts.refresh().await {
+                Ok(c) => c,
+                Err(e) => return self.fail(out, &e).await,
+            };
+            let r = Box::pin(crate::tenant::rec_sql::execute(
+                ts,
+                &cat,
+                current.as_deref(),
+                &stmt,
+                charset,
+            ))
+            .await;
+            let s = status(self.status());
+            return match r {
+                Ok(crate::tenant::rec_sql::RecAnswer::Ok) => {
+                    let mut ok = OkPacket::new(s);
+                    ok.affected_rows = 1;
+                    out.ok(ok).await?;
+                    Ok(Step {
+                        errored: false,
+                        status: Some(s),
+                    })
+                }
+                Ok(crate::tenant::rec_sql::RecAnswer::Rows(ans)) => {
+                    send_local(out, &ans, format, s).await?;
+                    Ok(Step {
+                        errored: false,
+                        status: Some(s),
+                    })
+                }
+                Err(e) => self.fail(out, &e).await,
+            };
+        }
+
         // Settings statements (chapter 42's `ALTER TABLE ... SPRIG
         // INHERITABLE` and `SPRIG RESET <table>` are not).
         if let Some(parsed) = settings_stmt::parse(text, &lex)
@@ -1006,6 +1054,10 @@ impl PassSession {
         let mut retried = false;
         // Chapter 07 (R1): metadata of the tables the advisor grouped.
         let grouped = self.grouped_tables().await;
+        // bugfix-8: `information_schema` rows of groups on other clusters,
+        // read there between two planning passes.
+        let mut remote = sprig_sql::names::RemoteBranches::default();
+        let mut remote_read = false;
         let planned = loop {
             let current = self.current_logical();
             let Some(ts) = self.tenant.as_deref() else {
@@ -1030,6 +1082,17 @@ impl PassSession {
                 let names: &dyn NameMap = match &with {
                     Some(w) => w,
                     None => &*map,
+                };
+                let far = grouped.as_deref().filter(|g| g.has_remote()).map(|g| {
+                    sprig_sql::names::WithRemote {
+                        inner: names,
+                        groups: g,
+                        branches: &remote,
+                    }
+                });
+                let names: &dyn NameMap = match &far {
+                    Some(w) => w,
+                    None => names,
                 };
                 let mut rw = RewriteCtx::new(names, self.persona)
                     .lex(lex)
@@ -1059,7 +1122,19 @@ impl PassSession {
                 plan(text, &pctx)
             };
             match r {
-                Ok(p) => break Ok((p, map)),
+                Ok(p) => {
+                    let wanted = remote.take_wanted();
+                    if wanted.is_empty() || remote_read {
+                        break Ok((p, map));
+                    }
+                    remote_read = true;
+                    for (cluster, sql) in wanted {
+                        match self.remote_branch_rows(cx, &cluster, &sql).await {
+                            Ok(rows) => remote.insert(sql, rows),
+                            Err(e) => return self.fail(out, &e).await,
+                        }
+                    }
+                }
                 Err(NameError::UnknownDatabase(n)) if !retried => {
                     retried = true;
                     let Some(ts) = self.tenant.as_deref_mut() else {

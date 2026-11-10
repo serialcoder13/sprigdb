@@ -1360,7 +1360,10 @@ pub fn decide(cause: Cause, e: &Evidence, s: &AdvisorSettings) -> Verdict {
         Cause::Periodic | Cause::NewObject => Verdict::NoChange,
     };
     match (s.mode, v) {
-        (AdvisorMode::Recommend, Verdict::Apply | Verdict::ApplyLowConfidence) => {
+        (
+            AdvisorMode::Recommend | AdvisorMode::Approve,
+            Verdict::Apply | Verdict::ApplyLowConfidence,
+        ) => {
             Verdict::Recommend
         }
         _ => v,

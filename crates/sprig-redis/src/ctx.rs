@@ -109,7 +109,8 @@ pub struct Ctx<'a> {
     pub env: &'a Env,
     /// The tenant, scoping the hub and the wait table.
     pub scope: &'a str,
-    /// MariaDB's clock at the last key read, ms since the epoch.
+    /// MariaDB's clock at the last key read, ms since the epoch; 0 after a
+    /// read of an absent key ([`Ctx::clock`] reads it then).
     pub now: i64,
     /// Keys this command pushed to (wakes blocked clients after commit).
     pub pushed: Vec<(u32, Vec<u8>)>,
@@ -261,20 +262,44 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// The key row's read: one table, the key and its distribution key in
+    /// the condition, so a sharded database's router sends it to the key's
+    /// shard (R6 round 4). An absent key returns no row.
     fn select_sql(ns: &Namespace, k: &[u8], lock: bool) -> String {
-        let on_live = if lock {
+        let and_live = if lock {
             String::new()
         } else {
             format!(" AND {}", live("t"))
         };
         format!(
             "SELECT {NOW_MS_SQL}, {KEY_COLS}, {}, (t.expires_at IS NOT NULL AND t.expires_at <= UTC_TIMESTAMP(3)) \
-             FROM (SELECT 1 AS one) AS d LEFT JOIN {} AS t ON t.k = {}{on_live}{}",
+             FROM {} AS t WHERE {}{and_live}{}",
             ms_sql("t.expires_at"),
             ns.keys(),
-            lit(k),
+            sprig_kv::api::key_pred(ns, k, "t."),
             if lock { " FOR UPDATE" } else { "" }
         )
+    }
+
+    /// MariaDB's clock (ms since the epoch): the last key read's, or, after
+    /// a read of an absent key, read on `k`'s shard (one aggregate over the
+    /// key table, so it routes like the key's statements).
+    ///
+    /// # Errors
+    /// The backend's.
+    pub async fn clock(&mut self, k: &[u8]) -> R<i64> {
+        if self.now == 0 {
+            let ns = self.ns.clone();
+            let rows = self
+                .q(&format!(
+                    "SELECT {NOW_MS_SQL}, COUNT(*) FROM {} WHERE {}",
+                    ns.keys(),
+                    sprig_kv::api::key_pred(&ns, k, "")
+                ))
+                .await?;
+            self.now = cell_i64(rows.first().and_then(|r| r.first()).and_then(Option::as_ref));
+        }
+        Ok(self.now)
     }
 
     /// Locks `k`'s row in `ns`; an expired key is deleted and reads as absent.
@@ -286,6 +311,7 @@ impl<'a> Ctx<'a> {
         let sql = Self::select_sql(ns, k, true);
         let rows = self.q(&sql).await?;
         let Some((now, row, expired)) = rows.first().and_then(|r| parse_row(k, r)) else {
+            self.now = 0;
             return Ok(None);
         };
         self.now = now;
@@ -356,6 +382,7 @@ impl<'a> Ctx<'a> {
         let sql = Self::select_sql(ns, k, false);
         let rows = self.q(&sql).await?;
         let Some((now, row, _)) = rows.first().and_then(|r| parse_row(k, r)) else {
+            self.now = 0;
             return Ok(None);
         };
         self.now = now;
@@ -413,7 +440,7 @@ impl<'a> Ctx<'a> {
         let v = row.v.as_deref().map_or_else(|| "NULL".to_owned(), lit);
         let sql = if row.stored {
             format!(
-                "UPDATE {} SET type = '{}', v = {v}, n = {}, lh = {}, lt = {}, g = {}, _v = {}, expires_at = {exp} WHERE k = {}",
+                "UPDATE {} SET type = '{}', v = {v}, n = {}, lh = {}, lt = {}, g = {}, _v = {}, expires_at = {exp} WHERE {}",
                 ns.keys(),
                 row.t.as_str(),
                 row.n,
@@ -421,7 +448,7 @@ impl<'a> Ctx<'a> {
                 row.lt,
                 row.g,
                 row.ver,
-                lit(&row.k)
+                sprig_kv::api::key_pred(ns, &row.k, "")
             )
         } else {
             format!(
@@ -475,14 +502,14 @@ impl<'a> Ctx<'a> {
     /// # Errors
     /// The backend's.
     pub async fn delete_in(&mut self, ns: &Namespace, row: &KeyRow) -> Result<(), SqlError> {
-        let k = lit(&row.k);
-        self.x(&format!("DELETE FROM {} WHERE k = {k}", ns.keys()))
+        let kp = sprig_kv::api::key_pred(ns, &row.k, "");
+        self.x(&format!("DELETE FROM {} WHERE {kp}", ns.keys()))
             .await?;
         match row.t {
             KeyType::String => {}
             KeyType::ZSet => {
                 self.x(&format!(
-                    "DELETE FROM {} WHERE k = {k} AND g = {}",
+                    "DELETE FROM {} WHERE {kp} AND g = {}",
                     ns.zset(),
                     row.g
                 ))
@@ -490,7 +517,7 @@ impl<'a> Ctx<'a> {
             }
             _ => {
                 self.x(&format!(
-                    "DELETE FROM {} WHERE k = {k} AND g = {}",
+                    "DELETE FROM {} WHERE {kp} AND g = {}",
                     ns.elems(),
                     row.g
                 ))
@@ -509,10 +536,38 @@ impl<'a> Ctx<'a> {
         self.delete_in(&ns, row).await
     }
 
-    /// `(k, g)` of `row` as a SQL condition.
+    /// `k = <key> AND _sprig_dk = <its distribution key>` on alias `p`
+    /// (`t.` or empty): on a sharded database the router sends the
+    /// statement to the key's shard (R6 round 4).
     #[must_use]
-    pub fn kg(row: &KeyRow) -> String {
-        format!("k = {} AND g = {}", lit(&row.k), row.g)
+    pub fn kp(&self, k: &[u8], p: &str) -> String {
+        sprig_kv::api::key_pred(&self.ns, k, p)
+    }
+
+    /// `k IN (...) AND _sprig_dk IN (...)` for `keys` (each at most 1024
+    /// bytes), or `FALSE` when there are none.
+    #[must_use]
+    pub fn keys_in(&self, keys: &[&[u8]]) -> String {
+        if keys.is_empty() {
+            return "FALSE".into();
+        }
+        let ks: Vec<String> = keys.iter().map(|k| lit(k)).collect();
+        let mut dks: Vec<&[u8]> = keys.iter().map(|k| self.ns.dist_key(k)).collect();
+        dks.sort_unstable();
+        dks.dedup();
+        let dks: Vec<String> = dks.into_iter().map(lit).collect();
+        format!(
+            "k IN ({}) AND _sprig_dk IN ({})",
+            ks.join(", "),
+            dks.join(", ")
+        )
+    }
+
+    /// `(k, g)` of `row` as a SQL condition, with the distribution key
+    /// (see [`Ctx::kp`]).
+    #[must_use]
+    pub fn kg(&self, row: &KeyRow) -> String {
+        format!("{} AND g = {}", self.kp(&row.k, ""), row.g)
     }
 
     /// The routing columns' values for an element row of `k`.

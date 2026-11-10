@@ -38,8 +38,7 @@ async fn readable(svc: &TenantServices, t: TenantId) -> Result<bool> {
     let Some(d) = super::dir_entry(svc, t).await? else {
         return Ok(false);
     };
-    let deny =
-        sprig_auth::TenantResidency::of(&d.residency).is_some_and(|r| r.deny_remote_access);
+    let deny = sprig_auth::TenantResidency::of(&d.residency).is_some_and(|r| r.deny_remote_access);
     if deny {
         metrics::counter!("sprig_inherit_fanin_skipped_total", "reason" => "residency")
             .increment(1);
@@ -53,6 +52,7 @@ async fn readable(svc: &TenantServices, t: TenantId) -> Result<bool> {
 ///
 /// # Errors
 /// The store's, the catalogs' and the clusters'.
+#[allow(clippy::many_single_char_names)]
 pub async fn attach_existing(
     svc: &Arc<TenantServices>,
     p: TenantId,
@@ -154,7 +154,8 @@ pub async fn on_instance(
 ) {
     let r = async {
         let store = svc.locator.dc_store();
-        let list = messages::fanin_triggers(store.as_ref(), (def.declarer.0, def.object_id)).await?;
+        let list =
+            messages::fanin_triggers(store.as_ref(), (def.declarer.0, def.object_id)).await?;
         if list.is_empty() {
             return Ok::<_, sprig_common::SprigError>(());
         }

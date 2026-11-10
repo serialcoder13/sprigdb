@@ -428,6 +428,11 @@ fn is_settings(sql: &[u8], toks: &[&Token]) -> bool {
             t.kind == TokenKind::Word && t.bytes(sql).eq_ignore_ascii_case(s.as_bytes())
         })
     };
+    // `SPRIG APPROVE|IGNORE|SNOOZE RECOMMENDATION` and `SHOW SPRIG
+    // RECOMMENDATIONS` are chapter 52's (`rec_stmt`).
+    if crate::rec_stmt::is_rec(sql, toks) {
+        return false;
+    }
     if w(0, "SPRIG") {
         // `SPRIG PIN`, `UNPIN` and `SHOW` are chapter 16's (`pin_stmt`).
         return !(w(1, "PIN") || w(1, "UNPIN") || w(1, "SHOW"));

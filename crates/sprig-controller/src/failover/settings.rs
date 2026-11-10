@@ -46,11 +46,11 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     key: "failover.mode",
     default: Cow::Borrowed("auto"),
     scopes: TCDG,
-    hard: HardBounds::one_of(&["auto", "manual"]),
+    hard: HardBounds::one_of(&["auto", "approve", "manual"]),
     apply: Apply::Live,
     operator_only: true,
     owner: 25,
-    doc: "auto or manual (the dry run)",
+    doc: "auto, approve (global scope only, chapter 52) or manual (the dry run)",
 };
 sprig_settings::register!(MODE);
 

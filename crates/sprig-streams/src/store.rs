@@ -737,7 +737,9 @@ mod tests {
     #[test]
     fn module_is_well_formed() {
         Migrator::new(&[STREAMS_MODULE]).unwrap();
-        assert_eq!(STREAMS_MODULE.newest(), 1);
+        assert_eq!(STREAMS_MODULE.newest(), 2);
+        // Migration 2 (R9 fan-in): the column and the key with it.
+        assert!(STREAMS_MIGRATIONS[1].statements[0].contains("instance_tenant_id"));
         for ddl in STREAMS_MIGRATIONS[0].statements {
             assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "));
         }

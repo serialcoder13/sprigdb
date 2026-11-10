@@ -34,11 +34,11 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     key: "advisor.mode",
     default: Cow::Borrowed("on"),
     scopes: TENANT_DC,
-    hard: HardBounds::one_of(&["on", "recommend", "off"]),
+    hard: HardBounds::one_of(&["on", "approve", "recommend", "off"]),
     apply: Apply::Live,
     operator_only: true,
     owner: 16,
-    doc: "Sharding advisor: on, recommend or off",
+    doc: "Sharding advisor: on, approve (chapter 52), recommend or off",
 };
 sprig_settings::register!(MODE);
 
@@ -91,6 +91,8 @@ pub enum AdvisorMode {
     On,
     /// Runs; `apply` becomes `recommend`.
     Recommend,
+    /// Runs; `apply` waits for an approval (chapter 52), then applies.
+    Approve,
     /// No runs: a first split uses the structural design.
     Off,
 }
@@ -163,6 +165,7 @@ impl AdvisorSettings {
         Self {
             mode: match layered(s, rows, &MODE, ctx).as_ref() {
                 "recommend" => AdvisorMode::Recommend,
+                "approve" => AdvisorMode::Approve,
                 "off" => AdvisorMode::Off,
                 _ => AdvisorMode::On,
             },

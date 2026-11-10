@@ -1,0 +1,33 @@
+[package]
+name = "sprig-approvals"
+description = "SprigDB: Approvals and recommendations for every automatic decision (chapter 52)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+# Chapter 52's sprig_approvals_* metrics.
+metrics.workspace = true
+mysql_async.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Fingerprints: the first 128 bits of SHA-256.
+sha2.workspace = true
+# The `approvals` migration module and the catalog locator.
+sprig-catalog.workspace = true
+sprig-common.workspace = true
+# Failover items in the DC and global tiers.
+sprig-meta.workspace = true
+sprig-settings.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

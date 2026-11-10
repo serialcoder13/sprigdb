@@ -66,7 +66,7 @@ async fn zlookup(cx: &mut Ctx<'_>, row: &KeyRow, items: &[&[u8]]) -> R<HashMap<V
             .q(&format!(
                 "SELECT m, c, score FROM {} WHERE {} AND ({})",
                 cx.ns.zset(),
-                Ctx::kg(row),
+                cx.kg(row),
                 mem_pred(chunk)
             ))
             .await?;
@@ -114,7 +114,7 @@ async fn zremove(cx: &mut Ctx<'_>, row: &KeyRow, items: &[&[u8]]) -> R<()> {
         cx.x(&format!(
             "DELETE FROM {} WHERE {} AND ({})",
             cx.ns.zset(),
-            Ctx::kg(row),
+            cx.kg(row),
             mem_pred(chunk)
         ))
         .await?;
@@ -140,7 +140,7 @@ async fn zselect(
         .q(&format!(
             "SELECT m, c, score FROM {} WHERE {} AND ({cond}) ORDER BY {order}{limit}",
             cx.ns.zset(),
-            Ctx::kg(row)
+            cx.kg(row)
         ))
         .await?;
     Ok(rows
@@ -434,7 +434,7 @@ async fn count_where(cx: &mut Ctx<'_>, row: &KeyRow, cond: &str) -> R<i64> {
         .q(&format!(
             "SELECT COUNT(*) FROM {} WHERE {} AND ({cond})",
             cx.ns.zset(),
-            Ctx::kg(row)
+            cx.kg(row)
         ))
         .await?;
     Ok(rows.first().map_or(0, |r| cell_i64(r[0].as_ref())))
@@ -1099,7 +1099,7 @@ pub async fn zscan(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
             .q(&format!(
                 "SELECT m, c, score, o FROM {} WHERE {} AND o >= {cursor} ORDER BY o, m LIMIT {count}",
                 cx.ns.zset(),
-                Ctx::kg(&row)
+                cx.kg(&row)
             ))
             .await?;
         let full = rows.len() == count;
@@ -1118,7 +1118,7 @@ pub async fn zscan(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
                     .q(&format!(
                         "SELECT m, c, score FROM {} WHERE {} AND o = {o} AND m > {} ORDER BY m",
                         cx.ns.zset(),
-                        Ctx::kg(&row),
+                        cx.kg(&row),
                         lit(&m)
                     ))
                     .await?;

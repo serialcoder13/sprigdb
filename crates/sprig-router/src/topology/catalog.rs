@@ -286,7 +286,13 @@ impl TableShape {
     #[must_use]
     pub fn unique_keys_hold(&self, col: &str) -> bool {
         let c = col.to_ascii_lowercase();
-        self.unique_keys.iter().all(|k| k.contains(&c))
+        // Chapter 33's key-value tables: `_sprig_dk` is a function of the
+        // key `k` (the hash tag or the first segments), so a unique key
+        // holding `k` holds the distribution key too (R6 round 4).
+        let dk_of_k = c == "_sprig_dk";
+        self.unique_keys
+            .iter()
+            .all(|k| k.contains(&c) || (dk_of_k && k.iter().any(|x| x == "k")))
     }
 }
 
@@ -834,6 +840,17 @@ mod tests {
         assert_eq!(s.ordinal("CID"), Some(1));
         assert!(s.unique_keys_hold("cid"));
         assert!(!s.unique_keys_hold("oid"));
+    }
+
+    #[test]
+    fn key_value_unique_keys_hold_the_distribution_key() {
+        // Chapter 33's element table: `_sprig_dk` derives from `k`.
+        let s = TableShape::parse(
+            "CREATE TABLE `__sprig_ke_db0` (\n  `k` varbinary(1024) NOT NULL,\n  `g` bigint(20) unsigned NOT NULL,\n  `o` bigint(20) NOT NULL,\n  `e` varbinary(2024) NOT NULL DEFAULT '',\n  `v` longblob DEFAULT NULL,\n  `_sprig_dk` varbinary(1024) NOT NULL DEFAULT '' INVISIBLE,\n  `_sprig_rk` bigint(20) unsigned DEFAULT NULL INVISIBLE,\n  PRIMARY KEY (`k`,`g`,`o`,`e`),\n  KEY `_sprig_rk` (`_sprig_rk`)\n) ENGINE=InnoDB",
+        );
+        assert!(s.unique_keys_hold("_sprig_dk"));
+        assert!(!s.unique_keys_hold("v"));
+        assert!(!TableShape::parse(CREATE).unique_keys_hold("_sprig_dk"));
     }
 
     #[test]

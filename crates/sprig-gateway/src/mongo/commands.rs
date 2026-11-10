@@ -371,6 +371,20 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             engine.catalog.prepare_db(c.sql()?, &d).await?;
         }
     }
+    // DDL ends the tenant's snapshot reads first (their open transactions
+    // hold the tables' metadata locks; `snapshot`).
+    if matches!(
+        name,
+        "drop"
+            | "dropDatabase"
+            | "create"
+            | "createIndexes"
+            | "dropIndexes"
+            | "renameCollection"
+            | "collMod"
+    ) {
+        c.shared.snapshots.close_tenant(owner(c).tenant).await;
+    }
     // Transactions.
     let lsid = lsid_of(body);
     let autocommit_false = body.get_bool("autocommit") == Ok(false);
@@ -806,6 +820,7 @@ async fn open_change_stream(
         full,
         before,
         pipeline: rest.to_vec(),
+        expanded: super::changes::expanded_of(stage),
     };
     let stream = feed.open(spec, resume.as_ref()).await?;
     let token = stream.token.clone();
@@ -988,6 +1003,17 @@ async fn exec(
                     .insert("changeStreamPreAndPostImages", doc! {"enabled": enabled});
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
             }
+            // A metadata-only table comment, so change streams with
+            // `showExpandedEvents` see a `modify` event, as MongoDB's do.
+            let mark = format!(
+                "ALTER TABLE {}.{} COMMENT = '{}'",
+                sprig_doc::sql::ident(&ns.db),
+                sprig_doc::sql::ident(&m.table),
+                super::changes::COLLMOD_MARK
+            );
+            if let Err(e) = sql.exec(&mark).await {
+                tracing::debug!(error = %e.message, "collMod's table comment not set");
+            }
             Ok(doc! {"ok": 1.0})
         }
         "insert" | "update" | "delete" | "findAndModify" | "findandmodify" | "bulkWrite" => {
@@ -1168,7 +1194,35 @@ async fn exec(
                 db: db.to_owned(),
                 coll: coll.clone(),
             };
-            let docs = engine.aggregate(sql, &ns, &pipeline).await?;
+            let docs = if coll.is_empty()
+                && pipeline
+                    .first()
+                    .is_some_and(|s| s.contains_key("$listLocalSessions"))
+            {
+                // `$listLocalSessions` (database-level): the caller's own
+                // session on this gateway, then the in-gateway stages.
+                let mut docs = Vec::new();
+                if let Some(l) = lsid {
+                    let who = owner(c);
+                    docs.push(doc! {
+                        "_id": {
+                            "id": bson::Binary { subtype: bson::spec::BinarySubtype::Uuid, bytes: l.to_vec() },
+                            "uid": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: super::retry::uid_of(&who).to_vec() },
+                        },
+                        "lastUse": bson::DateTime::now(),
+                    });
+                }
+                let lim = sprig_doc::agg::AggLimits {
+                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    now: bson::DateTime::now(),
+                };
+                for st in &pipeline[1..] {
+                    docs = sprig_doc::agg::run_stage(docs, st, &lim)?;
+                }
+                docs
+            } else {
+                engine.aggregate(sql, &ns, &pipeline).await?
+            };
             let plan = sprig_doc::engine::CursorPlan::from_docs(ns.clone(), docs);
             open_cursor(
                 &c.shared,

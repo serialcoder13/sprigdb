@@ -45,8 +45,10 @@ service Analytics {
     };
   }
   // Runs a query: detail rows, subtotals after their groups, the grand
-  // total last (one reply in this release, not a stream).
-  rpc Query(AnalyticsQuery) returns (AnalyticsResult) {
+  // total last. A stream of results of at most 1,000 rows each; the first
+  // carries the plan (R6 round 4). REST returns one JSON reply, or NDJSON
+  // lines with `Accept: application/x-ndjson`.
+  rpc Query(AnalyticsQuery) returns (stream AnalyticsResult) {
     option (google.api.http) = {
       post: "/v1/databases/{database}/models/{model}:query"
       body: "*"
@@ -148,7 +150,7 @@ message AnalyticsRow {
 
 message AnalyticsResult {
   repeated AnalyticsRow rows = 1;
-  // local or per_level.
+  // local or per_level (in the stream's first message).
   string plan = 2;
 }
 

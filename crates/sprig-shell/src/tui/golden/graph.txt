@@ -1,0 +1,24 @@
+ 1 cypher - │ Dashboard │ Admin │ Inbox
+┌ Explorer ──────────────────┐┌ Editor [cypher] ───────────────────────────────────────────────────┐
+│▾ shop                      ││ 1 SELECT order_id, status                                          │
+│  ▾ tables 2                ││ 2 FROM orders                                                      │
+│    ▸ orders ~3 rows        ││ 3 WHERE status = 'paid';                                           │
+│      order_items           │└────────────────────────────────────────────────────────────────────┘
+│  ▸ views 1                 │┌ Results [graph] · 2 rows · 3 ms ───────────────────────────────────┐
+│  ▸ streams 1               ││(1:Person {name: "Asha"})-[:KNOWS]->(2:Person {name: "Ravi"})       │
+│▸ hr                        ││                                                                    │
+│                            ││(1:Person {name: "Asha"})                                           │
+│                            ││  -[:KNOWS]->(2)                                                    │
+│                            ││(2:Person {name: "Ravi"})                                           │
+│                            ││  <-[:KNOWS]-(1)                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
+ dev  bolt://127.0.0.1:7687  F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit

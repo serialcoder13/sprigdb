@@ -625,11 +625,11 @@ impl Walker<'_, '_> {
     /// database's first shard into its group's schemas, so its name gets
     /// the group's representative schema: the edit of its database part
     /// (`db`, that part's range) changes, or a bare name is qualified.
-    fn grouped_table(&mut self, table_tok: usize, db: Option<std::ops::Range<usize>>) {
+    fn grouped_table(&mut self, table_tok: usize, db: Option<&std::ops::Range<usize>>) {
         if self.no_subst() {
             return;
         }
-        let at = match &db {
+        let at = match db {
             Some(r) => match self.edits.iter().position(|e| e.range == *r) {
                 Some(i) => Some(i),
                 // A system schema or a name left alone.
@@ -680,7 +680,7 @@ impl Walker<'_, '_> {
             Some(c) if c.n == 1 && !c.star => self.grouped_table(c.parts[0], None),
             Some(c) if c.n == 2 => {
                 let r = self.t[c.parts[0]].range();
-                self.grouped_table(c.parts[1], Some(r));
+                self.grouped_table(c.parts[1], Some(&r));
             }
             _ => {}
         }
@@ -2526,7 +2526,7 @@ impl Walker<'_, '_> {
                 .map(|e| e.range.clone());
             match (c, from_db) {
                 (Some(c), Some(r)) if c.n == 1 && !c.star => {
-                    self.grouped_table(c.parts[0], Some(r))
+                    self.grouped_table(c.parts[0], Some(&r));
                 }
                 (c, _) => self.grouped_chain(c),
             }

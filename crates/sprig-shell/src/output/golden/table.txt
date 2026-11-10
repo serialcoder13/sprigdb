@@ -1,0 +1,26 @@
++-----+----------------+-------------------+----------+------+
+| id  | name           | note              | raw      | name |
++-----+----------------+-------------------+----------+------+
+|   1 | Asha           | NULL              | 0x0001FF | x    |
+|  22 | Zoë, "the" 2nd | line1\nline2\ttab | NULL     |      |
+| 333 |                | back\slash        | 0x       | NULL |
++-----+----------------+-------------------+----------+------+
+3 rows
+1 warning(s)
+Query OK, 3 rows affected, last insert id 41
+Records: 3  Duplicates: 0  Warnings: 0
++---+
+| n |
++---+
+| 7 |
++---+
+first 1 row; the rest were left out at the cap
+{
+  "_id": {
+    "$oid": "65a1"
+  },
+  "tags": [
+    "a",
+    "b"
+  ]
+}

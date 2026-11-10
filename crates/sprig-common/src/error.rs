@@ -778,6 +778,12 @@ sprig_codes! {
     StudioExportTicketInvalid = 39929, "ER_SPRIG_STUDIO_EXPORT_TICKET_INVALID", "SprigStudioExportTicketInvalid", SQLSTATE_GENERAL, false;
     /// The binary was built without Studio's files (chapter 44).
     StudioNotBuilt = 39932, "ER_SPRIG_STUDIO_NOT_BUILT", "SprigStudioNotBuilt", SQLSTATE_GENERAL, false;
+    /// No open cursor has this name, or it belongs to another user
+    /// (chapter 44, decision ST30).
+    StudioCursorUnknown = 39934, "ER_SPRIG_STUDIO_CURSOR_UNKNOWN", "SprigStudioCursorUnknown", SQLSTATE_GENERAL, false;
+    /// The cursor was idle past `studio.cursor_idle_seconds` and closed;
+    /// open it again (chapter 44, decision ST30).
+    StudioCursorExpired = 39935, "ER_SPRIG_STUDIO_CURSOR_EXPIRED", "SprigStudioCursorExpired", SQLSTATE_GENERAL, false;
     /// Unknown stream or topic (chapter 45).
     StreamNotFound = 39940, "ER_SPRIG_STREAM_NOT_FOUND", "SprigStreamNotFound", SQLSTATE_GENERAL, false;
     /// `UPDATE` or `DELETE` on a stream; a produce to a change topic
@@ -865,6 +871,22 @@ sprig_codes! {
     /// A tenant import's checksums or grants differ from its export's
     /// manifest (chapter 47).
     ImportVerifyFailed = 39971, "ER_SPRIG_IMPORT_VERIFY_FAILED", "SprigImportVerifyFailed", SQLSTATE_GENERAL, false;
+    /// No recommendation with that id (chapter 52).
+    RecommendationNotFound = 39972, "ER_SPRIG_RECOMMENDATION_NOT_FOUND", "SprigRecommendationNotFound", SQLSTATE_GENERAL, false;
+    /// The action doesn't apply in the recommendation's state (chapter 52).
+    RecommendationState = 39973, "ER_SPRIG_RECOMMENDATION_STATE", "SprigRecommendationState", SQLSTATE_GENERAL, false;
+    /// The caller may not act at the recommendation's level (chapter 52).
+    ApprovalDenied = 39974, "ER_SPRIG_APPROVAL_DENIED", "SprigApprovalDenied", SQLSTATE_SYNTAX_ACCESS, false;
+    /// Re-validation failed before applying; the recommendation expired
+    /// (chapter 52).
+    RecommendationStale = 39975, "ER_SPRIG_RECOMMENDATION_STALE", "SprigRecommendationStale", SQLSTATE_GENERAL, false;
+    /// An approval window that is empty, past or longer than 30 days
+    /// (chapter 52).
+    ApprovalWindowInvalid = 39976, "ER_SPRIG_APPROVAL_WINDOW_INVALID", "SprigApprovalWindowInvalid", SQLSTATE_GENERAL, false;
+    /// A timer or kind list that doesn't parse (chapter 52).
+    ApprovalPolicyInvalid = 39977, "ER_SPRIG_APPROVAL_POLICY_INVALID", "SprigApprovalPolicyInvalid", SQLSTATE_GENERAL, false;
+    /// A test email or webhook failed (chapter 52).
+    NotifyFailed = 39978, "ER_SPRIG_NOTIFY_FAILED", "SprigNotifyFailed", SQLSTATE_GENERAL, false;
     /// `sprigdb.toml` or its environment overrides are invalid. Raised only at
     /// process start; never reaches a client. Not yet in Appendix E.
     ConfigInvalid = 39998, "ER_SPRIG_CONFIG_INVALID", "SprigConfigInvalid", SQLSTATE_GENERAL, false;
@@ -1006,7 +1028,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::GeoInvalid
         | SprigCode::GeoSridUnsupported
         | SprigCode::GeoUnsupportedExpression
-        | SprigCode::GeoTooComplex => (Code::InvalidArgument, 400),
+        | SprigCode::GeoTooComplex
+        | SprigCode::ApprovalWindowInvalid
+        | SprigCode::ApprovalPolicyInvalid => (Code::InvalidArgument, 400),
         SprigCode::SettingLocked
         | SprigCode::BinlogUnsupported
         | SprigCode::FeedSourceUnsupported
@@ -1064,11 +1088,13 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StreamSequencingTimeout
         | SprigCode::SinkDeliveryFailed
         | SprigCode::SinkPlatformSecretUnavailable
-        | SprigCode::StudioNotBuilt => (Code::Unavailable, 503),
+        | SprigCode::StudioNotBuilt
+        | SprigCode::NotifyFailed => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
         | SprigCode::TxnHandleUnknown
         | SprigCode::TxnHandleExpired
+        | SprigCode::StudioCursorExpired
         | SprigCode::ClusterFenceFailed
         | SprigCode::OutcomeUnknown
         | SprigCode::SessionStateLost
@@ -1111,7 +1137,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::KvNamespaceNotFound
         | SprigCode::VectorIndexNotFound
         | SprigCode::DimModelNotFound
-        | SprigCode::StudioDisabled => (Code::NotFound, 404),
+        | SprigCode::StudioDisabled
+        | SprigCode::StudioCursorUnknown
+        | SprigCode::RecommendationNotFound => (Code::NotFound, 404),
         SprigCode::ClusterExists
         | SprigCode::TenantExists
         | SprigCode::FeedSubscriptionExists
@@ -1176,7 +1204,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SinkDisabled
         | SprigCode::GraphReadOnlySource
         | SprigCode::GraphIdNotRoutable
-        | SprigCode::SinkState => (Code::FailedPrecondition, 409),
+        | SprigCode::SinkState
+        | SprigCode::RecommendationState
+        | SprigCode::RecommendationStale => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
         | SprigCode::DefinerRefused
@@ -1196,7 +1226,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StreamResidency
         | SprigCode::StudioInsecureTransport
         | SprigCode::StudioOriginRejected
-        | SprigCode::StudioCsrfHeaderMissing => (Code::PermissionDenied, 403),
+        | SprigCode::StudioCsrfHeaderMissing
+        | SprigCode::ApprovalDenied => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit
         | SprigCode::AdmissionTimeout

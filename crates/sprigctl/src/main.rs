@@ -55,9 +55,11 @@ mod failover;
 mod gateway;
 mod graph;
 mod index;
+// Chapter 52: approvals and recommendations.
 mod logic;
 mod mover;
 mod placement;
+mod recommendations;
 mod render;
 mod residency;
 mod settings;
@@ -438,6 +440,7 @@ fn cli() -> Command {
         .subcommand(tenant_group())
         .subcommand(settings::group())
         .subcommand(index::group())
+        .subcommand(recommendations::group())
         .subcommand(index::explain_group())
         .subcommand(mover::shard_group())
         .subcommand(mover::job_group())
@@ -494,7 +497,7 @@ fn main() -> ExitCode {
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
-        | "shard" | "space" | "txn" | "sink" | "graph" => true,
+        | "shard" | "space" | "txn" | "sink" | "graph" | "recommendations" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "logic" => logic::implemented(&name),
@@ -523,6 +526,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "index" => index::run(&client, &matches, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "recommendations" => recommendations::run(&client, &matches, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "explain" => index::explain(&client, sub, output(&matches))

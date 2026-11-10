@@ -503,6 +503,17 @@ pub fn render(d: &Document, opts: &RenderOpts) -> Result<(String, Option<String>
 /// an encoded `_id` over 1024 bytes; the errors of [`render`].
 pub fn to_stored(d: &Document, opts: &RenderOpts) -> Result<Stored, MongoError> {
     let id = d.get("_id").ok_or_else(|| invalid("document has no _id"))?;
+    // MongoDB stores no `$`-prefixed field inside `_id` (R5 round 4).
+    if let Bson::Document(sub) = id
+        && let Some(k) = sub.keys().find(|k| k.starts_with('$'))
+    {
+        return Err(MongoError::new(
+            code::INVALID_ID_FIELD,
+            format!(
+                "_id fields may not contain '$'-prefixed fields: {k} is not valid for storage."
+            ),
+        ));
+    }
     let id_key = id_key(id)?;
     let (doc, types) = render(d, opts)?;
     Ok(Stored { id_key, doc, types })

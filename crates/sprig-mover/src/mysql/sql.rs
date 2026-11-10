@@ -478,10 +478,22 @@ mod tests {
     fn stored_programs_are_recognised() {
         use ProgramDdl::*;
         for (q, want) in [
-            ("CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1", Some(CreateTrigger)),
-            ("CREATE DEFINER=`root`@`%` TRIGGER tr AFTER INSERT ON t FOR EACH ROW INSERT INTO a VALUES (1)", Some(CreateTrigger)),
-            ("CREATE OR REPLACE DEFINER = `u`@`%` TRIGGER tr AFTER UPDATE ON t FOR EACH ROW SET @x = 1", Some(CreateTrigger)),
-            ("/* c */ CREATE EVENT IF NOT EXISTS e ON SCHEDULE EVERY 1 MINUTE DO DELETE FROM t", Some(CreateEvent)),
+            (
+                "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1",
+                Some(CreateTrigger),
+            ),
+            (
+                "CREATE DEFINER=`root`@`%` TRIGGER tr AFTER INSERT ON t FOR EACH ROW INSERT INTO a VALUES (1)",
+                Some(CreateTrigger),
+            ),
+            (
+                "CREATE OR REPLACE DEFINER = `u`@`%` TRIGGER tr AFTER UPDATE ON t FOR EACH ROW SET @x = 1",
+                Some(CreateTrigger),
+            ),
+            (
+                "/* c */ CREATE EVENT IF NOT EXISTS e ON SCHEDULE EVERY 1 MINUTE DO DELETE FROM t",
+                Some(CreateEvent),
+            ),
             ("ALTER DEFINER=`root`@`%` EVENT e ENABLE", Some(CreateEvent)),
             ("DROP TRIGGER IF EXISTS s.tr", Some(Drop)),
             ("DROP EVENT e", Some(Drop)),

@@ -203,6 +203,8 @@ pub struct ShardingLoop {
     publish: Option<Arc<dyn sprig_advisor::sharding::apply::Publish>>,
     /// Tenants whose table groups this loop published since it started.
     published: Mutex<BTreeSet<TenantId>>,
+    /// Chapter 52: `sharding.mode = approve` holds jobs for approval.
+    pub approvals: std::sync::OnceLock<Arc<crate::approvals::ControllerApprovals>>,
 }
 
 impl std::fmt::Debug for ShardingLoop {
@@ -262,6 +264,56 @@ impl ShardingLoop {
             write_load: None,
             publish: None,
             published: Mutex::new(BTreeSet::new()),
+            approvals: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Chapter 52's gate for a split, merge or move proposal: `None` to
+    /// go ahead, `Some(why)` to hold. Only under `approve` and `recommend`
+    /// with an approvals hub.
+    async fn approval_gate(
+        &self,
+        tenant: TenantId,
+        p: &shards::Proposal,
+        subject: &str,
+        mode: ShardingMode,
+    ) -> Option<String> {
+        use sprig_approvals::{Action, Kind, Proposal, Verdict};
+        let a = self.approvals.get()?;
+        if !matches!(mode, ShardingMode::Approve | ShardingMode::Recommend) {
+            return None;
+        }
+        let kind = match p.job.kind() {
+            "split" => Kind::ShardSplit,
+            "merge" => Kind::ShardMerge,
+            _ => Kind::ShardMove,
+        };
+        let policy = a.policy(kind, Some(tenant), None, None, None).await;
+        let score = p
+            .evidence
+            .get("size_bytes")
+            .or_else(|| p.evidence.get("bytes"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        let gp = Proposal {
+            kind,
+            subject: a.subject(tenant).await,
+            target: format!("t{tenant}/g{}/{subject}", p.group),
+            action: Action {
+                text: format!("sprigctl shard {} {subject}", p.job.kind()),
+                machine: serde_json::to_value(&p.job).unwrap_or_default(),
+            },
+            evidence: p.evidence.clone(),
+            score,
+            summary: format!("{} of {subject} ({:?})", p.job.kind(), p.reason),
+            emergency: false,
+        };
+        match a.gate(&gp, &policy).await {
+            Verdict::Proceed(_) => None,
+            Verdict::Wait(id) => Some(format!("held for approval as {id}")),
+            Verdict::Advice(id) => Some(format!("recommended as {id}")),
+            Verdict::Suppressed(id) => Some(format!("ignored ({id})")),
+            Verdict::Off => Some("approvals unavailable".into()),
         }
     }
 
@@ -580,7 +632,9 @@ impl ShardingLoop {
                 cause: cause.as_str(),
                 mode: match s.mode {
                     AdvisorMode::On => "on",
-                    AdvisorMode::Recommend => "recommend",
+                    // `advisor_runs.mode` has no `approve`: held runs are
+                    // recommendations until approved (chapter 52).
+                    AdvisorMode::Recommend | AdvisorMode::Approve => "recommend",
                     AdvisorMode::Off => "off",
                 },
                 window_us: (us(window_start), us(now)),
@@ -642,6 +696,50 @@ impl ShardingLoop {
             .await;
         if d > 0 {
             runs::set_decision(c, &cat, run, d).await?;
+        }
+        if verdict == Verdict::Recommend
+            && let Some(a) = self.approvals.get()
+        {
+            // Chapter 52: the run's design is the proposal; the advisor
+            // runs again every `advisor_retry`, so an approved design is
+            // applied from a fresh run that still finds it.
+            use sprig_approvals::{Action, Kind, Proposal, Verdict as Gate};
+            let policy = a.policy(Kind::AdvisorDesign, Some(tenant), None, None, None).await;
+            let design = found.best.to_json(&asm.input);
+            let p = Proposal {
+                kind: Kind::AdvisorDesign,
+                subject: a.subject(tenant).await,
+                target: format!("t{tenant}/design"),
+                action: Action {
+                    text: format!("sprigctl sharding advisor apply --tenant {tenant} --run {run}"),
+                    machine: design,
+                },
+                evidence: json!({
+                    "run": run,
+                    "groups": found.best.groups.len(),
+                    "score": found.score.total,
+                    "confidence": confidence,
+                }),
+                score: found.score.total.max(0.0),
+                summary: format!(
+                    "sharding design: {} table groups (score {:.3}, confidence {:.2})",
+                    found.best.groups.len(),
+                    found.score.total,
+                    confidence
+                ),
+                emergency: false,
+            };
+            // Under `recommend` the run is advice; an approval in the
+            // inbox still applies it (chapter 52, "The modes").
+            if matches!(s.mode, AdvisorMode::Approve | AdvisorMode::Recommend)
+                && let Gate::Proceed(t) = a.gate(&p, &policy).await
+            {
+                let r = self
+                    .apply_run(tenant, ts, home, c, run, d, &found.best, &asm, report)
+                    .await;
+                a.finished(&t, r.is_ok(), &r.as_ref().map_or_else(|e| e.message.clone(), |()| format!("run {run} applied"))).await;
+                return r;
+            }
         }
         if !applying {
             return Ok(());
@@ -1077,6 +1175,12 @@ impl ShardingLoop {
                     }
                 }
                 Admission::Recommend => {
+                    // Chapter 52: advice in the approvals inbox too; an
+                    // approval there doesn't run it (the mode is still
+                    // `recommend`), the operator does.
+                    let _ = self
+                        .approval_gate(tenant, &p, &subject, ts.sharding.mode)
+                        .await;
                     let key = (subject.clone(), "recommend");
                     if lock(&self.state)
                         .entry(tenant)
@@ -1098,6 +1202,15 @@ impl ShardingLoop {
                     }
                 }
                 Admission::Submit => {
+                    if ts.sharding.mode == ShardingMode::Approve
+                        && let Some(why) = self
+                            .approval_gate(tenant, &p, &subject, ts.sharding.mode)
+                            .await
+                    {
+                        report.waiting.push((subject.clone(), "approval"));
+                        tracing::debug!(tenant = %tenant, subject = %subject, why, "shard job held");
+                        continue;
+                    }
                     let Ok(id) = self
                         .submit(tenant, &map, &dbs, &p, ts, running, report)
                         .await?

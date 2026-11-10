@@ -559,6 +559,9 @@ mod tests {
             "CALL `t9_sprig`.`__sprig_commit_offset_fi`(_utf8mb4 X'672731', 26306000003, 41, 3, 1206, 1205)"
         );
         assert!(procedure_for("t9_sprig", &f).contains("instance_tenant_id = p_instance"));
-        assert!(super::super::store::ALTER_STREAM_OFFSETS_INSTANCE.contains("ADD PRIMARY KEY (group_name, instance_tenant_id"));
+        assert!(
+            super::super::store::ALTER_STREAM_OFFSETS_INSTANCE
+                .contains("ADD PRIMARY KEY (group_name, instance_tenant_id")
+        );
     }
 }

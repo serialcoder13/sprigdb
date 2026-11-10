@@ -83,13 +83,13 @@ pub(crate) async fn pop(
         .q(&format!(
             "SELECT v FROM {} WHERE {} AND o >= {lo} AND o < {hi} ORDER BY o {order}",
             cx.ns.elems(),
-            Ctx::kg(row)
+            cx.kg(row)
         ))
         .await?;
     cx.x(&format!(
         "DELETE FROM {} WHERE {} AND o >= {lo} AND o < {hi}",
         cx.ns.elems(),
-        Ctx::kg(row)
+        cx.kg(row)
     ))
     .await?;
     match end {
@@ -185,12 +185,13 @@ async fn range_live(cx: &mut Ctx<'_>, k: &[u8], s: i64, e: i64) -> R<Vec<Vec<u8>
     let rows = cx
         .q(&format!(
             "SELECT t.type, t.n, x.v FROM {keys} AS t LEFT JOIN {el} AS x ON x.k = t.k AND x.g = t.g \
+             AND x._sprig_dk = t._sprig_dk \
              AND x.o >= t.lh + (CASE WHEN {s} < 0 THEN GREATEST(CAST(t.n AS SIGNED) + {s}, 0) ELSE {s} END) \
              AND x.o <= t.lh + (CASE WHEN {e} < 0 THEN CAST(t.n AS SIGNED) + {e} ELSE {e} END) \
-             WHERE t.k = {k} AND {live} ORDER BY x.o",
+             WHERE {k} AND {live} ORDER BY x.o",
             keys = cx.ns.keys(),
             el = cx.ns.elems(),
-            k = lit(k),
+            k = cx.kp(k, "t."),
             live = live("t")
         ))
         .await?;
@@ -231,7 +232,7 @@ pub async fn lindex(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         .q(&format!(
             "SELECT v FROM {} WHERE {} AND o = {}",
             cx.ns.elems(),
-            Ctx::kg(&row),
+            cx.kg(&row),
             row.lh + i
         ))
         .await?;
@@ -257,7 +258,7 @@ pub async fn lset(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         "UPDATE {} SET v = {} WHERE {} AND o = {}",
         cx.ns.elems(),
         lit(&a[3]),
-        Ctx::kg(&row),
+        cx.kg(&row),
         row.lh + i
     ))
     .await?;
@@ -280,7 +281,7 @@ pub async fn linsert(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         .q(&format!(
             "SELECT o FROM {} WHERE {} AND v = {} ORDER BY o LIMIT 1",
             cx.ns.elems(),
-            Ctx::kg(&row),
+            cx.kg(&row),
             lit(&a[3])
         ))
         .await?;
@@ -295,7 +296,7 @@ pub async fn linsert(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         cx.x(&format!(
             "UPDATE {} SET o = o - 1 WHERE {} AND o < {split} ORDER BY o ASC",
             cx.ns.elems(),
-            Ctx::kg(&row)
+            cx.kg(&row)
         ))
         .await?;
         row.lh -= 1;
@@ -304,7 +305,7 @@ pub async fn linsert(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         cx.x(&format!(
             "UPDATE {} SET o = o + 1 WHERE {} AND o >= {split} ORDER BY o DESC",
             cx.ns.elems(),
-            Ctx::kg(&row)
+            cx.kg(&row)
         ))
         .await?;
         row.lt += 1;
@@ -330,7 +331,7 @@ async fn rewrite_tail(cx: &mut Ctx<'_>, row: &mut KeyRow, from: i64, kept: &[Vec
     cx.x(&format!(
         "DELETE FROM {} WHERE {} AND o >= {from}",
         cx.ns.elems(),
-        Ctx::kg(row)
+        cx.kg(row)
     ))
     .await?;
     let route = cx.route_vals(&row.k);
@@ -374,7 +375,7 @@ pub async fn lrem(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         .q(&format!(
             "SELECT o FROM {} WHERE {} AND v = {} ORDER BY o {order}{limit}",
             cx.ns.elems(),
-            Ctx::kg(&row),
+            cx.kg(&row),
             lit(&a[3])
         ))
         .await?;
@@ -388,7 +389,7 @@ pub async fn lrem(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         .q(&format!(
             "SELECT o, v FROM {} WHERE {} AND o >= {first} ORDER BY o",
             cx.ns.elems(),
-            Ctx::kg(&row)
+            cx.kg(&row)
         ))
         .await?;
     let kept: Vec<Vec<u8>> = tail
@@ -417,7 +418,7 @@ pub async fn ltrim(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
             cx.x(&format!(
                 "DELETE FROM {} WHERE {} AND (o < {lo} OR o > {hi})",
                 cx.ns.elems(),
-                Ctx::kg(&row)
+                cx.kg(&row)
             ))
             .await?;
             row.lh = lo;
@@ -503,7 +504,7 @@ pub async fn lpos(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
         .q(&format!(
             "SELECT o FROM {} WHERE {} AND v = {}{window} ORDER BY o {order}{limit}",
             cx.ns.elems(),
-            Ctx::kg(&row),
+            cx.kg(&row),
             lit(&a[2])
         ))
         .await?;
@@ -663,7 +664,7 @@ pub(crate) async fn all_items(cx: &mut Ctx<'_>, row: &KeyRow) -> R<Vec<Vec<u8>>>
         .q(&format!(
             "SELECT v FROM {} WHERE {} ORDER BY o",
             cx.ns.elems(),
-            Ctx::kg(row)
+            cx.kg(row)
         ))
         .await?;
     Ok(rows

@@ -815,7 +815,8 @@ impl Session {
             return Frame::error("NOAUTH Authentication required.");
         };
         let cx = Ctx::new(login.sql.as_mut(), &env, &login.scope, db, false);
-        let table = cx.ns.keys();
+        let ns = cx.ns.clone();
+        let table = ns.keys();
         drop(cx);
         for k in keys {
             if self.watched.iter().any(|(d, wk, _)| *d == db && wk == k) {
@@ -824,8 +825,8 @@ impl Session {
             let rows = match login
                 .sql
                 .query(&format!(
-                    "SELECT _v FROM {table} WHERE k = {} AND {}",
-                    lit(k),
+                    "SELECT _v FROM {table} WHERE {} AND {}",
+                    sprig_kv::api::key_pred(&ns, k, ""),
                     live("")
                 ))
                 .await
@@ -848,13 +849,14 @@ impl Session {
         };
         for (db, k, ver) in watched {
             let cx = Ctx::new(login.sql.as_mut(), &env, &login.scope, db, false);
-            let table = cx.ns.keys();
+            let ns = cx.ns.clone();
+            let table = ns.keys();
             drop(cx);
             let rows = login
                 .sql
                 .query(&format!(
-                    "SELECT _v FROM {table} WHERE k = {} AND {} FOR UPDATE",
-                    lit(&k),
+                    "SELECT _v FROM {table} WHERE {} AND {} FOR UPDATE",
+                    sprig_kv::api::key_pred(&ns, &k, ""),
                     live("")
                 ))
                 .await?;
@@ -1562,15 +1564,20 @@ impl Session {
                     let mut ks: Vec<&Bytes> = keys.iter().filter(|k| k.len() <= 1024).collect();
                     ks.sort();
                     ks.dedup();
-                    let table = sprig_kv::Namespace::redis(&cfg.logical_database, self.db).keys();
+                    let ns = sprig_kv::Namespace::redis(&cfg.logical_database, self.db);
+                    let table = ns.keys();
                     let list: Vec<String> = ks.iter().map(|k| lit(k)).collect();
+                    let mut dks: Vec<String> = ks.iter().map(|k| lit(ns.dist_key(k))).collect();
+                    dks.sort();
+                    dks.dedup();
                     if !list.is_empty()
                         && let Some(l) = self.login.as_mut()
                         && let Err(e) = l
                             .sql
                             .query(&format!(
-                                "SELECT k FROM {table} WHERE k IN ({}) ORDER BY k FOR UPDATE",
-                                list.join(", ")
+                                "SELECT k FROM {table} WHERE k IN ({}) AND _sprig_dk IN ({}) ORDER BY k FOR UPDATE",
+                                list.join(", "),
+                                dks.join(", ")
                             ))
                             .await
                     {

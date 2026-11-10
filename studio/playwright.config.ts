@@ -10,7 +10,7 @@ export default defineConfig({
   timeout: 60_000,
   workers: 1,
   reporter: [['list']],
-  outputDir: '../target/agent-studio1/playwright-results',
+  outputDir: process.env.STUDIO_OUT ?? '../target/agent-studio1/playwright-results',
   use: {
     baseURL: process.env.STUDIO_URL ?? 'http://127.0.0.1:25080',
     channel: 'chrome',

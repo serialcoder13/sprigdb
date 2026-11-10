@@ -1,0 +1,10 @@
+The terminal is 50x10; sprig needs at least 60x16.
+
+
+
+
+
+
+
+
+

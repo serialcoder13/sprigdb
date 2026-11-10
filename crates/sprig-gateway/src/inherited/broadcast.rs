@@ -999,7 +999,10 @@ async fn retry_locked(
         }
         for (bid, attempts, _) in list {
             let row: Option<mysql_async::Row> = c
-                .exec_first(format!("SELECT {COLS} FROM {tbl} WHERE bid = ?"), (bid.clone(),))
+                .exec_first(
+                    format!("SELECT {COLS} FROM {tbl} WHERE bid = ?"),
+                    (bid.clone(),),
+                )
                 .await
                 .map_err(sprig_streams::maria::map_err)?;
             let Some(row) = row else {

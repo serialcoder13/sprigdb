@@ -149,6 +149,14 @@ impl ChannelSink {
         self.tx.is_closed()
     }
 
+    /// Resolves when the reader goes away: the HTTP client disconnected,
+    /// or a cursor closed (chapter 44, decision ST30). A statement waiting
+    /// for its first row would otherwise notice only at that row.
+    pub fn reader_gone(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let tx = self.tx.clone();
+        async move { tx.closed().await }
+    }
+
     async fn send(&self, item: Item) -> Result<()> {
         self.tx.send(item).await.map_err(|_| gone())
     }

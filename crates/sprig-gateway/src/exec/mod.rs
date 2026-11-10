@@ -427,7 +427,11 @@ impl PassSession {
     async fn prepare(&mut self, cx: &mut ExecCtx<'_>, sql: Bytes) -> Result<ExecSummary> {
         let (sql, renames) = self.session_rewrites(sql, cx.session.id.0);
         let info = StmtInfo::classify(&sql);
-        let prepared = self.bs(cx).prepare(&info, &sql).await?;
+        // H9 (bugfix3): sharded tables are prepared in one shard's schema.
+        let prepared = match self.prepare_meta(cx, &info, &sql).await {
+            Some(r) => r?,
+            None => self.bs(cx).prepare(&info, &sql).await?,
+        };
         let mut meta_params = prepared.param_defs.clone();
         let mut meta_columns = prepared.columns.clone();
         relay::rename_all(&mut meta_columns, &renames);

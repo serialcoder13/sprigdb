@@ -145,12 +145,9 @@ impl StreamSource {
         let mut at = HashMap::new();
         let mut fresh = Vec::new();
         for p in &partitions {
-            if let Some(o) = committed
-                .iter()
-                .find(|o| {
-                    o.instance_tenant == instance && o.stream == stream && o.partition.0 == *p
-                })
-            {
+            if let Some(o) = committed.iter().find(|o| {
+                o.instance_tenant == instance && o.stream == stream && o.partition.0 == *p
+            }) {
                 at.insert(*p, o.offset);
                 continue;
             }
@@ -362,6 +359,232 @@ impl SourceReader for StreamSource {
             && self.partitions.contains(partition)
         {
             self.at.insert(*partition, offset + 1);
+        }
+        Ok(())
+    }
+}
+
+// ----------------------------------------------------------------------
+// Fan-in sources (chapter 51, "Fan-in sinks").
+// ----------------------------------------------------------------------
+
+/// The header naming a record's member.
+pub const TENANT_HEADER: &str = "x-sprig-tenant";
+
+/// The stream id a fan-in task's positions carry for member `member`'s
+/// instance stream `stream` (as the Kafka fan-in topics pack them: bit
+/// 62, the member's id shifted by 24, the stream id), so positions of
+/// two members never collide. Members below 2^38, streams below 2^24.
+#[must_use]
+pub fn fanin_stream_id(member: u64, stream: u64) -> Option<u64> {
+    (member < (1 << 38) && stream < (1 << 24)).then_some((1 << 62) | (member << 24) | stream)
+}
+
+/// One member's instance, as a fan-in task reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FanInMember {
+    /// The member.
+    pub tenant: u64,
+    /// Its name (the `x-sprig-tenant` tag).
+    pub name: String,
+    /// Its instance's stream id.
+    pub stream: u64,
+}
+
+/// Opens one member's instance for a fan-in task: the member, its
+/// partitions this task reads.
+#[async_trait]
+pub trait FanInOpener: Send + Sync {
+    /// The members whose instances this task reads now, and for each the
+    /// partitions.
+    async fn members(&self) -> Result<Vec<(FanInMember, Vec<u32>)>>;
+    /// A source over `m`'s instance (positions in the sink's catalog).
+    async fn open(&self, m: &FanInMember, partitions: Vec<u32>) -> Result<StreamSource>;
+}
+
+struct Child {
+    member: FanInMember,
+    packed: u64,
+    src: StreamSource,
+    /// Nothing was there at the last read: not asked again before this.
+    idle_until: Option<tokio::time::Instant>,
+    idle_ms: u64,
+}
+
+/// A fan-in task's source: every member instance it reads, in turn; new
+/// instances join at each refresh. Records are tagged with their member
+/// (`x-sprig-tenant`), their idempotency keys start with the member's id,
+/// and their positions carry [`fanin_stream_id`].
+pub struct FanInSource {
+    opener: Box<dyn FanInOpener>,
+    children: Vec<Child>,
+    refresh: Duration,
+    next_refresh: tokio::time::Instant,
+    turn: usize,
+}
+
+impl std::fmt::Debug for FanInSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FanInSource")
+            .field("members", &self.children.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl FanInSource {
+    /// A source over the members `opener` lists, refreshed every
+    /// `refresh` (`sink.fanin_refresh_seconds`).
+    ///
+    /// # Errors
+    /// The first listing's.
+    pub async fn open(opener: Box<dyn FanInOpener>, refresh: Duration) -> Result<Self> {
+        let mut s = Self {
+            opener,
+            children: Vec::new(),
+            refresh,
+            next_refresh: tokio::time::Instant::now(),
+            turn: 0,
+        };
+        s.refresh_members().await?;
+        Ok(s)
+    }
+
+    /// The members read now.
+    #[must_use]
+    pub fn members(&self) -> Vec<u64> {
+        self.children.iter().map(|c| c.member.tenant).collect()
+    }
+
+    async fn refresh_members(&mut self) -> Result<()> {
+        self.next_refresh = tokio::time::Instant::now() + self.refresh;
+        let list = self.opener.members().await?;
+        for (m, parts) in list {
+            if self.children.iter().any(|c| c.member.tenant == m.tenant) {
+                continue;
+            }
+            let Some(packed) = fanin_stream_id(m.tenant, m.stream) else {
+                tracing::warn!(member = m.tenant, stream = m.stream, "fan-in sink: member or stream id too large to read");
+                continue;
+            };
+            match self.opener.open(&m, parts).await {
+                Ok(src) => {
+                    tracing::debug!(member = m.tenant, "fan-in sink: member joined");
+                    metrics::counter!("sprig_sink_fanin_members_joined_total").increment(1);
+                    self.children.push(Child {
+                        member: m,
+                        packed,
+                        src,
+                        idle_until: None,
+                        idle_ms: 0,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(member = m.tenant, error = %e, "fan-in sink: member not opened yet");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn child_of(&mut self, packed: u64) -> Option<&mut Child> {
+        self.children.iter_mut().find(|c| c.packed == packed)
+    }
+}
+
+fn tag(mut r: SinkRecord, c: &Child) -> SinkRecord {
+    if let Position::Stream { stream, .. } = &mut r.pos {
+        *stream = c.packed;
+        r.idem_key = format!("{}:{}", c.member.tenant, r.idem_key);
+    }
+    if !r.headers.iter().any(|(k, _)| k == TENANT_HEADER) {
+        r.headers
+            .push((TENANT_HEADER.to_owned(), c.member.name.clone().into_bytes()));
+    }
+    r
+}
+
+#[async_trait]
+impl SourceReader for FanInSource {
+    async fn next_batch(
+        &mut self,
+        max_records: usize,
+        max_bytes: u64,
+        wait: Duration,
+    ) -> Result<Vec<SinkRecord>> {
+        if tokio::time::Instant::now() >= self.next_refresh
+            && let Err(e) = self.refresh_members().await
+        {
+            tracing::debug!(error = %e, "fan-in sink: refresh failed");
+        }
+        let mut out = Vec::new();
+        let n = self.children.len();
+        let now = tokio::time::Instant::now();
+        for i in 0..n {
+            if out.len() >= max_records {
+                break;
+            }
+            let k = (self.turn + i) % n;
+            let c = &mut self.children[k];
+            if c.idle_until.is_some_and(|t| now < t) {
+                continue;
+            }
+            let got = c
+                .src
+                .next_batch(max_records - out.len(), max_bytes, Duration::ZERO)
+                .await?;
+            if got.is_empty() {
+                // Idle members are asked less often, up to once a second.
+                c.idle_ms = (c.idle_ms * 2).clamp(50, 1000);
+                c.idle_until = Some(now + Duration::from_millis(c.idle_ms));
+            } else {
+                c.idle_ms = 0;
+                c.idle_until = None;
+            }
+            let c = &self.children[k];
+            out.extend(got.into_iter().map(|r| tag(r, c)));
+        }
+        self.turn = self.turn.wrapping_add(1);
+        if out.is_empty() {
+            tokio::time::sleep(wait.min(Duration::from_millis(100))).await;
+        }
+        Ok(out)
+    }
+
+    async fn settle(&mut self, done: &[Position]) -> Result<()> {
+        let mut by: HashMap<u64, Vec<Position>> = HashMap::new();
+        for p in done {
+            if let Position::Stream { stream, .. } = p {
+                by.entry(*stream).or_default().push(p.clone());
+            }
+        }
+        for (packed, list) in by {
+            let Some(c) = self.child_of(packed) else {
+                continue;
+            };
+            let real = c.member.stream;
+            let list: Vec<Position> = list
+                .into_iter()
+                .map(|mut p| {
+                    if let Position::Stream { stream, .. } = &mut p {
+                        *stream = real;
+                    }
+                    p
+                })
+                .collect();
+            c.src.settle(&list).await?;
+        }
+        Ok(())
+    }
+
+    async fn seek_after(&mut self, pos: &Position) -> Result<()> {
+        if let Position::Stream { stream, .. } = pos
+            && let Some(c) = self.child_of(*stream)
+        {
+            let mut p = pos.clone();
+            if let Position::Stream { stream, .. } = &mut p {
+                *stream = c.member.stream;
+            }
+            c.src.seek_after(&p).await?;
         }
         Ok(())
     }

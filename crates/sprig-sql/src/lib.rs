@@ -37,4 +37,6 @@ pub mod compat;
 pub mod lex;
 pub mod names;
 pub mod pin_stmt;
+// Chapter 52: recommendations in SQL.
+pub mod rec_stmt;
 pub mod settings_stmt;

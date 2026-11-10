@@ -30,9 +30,7 @@
 *-mysql fail testsuite.regression.CachedRowsetTest.testBug5188 :: fails on plain MySQL 8.4.11 too: class testsuite.regression.CachedRowsetTest cannot access class com.sun.rowset.CachedRowSetImpl (in module java.sql.rowset) because module java.sql.ro
 gateway-mysql fail testsuite.regression.CallableStatementRegressionTest.testBug57022 :: not investigated (r4close): No operations allowed after statement closed.
 gateway-mysql fail testsuite.regression.CallableStatementRegressionTest.testBug95796 :: decision D4
-gateway-mysql fail testsuite.regression.CharsetRegressionTest.testBug71038 :: connections with detectCustomCollations=true fail to open through the gateway (to investigate; as ResultSetTest.testPadding)
-gateway-mysql fail testsuite.regression.CharsetRegressionTest.testBug91317 :: as testBug71038
-gateway-mysql fail testsuite.regression.CharsetRegressionTest.testBug95139 :: as testBug71038
+gateway-mysql fail testsuite.regression.CharsetRegressionTest.testBug95139 :: gaps row 60: @@collation_connection reads MariaDB's utf8mb4_uca1400_ai_ci where MySQL says utf8mb4_0900_ai_ci (connects since gaps row 54 was fixed)
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testAuthTestPlugin :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (mysql.plugin)
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug102404 :: session-state tracking of SET NAMES
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug11237 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
@@ -79,7 +77,6 @@ gateway-mysql fail testsuite.regression.ResultSetRegressionTest.testBug22305979 
 gateway-mysql fail testsuite.regression.ResultSetRegressionTest.testBug6743 :: a fully qualified column in an updatable result set's WHERE
 gateway-mysql fail testsuite.regression.ResultSetRegressionTest.testBug72609 :: metadata over SHOW statements differs
 gateway-mysql fail testsuite.regression.ResultSetRegressionTest.testBug75309 :: 1690's expression text differs (chapter 28, error mapping)
-gateway-mysql fail testsuite.regression.ResultSetRegressionTest.testBug78685 :: gaps row 34: integer expression metadata
 gateway-mysql fail testsuite.regression.ResultSetRegressionTest.testBug9236 :: as testBug63800
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug103796 :: statement cancellation: the gateway's KILL QUERY gives 1317 where the driver expects its own timeout
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug103878 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (USE mysql)
@@ -144,7 +141,6 @@ gateway-mysql fail testsuite.simple.QueryAttributesTest.rewriteQueriesWithAttrib
 gateway-mysql fail testsuite.simple.QueryAttributesTest.rewriteQueriesWithAttributesInPlainStatement :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (reads mysql.component to find the query-attributes component)
 gateway-mysql fail testsuite.simple.QueryAttributesTest.rewriteQueriesWithAttributesInServerPreparedStatement :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (reads mysql.component to find the query-attributes component)
 gateway-mysql fail testsuite.simple.QueryAttributesTest.serverPreparedStatementWithQueryAttributesInMultiHost :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (reads mysql.component to find the query-attributes component)
-gateway-mysql fail testsuite.simple.ResultSetTest.testPadding :: as CharsetRegressionTest.testBug71038 (detectCustomCollations=true)
 *-mysql fail testsuite.simple.SecureConnectionTest.testFipsCompliantJsse :: fails on plain MySQL 8.4.11 too: Communications link failure
 baseline-mysql fail testsuite.simple.SecureConnectionTest.testKeyStoreProvider :: plain MySQL 8.4.11 only: Communications link failure
 gateway-mysql flaky testsuite.simple.StatementsTest.testQueryInfoParsingAndRewrittingInsertSetEroteme :: row alias without a column list: fixed after the measured run (compat::rowsyntax); expected to pass
@@ -154,3 +150,4 @@ gateway-mysql flaky testsuite.simple.StatementsTest.testQueryInfoParsingAndRewri
 gateway-mysql fail testsuite.simple.StatementsTest.testReadOnlySafeStatements :: not investigated (r4close): Query: INSERT INTO roSafeTest VALUES (99, 'test99') the error message «No operations allowed after statement closed.» was expected to match «Connectio
 gateway-mysql flaky testsuite.simple.StatementsTest.testResultSetProducingQueries :: standalone VALUES ROW: fixed after the measured run (compat::rowsyntax); expected to pass
 gateway-mysql flaky testsuite.simple.ConnectionTest.testIPv6 :: 39070 catalog unavailable: the shared dev controller's catalog didn't answer during r4two's run (10 November)
+gateway-mysql flaky testsuite.regression.StatementRegressionTest.testBug51666 :: gaps row 46: Com_select is the pooled backend connection's counter; passes only when the session keeps one connection

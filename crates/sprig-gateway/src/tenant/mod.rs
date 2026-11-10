@@ -30,6 +30,8 @@ pub mod locator;
 pub mod names;
 pub mod password;
 pub mod pins_sql;
+// Chapter 52: recommendations in SQL.
+pub mod rec_sql;
 pub mod session;
 pub mod settings_sql;
 pub mod stored_names;

@@ -1,0 +1,28 @@
+# Approvals and recommendations (chapter 52, "Observability"): items left
+# waiting, notification channels failing, approved changes failing.
+# Tested with `promtool test rules` (deploy/alerts/test.sh).
+groups:
+  - name: sprig-approvals
+    rules:
+      - alert: SprigApprovalsWaitingLong
+        expr: max by (kind, level) (sprig_approvals_oldest_open_seconds) > 3 * 86400
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: A recommendation has waited more than 3 days for a decision
+          runbook: chapter 52 (approve, ignore or snooze it; or set approvals.escalate_after)
+      - alert: SprigApprovalsNotifyFailing
+        expr: sum by (channel) (increase(sprig_approvals_notifications_total{result="failed"}[30m])) > 0
+          and sum by (channel) (increase(sprig_approvals_notifications_total{result="sent"}[30m])) == 0
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: Approval notifications on a channel fail and none get through
+          runbook: chapter 52 (approvals.smtp_url, approvals.webhook_url, the stream's database)
+      - alert: SprigApprovalsApplyFailing
+        expr: sum by (kind) (increase(sprig_approvals_applied_total{result="failed"}[1h])) > 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: An approved change failed to apply
+          runbook: chapter 52 (sprigctl recommendations show <id>; the component's own job)

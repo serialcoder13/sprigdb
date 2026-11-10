@@ -249,6 +249,15 @@ pub enum OwnerEvent {
         /// The gateway.
         to: String,
     },
+    /// The queue went from empty to holding ready messages, or back
+    /// (reported once when the owner starts, then on each change): the
+    /// ready index of fan-in consumers (chapter 42, "Fan-in").
+    Ready {
+        /// The queue.
+        queue: u64,
+        /// Ready messages exist.
+        ready: bool,
+    },
 }
 
 /// How an owner ended.
@@ -458,6 +467,8 @@ struct Core {
     move_asked: bool,
     /// Set by `HandOff`.
     handoff: Option<String>,
+    /// The ready state last reported ([`OwnerEvent::Ready`]).
+    reported_ready: Option<bool>,
 }
 
 /// Runs the owner of `p.queue` over `store` on commands from `rx`: takes
@@ -553,6 +564,7 @@ pub async fn run_owned(
         follow: None,
         move_asked: false,
         handoff: None,
+        reported_ready: None,
         store,
         p,
     };
@@ -1845,6 +1857,7 @@ impl Core {
             if let Err(e) = self.settle_loop().await {
                 break e.to_string();
             }
+            self.report_ready();
         };
         let moved = MqError::new(MqCode::OwnerMoved, reason.clone());
         for (_, r) in self.inserts.drain(..) {
@@ -1881,6 +1894,19 @@ impl Core {
                 Exit::HandedOff { to, rx }
             }
             _ => Exit::Stopped,
+        }
+    }
+
+    /// Tells the engine when the queue went from empty to holding ready
+    /// messages or back (and once at the start).
+    fn report_ready(&mut self) {
+        let ready = self.ready_count > 0;
+        if self.reported_ready != Some(ready) {
+            self.reported_ready = Some(ready);
+            let _ = self.p.events.send(OwnerEvent::Ready {
+                queue: self.p.queue.id,
+                ready,
+            });
         }
     }
 

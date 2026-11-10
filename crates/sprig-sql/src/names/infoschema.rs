@@ -47,7 +47,7 @@ use sprig_proto_mysql::packets::Persona;
 
 use super::NameError;
 use super::hide::Visibility;
-use super::map::{LogicalDb, NameMap, Purpose};
+use super::map::{LogicalDb, NameMap, Purpose, SchemaName};
 use super::rewrite::{StmtKind, sql_string};
 use super::show::{ProcessRow, SessionSource, database_names};
 use crate::compat::schema::{self, Src};
@@ -1200,6 +1200,7 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
         if i > 0 {
             sql.push_str(" UNION ALL ");
         }
+        let start = sql.len();
         sql.push_str("SELECT ");
         for (k, (c, computed)) in shape.iter().enumerate() {
             if k > 0 {
@@ -1293,6 +1294,12 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
         }
         for (_, cond) in &push.names {
             let _ = write!(sql, " AND {cond}");
+        }
+        // A schema on another cluster: the rows read there (bugfix-8).
+        if let Ok(s) = phys.parse::<SchemaName>()
+            && let Some(rows) = ctx.map.remote_branch(&s, &sql[start..])
+        {
+            sql.push_str(&rows);
         }
     }
     Ok(sql)

@@ -487,6 +487,7 @@ impl MsgEnv {
     /// Supervises a running trigger: progress every second, a new version
     /// or a dropped source every [`RELOAD_EVERY`]. Returns `true` when the
     /// trigger is gone (its index entry is then removed).
+    #[allow(clippy::too_many_arguments)]
     async fn supervise(
         &self,
         cx: &JobCtx,
@@ -607,21 +608,24 @@ async fn replay_due(l: &Loaded, t: &Template, gw: &dyn Gateway) -> Result<u64> {
                 // In order: nothing after it runs; the later ones go back
                 // to `dead` with it, for the next replay.
                 store
-                    .set_dead_letters(
-                        &mut c,
-                        Some(l.source.binding_id),
-                        &[],
-                        "replaying",
-                        "dead",
-                    )
+                    .set_dead_letters(&mut c, Some(l.source.binding_id), &[], "replaying", "dead")
                     .await?;
-                tracing::warn!(binding = l.source.binding_id, dead_letter = r.dl_id, code = reply.code, "a replayed dead letter failed again; the replay stops there");
+                tracing::warn!(
+                    binding = l.source.binding_id,
+                    dead_letter = r.dl_id,
+                    code = reply.code,
+                    "a replayed dead letter failed again; the replay stops there"
+                );
                 break;
             }
         }
     }
     if n > 0 {
-        tracing::info!(binding = l.source.binding_id, replayed = n, "trigger dead letters replayed");
+        tracing::info!(
+            binding = l.source.binding_id,
+            replayed = n,
+            "trigger dead letters replayed"
+        );
     }
     Ok(n)
 }
@@ -679,18 +683,16 @@ fn db_err(e: mysql_async::Error) -> SprigError {
 impl StreamSide for MariaSide {
     async fn positions(&self) -> Result<HashMap<u32, u64>> {
         let mut c = self.catalog.get_conn().await?;
-        Ok(
-            offsets::positions_of(
-                &mut c,
-                &self.schema,
-                &self.group,
-                self.instance,
-                self.stream.0,
-            )
-                .await?
-                .into_iter()
-                .collect(),
+        Ok(offsets::positions_of(
+            &mut c,
+            &self.schema,
+            &self.group,
+            self.instance,
+            self.stream.0,
         )
+        .await?
+        .into_iter()
+        .collect())
     }
 
     async fn bounds(&self) -> Result<HashMap<u32, (u64, u64)>> {

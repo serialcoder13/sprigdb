@@ -881,7 +881,9 @@ mod tests {
         assert_eq!(src.name, "user_events");
         let d = parse("CREATE TRIGGER t ON STREAM s LANGUAGE javascript AS $$ 1 $$").unwrap();
         assert!(!d.source.unwrap().fan_in);
-        assert!(parse("CREATE TRIGGER t ON QUEUE q FAN IN LANGUAGE javascript AS $$ 1 $$").is_err());
+        assert!(
+            parse("CREATE TRIGGER t ON QUEUE q FAN IN LANGUAGE javascript AS $$ 1 $$").is_err()
+        );
     }
 
     #[test]

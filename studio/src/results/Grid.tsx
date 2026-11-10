@@ -14,6 +14,8 @@ export interface GridProps {
   edited?(row: number, col: number): boolean;
   rowClass?(row: number): string;
   height?: number;
+  /** The result's row number of row 0 (a cursor's sliding window). */
+  firstRow?: number;
 }
 
 const ROW_H = 26;
@@ -89,7 +91,7 @@ export function Grid(p: GridProps) {
       <div
         role="grid"
         aria-label={p.label}
-        aria-rowcount={p.rowCount + 1}
+        aria-rowcount={(p.firstRow ?? 0) + p.rowCount + 1}
         aria-colcount={cols + 1}
         className="grid"
         onKeyDown={onKey}
@@ -112,12 +114,12 @@ export function Grid(p: GridProps) {
               <div
                 role="row"
                 key={r}
-                aria-rowindex={r + 2}
+                aria-rowindex={(p.firstRow ?? 0) + r + 2}
                 className={p.rowClass?.(r)}
                 style={{ position: 'absolute', insetBlockStart: vr.start, insetInlineStart: 0 }}
               >
                 <div role="rowheader" aria-colindex={1}>
-                  {r + 1}
+                  {(p.firstRow ?? 0) + r + 1}
                 </div>
                 {p.columns.map((_, c) => {
                   const val = p.cell(r, c);

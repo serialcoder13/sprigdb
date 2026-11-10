@@ -573,3 +573,65 @@ fn bound_values_render_into_the_text() {
     assert!(render_params("SELECT ?", &p).is_none());
     assert!(render_params("SELECT ?, ?, ?, ?", &p).is_none());
 }
+
+/// H9 (bugfix3): a prepare's metadata text names one shard's schema for
+/// every sharded table (its group's lowest shard on the session's
+/// cluster, else the lowest), keeps placeholders and reference tables,
+/// and says where to prepare it.
+#[test]
+fn metadata_sql_names_one_shard_per_table() {
+    let t = topo();
+    let cx = |cluster: &'static str| PlanCtx {
+        topo: &t,
+        default_schema: Some(DEF),
+        session_cluster: cluster,
+        max_route_values: 1024,
+        lookup_batch: 256,
+        ids: crate::planner::IdMode::default(),
+    };
+    let (sql, at) = metadata_sql(
+        "INSERT INTO orders (id, cid) VALUES (?, ?) ON DUPLICATE KEY UPDATE id = VALUES(id)",
+        &cx("c1"),
+    )
+    .unwrap();
+    assert_eq!(
+        sql,
+        "INSERT INTO `t1_d1_g9_s1`.orders (id, cid) VALUES (?, ?) ON DUPLICATE KEY UPDATE id = VALUES(id)"
+    );
+    assert_eq!(at, "c1");
+    let (sql, _) = metadata_sql(
+        "SELECT o.id, p.pid FROM t1_d1_g1_s1.orders o JOIN products p ON p.pid = o.cid \
+         JOIN countries c ON c.id = o.id WHERE t1_d1_g1_s1.orders.cid = ? LOCK IN SHARE MODE",
+        &cx("c1"),
+    )
+    .unwrap();
+    assert_eq!(
+        sql,
+        "SELECT o.id, p.pid FROM `t1_d1_g9_s1`.orders o JOIN `t1_d1_g8_s1`.products p ON p.pid = o.cid \
+         JOIN countries c ON c.id = o.id WHERE `t1_d1_g9_s1`.orders.cid = ? LOCK IN SHARE MODE"
+    );
+    // No shard on the session's cluster: the lowest, prepared there.
+    let (sql, at) = metadata_sql("SELECT * FROM lines WHERE cid = ?", &cx("c7")).unwrap();
+    assert_eq!(sql, "SELECT * FROM `t1_d1_g9_s1`.lines WHERE cid = ?");
+    assert_eq!(at, "c1");
+    // Nothing of the topology, or only a reference table: unchanged.
+    assert!(metadata_sql("SELECT * FROM plain WHERE a = ?", &cx("c1")).is_none());
+    assert!(metadata_sql("SELECT * FROM countries WHERE id = ?", &cx("c1")).is_none());
+}
+
+/// bugfix3: 0 in a key column without `AUTO_INCREMENT` is a value, routed
+/// like any other (r2harden's tenant G got 39420 for `id = 0`).
+#[test]
+fn a_zero_key_without_auto_increment_is_a_value() {
+    let t = pass("INSERT INTO orders (id, cid) VALUES (5, 0)");
+    assert!(
+        t.sql.starts_with("INSERT INTO `t1_d1_g9_s")
+            && t.sql.ends_with(".orders (id, cid) VALUES (5, 0)"),
+        "{}",
+        t.sql
+    );
+    match p("INSERT INTO orders (id, cid) VALUES (5, 0), (6, 0)") {
+        Plan::Pass(t) => assert!(t.sql.contains("(5, 0), (6, 0)"), "{}", t.sql),
+        other => panic!("{other:?}"),
+    }
+}

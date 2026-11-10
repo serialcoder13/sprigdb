@@ -80,6 +80,10 @@ def!(OPERATOR_MTLS: Cow<'static, str> = "studio.operator_mtls", Cow::Borrowed("o
     HardBounds::one_of(&["off", "required"]), "off or required: client certificate for operator mode");
 def!(OPERATOR_REQUIRE_MFA: bool = "studio.operator_require_mfa", false, GLOBAL, HardBounds::NONE,
     "Second factor for operator mode");
+def!(CURSOR_IDLE_SECONDS: u64 = "studio.cursor_idle_seconds", 60, Scopes::TREE, HardBounds::range(1, 3600),
+    "Idle time before a cursor closes and its backend statement is killed");
+def!(CURSOR_MAX_OPEN: u64 = "studio.cursor_max_open", 4, TENANT_GLOBAL, HardBounds::range(1, 64),
+    "Open cursors per user on one gateway; opening another closes the least recently used");
 
 /// What serving and the session endpoints read, resolved at this
 /// gateway's scopes.
@@ -316,6 +320,8 @@ mod tests {
             "studio.path",
             "studio.max_result_rows",
             "studio.operator_require_mfa",
+            "studio.cursor_idle_seconds",
+            "studio.cursor_max_open",
         ] {
             assert!(reg.get(k).is_some(), "{k}");
         }

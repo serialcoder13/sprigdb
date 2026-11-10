@@ -1364,12 +1364,21 @@ impl PassSession {
             ids: self.id_mode(),
         };
         let tenant = self.tenant.as_deref().map(|t| t.tenant);
+        // R6 round 4: the key-value front ends' one-key compound
+        // statements (guarded batches) go to that key's shard; only the
+        // gateway's own internal statements take this path.
+        let internal = self.tenant.as_deref().is_some_and(|t| t.types.internal);
         // Chapter 20: writes count into the gateway's sketches.
         let plan = crate::write_load::observe(
             tenant,
             text,
             &cluster,
-            || sprig_router::plan(text, &pcx),
+            || {
+                internal
+                    .then(|| sprig_router::compound::plan_keyed_compound(text, &pcx))
+                    .flatten()
+                    .unwrap_or_else(|| sprig_router::plan(text, &pcx))
+            },
             |p| p,
         );
         self.router.ids = None;
@@ -1897,6 +1906,98 @@ impl PassSession {
                 }))
             }
         }
+    }
+
+    /// `COM_STMT_PREPARE` of a statement naming sharded tables (H9,
+    /// bugfix3): the backend prepares it, for its parameter and column
+    /// definitions, with every such table in one shard's schema
+    /// ([`sprig_router::metadata_sql`]), on that shard's cluster when the
+    /// session isn't in a transaction. A table the advisor regrouped is no
+    /// longer in its database's first schema, where the client's text
+    /// would be prepared (1146 on every prepare). Executions still route
+    /// the statement's own text. `None` to prepare `sql` as before.
+    pub(super) async fn prepare_meta(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        info: &StmtInfo,
+        sql: &[u8],
+    ) -> Option<Result<crate::backend::BackendStmt>> {
+        let (layout, _) = self.router_layout().await?;
+        let text = std::str::from_utf8(sql).ok()?;
+        let cfg = self.router_cfg();
+        let _ = self.bs(cx);
+        let default_schema = self.bs.as_ref().and_then(|bs| bs.vars().schema.clone());
+        let main = self.main_cluster().to_string();
+        let pcx = PlanCtx {
+            topo: &layout.topo,
+            default_schema: default_schema.as_deref(),
+            session_cluster: &main,
+            max_route_values: cfg.max_route_values,
+            lookup_batch: cfg.lookup_batch,
+            ids: self.id_mode(),
+        };
+        let (meta, at) = sprig_router::metadata_sql(text, &pcx)?;
+        // The other clusters' sessions come from the coordinator's factory.
+        self.ensure_coord(cx, &layout).await;
+        let slot = match ClusterId::new(&at) {
+            Ok(c) if at != main && !self.router.in_txn() && !self.legacy_txn() => Slot::Other(c),
+            _ => Slot::Main,
+        };
+        if let Err(e) = self.slot_in(&slot).await {
+            return Some(Err(e));
+        }
+        let r = match self.bs.as_mut() {
+            Some(bs) => bs.prepare(info, meta.as_bytes()).await,
+            None => Err(SprigError::internal("no backend session")),
+        };
+        self.slot_out(&slot);
+        Some(r)
+    }
+
+    /// bugfix-8: runs the `information_schema` branch `sql` on `cluster`
+    /// (a group's schema that isn't on the session's cluster) as the
+    /// session, and renders its rows for the second planning pass
+    /// ([`sprig_sql::names::inline_rows`]).
+    ///
+    /// # Errors
+    /// The backend's; 39420-style budget errors past 64 MB.
+    pub(super) async fn remote_branch_rows(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        cluster: &str,
+        sql: &str,
+    ) -> Result<String> {
+        let c = ClusterId::new(cluster)
+            .map_err(|e| SprigError::internal(format!("cluster id {cluster}: {e}")))?;
+        let _ = self.bs(cx);
+        if let Some((layout, _)) = self.router_layout().await {
+            self.ensure_coord(cx, &layout).await;
+        }
+        let slot = if c == self.main_cluster() {
+            Slot::Main
+        } else {
+            Slot::Other(c)
+        };
+        self.slot_in(&slot).await?;
+        let r = match self.bs.as_mut() {
+            Some(bs) => backend::run_on(bs, sql, &mut sprig_router::Budget::mb(64)).await,
+            None => Err(SprigError::internal("no backend session")),
+        };
+        self.slot_out(&slot);
+        let sprig_router::exec::ShardOutcome::Rows(rs) = r? else {
+            return Ok(String::new());
+        };
+        let types: Vec<(u8, bool)> = rs
+            .columns
+            .iter()
+            .map(|c| (c.col_type, c.charset == 63))
+            .collect();
+        let rows: Vec<Vec<Option<&[u8]>>> = rs
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|v| v.as_deref()).collect())
+            .collect();
+        Ok(sprig_sql::names::inline_rows(&types, &rows))
     }
 
     /// `COM_STMT_EXECUTE` of a tenant session whose tenant has sharded or

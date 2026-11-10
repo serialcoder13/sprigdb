@@ -97,6 +97,14 @@ pub trait NameMap: Send + Sync {
         None
     }
 
+    /// For an `information_schema` branch `sql` over `schema` when that
+    /// schema is on another cluster: the rows the gateway read there, as
+    /// text to append to the branch (see [`super::remote`]); `None` to
+    /// keep the branch as it is.
+    fn remote_branch(&self, _schema: &SchemaName, _sql: &str) -> Option<String> {
+        None
+    }
+
     /// The schemas `db` stands for, for `purpose`.
     ///
     /// # Errors
@@ -179,6 +187,9 @@ pub struct GroupedTables {
     schemas: HashMap<DbId, Vec<SchemaName>>,
     /// Per database and lowercase table name: its group's representative.
     tables: HashMap<(DbId, String), SchemaName>,
+    /// Representatives on another cluster than the session's, with their
+    /// cluster (bugfix-8: their `information_schema` rows are read there).
+    remote: HashMap<SchemaName, String>,
 }
 
 impl GroupedTables {
@@ -198,6 +209,23 @@ impl GroupedTables {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tables.is_empty()
+    }
+
+    /// Records that `schema` is on `cluster`, not the session's.
+    pub fn set_remote(&mut self, schema: SchemaName, cluster: &str) {
+        self.remote.insert(schema, cluster.to_owned());
+    }
+
+    /// The cluster of `schema` when it isn't the session's.
+    #[must_use]
+    pub fn remote_cluster(&self, schema: &SchemaName) -> Option<&str> {
+        self.remote.get(schema).map(String::as_str)
+    }
+
+    /// Whether some representative is on another cluster.
+    #[must_use]
+    pub fn has_remote(&self) -> bool {
+        !self.remote.is_empty()
     }
 }
 

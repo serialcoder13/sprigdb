@@ -1451,7 +1451,9 @@ impl Engine {
             Ok(Err(e)) => {
                 tracing::debug!(job = %self.job.0, error = %e, "triggers and events not recorded");
             }
-            Err(_) => tracing::debug!(job = %self.job.0, "triggers and events not recorded: no answer"),
+            Err(_) => {
+                tracing::debug!(job = %self.job.0, "triggers and events not recorded: no answer")
+            }
         }
     }
 

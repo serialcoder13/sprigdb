@@ -346,3 +346,24 @@ fn show_engines_is_mysqls_list() {
     assert!(!sql.contains("SEQUENCE") && !sql.contains("Aria"), "{sql}");
     assert!(sql.ends_with("ORDER BY m.`n`"), "{sql}");
 }
+
+#[test]
+fn show_collation_reads_mysqls_collations() {
+    let lit = |v: &str| format!("'{v}'");
+    let s = |q: &str| show_collation_sql(q.as_bytes(), &lit).map(|v| String::from_utf8(v).unwrap());
+    let all = s("SHOW COLLATION").unwrap();
+    assert!(all.contains("`PAD_ATTRIBUTE` AS `Pad_attribute`"), "{all}");
+    assert!(all.ends_with("ORDER BY `Collation`"), "{all}");
+    assert!(
+        s("show collation like 'utf8mb4%';")
+            .unwrap()
+            .contains(" WHERE `Collation` LIKE 'utf8mb4%' ORDER BY")
+    );
+    assert!(
+        s("SHOW COLLATION WHERE Charset = 'latin1'")
+            .unwrap()
+            .contains(" WHERE Charset = 'latin1' ORDER BY")
+    );
+    assert!(s("SHOW COLLATIONS").is_none());
+    assert!(s("SHOW CHARACTER SET").is_none());
+}

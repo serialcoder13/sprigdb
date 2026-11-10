@@ -512,6 +512,16 @@ fn plan_show(
                 ResultMapper::scrub(),
             )
         }
+        // 3306: MySQL's collations (gaps row 54; chapter 28, R4).
+        ShowKind::Other
+            if persona == Persona::MySql84
+                && crate::compat::schema::show_collation_sql(&text, &|v| sql_string(v, nbe))
+                    .is_some() =>
+        {
+            let sql = crate::compat::schema::show_collation_sql(&text, &|v| sql_string(v, nbe))
+                .unwrap_or_default();
+            forward(sql, ResultMapper::scrub())
+        }
         ShowKind::Grants | ShowKind::Other => forward(text, ResultMapper::scrub()),
         kind => {
             // R1: a database whose tables the advisor grouped lists them

@@ -43,6 +43,19 @@ fn db_err(what: &str, e: &mysql_async::Error) -> SprigError {
     SprigError::new(SprigCode::BackendUnavailable, format!("{what}: {e}"))
 }
 
+/// Rows of `schema.name` without `_sprig_rk`.
+async fn unfilled(c: &mut Conn, schema: &str, name: &str) -> Result<u64> {
+    let n: Option<u64> = c
+        .query_first(format!(
+            "SELECT COUNT(*) FROM {}.{} WHERE {RK_COLUMN} IS NULL",
+            quote(schema),
+            quote(name)
+        ))
+        .await
+        .map_err(|e| db_err("back-fill check", &e))?;
+    Ok(n.unwrap_or(0))
+}
+
 /// The routing hash of key values read from MariaDB under `spec`
 /// (`sprig_shard::rk::hash_values`, which the mover's re-key shares).
 ///
@@ -589,6 +602,12 @@ async fn backfill(c: &mut Conn, ctx: &ApplyCtx, g: &CreatedGroup, input: &Input)
             let pk = pk_of(*o);
             match routing {
                 Routing::Columns { columns } => {
+                    // Rows a front end already routed (chapter 33's tables
+                    // fill `_sprig_rk` on every write, whatever their
+                    // primary key) need no back-fill (R6 round 4).
+                    if pk.len() != 1 && unfilled(c, &schema, name).await? == 0 {
+                        continue;
+                    }
                     if pk.len() != 1 {
                         return Err(SprigError::new(
                             SprigCode::MoveUnsupported,

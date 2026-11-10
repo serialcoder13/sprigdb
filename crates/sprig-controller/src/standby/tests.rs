@@ -81,11 +81,7 @@ async fn tenant_failover_settings_are_copied_to_the_directory() {
         version: 2,
     };
     let seed = |rows: Vec<SettingRow>| {
-        scopes.seed(
-            t,
-            2,
-            build_rows(Registry::global().unwrap(), t, 2, rows),
-        );
+        scopes.seed(t, 2, build_rows(Registry::global().unwrap(), t, 2, rows));
     };
     seed(vec![
         row("failover.rpo_seconds", json!(1)),

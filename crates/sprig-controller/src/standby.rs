@@ -135,6 +135,9 @@ pub struct StandbyLoop {
     /// Automatic moves about to start (chapter 24): no standby goes to
     /// their target meanwhile.
     intents: Option<Arc<crate::dc_migrate::DecisionState>>,
+    /// Chapter 52: `failover.standby_mode = approve` holds creations and
+    /// removals for approval.
+    approvals: Option<Arc<crate::approvals::ControllerApprovals>>,
 }
 
 impl std::fmt::Debug for StandbyLoop {
@@ -164,6 +167,54 @@ impl StandbyLoop {
             live,
             scopes: None,
             intents: None,
+            approvals: None,
+        }
+    }
+
+    /// Chapter 52: hold standby creations and removals under
+    /// `failover.standby_mode = approve`.
+    #[must_use]
+    pub fn with_approvals(mut self, a: Arc<crate::approvals::ControllerApprovals>) -> Self {
+        self.approvals = Some(a);
+        self
+    }
+
+    /// Chapter 52's gate: whether to create (`dc` `None`) or drop the
+    /// standby in `dc` now. Without an approvals hub: always.
+    async fn standby_gate(&self, tenant: TenantId, dc: Option<&DcId>, want: usize, have: usize) -> bool {
+        use sprig_approvals::{Action, Kind, Proposal, Verdict};
+        let Some(a) = &self.approvals else {
+            return true;
+        };
+        let kind = if dc.is_some() { Kind::StandbyDrop } else { Kind::StandbyCreate };
+        let policy = a.policy(kind, Some(tenant), None, None, None).await;
+        let p = Proposal {
+            kind,
+            subject: a.subject(tenant).await,
+            target: format!("t{tenant}/standby"),
+            action: Action {
+                text: match dc {
+                    Some(d) => format!("drop the tenant's standby in {d}"),
+                    None => "create a standby in another DC (region, then round-trip time)".into(),
+                },
+                machine: serde_json::json!({ "dc": dc.map(ToString::to_string), "want": want }),
+            },
+            evidence: serde_json::json!({ "want": want, "have": have }),
+            score: 1.0,
+            summary: match dc {
+                Some(d) => format!("drop the standby in {d}: {have} standbys, failover.standby_dcs = {want}"),
+                None => format!("create a standby: {have} standbys, failover.standby_dcs = {want}"),
+            },
+            emergency: false,
+        };
+        match a.gate(&p, &policy).await {
+            Verdict::Proceed(t) => {
+                if t.id.is_some() {
+                    a.finished(&t, true, "standby job submitted").await;
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -351,6 +402,9 @@ impl StandbyLoop {
         }
         let want = self.want(tenant).await;
         if sbs.len() < want {
+            if !self.standby_gate(tenant, None, want, sbs.len()).await {
+                return Ok(Outcome::RequeueAfter(PASS));
+            }
             if let Some((y, sb)) = self.create(tenant, &e, &source, &sbs).await? {
                 sbs.insert(y, sb);
             }
@@ -368,7 +422,9 @@ impl StandbyLoop {
                     r(a.0).total_cmp(&r(b.0)).then_with(|| a.0.cmp(b.0))
                 })
                 .map(|(d, s)| (d.clone(), s.clone()));
-            if let Some((y, sb)) = far {
+            if let Some((y, sb)) = far
+                && self.standby_gate(tenant, Some(&y), want, sbs.len()).await
+            {
                 self.drop_standby(tenant, &y, &sb, "more standbys than failover.standby_dcs")
                     .await?;
             }

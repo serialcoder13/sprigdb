@@ -14,6 +14,7 @@
 //! | `POST /v1/users:setPassword` | `Users.SetPassword`, so a password never enters statement text |
 //! | `GET /v1/users`, `GET`/`POST /v1/api-keys`, `POST /v1/api-keys/{id}:revoke` | Accounts and API keys ([`accounts`]) |
 //! | `/v1/indexing/...` | The caller's tenant's automatic indexes, recommendations, actions and explanations |
+//! | `POST /v1/databases/{db}/cursors`, `POST /v1/cursors/{h}:fetch`, `:close` | `Cursors` ([`cursors`]) |
 //! | `GET /v1/openapi.json` | The data API's document with these routes added |
 //!
 //! Anything else goes on to the REST router. Every call runs with the
@@ -31,8 +32,11 @@
 
 pub mod accounts;
 pub mod catalog;
+pub mod cursors;
 pub mod exports;
 pub mod grants;
+// Chapter 52: the approvals inbox.
+pub mod recommendations;
 pub mod session;
 pub mod workload;
 
@@ -139,6 +143,8 @@ pub struct StudioState {
     global: Option<Arc<dyn MetaStore>>,
     /// Tenant services: the catalog writer for API keys.
     tenants: Option<Arc<crate::tenant::TenantServices>>,
+    /// Open cursors (decision ST30).
+    pub cursors: Arc<cursors::CursorRegistry>,
 }
 
 impl std::fmt::Debug for StudioState {
@@ -187,6 +193,7 @@ impl StudioState {
             login,
             global,
             tenants: None,
+            cursors: Arc::default(),
         }
     }
 
@@ -752,6 +759,9 @@ pub async fn handle(
         }
         ("GET", "/v1/openapi.json") => Ok(json_response(200, &openapi())),
         (_, p) if p.starts_with("/v1/indexing/") => indexing(core, info, req).await,
+        (_, p) if p.starts_with("/v1/recommendations") => {
+            recommendations::handle(core, info, req).await
+        }
         ("GET", p) if p.starts_with("/v1/workload/fingerprints") => {
             let query = req.uri().query().unwrap_or("").to_owned();
             let rest = p.trim_start_matches("/v1/workload/fingerprints").to_owned();
@@ -765,6 +775,15 @@ pub async fn handle(
                     Some((id, "series")) => workload::series(core, &caller, id, &query).await,
                     _ => Err(invalid(format!("no route GET {p}"))),
                 },
+            }
+        }
+        ("POST", p)
+            if p.starts_with("/v1/cursors/")
+                || (p.starts_with("/v1/databases/") && p.ends_with("/cursors")) =>
+        {
+            match cursors::route(core, info, req).await {
+                Ok(r) => r,
+                Err(req) => return Err(req),
             }
         }
         (_, p)

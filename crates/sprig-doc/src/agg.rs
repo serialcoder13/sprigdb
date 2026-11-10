@@ -187,6 +187,19 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
     };
     Ok(match op {
         "$literal" => arg.clone(),
+        // A uniform double in [0, 1) (R5 round 4).
+        "$rand" => {
+            use std::hash::{BuildHasher, Hasher};
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos()),
+            );
+            #[allow(clippy::cast_precision_loss)]
+            let u = (h.finish() >> 11) as f64 / (1u64 << 53) as f64;
+            Bson::Double(u)
+        }
         // Fields by literal name, dots and `$` included (MongoDB 5.0+).
         "$getField" | "$setField" | "$unsetField" => {
             let (field, input, value) = match arg {

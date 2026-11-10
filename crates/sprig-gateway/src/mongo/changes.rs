@@ -32,10 +32,17 @@
 //!   the row's operation hint, so it shows as a `replace` event with the
 //!   new document (`decisions/r5-interim.md` D14).
 //!
+//! - **`showExpandedEvents`** (R5 round 4): `create`, `createIndexes`,
+//!   `dropIndexes` and `modify` (a `collMod` sets a table comment) from
+//!   the feed's DDL statements, with `collectionUUID` and
+//!   `operationDescription`; `rename` carries `to`.
+//! - **Pre- and post-images** (R5 round 4): `whenAvailable` and
+//!   `required` follow the collection's `changeStreamPreAndPostImages`
+//!   option (`null`, or the stream fails with 280, when it is off).
+//!
 //! Not built: `startAtOperationTime` (the feed can't position by time yet),
-//! `showExpandedEvents` events beyond
-//! `drop` and `rename`, and the k-way merge across clusters (R1 keeps a
-//! tenant on one cluster at a time).
+//! `shardCollection` events, and the k-way merge across clusters (R1 keeps
+//! a tenant on one cluster at a time).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -297,6 +304,52 @@ pub struct StreamSpec {
     pub before: Images,
     /// Stages after `$changeStream`.
     pub pipeline: Vec<Document>,
+    /// `showExpandedEvents`: DDL events (`create`, `createIndexes`,
+    /// `dropIndexes`, `modify`) and the fields MongoDB 6.0 added
+    /// (`collectionUUID`, `operationDescription`).
+    pub expanded: bool,
+}
+
+/// Whether a `$changeStream` stage asks for `showExpandedEvents`.
+#[must_use]
+pub fn expanded_of(stage: &Document) -> bool {
+    stage.get_bool("showExpandedEvents").unwrap_or(false)
+}
+
+/// What a DDL event is in MongoDB's terms, from its statement.
+fn ddl_event(e: &ChangeEvent) -> Option<&'static str> {
+    let text = e.ddl.as_deref().unwrap_or("");
+    let words: Vec<String> = text
+        .split_ascii_whitespace()
+        .take(3)
+        .map(str::to_ascii_uppercase)
+        .collect();
+    let w = |i: usize| words.get(i).map_or("", String::as_str);
+    Some(match e.op {
+        Op::Ddl(DdlKind::Create) if w(1) == "TABLE" || text.is_empty() => "create",
+        Op::Ddl(DdlKind::Create) if w(1) == "INDEX" || (w(1) == "UNIQUE" && w(2) == "INDEX") => {
+            "createIndexes"
+        }
+        Op::Ddl(DdlKind::Drop) if w(1) == "INDEX" => "dropIndexes",
+        Op::Ddl(DdlKind::Drop) => "drop",
+        Op::Ddl(DdlKind::Rename) => "rename",
+        Op::Ddl(DdlKind::Alter) if text.contains(COLLMOD_MARK) => "modify",
+        _ => return None,
+    })
+}
+
+/// The table comment `collMod` sets, so the change feed carries a
+/// `modify` event (MongoDB's `collMod` has one).
+pub const COLLMOD_MARK: &str = "sprig:collMod";
+
+/// The new name in `RENAME TABLE a TO b` (logical, unquoted).
+fn rename_target(e: &ChangeEvent) -> Option<String> {
+    let text = e.ddl.as_deref()?;
+    let upper = text.to_ascii_uppercase();
+    let at = upper.find(" TO ")?;
+    let target = text[at + 4..].trim().trim_end_matches(';');
+    let name = target.rsplit('.').next()?.trim().trim_matches('`');
+    Some(name.to_owned())
 }
 
 /// Collection names of tables, for database-wide streams.
@@ -309,6 +362,11 @@ pub trait TableNames: Send + Sync + std::fmt::Debug {
     /// (`changeStreamPreAndPostImages: {enabled: true}`).
     async fn images(&self, _tenant: TenantId, _db: &str, _table: &str) -> bool {
         false
+    }
+
+    /// The collection's `info.uuid` (`collectionUUID` of expanded events).
+    async fn uuid(&self, _tenant: TenantId, _db: &str, _table: &str) -> Option<[u8; 16]> {
+        None
     }
 }
 
@@ -521,17 +579,36 @@ async fn render_inner(
     {
         return None;
     }
-    let coll = match &spec.coll {
-        Some((name, table)) => {
-            if &e.table != table {
-                return None;
-            }
-            name.clone()
+    let ddl = if matches!(e.op, Op::Ddl(_)) {
+        let k = ddl_event(e)?;
+        // Without `showExpandedEvents`, only drops and renames show.
+        if !spec.expanded && !matches!(k, "drop" | "rename") {
+            return None;
         }
-        None => match &spec.tables {
-            Some(t) => t.collection(spec.tenant, &e.db_name, &e.table).await?,
+        Some(k)
+    } else {
+        None
+    };
+    let coll = if let Some((name, table)) = &spec.coll {
+        if &e.table != table {
+            return None;
+        }
+        name.clone()
+    } else {
+        let found = match &spec.tables {
+            Some(t) => t.collection(spec.tenant, &e.db_name, &e.table).await,
             None => return None,
-        },
+        };
+        match found {
+            Some(c) => c,
+            // A collection created a moment ago may not be in this
+            // gateway's catalog yet: a plain table name is its own
+            // collection name (meta::table_name).
+            None if ddl == Some("create") && sprig_doc::meta::table_name(&e.table) == e.table => {
+                e.table.clone()
+            }
+            None => return None,
+        }
     };
     let token = e.token.to_hex();
     let (ts, wall) = ts_of(e.hlc);
@@ -543,6 +620,18 @@ async fn render_inner(
     };
     let ns = doc! {"db": e.db_name.clone(), "coll": coll.clone()};
     let invalidates = spec.coll.is_some();
+    if spec.expanded
+        && let Some(t) = &spec.tables
+        && let Some(u) = t.uuid(spec.tenant, &e.db_name, &e.table).await
+    {
+        d.insert(
+            "collectionUUID",
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Uuid,
+                bytes: u.to_vec(),
+            },
+        );
+    }
     match e.op {
         Op::Insert => {
             let after = image_doc(e.after.as_ref())?;
@@ -612,17 +701,35 @@ async fn render_inner(
                 err,
             );
         }
-        Op::Ddl(DdlKind::Drop) => {
-            d.insert("operationType", "drop");
+        Op::Ddl(_) => {
+            let kind = ddl.unwrap_or("drop");
+            d.insert("operationType", kind);
             d.insert("ns", ns);
-            return Some((d, invalidates));
+            match kind {
+                "drop" => return Some((d, invalidates)),
+                "rename" => {
+                    if let Some(to) = rename_target(e) {
+                        let to = doc! {"db": e.db_name.clone(), "coll": to};
+                        d.insert("to", to.clone());
+                        if spec.expanded {
+                            d.insert("operationDescription", doc! {"to": to, "dropTarget": false});
+                        }
+                    }
+                    return Some((d, invalidates));
+                }
+                "createIndexes" | "dropIndexes" => {
+                    d.insert("operationDescription", doc! {"indexes": []});
+                }
+                "create" => {
+                    d.insert(
+                        "operationDescription",
+                        doc! {"idIndex": {"v": 2, "key": {"_id": 1}, "name": "_id_"}},
+                    );
+                }
+                _ => {}
+            }
         }
-        Op::Ddl(DdlKind::Rename) => {
-            d.insert("operationType", "rename");
-            d.insert("ns", ns);
-            return Some((d, invalidates));
-        }
-        Op::Ddl(_) | Op::Truncate => return None,
+        Op::Truncate => return None,
     }
     Some((d, false))
 }

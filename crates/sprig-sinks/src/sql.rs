@@ -115,6 +115,38 @@ pub trait Host: Send {
     async fn platform(&mut self, name: &str) -> Result<Option<(PlatformConnection, bool)>>;
     /// Every platform connection granted to the tenant.
     async fn platform_granted(&mut self) -> Result<Vec<PlatformConnection>>;
+    /// The session holds `SPRIG_FAN_IN`.
+    fn fan_in(&self) -> bool {
+        false
+    }
+    /// The inherited stream definition `db.name` a fan-in sink of this
+    /// tenant may read (declared here or above, the tenant in reach of its
+    /// members), with `UNDER t` resolved to a member below this tenant.
+    /// `None`: no such definition.
+    ///
+    /// # Errors
+    /// `UNDER` names no tenant below this one; the catalog's.
+    async fn fan_in_stream(
+        &mut self,
+        _db: &str,
+        _name: &str,
+        _under: Option<&str>,
+    ) -> Result<Option<FanInDef>> {
+        Ok(None)
+    }
+}
+
+/// An inherited stream definition a fan-in sink reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FanInDef {
+    /// The declaring tenant.
+    pub def_tenant: u64,
+    /// The definition's object id.
+    pub def_object: u64,
+    /// Its partitions.
+    pub partitions: u32,
+    /// `UNDER t`'s tenant id.
+    pub under: Option<u64>,
 }
 
 /// What a statement answers.
@@ -874,6 +906,46 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
                 partitions,
             }
         }
+        grammar::SourceAst::FanIn { stream: q, under } => {
+            let sdbname = q.db.clone().unwrap_or_else(|| dbname.clone());
+            if !h.fan_in() {
+                return Err(err(
+                    SprigCode::SinkPrivilege,
+                    "Access denied; you need (at least one of) the SPRIG_FAN_IN privilege(s) for a fan-in sink",
+                ));
+            }
+            if !h.can_select(&sdbname, &q.name) {
+                return Err(err(
+                    SprigCode::SinkPrivilege,
+                    format!("you need SELECT on stream {}", q.name),
+                ));
+            }
+            let d = h
+                .fan_in_stream(&sdbname, &q.name, under.as_deref())
+                .await?
+                .ok_or_else(|| {
+                    sprig_common::SprigError::new(
+                        SprigCode::StreamNotFound,
+                        format!(
+                            "no FOR EACH TENANT stream {sdbname}.{} in reach for FAN IN",
+                            q.name
+                        ),
+                    )
+                })?;
+            if c.guarantee == Guarantee::ExactlyOnce {
+                return Err(bad_option(
+                    "EXACTLY ONCE isn't built for fan-in sinks yet: they deliver at least once, each record with its tenant-prefixed idempotency key",
+                ));
+            }
+            SourceSpec::FanIn {
+                def_tenant: d.def_tenant,
+                def_object: d.def_object,
+                db: sdbname,
+                name: q.name.clone(),
+                partitions: d.partitions,
+                under: d.under,
+            }
+        }
         grammar::SourceAst::Queue(q) => {
             return Err(bad_option(format!(
                 "queue sources (FROM QUEUE {}) don't run in workers yet: queue owners live in gateways until the relay between them is built",
@@ -1083,6 +1155,14 @@ pub fn render_sink(d: &SinkDef) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
+        SourceSpec::FanIn {
+            db, name, under, ..
+        } => {
+            s.push_str(&format!("STREAM `{db}`.`{name}` FAN IN"));
+            if let Some(u) = under {
+                s.push_str(&format!(" UNDER {u}"));
+            }
+        }
     }
     if let Some(f) = &d.filter_sql {
         s.push_str(&format!(" WHERE {f}"));
@@ -1206,9 +1286,12 @@ pub async fn apply<Q: Queryable + Send>(
         Change::State(id, s, r) => store.set_state(q, *id, *s, r.as_deref()).await?,
         Change::DropSink(def) => {
             store.delete_sink(q, def.id).await?;
-            sprig_streams::StreamsStore::new(schema)
-                .delete_group(q, &def.group())
-                .await?;
+            let streams = sprig_streams::StreamsStore::new(schema);
+            // A tenant whose catalog never held a stream (a fan-in sink's
+            // declarer whose task never ran) has no group tables.
+            if streams.migrated(q).await.unwrap_or(true) {
+                streams.delete_group(q, &def.group()).await?;
+            }
         }
         Change::Usage(u, grant) => store.set_usage(q, u, *grant, user).await?,
     }

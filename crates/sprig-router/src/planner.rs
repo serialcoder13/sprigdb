@@ -602,6 +602,61 @@ fn first_explain(targets: &[Target]) -> R<Plan> {
     }))
 }
 
+/// Chapter 17 ("Prepared statements", H9): the text a `COM_STMT_PREPARE`
+/// of `sql` is prepared as for its metadata (parameter and column
+/// definitions), with the cluster to prepare it on. Every table of the
+/// topology `sql` names moves to one shard's schema: its group's lowest
+/// shard on `cx.session_cluster`, else its group's lowest shard; a
+/// reference table stays in its own schema. A table the advisor regrouped
+/// is no longer in its database's first schema, where the unchanged text
+/// would be prepared (1146). The cluster is the one holding those shards
+/// when they are all elsewhere, else `cx.session_cluster`. `None` when
+/// `sql` names no table of the topology or the parser can't read it;
+/// executions still plan from the unchanged text.
+#[must_use]
+pub fn metadata_sql(sql: &str, cx: &PlanCtx<'_>) -> Option<(String, String)> {
+    if !cx.topo.mentions(sql) {
+        return None;
+    }
+    let (body, lock) = split_share_lock(sql);
+    let stmt = parse(body).ok()?;
+    let mut occ: HashMap<Loc, String> = HashMap::new();
+    let mut by_name: HashMap<(String, String), String> = HashMap::new();
+    let mut clusters: BTreeSet<String> = BTreeSet::new();
+    let _ = visit_relations(&stmt, |n| {
+        if let Some((e, schema)) = resolve_name(n, cx)
+            && !e.is_reference()
+        {
+            let pick = |local: bool| {
+                e.group
+                    .shards
+                    .iter()
+                    .filter(|s| !local || s.cluster == cx.session_cluster)
+                    .min_by_key(|s| s.shard)
+            };
+            if let Some(s) = pick(true).or_else(|| pick(false)) {
+                occ.insert(loc_of(n), s.schema.clone());
+                by_name.insert((schema, e.name.clone()), s.schema.clone());
+                clusters.insert(s.cluster.clone());
+            }
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    if occ.is_empty() {
+        return None;
+    }
+    let mut text =
+        splice(body, &stmt, &occ, &by_name).unwrap_or_else(|| render(&stmt, &occ, &by_name));
+    if let Some(l) = lock {
+        text.push_str(l);
+    }
+    let cluster = match clusters.iter().next() {
+        Some(c) if clusters.len() == 1 && !clusters.contains(cx.session_cluster) => c.clone(),
+        _ => cx.session_cluster.to_owned(),
+    };
+    Some((text, cluster))
+}
+
 // ---------------------------------------------------------------------------
 // Names and occurrences
 
@@ -2984,6 +3039,11 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
     }
     lookups::check_gap(entry)?;
     let class = entry.group.key_class;
+    let zero_generates = !cx.ids.no_auto_value_on_zero
+        && entry
+            .auto_inc
+            .as_ref()
+            .is_some_and(|a| a.column.eq_ignore_ascii_case(&key));
     // Chapter 15: every row carries its routing hash in `_sprig_rk`. The
     // statement is re-rendered with the column added (no splicing).
     let filled = fill_rk(ins, entry, &key, key_ordinal, class);
@@ -3029,7 +3089,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
         else {
             return reject(Reason::AutoIncrement, "an INSERT without the key column");
         };
-        let shard = route_value(&a.value, entry, class)?;
+        let shard = route_value(&a.value, entry, class, zero_generates)?;
         let near = entry.group.shards.get(shard).map(|s| s.cluster.as_str());
         if let Some(fkw) = fk::insert_work(
             ins,
@@ -3074,7 +3134,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
         let Some(v) = row.get(pos) else {
             return reject(Reason::AutoIncrement, "a row without the key value");
         };
-        let shard = route_value(v, entry, class)?;
+        let shard = route_value(v, entry, class, zero_generates)?;
         match by_shard.iter_mut().find(|(s, _)| *s == shard) {
             Some((_, rows)) => rows.push(ri),
             None => by_shard.push((shard, vec![ri])),
@@ -3226,7 +3286,7 @@ fn assigns_key(t: &sqlparser::ast::AssignmentTarget, key: &str) -> bool {
     }
 }
 
-fn route_value(v: &Expr, entry: &TableEntry, class: KeyClass) -> R<usize> {
+fn route_value(v: &Expr, entry: &TableEntry, class: KeyClass, zero_generates: bool) -> R<usize> {
     if let Expr::Value(x) = v
         && matches!(x.value, Value::Null)
     {
@@ -3243,7 +3303,10 @@ fn route_value(v: &Expr, entry: &TableEntry, class: KeyClass) -> R<usize> {
     }
     let kv = key_literal(v, class)
         .ok_or_else(|| Rejection::new(Reason::InsertKey, format!("key value {v}")))?;
-    if matches!(kv, KeyValue::Int(0)) {
+    // 0 asks for a generated value only in an `AUTO_INCREMENT` key column
+    // without `NO_AUTO_VALUE_ON_ZERO`; elsewhere it is a key like any
+    // other (bugfix3: r2harden's tenant G wrote id 0 and got 39420).
+    if matches!(kv, KeyValue::Int(0)) && zero_generates {
         return reject(Reason::AutoIncrement, "a zero key (AUTO_INCREMENT)");
     }
     entry

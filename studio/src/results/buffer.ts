@@ -9,6 +9,9 @@ export class ResultBuffer {
   /** One array per column. */
   readonly cols: Cell[][];
   rowCount = 0;
+  /** Rows dropped from the front by a cursor's sliding window: row 0 here
+   * is row `offset` of the result. */
+  offset = 0;
   /** Estimated bytes held (UTF-16 strings). */
   bytes = 0;
   truncated = false;
@@ -42,6 +45,43 @@ export class ResultBuffer {
       this.rowCount++;
     }
     return !this.full;
+  }
+
+  /**
+   * Adds a cursor's page and drops the oldest rows so the buffer keeps at
+   * most maxRows rows and maxBytes (chapter 44: "keeping a window of
+   * max_result_rows").
+   */
+  slide(rows: Row[]): void {
+    for (const row of rows) {
+      for (let c = 0; c < this.cols.length; c++) {
+        const v = row[c] ?? null;
+        this.cols[c]!.push(v);
+        this.bytes += v === null ? 8 : 16 + v.length * 2;
+      }
+      this.rowCount++;
+    }
+    let drop = Math.max(0, this.rowCount - this.maxRows);
+    // Bytes: drop whole rows from the front until under the cap.
+    let bytes = this.bytes;
+    while (bytes >= this.maxBytes && drop < this.rowCount - 1) {
+      for (const col of this.cols) {
+        const v = col[drop] ?? null;
+        bytes -= v === null ? 8 : 16 + v.length * 2;
+      }
+      drop++;
+    }
+    if (drop > 0) {
+      for (const col of this.cols) {
+        for (let i = 0; i < drop; i++) {
+          const v = col[i] ?? null;
+          this.bytes -= v === null ? 8 : 16 + v.length * 2;
+        }
+        col.splice(0, drop);
+      }
+      this.rowCount -= drop;
+      this.offset += drop;
+    }
   }
 
   cell(row: number, col: number): Cell {

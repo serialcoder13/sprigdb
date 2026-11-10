@@ -49,9 +49,11 @@ fn b64(s: &str) -> Result<Vec<u8>> {
         .map_err(|e| bad(format!("an id isn't base64: {e}")))
 }
 
+#[allow(clippy::cast_possible_truncation)] // vectors are FLOAT32
 fn floats(v: Option<&Value>) -> Result<Vec<f32>> {
-    v.and_then(Value::as_array)
-        .map(|a| {
+    v.and_then(Value::as_array).map_or_else(
+        || Ok(Vec::new()),
+        |a| {
             a.iter()
                 .map(|x| {
                     x.as_f64()
@@ -59,8 +61,8 @@ fn floats(v: Option<&Value>) -> Result<Vec<f32>> {
                         .ok_or_else(|| bad("a vector holds a non-number"))
                 })
                 .collect()
-        })
-        .unwrap_or_else(|| Ok(Vec::new()))
+        },
+    )
 }
 
 fn lat_lng(v: Option<&Value>) -> Option<(f64, f64)> {
@@ -168,11 +170,11 @@ fn maybe_auto(engine: &Arc<SqlEngine>, caller: &Caller, def: &IndexDef) {
     tokio::spawn(async move {
         match auto_ann(&mut sql, &mut def, &settings, 20, 10).await {
             Ok(Some(r)) => {
-                tracing::info!(index = %def.name, recall = r, kept = def.ann_state == index::AnnState::Ready, "automatic vector graph validated")
+                tracing::info!(index = %def.name, recall = r, kept = def.ann_state == index::AnnState::Ready, "automatic vector graph validated");
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!(index = %def.name, error = %e, "automatic vector graph failed")
+                tracing::warn!(index = %def.name, error = %e, "automatic vector graph failed");
             }
         }
         building()
@@ -461,6 +463,7 @@ impl pb::vectors_server::Vectors for VectorsSvc {
         }))
     }
 
+    #[allow(clippy::cast_possible_truncation)] // the proto's distances are floats
     async fn search(
         &self,
         req: Request<pb::SearchVectorsRequest>,

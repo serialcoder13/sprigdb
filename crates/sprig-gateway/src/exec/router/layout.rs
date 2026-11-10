@@ -390,13 +390,18 @@ impl TenantLayout {
                     .filter(|s| !local || s.cluster == cluster)
                     .min_by_key(|s| s.shard)
             };
-            let Some(shard) = pick(true).or_else(|| pick(false)) else {
+            let local = pick(true);
+            let Some(shard) = local.or_else(|| pick(false)) else {
                 continue;
             };
             let Ok(schema) = shard.schema.parse::<SchemaName>() else {
                 continue;
             };
             g.add(DbId(e.group.db), &e.name, schema);
+            // bugfix-8: its `information_schema` rows are read there.
+            if local.is_none() && !e.is_reference() {
+                g.set_remote(schema, &shard.cluster);
+            }
         }
         let g = Arc::new(g);
         m.insert(cluster.to_owned(), Arc::clone(&g));
@@ -410,7 +415,12 @@ impl TenantLayout {
     #[must_use]
     pub(crate) fn metadata_cluster(&self, sql: &str, main: &str) -> Option<String> {
         let first = sql.split_ascii_whitespace().next()?.to_ascii_uppercase();
-        if !matches!(first.as_str(), "SHOW" | "DESCRIBE" | "DESC") {
+        // 3306 answers `SHOW [FULL] COLUMNS`, `DESCRIBE` and `SHOW INDEX`
+        // with a `SELECT` over `information_schema` that probes the table
+        // (`(SELECT 1 FROM schema.t LIMIT 0) IS NULL`): it runs there too
+        // (bugfix3).
+        let probe = first == "SELECT" && sql.contains("LIMIT 0) IS NULL");
+        if !probe && !matches!(first.as_str(), "SHOW" | "DESCRIBE" | "DESC") {
             return None;
         }
         let mut found: Option<&str> = None;
@@ -732,6 +742,7 @@ mod tests {
     use super::*;
     use sprig_router::topology::catalog::{CatalogGroup, CatalogTable, Membership, build};
     use sprig_shard::{KeyClass, ShardMap};
+    use sprig_sql::names::{NameMap, Purpose};
 
     fn layout(topo: StaticTopology) -> TenantLayout {
         TenantLayout {
@@ -794,7 +805,6 @@ mod tests {
                 base: &sprig_sql::names::MemoryNameMap::new(TenantId(7)).with_db(1, "shop", 1, 1),
                 groups: &g,
             };
-            use sprig_sql::names::{NameMap, Purpose};
             let meta: Vec<String> = w
                 .physical("shop", Purpose::Metadata)
                 .unwrap_or_else(|e| panic!("{e:?}"))
@@ -831,5 +841,11 @@ mod tests {
             l.metadata_cluster("SELECT 1 FROM `t7_d1_g3_s2`.orders", "c1"),
             None
         );
+        // 3306's SHOW COLUMNS, DESCRIBE and SHOW INDEX (a probing SELECT).
+        let probe = "SELECT * FROM (SELECT `COLUMN_NAME` AS `Field` FROM information_schema.COLUMNS \
+                     WHERE `TABLE_SCHEMA` = 't7_d1_g3_s2' AND `TABLE_NAME` = 'orders' \
+                     AND (SELECT 1 FROM `t7_d1_g3_s2`.`orders` LIMIT 0) IS NULL) AS `c`";
+        assert_eq!(l.metadata_cluster(probe, "c1").as_deref(), Some("c2"));
+        assert_eq!(l.metadata_cluster(probe, "c2"), None);
     }
 }
