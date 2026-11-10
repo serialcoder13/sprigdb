@@ -201,6 +201,7 @@ mod tests {
             kind: RowKind::Insert,
             before: None,
             after: Some(img(1, "x", 9)),
+            hint: None,
         };
         let d = decode_row(&ins).unwrap();
         assert_eq!(d.op, Op::Insert);
@@ -211,6 +212,7 @@ mod tests {
             kind: RowKind::Update,
             before: Some(img(1, "x", 9)),
             after: Some(img(1, "x", 10)),
+            hint: None,
         };
         assert_eq!(decode_row(&backfill), None);
         let upd = RawRow {
@@ -218,6 +220,7 @@ mod tests {
             kind: RowKind::Update,
             before: Some(img(1, "x", 9)),
             after: Some(img(1, "y", 9)),
+            hint: None,
         };
         assert_eq!(decode_row(&upd).unwrap().delta, Some(vec!["v".to_owned()]));
         // Chapter 42: a hide marker over an override with the same values.
@@ -247,6 +250,7 @@ mod tests {
             kind: RowKind::Update,
             before: Some(row("ovr", 2)),
             after: Some(row("hide", 0)),
+            hint: None,
         };
         let d = decode_row(&hide).unwrap();
         assert_eq!(d.delta, Some(Vec::new()));

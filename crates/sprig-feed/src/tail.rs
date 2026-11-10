@@ -621,6 +621,7 @@ impl TenantTail {
                     hlc: 0,
                     txn: t.gtid,
                     ddl: None,
+                    hint: r.hint,
                 },
             ));
         }
@@ -670,6 +671,7 @@ impl TenantTail {
                         hlc: 0,
                         txn: t.gtid,
                         ddl: text,
+                        hint: None,
                     },
                 ));
             }
@@ -879,6 +881,7 @@ mod tests {
             kind: RowKind::Insert,
             before: None,
             after: Some(RowImage(vec![Some(Value::Int(k))])),
+            hint: None,
         }
     }
 

@@ -883,10 +883,13 @@ impl Conn<'_> {
             if settled {
                 self.reply_slots = self.reply_slots.wrapping_add(1);
                 let slot = self.reply_slots;
-                let reply_name =
-                    self.svc
-                        .replies
-                        .register(self.key, slot, consumer, self.events_tx.clone());
+                let reply_name = self.svc.replies.register(
+                    self.key,
+                    slot,
+                    consumer,
+                    self.events_tx.clone(),
+                    self.principal.tenant_id,
+                );
                 src.address = Some(format!("/queues/{}", percent_encode(&reply_name)));
                 reply_slot = Some(slot);
                 None
@@ -1228,7 +1231,7 @@ impl Conn<'_> {
         let (exchange, key) = addr.route();
         let msg = convert::from_10(exchange.to_owned(), key.to_owned(), &s);
         if exchange.is_empty() && key.starts_with(REPLY_PREFIX) {
-            let _ = self.svc.replies.deliver(key, msg);
+            let _ = self.svc.replies.deliver(key, msg, self.principal.tenant_id);
             return Ok(Some(Box::pin(async { Ok(()) })));
         }
         let p = self

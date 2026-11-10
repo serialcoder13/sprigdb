@@ -71,8 +71,9 @@ c_roles() {
 }
 c_gis() { admin "$(corpus gis)"; }
 c_stored_mode() { admin "$(corpus stored_mode)"; }
+c_group_by() { admin "$(corpus group_by)"; }
 
-CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode"}
+CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by"}
 for check in $CHECKS; do
   if [[ $check == gis && $SPRIG_PERSONA != mysql ]]; then
     emit gis n/a "MySQL's SRID 4326 semantics are the MySQL persona's only"

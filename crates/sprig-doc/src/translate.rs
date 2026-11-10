@@ -546,6 +546,7 @@ mod tests {
             uuid: [0; 16],
             array_paths: arrays.iter().map(|s| (*s).to_owned()).collect(),
             arrays_full: false,
+            pending_paths: std::collections::BTreeSet::new(),
             indexes: indexed
                 .iter()
                 .enumerate()

@@ -69,6 +69,38 @@ key! {
     "Response cap"
 }
 
+key! {
+    /// `logic.trigger_lanes`: key lanes per shard per binding (read when a
+    /// trigger job starts).
+    TRIGGER_LANES = "logic.trigger_lanes", Scopes(0b10_0101), 8, 1, 1024,
+    "Key lanes per shard per binding"
+}
+key! {
+    /// `logic.trigger_max_attempts`.
+    TRIGGER_MAX_ATTEMPTS = "logic.trigger_max_attempts", Scopes::DATA, 10, 1, 1_000_000,
+    "Before a dead letter"
+}
+key! {
+    /// `logic.trigger_retry_initial_ms`.
+    TRIGGER_RETRY_INITIAL_MS = "logic.trigger_retry_initial_ms", Scopes::DATA, 1000, 1, 3_600_000,
+    "First backoff"
+}
+key! {
+    /// `logic.trigger_retry_max_ms`.
+    TRIGGER_RETRY_MAX_MS = "logic.trigger_retry_max_ms", Scopes::DATA, 300_000, 1, 86_400_000,
+    "Backoff cap"
+}
+key! {
+    /// `logic.trigger_budget_ms`.
+    TRIGGER_BUDGET_MS = "logic.trigger_budget_ms", Scopes::DATA, 30_000, 1, 3_600_000,
+    "One trigger invocation"
+}
+key! {
+    /// `logic.job_budget_ms`.
+    JOB_BUDGET_MS = "logic.job_budget_ms", Scopes::DATA, 300_000, 1, 86_400_000,
+    "One scheduled run"
+}
+
 /// `logic.outbound_allowlist`: hosts `Sprig.Http.Fetch` may reach, as a
 /// JSON list (`["api.example.com", "*.svc.example.org:8443"]`) or
 /// comma-separated.

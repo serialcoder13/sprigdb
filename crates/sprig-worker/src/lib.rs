@@ -5,10 +5,13 @@
 //! [`run`] connects to the DC and global tiers and runs the mover's job
 //! runtime (`sprig_mover::JobRuntime`): it claims runnable mover jobs in
 //! its DC, runs each to its end, and gives them up when its lease is lost.
-//! Settings are the `mover.*` defaults (live resolution per job is a later
-//! step). Index builds (chapter 13) don't run here yet.
+//! Every job resolves its settings from the worker's live mirrors of the
+//! etcd scopes when it uses them ([`settings`]). Index builds (chapter 13)
+//! don't run here yet.
 
 pub mod inherit;
+// Chapter 33 (R6): the key-value expiry and old-generation sweeper.
+pub mod kv_sweep;
 pub mod logic;
 // Chapter 41 (R9): triggers on streams and queues.
 pub mod msg_triggers;
@@ -16,6 +19,8 @@ pub mod permit;
 // Chapter 25 (R2): errant_extract and node_rebuild.
 pub mod recovery;
 pub mod runtime;
+// Chapters 08 and 23: live settings for every job (r2final).
+pub mod settings;
 // Chapter 45 (R9): stream sequencers.
 pub mod streams;
 // Chapter 51 (R9): sink tasks.
@@ -63,13 +68,31 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     );
     let registry = ClusterRegistry::new(Arc::clone(&global), dc.clone())?;
     let registry_logic = registry.clone();
+    let sweep_registry = registry.clone();
     let recovery_env = recovery::RecoveryEnv {
         dc: dc.clone(),
         registry: registry.clone(),
     };
     let errant_extract = recovery::ErrantExtract::from_config(recovery_env.clone(), &cfg.recovery)?;
     let dc_logic = dc.clone();
-    let settings = MoverSettings::default();
+    // Live settings (chapter 23): the mirrors of the global, dc and
+    // cluster scopes, read by every job when it uses a key.
+    let Some(live) = settings::WorkerSettings::start(
+        Arc::clone(&global),
+        dc.clone(),
+        cfg.node.dc.clone(),
+        &ctx.shutdown,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let settings = live.live().map_or_else(MoverSettings::default, |l| {
+        MoverSettings::resolve(
+            &l.snapshot(),
+            &sprig_settings::SettingCtx::process(&cfg.node.dc),
+        )
+    });
     // Chapter 18's resolver finishes the tenant's prepared branches at
     // each cutover (chapter 10, steps 2b and 3b).
     let drain_id = cfg
@@ -84,14 +107,18 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     ));
     // Moves between DCs (chapter 24) commit on the one etcd of R0's
     // single-etcd mode: this DC's tier reaches the others.
-    let factory = Arc::new(
+    let mut factory =
         MysqlEnvFactory::new(registry, TenantMaps::new(dc.clone()), settings.clone())
             .with_home_changes(dc.clone())
             // Splits, merges and shard moves (chapter 20) cut over on the
             // table groups' maps in this DC's tier.
             .with_group_maps(dc.clone())
-            .with_drain(drain),
-    );
+            .with_drain(drain);
+    // Each job's `mover.*` from the live settings, followed while it runs.
+    if let Some(l) = live.live() {
+        factory = factory.with_live_settings(l.clone(), cfg.node.dc.clone());
+    }
+    let factory = Arc::new(factory);
     let store = JobStore::new(dc, Arc::new(SystemClock));
     let worker = cfg
         .node
@@ -143,9 +170,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             registry_logic,
             Arc::clone(&pools),
         )),
-        opts: logic::run_opts_from_env(),
-        trigger_budget: Duration::from_millis(30_000),
-        job_budget: Duration::from_millis(300_000),
+        opts: live.run_opts(),
+        settings: live.clone(),
     };
     // Chapter 42's copy worker: one job per tenant tree.
     let inherit_env = Arc::new(inherit::LiveEnv::new(
@@ -180,8 +206,14 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         pools: Arc::clone(&env.pools),
         gateways: Arc::new(msg_triggers::Gateways::new(dc_logic.clone(), peer_pems)),
         opts: env.opts.clone(),
-        budget: env.trigger_budget,
+        settings: live.clone(),
     };
+    // Decision RC2: agents' internal services over mutual TLS with `[tls]`.
+    let mut rebuild_handler = recovery::NodeRebuild::new(recovery_env);
+    if let Some(t) = cfg.tls.as_ref() {
+        rebuild_handler = rebuild_handler
+            .with_tls(sprig_cluster::failover::internal_tls::InternalTls::from_config(t)?);
+    }
     let jobs = runtime::WorkerRuntime::new(dc_logic, Arc::new(SystemClock), worker.clone())
         .with_handler(Arc::new(logic::LogicTrigger(env.clone())))
         .with_handler(Arc::new(logic::LogicSchedule(env)))
@@ -190,8 +222,15 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         .with_handler(Arc::new(sinks::SinkTask(sinks_env)))
         .with_handler(Arc::new(msg_triggers::StreamTrigger(msg_env.clone())))
         .with_handler(Arc::new(msg_triggers::QueueTrigger(msg_env)))
+        .with_handler(Arc::new(kv_sweep::KvSweep {
+            pools: Arc::new(
+                sprig_controller::catalogs::RegistryPools::new(sweep_registry, None)
+                    .budget("kv_sweep", 2),
+            ),
+            settings: Some(live.clone()),
+        }))
         .with_handler(Arc::new(errant_extract))
-        .with_handler(Arc::new(recovery::NodeRebuild::new(recovery_env)));
+        .with_handler(Arc::new(rebuild_handler));
     ctx.health.set_ready();
     tracing::info!(%role, %worker, "ready: running mover and logic jobs");
     let shutdown = ctx.shutdown.clone();

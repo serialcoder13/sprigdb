@@ -329,3 +329,63 @@ async fn the_tenant_lock_keeps_moves_out_while_held() {
     js.unlock_tenant(TenantId(13), "advisor").await.unwrap();
     m.submit(spec(13)).await.unwrap();
 }
+
+#[tokio::test]
+async fn retention_follows_the_setting_and_an_operators_end_stands() {
+    let st = store();
+    let rec = st.create(spec(9)).await.unwrap();
+    let hour = Duration::from_secs(3600);
+    let now = st.now_ms();
+    let mut r = rec.clone();
+    r.state = JobState::Retaining;
+    r.retain_from_ms = Some(now - 1000);
+    r.retain_until_ms = Some(now - 1000 + 24 * 3_600_000);
+    // `mover.source_retain_hours` as it resolves now: 24 h, then 0, then 48.
+    assert_eq!(r.retain_until(24 * hour, now), r.retain_until_ms);
+    assert_eq!(r.retain_until(Duration::ZERO, now), Some(now - 1000));
+    assert_eq!(
+        r.retain_until(48 * hour, now),
+        Some(now - 1000 + 48 * 3_600_000)
+    );
+    // A job with its own retention (sharding.retire_hours) keeps it.
+    let mut own = r.clone();
+    own.spec.retain_ms = Some(5_000_000);
+    assert_eq!(own.retain_until(Duration::ZERO, now), own.retain_until_ms);
+    // Ended (by an operator or a tenant delete): the end stands.
+    let mut ended = r.clone();
+    ended.retain_until_ms = Some(now - 1);
+    assert_eq!(ended.retain_until(48 * hour, now), Some(now - 1));
+    // Records written before r2final have no start: the stored end.
+    let mut old = r.clone();
+    old.retain_from_ms = None;
+    assert_eq!(old.retain_until(Duration::ZERO, now), old.retain_until_ms);
+    // A worker holding the job doesn't overwrite an end written meanwhile.
+    let lease = st.meta().grant_lease(Duration::from_secs(5)).await.unwrap();
+    let (cur, rev) = st.get(&rec.job_id).await.unwrap();
+    let mut c = st.claim(&cur, rev, "w1", lease).await.unwrap().unwrap();
+    c.save(|x| {
+        x.state = JobState::Retaining;
+        x.retain_from_ms = r.retain_from_ms;
+        x.retain_until_ms = r.retain_until_ms;
+    })
+    .await
+    .unwrap();
+    let (mut stored, rev) = st.get(&rec.job_id).await.unwrap();
+    stored.retain_until_ms = Some(now - 5);
+    let key = st.key(&job_rel(&rec.job_id)).unwrap();
+    st.meta()
+        .txn(sprig_meta::Txn {
+            when: vec![sprig_meta::Cmp::ModRev(key.clone(), rev)],
+            then: vec![sprig_meta::Op::Put {
+                key,
+                value: sprig_meta::Record::new(stored).encode().unwrap(),
+                lease: None,
+            }],
+            otherwise: Vec::new(),
+        })
+        .await
+        .unwrap();
+    c.save(|x| x.progress.rows_applied = 1).await.unwrap();
+    let (after, _) = st.get(&rec.job_id).await.unwrap();
+    assert_eq!(after.retain_until_ms, Some(now - 5));
+}

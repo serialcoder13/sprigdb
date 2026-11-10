@@ -1,14 +1,25 @@
-//! `sprig-geo`: geodesic functions, axis order and (later) S2 coverings,
-//! GeoJSON and WKB.
+//! `sprig-geo`: geodesic functions, axis order, S2 cells and coverings.
 //!
 //! Layer: 2 data layer. Design: [chapter 36](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/36-geo.md) (Geospatial) of the SprigDB low-level design.
 //!
-//! Built so far (R4, the MySQL persona's part, chapter 36 steps 1 to 3 in
-//! part): [`mysql`], MySQL 8.4's geographic numbers for SRID 4326 (the
-//! Andoyer distance Boost.Geometry computes, `ST_Distance_Sphere`'s
-//! haversine), WKT axis swaps and the bounding box a distance predicate
-//! may use. No third-party crates: the georust stack isn't vendored yet,
-//! and these formulas are closed-form. S2, H3 and the other models' parts
-//! follow in R6.
+//! - [`mysql`] (R4): MySQL 8.4's geographic numbers for SRID 4326 (the
+//!   Andoyer distance Boost.Geometry computes, `ST_Distance_Sphere`'s
+//!   haversine), WKT axis swaps and the bounding box a distance predicate
+//!   may use.
+//! - [`s2`] (R6): S2 cell ids, leaf cells of locations and coverings.
+//! - [`region`] (R6): the regions of SprigDB's own APIs (circle, box,
+//!   polygon) with their bounding caps, S2 ranges and exact tests: WGS 84
+//!   distances by Karney's method (`geographiclib-rs`), great-circle edges
+//!   for polygons.
+
+// Cube-face math is written as S2 writes it: f, i, j, u, v, s, t.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::many_single_char_names
+)]
 
 pub mod mysql;
+pub mod region;
+pub mod s2;

@@ -50,6 +50,8 @@ pub struct TxnEntry {
     started: Instant,
     /// 0 open, 1 committed, 2 aborted.
     state: u8,
+    /// The databases it wrote: their records hold its outcome.
+    dbs: std::collections::BTreeSet<String>,
 }
 
 /// Transactions by `lsid`.
@@ -100,6 +102,22 @@ impl TxnTable {
             }
         }
         a
+    }
+
+    /// Rolls back every open transaction of `who` (`killAllSessions`).
+    async fn kill_owner(&self, who: &Owner) {
+        let entries: Vec<Arc<tokio::sync::Mutex<TxnEntry>>> =
+            self.map.lock().await.values().cloned().collect();
+        for e in entries {
+            let mut g = e.lock().await;
+            if g.owner == *who && g.state == 0 {
+                if let Some(mut s) = g.sql.take() {
+                    let _ = s.exec("ROLLBACK").await;
+                    s.close().await;
+                }
+                g.state = 2;
+            }
+        }
     }
 
     async fn end_session(&self, lsid: &[u8]) {
@@ -167,6 +185,13 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
             format!("API version must be \"1\" but got \"{api}\""),
         ));
     }
+    // User and role commands (chapter 29).
+    if super::users::handles(name) {
+        if c.sql.is_none() {
+            c.sql()?;
+        }
+        return super::users::command(c, name, body, &db).await;
+    }
     // Commands that touch no data.
     match name {
         "ping" => return Ok(doc! {"ok": 1.0}),
@@ -218,6 +243,14 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
             }
             return Ok(doc! {"ok": 1.0});
         }
+        "killAllSessions" => {
+            // The caller's own sessions on this gateway (not other users',
+            // which MongoDB's killAnySession privilege would allow): their
+            // open transactions roll back.
+            let who = owner(c);
+            c.shared.txns.kill_owner(&who).await;
+            return Ok(doc! {"ok": 1.0});
+        }
         "refreshSessions" | "startSession" => {
             if name == "startSession" {
                 let id = uuid::Uuid::new_v4();
@@ -227,28 +260,11 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
             }
             return Ok(doc! {"ok": 1.0});
         }
-        "mapReduce"
-        | "eval"
-        | "$eval"
-        | "geoNear"
-        | "shardCollection"
-        | "enableSharding"
-        | "createUser"
-        | "updateUser"
-        | "dropUser"
-        | "usersInfo"
-        | "createRole"
-        | "dropRole"
-        | "rolesInfo"
-        | "grantRolesToUser"
-        | "revokeRolesFromUser" => {
+        "mapReduce" | "eval" | "$eval" | "geoNear" | "shardCollection" | "enableSharding" => {
             if matches!(name, "shardCollection" | "enableSharding") {
                 return Ok(
                     doc! {"ok": 1.0, "note": "recorded as a hint only: SprigDB shards collections itself (chapter 16)"},
                 );
-            }
-            if name == "usersInfo" || name == "rolesInfo" {
-                return Ok(doc! {"users": [], "roles": [], "ok": 1.0});
             }
             return Err(MongoError::new(
                 code::COMMAND_NOT_SUPPORTED,
@@ -256,6 +272,28 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
             ));
         }
         _ => {}
+    }
+    // One-time work on the database (old metadata moving into the
+    // catalog), outside any transaction.
+    if !matches!(
+        name,
+        "listDatabases"
+            | "endSessions"
+            | "killSessions"
+            | "commitTransaction"
+            | "abortTransaction"
+            | "getMore"
+            | "killCursors"
+    ) && db != "admin"
+    {
+        let engine = c.shared.engine.clone();
+        engine.catalog.prepare_db(c.sql()?, &db).await?;
+    }
+    if name == "bulkWrite" {
+        let engine = c.shared.engine.clone();
+        for d in super::writes::target_dbs(name, body, &db) {
+            engine.catalog.prepare_db(c.sql()?, &d).await?;
+        }
     }
     // Transactions.
     let lsid = lsid_of(body);
@@ -265,30 +303,52 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
         let (Some(l), Some(n)) = (lsid.as_ref(), txn_number) else {
             return Err(no_txn());
         };
-        let Some(e) = c.shared.txns.get(l).await else {
-            return Err(no_txn());
-        };
-        let mut g = e.lock().await;
-        if g.owner != owner(c) || g.txn_number != n {
-            return Err(no_txn());
-        }
         let commit = name == "commitTransaction";
-        match (g.state, commit) {
-            (1, true) | (2, false) => return Ok(doc! {"ok": 1.0}),
-            (0, _) => {}
-            _ => return Err(no_txn()),
-        }
-        let mut s = g.sql.take().ok_or_else(no_txn)?;
-        let r = s.exec(if commit { "COMMIT" } else { "ROLLBACK" }).await;
-        s.close().await;
-        g.state = if commit && r.is_ok() { 1 } else { 2 };
-        metrics::counter!("sprig_mongo_transactions_total", "outcome" => if g.state == 1 { "committed" } else { "aborted" }).increment(1);
-        return match r {
-            Ok(_) => Ok(doc! {"ok": 1.0}),
-            Err(e) => {
-                Err(sprig_doc::engine::mongo_error(&e).label("UnknownTransactionCommitResult"))
+        let who = owner(c);
+        let uid = super::retry::uid_of(&who);
+        let mut dbs = super::txn::token_dbs(body, who.tenant);
+        if let Some(e) = c.shared.txns.get(l).await {
+            let mut g = e.lock().await;
+            if g.owner != who {
+                return Err(no_txn());
             }
+            if g.txn_number == n {
+                match (g.state, commit) {
+                    (1, true) | (2, false) => return Ok(doc! {"ok": 1.0}),
+                    (0, _) => {
+                        let mut s = g.sql.take().ok_or_else(no_txn)?;
+                        // The outcome commits with the writes (D17).
+                        let r = if commit {
+                            match super::txn::commit_records(&mut s, &g.dbs, l, &uid, n).await {
+                                Ok(()) => s.exec("COMMIT").await.map(|_| ()).map_err(|e| {
+                                    sprig_doc::engine::mongo_error(&e)
+                                        .label("UnknownTransactionCommitResult")
+                                }),
+                                Err(e) => {
+                                    let _ = s.exec("ROLLBACK").await;
+                                    Err(e)
+                                }
+                            }
+                        } else {
+                            let _ = s.exec("ROLLBACK").await;
+                            Ok(())
+                        };
+                        s.close().await;
+                        g.state = if commit && r.is_ok() { 1 } else { 2 };
+                        metrics::counter!("sprig_mongo_transactions_total", "outcome" => if g.state == 1 { "committed" } else { "aborted" }).increment(1);
+                        return r.map(|()| doc! {"ok": 1.0});
+                    }
+                    // A commit after a failed COMMIT, or an abort after a
+                    // commit: the records know.
+                    _ => dbs = Some(g.dbs.clone()),
+                }
+            }
+        }
+        // Not open here: another gateway ran it, or this one restarted.
+        let Some(dbs) = dbs else {
+            return Err(no_txn());
         };
+        return super::txn::recover(c.sql()?, commit, &dbs, l, &uid, n).await;
     }
     if autocommit_false {
         let (Some(l), Some(n)) = (lsid.clone(), txn_number) else {
@@ -365,6 +425,7 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
                         owner: owner(c),
                         started: Instant::now(),
                         state: 0,
+                        dbs: std::collections::BTreeSet::new(),
                     },
                 )
                 .await
@@ -389,7 +450,7 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
                 db: db.clone(),
                 coll,
             };
-            let engine = c.shared.engine;
+            let engine = c.shared.engine.clone();
             let sql = c.sql()?;
             if engine.meta(sql, &ns).await?.is_none() {
                 engine.create(sql, &ns, Document::new(), false).await?;
@@ -398,17 +459,41 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
                 return Ok(doc! {"ok": 1.0});
             }
         }
+        if name == "bulkWrite" {
+            let engine = c.shared.engine.clone();
+            for ns in super::writes::created_namespaces(name, body, &db) {
+                let sql = c.sql()?;
+                if engine.meta(sql, &ns).await?.is_none() {
+                    engine.create(sql, &ns, Document::new(), false).await?;
+                }
+            }
+        }
+        // The records tables of the databases it writes, for its
+        // outcome (D17); DDL, so before the statement, outside it.
+        let wdbs = super::writes::target_dbs(name, body, &db);
+        let shared = Arc::clone(&c.shared);
+        let tenant = owner(c).tenant;
+        for d in &wdbs {
+            super::retry::ensure_table(&shared.records, c.sql()?, &(tenant, d.clone())).await?;
+        }
         let mut g = entry.lock().await;
         let mut s = g.sql.take().ok_or_else(no_txn)?;
         let r = exec(c, &mut s, name, body, &db, lsid.as_deref()).await;
         g.sql = Some(s);
-        return r.map_err(|e| {
-            if e.code == code::WRITE_CONFLICT {
-                e.label("TransientTransactionError")
-            } else {
-                e
-            }
-        });
+        g.dbs.extend(wdbs);
+        let token = super::txn::token(tenant, &c.shared.d.gateway_id, &g.dbs);
+        return r
+            .map(|mut d| {
+                d.insert("recoveryToken", token);
+                d
+            })
+            .map_err(|e| {
+                if e.code == code::WRITE_CONFLICT {
+                    e.label("TransientTransactionError")
+                } else {
+                    e
+                }
+            });
     }
     if c.sql.is_none() {
         c.sql()?;
@@ -475,6 +560,108 @@ async fn open_cursor(
     Ok(cursor_reply(id, &ns, batch, true))
 }
 
+/// `aggregate` with `$changeStream` (chapter 30 step 9).
+async fn open_change_stream(
+    c: &mut Conn,
+    sql: &mut SqlSession,
+    body: &Document,
+    db: &str,
+    coll: &str,
+    stage: &Document,
+    rest: &[Document],
+    lsid: Option<&[u8]>,
+) -> Result<Document, MongoError> {
+    use super::changes::{StreamSpec, check_pipeline, parse_stage, token_doc};
+    let (full, before, resume, all) = parse_stage(stage)?;
+    check_pipeline(rest)?;
+    let Some(feed) = c.shared.feed.as_ref() else {
+        return Err(MongoError::new(
+            code::COMMAND_NOT_SUPPORTED,
+            "change streams need the tenant catalog (catalog logins)",
+        ));
+    };
+    let who = owner(c);
+    if db == "admin" && (!all || !coll.is_empty()) {
+        return Err(MongoError::new(
+            code::INVALID_OPTIONS,
+            "$changeStream on admin must be {aggregate: 1} with allChangesForCluster: true",
+        ));
+    }
+    if db != "admin" && all {
+        return Err(MongoError::new(
+            code::INVALID_OPTIONS,
+            "allChangesForCluster is only for the admin database",
+        ));
+    }
+    // Privileges: reading the collection, or the database, as SQL would.
+    let engine = c.shared.engine.clone();
+    let coll_spec = if coll.is_empty() {
+        None
+    } else {
+        let ns = Ns {
+            db: db.to_owned(),
+            coll: coll.to_owned(),
+        };
+        let table = engine
+            .meta(sql, &ns)
+            .await?
+            .map_or_else(|| sprig_doc::meta::table_name(coll), |m| m.table);
+        Some((coll.to_owned(), table))
+    };
+    if db != "admin" {
+        let probe = match &coll_spec {
+            Some((_, t)) => format!(
+                "SELECT 1 FROM {}.{} LIMIT 0",
+                sprig_doc::sql::ident(db),
+                sprig_doc::sql::ident(t)
+            ),
+            None => format!("SHOW TABLES FROM {}", sprig_doc::sql::ident(db)),
+        };
+        if let Err(e) = sql.query(&probe).await
+            && !matches!(e.errno, Some(1146 | 1049))
+        {
+            return Err(sprig_doc::engine::mongo_error(&e));
+        }
+    }
+    let spec = StreamSpec {
+        tenant: sprig_common::ids::TenantId(who.tenant),
+        db: (db != "admin").then(|| db.to_owned()),
+        coll: coll_spec,
+        tables: c
+            .shared
+            .docs
+            .as_ref()
+            .map(|d| Arc::clone(d) as Arc<dyn super::changes::TableNames>),
+        full,
+        before,
+        pipeline: rest.to_vec(),
+    };
+    let stream = feed.open(spec, resume.as_ref()).await?;
+    let token = stream.token.clone();
+    let ns = if coll.is_empty() {
+        format!("{db}.$cmd.aggregate")
+    } else {
+        format!("{db}.{coll}")
+    };
+    let bs = body
+        .get_document("cursor")
+        .ok()
+        .and_then(|cd| cd.get("batchSize").and_then(as_i64))
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n > 0);
+    let id = c.shared.cursors.open_stream(
+        stream,
+        ns.clone(),
+        who,
+        lsid.map(<[u8]>::to_vec),
+        bs,
+        c.shared.settings().max_cursors,
+    )?;
+    Ok(
+        doc! {"cursor": {"firstBatch": [], "postBatchResumeToken": token_doc(&token), "id": id, "ns": ns}, "ok": 1.0},
+    )
+}
+
 fn first_batch(body: &Document, default: usize) -> usize {
     body.get_document("cursor")
         .ok()
@@ -493,7 +680,7 @@ async fn exec(
     db: &str,
     lsid: Option<&[u8]>,
 ) -> Result<Document, MongoError> {
-    let engine = c.shared.engine;
+    let engine = c.shared.engine.clone();
     let ns_of = |n: &str| -> Result<Ns, MongoError> {
         Ok(Ns {
             db: db.to_owned(),
@@ -620,9 +807,11 @@ async fn exec(
             }
             Ok(doc! {"ok": 1.0})
         }
-        "insert" | "update" | "delete" | "findAndModify" | "findandmodify" => {
+        "insert" | "update" | "delete" | "findAndModify" | "findandmodify" | "bulkWrite" => {
             let done = sprig_doc::sessions::StmtResults::new();
-            Ok(super::writes::run(engine, sql, name, body, db, &done).await?.reply)
+            Ok(super::writes::run(&engine, sql, name, body, db, &done)
+                .await?
+                .reply)
         }
         "find" => {
             let ns = ns_of("find")?;
@@ -671,6 +860,41 @@ async fn exec(
                 ));
             }
             CursorTable::touch(cursor);
+            if let Some(st) = cursor.stream.as_mut() {
+                // A change stream: wait up to maxTimeMS for events.
+                let wait = Duration::from_millis(
+                    i64_of(body, "maxTimeMS")
+                        .and_then(|n| u64::try_from(n).ok())
+                        .filter(|n| *n > 0)
+                        .unwrap_or(1000),
+                );
+                let n = i64_of(body, "batchSize")
+                    .and_then(|n| usize::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .or(cursor.batch_size)
+                    .unwrap_or(1000);
+                let r = st.next_batch(n, wait).await;
+                let token = st.token.clone();
+                let done = st.done();
+                let ns = cursor.ns.clone();
+                drop(g);
+                let batch = match r {
+                    Ok(b) => b,
+                    Err(e) => {
+                        c.shared.cursors.remove(id);
+                        return Err(e);
+                    }
+                };
+                let rid = if done {
+                    c.shared.cursors.remove(id);
+                    0
+                } else {
+                    id
+                };
+                return Ok(
+                    doc! {"cursor": {"nextBatch": batch.into_iter().map(Bson::Document).collect::<Vec<_>>(), "postBatchResumeToken": super::changes::token_doc(&token), "id": rid, "ns": ns}, "ok": 1.0},
+                );
+            }
             let n = i64_of(body, "batchSize")
                 .and_then(|n| usize::try_from(n).ok())
                 .filter(|n| *n > 0)
@@ -745,6 +969,12 @@ async fn exec(
                 }
             };
             let pipeline = docs_of(body, "pipeline");
+            if let Some(st) = pipeline
+                .first()
+                .and_then(|s| s.get_document("$changeStream").ok())
+            {
+                return open_change_stream(c, sql, body, db, &coll, st, &pipeline[1..], lsid).await;
+            }
             if body.contains_key("explain") || body.get_bool("explain").unwrap_or(false) {
                 return Err(MongoError::new(
                     code::SPRIG_DOC_FEATURE_UNSUPPORTED,
@@ -841,5 +1071,4 @@ async fn exec(
 /// Codes not in the shared table.
 mod code {
     pub(crate) use sprig_proto_mongo::errors::code::*;
-    pub(crate) const INVALID_LENGTH: i32 = 16;
 }

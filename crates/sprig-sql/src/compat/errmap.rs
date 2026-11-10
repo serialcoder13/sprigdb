@@ -248,7 +248,14 @@ pub fn reworded(e: &WireError) -> Option<WireError> {
             None
         }
         1366 | 1292 | 1265 | 1264 | 1406 | 1048 => {
-            let msg = mysql_column_names(m)?;
+            // MariaDB numbers the row of a statement inside stored code 0;
+            // MySQL counts from 1 (MySQL Connector/J's suite checks it).
+            let named = mysql_column_names(m);
+            let text = named.as_deref().unwrap_or(m);
+            let msg = match text.strip_suffix(" at row 0") {
+                Some(head) => format!("{head} at row 1"),
+                None => named?,
+            };
             let state = if e.code == 1366 {
                 *b"HY000"
             } else {
@@ -582,6 +589,28 @@ mod tests {
         assert_eq!(
             with_dup_key_table(&e, "p").unwrap().message,
             "Duplicate entry 'a' for key 'p.uk_u'"
+        );
+    }
+
+    #[test]
+    fn rows_count_from_one() {
+        let e = WireError::new(
+            1366,
+            *b"22007",
+            "Incorrect integer value: 'eight' for column `db`.`t`.`n` at row 0".to_owned(),
+        );
+        assert_eq!(
+            reworded(&e).unwrap().message,
+            "Incorrect integer value: 'eight' for column 'n' at row 1"
+        );
+        let e = WireError::new(
+            1366,
+            *b"HY000",
+            "Incorrect integer value: 'x' for column 'n' at row 0".to_owned(),
+        );
+        assert_eq!(
+            reworded(&e).unwrap().message,
+            "Incorrect integer value: 'x' for column 'n' at row 1"
         );
     }
 }

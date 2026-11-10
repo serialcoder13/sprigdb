@@ -1,4 +1,8 @@
 SprigDB for data center {{ .Values.dc.id }} is installed in {{ .Release.Namespace }}.
+{{- if .Values.tls.enabled }}
 It needs mariadb-operator, cert-manager and trust-manager in this cluster.
+{{- else }}
+It needs mariadb-operator in this cluster. TLS is off (tls.enabled=false): development only.
+{{- end }}
 Pools: {{ range .Values.pools }}{{ .name }} ({{ .topology }}, {{ .minClusters | default 0 }}-{{ .maxClusters }}) {{ end }}
   kubectl -n {{ .Release.Namespace }} get sprigclusters

@@ -54,7 +54,8 @@ impl PassSession {
             current_db: current.as_deref(),
             db_id: db_id_of(ts, cat, current.as_deref()),
             front_end: FrontEnd::of_persona(self.persona),
-            caller: None,
+            // `caller = studio` for a Studio session's statements (chapter 12).
+            caller: crate::workload::task_caller(),
             lower_case_table_names: lower,
             max_text_bytes: wl.workload().max_text_bytes(),
         };

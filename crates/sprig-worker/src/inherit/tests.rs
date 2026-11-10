@@ -102,6 +102,7 @@ impl Tail for ModelTail {
                             seq: self.next as u64,
                         },
                         ddl: None,
+                        hint: None,
                     })));
                 }
             }

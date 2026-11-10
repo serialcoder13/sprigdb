@@ -43,7 +43,9 @@ pub fn table_sql(db: &str) -> String {
     )
 }
 
-/// The row of `(lsid, uid)`, locked for the transaction.
+/// The row of `(lsid, uid)`, locked for the transaction; with
+/// `Record::aborted` and `Record::committed` it also settles a
+/// transaction's outcome (chapter 30, "Sessions and transactions").
 #[must_use]
 pub fn select_sql(db: &str, lsid: &[u8], uid: &[u8; 32]) -> String {
     format!(
@@ -98,6 +100,22 @@ pub struct Record {
     pub done: StmtResults,
     /// It records a committed transaction rather than retryable writes.
     pub committed: bool,
+    /// It fences an abandoned transaction of `txn_number` (written by the
+    /// gateway that answered its `commitTransaction` or
+    /// `abortTransaction` from a recovery token): that transaction can't
+    /// commit any more.
+    pub aborted: bool,
+}
+
+/// The `results` of a fence ([`Record::aborted`]).
+const ABORTED: &str = "$aborted";
+
+/// `results` for a fence.
+#[must_use]
+pub fn aborted_results() -> Vec<u8> {
+    let mut d = Document::new();
+    d.insert(ABORTED, true);
+    bson::to_vec(&d).unwrap_or_default()
 }
 
 /// Statement replies by statement id.
@@ -111,7 +129,7 @@ fn bad_row(what: &str) -> MongoError {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -143,9 +161,7 @@ pub fn decode(row: &[Option<Vec<u8>>]) -> Result<Record, MongoError> {
             .map(|b| String::from_utf8_lossy(b).into_owned())
             .ok_or_else(|| bad_row("missing column"))
     };
-    let txn_number = txt(0)?
-        .parse::<i64>()
-        .map_err(|_| bad_row("txn_number"))?;
+    let txn_number = txt(0)?.parse::<i64>().map_err(|_| bad_row("txn_number"))?;
     let bytes = hex_decode(&txt(1)?).ok_or_else(|| bad_row("results"))?;
     let d = if bytes.is_empty() {
         Document::new()
@@ -153,7 +169,11 @@ pub fn decode(row: &[Option<Vec<u8>>]) -> Result<Record, MongoError> {
         bson::from_slice::<Document>(&bytes).map_err(|_| bad_row("results"))?
     };
     let mut done = StmtResults::new();
+    let aborted = d.contains_key(ABORTED);
     for (k, v) in d {
+        if k.starts_with('$') {
+            continue;
+        }
         let id = k.parse::<i32>().map_err(|_| bad_row("statement id"))?;
         if let Bson::Document(r) = v {
             done.insert(id, r);
@@ -163,6 +183,7 @@ pub fn decode(row: &[Option<Vec<u8>>]) -> Result<Record, MongoError> {
         txn_number,
         done,
         committed: txt(2)? == "committed",
+        aborted,
     })
 }
 
@@ -174,9 +195,11 @@ mod tests {
 
     fn hex(b: &[u8]) -> Vec<u8> {
         b.iter()
-            .map(|x| format!("{x:02X}"))
-            .collect::<String>()
-            .into_bytes()
+            .flat_map(|x| {
+                let h = b"0123456789ABCDEF";
+                [h[usize::from(x >> 4)], h[usize::from(x & 15)]]
+            })
+            .collect()
     }
 
     #[test]
@@ -200,7 +223,14 @@ mod tests {
             Some(b"committed".to_vec()),
         ];
         let r = decode(&empty).unwrap();
-        assert!(r.done.is_empty() && r.committed);
+        assert!(r.done.is_empty() && r.committed && !r.aborted);
+        let fence = vec![
+            Some(b"4".to_vec()),
+            Some(hex(&aborted_results())),
+            Some(b"retryable".to_vec()),
+        ];
+        let r = decode(&fence).unwrap();
+        assert!(r.aborted && r.done.is_empty() && !r.committed);
         assert!(decode(&[Some(b"x".to_vec()), None, None]).is_err());
     }
 

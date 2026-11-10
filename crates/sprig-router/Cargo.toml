@@ -11,6 +11,10 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+# Analytic reads (chapter 17, "Analytic reads (R3)"): joins, aggregates and
+# windows over the shards' rows in the gateway.
+datafusion.workspace = true
+futures.workspace = true
 metrics.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -290,6 +290,10 @@ pub struct MysqlEnvFactory {
     group_store: Option<Arc<dyn sprig_meta::MetaStore>>,
     /// Chapter 18's resolver, for cutovers: set by [`Self::with_drain`].
     drain: Option<Arc<dyn crate::io::PreparedDrain>>,
+    /// The worker's live settings and DC: set by
+    /// [`Self::with_live_settings`]; without them every job gets
+    /// `settings`.
+    live: Option<(sprig_settings::LiveSettings, sprig_common::ids::DcId)>,
 }
 
 impl std::fmt::Debug for MysqlEnvFactory {
@@ -311,7 +315,23 @@ impl MysqlEnvFactory {
             home_store: None,
             group_store: None,
             drain: None,
+            live: None,
         }
+    }
+
+    /// Resolves each job's `mover.*` settings from `live` (the worker's
+    /// mirrors of the global, dc and cluster scopes) in `dc`, for the job's
+    /// tenant and source cluster, every time they are asked for: at the
+    /// claim, then every second while the job runs. The settings given to
+    /// [`Self::new`] are then unused.
+    #[must_use]
+    pub fn with_live_settings(
+        mut self,
+        live: sprig_settings::LiveSettings,
+        dc: sprig_common::ids::DcId,
+    ) -> Self {
+        self.live = Some((live, dc));
+        self
     }
 
     /// Cutovers finish the tenant's prepared distributed-transaction
@@ -387,7 +407,7 @@ impl EnvFactory for MysqlEnvFactory {
                 rec,
                 route,
                 store,
-                self.settings.server_id_base,
+                self.settings(rec).server_id_base,
                 self.drain.clone(),
             );
         }
@@ -398,7 +418,7 @@ impl EnvFactory for MysqlEnvFactory {
                 rec.tenant_id,
                 s.schemas.clone(),
                 s.tables.clone(),
-                server_id(self.settings.server_id_base, rec.job_id),
+                server_id(self.settings(rec).server_id_base, rec.job_id),
                 swap.is_some(),
             )
             .with_drain(self.drain.clone()),
@@ -420,7 +440,18 @@ impl EnvFactory for MysqlEnvFactory {
     }
 
     fn settings(&self, rec: &JobRecord) -> MoverSettings {
-        let mut s = self.settings.clone();
+        let mut s = match &self.live {
+            Some((live, dc)) => {
+                let snap = live.snapshot();
+                let ctx = sprig_settings::SettingCtx::process(dc).for_tenant(rec.tenant_id, &[]);
+                let ctx = match rec.spec.source_cluster() {
+                    Some(c) => ctx.with_cluster(c),
+                    None => ctx,
+                };
+                MoverSettings::resolve(&snap, &ctx)
+            }
+            None => self.settings.clone(),
+        };
         // A move between DCs brings its own budget (chapter 24).
         if let Some(ms) = rec.spec.max_hold_ms {
             s.cutover_max_hold = std::time::Duration::from_millis(ms);

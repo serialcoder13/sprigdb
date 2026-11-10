@@ -69,6 +69,10 @@ spec:
         {{- include "sprigdb.labels" . | nindent 8 }}
     spec:
       serviceAccountName: sprigdb-operator
+      # Kubernetes' service-link variables (SPRIGDB_CONTROLLER_PORT=tcp://...)
+      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process
+      # (found by r2close's helm install).
+      enableServiceLinks: false
       {{- include "sprigdb.podSecurity" . | nindent 6 }}
       containers:
         - name: operator
@@ -84,9 +88,11 @@ spec:
             {{- with .Values.nodeServices.nodePortHost }}
             - {name: SPRIG_OPERATOR_NODE_PORT_HOST, value: {{ . | quote }}}
             {{- end }}
+            {{- if .Values.tls.enabled }}
             - {name: SPRIG_OPERATOR_SERVER_CERT_ISSUER, value: {{ .Values.tls.issuerRef.name | quote }}}
             - {name: SPRIG_OPERATOR_CLIENT_CERT_ISSUER, value: {{ .Values.tls.issuerRef.name | quote }}}
             - {name: SPRIG_OPERATOR_MARIADB_CA_FILE, value: /etc/sprigdb/ca/ca.crt}
+            {{- end }}
             - {name: SPRIG_OPERATOR_READY_TIMEOUT_SECONDS, value: {{ .Values.operator.readyTimeoutSeconds | quote }}}
             {{- if .Values.operator.agentSidecar }}
             - {name: SPRIG_OPERATOR_AGENT_IMAGE, value: {{ include "sprigdb.image" . | quote }}}

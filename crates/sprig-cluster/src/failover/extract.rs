@@ -41,7 +41,9 @@ use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
-use sprig_binlog::{BinlogSource, BinlogStream, Event, Gtid, GtidPos, RowsKind, StreamOptions, Value};
+use sprig_binlog::{
+    BinlogSource, BinlogStream, Event, Gtid, GtidPos, RowsKind, StreamOptions, Value,
+};
 use sprig_common::ids::ClusterId;
 use sprig_common::{Result, SprigError};
 
@@ -187,11 +189,9 @@ pub fn tenant_of(schema: &str) -> u64 {
 pub fn start_position(range: &DivergedRange, applied: &str) -> GtidPos {
     let applied: GtidPos = applied.parse().unwrap_or_default();
     match applied.get(range.domain) {
-        Some(g) if g.seq == range.after_seq => {
-            format!("{}-{}-{}", g.domain, g.server, g.seq)
-                .parse()
-                .unwrap_or_default()
-        }
+        Some(g) if g.seq == range.after_seq => format!("{}-{}-{}", g.domain, g.server, g.seq)
+            .parse()
+            .unwrap_or_default(),
         _ if range.after_seq == 0 => GtidPos::default(),
         _ => format!("{}-{}-{}", range.domain, range.server, range.after_seq)
             .parse()
@@ -400,8 +400,14 @@ pub fn rows_of(txns: &[RawTxn], columns: &BTreeMap<String, Vec<String>>) -> Vec<
                         "insert",
                         format!(
                             "INSERT INTO {table} ({}) VALUES ({});",
-                            a.iter().map(|(n, _)| ident(n)).collect::<Vec<_>>().join(", "),
-                            a.iter().map(|(_, v)| value_sql(v)).collect::<Vec<_>>().join(", ")
+                            a.iter()
+                                .map(|(n, _)| ident(n))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            a.iter()
+                                .map(|(_, v)| value_sql(v))
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ),
                     )
                 }
@@ -422,7 +428,10 @@ pub fn rows_of(txns: &[RawTxn], columns: &BTreeMap<String, Vec<String>>) -> Vec<
                 }
                 RowsKind::Delete => {
                     let b = before.clone().unwrap_or_default();
-                    ("delete", format!("DELETE FROM {table} WHERE {} LIMIT 1;", cond(&b)))
+                    (
+                        "delete",
+                        format!("DELETE FROM {table} WHERE {} LIMIT 1;", cond(&b)),
+                    )
                 }
             };
             let map = |img: Option<Vec<(String, Value)>>| {
@@ -643,8 +652,7 @@ impl ExtractStore for LocalDirStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ =
-                tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+            let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
         }
         tokio::fs::rename(&tmp, &p)
             .await
@@ -701,7 +709,9 @@ mod tests {
     #[test]
     fn a_sealed_extract_opens_only_whole_and_with_its_key() {
         let key = [7u8; 32];
-        let plain: Vec<u8> = (0..(3 * FRAME + 17)).map(|i| (i % 251) as u8).collect();
+        let plain: Vec<u8> = (0..(3 * FRAME + 17))
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
         let sealed = seal(&key, &header(), &plain).expect("seal");
         assert_eq!(header_of(&sealed).expect("header"), header());
         let (h, back) = open(&key, &sealed).expect("open");
@@ -709,7 +719,12 @@ mod tests {
         assert_eq!(back, plain);
         assert!(open(&[8u8; 32], &sealed).is_err(), "another key");
         // Cut after the first frame: no final frame.
-        let first = MAGIC.len() + sealed[MAGIC.len()..].iter().position(|b| *b == b'\n').expect("nl") + 1;
+        let first = MAGIC.len()
+            + sealed[MAGIC.len()..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .expect("nl")
+            + 1;
         let len = u32::from_be_bytes(sealed[first..first + 4].try_into().expect("len")) as usize;
         let cut = &sealed[..first + 4 + NONCE_LEN + len];
         assert!(open(&key, cut).is_err(), "cut short");
@@ -734,7 +749,10 @@ mod tests {
                     table: "la".into(),
                     kind: RowsKind::Insert,
                     before: None,
-                    after: Some(vec![Some(Value::Int(3)), Some(Value::String(b"it's".to_vec()))]),
+                    after: Some(vec![
+                        Some(Value::Int(3)),
+                        Some(Value::String(b"it's".to_vec())),
+                    ]),
                     names: vec![None, None],
                 },
                 RawChange {
@@ -756,16 +774,25 @@ mod tests {
             ],
             statements: vec![],
         };
-        let cols = BTreeMap::from([("t42_d1_g1_s1.la".to_owned(), vec!["k".to_owned(), "v".to_owned()])]);
+        let cols = BTreeMap::from([(
+            "t42_d1_g1_s1.la".to_owned(),
+            vec!["k".to_owned(), "v".to_owned()],
+        )]);
         let rows = rows_of(&[t], &cols);
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].sql, "INSERT INTO `t42_d1_g1_s1`.`la` (`k`, `v`) VALUES (3, 'it''s');");
+        assert_eq!(
+            rows[0].sql,
+            "INSERT INTO `t42_d1_g1_s1`.`la` (`k`, `v`) VALUES (3, 'it''s');"
+        );
         assert_eq!(rows[0].after.as_ref().expect("after")["v"], json!("it's"));
         assert_eq!(
             rows[1].sql,
             "UPDATE `t42_d1_g1_s1`.`la` SET `k` = 3, `v` = X'00ff' WHERE `k` = 3 AND `v` IS NULL LIMIT 1;"
         );
-        assert_eq!(rows[2].sql, "DELETE FROM `__sprig_sys`.`hb` WHERE `@1` = 9 LIMIT 1;");
+        assert_eq!(
+            rows[2].sql,
+            "DELETE FROM `__sprig_sys`.`hb` WHERE `@1` = 9 LIMIT 1;"
+        );
         assert_eq!(tenant_of(&rows[0].schema), 42);
         assert_eq!(tenant_of(&rows[2].schema), 0);
         assert_eq!(tenant_of("test"), 0);

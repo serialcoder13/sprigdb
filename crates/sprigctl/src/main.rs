@@ -269,6 +269,7 @@ fn dc_group() -> Command {
 }
 
 /// `sprigctl cluster`.
+#[allow(clippy::too_many_lines)] // one subcommand each
 fn cluster_group() -> Command {
     let id = || {
         Arg::new("id")
@@ -761,6 +762,7 @@ fn confirm(m: &ArgMatches, what: &str, id: &str) -> Result<(), Failed> {
     }
 }
 
+#[allow(clippy::too_many_lines)] // one arm per subcommand
 async fn run_cluster(
     c: &AdminClient,
     m: &ArgMatches,
@@ -866,11 +868,15 @@ async fn run_cluster(
         }
         "extract-open" => {
             let file = sub.get_one::<String>("file").cloned().unwrap_or_default();
-            let keys = sub.get_one::<String>("key-file").cloned().unwrap_or_default();
+            let keys = sub
+                .get_one::<String>("key-file")
+                .cloned()
+                .unwrap_or_default();
             let fail = |e: String| Failed(e);
             let sealed = std::fs::read(&file).map_err(|e| fail(format!("{file}: {e}")))?;
-            let ring = sprig_workload::keyring::MasterKeyring::from_file(std::path::Path::new(&keys))
-                .map_err(|e| fail(e.to_string()))?;
+            let ring =
+                sprig_workload::keyring::MasterKeyring::from_file(std::path::Path::new(&keys))
+                    .map_err(|e| fail(e.to_string()))?;
             let h = sprig_cluster::failover::extract::header_of(&sealed)
                 .map_err(|e| fail(e.to_string()))?;
             let key = ring

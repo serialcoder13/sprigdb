@@ -144,6 +144,7 @@ pub mod code {
     pub const SPRIG_CURSOR_LIMIT: i32 = 39630;
     pub const SPRIG_DOC_ID_TOO_LONG: i32 = 39660;
     pub const SPRIG_DOC_FEATURE_UNSUPPORTED: i32 = 39662;
+    pub const SPRIG_PATH_PUBLISH_TIMEOUT: i32 = 39664;
     pub const SPRIG_DOC_TOO_DEEP: i32 = 39665;
 }
 

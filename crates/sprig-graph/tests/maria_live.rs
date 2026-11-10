@@ -3,7 +3,10 @@
 //! recursive CTE runs, budgets hold, and the commit check refuses dangling
 //! relationships. Skipped unless `SPRIG_TEST_MARIADB_SINGLE` names a
 //! server (`mysql://root:pw@127.0.0.1:13301`). Uses only the schemas
-//! `r8graphs_live_data` and `r8graphs_live_cat`, dropped at the end.
+//! `r8graphs3_live_*` (one shard) and `r8graphs3_live4_*` (four shard
+//! schemas with mirrors), dropped at the end.
+
+#![allow(clippy::many_single_char_names, clippy::too_many_lines)]
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -14,16 +17,18 @@ use mysql_async::prelude::Queryable;
 use sprig_common::{Result, SprigCode};
 use sprig_graph::catalog::{GraphCatalog, Tables};
 use sprig_graph::eval::Params;
-use sprig_graph::maria::{CounterIds, Dictionary, MariaStore, check_deleted};
+use sprig_graph::maria::{
+    CounterIds, Dictionary, GraphShards, MariaStore, OneConn, ShardLoc, check_deleted,
+};
 use sprig_graph::mem::MemStore;
+use sprig_graph::store::IndexDef;
 use sprig_graph::value::Value;
 use sprig_graph::{Budgets, Output, execute};
 
-const DATA: &str = "r8graphs_live_data";
-const CAT: &str = "r8graphs_live_cat";
 const GRAPH: u64 = 901;
 
 struct Dict {
+    cat: String,
     pool: mysql_async::Pool,
     labels: Mutex<BTreeMap<u32, String>>,
     types: Mutex<BTreeMap<u32, String>>,
@@ -37,7 +42,7 @@ impl Dictionary for Dict {
             .get_conn()
             .await
             .map_err(sprig_graph::catalog::backend_error)?;
-        let id = GraphCatalog::new(CAT)
+        let id = GraphCatalog::new(&self.cat)
             .add_source(&mut c, GRAPH, label, name)
             .await?;
         let m = if label { &self.labels } else { &self.types };
@@ -50,7 +55,10 @@ struct Live {
     pool: mysql_async::Pool,
     dict: Arc<Dict>,
     ids: Arc<CounterIds>,
-    tables: Tables,
+    layout: Arc<GraphShards>,
+    indexes: Mutex<Vec<IndexDef>>,
+    /// Every schema the test made.
+    schemas: Vec<String>,
 }
 
 impl Live {
@@ -69,29 +77,43 @@ impl Live {
         let labels = self.dict.labels.lock().expect("lock").clone();
         let types = self.dict.types.lock().expect("lock").clone();
         let r = {
-            let mut store = MariaStore::new(
-                &mut conn,
-                GRAPH,
-                self.tables.clone(),
-                labels,
-                types,
-                self.dict.clone(),
-                self.ids.clone(),
-            );
-            execute(&mut store, text, &Params::new(), b).await
-        };
-        let r = match r {
-            Ok(o) => match check_deleted(&mut conn, &self.tables, &o.deleted_nodes).await {
-                Ok(()) => Ok(o),
+            let mut one = OneConn(&mut conn);
+            let r = {
+                let mut store = MariaStore::new(
+                    &mut one,
+                    Arc::clone(&self.layout),
+                    labels,
+                    types,
+                    self.dict.clone(),
+                    self.ids.clone(),
+                )
+                .with_schema(self.indexes.lock().expect("lock").clone(), None);
+                execute(&mut store, text, &Params::new(), b).await
+            };
+            match r {
+                Ok(o) => match check_deleted(&mut one, &self.layout, &o.deleted_nodes).await {
+                    Ok(()) => Ok(o),
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
-            },
-            Err(e) => Err(e),
+            }
         };
         let end = if r.is_ok() { "COMMIT" } else { "ROLLBACK" };
         conn.query_drop(end)
             .await
             .map_err(sprig_graph::catalog::backend_error)?;
         r
+    }
+
+    async fn cleanup(self) {
+        let mut c = self.pool.get_conn().await.expect("conn");
+        for s in &self.schemas {
+            c.query_drop(format!("DROP DATABASE IF EXISTS {s}"))
+                .await
+                .expect("drop");
+        }
+        drop(c);
+        self.pool.disconnect().await.expect("disconnect");
     }
 
     async fn run(&self, text: &str) -> Output {
@@ -108,7 +130,9 @@ fn show(o: &Output) -> Vec<String> {
         .collect()
 }
 
-async fn setup() -> Option<Live> {
+/// A graph in schemas `<prefix>_s1..` (`shards` of them, with mirrors
+/// when more than one) and its catalog in `<prefix>_cat`.
+async fn setup(prefix: &str, shards: u32) -> Option<Live> {
     let url = std::env::var("SPRIG_TEST_MARIADB_SINGLE").ok()?;
     let opts = mysql_async::Opts::from_url(&url).expect("url");
     let pool = mysql_async::Pool::new(
@@ -118,8 +142,12 @@ async fn setup() -> Option<Live> {
                 .with_inactive_connection_ttl(Duration::from_secs(30)),
         ),
     );
+    let cat = format!("{prefix}_cat");
+    let data: Vec<String> = (1..=shards).map(|i| format!("{prefix}_s{i}")).collect();
+    let mut schemas = data.clone();
+    schemas.push(cat.clone());
     let mut c = pool.get_conn().await.expect("conn");
-    for s in [DATA, CAT] {
+    for s in &schemas {
         c.query_drop(format!("DROP DATABASE IF EXISTS {s}"))
             .await
             .expect("drop");
@@ -127,28 +155,54 @@ async fn setup() -> Option<Live> {
             .await
             .expect("create");
     }
-    GraphCatalog::new(CAT)
+    GraphCatalog::new(&cat)
         .migrate(&mut c)
         .await
         .expect("migrate");
-    GraphCatalog::new(CAT)
+    GraphCatalog::new(&cat)
         .insert_native(&mut c, GRAPH, 1)
         .await
         .expect("graph row");
-    let tables = Tables::of(DATA, GRAPH);
-    for s in tables.create_ddl() {
-        c.query_drop(s).await.expect("ddl");
+    let layout = if shards == 1 {
+        GraphShards::single(GRAPH, 1, &data[0], "c1")
+    } else {
+        let mut l = GraphShards::single(GRAPH, 1, &data[0], "c1");
+        l.group = 7;
+        l.mirrors = true;
+        l.shards = (0..shards)
+            .map(|i| ShardLoc {
+                shard: i + 1,
+                lo: u64::try_from((u128::from(i) << 64) / u128::from(shards)).expect("lo"),
+                epoch: 1,
+                cluster: "c1".into(),
+                schema: data[i as usize].clone(),
+                tables: Tables::of(&data[i as usize], GRAPH),
+            })
+            .collect();
+        l
+    };
+    for sh in &layout.shards {
+        for s in sh.tables.shard_ddl() {
+            c.query_drop(s).await.expect("ddl");
+        }
+    }
+    let first = Tables::of(&data[0], GRAPH);
+    for s in first.seq_ddl() {
+        c.query_drop(s).await.expect("seq");
     }
     drop(c);
     Some(Live {
         dict: Arc::new(Dict {
+            cat,
             pool: pool.clone(),
             labels: Mutex::new(BTreeMap::new()),
             types: Mutex::new(BTreeMap::new()),
         }),
-        ids: Arc::new(CounterIds::new(pool.clone(), &tables, 64)),
+        ids: Arc::new(CounterIds::new(pool.clone(), &first, 64)),
         pool,
-        tables,
+        layout: Arc::new(layout),
+        indexes: Mutex::new(Vec::new()),
+        schemas,
     })
 }
 
@@ -182,7 +236,7 @@ const CORPUS: &[&str] = &[
 
 #[tokio::test]
 async fn maria_and_memory_agree() {
-    let Some(live) = setup().await else {
+    let Some(live) = setup("r8graphs3_live", 1).await else {
         eprintln!("skipped: SPRIG_TEST_MARIADB_SINGLE is not set");
         return;
     };
@@ -240,6 +294,11 @@ async fn maria_and_memory_agree() {
         .run("MERGE (n:Person {name: 'Zed'}) ON CREATE SET n.new = true RETURN n.new")
         .await;
     assert_eq!(show(&o), ["true"]);
+    // A pushed-down boolean (not indexed) finds the node.
+    let o = live.run("MATCH (n:Person {new: true}) RETURN n.name").await;
+    assert_eq!(show(&o), ["Zed"]);
+    let o = live.run("MATCH (n:Person {new: false}) RETURN n.name").await;
+    assert_eq!(show(&o), Vec::<String>::new());
 
     // A chain of 40 for the budgets: deep traversals are refused with
     // 39903, exact below the limit.
@@ -279,12 +338,211 @@ async fn maria_and_memory_agree() {
     let plan = o.plan.expect("plan").join("\n");
     assert!(plan.contains("recursive CTEs: 3"), "{plan}");
 
+    numeric_keys(&live).await;
+
+    live.cleanup().await;
+}
+
+/// G19 (round 3): MariaDB's index column computes the same normalized
+/// number as `schema::index_value`, so a unique constraint treats `1` and
+/// `1.0` as one value, and lookups by either find both.
+async fn numeric_keys(live: &Live) {
+    use sprig_graph::ast::{Entity, IndexKind};
+    let label = live.dict.create(true, "Num").await.expect("label");
+    let def = IndexDef {
+        id: 77,
+        name: "num_k".into(),
+        unique: true,
+        kind: IndexKind::Range,
+        entity: Entity::Node,
+        token: "Num".into(),
+        token_id: label,
+        props: vec!["k".into()],
+        state: "online".into(),
+    };
     let mut c = live.pool.get_conn().await.expect("conn");
-    for s in [DATA, CAT] {
-        c.query_drop(format!("DROP DATABASE IF EXISTS {s}"))
+    for sh in &live.layout.shards {
+        c.query_drop(sh.tables.index_ddl(&def).expect("ddl"))
             .await
-            .expect("drop");
+            .expect("alter");
     }
     drop(c);
-    live.pool.disconnect().await.expect("disconnect");
+    live.indexes.lock().expect("lock").push(def.clone());
+    let values = [
+        "1", "1.5", "-0.0", "1e16", "-7", "123456789012", "0.1", "1e300", "2.5e-8",
+        "9007199254740993", "'1'", "true", "false",
+    ];
+    for v in values {
+        live.run(&format!("CREATE (:Num {{k: {v}}})")).await;
+    }
+    // The column, as MariaDB computes it, against Rust's text.
+    let mut c = live.pool.get_conn().await.expect("conn");
+    let mut rows: Vec<(String, Option<String>)> = Vec::new();
+    for sh in &live.layout.shards {
+        let r: Vec<(String, Option<String>)> = c
+            .query(format!(
+                "SELECT CAST(props AS CHAR), `{}` FROM {} WHERE `{}` IS NOT NULL",
+                Tables::index_column(&def, 0),
+                sh.tables.nodes,
+                Tables::index_column(&def, 0)
+            ))
+            .await
+            .expect("columns");
+        rows.extend(r);
+    }
+    drop(c);
+    assert_eq!(rows.len(), values.len(), "{rows:?}");
+    for (props, col) in &rows {
+        let j: serde_json::Value = serde_json::from_str(props).expect("json");
+        let want = sprig_graph::schema::index_value(&j["k"], IndexKind::Range);
+        assert_eq!(col.as_deref(), want.as_deref(), "{props}");
+    }
+    // Integral floats collide with their integers.
+    for dup in ["1.0", "10000000000000000", "-7.0", "0"] {
+        let e = live
+            .run_with(&format!("CREATE (:Num {{k: {dup}}})"), &Budgets::default())
+            .await
+            .expect_err(dup);
+        assert!(
+            matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1062, .. }),
+            "{dup}: {e}"
+        );
+    }
+    // 2^53 + 1 and its nearest float are two values, as in Neo4j.
+    live.run("CREATE (:Num {k: 9007199254740992.0})").await;
+    let o = live.run("MATCH (n:Num {k: 1.0}) RETURN n.k").await;
+    assert_eq!(show(&o), ["1"]);
+    let o = live
+        .run("MATCH (n:Num) WHERE n.k IN [1e16, 1.5, 9007199254740992] RETURN count(n)")
+        .await;
+    assert_eq!(show(&o), ["3"]);
+    eprintln!("numeric keys: {} values agree with MariaDB's column", rows.len());
+}
+
+/// Round 3: a graph over four shard schemas with mirrors gives the same
+/// answers as memory; incoming hops and incoming variable-length searches
+/// go through the mirrors; writes keep one mirror per edge; the commit
+/// check sees edges on other shards.
+#[tokio::test]
+async fn four_shards_with_mirrors_agree_with_memory() {
+    let Some(live) = setup("r8graphs3_live4", 4).await else {
+        eprintln!("skipped: SPRIG_TEST_MARIADB_SINGLE is not set");
+        return;
+    };
+    let mut mem = MemStore::new(4);
+    live.run(CORPUS_SETUP).await;
+    execute(&mut mem, CORPUS_SETUP, &Params::new(), &Budgets::default())
+        .await
+        .expect("mem setup");
+    // A ring of 60 with chords, so paths cross shards many times.
+    let ring = "UNWIND range(0, 59) AS i CREATE (:R {i: i})";
+    let link = "MATCH (a:R), (b:R) WHERE b.i = (a.i + 1) % 60 OR b.i = (a.i * 7) % 60 CREATE (a)-[:NEXT {w: a.i}]->(b)";
+    for q in [ring, link] {
+        live.run(q).await;
+        execute(&mut mem, q, &Params::new(), &Budgets::default())
+            .await
+            .expect(q);
+    }
+    let extra = [
+        "MATCH (a:R {i: 0})<-[:NEXT]-(x) RETURN x.i ORDER BY x.i",
+        "MATCH (a:R {i: 5})<-[:NEXT*1..3]-(x) RETURN count(DISTINCT x) AS c",
+        "MATCH (a:R {i: 5})-[:NEXT*1..4]->(x) RETURN count(DISTINCT x) AS c",
+        "MATCH (a:R {i: 5})<-[r:NEXT*2]-(x) RETURN x.i, [e IN r | e.w] AS ws ORDER BY x.i, ws",
+        "MATCH (a:R {i: 1}), (b:R {i: 31}) MATCH p = shortestPath((a)-[:NEXT*]->(b)) RETURN length(p)",
+        "MATCH (a:R {i: 3})-[:NEXT]-(x) RETURN x.i ORDER BY x.i",
+        "MATCH (x:R)<-[:NEXT]-(y:R) WHERE x.i < 4 RETURN x.i, count(y) ORDER BY x.i",
+    ];
+    let mut agree = 0;
+    for q in CORPUS.iter().chain(extra.iter()) {
+        let a = show(&live.run(q).await);
+        let b = show(
+            &execute(&mut mem, q, &Params::new(), &Budgets::default())
+                .await
+                .expect(q),
+        );
+        assert_eq!(a, b, "{q}");
+        agree += 1;
+    }
+    let shards_hit = {
+        let o = live
+            .run("PROFILE MATCH (a:R {i: 5})<-[:NEXT*1..3]-(x) RETURN count(DISTINCT x) AS c")
+            .await;
+        o.plan.expect("plan").join("\n")
+    };
+    eprintln!("4 shards vs memory: {agree} statements agree\n{shards_hit}");
+
+    // One mirror per edge, each on its destination's shard.
+    let mut c = live.pool.get_conn().await.expect("conn");
+    let mut edges = 0u64;
+    let mut mirrors = 0u64;
+    for (i, sh) in live.layout.shards.iter().enumerate() {
+        let e: Option<u64> = c
+            .query_first(format!("SELECT COUNT(*) FROM {}", sh.tables.edges))
+            .await
+            .expect("edges");
+        let m: Option<u64> = c
+            .query_first(format!("SELECT COUNT(*) FROM {}", sh.tables.mirrors))
+            .await
+            .expect("mirrors");
+        edges += e.unwrap_or(0);
+        mirrors += m.unwrap_or(0);
+        // Every row is in its own shard's range.
+        for (t, col) in [(&sh.tables.nodes, "_sprig_rk"), (&sh.tables.mirrors, "_sprig_rk")] {
+            let lo = sh.lo;
+            let hi = live.layout.hi(i).map_or(String::new(), |h| format!(" OR _sprig_rk >= {h}"));
+            let bad: Option<u64> = c
+                .query_first(format!("SELECT COUNT(*) FROM {t} WHERE {col} < {lo}{hi}"))
+                .await
+                .expect("range");
+            assert_eq!(bad, Some(0), "{t}");
+        }
+        assert!(e.unwrap_or(0) > 0, "shard {} has no edges", sh.shard);
+    }
+    drop(c);
+    assert_eq!(edges, mirrors);
+
+    // The commit check sees an incoming edge from another shard.
+    let e = live
+        .run_with("MATCH (n:R {i: 0}) DELETE n", &Budgets::default())
+        .await
+        .expect_err("dangling");
+    assert_eq!(e.code(), Some(SprigCode::GraphNodeHasRelationships));
+    // DETACH DELETE removes incoming edges on other shards and the mirrors.
+    let q = "MATCH (n:R {i: 0}) DETACH DELETE n";
+    let o = live.run(q).await;
+    let m = execute(&mut mem, q, &Params::new(), &Budgets::default())
+        .await
+        .expect(q);
+    assert_eq!(o.stats["relationships-deleted"], m.stats["relationships-deleted"]);
+    let q = "MATCH (a:R)-[r:NEXT]->(b:R) WHERE a.i = 7 DELETE r";
+    live.run(q).await;
+    execute(&mut mem, q, &Params::new(), &Budgets::default())
+        .await
+        .expect(q);
+    for q in extra.iter().chain(["MATCH ()-[r]->() RETURN count(r)"].iter()) {
+        let a = show(&live.run(q).await);
+        let b = show(
+            &execute(&mut mem, q, &Params::new(), &Budgets::default())
+                .await
+                .expect(q),
+        );
+        assert_eq!(a, b, "after deletes: {q}");
+    }
+    let mut c = live.pool.get_conn().await.expect("conn");
+    let (mut edges, mut mirrors) = (0u64, 0u64);
+    for sh in &live.layout.shards {
+        let e: Option<u64> = c
+            .query_first(format!("SELECT COUNT(*) FROM {}", sh.tables.edges))
+            .await
+            .expect("edges");
+        let m: Option<u64> = c
+            .query_first(format!("SELECT COUNT(*) FROM {}", sh.tables.mirrors))
+            .await
+            .expect("mirrors");
+        edges += e.unwrap_or(0);
+        mirrors += m.unwrap_or(0);
+    }
+    drop(c);
+    assert_eq!(edges, mirrors, "mirrors follow deletes");
+    live.cleanup().await;
 }

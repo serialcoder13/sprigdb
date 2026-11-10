@@ -82,6 +82,15 @@ pub struct ChannelSink {
     finished: bool,
     /// The status of the last OK or terminator.
     pub last_status: Option<StatusFlags>,
+    /// Caps per result (`Sql.Query`'s `max_rows`, `max_bytes`, clamped for
+    /// Studio; chapter 44 decision ST8): 0 for none.
+    cap_rows: u64,
+    cap_bytes: u64,
+    rows_in_result: u64,
+    bytes_in_result: u64,
+    capped: bool,
+    /// `Sql.Query`'s `timeout_ms`.
+    timeout: Option<std::time::Duration>,
 }
 
 impl ChannelSink {
@@ -98,7 +107,40 @@ impl ChannelSink {
             batch_bytes: 0,
             finished: false,
             last_status: None,
+            cap_rows: 0,
+            cap_bytes: 0,
+            rows_in_result: 0,
+            bytes_in_result: 0,
+            capped: false,
+            timeout: None,
         }
+    }
+
+    /// With caps per result (0: none) and a statement timeout.
+    #[must_use]
+    pub fn with_caps(
+        mut self,
+        max_rows: u64,
+        max_bytes: u64,
+        timeout: Option<std::time::Duration>,
+    ) -> Self {
+        self.cap_rows = max_rows;
+        self.cap_bytes = max_bytes;
+        self.timeout = timeout;
+        self
+    }
+
+    /// The statement timeout asked for.
+    #[must_use]
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        self.timeout
+    }
+
+    /// A result reached its cap: the rest was left out and the statement
+    /// should be killed.
+    #[must_use]
+    pub fn capped(&self) -> bool {
+        self.capped
     }
 
     /// Whether the reader is gone.
@@ -127,6 +169,30 @@ impl ChannelSink {
     }
 
     async fn push_row(&mut self, cells: Vec<prost_types::Value>, bytes: usize) -> Result<()> {
+        let bytes64 = bytes as u64;
+        if (self.cap_rows > 0 && self.rows_in_result >= self.cap_rows)
+            || (self.cap_bytes > 0 && self.bytes_in_result + bytes64 > self.cap_bytes)
+        {
+            // The cap: what was kept goes out, then an end marked
+            // truncated; the caller kills the statement.
+            self.flush_batch().await?;
+            self.capped = true;
+            metrics::counter!("sprig_api_results_truncated_total").increment(1);
+            self.part(query_response::Part::End(ResultEnd {
+                index: self.index,
+                truncated: true,
+                ..ResultEnd::default()
+            }))
+            .await?;
+            self.finished = true;
+            return Err(SprigError::standard(
+                1317,
+                *b"70100",
+                "the result reached its cap: the statement was stopped",
+            ));
+        }
+        self.rows_in_result += 1;
+        self.bytes_in_result += bytes64;
         self.batch.push(ListValue { values: cells });
         self.batch_bytes += bytes;
         if self.batch.len() >= self.batch_rows || self.batch_bytes >= BATCH_BYTES {
@@ -192,6 +258,8 @@ impl ResultSink for ChannelSink {
         let cols: Vec<Column> = columns.iter().map(column).collect();
         self.binary = cols.iter().map(|c| c.binary).collect();
         self.in_rows = true;
+        self.rows_in_result = 0;
+        self.bytes_in_result = 0;
         self.part(query_response::Part::Header(ResultHeader {
             index: self.index,
             columns: cols,
@@ -257,6 +325,7 @@ impl ResultSink for ChannelSink {
             warnings: u32::from(ok.warnings),
             info: String::from_utf8_lossy(&ok.info).into_owned(),
             more_results: ok.status.contains(StatusFlags::MORE_RESULTS_EXISTS),
+            truncated: false,
         })
         .await
     }

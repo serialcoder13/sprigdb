@@ -363,6 +363,7 @@ async fn grpc_worker(s: Arc<Soak>, n: u64, tls: bool) {
                 sql: sql_for(i),
                 transaction: String::new(),
                 multi_statements: false,
+                ..Default::default()
             });
             req.metadata_mut()
                 .insert("authorization", auth().parse().unwrap());

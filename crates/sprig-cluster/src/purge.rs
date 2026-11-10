@@ -7,6 +7,7 @@
 //! |---|---|
 //! | per-user backend accounts (chapter 29) | `t<id>_u<user>@'%'` |
 //! | MariaDB roles (chapter 29, later) | `t<id>_r<role>`, `t<id>_rc<hash>` |
+//! | the offsets role (chapter 45, `sprig.commit_offset`) | `t<id>_sprig_offsets` |
 //! | schemas | `t<id>_sprig`, `t<id>_d<db>_g<g>_s<s>`, `t<id>_d<db>_ref` |
 //! | `__sprig_sys.__sprig_names` rows (chapter 07) | an account's or a schema's name |
 //!
@@ -50,6 +51,18 @@ pub fn like_prefix(tenant: TenantId) -> String {
 pub fn owns_account(tenant: TenantId, user: &str) -> bool {
     user.parse::<AccountName>()
         .is_ok_and(|a| a.tenant() == tenant)
+}
+
+/// The roles SprigDB itself makes per tenant, by suffix: `t<id>_<suffix>`
+/// (chapter 45's offsets role, granted to accounts that commit offsets in
+/// a transaction).
+pub const INTERNAL_ROLES: &[&str] = &["sprig_offsets"];
+
+/// Whether `user` is exactly one of `tenant`'s internal roles.
+#[must_use]
+pub fn owns_internal_role(tenant: TenantId, user: &str) -> bool {
+    user.strip_prefix(&format!("t{tenant}_"))
+        .is_some_and(|rest| INTERNAL_ROLES.contains(&rest))
 }
 
 /// `name` as one of `tenant`'s schemas, if it is exactly one.
@@ -222,7 +235,7 @@ pub fn plan(tenant: TenantId, found: &Found, known: &Known) -> Plan {
     p.drop_accounts = found
         .accounts
         .iter()
-        .filter(|a| owns_account(tenant, &a.user))
+        .filter(|a| owns_account(tenant, &a.user) || owns_internal_role(tenant, &a.user))
         .cloned()
         .collect();
     p.delete_names = found
@@ -295,7 +308,8 @@ pub async fn read(conn: &mut Conn, tenant: TenantId) -> Result<Found> {
             .map(|(user, host, role)| Account {
                 user,
                 host,
-                role: role.eq_ignore_ascii_case("true"),
+                // JSON_VALUE gives `1` for the JSON `true` MariaDB stores.
+                role: role.eq_ignore_ascii_case("true") || role == "1",
             })
             .collect(),
         name_rows,
@@ -428,6 +442,34 @@ mod tests {
         assert!(owned_schema(t, "t30_d1_g1_s1").is_none());
         assert!(owned_schema(t, "t3_d1_g1_s1_old").is_none());
         assert!(owned_schema(TenantId(30), "t3_d1_g1_s1").is_none());
+    }
+
+    #[test]
+    fn the_offsets_role_goes_with_its_tenant_only() {
+        let t = TenantId(3);
+        let found = Found {
+            accounts: [
+                "t3_sprig_offsets",
+                "t30_sprig_offsets",
+                "t3_sprig_offsetsx",
+                "t3_sprig",
+            ]
+            .iter()
+            .map(|u| Account {
+                user: (*u).to_owned(),
+                host: String::new(),
+                role: true,
+            })
+            .collect(),
+            ..Found::default()
+        };
+        let p = plan(t, &found, &Known::default());
+        let users: Vec<&str> = p.drop_accounts.iter().map(|a| a.user.as_str()).collect();
+        assert_eq!(users, ["t3_sprig_offsets"]);
+        assert!(
+            p.statements()
+                .contains(&"DROP ROLE IF EXISTS 't3_sprig_offsets'".to_owned())
+        );
     }
 
     #[test]

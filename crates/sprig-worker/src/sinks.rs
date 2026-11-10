@@ -36,6 +36,8 @@ pub struct SinksEnv {
     keyring: Option<Arc<dyn SinkKeyring>>,
     secret_dir: PathBuf,
     worker: String,
+    /// The worker's live settings (global `sink.*`).
+    settings: crate::settings::WorkerSettings,
 }
 
 impl std::fmt::Debug for SinksEnv {
@@ -78,6 +80,7 @@ impl SinksEnv {
                 PathBuf::from,
             ),
             worker: worker.to_owned(),
+            settings: env.settings.clone(),
         }
     }
 }
@@ -119,6 +122,10 @@ impl SinkEnv for SinksEnv {
 
     fn worker_id(&self) -> String {
         self.worker.clone()
+    }
+
+    fn settings(&self) -> Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)> {
+        Some((self.settings.snapshot(), self.settings.dc().clone()))
     }
 }
 

@@ -27,6 +27,7 @@
 //! (read-modify-write for every operator in this release).
 
 use std::collections::{BTreeSet, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtOrd};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,9 +36,10 @@ use bson::{Bson, DateTime, Document, doc, oid::ObjectId};
 use sprig_proto_mongo::errors::{MongoError, code};
 
 use crate::agg::{self, AggExpr, AggLimits, Projection};
+use crate::catalog::{DocCatalog, TableCatalog};
 use crate::filter::{self, Pred};
 use crate::json::{self, RenderOpts};
-use crate::meta::{self, CollMeta, IndexDef, META_COLUMNS, META_TABLE};
+use crate::meta::{self, CollMeta, IndexDef};
 use crate::sql::{bin_lit, ident, str_lit};
 use crate::translate::{SqlPred, translate};
 use crate::update::{self, ApplyCx, UpdateSpec};
@@ -78,6 +80,11 @@ pub trait SqlRunner: Send {
     async fn query(&mut self, sql: &str) -> Result<Rows, SqlError>;
     /// Runs a statement returning an OK packet.
     async fn exec(&mut self, sql: &str) -> Result<Done, SqlError>;
+    /// The tenant the statements run for (0 outside the tenant catalog),
+    /// for a [`DocCatalog`] that keeps metadata per tenant.
+    fn tenant(&self) -> u64 {
+        0
+    }
 }
 
 /// MongoDB's view of a SQL error.
@@ -166,6 +173,28 @@ pub fn hlc_now() -> u64 {
             Err(c) => cur = c,
         }
     }
+}
+
+static FEED_HLC: AtomicU64 = AtomicU64::new(0);
+
+/// Chapter 38's statement comment for a whole-document replacement:
+/// `/*sprig h=<HLC> o=r*/`, the HLC in the feed's layout (seconds in the
+/// high 32 bits, a counter in the low 32), never going backwards.
+#[must_use]
+pub fn replace_comment() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let wall = secs << 32;
+    let mut cur = FEED_HLC.load(AtOrd::SeqCst);
+    let h = loop {
+        let next = wall.max(cur + 1);
+        match FEED_HLC.compare_exchange(cur, next, AtOrd::SeqCst, AtOrd::SeqCst) {
+            Ok(_) => break next,
+            Err(c) => cur = c,
+        }
+    };
+    format!("/*sprig h={h:016x} o=r*/ ")
 }
 
 fn now_date() -> DateTime {
@@ -321,22 +350,34 @@ impl CursorPlan {
     }
 }
 
-/// The document engine: stateless apart from its settings.
-#[derive(Debug, Clone, Copy, Default)]
+/// The document engine: stateless apart from its settings and where it
+/// keeps collection metadata.
+#[derive(Debug, Clone)]
 pub struct Engine {
     /// Settings.
     pub cfg: EngineConfig,
+    /// Collection metadata.
+    pub catalog: Arc<dyn DocCatalog>,
 }
 
-fn ns_missing(e: &SqlError) -> bool {
-    e.is(1146) || e.is(1049)
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new(EngineConfig::default())
+    }
 }
 
 impl Engine {
-    /// An engine with `cfg`.
+    /// An engine with `cfg`, keeping metadata in each database's hidden
+    /// table ([`TableCatalog`]).
     #[must_use]
     pub fn new(cfg: EngineConfig) -> Self {
-        Self { cfg }
+        Self::with_catalog(cfg, Arc::new(TableCatalog))
+    }
+
+    /// An engine with `cfg` over `catalog`.
+    #[must_use]
+    pub fn with_catalog(cfg: EngineConfig, catalog: Arc<dyn DocCatalog>) -> Self {
+        Self { cfg, catalog }
     }
 
     fn opts(&self) -> RenderOpts {
@@ -354,17 +395,7 @@ impl Engine {
         sql: &mut dyn SqlRunner,
         ns: &Ns,
     ) -> Result<Option<CollMeta>, MongoError> {
-        let q = format!(
-            "SELECT {META_COLUMNS} FROM {}.{} WHERE coll = {}",
-            ident(&ns.db),
-            ident(META_TABLE),
-            str_lit(&ns.coll)
-        );
-        match sql.query(&q).await {
-            Ok(rows) => rows.first().map(|r| CollMeta::from_row(r)).transpose(),
-            Err(e) if ns_missing(&e) => Ok(None),
-            Err(e) => Err(mongo_error(&e)),
-        }
+        self.catalog.get(sql, ns).await
     }
 
     /// Creates the database (if needed) and its metadata table.
@@ -373,29 +404,21 @@ impl Engine {
     /// SQL errors (privileges).
     pub async fn ensure_db(&self, sql: &mut dyn SqlRunner, db: &str) -> Result<(), MongoError> {
         check_db_name(db)?;
-        let probe = format!("SELECT 1 FROM {}.{} LIMIT 0", ident(db), ident(META_TABLE));
-        match sql.query(&probe).await {
-            Ok(_) => return Ok(()),
-            Err(e) if ns_missing(&e) => {}
-            Err(e) => return Err(mongo_error(&e)),
-        }
-        match sql.exec(&meta::meta_table_sql(db)).await {
+        // Retryable-write records live next to the collections (chapter
+        // 30); creating their table also tells whether the database exists.
+        match sql.exec(&crate::sessions::table_sql(db)).await {
             Ok(_) => {}
             Err(e) if e.is(1049) => {
                 sql.exec(&format!("CREATE DATABASE IF NOT EXISTS {}", ident(db)))
                     .await
                     .map_err(|e| mongo_error(&e))?;
-                sql.exec(&meta::meta_table_sql(db))
+                sql.exec(&crate::sessions::table_sql(db))
                     .await
                     .map_err(|e| mongo_error(&e))?;
             }
             Err(e) => return Err(mongo_error(&e)),
         }
-        // Retryable-write records live next to the collections (chapter 30).
-        sql.exec(&crate::sessions::table_sql(db))
-            .await
-            .map_err(|e| mongo_error(&e))?;
-        Ok(())
+        self.catalog.ensure_db(sql, db).await
     }
 
     /// Creates a collection; `explicit` makes an existing one an error
@@ -462,6 +485,7 @@ impl Engine {
             uuid,
             array_paths: BTreeSet::new(),
             arrays_full: false,
+            pending_paths: BTreeSet::new(),
             indexes: Vec::new(),
             options: options
                 .into_iter()
@@ -469,19 +493,13 @@ impl Engine {
                 .collect(),
             next_index: 1,
         };
-        match sql.exec(&m.insert_sql(&ns.db)).await {
-            Ok(_) => Ok(m),
-            Err(e) if e.is(1062) => {
-                if explicit {
-                    Err(MongoError::new(
-                        code::NAMESPACE_EXISTS,
-                        format!("Collection {ns} already exists."),
-                    ))
-                } else {
-                    self.meta(sql, ns).await?.ok_or_else(|| mongo_error(&e))
-                }
-            }
-            Err(e) => Err(mongo_error(&e)),
+        match self.catalog.register(sql, ns, &m).await? {
+            None => Ok(m),
+            Some(_) if explicit => Err(MongoError::new(
+                code::NAMESPACE_EXISTS,
+                format!("Collection {ns} already exists."),
+            )),
+            Some(x) => Ok(x),
         }
     }
 
@@ -511,14 +529,7 @@ impl Engine {
         ))
         .await
         .map_err(|e| mongo_error(&e))?;
-        sql.exec(&format!(
-            "DELETE FROM {}.{} WHERE coll = {}",
-            ident(&ns.db),
-            ident(META_TABLE),
-            str_lit(&ns.coll)
-        ))
-        .await
-        .map_err(|e| mongo_error(&e))?;
+        self.catalog.unregister(sql, ns).await?;
         Ok(true)
     }
 
@@ -531,7 +542,7 @@ impl Engine {
             .exec(&format!("DROP DATABASE IF EXISTS {}", ident(db)))
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => self.catalog.dropped_db(sql, db).await,
             Err(e) if e.is(1008) || e.is(1049) => Ok(()),
             Err(e) => Err(mongo_error(&e)),
         }
@@ -569,20 +580,10 @@ impl Engine {
         filter_doc: &Document,
         name_only: bool,
     ) -> Result<Vec<Document>, MongoError> {
-        let q = format!(
-            "SELECT {META_COLUMNS} FROM {}.{} ORDER BY coll",
-            ident(db),
-            ident(META_TABLE)
-        );
-        let rows = match sql.query(&q).await {
-            Ok(r) => r,
-            Err(e) if ns_missing(&e) => return Ok(Vec::new()),
-            Err(e) => return Err(mongo_error(&e)),
-        };
+        let list = self.catalog.list(sql, db).await?;
         let pred = filter::parse(filter_doc)?;
         let mut out = Vec::new();
-        for r in rows {
-            let m = CollMeta::from_row(&r)?;
+        for m in list {
             let d = if name_only {
                 doc! {"name": m.name.clone(), "type": "collection"}
             } else {
@@ -611,43 +612,38 @@ impl Engine {
             .iter()
             .filter(|p| !m.arrays_full && !m.array_paths.contains(*p))
             .collect();
-        if new.is_empty() {
+        // Paths registered by an earlier write whose publication wasn't
+        // confirmed yet: this write waits for it too.
+        let unconfirmed: Vec<&String> = if paths.is_empty() {
+            Vec::new()
+        } else if m.arrays_full && m.pending_paths.contains("*") {
+            paths.iter().collect()
+        } else {
+            paths
+                .iter()
+                .filter(|p| m.pending_paths.contains(*p))
+                .collect()
+        };
+        if new.is_empty() && unconfirmed.is_empty() {
             return Ok(());
         }
-        let full = m.array_paths.len() + new.len() > self.cfg.max_array_paths;
-        let stmt = if full {
-            format!(
-                "UPDATE {}.{} SET arrays_full = 1 WHERE coll = {}",
-                ident(&ns.db),
-                ident(META_TABLE),
-                str_lit(&ns.coll)
-            )
-        } else {
-            let mut set = String::from("array_paths");
-            let mut cond = Vec::new();
-            for p in &new {
-                let mut j = String::new();
-                json::write_json_string(&mut j, p);
-                set = format!(
-                    "IF(JSON_CONTAINS(array_paths, {0}), {set}, JSON_ARRAY_APPEND({set}, '$', {1}))",
-                    str_lit(&j),
-                    str_lit(p)
-                );
-                cond.push(format!("NOT JSON_CONTAINS(array_paths, {})", str_lit(&j)));
-            }
-            format!(
-                "UPDATE {}.{} SET array_paths = {set} WHERE coll = {} AND ({})",
-                ident(&ns.db),
-                ident(META_TABLE),
-                str_lit(&ns.coll),
-                cond.join(" OR ")
-            )
-        };
-        sql.exec(&stmt).await.map_err(|e| mongo_error(&e))?;
+        let full = !m.arrays_full && m.array_paths.len() + new.len() > self.cfg.max_array_paths;
+        let set: BTreeSet<String> = new
+            .iter()
+            .chain(unconfirmed.iter())
+            .map(|p| (*p).clone())
+            .collect();
+        self.catalog.add_array_paths(sql, ns, &set, full).await?;
         if full {
             m.arrays_full = true;
         } else {
             m.array_paths.extend(new.into_iter().cloned());
+        }
+        for p in &set {
+            m.pending_paths.remove(p);
+        }
+        if m.arrays_full {
+            m.pending_paths.remove("*");
         }
         Ok(())
     }
@@ -1303,8 +1299,16 @@ impl Engine {
                 ));
             }
             self.register_arrays(sql, ns, m, &array_paths(&new)).await?;
+            // A replacement carries chapter 38's statement comment, so
+            // change streams report it as `replace` (decisions/r5-interim.md
+            // D14); other updates stay plain.
+            let hint = if matches!(spec, UpdateSpec::Replace(_)) {
+                replace_comment()
+            } else {
+                String::new()
+            };
             let stmt = format!(
-                "UPDATE {}.{} SET _v = {}, doc = {}, _types = {} WHERE _id = {} AND _v = {v}",
+                "{hint}UPDATE {}.{} SET _v = {}, doc = {}, _types = {} WHERE _id = {} AND _v = {v}",
                 ident(&ns.db),
                 ident(&m.table),
                 hlc_now(),
@@ -1531,15 +1535,7 @@ impl Engine {
             }
             m.indexes.push(idx);
             m.next_index += 1;
-            let stmt = format!(
-                "UPDATE {}.{} SET indexes = {}, next_index = {} WHERE coll = {}",
-                ident(&ns.db),
-                ident(META_TABLE),
-                str_lit(&m.indexes_json()),
-                m.next_index,
-                str_lit(&ns.coll)
-            );
-            sql.exec(&stmt).await.map_err(|e| mongo_error(&e))?;
+            self.catalog.save_indexes(sql, ns, &m).await?;
         }
         Ok((before, m.indexes.len() + 1, !existed))
     }
@@ -1638,14 +1634,7 @@ impl Engine {
                 }
             }
         }
-        let stmt = format!(
-            "UPDATE {}.{} SET indexes = {} WHERE coll = {}",
-            ident(&ns.db),
-            ident(META_TABLE),
-            str_lit(&m.indexes_json()),
-            str_lit(&ns.coll)
-        );
-        sql.exec(&stmt).await.map_err(|e| mongo_error(&e))?;
+        self.catalog.save_indexes(sql, ns, &m).await?;
         Ok(before)
     }
 
@@ -1691,19 +1680,8 @@ impl Engine {
         ))
         .await
         .map_err(|e| mongo_error(&e))?;
-        sql.exec(&format!(
-            "DELETE FROM {}.{} WHERE coll = {}",
-            ident(&from.db),
-            ident(META_TABLE),
-            str_lit(&from.coll)
-        ))
-        .await
-        .map_err(|e| mongo_error(&e))?;
-        m.name.clone_from(&to.coll);
         m.table = table;
-        sql.exec(&m.insert_sql(&to.db))
-            .await
-            .map_err(|e| mongo_error(&e))?;
+        self.catalog.rename(sql, from, to, &m).await?;
         Ok(())
     }
 

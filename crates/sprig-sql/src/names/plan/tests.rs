@@ -317,3 +317,14 @@ fn show_status_filters_compare_schemas() {
     let (sql, _) = fwd("SHOW EVENTS LIKE 'billing'");
     assert!(sql.contains("'billing'"), "{sql}");
 }
+
+#[test]
+fn sprig_statement_comment_is_found() {
+    assert_eq!(
+        super::sprig_comment(b"  /*sprig h=0000000000000001 o=r*/ "),
+        Some(&b"/*sprig h=0000000000000001 o=r*/"[..])
+    );
+    assert_eq!(super::sprig_comment(b"/* other */ "), None);
+    assert_eq!(super::sprig_comment(b""), None);
+    assert_eq!(super::sprig_comment(b"/*sprig unterminated"), None);
+}

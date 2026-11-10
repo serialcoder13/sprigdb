@@ -16,6 +16,20 @@ pub struct QueryRequest {
     /// Allow several statements in `sql`, as CLIENT_MULTI_STATEMENTS does.
     #[prost(bool, tag = "4")]
     pub multi_statements: bool,
+    /// Rows kept per result; 0: no limit asked. A result that reaches it ends
+    /// with `truncated` and the statement is killed. Studio sessions are
+    /// clamped to `studio.max_result_rows` whatever is asked (chapter 44).
+    #[prost(uint64, tag = "5")]
+    pub max_rows: u64,
+    /// Cell bytes kept per result, as `max_rows`; Studio sessions are clamped
+    /// to `studio.max_result_mb`.
+    #[prost(uint64, tag = "6")]
+    pub max_bytes: u64,
+    /// Statement timeout in milliseconds; 0: none asked. Past it the statement
+    /// is killed with 3024. Studio sessions are clamped to
+    /// `studio.statement_timeout_ms`.
+    #[prost(uint64, tag = "7")]
+    pub timeout_ms: u64,
 }
 /// One column of a result.
 #[allow(clippy::all)]
@@ -93,6 +107,10 @@ pub struct ResultEnd {
     /// Another result follows.
     #[prost(bool, tag = "6")]
     pub more_results: bool,
+    /// The result reached `max_rows` or `max_bytes`: rows were left out and
+    /// the statement was killed; nothing follows.
+    #[prost(bool, tag = "7")]
+    pub truncated: bool,
 }
 #[allow(clippy::all)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -130,6 +148,9 @@ pub struct Result {
     pub warnings: u32,
     #[prost(string, tag = "6")]
     pub info: ::prost::alloc::string::String,
+    /// Rows were left out at `max_rows` or `max_bytes` (see ResultEnd).
+    #[prost(bool, tag = "7")]
+    pub truncated: bool,
 }
 #[allow(clippy::all)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1290,6 +1311,2504 @@ pub mod functions_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "sprig.v1.Functions";
     impl<T> tonic::server::NamedService for FunctionsServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvEntry {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    /// The value; `text` too when it is UTF-8.
+    #[prost(bytes = "vec", tag = "2")]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub text: ::prost::alloc::string::String,
+    /// `string`, `hash`, `list`, `set` or `zset` (`Scan` lists every type).
+    #[prost(string, tag = "4")]
+    pub r#type: ::prost::alloc::string::String,
+    /// Changes on every write; for `if_version`.
+    #[prost(uint64, tag = "5")]
+    pub version: u64,
+    /// Expiry in ms since the epoch; 0 for none.
+    #[prost(int64, tag = "6")]
+    pub expires_at_ms: i64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvGetRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub key: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvGetResponse {
+    /// Absent when the key is.
+    #[prost(message, optional, tag = "1")]
+    pub entry: ::core::option::Option<KvEntry>,
+    #[prost(bool, tag = "2")]
+    pub found: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvPutRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub key: ::prost::alloc::string::String,
+    /// The value as bytes, or `text` as UTF-8 (one of the two).
+    #[prost(bytes = "vec", tag = "4")]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "5")]
+    pub text: ::prost::alloc::string::String,
+    /// Write only when the key's version is this (0: the key must be absent).
+    #[prost(uint64, optional, tag = "6")]
+    pub if_version: ::core::option::Option<u64>,
+    /// Write only when the key is absent, or only when it exists.
+    #[prost(bool, tag = "7")]
+    pub if_absent: bool,
+    #[prost(bool, tag = "8")]
+    pub if_exists: bool,
+    /// Expire after this many ms; 0 for none.
+    #[prost(int64, tag = "9")]
+    pub ttl_ms: i64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvPutResponse {
+    #[prost(uint64, tag = "1")]
+    pub version: u64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvDeleteRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(uint64, optional, tag = "4")]
+    pub if_version: ::core::option::Option<u64>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvDeleteResponse {
+    #[prost(bool, tag = "1")]
+    pub deleted: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvScanRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub prefix: ::prost::alloc::string::String,
+    /// The page token: the last key of the previous page.
+    #[prost(string, tag = "4")]
+    pub page_token: ::prost::alloc::string::String,
+    /// Keys per page, 1 to 1000 (default 100).
+    #[prost(uint32, tag = "5")]
+    pub limit: u32,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvScanResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub entries: ::prost::alloc::vec::Vec<KvEntry>,
+    /// Empty on the last page.
+    #[prost(string, tag = "2")]
+    pub next_page_token: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KvExecRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub namespace: ::prost::alloc::string::String,
+    /// The command and its arguments, as text.
+    #[prost(string, repeated, tag = "3")]
+    pub command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvExecResponse {
+    /// The reply, RESP3 mapped to JSON: maps are objects (keys as text),
+    /// errors `{"error": "..."}`, doubles numbers, nulls null.
+    #[prost(message, optional, tag = "1")]
+    pub reply: ::core::option::Option<::prost_types::Value>,
+}
+/// Generated client implementations.
+pub mod key_value_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Reads and writes key-value namespaces.
+    #[derive(Debug, Clone)]
+    pub struct KeyValueClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> KeyValueClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> KeyValueClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            KeyValueClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Reads a string key.
+        pub async fn get(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvGetRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvGetResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Get");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Get"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Writes a string key, with an optional precondition and expiry.
+        pub async fn put(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvPutRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvPutResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Put");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Put"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Deletes a key of any type.
+        pub async fn delete(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvDeleteRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::KvDeleteResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Delete");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Delete"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Lists keys in key order, by prefix, a page at a time.
+        pub async fn scan(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvScanRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvScanResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Scan");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Scan"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Runs one Redis command on the namespace.
+        pub async fn exec(
+            &mut self,
+            request: impl tonic::IntoRequest<super::KvExecRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvExecResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.KeyValue/Exec");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.KeyValue", "Exec"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod key_value_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with KeyValueServer.
+    #[async_trait]
+    pub trait KeyValue: std::marker::Send + std::marker::Sync + 'static {
+        /// Reads a string key.
+        async fn get(
+            &self,
+            request: tonic::Request<super::KvGetRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvGetResponse>, tonic::Status>;
+        /// Writes a string key, with an optional precondition and expiry.
+        async fn put(
+            &self,
+            request: tonic::Request<super::KvPutRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvPutResponse>, tonic::Status>;
+        /// Deletes a key of any type.
+        async fn delete(
+            &self,
+            request: tonic::Request<super::KvDeleteRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::KvDeleteResponse>,
+            tonic::Status,
+        >;
+        /// Lists keys in key order, by prefix, a page at a time.
+        async fn scan(
+            &self,
+            request: tonic::Request<super::KvScanRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvScanResponse>, tonic::Status>;
+        /// Runs one Redis command on the namespace.
+        async fn exec(
+            &self,
+            request: tonic::Request<super::KvExecRequest>,
+        ) -> std::result::Result<tonic::Response<super::KvExecResponse>, tonic::Status>;
+    }
+    /// Reads and writes key-value namespaces.
+    #[derive(Debug)]
+    pub struct KeyValueServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> KeyValueServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for KeyValueServer<T>
+    where
+        T: KeyValue,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.v1.KeyValue/Get" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvGetRequest>
+                    for GetSvc<T> {
+                        type Response = super::KvGetResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvGetRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::get(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/Put" => {
+                    #[allow(non_camel_case_types)]
+                    struct PutSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvPutRequest>
+                    for PutSvc<T> {
+                        type Response = super::KvPutResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvPutRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::put(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PutSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/Delete" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvDeleteRequest>
+                    for DeleteSvc<T> {
+                        type Response = super::KvDeleteResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvDeleteRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::delete(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/Scan" => {
+                    #[allow(non_camel_case_types)]
+                    struct ScanSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvScanRequest>
+                    for ScanSvc<T> {
+                        type Response = super::KvScanResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvScanRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::scan(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ScanSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.KeyValue/Exec" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecSvc<T: KeyValue>(pub Arc<T>);
+                    impl<T: KeyValue> tonic::server::UnaryService<super::KvExecRequest>
+                    for ExecSvc<T> {
+                        type Response = super::KvExecResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::KvExecRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KeyValue>::exec(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for KeyValueServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.v1.KeyValue";
+    impl<T> tonic::server::NamedService for KeyValueServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateVectorIndexRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub index: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub dimensions: u32,
+    /// euclidean (default), cosine or dotProduct.
+    #[prost(string, tag = "4")]
+    pub similarity: ::prost::alloc::string::String,
+    /// HNSW's M; 0 for vector.default_m.
+    #[prost(uint32, tag = "5")]
+    pub m: u32,
+    /// auto (default), on or off.
+    #[prost(string, tag = "6")]
+    pub ann_mode: ::prost::alloc::string::String,
+    /// Items carry locations (chapter 36).
+    #[prost(bool, tag = "7")]
+    pub geo: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetVectorIndexRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub index: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VectorIndex {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub index: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub dimensions: u32,
+    #[prost(string, tag = "4")]
+    pub similarity: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub m: u32,
+    #[prost(string, tag = "6")]
+    pub ann_mode: ::prost::alloc::string::String,
+    /// none, building or ready.
+    #[prost(string, tag = "7")]
+    pub ann_state: ::prost::alloc::string::String,
+    #[prost(bool, tag = "8")]
+    pub geo: bool,
+    /// Recall at 10 measured when the graph was last validated; 0 if never.
+    #[prost(double, tag = "9")]
+    pub recall: f64,
+    #[prost(uint64, tag = "10")]
+    pub rows: u64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DropVectorIndexResponse {
+    #[prost(bool, tag = "1")]
+    pub dropped: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct LatLng {
+    #[prost(double, tag = "1")]
+    pub latitude: f64,
+    #[prost(double, tag = "2")]
+    pub longitude: f64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VectorItem {
+    #[prost(bytes = "vec", tag = "1")]
+    pub id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(float, repeated, tag = "2")]
+    pub vector: ::prost::alloc::vec::Vec<f32>,
+    /// A JSON object (MongoDB Extended JSON accepted); empty for none.
+    #[prost(string, tag = "3")]
+    pub metadata: ::prost::alloc::string::String,
+    /// Geo indexes: the item's location.
+    #[prost(message, optional, tag = "4")]
+    pub location: ::core::option::Option<LatLng>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpsertVectorsRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub index: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub items: ::prost::alloc::vec::Vec<VectorItem>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpsertVectorsResponse {
+    #[prost(uint64, tag = "1")]
+    pub upserted: u64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteVectorsRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub index: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", repeated, tag = "3")]
+    pub ids: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteVectorsResponse {
+    #[prost(uint64, tag = "1")]
+    pub deleted: u64,
+}
+/// A location filter (chapter 36): a circle (center and radius_m), a box
+/// (south_west and north_east), or a polygon (three or more vertices).
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GeoFilter {
+    #[prost(message, optional, tag = "1")]
+    pub center: ::core::option::Option<LatLng>,
+    #[prost(double, tag = "2")]
+    pub radius_m: f64,
+    #[prost(message, optional, tag = "3")]
+    pub south_west: ::core::option::Option<LatLng>,
+    #[prost(message, optional, tag = "4")]
+    pub north_east: ::core::option::Option<LatLng>,
+    #[prost(message, repeated, tag = "5")]
+    pub polygon: ::prost::alloc::vec::Vec<LatLng>,
+}
+/// Fusion with a full-text search (chapter 39); not offered in this release.
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HybridText {
+    #[prost(string, tag = "1")]
+    pub search_index: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub query: ::prost::alloc::string::String,
+    #[prost(float, tag = "3")]
+    pub vector_weight: f32,
+    #[prost(float, tag = "4")]
+    pub text_weight: f32,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchVectorsRequest {
+    #[prost(string, tag = "10")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "1")]
+    pub index: ::prost::alloc::string::String,
+    #[prost(float, repeated, tag = "2")]
+    pub query: ::prost::alloc::vec::Vec<f32>,
+    #[prost(uint32, tag = "3")]
+    pub k: u32,
+    #[prost(uint32, tag = "4")]
+    pub num_candidates: u32,
+    #[prost(bool, tag = "5")]
+    pub exact: bool,
+    /// A MongoDB query on the metadata, Extended JSON.
+    #[prost(string, tag = "6")]
+    pub filter: ::prost::alloc::string::String,
+    /// A type and its subtypes (chapter 32); not offered in this release.
+    #[prost(string, tag = "7")]
+    pub r#type: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "8")]
+    pub geo: ::core::option::Option<GeoFilter>,
+    #[prost(message, optional, tag = "9")]
+    pub text: ::core::option::Option<HybridText>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VectorHit {
+    #[prost(bytes = "vec", tag = "1")]
+    pub id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(float, tag = "2")]
+    pub distance: f32,
+    #[prost(float, tag = "3")]
+    pub score: f32,
+    /// The metadata as relaxed Extended JSON; empty for none.
+    #[prost(string, tag = "4")]
+    pub metadata: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub location: ::core::option::Option<LatLng>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchVectorsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub hits: ::prost::alloc::vec::Vec<VectorHit>,
+    /// exact, prefilter_exact, ann or ann_overfetch.
+    #[prost(string, tag = "2")]
+    pub plan: ::prost::alloc::string::String,
+}
+/// Generated client implementations.
+pub mod vectors_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Standalone vector indexes.
+    #[derive(Debug, Clone)]
+    pub struct VectorsClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> VectorsClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> VectorsClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            VectorsClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Creates an index (and its database when missing).
+        pub async fn create_index(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateVectorIndexRequest>,
+        ) -> std::result::Result<tonic::Response<super::VectorIndex>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Vectors/CreateIndex",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.Vectors", "CreateIndex"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Describes an index.
+        pub async fn get_index(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetVectorIndexRequest>,
+        ) -> std::result::Result<tonic::Response<super::VectorIndex>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Vectors/GetIndex",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Vectors", "GetIndex"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Drops an index and its items.
+        pub async fn drop_index(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetVectorIndexRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DropVectorIndexResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Vectors/DropIndex",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.Vectors", "DropIndex"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Inserts or replaces items.
+        pub async fn upsert(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpsertVectorsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpsertVectorsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.Vectors/Upsert");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Vectors", "Upsert"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Deletes items by id.
+        pub async fn delete(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteVectorsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteVectorsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.Vectors/Delete");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Vectors", "Delete"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// The k nearest items, with optional metadata and location filters.
+        pub async fn search(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SearchVectorsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SearchVectorsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.Vectors/Search");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Vectors", "Search"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod vectors_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with VectorsServer.
+    #[async_trait]
+    pub trait Vectors: std::marker::Send + std::marker::Sync + 'static {
+        /// Creates an index (and its database when missing).
+        async fn create_index(
+            &self,
+            request: tonic::Request<super::CreateVectorIndexRequest>,
+        ) -> std::result::Result<tonic::Response<super::VectorIndex>, tonic::Status>;
+        /// Describes an index.
+        async fn get_index(
+            &self,
+            request: tonic::Request<super::GetVectorIndexRequest>,
+        ) -> std::result::Result<tonic::Response<super::VectorIndex>, tonic::Status>;
+        /// Drops an index and its items.
+        async fn drop_index(
+            &self,
+            request: tonic::Request<super::GetVectorIndexRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DropVectorIndexResponse>,
+            tonic::Status,
+        >;
+        /// Inserts or replaces items.
+        async fn upsert(
+            &self,
+            request: tonic::Request<super::UpsertVectorsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpsertVectorsResponse>,
+            tonic::Status,
+        >;
+        /// Deletes items by id.
+        async fn delete(
+            &self,
+            request: tonic::Request<super::DeleteVectorsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteVectorsResponse>,
+            tonic::Status,
+        >;
+        /// The k nearest items, with optional metadata and location filters.
+        async fn search(
+            &self,
+            request: tonic::Request<super::SearchVectorsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SearchVectorsResponse>,
+            tonic::Status,
+        >;
+    }
+    /// Standalone vector indexes.
+    #[derive(Debug)]
+    pub struct VectorsServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> VectorsServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for VectorsServer<T>
+    where
+        T: Vectors,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.v1.Vectors/CreateIndex" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateIndexSvc<T: Vectors>(pub Arc<T>);
+                    impl<
+                        T: Vectors,
+                    > tonic::server::UnaryService<super::CreateVectorIndexRequest>
+                    for CreateIndexSvc<T> {
+                        type Response = super::VectorIndex;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateVectorIndexRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Vectors>::create_index(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateIndexSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Vectors/GetIndex" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetIndexSvc<T: Vectors>(pub Arc<T>);
+                    impl<
+                        T: Vectors,
+                    > tonic::server::UnaryService<super::GetVectorIndexRequest>
+                    for GetIndexSvc<T> {
+                        type Response = super::VectorIndex;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetVectorIndexRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Vectors>::get_index(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetIndexSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Vectors/DropIndex" => {
+                    #[allow(non_camel_case_types)]
+                    struct DropIndexSvc<T: Vectors>(pub Arc<T>);
+                    impl<
+                        T: Vectors,
+                    > tonic::server::UnaryService<super::GetVectorIndexRequest>
+                    for DropIndexSvc<T> {
+                        type Response = super::DropVectorIndexResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetVectorIndexRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Vectors>::drop_index(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DropIndexSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Vectors/Upsert" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpsertSvc<T: Vectors>(pub Arc<T>);
+                    impl<
+                        T: Vectors,
+                    > tonic::server::UnaryService<super::UpsertVectorsRequest>
+                    for UpsertSvc<T> {
+                        type Response = super::UpsertVectorsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpsertVectorsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Vectors>::upsert(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpsertSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Vectors/Delete" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteSvc<T: Vectors>(pub Arc<T>);
+                    impl<
+                        T: Vectors,
+                    > tonic::server::UnaryService<super::DeleteVectorsRequest>
+                    for DeleteSvc<T> {
+                        type Response = super::DeleteVectorsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteVectorsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Vectors>::delete(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Vectors/Search" => {
+                    #[allow(non_camel_case_types)]
+                    struct SearchSvc<T: Vectors>(pub Arc<T>);
+                    impl<
+                        T: Vectors,
+                    > tonic::server::UnaryService<super::SearchVectorsRequest>
+                    for SearchSvc<T> {
+                        type Response = super::SearchVectorsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SearchVectorsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Vectors>::search(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SearchSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for VectorsServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.v1.Vectors";
+    impl<T> tonic::server::NamedService for VectorsServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ModelRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    /// The model's name; taken from the definition when empty.
+    #[prost(string, tag = "2")]
+    pub model: ::prost::alloc::string::String,
+    /// The definition, JSON (chapter 35, "Model definition").
+    #[prost(message, optional, tag = "3")]
+    pub definition: ::core::option::Option<::prost_types::Struct>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetModelRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub model: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ModelInfo {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub definition: ::core::option::Option<::prost_types::Struct>,
+    #[prost(uint64, tag = "4")]
+    pub version: u64,
+    /// active or invalid.
+    #[prost(string, tag = "5")]
+    pub state: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListModelsRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListModelsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub models: ::prost::alloc::vec::Vec<ModelInfo>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DropModelResponse {
+    #[prost(bool, tag = "1")]
+    pub dropped: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LevelRef {
+    #[prost(string, tag = "1")]
+    pub dimension: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub level: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnalyticsFilter {
+    #[prost(string, tag = "1")]
+    pub dimension: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub level: ::prost::alloc::string::String,
+    /// eq, ne, in, not_in, between, lt, le, gt, ge.
+    #[prost(string, tag = "3")]
+    pub op: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub values: ::core::option::Option<::prost_types::ListValue>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnalyticsOrder {
+    /// A measure, or a grouped dimension (and level).
+    #[prost(string, tag = "1")]
+    pub measure: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub dimension: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub level: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub desc: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnalyticsQuery {
+    #[prost(string, tag = "10")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "1")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub measures: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "3")]
+    pub dimensions: ::prost::alloc::vec::Vec<LevelRef>,
+    #[prost(message, repeated, tag = "4")]
+    pub filters: ::prost::alloc::vec::Vec<AnalyticsFilter>,
+    #[prost(bool, tag = "5")]
+    pub totals: bool,
+    #[prost(message, repeated, tag = "6")]
+    pub order: ::prost::alloc::vec::Vec<AnalyticsOrder>,
+    /// 0 for no limit.
+    #[prost(uint64, tag = "7")]
+    pub limit: u64,
+    /// current or at_fact_time; empty for each link's own.
+    #[prost(string, tag = "8")]
+    pub attribution: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnalyticsRow {
+    /// Level values (null where rolled up or unknown), as text.
+    #[prost(message, optional, tag = "1")]
+    pub keys: ::core::option::Option<::prost_types::ListValue>,
+    /// One value per measure, as text (exact decimals), or null.
+    #[prost(message, optional, tag = "2")]
+    pub values: ::core::option::Option<::prost_types::ListValue>,
+    /// Bit n-1-i set when level i is rolled up (MySQL's GROUPING()).
+    #[prost(uint32, tag = "3")]
+    pub grouping: u32,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnalyticsResult {
+    #[prost(message, repeated, tag = "1")]
+    pub rows: ::prost::alloc::vec::Vec<AnalyticsRow>,
+    /// local or per_level.
+    #[prost(string, tag = "2")]
+    pub plan: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnalyticsExplain {
+    #[prost(string, tag = "1")]
+    pub plan: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub sql: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DrillRequest {
+    #[prost(string, tag = "10")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "1")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub query: ::core::option::Option<AnalyticsQuery>,
+    #[prost(string, tag = "3")]
+    pub dimension: ::prost::alloc::string::String,
+    /// The member to drill into (down); absent to go up.
+    #[prost(message, optional, tag = "4")]
+    pub member: ::core::option::Option<::prost_types::Value>,
+    #[prost(bool, tag = "5")]
+    pub up: bool,
+}
+/// Generated client implementations.
+pub mod analytics_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Dimensional models and their queries.
+    #[derive(Debug, Clone)]
+    pub struct AnalyticsClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> AnalyticsClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> AnalyticsClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            AnalyticsClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Creates a model (chapter 35's document as JSON).
+        pub async fn create_model(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ModelRequest>,
+        ) -> std::result::Result<tonic::Response<super::ModelInfo>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Analytics/CreateModel",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.Analytics", "CreateModel"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Reads a model.
+        pub async fn get_model(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetModelRequest>,
+        ) -> std::result::Result<tonic::Response<super::ModelInfo>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Analytics/GetModel",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.Analytics", "GetModel"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Lists a database's models.
+        pub async fn list_models(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListModelsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListModelsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Analytics/ListModels",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.Analytics", "ListModels"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Replaces a model's definition.
+        pub async fn update_model(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ModelRequest>,
+        ) -> std::result::Result<tonic::Response<super::ModelInfo>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Analytics/UpdateModel",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.Analytics", "UpdateModel"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Drops a model; its tables stay.
+        pub async fn drop_model(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetModelRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DropModelResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Analytics/DropModel",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.Analytics", "DropModel"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Runs a query: detail rows, subtotals after their groups, the grand
+        /// total last (one reply in this release, not a stream).
+        pub async fn query(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AnalyticsQuery>,
+        ) -> std::result::Result<
+            tonic::Response<super::AnalyticsResult>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.Analytics/Query");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Analytics", "Query"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// The compiled SQL and plan of a query.
+        pub async fn explain(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AnalyticsQuery>,
+        ) -> std::result::Result<
+            tonic::Response<super::AnalyticsExplain>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.v1.Analytics/Explain",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.v1.Analytics", "Explain"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// The next query down (a member's children) or up.
+        pub async fn drill(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DrillRequest>,
+        ) -> std::result::Result<tonic::Response<super::AnalyticsQuery>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.Analytics/Drill");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Analytics", "Drill"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod analytics_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with AnalyticsServer.
+    #[async_trait]
+    pub trait Analytics: std::marker::Send + std::marker::Sync + 'static {
+        /// Creates a model (chapter 35's document as JSON).
+        async fn create_model(
+            &self,
+            request: tonic::Request<super::ModelRequest>,
+        ) -> std::result::Result<tonic::Response<super::ModelInfo>, tonic::Status>;
+        /// Reads a model.
+        async fn get_model(
+            &self,
+            request: tonic::Request<super::GetModelRequest>,
+        ) -> std::result::Result<tonic::Response<super::ModelInfo>, tonic::Status>;
+        /// Lists a database's models.
+        async fn list_models(
+            &self,
+            request: tonic::Request<super::ListModelsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListModelsResponse>,
+            tonic::Status,
+        >;
+        /// Replaces a model's definition.
+        async fn update_model(
+            &self,
+            request: tonic::Request<super::ModelRequest>,
+        ) -> std::result::Result<tonic::Response<super::ModelInfo>, tonic::Status>;
+        /// Drops a model; its tables stay.
+        async fn drop_model(
+            &self,
+            request: tonic::Request<super::GetModelRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DropModelResponse>,
+            tonic::Status,
+        >;
+        /// Runs a query: detail rows, subtotals after their groups, the grand
+        /// total last (one reply in this release, not a stream).
+        async fn query(
+            &self,
+            request: tonic::Request<super::AnalyticsQuery>,
+        ) -> std::result::Result<tonic::Response<super::AnalyticsResult>, tonic::Status>;
+        /// The compiled SQL and plan of a query.
+        async fn explain(
+            &self,
+            request: tonic::Request<super::AnalyticsQuery>,
+        ) -> std::result::Result<
+            tonic::Response<super::AnalyticsExplain>,
+            tonic::Status,
+        >;
+        /// The next query down (a member's children) or up.
+        async fn drill(
+            &self,
+            request: tonic::Request<super::DrillRequest>,
+        ) -> std::result::Result<tonic::Response<super::AnalyticsQuery>, tonic::Status>;
+    }
+    /// Dimensional models and their queries.
+    #[derive(Debug)]
+    pub struct AnalyticsServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> AnalyticsServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for AnalyticsServer<T>
+    where
+        T: Analytics,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.v1.Analytics/CreateModel" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateModelSvc<T: Analytics>(pub Arc<T>);
+                    impl<T: Analytics> tonic::server::UnaryService<super::ModelRequest>
+                    for CreateModelSvc<T> {
+                        type Response = super::ModelInfo;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ModelRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Analytics>::create_model(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateModelSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Analytics/GetModel" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetModelSvc<T: Analytics>(pub Arc<T>);
+                    impl<
+                        T: Analytics,
+                    > tonic::server::UnaryService<super::GetModelRequest>
+                    for GetModelSvc<T> {
+                        type Response = super::ModelInfo;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetModelRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Analytics>::get_model(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetModelSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Analytics/ListModels" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListModelsSvc<T: Analytics>(pub Arc<T>);
+                    impl<
+                        T: Analytics,
+                    > tonic::server::UnaryService<super::ListModelsRequest>
+                    for ListModelsSvc<T> {
+                        type Response = super::ListModelsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListModelsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Analytics>::list_models(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListModelsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Analytics/UpdateModel" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateModelSvc<T: Analytics>(pub Arc<T>);
+                    impl<T: Analytics> tonic::server::UnaryService<super::ModelRequest>
+                    for UpdateModelSvc<T> {
+                        type Response = super::ModelInfo;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ModelRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Analytics>::update_model(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateModelSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Analytics/DropModel" => {
+                    #[allow(non_camel_case_types)]
+                    struct DropModelSvc<T: Analytics>(pub Arc<T>);
+                    impl<
+                        T: Analytics,
+                    > tonic::server::UnaryService<super::GetModelRequest>
+                    for DropModelSvc<T> {
+                        type Response = super::DropModelResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetModelRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Analytics>::drop_model(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DropModelSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Analytics/Query" => {
+                    #[allow(non_camel_case_types)]
+                    struct QuerySvc<T: Analytics>(pub Arc<T>);
+                    impl<T: Analytics> tonic::server::UnaryService<super::AnalyticsQuery>
+                    for QuerySvc<T> {
+                        type Response = super::AnalyticsResult;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AnalyticsQuery>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Analytics>::query(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = QuerySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Analytics/Explain" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExplainSvc<T: Analytics>(pub Arc<T>);
+                    impl<T: Analytics> tonic::server::UnaryService<super::AnalyticsQuery>
+                    for ExplainSvc<T> {
+                        type Response = super::AnalyticsExplain;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AnalyticsQuery>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Analytics>::explain(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExplainSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.v1.Analytics/Drill" => {
+                    #[allow(non_camel_case_types)]
+                    struct DrillSvc<T: Analytics>(pub Arc<T>);
+                    impl<T: Analytics> tonic::server::UnaryService<super::DrillRequest>
+                    for DrillSvc<T> {
+                        type Response = super::AnalyticsQuery;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DrillRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Analytics>::drill(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DrillSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for AnalyticsServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.v1.Analytics";
+    impl<T> tonic::server::NamedService for AnalyticsServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

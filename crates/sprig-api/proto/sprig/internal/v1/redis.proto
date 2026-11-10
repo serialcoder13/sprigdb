@@ -1,0 +1,84 @@
+// sprig.internal.v1.RedisPeer: chapter 40's pub/sub hubs between gateways,
+// on the peer service (7403, mutual TLS; chapter 04). Never exposed to
+// clients. The hub of a tenant's channels is chosen by rendezvous hashing
+// over the DC's ready gateways (`sprig_redis::fabric`).
+syntax = "proto3";
+
+package sprig.internal.v1;
+
+service RedisPeer {
+  // A gateway's interests (subscriptions, blocked keys) for one hub.
+  rpc Interest(RedisInterestRequest) returns (RedisInterestReply);
+  // PUBLISH or SPUBLISH, sent to the channel's hub; the hub delivers to
+  // every gateway with a matching interest and returns the receivers.
+  rpc Publish(RedisPublishRequest) returns (RedisPublishReply);
+  // The hub's delivery to one gateway's subscribers.
+  rpc Deliver(RedisPublishRequest) returns (RedisPublishReply);
+  // Pushes to keys: to the hub (forward), or from it to a gateway with
+  // waiters; also "the tenant has a waiter now".
+  rpc Wake(RedisWakeRequest) returns (RedisWakeReply);
+  // One gateway's channels and patterns of a tenant (PUBSUB).
+  rpc Introspect(RedisIntrospectRequest) returns (RedisIntrospectReply);
+}
+
+message RedisInterest {
+  // 0 channel, 1 pattern, 2 sharded channel, 3 a blocked key.
+  uint32 kind = 1;
+  bytes name = 2;
+  // The Redis database of a blocked key.
+  uint32 db = 3;
+}
+
+message RedisInterestRequest {
+  string tenant = 1;
+  // "c" for classic channels, patterns and blocked keys; "s<i>" for
+  // sharded channels.
+  string hub_key = 2;
+  string from_gateway = 3;
+  // `add` is the gateway's whole set for this hub (a refresh).
+  bool full = 4;
+  repeated RedisInterest add = 5;
+  repeated RedisInterest remove = 6;
+}
+
+message RedisInterestReply {}
+
+message RedisPublishRequest {
+  string tenant = 1;
+  bytes channel = 2;
+  bytes data = 3;
+  bool shard = 4;
+}
+
+message RedisPublishReply {
+  int64 receivers = 1;
+}
+
+message RedisWakeRequest {
+  string tenant = 1;
+  uint32 db = 2;
+  repeated bytes keys = 3;
+  bool forward = 4;
+  string from_gateway = 5;
+  bool appeared = 6;
+}
+
+message RedisWakeReply {
+  // The tenant has a blocked client on some gateway.
+  bool waiters = 1;
+}
+
+message RedisIntrospectRequest {
+  string tenant = 1;
+  bool shard = 2;
+}
+
+message RedisChannelCount {
+  bytes channel = 1;
+  int64 subscribers = 2;
+}
+
+message RedisIntrospectReply {
+  repeated RedisChannelCount channels = 1;
+  repeated bytes patterns = 2;
+}

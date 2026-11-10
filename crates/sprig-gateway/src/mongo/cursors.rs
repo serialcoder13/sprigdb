@@ -38,6 +38,8 @@ pub struct Cursor {
     pub batch_size: Option<usize>,
     /// `noCursorTimeout`.
     pub no_timeout: bool,
+    /// A change stream's feed (chapter 30 step 9); `plan` is unused.
+    pub stream: Option<super::changes::ChangeStream>,
     last_used: Instant,
 }
 
@@ -106,6 +108,7 @@ impl CursorTable {
                     lsid,
                     batch_size,
                     no_timeout,
+                    stream: None,
                     last_used: Instant::now(),
                 }))),
             );
@@ -113,6 +116,37 @@ impl CursorTable {
                 .set(f64::from(u32::try_from(m.len()).unwrap_or(u32::MAX)));
             return Ok(id);
         }
+    }
+
+    /// Opens a change-stream cursor over `stream`; returns its id.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open).
+    pub fn open_stream(
+        &self,
+        stream: super::changes::ChangeStream,
+        ns: String,
+        owner: Owner,
+        lsid: Option<Vec<u8>>,
+        batch_size: Option<usize>,
+        max_per_tenant: usize,
+    ) -> Result<i64, MongoError> {
+        let mut plan = CursorPlan::from_docs(
+            sprig_doc::engine::Ns {
+                db: String::new(),
+                coll: String::new(),
+            },
+            Vec::new(),
+        );
+        plan.exhausted = false;
+        let id = self.open(plan, ns, owner, lsid, batch_size, false, max_per_tenant)?;
+        if let Some(c) = self.lock().get(&id).cloned()
+            && let Ok(mut g) = c.try_lock()
+            && let Some(cur) = g.as_mut()
+        {
+            cur.stream = Some(stream);
+        }
+        Ok(id)
     }
 
     /// The cursor `id`, checked against `owner`.

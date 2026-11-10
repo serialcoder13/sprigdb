@@ -238,7 +238,11 @@ async fn handle(
         },
         ("POST", None) => {
             if let Some(m) = st.refuse_create.get(&coll) {
-                return status(400, "BadRequest", &format!("admission webhook denied the request: {m}"));
+                return status(
+                    400,
+                    "BadRequest",
+                    &format!("admission webhook denied the request: {m}"),
+                );
             }
             let mut o = body;
             let name = match o["metadata"]["name"].as_str() {

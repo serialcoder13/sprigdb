@@ -83,6 +83,40 @@ fn state_change_entry_is_read_as_servers_send_it() {
 }
 
 #[test]
+fn mariadb_packs_several_variables_into_one_entry() {
+    // MariaDB 11.8 after `SET sql_mode = '', time_zone = '+01:00'`: one
+    // system-variables entry holding both pairs. Reading only the first
+    // pair lost every later variable (and a commit's `last_gtid`).
+    let mut w = Writer::new();
+    w.u8(session_track::SYSTEM_VARIABLES);
+    let mut d = Writer::new();
+    d.lenenc_bytes(b"time_zone")
+        .lenenc_bytes(b"+01:00")
+        .lenenc_bytes(b"last_gtid")
+        .lenenc_bytes(b"2-201-657184");
+    w.lenenc_bytes(&d.into_bytes());
+    w.u8(session_track::STATE_CHANGE).lenenc_bytes(b"1");
+    let changes = tracker::decode_session_state(&w.into_bytes()).unwrap();
+    assert_eq!(
+        changes,
+        vec![
+            SessionChange::SystemVariable {
+                name: Bytes::from_static(b"time_zone"),
+                value: Bytes::from_static(b"+01:00"),
+            },
+            SessionChange::SystemVariable {
+                name: Bytes::from_static(b"last_gtid"),
+                value: Bytes::from_static(b"2-201-657184"),
+            },
+            SessionChange::StateChange(true),
+        ]
+    );
+    let c = SessionTracker::new().apply(&changes);
+    assert_eq!(c.var("time_zone"), Some("+01:00"));
+    assert_eq!(c.gtid.as_deref(), Some("2-201-657184"));
+}
+
+#[test]
 fn tracker_takes_last_gtid_from_the_variable() {
     let mut t = SessionTracker::new();
     let c = t.apply(&[SessionChange::SystemVariable {

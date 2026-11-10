@@ -18,8 +18,9 @@ use std::collections::BTreeMap;
 use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::ast::{
-    BinOp, Clause, Dir, Explain, Expr, LabelExpr, NodePat, PathKind, PathPattern, Projection,
-    Query, RelPat, RemoveItem, SetItem, SingleQuery, UnOp,
+    BinOp, Clause, Dir, Entity, Explain, Expr, IndexKind, LabelExpr, MapItem, NodePat, PathKind,
+    PathPattern, Projection, Query, RelPat, RemoveItem, Schema, SetItem, SingleQuery, SubqueryKind,
+    UnOp,
 };
 use crate::value::Value;
 
@@ -282,11 +283,11 @@ struct Parser {
     pos: usize,
 }
 
-const RESERVED: [&str; 34] = [
+const RESERVED: [&str; 35] = [
     "MATCH", "OPTIONAL", "WHERE", "RETURN", "WITH", "UNWIND", "CREATE", "MERGE", "SET", "DELETE",
     "DETACH", "REMOVE", "ORDER", "SKIP", "LIMIT", "UNION", "CALL", "YIELD", "AND", "OR", "XOR",
     "NOT", "IN", "AS", "ON", "CASE", "WHEN", "THEN", "ELSE", "END", "IS", "STARTS", "ENDS",
-    "CONTAINS",
+    "CONTAINS", "FOREACH",
 ];
 
 impl Parser {
@@ -425,6 +426,22 @@ impl Parser {
                 "USE is not supported: name the graph as the Bolt database",
             ));
         }
+        if let Some(s) = self.schema()? {
+            return Ok(Query {
+                explain,
+                parts: vec![SingleQuery {
+                    clauses: vec![Clause::Schema(s)],
+                }],
+                union_all: vec![],
+            });
+        }
+        let mut q = self.query_inner()?;
+        q.explain = explain;
+        Ok(q)
+    }
+
+    /// Single queries joined by `UNION`, up to the end or a `}`.
+    fn query_inner(&mut self) -> Result<Query> {
         let mut parts = vec![self.single()?];
         let mut union_all = Vec::new();
         while self.accept_kw("UNION") {
@@ -432,9 +449,231 @@ impl Parser {
             parts.push(self.single()?);
         }
         Ok(Query {
-            explain,
+            explain: Explain::None,
             parts,
             union_all,
+        })
+    }
+
+    /// `{ query }` after `CALL`, `EXISTS`, `COUNT` or `COLLECT`.
+    fn braced_query(&mut self) -> Result<Query> {
+        self.expect_sym("{")?;
+        let q = self.query_inner()?;
+        self.expect_sym("}")?;
+        Ok(q)
+    }
+
+    fn is_clause_start(&self) -> bool {
+        [
+            "MATCH", "OPTIONAL", "UNWIND", "WITH", "CALL", "RETURN", "CREATE", "MERGE",
+        ]
+        .iter()
+        .any(|k| self.is_kw(k))
+    }
+
+    /// An index or constraint command, or `None`.
+    fn schema(&mut self) -> Result<Option<Schema>> {
+        let unsupported = |what: &str| {
+            SprigError::new(
+                SprigCode::GraphUnsupported,
+                format!("{what} is not supported yet"),
+            )
+        };
+        if self.is_kw("DROP") && (self.is_kw_at(1, "INDEX") || self.is_kw_at(1, "CONSTRAINT")) {
+            self.bump();
+            let constraint = self.accept_kw("CONSTRAINT");
+            if !constraint {
+                self.expect_kw("INDEX")?;
+            }
+            let name = self.name()?;
+            let if_exists = if self.accept_kw("IF") {
+                self.expect_kw("EXISTS")?;
+                true
+            } else {
+                false
+            };
+            return Ok(Some(Schema::Drop {
+                constraint,
+                name,
+                if_exists,
+            }));
+        }
+        if !self.is_kw("CREATE") {
+            return Ok(None);
+        }
+        let mut n = 1;
+        let mut kind = IndexKind::Range;
+        if self.is_kw_at(1, "RANGE") || self.is_kw_at(1, "TEXT") {
+            if self.is_kw_at(1, "TEXT") {
+                kind = IndexKind::Text;
+            }
+            n = 2;
+        } else if ["POINT", "FULLTEXT", "VECTOR", "LOOKUP", "BTREE"]
+            .iter()
+            .any(|k| self.is_kw_at(1, k))
+            && self.is_kw_at(2, "INDEX")
+        {
+            let what = match self.peek_at(1) {
+                Tok::Ident(s) => s.to_uppercase(),
+                _ => String::new(),
+            };
+            return Err(unsupported(&format!("CREATE {what} INDEX")));
+        }
+        let unique = self.is_kw_at(n, "CONSTRAINT");
+        if !unique && !self.is_kw_at(n, "INDEX") {
+            return Ok(None);
+        }
+        for _ in 0..=n {
+            self.bump();
+        }
+        let name = if self.is_kw("FOR") || (self.is_kw("IF") && self.is_kw_at(1, "NOT")) {
+            None
+        } else {
+            Some(self.name()?)
+        };
+        let if_not_exists = if self.accept_kw("IF") {
+            self.expect_kw("NOT")?;
+            self.expect_kw("EXISTS")?;
+            true
+        } else {
+            false
+        };
+        self.expect_kw("FOR")?;
+        // (n:L) or ()-[r:T]-()
+        self.expect_sym("(")?;
+        let (entity, var, token) = if self.accept_sym(")") {
+            let _ = self.accept_sym("<");
+            self.expect_sym("-")?;
+            self.expect_sym("[")?;
+            let v = self.var()?;
+            self.expect_sym(":")?;
+            let t = self.name()?;
+            self.expect_sym("]")?;
+            self.expect_sym("-")?;
+            let _ = self.accept_sym(">");
+            self.expect_sym("(")?;
+            self.expect_sym(")")?;
+            (Entity::Relationship, v, t)
+        } else {
+            let v = self.var()?;
+            self.expect_sym(":")?;
+            let l = self.name()?;
+            self.expect_sym(")")?;
+            (Entity::Node, v, l)
+        };
+        let mut props = Vec::new();
+        let mut prop = |p: &mut Self| -> Result<()> {
+            let v = p.var()?;
+            if v != var {
+                return Err(p.err(&format!("a property of `{var}`")));
+            }
+            p.expect_sym(".")?;
+            props.push(p.name()?);
+            Ok(())
+        };
+        if unique {
+            self.expect_kw("REQUIRE")?;
+            if self.accept_sym("(") {
+                loop {
+                    prop(self)?;
+                    if !self.accept_sym(",") {
+                        break;
+                    }
+                }
+                self.expect_sym(")")?;
+            } else {
+                prop(self)?;
+            }
+            self.expect_kw("IS")?;
+            if !self.accept_kw("UNIQUE") {
+                return Err(unsupported(
+                    "a constraint other than IS UNIQUE (existence, key and type constraints)",
+                ));
+            }
+        } else {
+            self.expect_kw("ON")?;
+            self.expect_sym("(")?;
+            loop {
+                prop(self)?;
+                if !self.accept_sym(",") {
+                    break;
+                }
+            }
+            self.expect_sym(")")?;
+        }
+        if self.accept_kw("OPTIONS") {
+            // Index providers and configuration don't apply here.
+            let _ = self.map_literal()?;
+        }
+        if kind == IndexKind::Text && props.len() != 1 {
+            return Err(self.err("one property for a TEXT index"));
+        }
+        Ok(Some(Schema::Create {
+            name,
+            if_not_exists,
+            unique,
+            kind,
+            entity,
+            token,
+            props,
+        }))
+    }
+
+    /// `SHOW ... INDEXES|CONSTRAINTS [YIELD ...] [WHERE ...]` as a call of
+    /// `sprig.show.indexes` or `sprig.show.constraints`, the filter word
+    /// as its argument.
+    fn show(&mut self) -> Result<Clause> {
+        self.expect_kw("SHOW")?;
+        let filter = match self.peek() {
+            Tok::Ident(s)
+                if !["INDEX", "INDEXES", "CONSTRAINT", "CONSTRAINTS"]
+                    .iter()
+                    .any(|k| s.eq_ignore_ascii_case(k)) =>
+            {
+                let f = s.to_ascii_uppercase();
+                self.bump();
+                f
+            }
+            _ => "ALL".to_owned(),
+        };
+        let name = if self.accept_kw("INDEX") || self.accept_kw("INDEXES") {
+            "sprig.show.indexes"
+        } else if self.accept_kw("CONSTRAINT") || self.accept_kw("CONSTRAINTS") {
+            "sprig.show.constraints"
+        } else {
+            return Err(SprigError::new(
+                SprigCode::GraphUnsupported,
+                "SHOW supports INDEXES and CONSTRAINTS",
+            ));
+        };
+        let mut yields = None;
+        // ORDER BY, SKIP and LIMIT after YIELD are left to RETURN.
+        if self.accept_kw("YIELD") && !self.accept_sym("*") {
+            let mut y = Vec::new();
+            loop {
+                let col = self.name()?;
+                let alias = if self.accept_kw("AS") {
+                    self.var()?
+                } else {
+                    col.clone()
+                };
+                y.push((col, alias));
+                if !self.accept_sym(",") {
+                    break;
+                }
+            }
+            yields = Some(y);
+        }
+        let where_ = if self.accept_kw("WHERE") {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        Ok(Clause::Call {
+            name: name.to_owned(),
+            args: Some(vec![Expr::Lit(Value::String(filter))]),
+            yields,
+            where_,
         })
     }
 
@@ -472,8 +711,8 @@ impl Parser {
             } else if self.accept_kw("CREATE") {
                 if self.is_kw("INDEX") || self.is_kw("CONSTRAINT") || self.is_kw("OR") {
                     return Err(SprigError::new(
-                        SprigCode::GraphUnsupported,
-                        "index and constraint DDL is not supported yet",
+                        SprigCode::GraphSyntax,
+                        "index and constraint commands stand alone",
                     ));
                 }
                 Clause::Create(self.patterns()?)
@@ -509,14 +748,58 @@ impl Parser {
                 }
                 Clause::Delete { detach, exprs }
             } else if self.accept_kw("CALL") {
-                if self.is_sym("{") {
-                    return Err(SprigError::new(
-                        SprigCode::GraphUnsupported,
-                        "CALL { } subqueries are not supported yet",
-                    ));
+                if self.is_sym("{") || self.is_sym("(") {
+                    let imports = if self.accept_sym("(") {
+                        let mut v = Vec::new();
+                        if self.accept_sym("*") {
+                            v.push("*".to_owned());
+                        } else if !self.is_sym(")") {
+                            v.push(self.var()?);
+                            while self.accept_sym(",") {
+                                v.push(self.var()?);
+                            }
+                        }
+                        self.expect_sym(")")?;
+                        Some(v)
+                    } else {
+                        None
+                    };
+                    let query = Box::new(self.braced_query()?);
+                    if self.is_kw("IN") && self.is_kw_at(1, "TRANSACTIONS") {
+                        return Err(SprigError::new(
+                            SprigCode::GraphUnsupported,
+                            "CALL { } IN TRANSACTIONS is not supported yet",
+                        ));
+                    }
+                    Clause::Subquery { imports, query }
+                } else {
+                    self.call()?
                 }
-                self.call()?
-            } else if self.is_kw("FOREACH") || self.is_kw("LOAD") || self.is_kw("SHOW") {
+            } else if self.accept_kw("FOREACH") {
+                self.expect_sym("(")?;
+                let var = self.var()?;
+                self.expect_kw("IN")?;
+                let list = self.expr()?;
+                self.expect_sym("|")?;
+                let body = self.single()?.clauses;
+                for c in &body {
+                    if !matches!(
+                        c,
+                        Clause::Create(_)
+                            | Clause::Merge { .. }
+                            | Clause::Set(_)
+                            | Clause::Remove(_)
+                            | Clause::Delete { .. }
+                            | Clause::Foreach { .. }
+                    ) {
+                        return Err(self.err("only updates (CREATE, MERGE, SET, REMOVE, DELETE, FOREACH) inside FOREACH"));
+                    }
+                }
+                self.expect_sym(")")?;
+                Clause::Foreach { var, list, body }
+            } else if self.is_kw("SHOW") {
+                self.show()?
+            } else if self.is_kw("LOAD") {
                 return Err(SprigError::new(
                     SprigCode::GraphUnsupported,
                     format!("{} is not supported", self.name()?.to_uppercase()),
@@ -1177,10 +1460,79 @@ impl Parser {
             } else if self.is_sym(":") && matches!(e, Expr::Var(_)) {
                 self.bump();
                 e = Expr::HasLabels(Box::new(e), self.label_expr(true)?);
+            } else if self.is_sym("{") && matches!(e, Expr::Var(_)) {
+                e = self.map_projection(e)?;
             } else {
                 return Ok(e);
             }
         }
+    }
+
+    /// `{.a, .*, k: e, v}` after a variable.
+    fn map_projection(&mut self, base: Expr) -> Result<Expr> {
+        self.expect_sym("{")?;
+        let mut items = Vec::new();
+        if !self.is_sym("}") {
+            loop {
+                if self.accept_sym(".") {
+                    if self.accept_sym("*") {
+                        items.push(MapItem::All);
+                    } else {
+                        items.push(MapItem::Prop(self.name()?));
+                    }
+                } else if self.is_sym_at(1, ":") {
+                    let k = self.name()?;
+                    self.bump();
+                    items.push(MapItem::Lit(k, self.expr()?));
+                } else {
+                    items.push(MapItem::Var(self.var()?));
+                }
+                if !self.accept_sym(",") {
+                    break;
+                }
+            }
+        }
+        self.expect_sym("}")?;
+        Ok(Expr::MapProjection(Box::new(base), items))
+    }
+
+    /// The body of `EXISTS { }`, `COUNT { }` or `COLLECT { }` after the
+    /// brace: a query, or patterns with an optional `WHERE`.
+    fn subquery_body(&mut self, kind: SubqueryKind) -> Result<Expr> {
+        if self.is_clause_start() {
+            let q = self.query_inner()?;
+            self.expect_sym("}")?;
+            return Ok(Expr::Subquery(kind, Box::new(q)));
+        }
+        let patterns = self.patterns()?;
+        let where_ = if self.accept_kw("WHERE") {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        self.expect_sym("}")?;
+        if kind == SubqueryKind::Exists && where_.is_none() && patterns.len() == 1 {
+            return Ok(Expr::Pattern(Box::new(
+                patterns
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| unreachable!()),
+            )));
+        }
+        Ok(Expr::Subquery(
+            kind,
+            Box::new(Query {
+                explain: Explain::None,
+                parts: vec![SingleQuery {
+                    clauses: vec![Clause::Match {
+                        optional: false,
+                        patterns,
+                        where_,
+                    }],
+                }],
+                union_all: vec![],
+            }),
+        ))
     }
 
     /// Whether the tokens at the cursor start a relationship (after a node
@@ -1277,25 +1629,15 @@ impl Parser {
                         return Ok(Expr::Lit(Value::Null));
                     }
                     "CASE" => return self.case(),
-                    "EXISTS" if self.is_sym_at(1, "{") => {
+                    "EXISTS" | "COUNT" | "COLLECT" if self.is_sym_at(1, "{") => {
                         self.bump();
                         self.bump();
-                        let _ = self.accept_kw("MATCH");
-                        let p = self.pattern_body()?;
-                        if self.is_kw("WHERE") {
-                            return Err(SprigError::new(
-                                SprigCode::GraphUnsupported,
-                                "WHERE inside EXISTS { } is not supported yet",
-                            ));
-                        }
-                        self.expect_sym("}")?;
-                        return Ok(Expr::Pattern(Box::new(p)));
-                    }
-                    "COUNT" | "COLLECT" if self.is_sym_at(1, "{") => {
-                        return Err(SprigError::new(
-                            SprigCode::GraphUnsupported,
-                            format!("{up} {{ }} subqueries are not supported yet"),
-                        ));
+                        let kind = match up.as_str() {
+                            "EXISTS" => SubqueryKind::Exists,
+                            "COUNT" => SubqueryKind::Count,
+                            _ => SubqueryKind::Collect,
+                        };
+                        return self.subquery_body(kind);
                     }
                     "ALL" | "ANY" | "NONE" | "SINGLE"
                         if self.is_sym_at(1, "(") && self.is_kw_at(3, "IN") =>
@@ -1491,7 +1833,7 @@ mod tests {
             assert_eq!(e.code(), Some(SprigCode::GraphSyntax), "{s}");
             assert!(e.to_string().contains("offset"), "{e}");
         }
-        let e = parse("CALL { RETURN 1 } RETURN 1").expect_err("subquery");
+        let e = parse("CALL { RETURN 1 } IN TRANSACTIONS").expect_err("batches");
         assert_eq!(e.code(), Some(SprigCode::GraphUnsupported));
         let e = parse("WITH 1 + 1 RETURN 1").expect_err("alias");
         assert_eq!(e.code(), Some(SprigCode::GraphSyntax));

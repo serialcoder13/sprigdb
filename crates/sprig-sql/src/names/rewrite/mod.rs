@@ -32,7 +32,7 @@
 //! module only reports the system-schema references it sees
 //! ([`StatementInfo::system_refs`]).
 
-mod ast;
+pub(crate) mod ast;
 mod subst;
 mod walker;
 

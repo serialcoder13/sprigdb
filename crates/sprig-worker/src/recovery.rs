@@ -32,8 +32,8 @@ use sprig_cluster::failover::extract::{
     LocalDirStore,
 };
 use sprig_cluster::failover::rebuild::{
-    self, CANCEL_ROUTE, NodeRebuildSpec, REBUILD_ROUTE, RebuildPhase, RebuildStatus,
-    RebuildTicket, StartRebuild,
+    self, CANCEL_ROUTE, NodeRebuildSpec, REBUILD_ROUTE, RebuildPhase, RebuildStatus, RebuildTicket,
+    StartRebuild,
 };
 use sprig_cluster::failover::writer::{AgentRecord, MysqldState, WriterLease, writer_lease_key};
 use sprig_cluster::record::{ClusterRecord, TopologyKind};
@@ -42,7 +42,9 @@ use sprig_cluster::sql::{NodeEndpoint, ProbeSession, literal};
 use sprig_common::ids::TenantId;
 use sprig_common::{Result, SprigError};
 use sprig_controller::dispatch::JobClass;
-use sprig_controller::failover::cluster::{ClusterFailoverRecord, FormerWriter, record_key, repl_source};
+use sprig_controller::failover::cluster::{
+    ClusterFailoverRecord, FormerWriter, record_key, repl_source,
+};
 use sprig_controller::failover::nodes::{ctl_endpoints, repl_endpoints};
 use sprig_meta::{Consistency, ListOpts, MetaStore, Op, Record, Txn};
 use sprig_workload::keyring::MasterKeyring;
@@ -157,7 +159,10 @@ impl ErrantExtract {
     ///
     /// # Errors
     /// The key file can't be read.
-    pub fn from_config(env: RecoveryEnv, cfg: &sprig_common::config::RecoveryConfig) -> Result<Self> {
+    pub fn from_config(
+        env: RecoveryEnv,
+        cfg: &sprig_common::config::RecoveryConfig,
+    ) -> Result<Self> {
         let store = cfg
             .extract_dir
             .as_ref()
@@ -173,10 +178,7 @@ impl ErrantExtract {
 
 /// Column names in ordinal order for the tables `tables` names
 /// (`schema.table`), read on the node.
-async fn column_names(
-    ep: &NodeEndpoint,
-    tables: &[String],
-) -> BTreeMap<String, Vec<String>> {
+async fn column_names(ep: &NodeEndpoint, tables: &[String]) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     if tables.is_empty() {
         return out;
@@ -270,7 +272,11 @@ impl JobHandler for ErrantExtract {
         .map_err(|e| format!("reading {}'s binlog from {start}: {e}", spec.node))?;
         let mut tables: Vec<String> = txns
             .iter()
-            .flat_map(|t| t.changes.iter().map(|c| format!("{}.{}", c.schema, c.table)))
+            .flat_map(|t| {
+                t.changes
+                    .iter()
+                    .map(|c| format!("{}.{}", c.schema, c.table))
+            })
             .collect();
         tables.sort();
         tables.dedup();
@@ -284,7 +290,10 @@ impl JobHandler for ErrantExtract {
                 .or_default()
                 .push(r);
         }
-        let dir = format!("{}/{}/{}", spec.cluster, spec.node, spec.failover_at_unix_ms);
+        let dir = format!(
+            "{}/{}/{}",
+            spec.cluster, spec.node, spec.failover_at_unix_ms
+        );
         let mut files = Vec::new();
         let mut expected: BTreeMap<String, u64> = BTreeMap::new();
         for (tenant, rs) in &by_tenant {
@@ -378,6 +387,9 @@ pub struct NodeRebuild {
         hyper_util::client::legacy::connect::HttpConnector,
         Full<Bytes>,
     >,
+    /// `[tls]`: agents' `https://` services are called over mutual TLS
+    /// (decision RC2).
+    tls: Option<sprig_cluster::failover::internal_tls::InternalTls>,
 }
 
 impl std::fmt::Debug for NodeRebuild {
@@ -390,24 +402,80 @@ impl NodeRebuild {
     /// The handler.
     #[must_use]
     pub fn new(env: RecoveryEnv) -> Self {
-        let http = hyper_util::client::legacy::Client::builder(
-            hyper_util::rt::TokioExecutor::new(),
-        )
-        .build_http();
-        Self { env, http }
+        let http =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .build_http();
+        Self {
+            env,
+            http,
+            tls: None,
+        }
     }
 
-    async fn call(&self, method: hyper::Method, url: &str, body: Option<Vec<u8>>) -> Result<Vec<u8>> {
+    /// Calls agents' `https://` services with `tls` (`[tls]`).
+    #[must_use]
+    pub fn with_tls(mut self, tls: sprig_cluster::failover::internal_tls::InternalTls) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Sends `req` to `url`: over mutual TLS for `https://`.
+    async fn send(
+        &self,
+        url: &str,
+        req: hyper::Request<Full<Bytes>>,
+    ) -> Result<hyper::Response<hyper::body::Incoming>> {
+        let (https, host, port) = sprig_cluster::failover::internal_tls::split_url(url)?;
+        if !https {
+            return self
+                .http
+                .request(req)
+                .await
+                .map_err(|e| SprigError::internal(format!("{url}: {e}")));
+        }
+        let tls = self.tls.as_ref().ok_or_else(|| {
+            SprigError::internal(format!("{url} needs TLS, and this worker has no [tls]"))
+        })?;
+        let stream = tls.connect(&host, port).await?;
+        let (mut tx, conn) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                .await
+                .map_err(|e| SprigError::internal(format!("{url}: {e}")))?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let (mut parts, body) = req.into_parts();
+        parts.uri = parts
+            .uri
+            .path_and_query()
+            .map_or_else(|| "/".to_owned(), ToString::to_string)
+            .parse()
+            .map_err(|e| SprigError::internal(format!("{url}: {e}")))?;
+        parts.headers.insert(
+            hyper::header::HOST,
+            hyper::header::HeaderValue::from_str(&format!("{host}:{port}"))
+                .map_err(|e| SprigError::internal(format!("{url}: {e}")))?,
+        );
+        tx.send_request(hyper::Request::from_parts(parts, body))
+            .await
+            .map_err(|e| SprigError::internal(format!("{url}: {e}")))
+    }
+
+    async fn call(
+        &self,
+        method: hyper::Method,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
         let req = hyper::Request::builder()
             .method(method)
             .uri(url)
             .header("content-type", "application/json")
             .body(Full::new(Bytes::from(body.unwrap_or_default())))
             .map_err(|e| SprigError::internal(format!("{url}: {e}")))?;
-        let resp = tokio::time::timeout(Duration::from_secs(10), self.http.request(req))
+        let resp = tokio::time::timeout(Duration::from_secs(10), self.send(url, req))
             .await
-            .map_err(|_| SprigError::internal(format!("{url}: timed out")))?
-            .map_err(|e| SprigError::internal(format!("{url}: {e}")))?;
+            .map_err(|_| SprigError::internal(format!("{url}: timed out")))??;
         let code = resp.status();
         let b = resp
             .into_body()
@@ -473,7 +541,10 @@ impl NodeRebuild {
                 continue;
             }
             let lag = get("Seconds_Behind_Master").parse().unwrap_or(u64::MAX);
-            if best.as_ref().is_none_or(|(l, b, _)| (lag, node) < (*l, b.as_str())) {
+            if best
+                .as_ref()
+                .is_none_or(|(l, b, _)| (lag, node) < (*l, b.as_str()))
+            {
                 best = Some((lag, node.to_owned(), url));
             }
         }
@@ -532,7 +603,11 @@ impl JobHandler for NodeRebuild {
             .ok_or_else(|| format!("the writer {writer} isn't in the record"))?;
         // A diverged former writer is rebuilt only after its extract is
         // verified, unless the operator keeps the old data instead.
-        let fo = self.env.failover_record(&spec.cluster).await.map_err(fail)?;
+        let fo = self
+            .env
+            .failover_record(&spec.cluster)
+            .await
+            .map_err(fail)?;
         let diverged = fo.as_ref().and_then(|r| {
             r.history.iter().rev().find(|e| {
                 e.from == spec.node
@@ -645,7 +720,10 @@ impl JobHandler for NodeRebuild {
             if let Some(e) = &a.error
                 && (a.io == "No" || a.sql == "No")
             {
-                return Err(format!("{} doesn't replicate after the rebuild: {e}", spec.node));
+                return Err(format!(
+                    "{} doesn't replicate after the rebuild: {e}",
+                    spec.node
+                ));
             }
             let wpos = sprig_cluster::failover::primary_replica::binlog_pos(&writer_ep)
                 .await

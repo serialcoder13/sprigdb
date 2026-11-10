@@ -90,6 +90,7 @@ fn rows_of(changes: &[ModelChange]) -> Vec<RawRow> {
             },
             before: b.as_ref().map(|(k, v)| image(*k, v)),
             after: a.as_ref().map(|(k, v)| image(*k, v)),
+            hint: None,
         })
         .collect()
 }

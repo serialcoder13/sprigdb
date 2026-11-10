@@ -1351,10 +1351,21 @@ impl<B: TxnBackend> TxnCoordinator<B> {
                     ok
                 }
             });
-        match tokio::time::timeout(wait, join_all(futs)).await {
+        let stragglers = match tokio::time::timeout(wait, join_all(futs)).await {
             Ok(done) => done.iter().filter(|ok| !**ok).count(),
             Err(_) => prepared.len(),
+        };
+        if stragglers > 0 {
+            // The client gets OK before these branches commit: until the
+            // resolver finishes them, the session's next read may not see
+            // their rows (chapter 18, "Isolation and anomalies").
+            metrics::counter!("sprig_txn_phase2_stragglers_total").increment(stragglers as u64);
+            tracing::warn!(
+                stragglers,
+                "phase 2 outran txn.phase2_wait_ms; the resolver finishes the rest"
+            );
         }
+        stragglers
     }
 
     /// Best effort with no XA writer (chapter 18, "Best effort and

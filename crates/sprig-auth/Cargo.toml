@@ -16,6 +16,8 @@ testing = []
 [dependencies]
 arc-swap.workspace = true
 async-trait.workspace = true
+# Token signatures and refresh tokens (chapter 14 step 12) are base64url.
+base64.workspace = true
 getrandom.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
@@ -39,11 +41,11 @@ subtle.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+# Token session ids are UUIDv7 (chapter 14, `token_sessions.session_id`).
+uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-# RFC 5802 / 7677 test vectors are base64.
-base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }

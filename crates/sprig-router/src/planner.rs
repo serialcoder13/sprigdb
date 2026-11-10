@@ -3776,7 +3776,7 @@ fn empty_select(
 }
 
 mod fk;
-mod gather;
+pub(crate) mod gather;
 mod ids;
 mod lookups;
 mod parents;

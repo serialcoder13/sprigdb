@@ -1415,3 +1415,702 @@ pub mod queue_peer_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RedisInterest {
+    /// 0 channel, 1 pattern, 2 sharded channel, 3 a blocked key.
+    #[prost(uint32, tag = "1")]
+    pub kind: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub name: ::prost::alloc::vec::Vec<u8>,
+    /// The Redis database of a blocked key.
+    #[prost(uint32, tag = "3")]
+    pub db: u32,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RedisInterestRequest {
+    #[prost(string, tag = "1")]
+    pub tenant: ::prost::alloc::string::String,
+    /// "c" for classic channels, patterns and blocked keys; "s<i>" for
+    /// sharded channels.
+    #[prost(string, tag = "2")]
+    pub hub_key: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub from_gateway: ::prost::alloc::string::String,
+    /// `add` is the gateway's whole set for this hub (a refresh).
+    #[prost(bool, tag = "4")]
+    pub full: bool,
+    #[prost(message, repeated, tag = "5")]
+    pub add: ::prost::alloc::vec::Vec<RedisInterest>,
+    #[prost(message, repeated, tag = "6")]
+    pub remove: ::prost::alloc::vec::Vec<RedisInterest>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RedisInterestReply {}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RedisPublishRequest {
+    #[prost(string, tag = "1")]
+    pub tenant: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub channel: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag = "4")]
+    pub shard: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RedisPublishReply {
+    #[prost(int64, tag = "1")]
+    pub receivers: i64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RedisWakeRequest {
+    #[prost(string, tag = "1")]
+    pub tenant: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub db: u32,
+    #[prost(bytes = "vec", repeated, tag = "3")]
+    pub keys: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    #[prost(bool, tag = "4")]
+    pub forward: bool,
+    #[prost(string, tag = "5")]
+    pub from_gateway: ::prost::alloc::string::String,
+    #[prost(bool, tag = "6")]
+    pub appeared: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RedisWakeReply {
+    /// The tenant has a blocked client on some gateway.
+    #[prost(bool, tag = "1")]
+    pub waiters: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RedisIntrospectRequest {
+    #[prost(string, tag = "1")]
+    pub tenant: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub shard: bool,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RedisChannelCount {
+    #[prost(bytes = "vec", tag = "1")]
+    pub channel: ::prost::alloc::vec::Vec<u8>,
+    #[prost(int64, tag = "2")]
+    pub subscribers: i64,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RedisIntrospectReply {
+    #[prost(message, repeated, tag = "1")]
+    pub channels: ::prost::alloc::vec::Vec<RedisChannelCount>,
+    #[prost(bytes = "vec", repeated, tag = "2")]
+    pub patterns: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+}
+/// Generated client implementations.
+pub mod redis_peer_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct RedisPeerClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> RedisPeerClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> RedisPeerClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            RedisPeerClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// A gateway's interests (subscriptions, blocked keys) for one hub.
+        pub async fn interest(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RedisInterestRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RedisInterestReply>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.internal.v1.RedisPeer/Interest",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.internal.v1.RedisPeer", "Interest"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// PUBLISH or SPUBLISH, sent to the channel's hub; the hub delivers to
+        /// every gateway with a matching interest and returns the receivers.
+        pub async fn publish(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RedisPublishRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RedisPublishReply>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.internal.v1.RedisPeer/Publish",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.internal.v1.RedisPeer", "Publish"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// The hub's delivery to one gateway's subscribers.
+        pub async fn deliver(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RedisPublishRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RedisPublishReply>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.internal.v1.RedisPeer/Deliver",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.internal.v1.RedisPeer", "Deliver"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Pushes to keys: to the hub (forward), or from it to a gateway with
+        /// waiters; also "the tenant has a waiter now".
+        pub async fn wake(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RedisWakeRequest>,
+        ) -> std::result::Result<tonic::Response<super::RedisWakeReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.internal.v1.RedisPeer/Wake",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.internal.v1.RedisPeer", "Wake"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// One gateway's channels and patterns of a tenant (PUBSUB).
+        pub async fn introspect(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RedisIntrospectRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RedisIntrospectReply>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.internal.v1.RedisPeer/Introspect",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.internal.v1.RedisPeer", "Introspect"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod redis_peer_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with RedisPeerServer.
+    #[async_trait]
+    pub trait RedisPeer: std::marker::Send + std::marker::Sync + 'static {
+        /// A gateway's interests (subscriptions, blocked keys) for one hub.
+        async fn interest(
+            &self,
+            request: tonic::Request<super::RedisInterestRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RedisInterestReply>,
+            tonic::Status,
+        >;
+        /// PUBLISH or SPUBLISH, sent to the channel's hub; the hub delivers to
+        /// every gateway with a matching interest and returns the receivers.
+        async fn publish(
+            &self,
+            request: tonic::Request<super::RedisPublishRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RedisPublishReply>,
+            tonic::Status,
+        >;
+        /// The hub's delivery to one gateway's subscribers.
+        async fn deliver(
+            &self,
+            request: tonic::Request<super::RedisPublishRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RedisPublishReply>,
+            tonic::Status,
+        >;
+        /// Pushes to keys: to the hub (forward), or from it to a gateway with
+        /// waiters; also "the tenant has a waiter now".
+        async fn wake(
+            &self,
+            request: tonic::Request<super::RedisWakeRequest>,
+        ) -> std::result::Result<tonic::Response<super::RedisWakeReply>, tonic::Status>;
+        /// One gateway's channels and patterns of a tenant (PUBSUB).
+        async fn introspect(
+            &self,
+            request: tonic::Request<super::RedisIntrospectRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RedisIntrospectReply>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct RedisPeerServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> RedisPeerServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for RedisPeerServer<T>
+    where
+        T: RedisPeer,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.internal.v1.RedisPeer/Interest" => {
+                    #[allow(non_camel_case_types)]
+                    struct InterestSvc<T: RedisPeer>(pub Arc<T>);
+                    impl<
+                        T: RedisPeer,
+                    > tonic::server::UnaryService<super::RedisInterestRequest>
+                    for InterestSvc<T> {
+                        type Response = super::RedisInterestReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RedisInterestRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RedisPeer>::interest(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = InterestSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.internal.v1.RedisPeer/Publish" => {
+                    #[allow(non_camel_case_types)]
+                    struct PublishSvc<T: RedisPeer>(pub Arc<T>);
+                    impl<
+                        T: RedisPeer,
+                    > tonic::server::UnaryService<super::RedisPublishRequest>
+                    for PublishSvc<T> {
+                        type Response = super::RedisPublishReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RedisPublishRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RedisPeer>::publish(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PublishSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.internal.v1.RedisPeer/Deliver" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeliverSvc<T: RedisPeer>(pub Arc<T>);
+                    impl<
+                        T: RedisPeer,
+                    > tonic::server::UnaryService<super::RedisPublishRequest>
+                    for DeliverSvc<T> {
+                        type Response = super::RedisPublishReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RedisPublishRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RedisPeer>::deliver(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeliverSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.internal.v1.RedisPeer/Wake" => {
+                    #[allow(non_camel_case_types)]
+                    struct WakeSvc<T: RedisPeer>(pub Arc<T>);
+                    impl<
+                        T: RedisPeer,
+                    > tonic::server::UnaryService<super::RedisWakeRequest>
+                    for WakeSvc<T> {
+                        type Response = super::RedisWakeReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RedisWakeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RedisPeer>::wake(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WakeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.internal.v1.RedisPeer/Introspect" => {
+                    #[allow(non_camel_case_types)]
+                    struct IntrospectSvc<T: RedisPeer>(pub Arc<T>);
+                    impl<
+                        T: RedisPeer,
+                    > tonic::server::UnaryService<super::RedisIntrospectRequest>
+                    for IntrospectSvc<T> {
+                        type Response = super::RedisIntrospectReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RedisIntrospectRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RedisPeer>::introspect(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = IntrospectSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for RedisPeerServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.internal.v1.RedisPeer";
+    impl<T> tonic::server::NamedService for RedisPeerServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}

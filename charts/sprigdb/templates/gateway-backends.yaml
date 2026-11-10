@@ -1,0 +1,21 @@
+{{- /* The gateways' per-user backend accounts (chapter 29): every gateway
+     derives each user's MariaDB password from this one secret, so they
+     must share it. Generated once, kept across upgrades and uninstalls
+     (found missing by r2close's helm install: logins then failed with
+     "no backend account configured"). */}}
+{{- $old := lookup "v1" "Secret" .Release.Namespace "sprigdb-gateway-backends" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sprigdb-gateway-backends
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  {{- if $old }}
+  backends.toml: {{ index $old.data "backends.toml" }}
+  {{- else }}
+  {{- $tls := ternary "verify" "skip_verify" .Values.tls.enabled }}
+  backends.toml: {{ printf "[per_user]\nsecret = \"file:backends.toml#backend_secret\"\ntls = \"%s\"\n[backend_secret]\npassword = \"%s\"\n" $tls (randAlphaNum 48) | b64enc }}
+  {{- end }}

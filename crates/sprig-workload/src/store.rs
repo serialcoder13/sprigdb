@@ -595,6 +595,39 @@ impl WorkloadTables {
         Ok(out)
     }
 
+    /// One fingerprint's stats per bucket in `[from, to)` (seconds since the
+    /// epoch), merged over gateways and parts, oldest first: Studio's
+    /// latency series (chapter 44, `Workload.Series`).
+    ///
+    /// # Errors
+    /// The catalog's errors; 39999 for a malformed row.
+    pub async fn series<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        fingerprint: FingerprintId,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<(u64, Stats)>> {
+        let sql = format!(
+            "SELECT TIMESTAMPDIFF(SECOND, '1970-01-01', bucket_start), {STAT_COLS} FROM {} \
+             WHERE fingerprint_id = ? AND bucket_start >= {AT_S} AND bucket_start < {AT_S}",
+            self.stats
+        );
+        let rows: Vec<Row> = q
+            .exec(sql, (fingerprint.0, from, to))
+            .await
+            .map_err(map_err)?;
+        let mut out: BTreeMap<u64, Stats> = BTreeMap::new();
+        for mut r in rows {
+            let at: i64 = take(&mut r, 0, "bucket_start")?;
+            let s = read_stats(&mut r, 1)?;
+            out.entry(u64::try_from(at).unwrap_or(0))
+                .or_default()
+                .merge(&s);
+        }
+        Ok(out.into_iter().collect())
+    }
+
     /// Chapter 12's `WorkloadStore::window` over one catalog: every
     /// fingerprint with runs in buckets starting in `[from, to)`, its
     /// counters merged (sums, maxima, histograms and session sets), with

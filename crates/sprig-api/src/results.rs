@@ -235,6 +235,9 @@ pub fn result_json(r: &SqlResult) -> Value {
     }
     put_u32(&mut m, "warnings", r.warnings);
     put_str(&mut m, "info", &r.info);
+    if r.truncated {
+        m.insert("truncated".into(), Value::Bool(true));
+    }
     Value::Object(m)
 }
 
@@ -256,6 +259,7 @@ pub fn result_from_json(v: &Value) -> SqlResult {
         last_insert_id: u64_of(v, "last_insert_id"),
         warnings: u32_of(v, "warnings"),
         info: s(v, "info"),
+        truncated: v.get("truncated").and_then(Value::as_bool).unwrap_or(false),
     }
 }
 
@@ -304,6 +308,9 @@ pub fn query_part_json(r: &QueryResponse) -> Value {
             }
             put_u32(&mut m, "warnings", e.warnings);
             put_str(&mut m, "info", &e.info);
+            if e.truncated {
+                m.insert("truncated".into(), Value::Bool(true));
+            }
             if e.more_results {
                 m.insert("more_results".into(), Value::Bool(true));
             }
@@ -345,6 +352,10 @@ pub fn query_part_from_json(v: &Value) -> QueryResponse {
                     .get("more_results")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                truncated: e
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         })
     };
@@ -376,6 +387,7 @@ pub fn collect(parts: impl IntoIterator<Item = QueryResponse>) -> ExecuteRespons
                 r.last_insert_id = e.last_insert_id;
                 r.warnings = e.warnings;
                 r.info = e.info;
+                r.truncated = e.truncated;
                 out.results.push(r);
             }
             None => {}
@@ -436,6 +448,7 @@ mod tests {
             last_insert_id: 0,
             warnings: 1,
             info: String::new(),
+            truncated: false,
         }
     }
 

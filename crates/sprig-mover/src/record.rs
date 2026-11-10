@@ -119,6 +119,12 @@ pub struct JobRecord {
     /// When a retained source may be dropped.
     #[serde(default)]
     pub retain_until_ms: Option<u64>,
+    /// When the retention began (the commit), ms since the epoch. A job
+    /// without its own `spec.retain_ms` then retains for
+    /// `mover.source_retain_hours` as it is now, not as it was at the
+    /// commit ([`JobRecord::retain_until`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_from_ms: Option<u64>,
     /// The tenant was deleted (chapter 08, "Deleting a tenant"): cleaning
     /// also removes the tenant's backend accounts and `__sprig_names` rows
     /// on the source cluster, whose gateways no longer will.
@@ -137,7 +143,33 @@ impl Versioned for JobRecord {
     const V: u32 = 1;
 }
 
+/// `ours`, unless the stored record ended the retention earlier (an
+/// operator, or a tenant delete, wrote a past `retain_until_ms` while a
+/// worker held the job): that end stands.
+fn ended_retention(stored: &JobRecord, ours: Option<u64>, now_ms: u64) -> Option<u64> {
+    match (stored.retain_until_ms, ours) {
+        (Some(s), Some(o)) if s <= now_ms && s < o => Some(s),
+        _ => ours,
+    }
+}
+
 impl JobRecord {
+    /// When the retained source may be dropped, with `retain` as
+    /// `mover.source_retain_hours` resolves now: the retention follows the
+    /// setting live from the commit, unless the job brought its own
+    /// (`spec.retain_ms`) or the retention already ended (by time, by an
+    /// operator, or by a tenant delete setting it to the past).
+    #[must_use]
+    pub fn retain_until(&self, retain: std::time::Duration, now_ms: u64) -> Option<u64> {
+        match (self.retain_until_ms, self.retain_from_ms) {
+            (Some(u), _) if u <= now_ms => Some(u),
+            (Some(_), Some(from)) if self.spec.retain_ms.is_none() => {
+                Some(from.saturating_add(u64::try_from(retain.as_millis()).unwrap_or(u64::MAX)))
+            }
+            (u, _) => u,
+        }
+    }
+
     /// The status callers see.
     #[must_use]
     pub fn status(&self) -> JobStatus {
@@ -367,6 +399,7 @@ impl JobStore {
             epoch: None,
             not_before_ms: 0,
             retain_until_ms: None,
+            retain_from_ms: None,
             purge_tenant: false,
             created_ms: now,
             updated_ms: now,
@@ -902,6 +935,7 @@ impl Claim {
             next.cancel = stored.cancel.clone();
             next.go = stored.go;
             next.updated_ms = self.store.now_ms();
+            next.retain_until_ms = ended_retention(&stored, next.retain_until_ms, next.updated_ms);
             let jkey = self.store.key(&job_rel(&next.job_id))?;
             let r = self
                 .store
@@ -941,6 +975,8 @@ impl Claim {
     /// The store's errors.
     pub async fn refresh(&mut self) -> Result<()> {
         let (stored, _) = self.store.get(&self.rec.job_id).await?;
+        self.rec.retain_until_ms =
+            ended_retention(&stored, self.rec.retain_until_ms, self.store.now_ms());
         self.rec.cancel = stored.cancel;
         self.rec.go = stored.go;
         Ok(())
@@ -1247,7 +1283,10 @@ impl Mover for MetaMover {
     async fn cut_over(&self, id: &JobId) -> Result<()> {
         self.edit(id, |r| {
             // A Continuous job stops streaming and keeps its targets.
-            if !matches!(r.spec.cutover, CutoverMode::Manual | CutoverMode::Continuous) {
+            if !matches!(
+                r.spec.cutover,
+                CutoverMode::Manual | CutoverMode::Continuous
+            ) {
                 return Err(SprigError::new(
                     SprigCode::JobStateInvalid,
                     format!("job {} cuts over by itself", r.job_id.0),

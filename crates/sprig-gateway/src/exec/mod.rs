@@ -42,6 +42,8 @@ mod logic_bound;
 mod tenant;
 // Chapter 32: typed tables and record hierarchies.
 pub(crate) mod inherit;
+// Chapter 42 (R9): inherited messaging objects (`FOR EACH TENANT`).
+mod inherit_msg;
 pub(crate) mod types;
 // Chapter 45: event streams (R9).
 mod streams;
@@ -55,6 +57,8 @@ mod graph_ddl;
 // chapter 45's `sprig.commit_offset`.
 pub(crate) mod msg_trigger;
 mod offsets;
+// Chapter 28 (R4): ONLY_FULL_GROUP_BY on 3306.
+mod groupby;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -215,14 +219,20 @@ fn mariadb_caps(persona: Persona, client: Caps) -> Caps {
     }
 }
 
-/// 1064, as MySQL answers several statements without multi-statements.
-fn multi_statements_off(rest: &[u8]) -> SprigError {
+/// 1064, as the servers answer several statements without
+/// multi-statements, in the persona's wording ("your MySQL server
+/// version", "your MariaDB server version").
+fn multi_statements_off(rest: &[u8], persona: Persona) -> SprigError {
     let near: String = String::from_utf8_lossy(rest).chars().take(80).collect();
+    let server = match persona {
+        Persona::MySql84 => "MySQL",
+        Persona::MariaDb => "MariaDB",
+    };
     SprigError::standard(
         1064,
         *b"42000",
         format!(
-            "You have an error in your SQL syntax; check the manual that corresponds to your server version for the right syntax to use near '{}' at line 1",
+            "You have an error in your SQL syntax; check the manual that corresponds to your {server} server version for the right syntax to use near '{}' at line 1",
             near.trim_start()
         ),
     )
@@ -357,7 +367,10 @@ impl PassSession {
         let mut pieces = split::split(&sql);
         if pieces.len() > 1 && !cx.proto.multi_statements {
             let second = pieces[1].as_ptr() as usize - sql.as_ptr() as usize;
-            return Err(multi_statements_off(&sql[second.min(sql.len())..]));
+            return Err(multi_statements_off(
+                &sql[second.min(sql.len())..],
+                self.persona,
+            ));
         }
         if pieces.is_empty() {
             // Nothing but comments: the backend answers it (1065).
@@ -990,6 +1003,12 @@ impl SessionExec for PassSession {
             None => self.run_request(cx, req, out).await,
         };
         self.mq_after_request(u64::from(cx.session.id.0), txn_word, r.is_ok());
+        // Chapter 42 (R9): cross-tenant publishes of the transaction go
+        // out once it has ended.
+        crate::inherited::outbox::after_request(
+            u64::from(cx.session.id.0),
+            self.offsets_in_transaction(),
+        );
         // Tenant sessions: no error the gateway returns carries a physical
         // name (the relay maps the ones it sends itself).
         r.map_err(|e| self.map_error(e))
@@ -1074,15 +1093,38 @@ impl PassSession {
     /// string, `version_comment`, and on 3306 `gtid_mode`.
     fn persona_vars(&self) -> sprig_sql::compat::vars::PersonaVars {
         let vars = self.bs.as_ref().map(BackendSession::vars);
+        // Before the session's first backend statement there are no
+        // session variables yet: 3306 answers MySQL's default `sql_mode`
+        // (a client's first `SELECT @@sql_mode` read the backend value).
+        let login_mode = (vars.is_none() && self.persona == Persona::MySql84)
+            .then(|| sprig_sql::compat::sqlmode::MYSQL84_DEFAULT.render());
         sprig_sql::compat::vars::PersonaVars::new(
             self.persona,
             self.settings.persona_version(self.persona),
         )
         .with_session(
-            vars.and_then(|v| v.client_sql_mode.as_deref()),
+            vars.and_then(|v| v.client_sql_mode.as_deref())
+                .or(login_mode.as_deref()),
             vars.and_then(|v| v.vars.get("max_statement_time").map(String::as_str)),
         )
         .with_max_allowed_packet(self.packet_limit)
+        .with_max_connections(self.tenant_max_connections())
+    }
+
+    /// A tenant session's `@@max_connections`: the tenant's own limit
+    /// (`limits.tenant_connections`), not the backend's (gaps row 43).
+    /// MySQL Connector/J's suite raises it with `SET GLOBAL` when it reads
+    /// less than 200 free.
+    fn tenant_max_connections(&self) -> Option<u64> {
+        let ts = self.tenant.as_deref()?;
+        let cat = ts.catalog()?;
+        let svc = ts.services();
+        let ctx = cat.setting_ctx(&svc.dc);
+        Some(svc.settings.get(
+            &crate::limits::TENANT_CONNECTIONS,
+            &ctx,
+            Some(&cat.settings),
+        ))
     }
 
     /// The rows of `SHOW [SESSION] STATUS` (the client's TLS and
@@ -1096,9 +1138,28 @@ impl PassSession {
         if split::is_session_status(piece) {
             Some(relay::ConnStatus::of(proto))
         } else if split::is_show_variables(piece) {
-            Some(relay::ConnStatus::from_rows(
-                self.persona_vars().show_rows(),
-            ))
+            // The client's own values of gateway-owned variables (`SET
+            // wait_timeout = ...`), which `@@` reads already answer.
+            const OWNED: &[&str] = &[
+                "wait_timeout",
+                "interactive_timeout",
+                "net_read_timeout",
+                "net_write_timeout",
+                "session_track_schema",
+                "session_track_state_change",
+                "session_track_system_variables",
+                "session_track_transaction_info",
+                "wsrep_sync_wait",
+            ];
+            let mut rows = self.persona_vars().show_rows();
+            if let Some(bs) = &self.bs {
+                for (k, v) in &bs.vars().gateway_vars {
+                    if let Some(name) = OWNED.iter().find(|n| n.eq_ignore_ascii_case(k)) {
+                        rows.push((name, v.clone()));
+                    }
+                }
+            }
+            Some(relay::ConnStatus::from_rows(rows))
         } else {
             None
         }
@@ -1176,7 +1237,27 @@ impl PassSession {
                 }
             }
             Request::Execute { stmt, raw, params } => {
-                self.execute(cx, stmt, &raw, &params, out).await
+                // 3306: MySQL's `'table.key'` in 1062 for prepared
+                // statements too (chapter 28, R4; MySQL Connector/J's suite).
+                let dup_table = if self.persona == Persona::MySql84 {
+                    let lex = self.lex_opts().0;
+                    self.stmts
+                        .get_mut(stmt)
+                        .ok()
+                        .and_then(|s| s.logical.clone())
+                        .and_then(|l| sprig_sql::compat::errmap::dup_key_table(&l, &lex))
+                } else {
+                    None
+                };
+                match dup_table.as_deref() {
+                    Some(table) => {
+                        let mut wrapped = compat_sink::DupKeySink { inner: out, table };
+                        self.execute(cx, stmt, &raw, &params, &mut wrapped)
+                            .await
+                            .map_err(|e| compat_sink::map(e, Some(table)))
+                    }
+                    None => self.execute(cx, stmt, &raw, &params, out).await,
+                }
             }
             Request::Fetch { stmt, rows } => self.fetch(cx, stmt, rows, out).await,
             Request::LongData { stmt, param, data } => {

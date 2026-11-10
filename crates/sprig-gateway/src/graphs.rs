@@ -7,10 +7,18 @@
 //!   `graph`) and a `graphs` row, written in one versioned change; labels
 //!   and relationship types are `graph_node_sources` and
 //!   `graph_edge_sources` rows, added on first use in their own change.
-//! - **Storage.** The graph's tables are in its database's first shard
-//!   schema, created and dropped as the cluster's `sprig_ctl` account.
-//!   Statements run on a `sprig_ctl` connection of the tenant's cluster
-//!   inside the Bolt transaction (`READ COMMITTED`).
+//! - **Storage** (round 3). A new graph is a sharded table group keyed by
+//!   `part` (numeric), presplit into `sharding.min_shards` shards (database
+//!   scope) on the tenant's cluster: a `table_groups` row (origin
+//!   `structural`), four `group_members` rows (nodes on `part`; edges,
+//!   labels and mirrors through their node), the shard map in etcd, and in
+//!   each shard schema `t<t>_d<db>_g<group>_s<n>` the node, edge, label and
+//!   mirror tables with `__sprig_dtx`. The id counter stays in the
+//!   database's first shard schema. Splits, merges and moves of the group
+//!   are the mover's (chapter 20), like any group's. Graphs from rounds 1
+//!   and 2 stay in the first shard schema, one shard. Everything runs as the
+//!   cluster's `sprig_ctl` account; statements run inside the Bolt
+//!   transaction (`READ COMMITTED`) through [`txn`].
 //! - **Privileges.** A graph is an object with the table actions: reading
 //!   needs `SELECT`, `CREATE`/`MERGE` need `INSERT`, `SET`/`REMOVE`
 //!   `UPDATE`, `DELETE` `DELETE` on the graph or its database;
@@ -30,10 +38,18 @@ use sprig_catalog::version::VersionKind;
 use sprig_catalog::{CatalogLocator, Freshness, TenantCatalog};
 use sprig_common::ids::{ClusterId, DbId, ObjectId, TenantId, UserId};
 use sprig_common::{Result, SprigCode, SprigError};
+use sprig_graph::ast::{Entity, Schema};
 use sprig_graph::catalog::{GraphCatalog, GraphDef, GraphState, MODULE, Tables, backend_error};
-use sprig_graph::maria::{CounterIds, Dictionary};
+use sprig_graph::maria::{CounterIds, Dictionary, GraphShards, SchemaOps, ShardLoc};
+use sprig_graph::schema::{plan_create, plan_drop};
+use sprig_graph::store::{IndexDef, SchemaCounts};
+use sprig_common::ids::{DcId, GroupId, ShardId};
+use sprig_meta::{Tier, TierView};
+use sprig_shard::{KeyClass, KeySpec, ShardMap, ShardMapCache, ShardMapStore, shard_schema};
 
 use crate::tenant::TenantServices;
+
+pub(crate) mod txn;
 
 /// Ids handed out per block of the counter table.
 const ID_BLOCK: u64 = 256;
@@ -59,10 +75,16 @@ pub struct GraphRef {
     pub cluster: ClusterId,
     /// Labels and types at resolution.
     pub def: Arc<GraphDef>,
+    /// Its shards at resolution.
+    pub shards: Arc<GraphShards>,
+    /// While the mover holds a range of the graph's map: the latest end of
+    /// the holds (ms since the epoch).
+    pub held_until: Option<u64>,
 }
 
 impl GraphRef {
-    /// The graph's tables.
+    /// The graph's tables in the database's first shard schema (the id
+    /// counter; every table of a graph from rounds 1 and 2).
     #[must_use]
     pub fn tables(&self) -> Tables {
         Tables::of(&self.schema, self.graph_id)
@@ -81,6 +103,16 @@ pub struct GatewayGraphs {
     /// `sprig_ctl` pool, which the catalog and the id counters use while a
     /// transaction holds its connection.
     sessions: Mutex<HashMap<ClusterId, mysql_async::Pool>>,
+    /// Replica pools for Bolt reads in `mode: "r"`, by node address.
+    replicas: Mutex<HashMap<String, mysql_async::Pool>>,
+    /// Spreads reads over replicas.
+    next_replica: std::sync::atomic::AtomicUsize,
+    /// Bookmark keys by tenant (the tenant's `graph_keys` secret).
+    keys: Mutex<HashMap<u64, Arc<ring::hmac::Key>>>,
+    /// Shard map caches by home DC (graph groups' maps).
+    maps: Mutex<HashMap<DcId, ShardMapCache>>,
+    /// Chapter 18's coordinator pieces for Bolt transactions.
+    pub(crate) coord: txn::CoordServices,
 }
 
 type Names = (BTreeMap<u32, String>, BTreeMap<u32, String>);
@@ -115,7 +147,179 @@ impl GatewayGraphs {
             counters: Mutex::new(HashMap::new()),
             names: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            replicas: Mutex::new(HashMap::new()),
+            next_replica: std::sync::atomic::AtomicUsize::new(0),
+            keys: Mutex::new(HashMap::new()),
+            maps: Mutex::new(HashMap::new()),
+            coord: txn::CoordServices::new(),
         }
+    }
+
+    /// The shard map cache of `tenant`'s home DC (started at first use).
+    ///
+    /// # Errors
+    /// `Internal` never in practice.
+    pub fn map_cache(&self, tenant: TenantId) -> Result<ShardMapCache> {
+        let home = self.svc.locator.home_of(tenant);
+        let mut m = self.maps.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(c) = m.get(&home) {
+            return Ok(c.clone());
+        }
+        let dc = self.svc.locator.dc_store();
+        let store = if home == self.svc.dc {
+            dc
+        } else {
+            TierView::over(&dc, Tier::Dc(home.clone()))
+        };
+        let c = ShardMapCache::spawn(store)?;
+        m.insert(home, c.clone());
+        Ok(c)
+    }
+
+    /// A linearizable map store over `tenant`'s home DC tier.
+    fn map_store(&self, tenant: TenantId) -> ShardMapStore {
+        let home = self.svc.locator.home_of(tenant);
+        let dc = self.svc.locator.dc_store();
+        if home == self.svc.dc {
+            ShardMapStore::new(dc)
+        } else {
+            ShardMapStore::new(TierView::over(&dc, Tier::Dc(home)))
+        }
+    }
+
+    /// Group `group`'s map: the watched copy, or etcd when the copy hasn't
+    /// seen it yet (a graph just created).
+    ///
+    /// # Errors
+    /// 39424-class map errors from the store.
+    pub async fn shard_map(&self, tenant: TenantId, group: u32) -> Result<Arc<ShardMap>> {
+        if let Ok(m) = self
+            .map_cache(tenant)
+            .and_then(|c| c.get(tenant, GroupId(group)))
+        {
+            return Ok(m);
+        }
+        let (m, _) = self.map_store(tenant).load(tenant, GroupId(group)).await?;
+        Ok(Arc::new(m))
+    }
+
+    /// The shards of graph `def` in database `db`, and the end of any hold.
+    async fn layout(
+        &self,
+        tenant: TenantId,
+        def: &GraphDef,
+        default_schema: &str,
+        cluster: &ClusterId,
+    ) -> Result<(Arc<GraphShards>, Option<u64>)> {
+        let Some(group) = def.group_id else {
+            return Ok((
+                Arc::new(GraphShards::single(
+                    def.graph_id,
+                    def.db_id,
+                    default_schema,
+                    cluster.as_str(),
+                )),
+                None,
+            ));
+        };
+        let map = self.shard_map(tenant, group).await?;
+        let mut held: Option<u64> = None;
+        let shards = map
+            .ranges
+            .iter()
+            .map(|r| {
+                if r.state == sprig_shard::shardmap::RangeState::Held {
+                    let u = r.hold_until_ms.unwrap_or(0);
+                    held = Some(held.map_or(u, |h| h.max(u)));
+                }
+                let schema = shard_schema(tenant, DbId(def.db_id), GroupId(group), r.shard);
+                ShardLoc {
+                    shard: r.shard.0,
+                    lo: r.lo,
+                    epoch: r.epoch,
+                    cluster: r.cluster.to_string(),
+                    tables: Tables::of(&schema, def.graph_id),
+                    schema,
+                }
+            })
+            .collect();
+        Ok((
+            Arc::new(GraphShards {
+                graph: def.graph_id,
+                db: def.db_id,
+                group,
+                version: map.version,
+                shards,
+                seq: Tables::of(default_schema, def.graph_id).seq,
+                mirrors: def.mirrors,
+            }),
+            held,
+        ))
+    }
+
+    /// The tenant's bookmark key: its catalog's `graph_keys` secret, the
+    /// same on every gateway.
+    ///
+    /// # Errors
+    /// The locator's; a backend error.
+    pub async fn bookmark_key(&self, tenant: TenantId) -> Result<Arc<ring::hmac::Key>> {
+        if let Some(k) = self
+            .keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&tenant.0)
+        {
+            return Ok(Arc::clone(k));
+        }
+        self.prepare(tenant).await?;
+        let ep = self.svc.locator.writer(tenant).await?;
+        let mut conn = ep.pool.get_conn().await.map_err(backend_error)?;
+        let secret = GraphCatalog::new(ep.store.schema())
+            .bookmark_secret(&mut conn)
+            .await?;
+        let k = Arc::new(sprig_graph::bookmark::key(&secret));
+        self.keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(tenant.0, Arc::clone(&k));
+        Ok(k)
+    }
+
+    /// One replica pool of `cluster` for a read, taking turns; `None` for
+    /// clusters without replicas (one node, Galera, external).
+    ///
+    /// # Errors
+    /// The locator's.
+    pub async fn replica_pool(&self, cluster: &ClusterId) -> Result<Option<mysql_async::Pool>> {
+        let opts = self.svc.locator.ctl_replica_opts(cluster).await?;
+        if opts.is_empty() {
+            return Ok(None);
+        }
+        let i = self
+            .next_replica
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % opts.len();
+        let o = opts[i].clone();
+        let key = format!(
+            "{}:{}:{}",
+            o.ip_or_hostname(),
+            o.tcp_port(),
+            o.user().unwrap_or("")
+        );
+        let mut m = self.replicas.lock().unwrap_or_else(PoisonError::into_inner);
+        let pool = m.entry(key).or_insert_with(|| {
+            mysql_async::Pool::new(
+                mysql_async::OptsBuilder::from_opts(o).pool_opts(
+                    mysql_async::PoolOpts::new()
+                        .with_constraints(
+                            mysql_async::PoolConstraints::new(0, SESSION_POOL_MAX)
+                                .unwrap_or_default(),
+                        )
+                        .with_inactive_connection_ttl(std::time::Duration::from_secs(60)),
+                ),
+            )
+        });
+        Ok(Some(pool.clone()))
     }
 
     /// The module's tables in the tenant catalog, once per process.
@@ -236,6 +440,7 @@ impl GatewayGraphs {
             .map(ToString::to_string)
             .ok_or_else(|| not_found(db, name))?;
         let cluster = self.svc.locator.cluster(cat.tenant).await?;
+        let (shards, held_until) = self.layout(cat.tenant, &def, &schema, &cluster).await?;
         Ok(Some(GraphRef {
             tenant: cat.tenant,
             db_id: row.db_id,
@@ -245,7 +450,22 @@ impl GatewayGraphs {
             schema,
             cluster,
             def,
+            shards,
+            held_until,
         }))
+    }
+
+    /// `g` again with the shard map now (after a map change).
+    ///
+    /// # Errors
+    /// The map store's.
+    pub async fn refresh(&self, g: &GraphRef) -> Result<GraphRef> {
+        let (shards, held_until) = self.layout(g.tenant, &g.def, &g.schema, &g.cluster).await?;
+        Ok(GraphRef {
+            shards,
+            held_until,
+            ..g.clone()
+        })
     }
 
     /// The `sprig_ctl` pool of `cluster`.
@@ -315,12 +535,15 @@ impl GatewayGraphs {
         Ok(c)
     }
 
-    /// `CREATE GRAPH`: the physical tables, then the catalog rows in one
-    /// change. Returns the graph and the catalog version that has it.
+    /// `CREATE GRAPH`: the group's id and the shard schemas with their
+    /// tables, the shard map, then the catalog rows (object, graph, group,
+    /// members) in one change. Returns the graph and the catalog version
+    /// that has it.
     ///
     /// # Errors
     /// 39902 for an unknown database; 39908 for a name in use (unless
-    /// `if_not_exists`); catalog and backend errors.
+    /// `if_not_exists`); catalog, map and backend errors.
+    #[allow(clippy::too_many_lines)] // ids, schemas, map, catalog, undo
     pub async fn create(
         &self,
         tenant: TenantId,
@@ -348,19 +571,80 @@ impl GatewayGraphs {
             .first()
             .map(ToString::to_string)
             .ok_or_else(|| not_found(db, name))?;
+        let shards = u32::try_from(self.svc.settings.get(
+            &sprig_balancer::shards::settings::MIN_SHARDS,
+            &cat.setting_ctx(&self.svc.dc).with_db(row.db_id),
+            Some(&cat.settings),
+        ))
+        .unwrap_or(1)
+        .clamp(1, 256);
         let ep = self.svc.locator.writer(tenant).await?;
-        let object_id = {
+        let (object_id, members, group) = {
             let mut c = ep.pool.get_conn().await.map_err(backend_error)?;
-            ep.store.next_object_id(&mut c).await?
+            let o = ep.store.next_object_id(&mut c).await?;
+            let mut m = [0u64; 4];
+            for x in &mut m {
+                *x = ep.store.next_object_id(&mut c).await?.0;
+            }
+            sprig_shard::groups::migrate(&mut c, ep.store.schema()).await?;
+            let g = alloc_group_id(&mut c, ep.store.schema()).await?;
+            (o, m, g)
         };
         let cluster = self.svc.locator.cluster(tenant).await?;
-        let tables = Tables::of(&schema, object_id.0);
-        {
+        let spec = KeySpec::new(vec![KeyClass::Numeric])?;
+        let map = ShardMap::presplit(
+            tenant,
+            GroupId(group),
+            spec.digest,
+            shards,
+            std::slice::from_ref(&cluster),
+        )?;
+        let schemas: Vec<String> = map
+            .ranges
+            .iter()
+            .map(|r| shard_schema(tenant, row.db_id, GroupId(group), r.shard))
+            .collect();
+        let seq = Tables::of(&schema, object_id.0);
+        let made = async {
             let pool = self.pool(&cluster).await?;
             let mut c = pool.get_conn().await.map_err(backend_error)?;
-            for s in tables.create_ddl() {
-                c.query_drop(s).await.map_err(backend_error)?;
+            let like: Option<(String, String)> = c
+                .query_first(format!(
+                    "SHOW CREATE DATABASE {}",
+                    sprig_common::names::quote(&schema)
+                ))
+                .await
+                .map_err(backend_error)?;
+            for s in &schemas {
+                let sql = like.as_ref().map_or_else(
+                    || format!("CREATE DATABASE IF NOT EXISTS {}", sprig_common::names::quote(s)),
+                    |(_, x)| {
+                        x.replacen("CREATE DATABASE", "CREATE DATABASE IF NOT EXISTS", 1)
+                            .replace(
+                                &sprig_common::names::quote(&schema),
+                                &sprig_common::names::quote(s),
+                            )
+                    },
+                );
+                c.query_drop(sql).await.map_err(backend_error)?;
+                c.query_drop(sprig_catalog::ddl::dtx_table_sql(s))
+                    .await
+                    .map_err(backend_error)?;
+                for d in Tables::of(s, object_id.0).shard_ddl() {
+                    c.query_drop(d).await.map_err(backend_error)?;
+                }
             }
+            for d in seq.seq_ddl() {
+                c.query_drop(d).await.map_err(backend_error)?;
+            }
+            self.map_store(tenant).create(&map).await?;
+            Ok::<(), SprigError>(())
+        }
+        .await;
+        if let Err(e) = made {
+            self.drop_physical(tenant, &cluster, &schemas, &seq, Some(group))
+                .await;
+            return Err(e);
         }
         let mut ch = self
             .svc
@@ -385,18 +669,25 @@ impl GatewayGraphs {
                 created_at: SystemTime::now(),
                 changed_version: version,
             };
+            let cat_schema = store.schema().to_owned();
             match store.insert_object(tx, &obj).await {
-                Ok(()) => {
-                    GraphCatalog::new(store.schema())
-                        .insert_native(tx, object_id.0, row.db_id.0)
-                        .await
-                }
+                Ok(()) => match GraphCatalog::new(&cat_schema)
+                    .insert_native_in(tx, object_id.0, row.db_id.0, Some(group))
+                    .await
+                {
+                    Ok(()) => {
+                        insert_group(tx, &cat_schema, group, &spec, row.db_id, object_id.0, members)
+                            .await
+                    }
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             }
         };
         if let Err(e) = r {
             let _ = ch.rollback().await;
-            self.drop_tables(&cluster, &tables).await;
+            self.drop_physical(tenant, &cluster, &schemas, &seq, Some(group))
+                .await;
             return Err(e);
         }
         let v = ch.commit().await?;
@@ -412,21 +703,54 @@ impl GatewayGraphs {
             db,
             graph = name,
             id = object_id.0,
+            group,
+            shards,
             "graph created"
         );
         Ok((g, v))
     }
 
-    async fn drop_tables(&self, cluster: &ClusterId, tables: &Tables) {
-        if let Ok(pool) = self.pool(cluster).await
-            && let Ok(mut c) = pool.get_conn().await
-            && let Err(e) = c.query_drop(tables.drop_ddl()).await
+    /// Drops a graph's storage: its group's shard schemas (each on its
+    /// cluster, as `shards` lists them) and map, or its tables in one
+    /// schema; then the id counter.
+    async fn drop_physical(
+        &self,
+        tenant: TenantId,
+        cluster: &ClusterId,
+        schemas: &[String],
+        seq: &Tables,
+        group: Option<u32>,
+    ) {
+        self.drop_schemas(&schemas.iter().map(|s| (cluster.clone(), s.clone())).collect::<Vec<_>>())
+            .await;
+        self.drop_sql(cluster, &format!("DROP TABLE IF EXISTS {}", seq.seq))
+            .await;
+        if let Some(g) = group
+            && let Err(e) = self.map_store(tenant).delete(tenant, GroupId(g)).await
+            && e.code() != Some(SprigCode::ShardMapUnavailable)
         {
-            tracing::warn!(error = %e, "dropping graph tables failed");
+            tracing::warn!(error = %e, group = g, "deleting a graph's shard map failed");
         }
     }
 
-    /// `DROP GRAPH`: the catalog rows in one change, then the tables.
+    async fn drop_schemas(&self, at: &[(ClusterId, String)]) {
+        for (c, s) in at {
+            self.drop_sql(c, &format!("DROP DATABASE IF EXISTS {}", sprig_common::names::quote(s)))
+                .await;
+        }
+    }
+
+    async fn drop_sql(&self, cluster: &ClusterId, sql: &str) {
+        if let Ok(pool) = self.pool(cluster).await
+            && let Ok(mut c) = pool.get_conn().await
+            && let Err(e) = c.query_drop(sql).await
+        {
+            tracing::warn!(error = %e, sql, "dropping graph storage failed");
+        }
+    }
+
+    /// `DROP GRAPH`: the catalog rows in one change (with the group and
+    /// its members), then the storage.
     /// Returns the catalog version (0 when nothing was dropped).
     ///
     /// # Errors
@@ -440,12 +764,17 @@ impl GatewayGraphs {
     ) -> Result<u64> {
         self.prepare(tenant).await?;
         let cat = self.catalog(tenant, Freshness::Latest).await?;
-        let Some(g) = self.resolve(&cat, db, name).await? else {
+        let found = match self.resolve(&cat, db, name).await {
+            Err(e) if if_exists && e.code() == Some(SprigCode::GraphNotFound) => None,
+            r => r?,
+        };
+        let Some(g) = found else {
             if if_exists {
                 return Ok(0);
             }
             return Err(not_found(db, name));
         };
+        let group = g.def.group_id;
         let mut ch = self
             .svc
             .catalog
@@ -454,15 +783,18 @@ impl GatewayGraphs {
         let version = ch.version();
         let r = {
             let (store, tx) = ch.tx().parts();
+            let cat_schema = store.schema().to_owned();
             match store
                 .set_object_state(tx, ObjectId(g.graph_id), ObjectState::Dropped, version)
                 .await
             {
-                Ok(_) => {
-                    GraphCatalog::new(store.schema())
-                        .delete(tx, g.graph_id)
-                        .await
-                }
+                Ok(_) => match GraphCatalog::new(&cat_schema).delete(tx, g.graph_id).await {
+                    Ok(()) => match group {
+                        Some(gid) => delete_group(tx, &cat_schema, gid).await,
+                        None => Ok(()),
+                    },
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             }
         };
@@ -471,7 +803,19 @@ impl GatewayGraphs {
             return Err(e);
         }
         let v = ch.commit().await?;
-        self.drop_tables(&g.cluster, &g.tables()).await;
+        if group.is_some() {
+            let at: Vec<(ClusterId, String)> = g
+                .shards
+                .shards
+                .iter()
+                .filter_map(|s| ClusterId::new(&s.cluster).ok().map(|c| (c, s.schema.clone())))
+                .collect();
+            self.drop_schemas(&at).await;
+            self.drop_physical(tenant, &g.cluster, &[], &g.tables(), group)
+                .await;
+        } else {
+            self.drop_sql(&g.cluster, &g.tables().drop_ddl()).await;
+        }
         self.counters
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -516,6 +860,199 @@ impl GatewayGraphs {
             tenant: g.tenant,
             graph: g.graph_id,
         })
+    }
+}
+
+/// Index and constraint commands of one graph.
+struct GwSchema {
+    graphs: Arc<GatewayGraphs>,
+    g: GraphRef,
+}
+
+#[async_trait]
+impl SchemaOps for GwSchema {
+    async fn run(&self, cmd: &Schema) -> Result<SchemaCounts> {
+        self.graphs.schema(&self.g, cmd).await
+    }
+}
+
+fn neo_schema(code: &str, msg: impl std::fmt::Display) -> SprigError {
+    SprigError::new(
+        SprigCode::GraphDefinitionInvalid,
+        format!("[Neo.ClientError.Schema.{code}] {msg}"),
+    )
+}
+
+impl GatewayGraphs {
+    /// How `g`'s index and constraint commands run.
+    #[must_use]
+    pub fn schema_ops(self: &Arc<Self>, g: &GraphRef) -> Arc<dyn SchemaOps> {
+        Arc::new(GwSchema {
+            graphs: Arc::clone(self),
+            g: g.clone(),
+        })
+    }
+
+    /// Runs `sql(tables)` on every shard of `g`, each on its cluster, as
+    /// `sprig_ctl`; stops at the first error.
+    async fn on_shards(
+        &self,
+        g: &GraphRef,
+        sql: impl Fn(&Tables) -> Result<String>,
+    ) -> Result<()> {
+        for sh in &g.shards.shards {
+            let cluster = ClusterId::new(&sh.cluster)?;
+            let pool = self.pool(&cluster).await?;
+            let mut c = pool.get_conn().await.map_err(backend_error)?;
+            c.query_drop(sql(&sh.tables)?)
+                .await
+                .map_err(backend_error)?;
+        }
+        Ok(())
+    }
+
+    /// `g`'s indexes from the catalog now, with token names.
+    async fn current_indexes(&self, g: &GraphRef) -> Result<Vec<IndexDef>> {
+        let ep = self.svc.locator.writer(g.tenant).await?;
+        let mut c = ep.pool.get_conn().await.map_err(backend_error)?;
+        let rows = GraphCatalog::new(ep.store.schema())
+            .indexes(&mut c, Some(g.graph_id))
+            .await?;
+        let (labels, types) = self.names_of(g);
+        let mut out = Vec::with_capacity(rows.len());
+        for (_, mut d) in rows {
+            let names = if d.entity == Entity::Node {
+                &labels
+            } else {
+                &types
+            };
+            if let Some(n) = names.get(&d.token_id) {
+                d.token.clone_from(n);
+            }
+            out.push(d);
+        }
+        Ok(out)
+    }
+
+    /// `CREATE INDEX`, `CREATE CONSTRAINT`, `DROP INDEX`, `DROP
+    /// CONSTRAINT` on graph `g`: catalog rows in versioned changes around
+    /// the `ALTER TABLE` (see [`sprig_graph::schema`]).
+    ///
+    /// # Errors
+    /// 39908 as [`plan_create`] and [`plan_drop`] say, or when existing
+    /// data breaks a new constraint; catalog and backend errors.
+    #[allow(clippy::too_many_lines)] // drop, or plan, record, alter, mark online
+    pub async fn schema(self: &Arc<Self>, g: &GraphRef, cmd: &Schema) -> Result<SchemaCounts> {
+        self.prepare(g.tenant).await?;
+        let existing = self.current_indexes(g).await?;
+        if let Schema::Drop { .. } = cmd {
+            let Some(d) = plan_drop(&existing, cmd)? else {
+                return Ok(vec![]);
+            };
+            // The catalog first, so no statement plans with the index once
+            // its columns go.
+            let mut ch = self
+                .svc
+                .catalog
+                .change(g.tenant, VersionKind::Catalog)
+                .await?;
+            let r = {
+                let (store, tx) = ch.tx().parts();
+                GraphCatalog::new(store.schema())
+                    .delete_index(tx, g.graph_id, d.id)
+                    .await
+            };
+            if let Err(e) = r {
+                let _ = ch.rollback().await;
+                return Err(e);
+            }
+            ch.commit().await?;
+            self.on_shards(g, |t| Ok(t.index_drop_ddl(&d))).await?;
+            tracing::info!(tenant = g.tenant.0, graph = g.graph_id, index = %d.name, "graph index dropped");
+            return Ok(vec![(
+                if d.unique {
+                    "constraints-removed"
+                } else {
+                    "indexes-removed"
+                },
+                1,
+            )]);
+        }
+        let Some(mut d) = plan_create(&existing, cmd)? else {
+            return Ok(vec![]);
+        };
+        d.token_id = self
+            .dictionary(g)
+            .create(d.entity == Entity::Node, &d.token)
+            .await?;
+        let mut ch = self
+            .svc
+            .catalog
+            .change(g.tenant, VersionKind::Catalog)
+            .await?;
+        let r = {
+            let (store, tx) = ch.tx().parts();
+            GraphCatalog::new(store.schema())
+                .insert_index(tx, g.graph_id, &d)
+                .await
+        };
+        d.id = match r {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = ch.rollback().await;
+                return Err(match e.kind {
+                    sprig_common::ErrorKind::Backend { errno: 1062, .. } => neo_schema(
+                        "IndexWithNameAlreadyExists",
+                        format!("There already exists an index called '{}'.", d.name),
+                    ),
+                    _ => e,
+                });
+            }
+        };
+        ch.commit().await?;
+        let altered = self.on_shards(g, |t| t.index_ddl(&d)).await;
+        let mut ch = self
+            .svc
+            .catalog
+            .change(g.tenant, VersionKind::Catalog)
+            .await?;
+        let r = {
+            let (store, tx) = ch.tx().parts();
+            let gc = GraphCatalog::new(store.schema());
+            if altered.is_ok() {
+                gc.index_online(tx, g.graph_id, d.id).await
+            } else {
+                gc.delete_index(tx, g.graph_id, d.id).await
+            }
+        };
+        if let Err(e) = r {
+            let _ = ch.rollback().await;
+            return Err(e);
+        }
+        ch.commit().await?;
+        if let Err(e) = altered {
+            let _ = self.on_shards(g, |t| Ok(t.index_drop_ddl(&d))).await;
+            return Err(match e.kind {
+                sprig_common::ErrorKind::Backend { errno: 1062, .. } => neo_schema(
+                    "ConstraintCreationFailed",
+                    format!(
+                        "Unable to create constraint {}: existing data has duplicate values of {}",
+                        d.name,
+                        sprig_graph::schema::describe(d.entity, &d.token, &d.props)
+                    ),
+                ),
+                _ => e,
+            });
+        }
+        tracing::info!(tenant = g.tenant.0, graph = g.graph_id, index = %d.name, "graph index created");
+        Ok(vec![(
+            if d.unique {
+                "constraints-added"
+            } else {
+                "indexes-added"
+            },
+            1,
+        )])
     }
 }
 
@@ -588,4 +1125,111 @@ impl GwDict {
             }
         }
     }
+}
+
+/// A new group id from the catalog's `sprig.next_group_id`, kept past every
+/// group id in use (as chapter 16's apply does).
+async fn alloc_group_id(c: &mut mysql_async::Conn, cat: &str) -> Result<u32> {
+    let cat = cat.replace('`', "``");
+    c.exec_drop(
+        format!(
+            "INSERT INTO `{cat}`.settings (scope_kind, scope_id, setting_key, value, bounds, \
+             set_by, set_at, version) VALUES ('tenant', 0, 'sprig.next_group_id', '1', NULL, \
+             'system', UTC_TIMESTAMP(6), 0) ON DUPLICATE KEY UPDATE setting_key = setting_key"
+        ),
+        (),
+    )
+    .await
+    .map_err(backend_error)?;
+    let floor: Option<u64> = c
+        .query_first(format!(
+            "SELECT GREATEST(COALESCE((SELECT MAX(default_group_id) FROM `{cat}`.`databases`), 0), \
+             COALESCE((SELECT MAX(group_id) FROM `{cat}`.table_groups), 0)) + 1"
+        ))
+        .await
+        .map_err(backend_error)?;
+    c.exec_drop(
+        format!(
+            "UPDATE `{cat}`.settings SET value = LAST_INSERT_ID(GREATEST(CAST(value AS UNSIGNED), ?) + 1), \
+             set_at = UTC_TIMESTAMP(6) WHERE scope_kind = 'tenant' AND scope_id = 0 \
+             AND setting_key = 'sprig.next_group_id'"
+        ),
+        (floor.unwrap_or(1),),
+    )
+    .await
+    .map_err(backend_error)?;
+    let next: Option<u64> = c
+        .query_first("SELECT LAST_INSERT_ID()")
+        .await
+        .map_err(backend_error)?;
+    next.and_then(|n| n.checked_sub(1))
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| SprigError::internal("group ids exhausted"))
+}
+
+/// The graph's `table_groups` row (sharded, keyed by `part`, origin
+/// `structural`) and its four members: nodes on `part`; edges, labels and
+/// mirrors through their node (`src`, `id`, `dst`). Members carry object
+/// ids of their own, with no `objects` row, so the SQL router never
+/// resolves a name to them.
+async fn insert_group<Q: Queryable + Send>(
+    q: &mut Q,
+    cat: &str,
+    group: u32,
+    spec: &KeySpec,
+    db: DbId,
+    graph: u64,
+    members: [u64; 4],
+) -> Result<()> {
+    let cat = cat.replace('`', "``");
+    q.exec_drop(
+        format!(
+            "INSERT INTO `{cat}`.table_groups (group_id, kind, name, key_spec, key_spec_digest, \
+             state, origin, created_at, updated_at) VALUES (?, 'sharded', ?, ?, ?, 'active', \
+             'structural', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))"
+        ),
+        (
+            group,
+            format!("graph_{graph}"),
+            spec.to_json().to_string(),
+            spec.digest,
+        ),
+    )
+    .await
+    .map_err(backend_error)?;
+    let [nodes, edges, labels, mirrors] = members;
+    let rows: [(u64, &str, Option<&str>, Option<u64>, Option<&str>); 4] = [
+        (nodes, "columns", Some("[\"part\"]"), None, None),
+        (edges, "parent", None, Some(nodes), Some("src")),
+        (labels, "parent", None, Some(nodes), Some("id")),
+        (mirrors, "parent", None, Some(nodes), Some("dst")),
+    ];
+    for (o, routing, cols, parent, fk) in rows {
+        q.exec_drop(
+            format!(
+                "INSERT INTO `{cat}`.group_members (object_id, group_id, db_id, routing, key_columns, \
+                 parent_object_id, parent_fk, rk_state, pinned, joined_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', 0, UTC_TIMESTAMP(6))"
+            ),
+            (o, group, db.0, routing, cols, parent, fk),
+        )
+        .await
+        .map_err(backend_error)?;
+    }
+    Ok(())
+}
+
+/// Deletes a graph's group and its members.
+async fn delete_group<Q: Queryable + Send>(q: &mut Q, cat: &str, group: u32) -> Result<()> {
+    let cat = cat.replace('`', "``");
+    for t in ["group_members", "table_groups"] {
+        q.exec_drop(
+            format!("DELETE FROM `{cat}`.{t} WHERE group_id = ?"),
+            (group,),
+        )
+        .await
+        .map_err(backend_error)?;
+    }
+    Ok(())
 }

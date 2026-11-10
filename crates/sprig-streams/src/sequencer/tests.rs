@@ -78,6 +78,7 @@ fn outbox_event(seq: u64, row: u32, n: u8, key: &str) -> ChangeEvent {
             seq,
         },
         ddl: None,
+        hint: None,
     }
 }
 

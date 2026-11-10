@@ -559,12 +559,10 @@ async fn a_stale_resource_version_is_a_conflict() {
 async fn a_refused_pass_shows_its_reason_in_the_status() {
     let w = world().await;
     w.api.put(SC, sprig_cluster("fra1-c9", "replication", 3));
-    w.api
-        .state
-        .lock()
-        .unwrap()
-        .refuse_create
-        .insert(MDB.to_owned(), "spec.replication.replica.recovery needs bootstrapFrom".into());
+    w.api.state.lock().unwrap().refuse_create.insert(
+        MDB.to_owned(),
+        "spec.replication.replica.recovery needs bootstrapFrom".into(),
+    );
     let raw = w
         .kube
         .get(&crd::SPRIG_CLUSTER, NS, "fra1-c9")
@@ -575,7 +573,10 @@ async fn a_refused_pass_shows_its_reason_in_the_status() {
     let st = w.status("fra1-c9");
     assert_eq!(st["phase"], "Pending", "{st}");
     let msg = st["message"].as_str().unwrap_or_default();
-    assert!(msg.contains("reconcile error") && msg.contains("bootstrapFrom"), "{st}");
+    assert!(
+        msg.contains("reconcile error") && msg.contains("bootstrapFrom"),
+        "{st}"
+    );
     let events = || {
         w.api
             .names(EVENTS)
@@ -600,7 +601,10 @@ async fn a_refused_pass_shows_its_reason_in_the_status() {
     assert_eq!(o.phase, Phase::Provisioning);
     let st = w.status("fra1-c9");
     assert!(
-        !st["message"].as_str().unwrap_or_default().contains("reconcile error"),
+        !st["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reconcile error"),
         "{st}"
     );
 }

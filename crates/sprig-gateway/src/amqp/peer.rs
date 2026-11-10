@@ -547,7 +547,9 @@ impl QueuePeer for QueuePeerService {
         let m = msg_of(r.message.unwrap_or_default())
             .message()
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
-        let delivered = self.replies.deliver(&r.name, m) == Some(true);
+        // The sending gateway checked the replier's tenant against the
+        // name (`DirectReplyTo::deliver`).
+        let delivered = self.replies.deliver_relayed(&r.name, m) == Some(true);
         Ok(tonic::Response::new(pb::QueueReplyAck { delivered }))
     }
 }
@@ -1499,9 +1501,11 @@ mod tests {
         // Direct reply-to: a requester on A, answered through B.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let rc = ConsumerId::next();
-        let name = replies[0].register(ConnKey::next(), 1, rc, tx);
-        assert!(replies[1].alive(&name));
-        assert_eq!(replies[1].deliver(&name, reply(&name)), Some(true));
+        let name = replies[0].register(ConnKey::next(), 1, rc, tx, 7);
+        assert!(replies[1].alive(&name, 7));
+        // Another tenant's connection can't reply to it.
+        assert_eq!(replies[1].deliver(&name, reply(&name), 8), None);
+        assert_eq!(replies[1].deliver(&name, reply(&name), 7), Some(true));
         let ev = tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await
             .expect("the direct reply in time")

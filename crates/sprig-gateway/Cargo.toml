@@ -9,6 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Sql.Check (chapter 37, "APIs for Studio"): syntax errors with positions.
+sqlparser.workspace = true
 arc-swap = "1.7"
 async-trait.workspace = true
 # HTTP on 8080/8443 and the peer service on 7403 (chapter 04 steps 4 and
@@ -67,6 +69,20 @@ sprig-proto-amqp = { path = "../sprig-proto-amqp" }
 # engine, and BSON (MIT).
 sprig-proto-mongo = { path = "../sprig-proto-mongo" }
 sprig-doc = { path = "../sprig-doc" }
+# The Redis front end (chapter 40, R6) over the key-value engine (chapter 33).
+sprig-redis = { path = "../sprig-redis" }
+sprig-proto-redis = { path = "../sprig-proto-redis" }
+sprig-kv = { path = "../sprig-kv" }
+# Chapter 34 (R6): the Vectors API; chapter 36: regions for its geo filters.
+sprig-vector = { path = "../sprig-vector" }
+sprig-geo = { path = "../sprig-geo" }
+# Chapter 35 (R6): the Analytics API.
+sprig-dim = { path = "../sprig-dim" }
+# Change streams over the change feed (chapter 30 step 9).
+sprig-feed.workspace = true
+# Chapter 44: Studio's embedded files and serving.
+sprig-studio = { path = "../sprig-studio" }
+sprig-binlog.workspace = true
 bson = "=2.15.0"
 getrandom.workspace = true
 # Chapter 50: the queue engine behind AMQP (R9).

@@ -24,10 +24,11 @@ spec:
           args:
             - --name={{ .Values.dc.id }}
             - --data-dir=/var/lib/etcd
-            - --listen-client-urls=https://0.0.0.0:2379
-            - --advertise-client-urls=https://{{ .Values.global.voter.advertise }}:2379
-            - --listen-peer-urls=https://0.0.0.0:2380
-            - --initial-advertise-peer-urls=https://{{ .Values.global.voter.advertise }}:2380
+            - --listen-client-urls={{ $s := ternary "https" "http" .Values.tls.enabled }}{{ $s }}://0.0.0.0:2379
+            - --advertise-client-urls={{ $s }}://{{ .Values.global.voter.advertise }}:2379
+            - --listen-peer-urls={{ $s }}://0.0.0.0:2380
+            - --initial-advertise-peer-urls={{ $s }}://{{ .Values.global.voter.advertise }}:2380
+            {{- if .Values.tls.enabled }}
             - --client-cert-auth
             - --trusted-ca-file=/etc/etcd/ca/ca.crt
             - --cert-file=/etc/etcd/tls/tls.crt
@@ -36,18 +37,23 @@ spec:
             - --peer-trusted-ca-file=/etc/etcd/ca/ca.crt
             - --peer-cert-file=/etc/etcd/tls/tls.crt
             - --peer-key-file=/etc/etcd/tls/tls.key
+            {{- end }}
           ports:
             - {name: client, containerPort: 2379}
             - {name: peer, containerPort: 2380}
           volumeMounts:
             - {name: data, mountPath: /var/lib/etcd}
+            {{- if .Values.tls.enabled }}
             - {name: tls, mountPath: /etc/etcd/tls, readOnly: true}
             - {name: ca, mountPath: /etc/etcd/ca, readOnly: true}
+            {{- end }}
+      {{- if .Values.tls.enabled }}
       volumes:
         - name: tls
           secret: {secretName: sprigdb-etcd-global-tls}
         - name: ca
           configMap: {name: {{ .Values.tls.bundleConfigMap }}}
+      {{- end }}
   volumeClaimTemplates:
     - metadata: {name: data}
       spec:

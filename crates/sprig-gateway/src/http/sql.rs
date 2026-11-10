@@ -80,6 +80,29 @@ pub struct Caller {
     pub client_dc: Option<sprig_common::ids::DcId>,
 }
 
+/// Caps on one call's results (chapter 44, decision ST8): 0 for none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Caps {
+    /// Rows kept per result.
+    pub max_rows: u64,
+    /// Cell bytes kept per result.
+    pub max_bytes: u64,
+    /// The statement timeout.
+    pub timeout: Option<Duration>,
+}
+
+impl Caps {
+    /// `asked` (0: none) clamped to `limit` (0: none).
+    #[must_use]
+    pub fn clamp(asked: u64, limit: u64) -> u64 {
+        match (asked, limit) {
+            (0, l) => l,
+            (a, 0) => a,
+            (a, l) => a.min(l),
+        }
+    }
+}
+
 /// One statement text to run.
 #[derive(Debug, Clone)]
 pub struct SqlCall {
@@ -370,6 +393,7 @@ impl SqlEngine {
         enum End {
             Done(Result<crate::pipeline::ExecSummary>),
             Killed,
+            TimedOut,
         }
         let bytes = Bytes::from(sql);
         if let Some(l) = local::classify(&bytes) {
@@ -400,11 +424,20 @@ impl SqlEngine {
         // A large statement runs on a blocking thread (chapter 04, "Large
         // statements").
         let (size, threshold) = (req.size(), self.frontend.current().large_statement);
+        // Sql.Query's timeout_ms (clamped for Studio, chapter 44).
+        let timeout = sink.timeout();
         let end = crate::offload::run(size, threshold, async {
+            let deadline = async {
+                match timeout {
+                    Some(t) => tokio::time::sleep(t).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 biased;
                 r = exec.execute(&mut cx, req, &mut *sink) => End::Done(r),
                 () = handle.flags().query_killed() => End::Killed,
+                () = deadline => End::TimedOut,
             }
         })
         .await;
@@ -426,7 +459,7 @@ impl SqlEngine {
                 Ok(())
             }
             End::Done(Err(e)) => {
-                if sink.closed() {
+                if sink.closed() || sink.capped() {
                     exec.abandoned(&mut cx, Abandon::ClientGone).await;
                     return Ok(());
                 }
@@ -440,6 +473,15 @@ impl SqlEngine {
                 handle.flags().take_kill_query();
                 sink.error(&interrupted()).await
             }
+            End::TimedOut => {
+                exec.abandoned(&mut cx, Abandon::Killed).await;
+                sink.error(&SprigError::standard(
+                    3024,
+                    *b"HY000",
+                    "Query execution was interrupted, maximum statement execution time exceeded",
+                ))
+                .await
+            }
         }
     }
 
@@ -452,12 +494,35 @@ impl SqlEngine {
         txn: Option<&str>,
         tx: mpsc::Sender<Item>,
     ) {
+        self.run_capped(caller, call, txn, Caps::default(), tx)
+            .await;
+    }
+
+    /// [`SqlEngine::run`] with caps per result and a statement timeout
+    /// (`Sql.Query`'s `max_rows`, `max_bytes`, `timeout_ms`).
+    pub async fn run_capped(
+        &self,
+        caller: &Caller,
+        call: SqlCall,
+        txn: Option<&str>,
+        caps: Caps,
+        tx: mpsc::Sender<Item>,
+    ) {
         let batch = self.settings().batch_rows;
-        let mut sink = ChannelSink::new(tx.clone(), batch);
-        let r = match txn.filter(|t| !t.is_empty()) {
-            None => self.autocommit(caller, call, &mut sink).await,
-            Some(name) => self.in_txn(caller, name, call, &mut sink).await,
-        };
+        let mut sink =
+            ChannelSink::new(tx.clone(), batch).with_caps(caps.max_rows, caps.max_bytes, caps.timeout);
+        // Studio's statements are recorded with `caller = studio` (chapter 12).
+        let wl_caller = (super::studio::session_client(caller.authorization.as_deref()).as_deref()
+            == Some("studio"))
+        .then(sprig_workload::fingerprint::Caller::studio);
+        let r = crate::workload::CALLER
+            .scope(wl_caller, async {
+                match txn.filter(|t| !t.is_empty()) {
+                    None => self.autocommit(caller, call, &mut sink).await,
+                    Some(name) => self.in_txn(caller, name, call, &mut sink).await,
+                }
+            })
+            .await;
         if let Err(e) = r
             && !sink.finished()
         {

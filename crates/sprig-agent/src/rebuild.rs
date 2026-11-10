@@ -50,6 +50,7 @@ use axum::http::{StatusCode, header};
 use axum::response::Response;
 use axum::routing::{get, post};
 use http_body_util::BodyExt;
+use sprig_cluster::failover::internal_tls::{HANDSHAKE_TIMEOUT, InternalTls, split_url};
 use sprig_cluster::failover::rebuild::{
     BACKUP_ROUTE, CANCEL_ROUTE, REBUILD_ROUTE, RebuildPhase, RebuildStatus, RebuildTicket,
     StartRebuild, backup_gtid, ticket_key,
@@ -202,6 +203,9 @@ pub struct RebuildService {
         hyper_util::client::legacy::connect::HttpConnector,
         http_body_util::Full<Bytes>,
     >,
+    /// `[tls]`: the service is mutual TLS, and backups are pulled from
+    /// `https://` sources with this identity (decision RC2).
+    tls: Option<InternalTls>,
 }
 
 impl std::fmt::Debug for RebuildService {
@@ -226,10 +230,9 @@ impl RebuildService {
         hold: Arc<AtomicBool>,
     ) -> Self {
         let shell = NodeShell::new(cfg.exec_prefix.clone());
-        let http = hyper_util::client::legacy::Client::builder(
-            hyper_util::rt::TokioExecutor::new(),
-        )
-        .build_http();
+        let http =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .build_http();
         Self {
             cfg,
             store,
@@ -240,7 +243,54 @@ impl RebuildService {
             hold,
             current: Mutex::new(None),
             http,
+            tls: None,
         }
+    }
+
+    /// Serves and pulls backups over mutual TLS with `tls` (`[tls]`).
+    #[must_use]
+    pub fn with_tls(mut self, tls: InternalTls) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// GET `url`: over mutual TLS for `https://`, plain HTTP otherwise.
+    async fn get(&self, url: &str) -> Result<hyper::Response<hyper::body::Incoming>> {
+        let (https, host, port) = split_url(url)?;
+        if !https {
+            let uri: hyper::Uri = url
+                .parse()
+                .map_err(|e| SprigError::internal(format!("{url}: {e}")))?;
+            return self
+                .http
+                .get(uri)
+                .await
+                .map_err(|e| SprigError::internal(format!("{url}: {e}")));
+        }
+        let tls = self.tls.as_ref().ok_or_else(|| {
+            SprigError::internal(format!("{url} needs TLS, and this agent has no [tls]"))
+        })?;
+        let stream = tls.connect(&host, port).await?;
+        let (mut send, conn) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                .await
+                .map_err(|e| SprigError::internal(format!("{url}: {e}")))?;
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                tracing::debug!(error = %e, "backup connection ended");
+            }
+        });
+        let path = url
+            .splitn(4, '/')
+            .nth(3)
+            .map_or_else(|| "/".to_owned(), |p| format!("/{p}"));
+        let req = hyper::Request::get(path)
+            .header(header::HOST, format!("{host}:{port}"))
+            .body(http_body_util::Full::new(Bytes::new()))
+            .map_err(|e| SprigError::internal(format!("{url}: {e}")))?;
+        send.send_request(req)
+            .await
+            .map_err(|e| SprigError::internal(format!("{url}: {e}")))
     }
 
     async fn ticket(&self, job: &str) -> Result<RebuildTicket> {
@@ -411,10 +461,7 @@ impl RebuildService {
         // 1. Stream into a fresh staging directory.
         Self::set(status, RebuildPhase::Streaming);
         self.shell
-            .sh(&format!(
-                "rm -rf {s} && mkdir -p {s}",
-                s = q(&staging)
-            ))
+            .sh(&format!("rm -rf {s} && mkdir -p {s}", s = q(&staging)))
             .await?;
         let mut child = self
             .shell
@@ -438,12 +485,8 @@ impl RebuildService {
             t.source_url.trim_end_matches('/'),
             t.job_id
         );
-        let uri: hyper::Uri = url
-            .parse()
-            .map_err(|e| SprigError::internal(format!("source URL {}: {e}", t.source_url)))?;
         let resp = self
-            .http
-            .get(uri)
+            .get(&url)
             .await
             .map_err(|e| SprigError::internal(format!("backup from {}: {e}", t.source_node)))?;
         if !resp.status().is_success() {
@@ -613,6 +656,7 @@ impl RebuildService {
     ///
     /// # Errors
     /// The ticket doesn't admit the request; the backup couldn't start.
+    #[allow(clippy::too_many_lines)] // the stream, its pacing and its end
     pub async fn backup(&self, job: &str, token: &str) -> Result<Body> {
         let t = self.ticket(job).await?;
         if t.cluster != self.cluster.as_str() || t.source_node != self.node.as_str() {
@@ -715,9 +759,7 @@ impl RebuildService {
             }
             let status = child.wait().await;
             let err = err_task.await.unwrap_or_default();
-            let _ = shell
-                .sh(&format!("rm -rf {} {}", q(&dir), q(&cnf)))
-                .await;
+            let _ = shell.sh(&format!("rm -rf {} {}", q(&dir), q(&cnf))).await;
             match (broken, status) {
                 (None, Ok(s)) if s.success() => {
                     tracing::info!(%job, bytes = sent, elapsed_ms = ms(t0.elapsed()), "backup streamed");
@@ -834,21 +876,103 @@ pub fn router(state: Arc<RebuildService>) -> Router {
         .with_state(state)
 }
 
-/// Serves the routes on `listener` until `stop`.
+/// Serves the routes on `listener` until `stop`: over mutual TLS when the
+/// service has `[tls]` ([`RebuildService::with_tls`]), else plain HTTP.
 pub fn serve(
     listener: tokio::net::TcpListener,
     state: Arc<RebuildService>,
     stop: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+    let tls = state.tls.clone();
     let app = router(state);
     tokio::spawn(async move {
-        let r = axum::serve(listener, app)
-            .with_graceful_shutdown(async move { stop.cancelled().await })
-            .await;
+        let stopped = {
+            let stop = stop.clone();
+            async move { stop.cancelled().await }
+        };
+        let r = match tls {
+            Some(tls) => match TlsListener::start(listener, &tls, stop) {
+                Ok(l) => axum::serve(l, app).with_graceful_shutdown(stopped).await,
+                Err(e) => Err(e),
+            },
+            None => {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(stopped)
+                    .await
+            }
+        };
         if let Err(e) = r {
             tracing::warn!(error = %e, "agent internal service stopped");
         }
     })
+}
+
+/// Mutual-TLS connections for `axum::serve`: TCP accepts here, each
+/// handshake in its own task (at most [`HANDSHAKE_TIMEOUT`]), so a slow or
+/// foreign client never holds up the others; a failed handshake (no
+/// certificate, or one the internal CA didn't sign) is dropped.
+struct TlsListener {
+    rx: tokio::sync::mpsc::Receiver<(
+        tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        std::net::SocketAddr,
+    )>,
+    local: std::net::SocketAddr,
+}
+
+impl TlsListener {
+    fn start(
+        listener: tokio::net::TcpListener,
+        tls: &InternalTls,
+        stop: CancellationToken,
+    ) -> std::io::Result<Self> {
+        let local = listener.local_addr()?;
+        let acceptor = tls.acceptor();
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                let (tcp, peer) = tokio::select! {
+                    () = stop.cancelled() => return,
+                    r = listener.accept() => match r {
+                        Ok(x) => x,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "internal service accept failed");
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            continue;
+                        }
+                    },
+                };
+                let (acceptor, tx) = (acceptor.clone(), tx.clone());
+                tokio::spawn(async move {
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                        Ok(Ok(s)) => {
+                            let _ = tx.send((s, peer)).await;
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(%peer, error = %e, "internal service: TLS handshake refused");
+                        }
+                        Err(_) => tracing::warn!(%peer, "internal service: TLS handshake timed out"),
+                    }
+                });
+            }
+        });
+        Ok(Self { rx, local })
+    }
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        match self.rx.recv().await {
+            Some(c) => c,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Ok(self.local)
+    }
 }
 
 #[cfg(test)]

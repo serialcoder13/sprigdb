@@ -70,6 +70,7 @@ pub mod settings;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+pub mod token;
 pub mod verifier;
 
 pub use account::{

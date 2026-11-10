@@ -617,6 +617,16 @@ impl CheckCtx<'_> {
         else {
             return Ok(());
         };
+        // Chapter 30's retryable-write records (`decisions/r5-interim.md`
+        // D12): the document engine writes them in the write's own
+        // transaction for any user of the database. Only the engine's
+        // internal statements can name a `__sprig_` table (chapter 07),
+        // and the writes they record are checked on their collections.
+        if name.eq_ignore_ascii_case(sprig_auth::authz::backend::DOC_SESSIONS_TABLE)
+            && self.p.sees_database(&key, Some(row.db_id))
+        {
+            return Ok(());
+        }
         let okey = object_key(ObjectKind::Table, name, self.lctn);
         let target = self.relation(&key, row.db_id, &okey);
         if let Some(a) = any.iter().find(|a| self.p.allows(*a, target)) {
@@ -733,6 +743,15 @@ impl CheckCtx<'_> {
                     }
                     let key = database_key(&d, self.lctn);
                     if self.p.allows(*action, Target::Database { db_key: &key }) {
+                        return Ok(());
+                    }
+                    // The records table (see `table`), created on a
+                    // database's first retryable write.
+                    if o.eq_ignore_ascii_case(sprig_auth::authz::backend::DOC_SESSIONS_TABLE)
+                        && self
+                            .p
+                            .sees_database(&key, self.cat.database(&key).map(|r| r.db_id))
+                    {
                         return Ok(());
                     }
                     // MySQL accepts a table-level grant for the table

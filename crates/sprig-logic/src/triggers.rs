@@ -517,6 +517,31 @@ pub struct RunOpts {
     pub ack_every: Duration,
     /// Items read ahead of the checkpoint at most.
     pub max_in_flight: usize,
+    /// Resolves these settings again while a runner runs (a worker's live
+    /// settings): attempts and retry waits follow it at each failure;
+    /// lanes stay as they started. `None` keeps them fixed.
+    pub live: Option<LiveRunOpts>,
+}
+
+/// A source of [`RunOpts`] as they resolve now.
+#[derive(Clone)]
+pub struct LiveRunOpts(pub std::sync::Arc<dyn Fn() -> RunOpts + Send + Sync>);
+
+impl std::fmt::Debug for LiveRunOpts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiveRunOpts")
+    }
+}
+
+impl RunOpts {
+    /// The settings as they are now: [`RunOpts::live`]'s, else these.
+    #[must_use]
+    pub fn current(&self) -> RunOpts {
+        match &self.live {
+            Some(l) => (l.0)(),
+            None => self.clone(),
+        }
+    }
 }
 
 impl Default for RunOpts {
@@ -528,6 +553,7 @@ impl Default for RunOpts {
             retry_max: Duration::from_secs(300),
             ack_every: Duration::from_secs(1),
             max_in_flight: 10_000,
+            live: None,
         }
     }
 }
@@ -590,6 +616,9 @@ async fn deliver(
             }
             Err(e) => {
                 stats.retries.fetch_add(1, Ordering::Relaxed);
+                // `logic.trigger_*` as they resolve now.
+                let now = opts.current();
+                let opts = &now;
                 if !e.retryable {
                     failures += 1;
                 }

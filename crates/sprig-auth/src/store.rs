@@ -10,9 +10,10 @@
 //!
 //! Format 1 creates `users`, `verifiers` and `login_state` exactly as
 //! Appendix C defines them, plus the user id counter
-//! `sprig.next_user_id`; format 2 adds `api_keys`, and format 3 adds
-//! `scram_sha_512` to `verifiers.mechanism`. The other chapter 14 tables
-//! (`user_factors`, `token_sessions`, `oidc_issuers`, `claim_mappings`)
+//! `sprig.next_user_id`; format 2 adds `api_keys`, format 3 adds
+//! `scram_sha_512` to `verifiers.mechanism`, and format 4 adds
+//! `token_sessions` ([`crate::token`]). The other chapter 14 tables
+//! (`user_factors`, `oidc_issuers`, `claim_mappings`)
 //! arrive as later expand migrations with the steps that use them.
 //!
 //! **Versioning.** `users` and `verifiers` are versioned by the tenant's
@@ -138,6 +139,12 @@ pub static AUTH_MIGRATIONS: &[Migration] = &[
         phase: Phase::Expand,
         name: "verifiers.mechanism gains scram_sha_512",
         statements: &[ALTER_VERIFIERS_SCRAM_SHA_512],
+    },
+    Migration {
+        format: 4,
+        phase: Phase::Expand,
+        name: "token_sessions",
+        statements: &[crate::token::sessions::DDL_TOKEN_SESSIONS],
     },
 ];
 

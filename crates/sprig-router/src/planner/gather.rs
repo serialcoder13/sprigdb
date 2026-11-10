@@ -613,7 +613,7 @@ fn guard(stmt: &Statement, why: &Rejection) -> R<()> {
 /// comparisons, `AND`, `OR`, `NOT`, `IS [NOT] NULL`, `IN (…)`, `BETWEEN`
 /// and `LIKE`. Strings with backslashes or quotes, user variables and
 /// anything else stay in the statement only.
-fn pushable(e: &Expr) -> bool {
+pub(crate) fn pushable(e: &Expr) -> bool {
     let ident_ok = |i: &sqlparser::ast::Ident| {
         matches!(i.quote_style, None | Some('`')) && !i.value.starts_with('@')
     };

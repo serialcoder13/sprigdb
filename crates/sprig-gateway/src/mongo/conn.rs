@@ -81,6 +81,8 @@ pub struct Conn {
     /// A restore connection (`mongorestore`): indexes are `migrated`.
     pub(crate) restore: bool,
     pub(crate) hello_done: bool,
+    /// A fail point closes the connection without a reply.
+    pub(crate) close_now: bool,
 }
 
 impl std::fmt::Debug for Conn {
@@ -122,6 +124,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
         dc: None,
         restore: false,
         hello_done: false,
+        close_now: false,
     };
     let close = conn.close_soon.clone();
     let mut next_id = 1i32;
@@ -167,6 +170,9 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                 Frame::Msg(m) => {
                     let more = m.flags & FLAG_MORE_TO_COME != 0;
                     let (name, body) = st.dispatch(m).await;
+                    if st.close_now {
+                        return Ok(());
+                    }
                     let comp = comp.filter(|_| !NEVER_COMPRESSED.contains(&name.as_str()));
                     if more {
                         (None, None)
@@ -557,6 +563,106 @@ impl Conn {
                 .to_doc(),
             );
         }
+        // Driver test suites' fail point (D18), when the operator allows it.
+        let tenant = self
+            .principal
+            .as_ref()
+            .and_then(|p| p.tenant)
+            .map_or(0, |t| t.0);
+        if name == "configureFailPoint" {
+            let r = if self.shared.test_commands() && self.principal.is_some() {
+                self.shared.failpoints.configure(tenant, &body)
+            } else {
+                Err(MongoError::new(
+                    code::COMMAND_NOT_FOUND,
+                    "no such command: 'configureFailPoint'",
+                ))
+            };
+            return (name, r.unwrap_or_else(|e| e.to_doc()));
+        }
+        let injected = if self.principal.is_some() && self.shared.test_commands() {
+            let app = self
+                .client_meta
+                .as_ref()
+                .and_then(|m| m.get_document("application").ok())
+                .and_then(|a| a.get_str("name").ok())
+                .map(str::to_owned);
+            self.shared.failpoints.check(tenant, &name, app.as_deref())
+        } else {
+            None
+        };
+        if let Some(i) = &injected {
+            if let Some(b) = i.block {
+                tokio::time::sleep(b).await;
+            }
+            if i.close {
+                self.close_now = true;
+                return (name, Document::new());
+            }
+            if let Some(c) = i.error_code {
+                let mut e = MongoError::new(c, "Failing command via 'failCommand' failpoint");
+                match &i.labels {
+                    Some(l) => {
+                        for x in l {
+                            let known = [
+                                "RetryableWriteError",
+                                "TransientTransactionError",
+                                "UnknownTransactionCommitResult",
+                                "NoWritesPerformed",
+                                "ResumableChangeStreamError",
+                                "NonResumableChangeStreamError",
+                                "SystemOverloadedError",
+                                "RetryableError",
+                            ];
+                            if let Some(k) = known.iter().find(|k| **k == x.as_str()) {
+                                e = e.label(k);
+                            }
+                        }
+                    }
+                    None => {
+                        let retryable = super::retry::applies(&name, &body)
+                            || matches!(name.as_str(), "commitTransaction" | "abortTransaction");
+                        if retryable && super::retry::retryable_code(c) {
+                            e = e.label("RetryableWriteError");
+                        }
+                    }
+                }
+                return (name, e.to_doc());
+            }
+        }
+        // The other two fail points of the drivers' tests.
+        let mut close_after = false;
+        if self.principal.is_some() && self.shared.test_commands() {
+            if name == "getMore"
+                && let Some(c) = self
+                    .shared
+                    .failpoints
+                    .named(tenant, "failGetMoreAfterCursorCheckout")
+                    .and_then(|i| i.error_code)
+            {
+                return (
+                    name,
+                    MongoError::new(c, "Failing getMore via failGetMoreAfterCursorCheckout")
+                        .to_doc(),
+                );
+            }
+            if super::retry::applies(&name, &body)
+                && let Some(i) = self
+                    .shared
+                    .failpoints
+                    .named(tenant, "onPrimaryTransactionalWrite")
+            {
+                if let Some(c) = i.error_code {
+                    let mut e =
+                        MongoError::new(c, "Failing write via onPrimaryTransactionalWrite");
+                    if super::retry::retryable_code(c) {
+                        e = e.label("RetryableWriteError");
+                    }
+                    return (name, e.to_doc());
+                }
+                close_after = i.close;
+            }
+        }
         let r = match name.as_str() {
             "hello" | "isMaster" | "ismaster" => self.hello(&body, false).await,
             "saslStart" => self.sasl_start(&body).await,
@@ -570,6 +676,11 @@ impl Conn {
             }
             _ => super::commands::run(self, &name, &body).await,
         };
+        if close_after {
+            // The write committed; the client never hears.
+            self.close_now = true;
+            return (name, Document::new());
+        }
         let result = if r.is_ok() { "ok" } else { "error" };
         metrics::counter!("sprig_mongo_commands_total", "command" => name.clone(), "result" => result).increment(1);
         metrics::histogram!("sprig_mongo_command_duration_seconds", "command" => name.clone())
@@ -578,6 +689,9 @@ impl Conn {
             Ok(mut d) => {
                 if !d.contains_key("ok") {
                     d.insert("ok", 1.0);
+                }
+                if let Some(w) = injected.and_then(|i| i.write_concern_error) {
+                    d.insert("writeConcernError", w);
                 }
                 d
             }

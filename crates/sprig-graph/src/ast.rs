@@ -78,6 +78,26 @@ pub enum Clause {
         /// What to delete.
         exprs: Vec<Expr>,
     },
+    /// `CALL { subquery }`, or `CALL (a, b) { ... }` with a scope clause:
+    /// run once per incoming row.
+    Subquery {
+        /// The variables imported by a scope clause (`None`: the
+        /// subquery's leading `WITH` imports).
+        imports: Option<Vec<String>>,
+        /// The subquery.
+        query: Box<Query>,
+    },
+    /// `FOREACH (var IN list | updates)`.
+    Foreach {
+        /// The variable.
+        var: String,
+        /// The list.
+        list: Expr,
+        /// The update clauses run for each element.
+        body: Vec<Clause>,
+    },
+    /// Index and constraint commands.
+    Schema(Schema),
     /// `CALL proc(args) [YIELD ...] [WHERE ...]`.
     Call {
         /// Dotted procedure name.
@@ -88,6 +108,56 @@ pub enum Clause {
         yields: Option<Vec<(String, String)>>,
         /// `WHERE` after `YIELD`.
         where_: Option<Expr>,
+    },
+}
+
+/// Whether an index or constraint is on nodes or relationships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entity {
+    /// `FOR (n:Label)`.
+    Node,
+    /// `FOR ()-[r:TYPE]-()`.
+    Relationship,
+}
+
+/// Index kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexKind {
+    /// `RANGE` (the default).
+    Range,
+    /// `TEXT`: string values only.
+    Text,
+}
+
+/// Index and constraint commands (chapter 43, "Indexes and
+/// constraints").
+#[derive(Debug, Clone, PartialEq)]
+pub enum Schema {
+    /// `CREATE INDEX` or `CREATE CONSTRAINT ... IS UNIQUE`.
+    Create {
+        /// The name (`None`: generated).
+        name: Option<String>,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// A uniqueness constraint (with its backing index).
+        unique: bool,
+        /// The index kind.
+        kind: IndexKind,
+        /// Nodes or relationships.
+        entity: Entity,
+        /// The label or relationship type.
+        token: String,
+        /// The properties.
+        props: Vec<String>,
+    },
+    /// `DROP INDEX name` or `DROP CONSTRAINT name`.
+    Drop {
+        /// `CONSTRAINT`.
+        constraint: bool,
+        /// The name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
     },
 }
 
@@ -369,6 +439,34 @@ pub enum Expr {
     /// A slot the binder filled: the pattern predicate's result
     /// variable.
     Slot(String),
+    /// `n {.a, .*, k: e, v}`.
+    MapProjection(Box<Expr>, Vec<MapItem>),
+    /// `EXISTS { ... }`, `COUNT { ... }`, `COLLECT { ... }`.
+    Subquery(SubqueryKind, Box<Query>),
+}
+
+/// An entry of a map projection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MapItem {
+    /// `.key`.
+    Prop(String),
+    /// `.*`.
+    All,
+    /// `key: expr`.
+    Lit(String, Expr),
+    /// `var`: `var: var`.
+    Var(String),
+}
+
+/// An expression subquery's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubqueryKind {
+    /// `EXISTS { }`: whether it has a row.
+    Exists,
+    /// `COUNT { }`: its row count.
+    Count,
+    /// `COLLECT { }`: its one column as a list.
+    Collect,
 }
 
 impl Expr {
@@ -425,7 +523,16 @@ impl Expr {
                 list.walk(f);
                 pred.walk(f);
             }
-            Expr::Lit(_)
+            Expr::MapProjection(b, items) => {
+                b.walk(f);
+                for i in items {
+                    if let MapItem::Lit(_, e) = i {
+                        e.walk(f);
+                    }
+                }
+            }
+            Expr::Subquery(..)
+            | Expr::Lit(_)
             | Expr::Param(_)
             | Expr::Var(_)
             | Expr::CountStar

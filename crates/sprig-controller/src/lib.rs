@@ -81,7 +81,11 @@ pub mod settings;
 pub mod settings_admin;
 pub mod sharding;
 pub mod sharding_runtime;
+// Chapter 25 (R2, r2final): job standbys kept current by the mover.
+pub mod standby;
 pub mod streams_loop;
+// Chapter 33 (R6): the key-value sweeper job.
+pub mod kv_sweep_loop;
 // Chapter 51 (R9): sink tasks.
 pub mod sinks_loop;
 pub mod tenants;
@@ -461,8 +465,25 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(logic_loop::LogicLoop::new(logic_locator)))
         .with_loop(Loop::new(inherit_loop::InheritLoop))
         .with_loop(Loop::new(streams_loop::StreamsLoop))
+        .with_loop(Loop::new(kv_sweep_loop::KvSweepLoop::new(Some((
+            settings.live.clone(),
+            dc.clone(),
+        )))))
         .with_loop(Loop::new(sinks_loop::SinksLoop::default()))
         .global_candidate(cfg.controller.global_candidate);
+    // Chapter 25 (r2final): job standbys, in single-etcd mode (the loop
+    // writes the standby DC's tier through the one etcd).
+    let rt = if single_etcd(&cfg.meta) {
+        rt.with_loop(Loop::new(standby::StandbyLoop::new(
+            dc.clone(),
+            Arc::clone(&stores.dc),
+            Arc::clone(&stores.global),
+            Arc::clone(&clock),
+            Some(settings.live.clone()),
+        )))
+    } else {
+        rt
+    };
     // Chapter 25 (R2): the DC lease, permits, observations, the return of
     // a lost DC and the global failover decision (failover::role).
     let failover = failover::role::FailoverRole::new(
@@ -511,6 +532,12 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .as_deref()
         .map(http::load_token)
         .transpose()?;
+    let gateway_token = cfg
+        .controller
+        .gateway_token_file
+        .as_deref()
+        .map(http::load_token)
+        .transpose()?;
     let listener = http::bind(cfg.controller.admin_addr, token.as_deref()).await?;
     let admin_addr = listener
         .local_addr()
@@ -530,7 +557,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     );
     let admin = tokio::spawn(http::serve(
         listener,
-        http::router(svc, token),
+        http::router_with(svc, token, gateway_token),
         ctx.shutdown.clone(),
     ));
     // Gateways find the leader's Admin API here (chapter 37 step 4).

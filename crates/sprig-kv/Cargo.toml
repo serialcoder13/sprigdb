@@ -8,5 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+getrandom.workspace = true
+sprig-common.workspace = true
+# Routing hashes: the same xxh3_64 over normalized bytes as every table.
+sprig-shard.workspace = true
+
 [lints]
 workspace = true

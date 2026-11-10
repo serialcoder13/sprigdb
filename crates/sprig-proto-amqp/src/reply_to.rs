@@ -4,10 +4,14 @@
 //! A requester consumes `amq.rabbitmq.reply-to` (0-9-1, `no_ack`) or
 //! attaches a volatile receiving link (1.0); its published `reply_to` is
 //! rewritten to `amq.rabbitmq.reply-to.<token>`, where the token is
-//! base64url of `(gateway, connection, channel, nonce)` and an HMAC under
-//! this gateway's key, so responders can't forge names that reach another
-//! connection. A reply published to the default exchange with that name
-//! as the routing key goes straight to the requester's connection.
+//! base64url of `(gateway, connection, channel, nonce, tenant)` and an HMAC
+//! under this gateway's key, so responders can't forge names that reach
+//! another connection. A reply published to the default exchange with that
+//! name as the routing key goes straight to the requester's connection,
+//! only from a connection of the requester's own tenant: the key is shared
+//! by the data center's gateways, so a name that leaked to another tenant
+//! would otherwise carry that tenant's message into the requester's
+//! connection (the lead's choice on r9queues2's decision 7).
 //!
 //! Replies for a requester on another gateway go over the peer service
 //! (7403): gateways that share the key ([`DirectReplyTo::with_key`]) check
@@ -34,11 +38,14 @@ pub const PSEUDO_QUEUE: &str = "amq.rabbitmq.reply-to";
 pub const PREFIX: &str = "amq.rabbitmq.reply-to.";
 
 const MAC_LEN: usize = 16;
+/// Gateway (4), connection (8), channel (2), nonce (8), tenant (8).
+const BODY_LEN: usize = 30;
 
 struct Entry {
     events: EventSender,
     consumer: ConsumerId,
     nonce: u64,
+    tenant: u64,
 }
 
 /// Carries replies to requesters on other gateways (the peer service).
@@ -74,6 +81,8 @@ pub struct ReplyAddr {
     /// Its channel (0-9-1) or link handle slot (1.0).
     pub channel: u16,
     nonce: u64,
+    /// The requester's tenant (0 for a connection without one).
+    pub tenant: u64,
 }
 
 impl DirectReplyTo {
@@ -109,13 +118,15 @@ impl DirectReplyTo {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Registers a requester; returns its reply-to name.
+    /// Registers a requester of tenant `tenant`; returns its reply-to
+    /// name.
     pub fn register(
         &self,
         conn: ConnKey,
         channel: u16,
         consumer: ConsumerId,
         events: EventSender,
+        tenant: u64,
     ) -> String {
         let mut n = [0u8; 8];
         let _ = SystemRandom::new().fill(&mut n);
@@ -126,9 +137,10 @@ impl DirectReplyTo {
                 events,
                 consumer,
                 nonce,
+                tenant,
             },
         );
-        self.name(conn, channel, nonce)
+        self.name(conn, channel, nonce, tenant)
     }
 
     /// The requester registered on `(conn, channel)`, and its name.
@@ -136,7 +148,7 @@ impl DirectReplyTo {
     pub fn lookup(&self, conn: ConnKey, channel: u16) -> Option<(ConsumerId, String)> {
         let g = self.lock();
         let e = g.get(&(conn, channel))?;
-        Some((e.consumer, self.name(conn, channel, e.nonce)))
+        Some((e.consumer, self.name(conn, channel, e.nonce, e.tenant)))
     }
 
     /// Removes a requester.
@@ -149,12 +161,13 @@ impl DirectReplyTo {
         self.lock().retain(|(c, _), _| *c != conn);
     }
 
-    fn name(&self, conn: ConnKey, channel: u16, nonce: u64) -> String {
-        let mut raw = Vec::with_capacity(22 + MAC_LEN);
+    fn name(&self, conn: ConnKey, channel: u16, nonce: u64, tenant: u64) -> String {
+        let mut raw = Vec::with_capacity(BODY_LEN + MAC_LEN);
         raw.extend_from_slice(&self.gateway.to_be_bytes());
         raw.extend_from_slice(&conn.0.to_be_bytes());
         raw.extend_from_slice(&channel.to_be_bytes());
         raw.extend_from_slice(&nonce.to_be_bytes());
+        raw.extend_from_slice(&tenant.to_be_bytes());
         let tag = hmac::sign(&self.key, &raw);
         raw.extend_from_slice(&tag.as_ref()[..MAC_LEN]);
         format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(raw))
@@ -165,10 +178,10 @@ impl DirectReplyTo {
     #[must_use]
     pub fn decode(&self, name: &str) -> Option<ReplyAddr> {
         let raw = URL_SAFE_NO_PAD.decode(name.strip_prefix(PREFIX)?).ok()?;
-        if raw.len() != 22 + MAC_LEN {
+        if raw.len() != BODY_LEN + MAC_LEN {
             return None;
         }
-        let (body, mac) = raw.split_at(22);
+        let (body, mac) = raw.split_at(BODY_LEN);
         // The MAC is truncated: compare its prefix in constant time.
         let full = hmac::sign(&self.key, body);
         if !bool::from(full.as_ref()[..MAC_LEN].ct_eq(mac)) {
@@ -186,14 +199,22 @@ impl DirectReplyTo {
             conn: ConnKey(u64_at(4)),
             channel: u16::from_be_bytes([body[12], body[13]]),
             nonce: u64_at(14),
+            tenant: u64_at(22),
         })
     }
 
-    /// Whether `name` reaches a live requester (a passive
+    /// Decodes a name a connection of `tenant` may use: `None` for a
+    /// malformed or forged one, or one of another tenant's requester.
+    #[must_use]
+    pub fn decode_for(&self, name: &str, tenant: u64) -> Option<ReplyAddr> {
+        self.decode(name).filter(|a| a.tenant == tenant)
+    }
+
+    /// Whether `name` reaches a live requester of `tenant` (a passive
     /// `queue.declare` of it).
     #[must_use]
-    pub fn alive(&self, name: &str) -> bool {
-        self.decode(name).is_some_and(|a| {
+    pub fn alive(&self, name: &str, tenant: u64) -> bool {
+        self.decode_for(name, tenant).is_some_and(|a| {
             // Another gateway's requester: its name is genuine (the shared
             // key), and only its gateway knows whether it is still there.
             (a.gateway != self.gateway && self.relay.get().is_some())
@@ -205,24 +226,37 @@ impl DirectReplyTo {
         })
     }
 
-    /// Delivers a reply. `None` for a malformed or forged name (the
-    /// caller treats it as unroutable); `Some(false)` when the requester is
-    /// gone (the reply is dropped, and still counts as routed).
+    /// Delivers a reply from a connection of `tenant`. `None` for a
+    /// malformed or forged name, or another tenant's requester (the caller
+    /// treats it as unroutable); `Some(false)` when the requester is gone
+    /// (the reply is dropped, and still counts as routed).
     #[must_use]
-    pub fn deliver(&self, name: &str, message: Message) -> Option<bool> {
+    pub fn deliver(&self, name: &str, message: Message, tenant: u64) -> Option<bool> {
+        let a = self.decode_for(name, tenant)?;
+        Some(self.deliver_to(name, a, message))
+    }
+
+    /// Delivers a reply another gateway relayed: that gateway checked the
+    /// replier's tenant against the name already.
+    #[must_use]
+    pub fn deliver_relayed(&self, name: &str, message: Message) -> Option<bool> {
         let a = self.decode(name)?;
+        Some(self.deliver_to(name, a, message))
+    }
+
+    fn deliver_to(&self, name: &str, a: ReplyAddr, message: Message) -> bool {
         if a.gateway != self.gateway {
-            return Some(match self.relay.get() {
+            return match self.relay.get() {
                 Some(r) => {
                     r.relay(a.gateway, name, message);
                     true
                 }
                 None => false,
-            });
+            };
         }
         let g = self.lock();
         let Some(e) = g.get(&(a.conn, a.channel)).filter(|e| e.nonce == a.nonce) else {
-            return Some(false);
+            return false;
         };
         let d = Delivery {
             id: DeliveryId::default(),
@@ -232,14 +266,12 @@ impl DirectReplyTo {
             delivery_count: 0,
             annotations: FieldTable::new(),
         };
-        Some(
-            e.events
-                .send(Event::Deliver {
-                    consumer: e.consumer,
-                    delivery: d,
-                })
-                .is_ok(),
-        )
+        e.events
+            .send(Event::Deliver {
+                consumer: e.consumer,
+                delivery: d,
+            })
+            .is_ok()
     }
 }
 
@@ -267,26 +299,48 @@ mod tests {
         let r = DirectReplyTo::new(7);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let c = ConsumerId::next();
-        let name = r.register(ConnKey(42), 3, c, tx);
+        let name = r.register(ConnKey(42), 3, c, tx, 900);
         assert!(name.starts_with(PREFIX));
-        assert!(r.alive(&name));
+        assert!(r.alive(&name, 900));
         let a = r.decode(&name).unwrap();
-        assert_eq!((a.gateway, a.conn, a.channel), (7, ConnKey(42), 3));
-        assert_eq!(r.deliver(&name, msg()), Some(true));
+        assert_eq!(
+            (a.gateway, a.conn, a.channel, a.tenant),
+            (7, ConnKey(42), 3, 900)
+        );
+        assert_eq!(r.deliver(&name, msg(), 900), Some(true));
         assert!(matches!(rx.try_recv(), Ok(Event::Deliver { consumer, .. }) if consumer == c));
         // A flipped character fails the MAC.
         let mut forged = name.clone().into_bytes();
         let last = forged.len() - 3;
         forged[last] = if forged[last] == b'A' { b'B' } else { b'A' };
         let forged = String::from_utf8(forged).unwrap();
-        assert_eq!(r.deliver(&forged, msg()), None);
+        assert_eq!(r.deliver(&forged, msg(), 900), None);
         // Another gateway's key.
         let other = DirectReplyTo::new(7);
         assert!(other.decode(&name).is_none());
         // Gone requester: dropped, not an error.
         r.unregister(ConnKey(42), 3);
-        assert!(!r.alive(&name));
-        assert_eq!(r.deliver(&name, msg()), Some(false));
+        assert!(!r.alive(&name, 900));
+        assert_eq!(r.deliver(&name, msg(), 900), Some(false));
+    }
+
+    #[test]
+    fn another_tenant_can_not_reply() {
+        let r = DirectReplyTo::with_key(1, b"shared-in-the-dc");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let c = ConsumerId::next();
+        let name = r.register(ConnKey(9), 1, c, tx, 2_430_600_001);
+        // A connection of another tenant: unroutable, never delivered.
+        assert_eq!(r.deliver(&name, msg(), 2_430_600_002), None);
+        assert!(!r.alive(&name, 2_430_600_002));
+        assert!(rx.try_recv().is_err());
+        // Another gateway of the DC checks it the same way.
+        let b = DirectReplyTo::with_key(2, b"shared-in-the-dc");
+        assert!(b.decode_for(&name, 2_430_600_002).is_none());
+        assert!(b.decode_for(&name, 2_430_600_001).is_some());
+        // The requester's own tenant.
+        assert_eq!(r.deliver(&name, msg(), 2_430_600_001), Some(true));
+        assert!(matches!(rx.try_recv(), Ok(Event::Deliver { consumer, .. }) if consumer == c));
     }
 
     #[test]
@@ -295,22 +349,22 @@ mod tests {
         impl ReplyRelay for Hop {
             fn relay(&self, slot: u32, name: &str, message: Message) {
                 assert_eq!(slot, 1);
-                let _ = self.0.deliver(name, message);
+                let _ = self.0.deliver_relayed(name, message);
             }
         }
         let a = DirectReplyTo::with_key(1, b"shared");
         let b = DirectReplyTo::with_key(2, b"shared");
         let (tx, mut rx) = mpsc::unbounded_channel();
         let c = ConsumerId::next();
-        let name = a.register(ConnKey(5), 1, c, tx);
+        let name = a.register(ConnKey(5), 1, c, tx, 0);
         // Without a relay, another gateway's requester is dropped.
-        assert_eq!(b.deliver(&name, msg()), Some(false));
+        assert_eq!(b.deliver(&name, msg(), 0), Some(false));
         b.set_relay(Arc::new(Hop(Arc::clone(&a))));
-        assert!(b.alive(&name));
-        assert_eq!(b.deliver(&name, msg()), Some(true));
+        assert!(b.alive(&name, 0));
+        assert_eq!(b.deliver(&name, msg(), 0), Some(true));
         assert!(matches!(rx.try_recv(), Ok(Event::Deliver { consumer, .. }) if consumer == c));
         // Another key can't check the name: unroutable.
         let other = DirectReplyTo::with_key(3, b"other");
-        assert_eq!(other.deliver(&name, msg()), None);
+        assert_eq!(other.deliver(&name, msg(), 0), None);
     }
 }

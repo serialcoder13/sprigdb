@@ -21,6 +21,9 @@
 //!   functions, subqueries, set operations, joins of several groups or on
 //!   any condition) runs once on the session's cluster, over temporary
 //!   copies of the rows it reads ([`gather`]).
+//! - **Analytic reads** (R3): a gathered `SELECT` the analytic guard
+//!   accepts runs in DataFusion over streams of the shards' rows instead,
+//!   on keys that compare as MariaDB compares ([`analytics`]).
 //! - **Reject**: `ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE` (39420) with a
 //!   reason code; never a different answer.
 //!
@@ -37,6 +40,7 @@
 // The planner and executor follow the book step by step.
 #![allow(clippy::too_many_lines)]
 
+pub mod analytics;
 pub mod collation;
 pub mod exec;
 pub mod fk;
@@ -49,6 +53,7 @@ pub mod topology;
 pub mod value;
 pub mod write_notes;
 
+pub use analytics::{AnalyticsLimits, AnalyticsMode};
 pub use exec::{
     Budget, Output, RowSink, ShardBackend, ShardOk, ShardOutcome, ShardRows, ShardStream, execute,
     execute_to,

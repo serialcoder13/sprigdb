@@ -458,7 +458,7 @@ fn modelled(s: &Statement) -> bool {
 
 /// The parse view of a statement's tokens; `None` for text the view can't
 /// keep faithful.
-fn parse_view(text: &str, toks: &[Token]) -> Option<String> {
+pub(crate) fn parse_view(text: &str, toks: &[Token]) -> Option<String> {
     let bytes = text.as_bytes();
     let first = toks.first()?.start as usize;
     let last = toks.last()?.end as usize;

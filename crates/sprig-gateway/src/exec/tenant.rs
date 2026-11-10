@@ -247,6 +247,9 @@ const MYSQL_ONLY_VARS: &[&str] = &[
     "information_schema_stats_expiry",
     // mysqldump 8.4 sets it around events (R4; reads answer `NONE`).
     "terminology_use_previous",
+    // GTID tracking needs gtid_mode = ON, which 3306 reports OFF; MySQL
+    // Connector/J sets it (R4, r4close).
+    "session_track_gtids",
 ];
 
 /// Whether `text` is `SET [SESSION] v = literal [, ...]` of
@@ -436,7 +439,10 @@ impl PassSession {
         let mut pieces = split::split(&sql);
         if pieces.len() > 1 && !cx.proto.multi_statements {
             let second = pieces[1].as_ptr() as usize - sql.as_ptr() as usize;
-            return Err(multi_statements_off(&sql[second.min(sql.len())..]));
+            return Err(multi_statements_off(
+                &sql[second.min(sql.len())..],
+                self.persona,
+            ));
         }
         if pieces.is_empty() {
             pieces.push(sql);
@@ -523,6 +529,13 @@ impl PassSession {
         // Chapter 51 (R9): sinks and connections, before anything else
         // reads the text (it may hold credentials).
         if let Some(step) = Box::pin(self.tenant_sinks(cx, text, more, format, out)).await? {
+            return Ok(step);
+        }
+        // Chapter 42 (R9): inherited messaging objects (`FOR EACH TENANT`),
+        // before chapter 41's declarations and the stream layer see them.
+        if let Some(step) =
+            Box::pin(self.tenant_inherit_msg(cx, text, attrs, more, format, out)).await?
+        {
             return Ok(step);
         }
         let charset = cx.proto.collation;
@@ -912,6 +925,23 @@ impl PassSession {
         {
             return Ok(step);
         }
+        // 3306: MySQL's ONLY_FULL_GROUP_BY and ORDER BY rules (chapter
+        // 28, R4).
+        if let Some(e) = self.group_check(cx, text, &lex).await? {
+            return self.fail(out, &e).await;
+        }
+        let mysql_funcs;
+        let text: &Bytes = if self.persona == Persona::MySql84 {
+            match sprig_sql::compat::funcs::rewrite(text, &lex) {
+                Some(t) => {
+                    mysql_funcs = Bytes::from(t);
+                    &mysql_funcs
+                }
+                None => text,
+            }
+        } else {
+            text
+        };
         let attr_owned = attr_pairs(attrs);
         let mut retried = false;
         let planned = loop {
@@ -1246,6 +1276,14 @@ impl PassSession {
                 return Ok(Route::Done(self.fail(out, &e).await?));
             }
             (status & StatusFlags::MORE_RESULTS_EXISTS) | self.status()
+        } else if self.bs.as_ref().is_some_and(|b| b.pins().in_transaction()) {
+            // The same for a transaction on the session's own connection:
+            // the DDL runs on another one, so without the commit it would
+            // stay open (and its metadata locks could block the DDL).
+            if let Err(e) = self.backend_rows(cx, "COMMIT").await {
+                return Ok(Route::Done(self.fail(out, &e).await?));
+            }
+            (status & StatusFlags::MORE_RESULTS_EXISTS) | self.status()
         } else {
             status
         };
@@ -1306,6 +1344,15 @@ impl PassSession {
         let (lex, _) = self.lex_opts();
         if let Some(ts) = self.tenant.as_deref() {
             autoindex::make_room(ts, &ctl, target, original, &lex).await;
+        }
+        // Chapter 42 (r9fet item 23): the committed rows of a dropped
+        // database's cross-tenant outbox are forwarded first (39245 when
+        // they can't be within inherit.outbox_drain_seconds).
+        if let DdlStatement::DropDatabase { name, .. } = &stmt
+            && let Err(e) =
+                crate::inherited::outbox::before_drop_database(&svc, tenant, name, lctn).await
+        {
+            return Ok(Route::Done(self.fail(out, &e).await?));
         }
         let ctl_pool = ctl.clone();
         let ctl = MariaExecutor::new(ctl);
@@ -1786,6 +1833,18 @@ impl PassSession {
         } else {
             sql
         };
+        // 3306: MySQL checks ONLY_FULL_GROUP_BY when it prepares (chapter
+        // 28, R4).
+        if let Some(e) = self.group_check(cx, &sql, &lex).await? {
+            return Err(e);
+        }
+        let sql = match (self.persona == Persona::MySql84)
+            .then(|| sprig_sql::compat::funcs::rewrite(&sql, &lex))
+            .flatten()
+        {
+            Some(t) => Bytes::from(t),
+            None => sql,
+        };
         let current = self.current_logical();
         let Some(ts) = self.tenant.as_deref() else {
             return Err(SprigError::internal("no tenant"));
@@ -1818,6 +1877,10 @@ impl PassSession {
             .stored_names(crate::tenant::stored_names::ready(&ts.principal.backend.cluster))
             .oracle(self.oracle_mode());
         let p = plan(&sql, &pctx)?;
+        // An empty text: the servers' 1065 (PHP's mysqlnd tests check it).
+        if p.statements.is_empty() {
+            return Err(SprigError::standard(1065, *b"42000", "Query was empty"));
+        }
         let [sp] = p.statements.as_slice() else {
             return Err(SprigError::standard(
                 1064,

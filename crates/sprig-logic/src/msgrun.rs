@@ -172,6 +172,7 @@ async fn run_record(
             Err(e) => {
                 transient += 1;
                 tracing::debug!(error = %e, "trigger run: no gateway answered");
+                let opts = opts.current();
                 if !sleep_or_cancel(
                     backoff(transient, opts.retry_initial, opts.retry_max, &seed),
                     cancel,
@@ -198,6 +199,8 @@ async fn run_record(
             }
             RunOutcome::Failed => {
                 stats.failed.fetch_add(1, Ordering::Relaxed);
+                // `logic.trigger_*` as they resolve now.
+                let opts = opts.current();
                 let n = if reply.transient {
                     transient += 1;
                     transient
@@ -411,6 +414,7 @@ pub async fn run_queue(
                     Err(e) => {
                         errs += 1;
                         tracing::debug!(error = %e, "queue trigger: no gateway answered");
+                        let opts = opts.current();
                         backoff(errs, opts.retry_initial, opts.retry_max, &seed)
                     }
                     Ok(r) => {
@@ -450,6 +454,7 @@ pub async fn run_queue(
                                     .await;
                                 }
                                 let n = if r.transient { 1 } else { r.attempts + 1 };
+                                let opts = opts.current();
                                 backoff(
                                     n,
                                     opts.retry_initial,

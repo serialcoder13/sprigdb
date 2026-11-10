@@ -12,15 +12,25 @@
 //! - [`writes`]: the write commands, statement by statement;
 //! - [`retry`]: retryable writes, exactly once, with their records.
 //!
+//! - [`catalog`]: collections in the tenant catalog;
+//! - [`publish`]: the publication wait for new array paths;
+//! - [`changes`]: change streams over the change feed;
+//! - [`users`]: user and role commands over chapter 29's accounts.
+//!
 //! Interim scope (R5 interim, `decisions/r5-interim.md`): transactions on one executor
-//! session per `lsid`, no `$clusterTime` signing, and no users and roles
-//! commands.
+//! session per `lsid`, and no `$clusterTime` signing.
 
+pub mod catalog;
+pub mod changes;
 pub mod commands;
 pub mod conn;
 pub mod cursors;
+pub mod failpoint;
+pub mod publish;
 pub mod retry;
 pub mod sql;
+pub mod txn;
+pub mod users;
 pub mod writes;
 
 use std::borrow::Cow;
@@ -190,6 +200,12 @@ pub struct MongoDeps {
     pub gateway_id: String,
     /// Draining (91 `ShutdownInProgress` on `hello`).
     pub draining: Arc<std::sync::atomic::AtomicBool>,
+    /// The tenant services (catalog logins): collection metadata in the
+    /// tenant catalog. `None` keeps it in each database's hidden table.
+    pub tenants: Option<Arc<crate::tenant::TenantServices>>,
+    /// This DC's tier (shard maps and handoff records for change streams);
+    /// `None`: no change streams.
+    pub dc_store: Option<Arc<dyn sprig_meta::MetaStore>>,
 }
 
 impl std::fmt::Debug for MongoDeps {
@@ -206,6 +222,9 @@ pub struct Shared {
     pub(crate) cursors: cursors::CursorTable,
     pub(crate) txns: commands::TxnTable,
     pub(crate) records: retry::Records,
+    pub(crate) failpoints: failpoint::FailPoints,
+    pub(crate) feed: Option<changes::ChangeFeed>,
+    pub(crate) docs: Option<Arc<catalog::CatalogDocs>>,
     pub(crate) engine: sprig_doc::engine::Engine,
     pub(crate) decoy_secret: [u8; 32],
     pub(crate) process_id: bson::oid::ObjectId,
@@ -214,6 +233,14 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// `mongo.test_commands`: the `failCommand` fail point is accepted.
+    #[must_use]
+    pub fn test_commands(&self) -> bool {
+        self.d.live.as_ref().is_some_and(|(l, dc)| {
+            l.get(&failpoint::TEST_COMMANDS, &SettingCtx::process(dc))
+        })
+    }
+
     /// The settings now.
     #[must_use]
     pub fn settings(&self) -> MongoSettings {
@@ -240,13 +267,56 @@ impl MongoFrontend {
     /// which stops on `stop`.
     #[must_use]
     pub fn start(d: MongoDeps, stop: CancellationToken) -> Self {
+        // The publication wait (chapter 31's check_flags) needs the DC
+        // tier, where gateways acknowledge catalog versions.
+        let publisher = match (&d.tenants, &d.dc_store) {
+            (Some(t), Some(dc)) => {
+                let p = Arc::new(publish::Publisher::new(
+                    Arc::clone(dc),
+                    Arc::clone(t),
+                    d.gateway_id.clone(),
+                ));
+                tokio::spawn(Arc::clone(&p).run(stop.clone()));
+                Some(p)
+            }
+            _ => None,
+        };
+        let docs = d.tenants.as_ref().map(|t| {
+            let c = catalog::CatalogDocs::new(Arc::clone(t));
+            Arc::new(match publisher {
+                Some(p) => c.with_publisher(p),
+                None => c,
+            })
+        });
+        let feed = match (&d.tenants, &d.dc_store) {
+            (Some(t), Some(dc)) => {
+                let locator: Arc<dyn sprig_catalog::CatalogLocator> = t.locator.clone();
+                match changes::ChangeFeed::new(Arc::clone(&t.global), Arc::clone(dc), locator) {
+                    Ok(f) => Some(f),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "change streams unavailable");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let mut decoy_secret = [0u8; 32];
         let _ = getrandom::fill(&mut decoy_secret);
         let shared = Arc::new(Shared {
             cursors: cursors::CursorTable::new(&d.gateway_id),
             txns: commands::TxnTable::default(),
             records: retry::Records::default(),
-            engine: sprig_doc::engine::Engine::default(),
+            failpoints: failpoint::FailPoints::default(),
+            engine: match &docs {
+                Some(c) => sprig_doc::engine::Engine::with_catalog(
+                    sprig_doc::engine::EngineConfig::default(),
+                    Arc::clone(c) as Arc<dyn sprig_doc::catalog::DocCatalog>,
+                ),
+                None => sprig_doc::engine::Engine::default(),
+            },
+            feed,
+            docs,
             decoy_secret,
             process_id: bson::oid::ObjectId::new(),
             conn_ids: std::sync::atomic::AtomicI32::new(1),

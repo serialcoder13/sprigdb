@@ -2,7 +2,9 @@
 //! 03, "Declaring a key"), and [`RouterConfig`], what one statement reads.
 //!
 //! Only the keys the router uses are registered: R1's, and R3's
-//! `router.gather.*` for gathered reads; the cluster-local fallback,
+//! `router.gather.*` for gathered reads and `router.analytics.*` (with
+//! chapter 35's `analytics.datafusion_memory_mb` and
+//! `analytics.max_concurrent_per_gateway`) for analytic reads; the cluster-local fallback,
 //! pull-out subqueries, backend statement caching and shadow mode wait for
 //! their code. Scopes follow the chapter's table: **T** is tenant, dc and
 //! global; **G** is dc and global (one value per gateway).
@@ -76,6 +78,61 @@ key! {
     "Gathered reads per gateway at once"
 }
 
+key! {
+    /// `router.analytics.max_rows` (R3): rows an analytic read may read
+    /// from the shards (chapter 17, "Analytic reads (R3)").
+    ANALYTICS_MAX_ROWS = "router.analytics.max_rows", TENANT_DC, 50_000_000, 1, 10_000_000_000,
+    "Rows an analytic read may read from the shards"
+}
+key! {
+    /// `router.analytics.spill_mb` (R3): disk an analytic read's sorts and
+    /// aggregates may spill to; 0 refuses (39421) instead of spilling.
+    ANALYTICS_SPILL_MB = "router.analytics.spill_mb", TENANT_DC, 4096, 0, 1_048_576,
+    "Disk an analytic read may spill to (0: none)"
+}
+
+/// `router.analytics.mode` (R3): `off`, `fallback` or `prefer` (chapter
+/// 17, "Analytic reads (R3)", the selection rule).
+pub static ANALYTICS_MODE: Setting<std::borrow::Cow<'static, str>> = Setting {
+    key: "router.analytics.mode",
+    default: std::borrow::Cow::Borrowed("fallback"),
+    scopes: TENANT_DC,
+    hard: HardBounds::one_of(&["off", "fallback", "prefer"]),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 17,
+    doc: "off, fallback or prefer",
+};
+sprig_settings::register!(ANALYTICS_MODE);
+
+/// `analytics.datafusion_memory_mb` (chapter 35's key, used from R3 by
+/// chapter 17's analytic reads): DataFusion's memory pool per statement.
+pub static DATAFUSION_MEMORY_MB: Setting<u64> = Setting {
+    key: "analytics.datafusion_memory_mb",
+    default: 1024,
+    scopes: TENANT_DC,
+    hard: HardBounds::range(16, 65_536),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 35,
+    doc: "Memory per DataFusion query (R3)",
+};
+sprig_settings::register!(DATAFUSION_MEMORY_MB);
+
+/// `analytics.max_concurrent_per_gateway` (chapter 35's key): analytic
+/// reads one gateway runs at once (read when the first one runs).
+pub static ANALYTICS_MAX_CONCURRENT: Setting<u64> = Setting {
+    key: "analytics.max_concurrent_per_gateway",
+    default: 8,
+    scopes: GATEWAY,
+    hard: HardBounds::range(1, 1024),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 35,
+    doc: "Queries per gateway",
+};
+sprig_settings::register!(ANALYTICS_MAX_CONCURRENT);
+
 /// `fk.lock_wait_seconds` (chapter 19, R3): how long a foreign-key probe
 /// waits for a row lock (`LOCK IN SHARE MODE WAIT n`) before 1205.
 pub static FK_LOCK_WAIT_SECONDS: Setting<u64> = Setting {
@@ -111,6 +168,8 @@ pub struct RouterConfig {
     pub gather_max_concurrent: usize,
     /// `fk.lock_wait_seconds` (chapter 19).
     pub fk_lock_wait_seconds: u64,
+    /// Analytic reads (`router.analytics.*`, `analytics.*`).
+    pub analytics: crate::analytics::AnalyticsLimits,
 }
 
 impl Default for RouterConfig {
@@ -125,6 +184,13 @@ impl Default for RouterConfig {
             gather_max_rows: GATHER_MAX_ROWS.default,
             gather_max_concurrent: to_usize(GATHER_MAX_CONCURRENT.default),
             fk_lock_wait_seconds: FK_LOCK_WAIT_SECONDS.default,
+            analytics: crate::analytics::AnalyticsLimits {
+                mode: crate::analytics::AnalyticsMode::parse(&ANALYTICS_MODE.default),
+                memory_mb: DATAFUSION_MEMORY_MB.default,
+                spill_mb: ANALYTICS_SPILL_MB.default,
+                max_rows: ANALYTICS_MAX_ROWS.default,
+                max_concurrent: to_usize(ANALYTICS_MAX_CONCURRENT.default),
+            },
         }
     }
 }
@@ -139,7 +205,20 @@ impl RouterConfig {
     /// rows) for `ctx`.
     pub fn resolve(
         ctx: &SettingCtx<'_>,
+        get: impl FnMut(&'static Setting<u64>, &SettingCtx<'_>) -> u64,
+    ) -> Self {
+        Self::resolve_with(ctx, get, |k, _| k.default.clone().into_owned())
+    }
+
+    /// [`Self::resolve`], with `text` resolving the text keys
+    /// (`router.analytics.mode`).
+    pub fn resolve_with(
+        ctx: &SettingCtx<'_>,
         mut get: impl FnMut(&'static Setting<u64>, &SettingCtx<'_>) -> u64,
+        mut text: impl FnMut(
+            &'static Setting<std::borrow::Cow<'static, str>>,
+            &SettingCtx<'_>,
+        ) -> String,
     ) -> Self {
         Self {
             max_parallel_shards: to_usize(get(&MAX_PARALLEL_SHARDS, ctx)).max(1),
@@ -151,6 +230,13 @@ impl RouterConfig {
             gather_max_rows: get(&GATHER_MAX_ROWS, ctx),
             gather_max_concurrent: to_usize(get(&GATHER_MAX_CONCURRENT, ctx)).max(1),
             fk_lock_wait_seconds: get(&FK_LOCK_WAIT_SECONDS, ctx),
+            analytics: crate::analytics::AnalyticsLimits {
+                mode: crate::analytics::AnalyticsMode::parse(&text(&ANALYTICS_MODE, ctx)),
+                memory_mb: get(&DATAFUSION_MEMORY_MB, ctx),
+                spill_mb: get(&ANALYTICS_SPILL_MB, ctx),
+                max_rows: get(&ANALYTICS_MAX_ROWS, ctx).max(1),
+                max_concurrent: to_usize(get(&ANALYTICS_MAX_CONCURRENT, ctx)).max(1),
+            },
         }
     }
 }
@@ -177,6 +263,10 @@ mod tests {
             ("router.gather.max_rows", 100_000),
             ("router.gather.max_concurrent", 4),
             ("fk.lock_wait_seconds", 5),
+            ("router.analytics.max_rows", 50_000_000),
+            ("router.analytics.spill_mb", 4096),
+            ("analytics.datafusion_memory_mb", 1024),
+            ("analytics.max_concurrent_per_gateway", 8),
         ] {
             let def = reg
                 .get(k)

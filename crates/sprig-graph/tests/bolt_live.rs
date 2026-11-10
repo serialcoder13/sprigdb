@@ -11,7 +11,16 @@
 //!   `SPRIG_TEST_NEO4J_PASSWORD` (user `neo4j`): a reference Neo4j 5. It
 //!   runs one corpus on both and compares the answers.
 //!
+//! - `round_two_end_to_end` (R8 round 2) checks signed bookmarks,
+//!   streamed results, constraints and concurrent `MERGE` under one; with
+//!   `SPRIG_TEST_BOLT_REPL_USER` (a `tenant.user` whose tenant lives on a
+//!   primary with replicas) and `SPRIG_TEST_GW_METRICS` (the gateway's
+//!   `/metrics` URL) it also checks that `mode: "r"` reads wait on a
+//!   replica for the session's bookmark.
+//!
 //! Without the variables the tests skip.
+
+#![allow(clippy::many_single_char_names)]
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -23,6 +32,7 @@ use sprig_graph::mem::MemStore;
 use sprig_graph::{Budgets, execute};
 use sprig_proto_bolt::client::{BoltClient, ClientError, Rows};
 use sprig_proto_bolt::{PackValue, Request, Response};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 type Client = BoltClient<TcpStream>;
@@ -93,7 +103,11 @@ fn norm(v: &PackValue) -> String {
             }
             s
         }
-        PackValue::Struct { tag, .. } => format!("<struct {tag:#x}>"),
+        // Temporal and spatial structures: the tag and the fields.
+        PackValue::Struct { tag, fields } => format!(
+            "<{tag:#x} {}>",
+            fields.iter().map(norm).collect::<Vec<_>>().join(" ")
+        ),
     }
 }
 
@@ -169,14 +183,44 @@ const CORPUS: &[&str] = &[
     "RETURN [x IN range(1, 6) WHERE x % 2 = 0 | x * 10] AS a, all(x IN [1, 2] WHERE x > 0) AS b, any(x IN [1, 2] WHERE x > 1) AS c",
     "MATCH (n:Person) WHERE n.age >= 30 RETURN n.name ORDER BY n.age DESC SKIP 1",
     "MATCH (a:Person {name: 'Alice'}) RETURN a {.name, .age} AS m",
+    // Round 2: map projections, subqueries, FOREACH.
+    "MATCH (p:Person) RETURN p {.name, k: size(p.name), .nope} AS m ORDER BY m.name",
+    "MATCH (p:Person {name: 'Bob'}) RETURN p {.*} AS m",
+    "MATCH (p:Person) CALL { WITH p MATCH (p)-[:BOUGHT]->(x) RETURN count(x) AS n } RETURN p.name, n ORDER BY p.name",
+    "MATCH (p:Person {name: 'Carol'}) CALL (p) { MATCH (p)-[:BOUGHT]->(x) RETURN x.name AS x } RETURN x ORDER BY x",
+    "CALL { MATCH (p:Product) RETURN p.name AS n UNION MATCH (p:Person) WHERE p.age > 35 RETURN p.name AS n } RETURN n ORDER BY n",
+    "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:BOUGHT]->(x) WHERE x.price > 50 } RETURN p.name ORDER BY p.name",
+    "MATCH (p:Person) RETURN p.name, COUNT { (p)-[:KNOWS]-() } AS k ORDER BY p.name",
+    "MATCH (p:Person {name: 'Carol'}) RETURN COLLECT { MATCH (p)-[:BOUGHT]->(x) RETURN x.name ORDER BY x.name } AS xs",
+    "MATCH (a:Person {name: 'Alice'}) FOREACH (i IN [1, 2, 3] | CREATE (a)-[:TAGGED]->(:Tag {i: i}))",
+    "MATCH (:Person {name: 'Alice'})-[:TAGGED]->(t:Tag) RETURN sum(t.i) AS s, count(t) AS c",
+    "MATCH (t:Tag) FOREACH (x IN CASE WHEN t.i > 1 THEN [1] ELSE [] END | SET t.big = true)",
+    "MATCH (t:Tag) RETURN t.i, t.big ORDER BY t.i",
+    "MATCH (t:Tag) DETACH DELETE t",
+    // Temporal and spatial values.
+    "RETURN date('2020-01-31') + duration('P1M') AS a, time('12:30:15.5+02:00') AS b, datetime('2020-01-05T10:00:00[Europe/Berlin]') AS c, duration.between(date('2020-01-01'), date('2021-03-04')) AS d, localdatetime('2020-01-05T10:00') AS e, localtime('12:00') AS f, datetime('2020-01-05T10:00:00+01:00') AS g",
+    "RETURN toString(date('2020-01-05')) AS a, toString(localtime('12:00')) AS b, toString(datetime('2020-01-05T10:00:00[Europe/Berlin]')) AS c, toString(duration({days: 1, hours: 25})) AS d, date('2020-02-29').dayOfWeek AS e, date('2020-02-29').week AS f, datetime('2020-01-05T10:00:00+01:00').epochSeconds AS g, duration('PT90M').minutes AS h",
+    "RETURN point({x: 1, y: 2}) AS a, point({latitude: 55.6, longitude: 12.5}) AS b, point.distance(point({x: 0, y: 0}), point({x: 3, y: 4})) AS c, point.distance(point({latitude: 55.6, longitude: 12.5}), point({latitude: 56.0, longitude: 13.0})) AS d, point({x: 1, y: 2, z: 3}).crs AS e, toString(point({x: 1, y: 2})) AS f",
+    "CREATE (:Ev {at: date('2021-05-01'), t: localtime('09:30:00.25'), d: duration('P2D'), p: point({x: 1.5, y: 2}), ds: [date('2020-01-01'), date('2020-01-02')]}), (:Ev {at: date('2020-05-01'), t: localtime('10:00'), d: duration('P1D'), p: point({x: 0, y: 0})})",
+    "MATCH (e:Ev) RETURN e.at, e.t, e.d, e.p, e.ds ORDER BY e.at",
+    "MATCH (e:Ev) WHERE e.at > date('2021-01-01') RETURN e.at.year AS y, e.p.x AS x",
+    "MATCH (e:Ev) DETACH DELETE e",
+    // Indexes and constraints (schema persists on the reference: IF NOT
+    // EXISTS / IF EXISTS keep reruns clean).
+    "CREATE CONSTRAINT r8g2_person_email IF NOT EXISTS FOR (p:Person) REQUIRE p.email IS UNIQUE",
+    "CREATE INDEX r8g2_product_name IF NOT EXISTS FOR (p:Product) ON (p.name)",
+    "SHOW INDEXES YIELD name, type, entityType, labelsOrTypes, properties, owningConstraint WHERE name STARTS WITH 'r8g2' OR type = 'LOOKUP' RETURN * ORDER BY name",
+    "SHOW CONSTRAINTS YIELD name, type, entityType, labelsOrTypes, properties, ownedIndex WHERE name STARTS WITH 'r8g2' RETURN * ORDER BY name",
+    "MATCH (p:Product {name: 'Desk'}) RETURN p.price",
+    "MATCH (p:Person) WHERE p.email = 'alice@example.com' RETURN p.name",
+    "MERGE (p:Person {email: 'alice@example.com'}) RETURN p.name, p.age",
+    "DROP INDEX r8g2_product_name IF EXISTS",
+    "DROP CONSTRAINT r8g2_person_email IF EXISTS",
 ];
 
 /// Statements the differential leaves out, with the reason (shown in the
 /// test output).
-const KNOWN_GAPS: &[(&str, &str)] = &[(
-    "RETURN a {.name, .age}",
-    "map projections are not supported yet (39900)",
-)];
+const KNOWN_GAPS: &[(&str, &str)] = &[];
 
 async fn fresh(c: &mut Client, extra: &[(&str, PackValue)]) {
     c.query("MATCH (n) DETACH DELETE n", vec![], extra.to_vec())
@@ -554,7 +598,11 @@ async fn differential_against_neo4j() {
         eprintln!("skipped: SPRIG_TEST_BOLT_* and SPRIG_TEST_NEO4J_ADDR / _PASSWORD not set");
         return;
     };
-    let db = [("db", PackValue::str("r8graphs_g.diff"))];
+    // `SPRIG_TEST_BOLT_DIFF_DB` names another graph (round 3: one in a
+    // database whose `sharding.min_shards` is 4).
+    let diff_db = env("SPRIG_TEST_BOLT_DIFF_DB").unwrap_or_else(|| "r8graphs_g.diff".into());
+    let db = [("db", PackValue::String(diff_db.clone()))];
+    eprintln!("differential graph: {diff_db}");
     // The graph `r8graphs_g.diff` is created on demand through SQL by the
     // end-to-end test's helper; here the default graph route is avoided.
     let mut g = connect(&addr, &user, &pw).await.expect("gateway");
@@ -613,4 +661,588 @@ async fn differential_against_neo4j() {
         .expect("clean");
     assert!(diffs.is_empty(), "{} statements differ", diffs.len());
     tokio::time::sleep(Duration::from_millis(1)).await;
+}
+
+/// Pulls everything of an open result with `PULL {n}` batches: (records,
+/// batches, the last summary).
+async fn pull_all(c: &mut Client, n: i64, qid: i64) -> (usize, usize, PackValue) {
+    let mut recs = 0;
+    let mut batches = 0;
+    loop {
+        c.send(&Request::Pull(PackValue::map([
+            ("n", PackValue::Int(n)),
+            ("qid", PackValue::Int(qid)),
+        ])))
+        .await
+        .expect("pull");
+        batches += 1;
+        loop {
+            match c.recv().await.expect("recv") {
+                Response::Record(_) => recs += 1,
+                Response::Success(m) => {
+                    if m.get("has_more") == Some(&PackValue::Bool(true)) {
+                        break;
+                    }
+                    return (recs, batches, m);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+}
+
+async fn run_only(c: &mut Client, q: &str, extra: Vec<(&str, PackValue)>) -> PackValue {
+    c.send(&Request::Run {
+        query: q.into(),
+        params: PackValue::Map(vec![]),
+        extra: PackValue::map(extra),
+    })
+    .await
+    .expect("send");
+    match c.recv().await.expect("run") {
+        Response::Success(m) => m,
+        other => panic!("{q}: {other:?}"),
+    }
+}
+
+async fn metric(url: &str, name: &str) -> f64 {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return 0.0;
+    };
+    let (host, path) = rest.split_once('/').unwrap_or((rest, "metrics"));
+    let Ok(mut s) = TcpStream::connect(host).await else {
+        return 0.0;
+    };
+    let _ = s
+        .write_all(format!("GET /{path} HTTP/1.0\r\nHost: {host}\r\n\r\n").as_bytes())
+        .await;
+    let mut body = String::new();
+    let _ = s.read_to_string(&mut body).await;
+    body.lines()
+        .filter(|l| l.starts_with(name))
+        .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        .sum()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one walk over the round-two features
+async fn round_two_end_to_end() {
+    let (Some(addr), Some(user), Some(pw)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* not set");
+        return;
+    };
+    let db = || vec![("db", PackValue::str("r8graphs_g.round2"))];
+    if let Some(sql) = env("SPRIG_TEST_SQL_ADDR") {
+        let (host, port) = sql.split_once(':').expect("host:port");
+        let opts = mysql_async::OptsBuilder::default()
+            .ip_or_hostname(host)
+            .tcp_port(port.parse().expect("port"))
+            .user(Some(user.clone()))
+            .pass(Some(pw.clone()))
+            .ssl_opts(Some(
+                mysql_async::SslOpts::default()
+                    .with_danger_accept_invalid_certs(true)
+                    .with_danger_skip_domain_validation(true),
+            ));
+        let mut s = mysql_async::Conn::new(opts).await.expect("sql login");
+        s.query_drop("CREATE GRAPH IF NOT EXISTS r8graphs_g.round2")
+            .await
+            .expect("graph");
+        s.disconnect().await.expect("bye");
+    }
+    let mut c = connect(&addr, &user, &pw).await.expect("login");
+    c.query("MATCH (n) DETACH DELETE n", vec![], db())
+        .await
+        .expect("clean");
+    // Signed bookmarks: a commit's bookmark is accepted, a forged one not.
+    c.begin(db()).await.expect("begin");
+    c.query("CREATE (:Bm {v: 1})", vec![], vec![])
+        .await
+        .expect("write");
+    let b = c.commit().await.expect("commit");
+    let bm = b
+        .get("bookmark")
+        .and_then(PackValue::as_str)
+        .expect("bookmark")
+        .to_owned();
+    assert!(bm.starts_with("SB1:") && bm.contains('.'), "{bm}");
+    let mut extra = db();
+    extra.push((
+        "bookmarks",
+        PackValue::List(vec![PackValue::str(bm.clone())]),
+    ));
+    let r = c
+        .query("MATCH (b:Bm) RETURN count(b)", vec![], extra)
+        .await
+        .expect("with bookmark");
+    assert_eq!(r.records[0][0], PackValue::Int(1));
+    let forged = format!("{}x", &bm[..bm.len() - 1]);
+    let mut extra = db();
+    extra.push(("bookmarks", PackValue::List(vec![PackValue::str(forged)])));
+    let e = c
+        .query("MATCH (b:Bm) RETURN count(b)", vec![], extra)
+        .await
+        .expect_err("forged");
+    assert_eq!(e.code, "Neo.ClientError.Transaction.InvalidBookmark", "{e}");
+    let e = c
+        .begin(vec![
+            ("db", PackValue::str("r8graphs_g.round2")),
+            (
+                "bookmarks",
+                PackValue::List(vec![PackValue::str("SB1:x.y")]),
+            ),
+        ])
+        .await
+        .expect_err("garbage bookmark");
+    assert_eq!(e.code, "Neo.ClientError.Transaction.InvalidBookmark", "{e}");
+    c.reset().await.expect("reset");
+    // Streamed results: 3,000 rows in batches of 250.
+    c.query(
+        "UNWIND range(1, 3000) AS i CREATE (:Big {i: i})",
+        vec![],
+        db(),
+    )
+    .await
+    .expect("big");
+    let started = Instant::now();
+    let m = run_only(&mut c, "MATCH (n:Big) RETURN n.i AS i", db()).await;
+    let first = started.elapsed();
+    assert_eq!(
+        m.get("fields"),
+        Some(&PackValue::List(vec![PackValue::str("i")]))
+    );
+    let (n, batches, end) = pull_all(&mut c, 250, -1).await;
+    assert_eq!((n, batches), (3000, 12));
+    assert!(end.get("bookmark").is_some(), "{end:?}");
+    eprintln!(
+        "streamed 3000 rows in 12 PULLs; first answer after {first:?}, all after {:?}",
+        started.elapsed()
+    );
+    // DISCARD in the middle ends the statement.
+    run_only(&mut c, "MATCH (n:Big) RETURN n", db()).await;
+    c.send(&Request::Pull(PackValue::map([("n", PackValue::Int(10))])))
+        .await
+        .expect("pull");
+    let mut got = 0;
+    loop {
+        match c.recv().await.expect("recv") {
+            Response::Record(_) => got += 1,
+            Response::Success(_) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(got, 10);
+    c.send(&Request::Discard(PackValue::map([(
+        "n",
+        PackValue::Int(-1),
+    )])))
+    .await
+    .expect("discard");
+    assert!(matches!(
+        c.recv().await.expect("discard"),
+        Response::Success(_)
+    ));
+    // In a transaction: a second RUN while the first streams buffers it.
+    c.begin(db()).await.expect("begin");
+    run_only(&mut c, "MATCH (n:Big) WHERE n.i <= 1500 RETURN n.i", vec![]).await;
+    run_only(&mut c, "MATCH (n:Big) WHERE n.i > 1500 RETURN n.i", vec![]).await;
+    let (a, _, _) = pull_all(&mut c, 100, 1).await;
+    let (b, _, _) = pull_all(&mut c, 100, 0).await;
+    assert_eq!((a, b), (1500, 1500));
+    c.commit().await.expect("commit");
+    // Constraints: violations, creation over duplicates, MERGE.
+    c.query(
+        "CREATE CONSTRAINT live_k IF NOT EXISTS FOR (n:U) REQUIRE n.k IS UNIQUE",
+        vec![],
+        db(),
+    )
+    .await
+    .expect("constraint");
+    c.query("CREATE (:U {k: 'a'})", vec![], db())
+        .await
+        .expect("first");
+    let e = c
+        .query("CREATE (:U {k: 'a'})", vec![], db())
+        .await
+        .expect_err("duplicate");
+    assert_eq!(
+        e.code, "Neo.ClientError.Schema.ConstraintValidationFailed",
+        "{e}"
+    );
+    assert!(e.message.contains("already exists with label `U`"), "{e}");
+    let r = c
+        .query(
+            "SHOW CONSTRAINTS YIELD name, type RETURN name, type",
+            vec![],
+            db(),
+        )
+        .await
+        .expect("show");
+    assert_eq!(r.records.len(), 1);
+    c.query("CREATE (:V {k: 1}), (:V {k: 1})", vec![], db())
+        .await
+        .expect("dups");
+    let e = c
+        .query(
+            "CREATE CONSTRAINT FOR (n:V) REQUIRE n.k IS UNIQUE",
+            vec![],
+            db(),
+        )
+        .await
+        .expect_err("existing duplicates");
+    assert_eq!(
+        e.code, "Neo.ClientError.Schema.ConstraintCreationFailed",
+        "{e}"
+    );
+    // Concurrent MERGE on the constrained key: one node.
+    let mut hs = Vec::new();
+    for _ in 0..8 {
+        let (addr, user, pw) = (addr.clone(), user.clone(), pw.clone());
+        hs.push(tokio::spawn(async move {
+            let mut c = connect(&addr, &user, &pw).await.expect("login");
+            for i in 0..20 {
+                c.query(
+                    "MERGE (n:U {k: $k}) ON CREATE SET n.c = 1 ON MATCH SET n.m = coalesce(n.m, 0) + 1",
+                    vec![("k", PackValue::str(format!("m{}", i % 5)))],
+                    vec![("db", PackValue::str("r8graphs_g.round2"))],
+                )
+                .await
+                .expect("merge");
+            }
+        }));
+    }
+    for h in hs {
+        h.await.expect("join");
+    }
+    let r = c
+        .query(
+            "MATCH (n:U) WHERE n.k STARTS WITH 'm' RETURN count(n), sum(n.m)",
+            vec![],
+            db(),
+        )
+        .await
+        .expect("merged");
+    assert_eq!(r.records[0][0], PackValue::Int(5), "{:?}", r.records);
+    assert_eq!(r.records[0][1], PackValue::Int(155), "{:?}", r.records);
+    // The index serves equality lookups.
+    let r = c
+        .query("PROFILE MATCH (n:U {k: 'a'}) RETURN n.k", vec![], db())
+        .await
+        .expect("profile");
+    assert_eq!(r.records.len(), 1);
+    c.query("DROP CONSTRAINT live_k", vec![], db())
+        .await
+        .expect("drop");
+    c.query("MATCH (n) DETACH DELETE n", vec![], db())
+        .await
+        .expect("clean");
+    // Replica reads that wait for the session's bookmark.
+    let (Some(ruser), Some(metrics)) = (
+        env("SPRIG_TEST_BOLT_REPL_USER"),
+        env("SPRIG_TEST_GW_METRICS"),
+    ) else {
+        eprintln!(
+            "replica reads skipped: SPRIG_TEST_BOLT_REPL_USER / SPRIG_TEST_GW_METRICS not set"
+        );
+        return;
+    };
+    let rdb = || vec![("db", PackValue::str("r8graphs_g.repl"))];
+    let mut r = connect(&addr, &ruser, &pw).await.expect("repl login");
+    let ok_before = metric(&metrics, "sprig_bolt_bookmark_waits_total{outcome=\"ok\"").await;
+    let mut misses = 0;
+    for i in 0..20 {
+        r.begin(rdb()).await.expect("begin");
+        r.query(
+            "CREATE (:R {i: $i})",
+            vec![("i", PackValue::Int(i))],
+            vec![],
+        )
+        .await
+        .expect("write");
+        let b = r.commit().await.expect("commit");
+        let bm = b
+            .get("bookmark")
+            .and_then(PackValue::as_str)
+            .expect("bm")
+            .to_owned();
+        let mut extra = rdb();
+        extra.push(("mode", PackValue::str("r")));
+        extra.push(("bookmarks", PackValue::List(vec![PackValue::str(bm)])));
+        let got = r
+            .query("MATCH (n:R) RETURN count(n) AS c", vec![], extra)
+            .await
+            .expect("replica read");
+        if got.records[0][0] != PackValue::Int(i + 1) {
+            misses += 1;
+        }
+    }
+    let ok_after = metric(&metrics, "sprig_bolt_bookmark_waits_total{outcome=\"ok\"").await;
+    eprintln!(
+        "replica reads: 20 read-your-writes checks, {misses} misses, {} replica waits",
+        ok_after - ok_before
+    );
+    assert_eq!(misses, 0);
+    assert!(ok_after > ok_before, "no read waited on a replica");
+    r.query("MATCH (n) DETACH DELETE n", vec![], rdb())
+        .await
+        .expect("clean");
+}
+
+/// `sprigctl -o json <args>` (the binary `SPRIG_TEST_SPRIGCTL`, the Admin
+/// API from `SPRIGCTL_ENDPOINT`).
+fn sprigctl(bin: &str, args: &[&str]) -> serde_json::Value {
+    let out = std::process::Command::new(bin)
+        .arg("-o")
+        .arg("json")
+        .args(args)
+        .output()
+        .expect("sprigctl");
+    assert!(
+        out.status.success(),
+        "sprigctl {args:?}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null)
+}
+
+/// Waits for mover job `id` to commit (or fails the test).
+async fn wait_job(bin: &str, id: &str) -> Duration {
+    let t = Instant::now();
+    loop {
+        let j = sprigctl(bin, &["job", "show", id]);
+        let state = j["state"].as_str().unwrap_or_default().to_owned();
+        if ["post_cutover", "retaining", "cleaning", "done"].contains(&state.as_str()) {
+            return t.elapsed();
+        }
+        assert!(
+            !["rolling_back", "rolled_back", "failed", "cancelled"].contains(&state.as_str()),
+            "job {id}: {j}"
+        );
+        assert!(t.elapsed() < Duration::from_secs(600), "job {id} stuck: {j}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// The shards of the graph's group, from `sprigctl shard list`:
+/// `(shard, cluster)`.
+fn graph_shards(bin: &str, tenant: &str, group: &str) -> (u64, Vec<(u64, String)>) {
+    let l = sprigctl(bin, &["shard", "list", tenant]);
+    let groups = l.as_array().cloned().unwrap_or_default();
+    let g = groups
+        .iter()
+        .find(|g| g["name"].as_str() == Some(group))
+        .unwrap_or_else(|| panic!("no group {group} in {l}"));
+    let id = g["group"].as_u64().expect("group id");
+    let shards = g["shards"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|s| {
+            (
+                s["shard"].as_u64().unwrap_or(0),
+                s["cluster"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    (id, shards)
+}
+
+/// Round 3 (decision G25 steps 1–4): a graph is a sharded table group the
+/// mover splits and moves like any other. Answers before, during and after
+/// two splits and two moves (across the three dev clusters) stay the same,
+/// and writes running throughout all land exactly once.
+///
+/// Needs the end-to-end variables plus `SPRIG_TEST_SPRIGCTL` (a sprigctl
+/// binary) and `SPRIGCTL_ENDPOINT`; `SPRIG_TEST_TENANT` (default `acme`).
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // load, split, split, move, move, check
+async fn sharded_graph_split_and_move() {
+    let (Some(addr), Some(user), Some(pw), Some(sql), Some(ctl)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_SQL_ADDR"),
+        env("SPRIG_TEST_SPRIGCTL"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* / SPRIG_TEST_SQL_ADDR / SPRIG_TEST_SPRIGCTL not set");
+        return;
+    };
+    let tenant = env("SPRIG_TEST_TENANT").unwrap_or_else(|| "acme".into());
+    {
+        let (host, port) = sql.split_once(':').expect("host:port");
+        let opts = mysql_async::OptsBuilder::default()
+            .ip_or_hostname(host)
+            .tcp_port(port.parse().expect("port"))
+            .user(Some(user.clone()))
+            .pass(Some(pw.clone()))
+            .ssl_opts(Some(
+                mysql_async::SslOpts::default()
+                    .with_danger_accept_invalid_certs(true)
+                    .with_danger_skip_domain_validation(true),
+            ));
+        let mut c = mysql_async::Conn::new(opts).await.expect("sql login");
+        c.query_drop("CREATE DATABASE IF NOT EXISTS r8g3_split")
+            .await
+            .expect("db");
+        c.query_drop("DROP GRAPH IF EXISTS r8g3_split.sg")
+            .await
+            .expect("drop");
+        c.query_drop("CREATE GRAPH r8g3_split.sg")
+            .await
+            .expect("create");
+        c.disconnect().await.expect("bye");
+    }
+    let db = vec![("db", PackValue::str("r8g3_split.sg"))];
+    let mut c = connect(&addr, &user, &pw).await.expect("login");
+    let ring = "UNWIND range(0, 299) AS i CREATE (:R {i: i})";
+    let link = "MATCH (a:R), (b:R) WHERE b.i = (a.i + 1) % 300 OR b.i = (a.i * 7) % 300 CREATE (a)-[:NEXT {w: a.i}]->(b)";
+    c.query(ring, vec![], db.clone()).await.expect("ring");
+    c.query(link, vec![], db.clone()).await.expect("link");
+    let eid = c
+        .query("MATCH (n:R {i: 0}) RETURN elementId(n)", vec![], db.clone())
+        .await
+        .expect("element id");
+    let graph_id = eid.records[0][0]
+        .as_str()
+        .and_then(|s| s.split(':').nth(1))
+        .expect("graph id")
+        .to_owned();
+    let group_name = format!("graph_{graph_id}");
+    let corpus = [
+        "MATCH (n:R) RETURN count(n)",
+        "MATCH ()-[r:NEXT]->() RETURN count(r), sum(r.w)",
+        "MATCH (a:R {i: 5})-[:NEXT*1..4]->(x) RETURN count(DISTINCT x)",
+        "MATCH (a:R {i: 5})<-[:NEXT*1..3]-(x) RETURN count(DISTINCT x)",
+        "MATCH (a:R {i: 0})<-[:NEXT]-(x) RETURN x.i ORDER BY x.i",
+        "MATCH (a:R {i: 1}), (b:R {i: 151}) MATCH p = shortestPath((a)-[:NEXT*]->(b)) RETURN length(p)",
+        "MATCH (a:R)-[:NEXT]->(b:R) WHERE a.i < 20 RETURN a.i, collect(b.i) ORDER BY a.i",
+    ];
+    let snapshot = |rows: &Rows| rows_text(rows, true);
+    let mut before = Vec::new();
+    for q in corpus {
+        before.push(snapshot(&c.query(q, vec![], db.clone()).await.expect(q)));
+    }
+    // Writes throughout: nodes and an edge between consecutive ones.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let stop = std::sync::Arc::clone(&stop);
+        let (addr, user, pw) = (addr.clone(), user.clone(), pw.clone());
+        let db = db.clone();
+        tokio::spawn(async move {
+            let mut w = connect(&addr, &user, &pw).await.expect("writer login");
+            let (mut ok, mut retried, mut k) = (0i64, 0u64, 0i64);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let q = "MERGE (a:W {k: $k}) WITH a OPTIONAL MATCH (p:W {k: $k - 1}) FOREACH (_ IN CASE WHEN p IS NULL THEN [] ELSE [1] END | CREATE (p)-[:THEN]->(a))";
+                loop {
+                    match w
+                        .query(q, vec![("k", PackValue::Int(k))], db.clone())
+                        .await
+                    {
+                        Ok(_) => break,
+                        Err(e) if e.code.starts_with("Neo.TransientError") => {
+                            retried += 1;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        Err(e) => panic!("writer {k}: {e}"),
+                    }
+                }
+                ok += 1;
+                k += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            (ok, retried)
+        })
+    };
+    let (gid, shards) = graph_shards(&ctl, &tenant, &group_name);
+    let gid = gid.to_string();
+    assert_eq!(shards.len(), 1, "a new graph starts with one shard");
+    let mut steps = Vec::new();
+    let check = |c: &mut Client, label: String| {
+        let db = db.clone();
+        let before = before.clone();
+        async move {
+            for (q, want) in corpus.iter().zip(&before) {
+                let got = c.query(q, vec![], db.clone()).await.expect(q);
+                assert_eq!(&snapshot(&got), want, "{label}: {q}");
+            }
+        }
+    };
+    // Split shard 1, then the larger child again.
+    let first = shards[0].0.to_string();
+    let j = sprigctl(&ctl, &["shard", "split", &tenant, &gid, &first]);
+    let id = j["id"].as_str().expect("job id").to_owned();
+    steps.push(("split 1 -> 2", wait_job(&ctl, &id).await));
+    check(&mut c, "after the first split".into()).await;
+    let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
+    assert_eq!(shards.len(), 2, "{shards:?}");
+    let s = shards[1].0.to_string();
+    let j = sprigctl(&ctl, &["shard", "split", &tenant, &gid, &s]);
+    let id = j["id"].as_str().expect("job id").to_owned();
+    steps.push(("split 2 -> 3", wait_job(&ctl, &id).await));
+    check(&mut c, "after the second split".into()).await;
+    // Move two shards to the other clusters.
+    let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
+    assert_eq!(shards.len(), 3, "{shards:?}");
+    for ((s, _), to) in shards.iter().skip(1).zip(["dc-a-c2", "dc-a-c3"]) {
+        let s = s.to_string();
+        let j = sprigctl(&ctl, &["shard", "move", &tenant, &gid, &s, "--to", to]);
+        let id = j["id"].as_str().expect("job id").to_owned();
+        let label = if to == "dc-a-c2" { "move to c2" } else { "move to c3" };
+        steps.push((label, wait_job(&ctl, &id).await));
+        check(&mut c, format!("after {label}")).await;
+    }
+    let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
+    let clusters: std::collections::BTreeSet<&str> =
+        shards.iter().map(|(_, c)| c.as_str()).collect();
+    assert_eq!(clusters.len(), 3, "{shards:?}");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (ok, retried) = writer.await.expect("writer");
+    let w = c
+        .query(
+            "MATCH (a:W) WITH count(a) AS n, count(DISTINCT a.k) AS d MATCH ()-[t:THEN]->() RETURN n, d, count(t)",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("writes");
+    let row: Vec<i64> = w.records[0].iter().filter_map(PackValue::as_int).collect();
+    eprintln!(
+        "split and move: {steps:?}; shards now {shards:?}; writer: {ok} statements, {retried} retried; graph has {row:?}"
+    );
+    assert_eq!(row, vec![ok, ok, ok - 1], "every write landed once");
+    // Edges crossing clusters: incoming hops and a commit check.
+    let e = c
+        .query("MATCH (n:R {i: 0}) DELETE n", vec![], db.clone())
+        .await
+        .expect_err("dangling");
+    assert_eq!(e.code, "Neo.ClientError.Schema.ConstraintValidationFailed");
+    let count = |rows: &Rows| rows.records[0][0].as_int().unwrap_or(-1);
+    let all = count(
+        &c.query("MATCH ()-[r:NEXT]->() RETURN count(r)", vec![], db.clone())
+            .await
+            .expect("count"),
+    );
+    let touching = count(
+        &c.query(
+            "MATCH (n:R {i: 0})-[r]-() RETURN count(DISTINCT r)",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("touching"),
+    );
+    c.query("MATCH (n:R {i: 0}) DETACH DELETE n", vec![], db.clone())
+        .await
+        .expect("detach");
+    let o = c
+        .query("MATCH ()-[r:NEXT]->() RETURN count(r)", vec![], db.clone())
+        .await
+        .expect("after detach");
+    assert_eq!(count(&o), all - touching);
 }

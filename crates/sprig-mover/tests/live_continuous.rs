@@ -116,7 +116,10 @@ async fn up(p: &Pool) {
 }
 
 async fn checksum(p: &Pool, data: &str) -> Option<(u64, String)> {
-    let mut c = tokio::time::timeout(Duration::from_secs(3), p.get_conn()).await.ok()?.ok()?;
+    let mut c = tokio::time::timeout(Duration::from_secs(3), p.get_conn())
+        .await
+        .ok()?
+        .ok()?;
     c.query_first(format!(
         "SELECT COUNT(*), CAST(COALESCE(SUM(CRC32(CONCAT(id, v))), 0) AS CHAR) FROM `{data}`.items"
     ))
@@ -219,16 +222,20 @@ async fn a_continuous_job_streams_survives_a_lost_source_and_stops_in_place() {
     {
         let mut c = src.get_conn().await.unwrap();
         for s in [&cat, &data] {
-            c.query_drop(format!("CREATE DATABASE `{s}`")).await.unwrap();
+            c.query_drop(format!("CREATE DATABASE `{s}`"))
+                .await
+                .unwrap();
         }
         c.query_drop(format!(
             "CREATE TABLE `{cat}`.meta (k VARCHAR(64) PRIMARY KEY, v JSON NOT NULL)"
         ))
         .await
         .unwrap();
-        c.query_drop(format!("INSERT INTO `{cat}`.meta VALUES ('a', '{{\"x\": 1}}')"))
-            .await
-            .unwrap();
+        c.query_drop(format!(
+            "INSERT INTO `{cat}`.meta VALUES ('a', '{{\"x\": 1}}')"
+        ))
+        .await
+        .unwrap();
         c.query_drop(format!(
             "CREATE TABLE `{data}`.items (id INT PRIMARY KEY, v VARCHAR(40) NOT NULL)"
         ))
@@ -274,11 +281,18 @@ async fn a_continuous_job_streams_survives_a_lost_source_and_stops_in_place() {
     let halt = Arc::new(AtomicBool::new(false));
     let written = Arc::new(AtomicU64::new(0));
     let wtask = {
-        let (p, data, halt, written) = (src.clone(), data.clone(), Arc::clone(&halt), Arc::clone(&written));
+        let (p, data, halt, written) = (
+            src.clone(),
+            data.clone(),
+            Arc::clone(&halt),
+            Arc::clone(&written),
+        );
         tokio::spawn(async move {
             let mut id = 100_000u64;
             while !halt.load(Ordering::SeqCst) {
-                if let Ok(Ok(mut c)) = tokio::time::timeout(Duration::from_secs(2), p.get_conn()).await {
+                if let Ok(Ok(mut c)) =
+                    tokio::time::timeout(Duration::from_secs(2), p.get_conn()).await
+                {
                     let r = c
                         .exec_drop(
                             format!("INSERT INTO `{data}`.items (id, v) VALUES (?, ?)"),
@@ -328,7 +342,9 @@ async fn a_continuous_job_streams_survives_a_lost_source_and_stops_in_place() {
     assert!(st.progress.lag_ms.is_some_and(|l| l < 5_000), "{st:?}");
     assert!(st.progress.applied_source_gtid.is_some(), "{st:?}");
     assert!(st.progress.rows_applied > 100, "changes stream: {st:?}");
-    let home = Placement::of(&maps.load(tenant).await.unwrap().0).unwrap().cluster;
+    let home = Placement::of(&maps.load(tenant).await.unwrap().0)
+        .unwrap()
+        .cluster;
     assert_eq!(home, src_id, "the map never moves");
     let fenced: u64 = src
         .get_conn()
@@ -347,12 +363,19 @@ async fn a_continuous_job_streams_survives_a_lost_source_and_stops_in_place() {
     let frozen = Instant::now();
     tokio::time::sleep(Duration::from_secs(20)).await;
     let st = mover.status(&id).await.unwrap();
-    assert_eq!(st.state, JobState::Streaming, "a lost source keeps the job streaming: {st:?}");
+    assert_eq!(
+        st.state,
+        JobState::Streaming,
+        "a lost source keeps the job streaming: {st:?}"
+    );
     let seen_age = st
         .progress
         .source_seen_ms
         .map(|s| sprig_mover::record::wall_ms(std::time::SystemTime::now()).saturating_sub(s));
-    eprintln!("src frozen 20 s: state {}, source last seen {seen_age:?} ms ago, error {:?}", st.state, st.error);
+    eprintln!(
+        "src frozen 20 s: state {}, source last seen {seen_age:?} ms ago, error {:?}",
+        st.state, st.error
+    );
     docker(&["unpause", src_c.name()]).unwrap();
     let thaw = Instant::now();
     loop {
@@ -360,10 +383,18 @@ async fn a_continuous_job_streams_survives_a_lost_source_and_stops_in_place() {
         if st.progress.source_seen_ms.is_some_and(|s| {
             sprig_mover::record::wall_ms(std::time::SystemTime::now()).saturating_sub(s) < 2_000
         }) {
-            eprintln!("caught up {:?} after the thaw (frozen {:?} in all), lag {:?} ms", thaw.elapsed(), frozen.elapsed(), st.progress.lag_ms);
+            eprintln!(
+                "caught up {:?} after the thaw (frozen {:?} in all), lag {:?} ms",
+                thaw.elapsed(),
+                frozen.elapsed(),
+                st.progress.lag_ms
+            );
             break;
         }
-        assert!(thaw.elapsed() < Duration::from_secs(60), "never caught up: {st:?}");
+        assert!(
+            thaw.elapsed() < Duration::from_secs(60),
+            "never caught up: {st:?}"
+        );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
@@ -376,7 +407,10 @@ async fn a_continuous_job_streams_survives_a_lost_source_and_stops_in_place() {
         if checksum(&dst, &data).await.as_ref() == Some(&want) {
             break;
         }
-        assert!(t1.elapsed() < Duration::from_secs(30), "dst never equal to src");
+        assert!(
+            t1.elapsed() < Duration::from_secs(30),
+            "dst never equal to src"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     eprintln!(
@@ -399,17 +433,29 @@ async fn a_continuous_job_streams_survives_a_lost_source_and_stops_in_place() {
         st.progress.applied_source_gtid
     );
     assert!(st.progress.applied_source_gtid.is_some());
-    assert_eq!(checksum(&dst, &data).await, Some(want.clone()), "dst keeps what it applied");
-    let home = Placement::of(&maps.load(tenant).await.unwrap().0).unwrap().cluster;
+    assert_eq!(
+        checksum(&dst, &data).await,
+        Some(want.clone()),
+        "dst keeps what it applied"
+    );
+    let home = Placement::of(&maps.load(tenant).await.unwrap().0)
+        .unwrap()
+        .cluster;
     assert_eq!(home, src_id, "a stop doesn't move the tenant");
     {
         let mut c = src.get_conn().await.unwrap();
-        c.query_drop(format!("INSERT INTO `{data}`.items VALUES (999999, 'after')"))
-            .await
-            .unwrap();
+        c.query_drop(format!(
+            "INSERT INTO `{data}`.items VALUES (999999, 'after')"
+        ))
+        .await
+        .unwrap();
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(checksum(&dst, &data).await, Some(want), "nothing streams after the stop");
+    assert_eq!(
+        checksum(&dst, &data).await,
+        Some(want),
+        "nothing streams after the stop"
+    );
 
     // 5. Cancel while streaming: rolled back, targets dropped.
     {
@@ -433,7 +479,10 @@ async fn a_continuous_job_streams_survives_a_lost_source_and_stops_in_place() {
     mover.cancel(&id2, "r2close test").await.unwrap();
     let st = wait_state(&mover, &id2, Duration::from_secs(60), JobState::is_terminal).await;
     assert_eq!(st.state, JobState::RolledBack, "{st:?}");
-    assert!(schemas_on(&dst, tenant).await.is_empty(), "the standby copy is dropped");
+    assert!(
+        schemas_on(&dst, tenant).await.is_empty(),
+        "the standby copy is dropped"
+    );
     assert_eq!(schemas_on(&src, tenant).await.len(), 2, "src untouched");
     eprintln!("cancel while streaming: rolled back, target dropped, source untouched");
 

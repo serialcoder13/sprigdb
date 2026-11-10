@@ -17,6 +17,9 @@ metrics.workspace = true
 mysql_async.workspace = true
 # errant_extract's sealed files (chapter 25): AES-256-GCM.
 ring.workspace = true
+# Mutual TLS for the agents' internal service (chapter 25, RC2), already
+# in the tree (Apache-2.0 / ISC / MIT).
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -25,12 +28,14 @@ sprig-binlog.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
 sprig-settings.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-rustls.workspace = true
 tracing.workspace = true
 twox-hash.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+rcgen.workspace = true
+tokio = { workspace = true, features = ["test-util", "io-util"] }
 
 [lints]
 workspace = true

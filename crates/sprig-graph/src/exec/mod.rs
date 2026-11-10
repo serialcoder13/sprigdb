@@ -20,7 +20,10 @@
 //! fails with 39903 naming it, never with a truncated answer.
 
 mod matcher;
+mod stream;
 mod write;
+
+pub use stream::{RowSink, VecSink, run_stream, streamable};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -28,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use sprig_common::{Result, SprigCode, SprigError};
 
-use crate::ast::{Clause, Explain, Expr, PathPattern, Projection, Query, SingleQuery};
+use crate::ast::{Clause, Explain, Expr, MapItem, PathPattern, Projection, Query, SubqueryKind};
 use crate::eval::{Params, Row, eval};
 use crate::store::{EdgeRow, GraphStore, NodeRow};
 use crate::value::{Key, Node, Rel, Value, props_from_json};
@@ -117,6 +120,7 @@ pub async fn run(
         wrote: false,
         plan: Vec::new(),
         slot: 0,
+        star_in_order: false,
     };
     if q.explain == Explain::Explain {
         let plan = explain(q);
@@ -126,29 +130,14 @@ pub async fn run(
             ..Output::default()
         });
     }
-    let mut columns: Option<Vec<String>> = None;
-    let mut all: Vec<Vec<Value>> = Vec::new();
-    for part in &q.parts {
-        let (cols, rows) = ex.single(part).await?;
-        if let Some(c) = &columns {
-            if *c != cols {
-                return Err(SprigError::new(
-                    SprigCode::GraphSyntax,
-                    "All sub queries in an UNION must have the same return column names",
-                ));
-            }
-        } else {
-            columns = Some(cols);
-        }
-        all.extend(rows);
-        ex.check_rows(all.len())?;
-    }
-    if q.union_all.iter().any(|a| !a) {
-        let mut seen = HashSet::new();
-        all.retain(|r| seen.insert(r.iter().map(Value::key).collect::<Vec<Key>>()));
-    }
-    let columns = columns.unwrap_or_default();
+    let inits = vec![Row::new(); q.parts.len()];
+    let (columns, all) = ex.union_parts(q, inits, &[]).await?;
+    let schema = q
+        .parts
+        .iter()
+        .any(|p| p.clauses.iter().any(|c| matches!(c, Clause::Schema(_))));
     let qtype = match (ex.wrote || has_writes(q), columns.is_empty()) {
+        _ if schema => "s",
         (true, true) => "w",
         (true, false) => "rw",
         (false, _) => "r",
@@ -172,18 +161,23 @@ pub async fn run(
     })
 }
 
-fn has_writes(q: &Query) -> bool {
-    q.parts.iter().any(|p| {
-        p.clauses.iter().any(|c| {
-            matches!(
-                c,
-                Clause::Create(_)
-                    | Clause::Merge { .. }
-                    | Clause::Set(_)
-                    | Clause::Remove(_)
-                    | Clause::Delete { .. }
-            )
-        })
+/// Whether a statement writes (or changes the schema).
+#[must_use]
+pub fn has_writes(q: &Query) -> bool {
+    q.parts.iter().any(|p| clauses_write(&p.clauses))
+}
+
+fn clauses_write(cs: &[Clause]) -> bool {
+    cs.iter().any(|c| match c {
+        Clause::Create(_)
+        | Clause::Merge { .. }
+        | Clause::Set(_)
+        | Clause::Remove(_)
+        | Clause::Delete { .. }
+        | Clause::Foreach { .. }
+        | Clause::Schema(_) => true,
+        Clause::Subquery { query, .. } => has_writes(query),
+        _ => false,
     })
 }
 
@@ -220,10 +214,20 @@ fn explain(q: &Query) -> Vec<String> {
                 Clause::Remove(_) => out.push("Remove".into()),
                 Clause::Delete { .. } => out.push("Delete".into()),
                 Clause::Call { name, .. } => out.push(format!("ProcedureCall {name}")),
+                Clause::Subquery { .. } => out.push("CallSubquery: once per row".into()),
+                Clause::Foreach { .. } => out.push("Foreach".into()),
+                Clause::Schema(_) => out.push("SchemaCommand".into()),
             }
         }
     }
     out
+}
+
+/// A pattern predicate or expression subquery lifted out of an
+/// expression.
+enum Lifted {
+    Pattern(PathPattern),
+    Subquery(SubqueryKind, Query),
 }
 
 /// A procedure's columns, and its rows by input row.
@@ -242,6 +246,8 @@ pub(crate) struct Exec<'a> {
     pub(crate) wrote: bool,
     pub(crate) plan: Vec<String>,
     slot: usize,
+    /// `RETURN *` after `SHOW ... YIELD` keeps the yield order (Neo4j).
+    star_in_order: bool,
 }
 
 /// Whether duplicates of rows coming out of a `MATCH` can't change the
@@ -345,14 +351,44 @@ impl Exec<'_> {
         format!(" pp{}", self.slot)
     }
 
-    /// Replaces pattern predicates in `e` by slots, returning the patterns.
-    fn lift_patterns(&mut self, e: &Expr, out: &mut Vec<(String, PathPattern)>) -> Expr {
+    /// Replaces pattern predicates and subqueries in `e` by slots,
+    /// returning them.
+    fn lift_patterns(&mut self, e: &Expr, out: &mut Vec<(String, Lifted)>) -> Expr {
         match e {
             Expr::Pattern(p) => {
                 let s = self.next_slot();
-                out.push((s.clone(), (**p).clone()));
+                out.push((s.clone(), Lifted::Pattern((**p).clone())));
                 Expr::Slot(s)
             }
+            Expr::Subquery(k, q) => {
+                let s = self.next_slot();
+                out.push((s.clone(), Lifted::Subquery(*k, (**q).clone())));
+                Expr::Slot(s)
+            }
+            Expr::Prop(x, k) => Expr::Prop(Box::new(self.lift_patterns(x, out)), k.clone()),
+            Expr::IsNull(x, n) => Expr::IsNull(Box::new(self.lift_patterns(x, out)), *n),
+            Expr::HasLabels(x, l) => {
+                Expr::HasLabels(Box::new(self.lift_patterns(x, out)), l.clone())
+            }
+            Expr::Index(a, b) => Expr::Index(
+                Box::new(self.lift_patterns(a, out)),
+                Box::new(self.lift_patterns(b, out)),
+            ),
+            Expr::Map(m) => Expr::Map(
+                m.iter()
+                    .map(|(k, x)| (k.clone(), self.lift_patterns(x, out)))
+                    .collect(),
+            ),
+            Expr::MapProjection(b, items) => Expr::MapProjection(
+                b.clone(),
+                items
+                    .iter()
+                    .map(|i| match i {
+                        MapItem::Lit(k, x) => MapItem::Lit(k.clone(), self.lift_patterns(x, out)),
+                        other => other.clone(),
+                    })
+                    .collect(),
+            ),
             Expr::Unary(op, x) => Expr::Unary(*op, Box::new(self.lift_patterns(x, out))),
             Expr::Binary(op, a, b) => Expr::Binary(
                 *op,
@@ -393,10 +429,20 @@ impl Exec<'_> {
         let mut pats = Vec::new();
         let pred = self.lift_patterns(pred, &mut pats);
         let mut rows = rows;
-        for (slot, p) in &pats {
-            let hits = self.pattern_hits(&rows, p).await?;
-            for (i, r) in rows.iter_mut().enumerate() {
-                r.insert(slot.clone(), Value::Bool(hits.contains(&i)));
+        for (slot, l) in &pats {
+            match l {
+                Lifted::Pattern(p) => {
+                    let hits = self.pattern_hits(&rows, p).await?;
+                    for (i, r) in rows.iter_mut().enumerate() {
+                        r.insert(slot.clone(), Value::Bool(hits.contains(&i)));
+                    }
+                }
+                Lifted::Subquery(k, q) => {
+                    for r in &mut rows {
+                        let v = self.subquery_value(*k, q, r).await?;
+                        r.insert(slot.clone(), v);
+                    }
+                }
             }
         }
         let mut out = Vec::with_capacity(rows.len());
@@ -414,25 +460,197 @@ impl Exec<'_> {
     /// Evaluates `e` over `row`, resolving pattern predicates in it first.
     pub(crate) async fn eval_full(&mut self, e: &Expr, row: &Row) -> Result<Value> {
         let mut has_pattern = false;
-        e.walk(&mut |x| has_pattern |= matches!(x, Expr::Pattern(_)));
+        e.walk(&mut |x| has_pattern |= matches!(x, Expr::Pattern(_) | Expr::Subquery(..)));
         if !has_pattern {
             return eval(e, row, self.params);
         }
         let mut pats = Vec::new();
         let lifted = self.lift_patterns(e, &mut pats);
         let mut r = row.clone();
-        for (slot, p) in &pats {
-            let hits = self.pattern_hits(std::slice::from_ref(row), p).await?;
-            r.insert(slot.clone(), Value::Bool(!hits.is_empty()));
+        for (slot, l) in &pats {
+            let v = match l {
+                Lifted::Pattern(p) => Value::Bool(
+                    !self
+                        .pattern_hits(std::slice::from_ref(row), p)
+                        .await?
+                        .is_empty(),
+                ),
+                Lifted::Subquery(k, q) => self.subquery_value(*k, q, row).await?,
+            };
+            r.insert(slot.clone(), v);
         }
         eval(&lifted, &r, self.params)
     }
 
-    async fn single(&mut self, q: &SingleQuery) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-        let mut rows: Vec<Row> = vec![Row::new()];
-        let mut scope: Vec<String> = Vec::new();
-        let n = q.clauses.len();
-        for (i, c) in q.clauses.iter().enumerate() {
+    /// The value of `EXISTS { }`, `COUNT { }` or `COLLECT { }` for `row`.
+    async fn subquery_value(&mut self, k: SubqueryKind, q: &Query, row: &Row) -> Result<Value> {
+        let mut q = q.clone();
+        if k != SubqueryKind::Collect {
+            for p in &mut q.parts {
+                if !matches!(p.clauses.last(), Some(Clause::Return(_))) {
+                    p.clauses.push(Clause::Return(Projection {
+                        distinct: false,
+                        star: false,
+                        items: vec![(Expr::Lit(Value::Int(1)), " one".into())],
+                        order: vec![],
+                        skip: None,
+                        limit: None,
+                        where_: None,
+                    }));
+                }
+            }
+        }
+        let scope: Vec<String> = row
+            .keys()
+            .filter(|k| !k.starts_with(' '))
+            .cloned()
+            .collect();
+        let mut init = row.clone();
+        init.retain(|k, _| !k.starts_with(' '));
+        let inits = vec![init; q.parts.len()];
+        let (cols, rows) = Box::pin(self.union_parts(&q, inits, &scope)).await?;
+        Ok(match k {
+            SubqueryKind::Exists => Value::Bool(!rows.is_empty()),
+            SubqueryKind::Count => Value::Int(i64::try_from(rows.len()).unwrap_or(i64::MAX)),
+            SubqueryKind::Collect => {
+                if cols.len() != 1 {
+                    return Err(SprigError::new(
+                        SprigCode::GraphSyntax,
+                        "A COLLECT subquery must end with a single return column.",
+                    ));
+                }
+                Value::List(
+                    rows.into_iter()
+                        .filter_map(|r| r.into_iter().next())
+                        .collect(),
+                )
+            }
+        })
+    }
+
+    /// The parts of `q`, each from its initial row, joined by `UNION`.
+    pub(crate) async fn union_parts(
+        &mut self,
+        q: &Query,
+        inits: Vec<Row>,
+        scope: &[String],
+    ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+        let mut columns: Option<Vec<String>> = None;
+        let mut all: Vec<Vec<Value>> = Vec::new();
+        for (part, init) in q.parts.iter().zip(inits) {
+            let (cols, rows) =
+                Box::pin(self.clauses(&part.clauses, vec![init], scope.to_vec())).await?;
+            if let Some(c) = &columns {
+                if *c != cols {
+                    return Err(SprigError::new(
+                        SprigCode::GraphSyntax,
+                        "All sub queries in an UNION must have the same return column names",
+                    ));
+                }
+            } else {
+                columns = Some(cols);
+            }
+            all.extend(rows);
+            self.check_rows(all.len())?;
+        }
+        if q.union_all.iter().any(|a| !a) {
+            let mut seen = HashSet::new();
+            all.retain(|r| seen.insert(r.iter().map(Value::key).collect::<Vec<Key>>()));
+        }
+        Ok((columns.unwrap_or_default(), all))
+    }
+
+    /// `CALL { }` for each row: the subquery's rows joined to it (a unit
+    /// subquery passes the row through).
+    async fn call_subquery(
+        &mut self,
+        rows: Vec<Row>,
+        imports: Option<&Vec<String>>,
+        q: &Query,
+    ) -> Result<(Vec<Row>, Vec<String>)> {
+        let mut next = Vec::new();
+        let mut new_cols = Vec::new();
+        for r in rows {
+            let visible = |k: &String| !k.starts_with(' ');
+            let mut inits = Vec::with_capacity(q.parts.len());
+            for part in &q.parts {
+                let init: Row = match imports {
+                    Some(v) if v.iter().any(|x| x == "*") => r
+                        .iter()
+                        .filter(|(k, _)| visible(k))
+                        .map(|(k, x)| (k.clone(), x.clone()))
+                        .collect(),
+                    Some(v) => v
+                        .iter()
+                        .filter_map(|k| r.get(k).map(|x| (k.clone(), x.clone())))
+                        .collect(),
+                    None => match part.clauses.first() {
+                        // An importing WITH: plain variables of the row.
+                        Some(Clause::With(p)) => {
+                            let mut m: Row = Row::new();
+                            if p.star {
+                                m.extend(
+                                    r.iter()
+                                        .filter(|(k, _)| visible(k))
+                                        .map(|(k, x)| (k.clone(), x.clone())),
+                                );
+                            }
+                            for (e, _) in &p.items {
+                                if let Expr::Var(v) = e
+                                    && let Some(x) = r.get(v)
+                                {
+                                    m.insert(v.clone(), x.clone());
+                                }
+                            }
+                            m
+                        }
+                        _ => Row::new(),
+                    },
+                };
+                inits.push(init);
+            }
+            let scope: Vec<String> = inits
+                .first()
+                .map(|i| i.keys().cloned().collect())
+                .unwrap_or_default();
+            let (cols, out) = Box::pin(self.union_parts(q, inits, &scope)).await?;
+            if cols.is_empty() {
+                next.push(r);
+                continue;
+            }
+            for c in &cols {
+                if r.contains_key(c) && !scope.contains(c) {
+                    return Err(SprigError::new(
+                        SprigCode::GraphSyntax,
+                        format!("Variable `{c}` already declared in outer scope"),
+                    ));
+                }
+            }
+            for vals in out {
+                let mut nr = r.clone();
+                for (c, v) in cols.iter().zip(vals) {
+                    nr.insert(c.clone(), v);
+                }
+                next.push(nr);
+            }
+            self.check_rows(next.len())?;
+            new_cols = cols;
+        }
+        Ok((next, new_cols))
+    }
+
+    /// Runs `clauses` over `rows` with `scope` bound: the columns and rows
+    /// of the final `RETURN` (none for an update statement).
+    pub(crate) async fn clauses(
+        &mut self,
+        clauses: &[Clause],
+        rows: Vec<Row>,
+        scope: Vec<String>,
+    ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+        let mut rows = rows;
+        let mut scope = scope;
+        let n = clauses.len();
+        for (i, c) in clauses.iter().enumerate() {
             self.check_time()?;
             match c {
                 Clause::Match {
@@ -440,7 +658,7 @@ impl Exec<'_> {
                     patterns,
                     where_,
                 } => {
-                    let mult_ok = dup_insensitive(&q.clauses[i + 1..]);
+                    let mult_ok = dup_insensitive(&clauses[i + 1..]);
                     rows = self
                         .match_clause(rows, patterns, where_.as_ref(), *optional, mult_ok)
                         .await?;
@@ -518,6 +736,49 @@ impl Exec<'_> {
                 Clause::Delete { detach, exprs } => {
                     rows = self.delete(rows, exprs, *detach).await?;
                 }
+                Clause::Subquery { imports, query } => {
+                    let (next, cols) = self.call_subquery(rows, imports.as_ref(), query).await?;
+                    rows = next;
+                    for c in cols {
+                        if !scope.contains(&c) {
+                            scope.push(c);
+                        }
+                    }
+                }
+                Clause::Foreach { var, list, body } => {
+                    let mut inner = scope.clone();
+                    inner.push(var.clone());
+                    for r in &rows {
+                        let items = match self.eval_full(list, r).await? {
+                            Value::Null => Vec::new(),
+                            Value::List(l) => l,
+                            other => {
+                                return Err(crate::value::type_error(format!(
+                                    "FOREACH over a {}",
+                                    other.type_name()
+                                )));
+                            }
+                        };
+                        for x in items {
+                            let mut init = r.clone();
+                            init.insert(var.clone(), x);
+                            Box::pin(self.clauses(body, vec![init], inner.clone())).await?;
+                        }
+                    }
+                }
+                Clause::Schema(cmd) => {
+                    if n != 1 {
+                        return Err(SprigError::new(
+                            SprigCode::GraphSyntax,
+                            "index and constraint commands stand alone",
+                        ));
+                    }
+                    for (k, v) in self.store.schema(cmd).await? {
+                        self.bump(k, v);
+                    }
+                    self.wrote = true;
+                    return Ok((Vec::new(), Vec::new()));
+                }
                 Clause::Call {
                     name,
                     args,
@@ -525,6 +786,7 @@ impl Exec<'_> {
                     where_,
                 } => {
                     let standalone = n == 1;
+                    self.star_in_order = name.starts_with("sprig.show.") && yields.is_some();
                     let (cols, out) = self.call(name, args.as_deref(), yields.as_ref(), &rows)?;
                     if standalone {
                         return Ok((cols, out.into_iter().map(|(_, v)| v).collect()));
@@ -558,13 +820,22 @@ impl Exec<'_> {
         yields: Option<&Vec<(String, String)>>,
         rows: &[Row],
     ) -> Result<CallRows> {
-        if args.is_some_and(|a| !a.is_empty()) {
+        let show = name.starts_with("sprig.show.");
+        if !show && args.is_some_and(|a| !a.is_empty()) {
             return Err(SprigError::new(
                 SprigCode::GraphSyntax,
                 format!("procedure {name} takes no arguments"),
             ));
         }
+        let filter = match args.and_then(<[Expr]>::first) {
+            Some(Expr::Lit(Value::String(f))) => f.as_str(),
+            _ => "ALL",
+        };
         let (cols, vals): (Vec<&str>, Vec<Vec<Value>>) = match name {
+            "sprig.show.indexes" => crate::schema::show_indexes(&self.store.indexes(), filter),
+            "sprig.show.constraints" => {
+                crate::schema::show_constraints(&self.store.indexes(), filter)
+            }
             "db.labels" => (
                 vec!["label"],
                 self.store
@@ -655,7 +926,9 @@ impl Exec<'_> {
                 .filter(|v| !v.starts_with(' '))
                 .cloned()
                 .collect();
-            vars.sort();
+            if !std::mem::take(&mut self.star_in_order) {
+                vars.sort();
+            }
             vars.dedup();
             if vars.is_empty() && p.items.is_empty() {
                 return Err(SprigError::new(
@@ -887,6 +1160,18 @@ mod agg {
             Expr::Map(m) => Expr::Map(
                 m.iter()
                     .map(|(k, a)| Ok((k.clone(), lift(a, specs)?)))
+                    .collect::<Result<_>>()?,
+            ),
+            Expr::MapProjection(b, items) => Expr::MapProjection(
+                b.clone(),
+                items
+                    .iter()
+                    .map(|i| match i {
+                        crate::ast::MapItem::Lit(k, a) => {
+                            Ok(crate::ast::MapItem::Lit(k.clone(), lift(a, specs)?))
+                        }
+                        other => Ok(other.clone()),
+                    })
                     .collect::<Result<_>>()?,
             ),
             Expr::Case {

@@ -11,10 +11,13 @@
 //! any ──GOODBYE, protocol error, drain──► Defunct
 //! ```
 //!
-//! **Results are buffered** (as built): a `RUN` produces its whole result,
-//! within the graph budgets and `bolt.max_buffered_result_mb`, and `PULL
-//! {n}` hands out `n` records at a time. The chapter's back-pressured
-//! streaming from the shards comes later.
+//! **Results stream.** A `RUN`'s result may carry a [`RecordStream`]:
+//! `PULL {n}` takes `n` records from it as the client asks, so the
+//! client's pace bounds memory, and the last `SUCCESS` carries the
+//! stream's summary. A statement in a transaction while an earlier result
+//! is still open first buffers that result, up to
+//! [`Config::max_buffered`] bytes (39918 past it), as the chapter says.
+//! `DISCARD`, `RESET` and `ROLLBACK` drop open streams.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -72,8 +75,29 @@ impl BoltFailure {
     }
 }
 
-/// One query's buffered result.
+/// The end of a streamed result.
 #[derive(Debug, Clone, Default)]
+pub struct StreamEnd {
+    /// Update counters, only those above zero.
+    pub stats: BTreeMap<String, i64>,
+    /// The bookmark of an auto-commit statement's commit.
+    pub bookmark: Option<String>,
+}
+
+/// Records produced on demand: what `PULL` takes after a result's
+/// buffered records. Dropping it stops the producer.
+#[async_trait]
+pub trait RecordStream: Send {
+    /// The next record; `Ok(None)` at the end, after which [`Self::end`]
+    /// holds the summary.
+    async fn next(&mut self) -> Result<Option<Vec<PackValue>>, BoltFailure>;
+
+    /// The summary, once [`Self::next`] returned `None`.
+    fn end(&mut self) -> StreamEnd;
+}
+
+/// One query's result: buffered records, then an optional stream.
+#[derive(Default)]
 pub struct QueryResult {
     /// Column names.
     pub fields: Vec<String>,
@@ -87,6 +111,19 @@ pub struct QueryResult {
     pub db: Option<String>,
     /// Milliseconds until the result was available.
     pub t_first: i64,
+    /// More records, produced as the client pulls them.
+    pub stream: Option<Box<dyn RecordStream>>,
+}
+
+impl std::fmt::Debug for QueryResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryResult")
+            .field("fields", &self.fields)
+            .field("records", &self.records.len())
+            .field("qtype", &self.qtype)
+            .field("streamed", &self.stream.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// A logged-in session: what a Bolt connection runs queries through.
@@ -152,6 +189,9 @@ pub struct Config {
     pub max_message: usize,
     /// Prefix of `connection_id`.
     pub id_prefix: String,
+    /// Bytes of an open result buffered when a transaction runs another
+    /// statement (`bolt.max_buffered_result_mb`); 39918 past it.
+    pub max_buffered: usize,
 }
 
 impl Default for Config {
@@ -163,6 +203,7 @@ impl Default for Config {
             handshake_timeout: Duration::from_secs(10),
             max_message: 16 << 20,
             id_prefix: "bolt-".into(),
+            max_buffered: 64 << 20,
         }
     }
 }
@@ -287,24 +328,48 @@ impl Conn {
         self.results.iter().position(|(q, _)| *q == qid)
     }
 
-    fn pull(&mut self, extra: &PackValue, discard: bool) {
+    #[allow(clippy::too_many_lines)] // take, look ahead, summarize
+    async fn pull(&mut self, extra: &PackValue, discard: bool) {
         let n = int_of(extra, "n", -1);
         let qid = int_of(extra, "qid", -1);
         let Some(i) = self.result_index(qid) else {
             self.fail(&BoltFailure::invalid("no result to pull"));
             return;
         };
-        let take = if discard || n < 0 {
+        if discard && n < 0 {
+            // Everything: drop the stream (its producer stops).
+            let r = &mut self.results[i].1;
+            r.records.clear();
+            r.stream = None;
+        }
+        let take = if n < 0 {
             usize::MAX
         } else {
             usize::try_from(n).unwrap_or(usize::MAX)
         };
-        let mut sent = 0usize;
         let mut rows = Vec::new();
+        let mut end: Option<StreamEnd> = None;
+        let mut failed: Option<BoltFailure> = None;
         {
             let r = &mut self.results[i].1;
+            let mut sent = 0usize;
             while sent < take {
-                let Some(rec) = r.records.pop_front() else {
+                let rec = if let Some(rec) = r.records.pop_front() {
+                    rec
+                } else if let Some(s) = r.stream.as_mut() {
+                    match s.next().await {
+                        Ok(Some(rec)) => rec,
+                        Ok(None) => {
+                            end = Some(s.end());
+                            r.stream = None;
+                            break;
+                        }
+                        Err(f) => {
+                            failed = Some(f);
+                            break;
+                        }
+                    }
+                } else {
                     break;
                 };
                 if !discard {
@@ -312,12 +377,39 @@ impl Conn {
                 }
                 sent += 1;
             }
+            // Look ahead one record, so `has_more` is exact.
+            if failed.is_none()
+                && r.records.is_empty()
+                && let Some(s) = r.stream.as_mut()
+            {
+                match s.next().await {
+                    Ok(Some(rec)) => r.records.push_back(rec),
+                    Ok(None) => {
+                        end = Some(s.end());
+                        r.stream = None;
+                    }
+                    Err(f) => failed = Some(f),
+                }
+            }
         }
         for rec in rows {
             self.send(&Response::Record(rec));
         }
-        if self.results[i].1.records.is_empty() {
+        if let Some(f) = failed {
+            self.fail(&f);
+            return;
+        }
+        let r = &self.results[i].1;
+        if r.records.is_empty() && r.stream.is_none() {
             let (_, r) = self.results.remove(i);
+            let mut stats = r.stats;
+            let mut bookmark = None;
+            if let Some(e) = end {
+                for (k, v) in e.stats {
+                    *stats.entry(k).or_default() += v;
+                }
+                bookmark = e.bookmark;
+            }
             let mut meta = vec![
                 ("type", PackValue::str(r.qtype)),
                 ("t_last", PackValue::Int(0)),
@@ -325,11 +417,11 @@ impl Conn {
             if let Some(db) = r.db {
                 meta.push(("db", PackValue::String(db)));
             }
-            if !r.stats.is_empty() {
+            if !stats.is_empty() {
                 meta.push((
                     "stats",
                     PackValue::Map(
-                        r.stats
+                        stats
                             .into_iter()
                             .map(|(k, v)| (k, PackValue::Int(v)))
                             .collect(),
@@ -337,7 +429,8 @@ impl Conn {
                 ));
             }
             if self.state == State::Streaming
-                && let Some(b) = self.session.as_ref().and_then(|s| s.last_bookmark())
+                && let Some(b) =
+                    bookmark.or_else(|| self.session.as_ref().and_then(|s| s.last_bookmark()))
             {
                 meta.push(("bookmark", PackValue::String(b)));
             }
@@ -350,6 +443,35 @@ impl Conn {
         } else {
             self.success(vec![("has_more", PackValue::Bool(true))]);
         }
+    }
+
+    /// Buffers every open stream (a transaction runs another statement
+    /// while earlier results are open), up to `limit` bytes per result.
+    async fn buffer_streams(&mut self, limit: usize) -> Result<(), BoltFailure> {
+        for (_, r) in &mut self.results {
+            let Some(mut s) = r.stream.take() else {
+                continue;
+            };
+            let mut bytes: usize = r.records.iter().flatten().map(PackValue::encoded_len).sum();
+            while let Some(rec) = s.next().await? {
+                bytes += rec.iter().map(PackValue::encoded_len).sum::<usize>();
+                if bytes > limit {
+                    return Err(BoltFailure::new(
+                        "Neo.ClientError.Statement.SprigBoltResultBufferLimit",
+                        format!(
+                            "an open result is larger than bolt.max_buffered_result_mb = {} (39918)",
+                            limit >> 20
+                        ),
+                    ));
+                }
+                r.records.push_back(rec);
+            }
+            let e = s.end();
+            for (k, v) in e.stats {
+                *r.stats.entry(k).or_default() += v;
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)] // one arm per message
@@ -458,7 +580,13 @@ impl Conn {
                 },
             ) => {
                 // Another statement in the transaction while an earlier
-                // result is still open: allowed, results keep their qid.
+                // result is still open: allowed, results keep their qid;
+                // open streams are buffered first (they hold the
+                // transaction's connection).
+                if let Err(f) = self.buffer_streams(cfg.max_buffered).await {
+                    self.fail(&f);
+                    return;
+                }
                 self.state = State::TxReady;
                 Box::pin(self.handle(
                     Request::Run {
@@ -475,10 +603,10 @@ impl Conn {
                 }
             }
             (State::Streaming | State::TxStreaming, Request::Pull(extra)) => {
-                self.pull(&extra, false);
+                self.pull(&extra, false).await;
             }
             (State::Streaming | State::TxStreaming, Request::Discard(extra)) => {
-                self.pull(&extra, true);
+                self.pull(&extra, true).await;
             }
             (State::Ready, Request::Begin(extra)) => {
                 let Some(s) = self.session.as_mut() else {

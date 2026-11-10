@@ -81,19 +81,34 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         let bound = listener.local_addr().map_err(|e| {
             sprig_common::SprigError::internal(format!("[agent] internal_addr: {e}"))
         })?;
+        // Decision RC2: mutual TLS with `[tls]` (the backup stream carries
+        // tenant data); plain HTTP only without it, for development.
+        let internal_tls = cfg
+            .tls
+            .as_ref()
+            .map(sprig_cluster::failover::internal_tls::InternalTls::from_config)
+            .transpose()?;
+        let scheme = if internal_tls.is_some() { "https" } else { "http" };
+        if internal_tls.is_none() {
+            tracing::warn!("no [tls]: the internal service (backup streams) is plain HTTP; development only");
+        }
         let url = cfg
             .agent
             .internal_advertise
             .clone()
-            .unwrap_or_else(|| format!("http://{bound}"));
-        let service = Arc::new(rebuild::RebuildService::new(
+            .unwrap_or_else(|| format!("{scheme}://{bound}"));
+        let mut service = rebuild::RebuildService::new(
             cfg.agent.rebuild.clone(),
             store,
             target.cluster.clone(),
             target.node.clone(),
             target.endpoint.clone(),
             agent.hold(),
-        ));
+        );
+        if let Some(t) = internal_tls {
+            service = service.with_tls(t);
+        }
+        let service = Arc::new(service);
         service_task = Some(rebuild::serve(
             listener,
             Arc::clone(&service),

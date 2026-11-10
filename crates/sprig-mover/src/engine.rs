@@ -46,6 +46,9 @@ const POS_COMMIT_EVERY: Duration = Duration::from_secs(1);
 const STREAM_BUFFER: usize = 256;
 /// Consecutive failures before a job gives up and rolls back.
 const MAX_FAILURES: u32 = 200;
+/// A `Continuous` job's pump that runs this long is dropped (its source
+/// stalled), so a stop or cancel never waits on a lost source.
+const STREAM_STALL: Duration = Duration::from_secs(5);
 /// The fence's own `RENAME`s (and the unfence's) in the source binlog.
 const FENCE_MARK: &str = "__sprig_f_";
 
@@ -140,7 +143,14 @@ pub struct Engine {
     xa_open: Vec<(String, GtidPos, Vec<RowChange>)>,
     /// The feed handoff of the cutover attempt in progress (`G`, `H`).
     handoff: Option<HandoffPos>,
+    /// Re-resolves the job's settings: a running job follows changes
+    /// (chapter 10, "Configuration": changes apply live), checked with the
+    /// job record every second.
+    settings_source: Option<SettingsSource>,
 }
+
+/// Resolves a job's settings as they are now ([`Engine::with_settings_source`]).
+pub type SettingsSource = Arc<dyn Fn() -> MoverSettings + Send + Sync>;
 
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -216,6 +226,28 @@ impl Engine {
             copied_since: (now, 0),
             xa_open: Vec::new(),
             handoff: None,
+            settings_source: None,
+        }
+    }
+
+    /// Follows `source` for the job's settings while it runs: they are
+    /// resolved again at least every second (with the cancel check), so a
+    /// changed setting reaches the job's next chunk, batch, tick, cutover
+    /// attempt or retention check.
+    #[must_use]
+    pub fn with_settings_source(mut self, source: SettingsSource) -> Self {
+        self.settings_source = Some(source);
+        self
+    }
+
+    /// Resolves the settings again, if the engine follows a source.
+    fn refresh_settings(&mut self) {
+        if let Some(src) = &self.settings_source {
+            let next = src();
+            if next != self.settings {
+                tracing::info!(job = %self.job.0, "mover settings changed; applying them to the running job");
+                self.settings = next;
+            }
         }
     }
 
@@ -1355,14 +1387,34 @@ impl Engine {
                     // What was read and not yet committed goes in first.
                     let _ = self.flush(true).await;
                 }
-                let pos = self.applied.to_string();
+                // The target's own position row is the truth (a dropped
+                // pump may have committed past what this process saw).
+                let pos = match self.env.target.load_pos(self.job).await {
+                    Ok(Some(row)) => row.gtid_pos.to_string(),
+                    _ => self.applied.to_string(),
+                };
                 tracing::warn!(job = %self.job.0, applied = %pos, "continuous job stopped; the target keeps what it applied");
                 self.claim.rec.progress.applied_source_gtid = Some(pos);
                 self.claim.finish(JobState::Done, None).await?;
                 return Ok(Step::End(JobState::Done));
             }
-            self.pump(Until::For(Duration::from_millis(500)), None)
-                .await?;
+            // A source that stopped answering (a lost DC, a frozen host)
+            // must not hold a stop or a cancel: a pump that runs past
+            // STREAM_STALL is dropped, and the stream resumes from what the
+            // target committed (as after any stream error).
+            if let Ok(r) = tokio::time::timeout(
+                STREAM_STALL,
+                self.pump(Until::For(Duration::from_millis(500)), None),
+            )
+            .await
+            {
+                r?;
+            } else {
+                tracing::warn!(job = %self.job.0, "the stream stalled; resuming from the target's position");
+                self.drop_stream();
+                self.check_cancel(true).await?;
+                continue;
+            }
             let pos = self.applied.to_string();
             if !pos.is_empty() {
                 self.claim.rec.progress.applied_source_gtid = Some(pos);
@@ -1707,8 +1759,10 @@ impl Engine {
 
     async fn post_cutover(&mut self) -> Result<Step> {
         self.drop_stream();
+        self.refresh_settings();
         let retain = self.settings.source_retain;
-        let until = wall_ms(self.clock.wall()) + u64::try_from(retain.as_millis()).unwrap_or(0);
+        let from = wall_ms(self.clock.wall());
+        let until = from + u64::try_from(retain.as_millis()).unwrap_or(0);
         let src = self.claim.rec.spec.sources[0].cluster.clone();
         let tgt = self.claim.rec.spec.targets[0].cluster.clone();
         let max = self.settings.max_copies_per_cluster;
@@ -1718,6 +1772,7 @@ impl Engine {
             .save(|r| {
                 r.state = JobState::Retaining;
                 r.retain_until_ms = Some(until);
+                r.retain_from_ms = Some(from);
             })
             .await?;
         Ok(Step::Next)
@@ -1726,7 +1781,18 @@ impl Engine {
     async fn retaining(&mut self) -> Result<Step> {
         loop {
             let now = wall_ms(self.clock.wall());
-            let until = self.claim.rec.retain_until_ms.unwrap_or(0);
+            // `mover.source_retain_hours` as it is now (and an end set by
+            // an operator or a tenant delete), checked every second.
+            self.refresh_settings();
+            let until = self
+                .claim
+                .rec
+                .retain_until(self.settings.source_retain, now)
+                .unwrap_or(0);
+            if self.claim.rec.retain_until_ms != Some(until) {
+                tracing::info!(job = %self.job.0, until, "retention follows mover.source_retain_hours");
+                self.claim.save(|r| r.retain_until_ms = Some(until)).await?;
+            }
             if now >= until {
                 break;
             }
@@ -1737,9 +1803,10 @@ impl Engine {
                 self.claim.release().await?;
                 return Ok(Step::End(JobState::Retaining));
             }
-            tokio::time::sleep(Duration::from_millis((until - now).min(60_000))).await;
-            // Keep proving ownership while waiting.
-            self.claim.save(|_| {}).await?;
+            tokio::time::sleep(Duration::from_millis((until - now).min(1000))).await;
+            // Keep proving ownership while waiting, and see an end set
+            // meanwhile.
+            self.claim.refresh().await?;
         }
         self.claim.save(|r| r.state = JobState::Cleaning).await?;
         Ok(Step::Next)
@@ -1770,6 +1837,7 @@ impl Engine {
         let t = self.clock.now();
         if now || t.saturating_duration_since(self.last_check) >= CANCEL_CHECK {
             self.last_check = t;
+            self.refresh_settings();
             self.claim.refresh().await?;
         }
         Ok(())

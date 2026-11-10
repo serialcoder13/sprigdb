@@ -45,7 +45,7 @@ use super::{ConnInfo, Core};
 
 type GrpcResult<T> = std::result::Result<Response<T>, Status>;
 
-fn st(e: &SprigError) -> Status {
+pub(crate) fn st(e: &SprigError) -> Status {
     to_status(e)
 }
 
@@ -56,7 +56,10 @@ fn meta(req: &Request<impl Sized>, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-async fn caller<T>(core: &Core, req: &Request<T>) -> std::result::Result<Caller, Status> {
+pub(crate) async fn caller<T>(
+    core: &Core,
+    req: &Request<T>,
+) -> std::result::Result<Caller, Status> {
     let info = req
         .extensions()
         .get::<ConnInfo>()
@@ -131,7 +134,21 @@ fn query_json(r: &QueryRequest) -> serde_json::Value {
     serde_json::json!({
         "database": r.database, "sql": r.sql, "transaction": r.transaction,
         "multi_statements": r.multi_statements,
+        "max_rows": r.max_rows, "max_bytes": r.max_bytes, "timeout_ms": r.timeout_ms,
     })
+}
+
+/// The caps a gRPC request asks for, clamped for Studio sessions.
+fn caps_of(core: &Core, c: &super::sql::Caller, r: &QueryRequest) -> super::sql::Caps {
+    core.studio.caps_for(
+        c,
+        &r.database,
+        super::sql::Caps {
+            max_rows: r.max_rows,
+            max_bytes: r.max_bytes,
+            timeout: (r.timeout_ms > 0).then(|| std::time::Duration::from_millis(r.timeout_ms)),
+        },
+    )
 }
 
 #[derive(Clone)]
@@ -161,13 +178,14 @@ impl Sql for SqlSvc {
         }
         let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
         let engine = Arc::clone(&self.0.engine);
+        let caps = caps_of(&self.0, &c, &r);
         let call = SqlCall {
             database: r.database,
             sql: r.sql,
             multi: r.multi_statements,
         };
         let txn = (!r.transaction.is_empty()).then_some(r.transaction);
-        tokio::spawn(async move { engine.run(&c, call, txn.as_deref(), tx).await });
+        tokio::spawn(async move { engine.run_capped(&c, call, txn.as_deref(), caps, tx).await });
         let stream = futures::stream::unfold(Some(rx), |rx| async move {
             let mut rx = rx?;
             match rx.recv().await? {
@@ -192,13 +210,14 @@ impl Sql for SqlSvc {
         let engine = Arc::clone(&self.0.engine);
         let max = engine.settings().max_buffered;
         let charge = engine.charge(&c);
+        let caps = caps_of(&self.0, &c, &r);
         let call = SqlCall {
             database: r.database,
             sql: r.sql,
             multi: r.multi_statements,
         };
         let txn = (!r.transaction.is_empty()).then_some(r.transaction);
-        tokio::spawn(async move { engine.run(&c, call, txn.as_deref(), tx).await });
+        tokio::spawn(async move { engine.run_capped(&c, call, txn.as_deref(), caps, tx).await });
         collect(rx, max, charge)
             .await
             .map(Response::new)
@@ -235,6 +254,155 @@ impl Functions for FunctionsSvc {
         .await
         .map(|v| Response::new(super::functions::response(&v)))
         .map_err(|e| st(&e))
+    }
+}
+
+#[derive(Clone)]
+struct KvSvc(Arc<Core>);
+
+impl KvSvc {
+    async fn run(
+        &self,
+        c: &Caller,
+        rpc: &str,
+        body: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, Status> {
+        metrics::counter!("sprig_api_requests_total", "service" => "sprig.v1.KeyValue", "method" => rpc.to_owned(), "protocol" => "grpc").increment(1);
+        super::kv::call(&self.0.engine, c, &format!("KeyValue.{rpc}"), &body)
+            .await
+            .map_err(|e| st(&e))
+    }
+}
+
+fn kv_entry(v: &serde_json::Value) -> sprig_api::proto::v1::KvEntry {
+    use base64::Engine as _;
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    sprig_api::proto::v1::KvEntry {
+        key: s("key"),
+        value: base64::engine::general_purpose::STANDARD
+            .decode(s("value"))
+            .unwrap_or_default(),
+        text: s("text"),
+        r#type: s("type"),
+        version: s("version").parse().unwrap_or(0),
+        expires_at_ms: s("expires_at_ms").parse().unwrap_or(0),
+    }
+}
+
+#[tonic::async_trait]
+impl sprig_api::proto::v1::key_value_server::KeyValue for KvSvc {
+    async fn get(
+        &self,
+        req: Request<sprig_api::proto::v1::KvGetRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::KvGetResponse> {
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let v = self
+            .run(
+                &c,
+                "Get",
+                serde_json::json!({"database": r.database, "namespace": r.namespace, "key": r.key}),
+            )
+            .await?;
+        Ok(Response::new(sprig_api::proto::v1::KvGetResponse {
+            entry: v.get("entry").map(kv_entry),
+            found: v
+                .get("found")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        }))
+    }
+
+    async fn put(
+        &self,
+        req: Request<sprig_api::proto::v1::KvPutRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::KvPutResponse> {
+        use base64::Engine as _;
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let mut body = serde_json::json!({
+            "database": r.database, "namespace": r.namespace, "key": r.key,
+            "text": r.text, "if_absent": r.if_absent, "if_exists": r.if_exists,
+            "ttl_ms": r.ttl_ms,
+        });
+        if !r.value.is_empty() {
+            body["value"] = serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(&r.value),
+            );
+        }
+        if let Some(v) = r.if_version {
+            body["if_version"] = serde_json::Value::String(v.to_string());
+        }
+        let v = self.run(&c, "Put", body).await?;
+        Ok(Response::new(sprig_api::proto::v1::KvPutResponse {
+            version: v
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+        }))
+    }
+
+    async fn delete(
+        &self,
+        req: Request<sprig_api::proto::v1::KvDeleteRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::KvDeleteResponse> {
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let mut body =
+            serde_json::json!({"database": r.database, "namespace": r.namespace, "key": r.key});
+        if let Some(v) = r.if_version {
+            body["if_version"] = serde_json::Value::String(v.to_string());
+        }
+        let v = self.run(&c, "Delete", body).await?;
+        Ok(Response::new(sprig_api::proto::v1::KvDeleteResponse {
+            deleted: v
+                .get("deleted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        }))
+    }
+
+    async fn scan(
+        &self,
+        req: Request<sprig_api::proto::v1::KvScanRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::KvScanResponse> {
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let v = self
+            .run(&c, "Scan", serde_json::json!({"database": r.database, "namespace": r.namespace, "prefix": r.prefix, "page_token": r.page_token, "limit": r.limit}))
+            .await?;
+        Ok(Response::new(sprig_api::proto::v1::KvScanResponse {
+            entries: v
+                .get("entries")
+                .and_then(serde_json::Value::as_array)
+                .map(|a| a.iter().map(kv_entry).collect())
+                .unwrap_or_default(),
+            next_page_token: v
+                .get("next_page_token")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        }))
+    }
+
+    async fn exec(
+        &self,
+        req: Request<sprig_api::proto::v1::KvExecRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::KvExecResponse> {
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let v = self
+            .run(&c, "Exec", serde_json::json!({"database": r.database, "namespace": r.namespace, "command": r.command}))
+            .await?;
+        Ok(Response::new(sprig_api::proto::v1::KvExecResponse {
+            reply: v.get("reply").map(super::functions::to_proto),
+        }))
     }
 }
 
@@ -531,6 +699,22 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
     tonic::service::Routes::new(SqlServer::new(SqlSvc(c())).max_decoding_message_size(max))
         .add_service(TransactionsServer::new(TxnSvc(c())))
         .add_service(FunctionsServer::new(FunctionsSvc(c())).max_decoding_message_size(max))
+        .add_service(
+            sprig_api::proto::v1::key_value_server::KeyValueServer::new(KvSvc(c()))
+                .max_decoding_message_size(max),
+        )
+        .add_service(
+            sprig_api::proto::v1::vectors_server::VectorsServer::new(super::vectors::VectorsSvc(
+                c(),
+            ))
+            .max_decoding_message_size(max),
+        )
+        .add_service(
+            sprig_api::proto::v1::analytics_server::AnalyticsServer::new(
+                super::analytics::AnalyticsSvc(c()),
+            )
+            .max_decoding_message_size(max),
+        )
         .add_service(HealthServer::new(HealthSvc(c())))
         .add_service(ClustersServer::new(ClustersSvc(c())))
         .add_service(DataCentersServer::new(DcsSvc(c())))

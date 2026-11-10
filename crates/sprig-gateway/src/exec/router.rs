@@ -635,7 +635,9 @@ impl PassSession {
                    cx: &sprig_settings::SettingCtx<'_>| {
             svc.settings.get(k, cx, Some(&cat.settings))
         };
-        let router = sprig_router::RouterConfig::resolve(&ctx, get);
+        let router = sprig_router::RouterConfig::resolve_with(&ctx, get, |k, cx| {
+            svc.settings.get(k, cx, Some(&cat.settings)).into_owned()
+        });
         let txn = TxnConfig::resolve_with(
             &ctx,
             |k, cx| svc.settings.get(k, cx, Some(&cat.settings)),
@@ -1720,6 +1722,8 @@ impl PassSession {
                 gather: sprig_router::GatherLimits {
                     max_rows: cfg.gather_max_rows,
                     max_concurrent: cfg.gather_max_concurrent,
+                    // Analytic reads (chapter 17, R3).
+                    analytics: cfg.analytics,
                 },
                 fk_lock_wait: cfg.fk_lock_wait_seconds,
             };

@@ -198,11 +198,20 @@ impl SessionChange {
             let data = block.slice_ref(r.lenenc_bytes()?);
             let mut d = Reader::new(&data);
             let change = match kind {
-                session_track::SYSTEM_VARIABLES => {
+                // MySQL sends one name and value per entry; MariaDB packs
+                // every changed variable into one entry (`timestamp` and
+                // `last_gtid` together after a COMMIT under a fixed
+                // timestamp: reading only the first pair lost the commit's
+                // GTID, and with it read-your-writes; R3, agent r3d).
+                session_track::SYSTEM_VARIABLES => loop {
                     let name = data.slice_ref(d.lenenc_bytes()?);
                     let value = data.slice_ref(d.lenenc_bytes()?);
-                    SessionChange::SystemVariable { name, value }
-                }
+                    let v = SessionChange::SystemVariable { name, value };
+                    if d.is_empty() {
+                        break v;
+                    }
+                    out.push(v);
+                },
                 session_track::SCHEMA => SessionChange::Schema(data.slice_ref(d.lenenc_bytes()?)),
                 // Servers send the flag bare (`02 01 31`: length 1, then
                 // '1'); libmysql rejects any other length. A nested lenenc

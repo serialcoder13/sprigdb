@@ -182,6 +182,11 @@ pub struct CollMeta {
     pub array_paths: BTreeSet<String>,
     /// Past `doc.max_array_paths`: every path counts as an array path.
     pub arrays_full: bool,
+    /// Registered array paths not yet confirmed loaded by every gateway
+    /// (chapter 31, `check_flags`): a write holding one waits for the
+    /// confirmation first. `*` stands for `arrays_full`. Always empty in
+    /// the hidden-table storage, which is read per command.
+    pub pending_paths: BTreeSet<String>,
     /// Secondary indexes (not `_id`).
     pub indexes: Vec<IndexDef>,
     /// `create` options (validator, collation, ...), as given.
@@ -308,6 +313,7 @@ impl CollMeta {
                 })
                 .unwrap_or_default(),
             arrays_full: text(4)? == "1",
+            pending_paths: BTreeSet::new(),
             indexes: idx
                 .as_array()
                 .map(|a| a.iter().filter_map(IndexDef::from_json).collect())
@@ -525,6 +531,7 @@ mod tests {
             uuid: [7; 16],
             array_paths: ["items".to_owned()].into(),
             arrays_full: false,
+            pending_paths: BTreeSet::new(),
             indexes: vec![IndexDef {
                 id: 1,
                 name: "a_1_b_-1".into(),

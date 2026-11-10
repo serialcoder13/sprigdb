@@ -19,7 +19,7 @@ const PATH_RELS: &str = " pr";
 const ROW_ID: &str = " rid";
 
 /// The `AND`ed parts of a predicate.
-fn conjuncts(e: &Expr) -> Vec<&Expr> {
+pub(super) fn conjuncts(e: &Expr) -> Vec<&Expr> {
     match e {
         Expr::Binary(BinOp::And, a, b) => {
             let mut v = conjuncts(a);
@@ -217,7 +217,7 @@ impl Exec<'_> {
     }
 
     /// How good a node is as the start point (chapter 43, step 1).
-    fn score(np: &NodePat, rows: &[Row], conj: &[Expr]) -> u32 {
+    pub(super) fn score(np: &NodePat, rows: &[Row], conj: &[Expr]) -> u32 {
         let Some(v) = &np.var else {
             return u32::from(np.labels.is_some()) * 10 + u32::from(np.props.is_some()) * 80;
         };
@@ -277,7 +277,7 @@ impl Exec<'_> {
 
     /// The scan for an unbound start node: label, ids and pushed-down
     /// property equalities (a superset; rechecked).
-    async fn start_scan(&mut self, np: &NodePat, conj: &[Expr]) -> Result<Option<Scan>> {
+    pub(super) async fn start_scan(&mut self, np: &NodePat, conj: &[Expr]) -> Result<Option<Scan>> {
         let mut s = Scan {
             limit: Some(self.b.max_rows.saturating_add(1)),
             ..Scan::default()

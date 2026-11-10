@@ -18,6 +18,7 @@
 #![recursion_limit = "512"]
 
 pub mod agg;
+pub mod catalog;
 pub mod engine;
 pub mod filter;
 pub mod json;

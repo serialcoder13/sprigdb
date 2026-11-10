@@ -19,7 +19,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use super::{Exec, RELS};
 use crate::ast::{Dir, Expr, NodePat, PathPattern, RemoveItem, SetItem};
 use crate::eval::{Row, eval};
-use crate::store::{EdgeRow, IdKind, NodeRow, rk_of};
+use crate::store::{EdgeKey, EdgeRow, IdKind, NodeRow, rk_of};
 use crate::value::{Node, Props, Rel, Value, check_property, props_to_json};
 
 fn syntax(msg: impl Into<String>) -> SprigError {
@@ -287,6 +287,7 @@ impl Exec<'_> {
             tagged.insert(RELS.into(), Value::List(vec![]));
             let found = Box::pin(self.match_pattern(vec![tagged], pat, &[], false, &[])).await?;
             if found.is_empty() {
+                let r_again = r.clone();
                 let mut nr = r;
                 let mut create = pat.clone();
                 // `MERGE (a)-[:R]-(b)` creates left to right.
@@ -296,9 +297,35 @@ impl Exec<'_> {
                     }
                 }
                 let mut locked = HashSet::new();
-                self.create_path(&mut nr, &create, &mut locked).await?;
-                let mut v = Box::pin(self.set(vec![nr], on_create)).await?;
-                out.append(&mut v);
+                match self.create_path(&mut nr, &create, &mut locked).await {
+                    Ok(()) => {
+                        let mut v = Box::pin(self.set(vec![nr], on_create)).await?;
+                        out.append(&mut v);
+                    }
+                    // A uniqueness constraint: another writer created it
+                    // since the match; match again (it has committed, as
+                    // the duplicate check waited for it).
+                    Err(e) if is_duplicate(&e) => {
+                        let mut tagged = r_again.clone();
+                        tagged.insert(RELS.into(), Value::List(vec![]));
+                        let again =
+                            Box::pin(self.match_pattern(vec![tagged], pat, &[], false, &[]))
+                                .await?;
+                        if again.is_empty() {
+                            return Err(e);
+                        }
+                        let again: Vec<Row> = again
+                            .into_iter()
+                            .map(|mut x| {
+                                x.remove(RELS);
+                                x
+                            })
+                            .collect();
+                        let mut v = Box::pin(self.set(again, on_match)).await?;
+                        out.append(&mut v);
+                    }
+                    Err(e) => return Err(e),
+                }
             } else {
                 let found: Vec<Row> = found
                     .into_iter()
@@ -582,8 +609,8 @@ impl Exec<'_> {
         detach: bool,
     ) -> Result<Vec<Row>> {
         let mut nodes: Vec<u64> = Vec::new();
-        let mut rels: Vec<u64> = Vec::new();
-        let add = |v: &Value, nodes: &mut Vec<u64>, rels: &mut Vec<u64>| -> Result<()> {
+        let mut rels: Vec<Rel> = Vec::new();
+        let add = |v: &Value, nodes: &mut Vec<u64>, rels: &mut Vec<Rel>| -> Result<()> {
             match v {
                 Value::Null => {}
                 Value::Node(n) => {
@@ -592,8 +619,8 @@ impl Exec<'_> {
                     }
                 }
                 Value::Rel(r) => {
-                    if !rels.contains(&r.id) {
-                        rels.push(r.id);
+                    if !rels.iter().any(|x| x.id == r.id) {
+                        rels.push(r.as_ref().clone());
                     }
                 }
                 Value::Path(p) => {
@@ -603,8 +630,8 @@ impl Exec<'_> {
                         }
                     }
                     for r in &p.rels {
-                        if !rels.contains(&r.id) {
-                            rels.push(r.id);
+                        if !rels.iter().any(|x| x.id == r.id) {
+                            rels.push(r.as_ref().clone());
                         }
                     }
                 }
@@ -630,8 +657,19 @@ impl Exec<'_> {
             }
         }
         if !rels.is_empty() {
+            let mut keys = Vec::with_capacity(rels.len());
+            for r in &rels {
+                keys.push(EdgeKey {
+                    id: r.id,
+                    src: r.src,
+                    dst: r.dst,
+                    rtype: self.store.type_id(&r.rtype, false).await?.unwrap_or(0),
+                    src_rk: r.src_rk,
+                    dst_rk: r.dst_rk,
+                });
+            }
             let mut n = 0;
-            for batch in rels.chunks(self.b.batch_nodes.max(1)) {
+            for batch in keys.chunks(self.b.batch_nodes.max(1)) {
                 n += self.store.delete_edges(batch).await?;
             }
             self.bump("relationships-deleted", i64::try_from(n).unwrap_or(0));
@@ -652,9 +690,9 @@ impl Exec<'_> {
                         ),
                     ));
                 }
-                let ids: Vec<u64> = touching.iter().map(|e| e.id).collect();
+                let keys: Vec<EdgeKey> = touching.iter().map(EdgeKey::from).collect();
                 let mut n = 0;
-                for batch in ids.chunks(self.b.batch_nodes.max(1)) {
+                for batch in keys.chunks(self.b.batch_nodes.max(1)) {
                     n += self.store.delete_edges(batch).await?;
                 }
                 self.bump("relationships-deleted", i64::try_from(n).unwrap_or(0));
@@ -670,6 +708,15 @@ impl Exec<'_> {
         }
         Ok(rows)
     }
+}
+
+/// A duplicate key: a uniqueness constraint refused the row.
+pub(crate) fn is_duplicate(e: &SprigError) -> bool {
+    matches!(
+        e.kind,
+        sprig_common::ErrorKind::Backend { errno: 1062, .. }
+            | sprig_common::ErrorKind::Standard { errno: 1062, .. }
+    )
 }
 
 fn refreshed(v: &Value, p: &Pending) -> Value {

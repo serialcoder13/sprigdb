@@ -539,6 +539,57 @@ sprig_codes! {
     SubtreeTooLarge = 39715, "ER_SPRIG_SUBTREE_TOO_LARGE", "SprigSubtreeTooLarge", SQLSTATE_GENERAL, false;
     /// `ADD HIERARCHY` found orphans or cycles (chapter 32).
     HierarchyBackfillFailed = 39716, "ER_SPRIG_HIERARCHY_BACKFILL_FAILED", "SprigHierarchyBackfillFailed", SQLSTATE_GENERAL, false;
+    /// Unknown key-value namespace (chapter 33).
+    KvNamespaceNotFound = 39720, "ER_SPRIG_KV_NAMESPACE_NOT_FOUND", "SprigKvNamespaceNotFound", SQLSTATE_GENERAL, false;
+    /// A key's version isn't the one the write expected (chapter 33).
+    KvVersionMismatch = 39721, "ER_SPRIG_KV_VERSION_MISMATCH", "SprigKvVersionMismatch", SQLSTATE_GENERAL, false;
+    /// The key exists, and the write needed it absent (chapter 33).
+    KvKeyExists = 39722, "ER_SPRIG_KV_KEY_EXISTS", "SprigKvKeyExists", SQLSTATE_GENERAL, false;
+    /// An empty key, or one over 1024 bytes (chapter 33).
+    KvInvalidKey = 39723, "ER_SPRIG_KV_INVALID_KEY", "SprigKvInvalidKey", SQLSTATE_GENERAL, false;
+    /// A value over the namespace's limit or not in its codec (chapter 33).
+    KvValueInvalid = 39724, "ER_SPRIG_KV_VALUE_INVALID", "SprigKvValueInvalid", SQLSTATE_GENERAL, false;
+    /// The key holds another type (chapter 33; Redis `WRONGTYPE`).
+    KvWrongType = 39730, "ER_SPRIG_KV_WRONG_TYPE", "SprigKvWrongType", SQLSTATE_GENERAL, false;
+    /// A hash field or member over 2024 bytes (chapter 33).
+    KvElementTooLong = 39731, "ER_SPRIG_KV_ELEMENT_TOO_LONG", "SprigKvElementTooLong", SQLSTATE_GENERAL, false;
+    /// Unknown vector index (chapter 34).
+    VectorIndexNotFound = 39735, "ER_SPRIG_VECTOR_INDEX_NOT_FOUND", "SprigVectorIndexNotFound", SQLSTATE_GENERAL, false;
+    /// A vector of the wrong length (chapter 34).
+    VectorDimensionMismatch = 39736, "ER_SPRIG_VECTOR_DIMENSION_MISMATCH", "SprigVectorDimensionMismatch", SQLSTATE_GENERAL, false;
+    /// A metric the index doesn't use, or a zero vector under a cosine
+    /// or dotProduct index (chapter 34).
+    VectorMetricMismatch = 39737, "ER_SPRIG_VECTOR_METRIC_MISMATCH", "SprigVectorMetricMismatch", SQLSTATE_GENERAL, false;
+    /// `limit` over `numCandidates`, or over `vector.max_k` (chapter 34).
+    VectorLimitInvalid = 39738, "ER_SPRIG_VECTOR_LIMIT_INVALID", "SprigVectorLimitInvalid", SQLSTATE_GENERAL, false;
+    /// A filter on a field the index can't evaluate (chapter 34).
+    VectorFilterNotIndexed = 39739, "ER_SPRIG_VECTOR_FILTER_NOT_INDEXED", "SprigVectorFilterNotIndexed", SQLSTATE_GENERAL, false;
+    /// Over `vector.max_indexes_per_table` (chapter 34).
+    VectorTooManyIndexes = 39740, "ER_SPRIG_VECTOR_TOO_MANY_INDEXES", "SprigVectorTooManyIndexes", SQLSTATE_GENERAL, false;
+    /// Unknown dimensional model (chapter 35).
+    DimModelNotFound = 39750, "ER_SPRIG_DIM_MODEL_NOT_FOUND", "SprigDimModelNotFound", SQLSTATE_GENERAL, false;
+    /// Unknown measure, dimension or level (chapter 35).
+    DimUnknownMember = 39751, "ER_SPRIG_DIM_UNKNOWN_MEMBER", "SprigDimUnknownMember", SQLSTATE_GENERAL, false;
+    /// A model naming a missing table, column or key (chapter 35).
+    DimInvalidModel = 39752, "ER_SPRIG_DIM_INVALID_MODEL", "SprigDimInvalidModel", SQLSTATE_GENERAL, false;
+    /// Over `analytics.max_groups` (chapter 35).
+    DimTooManyGroups = 39753, "ER_SPRIG_DIM_TOO_MANY_GROUPS", "SprigDimTooManyGroups", SQLSTATE_GENERAL, false;
+    /// A query the merge can't answer exactly (chapter 35).
+    DimNotDecomposable = 39754, "ER_SPRIG_DIM_NOT_DECOMPOSABLE", "SprigDimNotDecomposable", SQLSTATE_GENERAL, false;
+    /// A named time zone without MariaDB's zone tables (chapter 35).
+    DimTzUnavailable = 39755, "ER_SPRIG_DIM_TZ_UNAVAILABLE", "SprigDimTzUnavailable", SQLSTATE_GENERAL, false;
+    /// `TRUNCATE` of a versioned dimension (chapter 35).
+    DimVersionedTruncate = 39756, "ER_SPRIG_DIM_VERSIONED_TRUNCATE", "SprigDimVersionedTruncate", SQLSTATE_GENERAL, false;
+    /// `as_of` older than the kept history (chapter 35).
+    DimHistoryPurged = 39757, "ER_SPRIG_DIM_HISTORY_PURGED", "SprigDimHistoryPurged", SQLSTATE_GENERAL, false;
+    /// Bad geometry or coordinates (chapter 36).
+    GeoInvalid = 39765, "ER_SPRIG_GEO_INVALID", "SprigGeoInvalid", SQLSTATE_GENERAL, false;
+    /// A geographic SRID other than 4326 (chapter 36).
+    GeoSridUnsupported = 39766, "ER_SPRIG_GEO_SRID_UNSUPPORTED", "SprigGeoSridUnsupported", SQLSTATE_GENERAL, false;
+    /// A geodesic expression the gateway can't evaluate exactly (chapter 36).
+    GeoUnsupportedExpression = 39767, "ER_SPRIG_GEO_UNSUPPORTED_EXPRESSION", "SprigGeoUnsupportedExpression", SQLSTATE_GENERAL, false;
+    /// A geometry over `geo.max_vertices` (chapter 36).
+    GeoTooComplex = 39768, "ER_SPRIG_GEO_TOO_COMPLEX", "SprigGeoTooComplex", SQLSTATE_GENERAL, false;
     /// Unknown space (chapter 42).
     SpaceNotFound = 39880, "ER_SPRIG_SPACE_NOT_FOUND", "SprigSpaceNotFound", SQLSTATE_GENERAL, false;
     /// A space or share name is taken (chapter 42).
@@ -577,6 +628,42 @@ sprig_codes! {
     /// A destructive schema change on an inheritable object that a share
     /// still reaches (chapter 42).
     InheritedObjectInUse = 39895, "ER_SPRIG_INHERITED_OBJECT_IN_USE", "SprigInheritedObjectInUse", SQLSTATE_GENERAL, false;
+    /// A publish into an inherited object names no target where one is
+    /// needed, a tenant that isn't a member, or one the publisher isn't a
+    /// proper ancestor of (chapter 42, R9).
+    InheritTargetTenant = 39896, "ER_SPRIG_INHERIT_TARGET_TENANT", "SprigInheritTargetTenant", SQLSTATE_GENERAL, false;
+    /// A member changes what only the definition decides, drops an
+    /// instance, or creates a local object with an inherited name (chapter
+    /// 42, R9).
+    InheritNotOverridable = 39897, "ER_SPRIG_INHERIT_NOT_OVERRIDABLE", "SprigInheritNotOverridable", SQLSTATE_GENERAL, false;
+    /// A publish into a definition, or an instance, that is being dropped
+    /// or has left its scope (chapter 42, R9).
+    InheritDefinitionDropping = 39898, "ER_SPRIG_INHERIT_DEFINITION_DROPPING", "SprigInheritDefinitionDropping", SQLSTATE_GENERAL, false;
+    /// An instance couldn't be created or reached in time (chapter 42, R9).
+    InheritInstanceUnavailable = 39899, "ER_SPRIG_INHERIT_INSTANCE_UNAVAILABLE", "SprigInheritInstanceUnavailable", SQLSTATE_RETRY, true;
+    /// Over `inherit.max_definitions_per_tenant` or
+    /// `inherit.max_instances_per_tenant` (chapter 42, R9).
+    InheritInstanceQuota = 39240, "ER_SPRIG_INHERIT_INSTANCE_QUOTA", "SprigInheritInstanceQuota", SQLSTATE_GENERAL, false;
+    /// An inherited connection's `REQUIRED` option or credential isn't set
+    /// for this member (chapter 42, R9).
+    InheritConfigMissing = 39241, "ER_SPRIG_INHERIT_CONFIG_MISSING", "SprigInheritConfigMissing", SQLSTATE_GENERAL, false;
+    /// The member's `sprig_inherited` principal lacks a privilege the
+    /// definition's `GRANTS` asks for (chapter 42, R9).
+    InheritRunAsPrivilege = 39242, "ER_SPRIG_INHERIT_RUN_AS_PRIVILEGE", "SprigInheritRunAsPrivilege", SQLSTATE_GENERAL, false;
+    /// A fan-in read, or under `residency.cross_tenant_messaging_strict` a
+    /// cross-tenant publish, would move a member's messages where its
+    /// residency forbids (chapter 42, R9).
+    InheritResidency = 39243, "ER_SPRIG_INHERIT_RESIDENCY", "SprigInheritResidency", SQLSTATE_GENERAL, false;
+    /// A broadcast over `inherit.broadcast_max_bytes`,
+    /// `inherit.broadcasts_per_hour` or `inherit.broadcast_max_members`
+    /// (chapter 42, R9).
+    InheritBroadcastLimit = 39244, "ER_SPRIG_INHERIT_BROADCAST_LIMIT", "SprigInheritBroadcastLimit", SQLSTATE_GENERAL, false;
+    /// `DROP DATABASE` of a database whose cross-tenant outbox still holds
+    /// committed rows after `inherit.outbox_drain_seconds` (chapter 42, R9).
+    InheritOutboxPending = 39245, "ER_SPRIG_INHERIT_OUTBOX_PENDING", "SprigInheritOutboxPending", SQLSTATE_GENERAL, true;
+    /// A request over a rate limit or admission control (chapter 37;
+    /// analytics admission, chapter 35).
+    RateLimited = 39780, "ER_SPRIG_RATE_LIMITED", "SprigRateLimited", SQLSTATE_GENERAL, true;
     /// A transaction handle names no open transaction on its gateway
     /// (chapter 37).
     TxnHandleUnknown = 39781, "ER_SPRIG_TXN_HANDLE_UNKNOWN", "SprigTxnHandleUnknown", SQLSTATE_GENERAL, false;
@@ -666,6 +753,27 @@ sprig_codes! {
     /// record: another run of the trigger committed it (chapter 41, R9;
     /// the run is rolled back and skipped).
     LogicTriggerPositionMoved = 39877, "ER_SPRIG_LOGIC_TRIGGER_POSITION_MOVED", "SprigLogicTriggerPositionMoved", SQLSTATE_GENERAL, true;
+    /// Studio is off, or not served on this listener (chapter 44).
+    StudioDisabled = 39920, "ER_SPRIG_STUDIO_DISABLED", "SprigStudioDisabled", SQLSTATE_GENERAL, false;
+    /// A plain-HTTP password login from a non-loopback client while
+    /// `studio.allow_insecure_http` is off (chapter 44).
+    StudioInsecureTransport = 39921, "ER_SPRIG_STUDIO_INSECURE_TRANSPORT", "SprigStudioInsecureTransport", SQLSTATE_GENERAL, false;
+    /// A cookie request from another site: `Sec-Fetch-Site` or `Origin`
+    /// (chapter 44).
+    StudioOriginRejected = 39922, "ER_SPRIG_STUDIO_ORIGIN_REJECTED", "SprigStudioOriginRejected", SQLSTATE_GENERAL, false;
+    /// A cookie request without `X-Sprig-CSRF` (chapter 44).
+    StudioCsrfHeaderMissing = 39923, "ER_SPRIG_STUDIO_CSRF_HEADER_MISSING", "SprigStudioCsrfHeaderMissing", SQLSTATE_GENERAL, false;
+    /// The token session was idle past `studio.session_idle_minutes`
+    /// (chapter 44).
+    StudioSessionIdle = 39924, "ER_SPRIG_STUDIO_SESSION_IDLE", "SprigStudioSessionIdle", SQLSTATE_GENERAL, false;
+    /// The token session is older than `studio.session_max_hours`
+    /// (chapter 44).
+    StudioSessionExpired = 39925, "ER_SPRIG_STUDIO_SESSION_EXPIRED", "SprigStudioSessionExpired", SQLSTATE_GENERAL, false;
+    /// An export ticket is malformed, expired, or its session ended
+    /// (chapter 44).
+    StudioExportTicketInvalid = 39929, "ER_SPRIG_STUDIO_EXPORT_TICKET_INVALID", "SprigStudioExportTicketInvalid", SQLSTATE_GENERAL, false;
+    /// The binary was built without Studio's files (chapter 44).
+    StudioNotBuilt = 39932, "ER_SPRIG_STUDIO_NOT_BUILT", "SprigStudioNotBuilt", SQLSTATE_GENERAL, false;
     /// Unknown stream or topic (chapter 45).
     StreamNotFound = 39940, "ER_SPRIG_STREAM_NOT_FOUND", "SprigStreamNotFound", SQLSTATE_GENERAL, false;
     /// `UPDATE` or `DELETE` on a stream; a produce to a change topic
@@ -692,6 +800,14 @@ sprig_codes! {
     /// coordinate, with the tenant catalog on another cluster than the
     /// transaction's (chapter 45, R9).
     StreamOffsetTxnUnsupported = 39958, "ER_SPRIG_STREAM_OFFSET_TXN_UNSUPPORTED", "SprigStreamOffsetTxnUnsupported", SQLSTATE_GENERAL, false;
+    /// Under `residency.cross_tenant_messaging_strict`, a publish from a
+    /// pinned tenant into another tenant's stream outside its allowed data
+    /// centers (chapter 45, R9).
+    StreamResidency = 39949, "ER_SPRIG_STREAM_RESIDENCY", "SprigStreamResidency", SQLSTATE_GENERAL, false;
+    /// A descendant's publish into an ancestor's stream with a key other
+    /// than its own tenant name, under `stream.descendant_key = origin`
+    /// (chapter 45, R9).
+    StreamOriginKey = 39957, "ER_SPRIG_STREAM_ORIGIN_KEY", "SprigStreamOriginKey", SQLSTATE_GENERAL, false;
     /// A Cypher, GQL or graph DDL text that doesn't parse (chapter 43);
     /// Bolt `Neo.ClientError.Statement.SyntaxError`.
     GraphSyntax = 39900, "ER_SPRIG_GRAPH_SYNTAX", "SprigGraphSyntax", SQLSTATE_SYNTAX_ACCESS, false;
@@ -704,6 +820,12 @@ sprig_codes! {
     /// A traversal went past a budget: hops, frontier, rows, time or memory;
     /// the message names it (chapter 43).
     GraphBudgetExceeded = 39903, "ER_SPRIG_GRAPH_BUDGET_EXCEEDED", "SprigGraphBudgetExceeded", SQLSTATE_GENERAL, false;
+    /// A write to a mapped graph's read-only source, or to the labels of a
+    /// mapped node (chapter 43).
+    GraphReadOnlySource = 39904, "ER_SPRIG_GRAPH_READ_ONLY_SOURCE", "SprigGraphReadOnlySource", SQLSTATE_GENERAL, false;
+    /// `id()` of an element whose id hashes its key can't be looked up:
+    /// use `elementId()` (chapter 43).
+    GraphIdNotRoutable = 39905, "ER_SPRIG_GRAPH_ID_NOT_ROUTABLE", "SprigGraphIdNotRoutable", SQLSTATE_GENERAL, false;
     /// `DELETE` of a node that still has relationships, checked at commit
     /// (chapter 43); Bolt `Neo.ClientError.Schema.ConstraintValidationFailed`.
     GraphNodeHasRelationships = 39906, "ER_SPRIG_GRAPH_NODE_HAS_RELATIONSHIPS", "SprigGraphNodeHasRelationships", SQLSTATE_GENERAL, false;
@@ -726,6 +848,10 @@ sprig_codes! {
     /// `imp_user` (impersonation) is refused (chapter 43); Bolt
     /// `Neo.ClientError.Security.Forbidden`.
     BoltImpersonation = 39916, "ER_SPRIG_BOLT_IMPERSONATION", "SprigBoltImpersonation", SQLSTATE_SYNTAX_ACCESS, false;
+    /// A Bolt bookmark that doesn't parse, carries a bad signature or names
+    /// another tenant (chapter 43); Bolt
+    /// `Neo.ClientError.Transaction.InvalidBookmark`.
+    BoltBookmarkInvalid = 39917, "ER_SPRIG_BOLT_BOOKMARK_INVALID", "SprigBoltBookmarkInvalid", SQLSTATE_GENERAL, false;
     /// A Bolt result kept unconsumed past `bolt.max_buffered_result_mb`
     /// (chapter 43).
     BoltResultBufferLimit = 39918, "ER_SPRIG_BOLT_RESULT_BUFFER_LIMIT", "SprigBoltResultBufferLimit", SQLSTATE_GENERAL, false;
@@ -845,6 +971,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::GraphDefinitionInvalid
         | SprigCode::GraphPropertyType
         | SprigCode::BoltProtocol
+        | SprigCode::BoltBookmarkInvalid
         | SprigCode::LogicSignatureMismatch
         | SprigCode::LogicScheduleInvalid
         | SprigCode::LogicValidationFailed
@@ -855,10 +982,27 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StreamPartitionsDecrease
         | SprigCode::StreamKeyNotAttached
         | SprigCode::StreamCompactNeedsKey
+        | SprigCode::InheritTargetTenant
+        | SprigCode::StreamOriginKey
         | SprigCode::SinkCredentialsInvalid
         | SprigCode::SinkOptionInvalid
         | SprigCode::SinkTransformInvalid
-        | SprigCode::SinkFormatUnsupported => (Code::InvalidArgument, 400),
+        | SprigCode::SinkFormatUnsupported
+        | SprigCode::KvInvalidKey
+        | SprigCode::KvValueInvalid
+        | SprigCode::KvElementTooLong
+        | SprigCode::VectorDimensionMismatch
+        | SprigCode::VectorMetricMismatch
+        | SprigCode::VectorLimitInvalid
+        | SprigCode::VectorFilterNotIndexed
+        | SprigCode::VectorTooManyIndexes
+        | SprigCode::DimUnknownMember
+        | SprigCode::DimInvalidModel
+        | SprigCode::DimTzUnavailable
+        | SprigCode::GeoInvalid
+        | SprigCode::GeoSridUnsupported
+        | SprigCode::GeoUnsupportedExpression
+        | SprigCode::GeoTooComplex => (Code::InvalidArgument, 400),
         SprigCode::SettingLocked
         | SprigCode::BinlogUnsupported
         | SprigCode::FeedSourceUnsupported
@@ -911,10 +1055,12 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::MoveSourceDiverged
         | SprigCode::InheritCopyStale
         | SprigCode::InheritFederatedUnavailable
+        | SprigCode::InheritInstanceUnavailable
         | SprigCode::LogicEngineBusy
         | SprigCode::StreamSequencingTimeout
         | SprigCode::SinkDeliveryFailed
-        | SprigCode::SinkPlatformSecretUnavailable => (Code::Unavailable, 503),
+        | SprigCode::SinkPlatformSecretUnavailable
+        | SprigCode::StudioNotBuilt => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
         | SprigCode::TxnHandleUnknown
@@ -957,14 +1103,24 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SpaceNotFound
         | SprigCode::ShareNotFound
         | SprigCode::StreamNotFound
-        | SprigCode::SinkNotFound => (Code::NotFound, 404),
+        | SprigCode::SinkNotFound
+        | SprigCode::KvNamespaceNotFound
+        | SprigCode::VectorIndexNotFound
+        | SprigCode::DimModelNotFound
+        | SprigCode::StudioDisabled => (Code::NotFound, 404),
         SprigCode::ClusterExists
         | SprigCode::TenantExists
         | SprigCode::FeedSubscriptionExists
         | SprigCode::SpaceExists
         | SprigCode::StreamExists
-        | SprigCode::SinkExists => (Code::AlreadyExists, 409),
+        | SprigCode::SinkExists
+        | SprigCode::KvKeyExists => (Code::AlreadyExists, 409),
         SprigCode::ClusterStateInvalid
+        | SprigCode::KvVersionMismatch
+        | SprigCode::KvWrongType
+        | SprigCode::DimNotDecomposable
+        | SprigCode::DimVersionedTruncate
+        | SprigCode::DimHistoryPurged
         | SprigCode::TypeHasDependents
         | SprigCode::HierarchyCycle
         | SprigCode::HierarchyHasChildren
@@ -999,6 +1155,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::InheritStatementUnsupported
         | SprigCode::InheritSchemaMismatch
         | SprigCode::InheritedObjectInUse
+        | SprigCode::InheritNotOverridable
+        | SprigCode::InheritDefinitionDropping
+        | SprigCode::InheritConfigMissing
+        | SprigCode::InheritRunAsPrivilege
+        | SprigCode::InheritOutboxPending
         | SprigCode::AuthorizerUnknownToGateways
         | SprigCode::StreamAppendOnly
         | SprigCode::LogicTriggerPositionMoved
@@ -1009,6 +1170,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SinkSourceLost
         | SprigCode::SinkSchemaMismatch
         | SprigCode::SinkDisabled
+        | SprigCode::GraphReadOnlySource
+        | SprigCode::GraphIdNotRoutable
         | SprigCode::SinkState => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
@@ -1024,7 +1187,12 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SinkPlatformIdentityDenied
         | SprigCode::SinkOwnerPrivilegeLost
         | SprigCode::SinkPlatformConnectionNotGranted
-        | SprigCode::SinkScriptReadOnly => (Code::PermissionDenied, 403),
+        | SprigCode::SinkScriptReadOnly
+        | SprigCode::InheritResidency
+        | SprigCode::StreamResidency
+        | SprigCode::StudioInsecureTransport
+        | SprigCode::StudioOriginRejected
+        | SprigCode::StudioCsrfHeaderMissing => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit
         | SprigCode::AdmissionTimeout
@@ -1034,7 +1202,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::BoltResultBufferLimit
         | SprigCode::RouterMemoryLimit
         | SprigCode::PlanLimitExceeded
-        | SprigCode::SinkQuota => (Code::ResourceExhausted, 429),
+        | SprigCode::SinkQuota
+        | SprigCode::InheritInstanceQuota
+        | SprigCode::InheritBroadcastLimit
+        | SprigCode::DimTooManyGroups
+        | SprigCode::RateLimited => (Code::ResourceExhausted, 429),
         SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts => {
             (Code::ResourceExhausted, 503)
         }
@@ -1046,7 +1218,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::AdminUnauthenticated
         | SprigCode::BoltAuthScheme
         | SprigCode::SessionRevoked
-        | SprigCode::TenantAmbiguous => (Code::Unauthenticated, 401),
+        | SprigCode::TenantAmbiguous
+        | SprigCode::StudioSessionIdle
+        | SprigCode::StudioSessionExpired
+        | SprigCode::StudioExportTicketInvalid => (Code::Unauthenticated, 401),
         SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
     };
     ProtocolError {

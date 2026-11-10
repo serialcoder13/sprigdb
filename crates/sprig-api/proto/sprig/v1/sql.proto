@@ -68,6 +68,17 @@ message QueryRequest {
   string transaction = 3;
   // Allow several statements in `sql`, as CLIENT_MULTI_STATEMENTS does.
   bool multi_statements = 4;
+  // Rows kept per result; 0: no limit asked. A result that reaches it ends
+  // with `truncated` and the statement is killed. Studio sessions are
+  // clamped to `studio.max_result_rows` whatever is asked (chapter 44).
+  uint64 max_rows = 5;
+  // Cell bytes kept per result, as `max_rows`; Studio sessions are clamped
+  // to `studio.max_result_mb`.
+  uint64 max_bytes = 6;
+  // Statement timeout in milliseconds; 0: none asked. Past it the statement
+  // is killed with 3024. Studio sessions are clamped to
+  // `studio.statement_timeout_ms`.
+  uint64 timeout_ms = 7;
 }
 
 // One column of a result.
@@ -120,6 +131,9 @@ message ResultEnd {
   string info = 5;
   // Another result follows.
   bool more_results = 6;
+  // The result reached `max_rows` or `max_bytes`: rows were left out and
+  // the statement was killed; nothing follows.
+  bool truncated = 7;
 }
 
 message QueryResponse {
@@ -139,6 +153,8 @@ message Result {
   uint64 last_insert_id = 4;
   uint32 warnings = 5;
   string info = 6;
+  // Rows were left out at `max_rows` or `max_bytes` (see ResultEnd).
+  bool truncated = 7;
 }
 
 message ExecuteResponse {

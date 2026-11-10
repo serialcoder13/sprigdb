@@ -370,7 +370,7 @@ pub async fn execute(
         Plan::LookupJoin(j) => lookup_join(j, be, budget).await,
         Plan::Write(w) => write(w, be, budget).await,
         Plan::Explain(p) => explain(p, be, budget).await,
-        Plan::Gather(g) => crate::gather::execute(g, be, budget, None).await,
+        Plan::Gather(g) => gather_or_analytics(g, be, budget, None).await,
         Plan::Pass(t) => match be.run(t, &t.sql, budget).await? {
             ShardOutcome::Rows(r) => Ok(Output::Rows {
                 columns: r.columns,
@@ -524,9 +524,67 @@ pub async fn execute_to(
     }
     if let Plan::Gather(g) = plan {
         metrics::counter!("sprig_router_statements_total", "plan" => "gather").increment(1);
-        return crate::gather::execute(g, be, budget, Some(sink)).await;
+        return gather_or_analytics(g, be, budget, Some(sink)).await;
     }
     execute(plan, be, budget).await
+}
+
+/// A statement the planner gathers: a gathered read or an analytic read
+/// (chapter 17, "Analytic reads (R3)", the selection rule):
+/// `router.analytics.mode = prefer` or the hint `/*+ SPRIG_ANALYTICS */`
+/// tries the analytic read first and gathers when its guard refuses;
+/// `fallback` (the default) gathers first and reads analytically when the
+/// gathered read would copy more than `router.gather.max_rows` (39421) or
+/// gathering is off; `/*+ SPRIG_GATHER */` and `off` only gather.
+async fn gather_or_analytics(
+    g: &crate::gather::GatherPlan,
+    be: &mut dyn ShardBackend,
+    budget: &mut Budget,
+    mut sink: Option<&mut dyn RowSink>,
+) -> Result<Output> {
+    use crate::analytics::{AnalyticsMode, Outcome};
+    let lim = be.gather_limits();
+    let hint = crate::analytics::hint(&g.sql);
+    let mode = lim.analytics.mode;
+    if mode == AnalyticsMode::Off || hint == Some(false) {
+        return crate::gather::execute(g, be, budget, sink).await;
+    }
+    let first = mode == AnalyticsMode::Prefer || hint == Some(true) || lim.max_rows == 0;
+    if first {
+        match crate::analytics::execute(g, be, budget, reborrow(&mut sink)).await? {
+            Outcome::Done(o) => {
+                metrics::counter!("sprig_router_statements_total", "plan" => "analytics")
+                    .increment(1);
+                return Ok(o);
+            }
+            Outcome::Refused(_) => {}
+        }
+        return crate::gather::execute(g, be, budget, sink).await;
+    }
+    match crate::gather::execute(g, be, budget, reborrow(&mut sink)).await {
+        Err(e) if e.code() == Some(sprig_common::SprigCode::PlanLimitExceeded) => {
+            match crate::analytics::execute(g, be, budget, sink).await? {
+                Outcome::Done(o) => {
+                    metrics::counter!("sprig_router_statements_total", "plan" => "analytics")
+                        .increment(1);
+                    Ok(o)
+                }
+                Outcome::Refused(why) => {
+                    let mut e = e;
+                    e.message = format!("{}; an analytic read was refused: {why}", e.message);
+                    Err(e)
+                }
+            }
+        }
+        r => r,
+    }
+}
+
+fn reborrow<'s>(sink: &'s mut Option<&mut dyn RowSink>) -> Option<&'s mut dyn RowSink> {
+    match sink {
+        Some(s) => Some(&mut **s),
+        None => None,
+    }
 }
 
 /// What a scatter's stream tasks report.

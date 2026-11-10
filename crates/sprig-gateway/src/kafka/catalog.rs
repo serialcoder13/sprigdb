@@ -306,13 +306,43 @@ impl Topics for StreamTopics {
             .filter(|d| self.data.visible(p, &cat, d))
             .filter_map(|d| self.info(p, &cat, d))
             .collect();
+        // Chapter 42 (R9): inherited streams' topics.
+        for n in self.data.inherited_names(p).await {
+            if !out.iter().any(|t| t.name == n)
+                && let Some(t) = self.get(p, &n).await?
+            {
+                out.push(t);
+            }
+        }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
 
     async fn get(&self, p: &Principal, name: &str) -> Result<Option<TopicInfo>, TopicError> {
         let cat = self.catalog(p).await?;
-        Ok(self.find(p, &cat, name))
+        if let Some(t) = self.find(p, &cat, name) {
+            return Ok(Some(t));
+        }
+        // Chapter 42 (R9): an inherited stream's topic, as a member or
+        // the declaring tenant sees it.
+        let Some(i) = self.data.inherited_info(p, name).await else {
+            return Ok(None);
+        };
+        let defaults = self.defaults(p, name).await?;
+        Ok(Some(TopicInfo {
+            name: name.to_owned(),
+            stream_id: i.stream_id,
+            topic_id: Uuid::from_u64_pair(p.tenant_id, i.stream_id),
+            partitions: i.partitions,
+            kind: TopicKind::Events,
+            configs: TopicConfigs {
+                retention_ms: None,
+                retention_bytes: None,
+                cleanup: None,
+                max_message_bytes: None,
+            },
+            defaults,
+        }))
     }
 
     async fn defaults(&self, p: &Principal, name: &str) -> Result<TopicDefaults, TopicError> {

@@ -8,6 +8,9 @@ fn annotated() -> Vec<(String, String, String, String)> {
     for file in [
         "sprig/v1/sql.proto",
         "sprig/v1/functions.proto",
+        "sprig/v1/kv.proto",
+        "sprig/v1/vectors.proto",
+        "sprig/v1/analytics.proto",
         "sprig/admin/v1/admin.proto",
     ] {
         let text = std::fs::read_to_string(root.join(file)).unwrap();

@@ -346,6 +346,7 @@ async fn run_over(e: &Env, p: Path, auth: &str, sql: &str, db: &str) -> Outcome 
                         sql: sql.to_owned(),
                         transaction: String::new(),
                         multi_statements: multi,
+                        ..Default::default()
                     },
                     auth,
                 ))
@@ -527,6 +528,7 @@ async fn transactions_hold_a_session_across_calls() {
             sql: "INSERT INTO t VALUES (2, 20)".into(),
             transaction: h.clone(),
             multi_statements: false,
+            ..Default::default()
         },
         &auth,
     ))

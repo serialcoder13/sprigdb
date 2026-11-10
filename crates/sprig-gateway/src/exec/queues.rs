@@ -326,8 +326,20 @@ impl PassSession {
                 let key = text(1).unwrap_or_default();
                 let body = vals.get(2).cloned().flatten().unwrap_or_default();
                 let mandatory = num(4, 0) != 0;
-                let m = mq::message(&exchange, &key, body, text(3).as_deref())
+                let mut m = mq::message(&exchange, &key, body, text(3).as_deref())
                     .map_err(|e| sql_error(&e))?;
+                // Chapter 42: an inherited exchange or queue (a targeted
+                // publish into a member's instance, or the headers stamped
+                // on one into this tenant's own).
+                if let Some(routed) = self
+                    .inherit_mq_publish(cx, &mut m, mandatory, &vhost(5))
+                    .await?
+                {
+                    return Ok(Reply::Rows(
+                        vec!["routed"],
+                        vec![vec![Some(routed.to_string().into_bytes())]],
+                    ));
+                }
                 let v = engine
                     .sql_vhost(principal, &vhost(5), session)
                     .await

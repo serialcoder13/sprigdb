@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use sprig_common::{Result, SprigCode, SprigError};
 
-use crate::ast::{BinOp, Expr, UnOp};
+use crate::ast::{BinOp, Expr, MapItem, UnOp};
 use crate::value::{Value, fmt_float, type_error};
 
 /// One binding row: variable name to value.
@@ -232,10 +232,42 @@ pub fn eval(e: &Expr, row: &Row, params: &Params) -> Result<Value> {
                 "count(*) is not allowed here",
             ));
         }
-        Expr::Pattern(_) => {
-            return Err(SprigError::internal(
-                "a pattern predicate reached the evaluator unbound",
+        Expr::Pattern(_) | Expr::Subquery(..) => {
+            return Err(SprigError::new(
+                SprigCode::GraphUnsupported,
+                "a pattern or subquery in this position is not supported yet",
             ));
+        }
+        Expr::MapProjection(b, items) => {
+            let base = eval(b, row, params)?;
+            let props: BTreeMap<String, Value> = match &base {
+                Value::Null => return Ok(Value::Null),
+                Value::Node(n) => n.props.clone(),
+                Value::Rel(r) => r.props.clone(),
+                Value::Map(m) => m.clone(),
+                other => {
+                    return Err(type_error(format!(
+                        "a map projection of a {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let mut out = BTreeMap::new();
+            for it in items {
+                match it {
+                    MapItem::All => out.extend(props.clone()),
+                    MapItem::Prop(k) => {
+                        out.insert(k.clone(), props.get(k).cloned().unwrap_or(Value::Null));
+                    }
+                    MapItem::Lit(k, e) => {
+                        out.insert(k.clone(), eval(e, row, params)?);
+                    }
+                    MapItem::Var(v) => {
+                        out.insert(v.clone(), eval(&Expr::Var(v.clone()), row, params)?);
+                    }
+                }
+            }
+            Value::Map(out)
         }
     })
 }
@@ -263,12 +295,15 @@ fn prop(v: &Value, k: &str) -> Result<Value> {
         Value::Node(n) => n.props.get(k).cloned().unwrap_or(Value::Null),
         Value::Rel(r) => r.props.get(k).cloned().unwrap_or(Value::Null),
         Value::Map(m) => m.get(k).cloned().unwrap_or(Value::Null),
-        other => {
-            return Err(type_error(format!(
-                "Type mismatch: expected a map, node or relationship but was {} (property '{k}')",
-                other.type_name()
-            )));
-        }
+        other => match crate::temporal::property(other, k)? {
+            Some(v) => v,
+            None => {
+                return Err(type_error(format!(
+                    "Type mismatch: expected a map, node or relationship but was {} (property '{k}')",
+                    other.type_name()
+                )));
+            }
+        },
     })
 }
 
@@ -351,6 +386,13 @@ fn num(a: &Value, b: &Value) -> Option<(f64, f64)> {
 #[allow(clippy::too_many_lines)] // one arm per operator
 pub fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
     use std::cmp::Ordering as O;
+    if matches!(op, BinOp::Add | BinOp::Sub)
+        && !a.is_null()
+        && !b.is_null()
+        && let Some(v) = crate::temporal::add(&a, &b, if op == BinOp::Add { 1 } else { -1 })?
+    {
+        return Ok(v);
+    }
     Ok(match op {
         BinOp::Eq => tri(a.cypher_eq(&b)),
         BinOp::Ne => tri(a.cypher_eq(&b).map(|x| !x)),
@@ -405,6 +447,34 @@ pub fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
             }
             _ => Value::Null,
         },
+        BinOp::Mul | BinOp::Div
+            if matches!(
+                (&a, &b),
+                (Value::Duration(_), Value::Int(_) | Value::Float(_))
+            ) || (op == BinOp::Mul
+                && matches!(
+                    (&a, &b),
+                    (Value::Int(_) | Value::Float(_), Value::Duration(_))
+                )) =>
+        {
+            #[allow(clippy::cast_precision_loss)]
+            let (d, n) = match (&a, &b) {
+                (Value::Duration(d), Value::Int(i)) | (Value::Int(i), Value::Duration(d)) => {
+                    (*d, *i as f64)
+                }
+                (Value::Duration(d), Value::Float(f)) | (Value::Float(f), Value::Duration(d)) => {
+                    (*d, *f)
+                }
+                _ => return Err(SprigError::internal("duration scaling")),
+            };
+            if op == BinOp::Div && n == 0.0 {
+                return Err(arith_err("/ by zero"));
+            }
+            Value::Duration(crate::temporal::scale(
+                &d,
+                if op == BinOp::Div { 1.0 / n } else { n },
+            ))
+        }
         BinOp::Add => match (a, b) {
             (Value::Null, _) | (_, Value::Null) => Value::Null,
             (Value::Int(x), Value::Int(y)) => Value::Int(
@@ -694,7 +764,16 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "tostring" => match a0 {
             Value::Null => Value::Null,
             Value::Float(f) => Value::String(fmt_float(f)),
-            v @ (Value::Int(_) | Value::Bool(_) | Value::String(_)) => Value::String(v.display()),
+            v @ (Value::Int(_)
+            | Value::Bool(_)
+            | Value::String(_)
+            | Value::Date(_)
+            | Value::LocalTime(_)
+            | Value::Time(..)
+            | Value::LocalDateTime(_)
+            | Value::DateTime(_)
+            | Value::Duration(_)
+            | Value::Point(_)) => Value::String(v.display()),
             o => return Err(type_error(format!("toString() of a {}", o.type_name()))),
         },
         "tointeger" => match a0 {
@@ -839,7 +918,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         }
         "exists" => Value::Bool(!a0.is_null()),
         "valuetype" => Value::str(a0.type_name()),
-        other => return Err(unsupported(format!("function {other}()"))),
+        other => match crate::temporal::call(other, &args)? {
+            Some(v) => v,
+            None => return Err(unsupported(format!("function {other}()"))),
+        },
     })
 }
 

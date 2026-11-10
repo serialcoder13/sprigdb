@@ -68,6 +68,45 @@ pub trait SinkEnv: Send + Sync {
     }
     /// This worker's id.
     fn worker_id(&self) -> String;
+    /// The worker's live settings (etcd scopes) and its DC: global
+    /// `sink.*` values under the catalog's rows. `None`: the defaults.
+    fn settings(&self) -> Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)> {
+        None
+    }
+}
+
+/// `opts` with every `sink.*` key set at the global scope of `etcd` (in
+/// `dc`) added where the catalog and the sink's own options don't set it:
+/// object > database > tenant > `WITH` > global > default.
+#[must_use]
+pub fn over_global(
+    mut opts: Opts,
+    etcd: &sprig_settings::MemSettings<'_>,
+    dc: &sprig_common::ids::DcId,
+) -> Opts {
+    let ctx = sprig_settings::SettingCtx::process(dc);
+    for def in etcd.registry().iter() {
+        let Some(short) = def.key().strip_prefix("sink.") else {
+            continue;
+        };
+        if opts.0.contains_key(short) {
+            continue;
+        }
+        let Ok(r) = etcd.resolve(def.key(), &ctx) else {
+            continue;
+        };
+        if r.source == sprig_settings::ScopeKind::Default {
+            continue;
+        }
+        let text = match r.value {
+            sprig_settings::Value::Bool(b) => if b { "on" } else { "off" }.to_owned(),
+            sprig_settings::Value::Int(i) => i.to_string(),
+            sprig_settings::Value::Float(f) => f.to_string(),
+            sprig_settings::Value::Str(t) => t,
+        };
+        opts.0.insert(short.to_owned(), text);
+    }
+    opts
 }
 
 /// The partitions task `task_no` reads, of a stream with `partitions`
@@ -498,6 +537,10 @@ pub async fn run_sink_task(
     }
     let def = Arc::new(def);
     let opts = resolve_opts(&mut c, &cat_schema, &def).await?;
+    let opts = match env.settings() {
+        Some((etcd, dc)) => over_global(opts, &etcd, &dc),
+        None => opts,
+    };
     crate::policy::check_enabled(
         opts.flag("enabled", true),
         opts.get("allowed_kinds")

@@ -1,0 +1,168 @@
+// sprig.v1: the Analytics API (chapter 35, "Analytics query"; chapter 37).
+// A model is a semantic layer over a logical database's tables: facts with
+// measures, dimensions with levels. Queries compile to SQL with partial
+// aggregates; the gateway adds subtotals with GROUPING() bits. Calls run in
+// the caller's session, with its privileges.
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/struct.proto";
+
+// Dimensional models and their queries.
+service Analytics {
+  // Creates a model (chapter 35's document as JSON).
+  rpc CreateModel(ModelRequest) returns (ModelInfo) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/models"
+      body: "*"
+    };
+  }
+  // Reads a model.
+  rpc GetModel(GetModelRequest) returns (ModelInfo) {
+    option (google.api.http) = {
+      get: "/v1/databases/{database}/models/{model}"
+    };
+  }
+  // Lists a database's models.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse) {
+    option (google.api.http) = {
+      get: "/v1/databases/{database}/models"
+    };
+  }
+  // Replaces a model's definition.
+  rpc UpdateModel(ModelRequest) returns (ModelInfo) {
+    option (google.api.http) = {
+      put: "/v1/databases/{database}/models/{model}"
+      body: "*"
+    };
+  }
+  // Drops a model; its tables stay.
+  rpc DropModel(GetModelRequest) returns (DropModelResponse) {
+    option (google.api.http) = {
+      delete: "/v1/databases/{database}/models/{model}"
+    };
+  }
+  // Runs a query: detail rows, subtotals after their groups, the grand
+  // total last (one reply in this release, not a stream).
+  rpc Query(AnalyticsQuery) returns (AnalyticsResult) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/models/{model}:query"
+      body: "*"
+    };
+  }
+  // The compiled SQL and plan of a query.
+  rpc Explain(AnalyticsQuery) returns (AnalyticsExplain) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/models/{model}:explain"
+      body: "*"
+    };
+  }
+  // The next query down (a member's children) or up.
+  rpc Drill(DrillRequest) returns (AnalyticsQuery) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/models/{model}:drill"
+      body: "*"
+    };
+  }
+}
+
+message ModelRequest {
+  string database = 1;
+  // The model's name; taken from the definition when empty.
+  string model = 2;
+  // The definition, JSON (chapter 35, "Model definition").
+  google.protobuf.Struct definition = 3;
+}
+
+message GetModelRequest {
+  string database = 1;
+  string model = 2;
+}
+
+message ModelInfo {
+  string database = 1;
+  string model = 2;
+  google.protobuf.Struct definition = 3;
+  uint64 version = 4;
+  // active or invalid.
+  string state = 5;
+}
+
+message ListModelsRequest {
+  string database = 1;
+}
+
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+}
+
+message DropModelResponse {
+  bool dropped = 1;
+}
+
+message LevelRef {
+  string dimension = 1;
+  string level = 2;
+}
+
+message AnalyticsFilter {
+  string dimension = 1;
+  string level = 2;
+  // eq, ne, in, not_in, between, lt, le, gt, ge.
+  string op = 3;
+  google.protobuf.ListValue values = 4;
+}
+
+message AnalyticsOrder {
+  // A measure, or a grouped dimension (and level).
+  string measure = 1;
+  string dimension = 2;
+  string level = 3;
+  bool desc = 4;
+}
+
+message AnalyticsQuery {
+  string database = 10;
+  string model = 1;
+  repeated string measures = 2;
+  repeated LevelRef dimensions = 3;
+  repeated AnalyticsFilter filters = 4;
+  bool totals = 5;
+  repeated AnalyticsOrder order = 6;
+  // 0 for no limit.
+  uint64 limit = 7;
+  // current or at_fact_time; empty for each link's own.
+  string attribution = 8;
+}
+
+message AnalyticsRow {
+  // Level values (null where rolled up or unknown), as text.
+  google.protobuf.ListValue keys = 1;
+  // One value per measure, as text (exact decimals), or null.
+  google.protobuf.ListValue values = 2;
+  // Bit n-1-i set when level i is rolled up (MySQL's GROUPING()).
+  uint32 grouping = 3;
+}
+
+message AnalyticsResult {
+  repeated AnalyticsRow rows = 1;
+  // local or per_level.
+  string plan = 2;
+}
+
+message AnalyticsExplain {
+  string plan = 1;
+  repeated string sql = 2;
+}
+
+message DrillRequest {
+  string database = 10;
+  string model = 1;
+  AnalyticsQuery query = 2;
+  string dimension = 3;
+  // The member to drill into (down); absent to go up.
+  google.protobuf.Value member = 4;
+  bool up = 5;
+}

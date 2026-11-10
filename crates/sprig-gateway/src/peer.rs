@@ -12,6 +12,7 @@
 //!
 //! - `QueuePeer` (a second service on the same listener): chapter 50's
 //!   queue relay, [`crate::amqp::peer`].
+//! - `RedisPeer`: chapter 40's pub/sub hubs, [`crate::redis::hub`].
 //! - `HandoffLogin`: a login of a tenant whose residency (chapter 26)
 //!   doesn't allow the calling gateway's DC, decided here (chapter 14,
 //!   "Credential residency"); [`PeerHandoff`] is the calling side. A
@@ -159,6 +160,11 @@ pub trait PeerHost: Send + Sync + 'static {
     /// Workers' runs of triggers on streams and queues (chapter 41,
     /// `LogicPeer`), when this gateway serves tenant catalogs.
     fn logic_peer(&self) -> Option<crate::triggers::LogicPeerService> {
+        None
+    }
+    /// Chapter 40's pub/sub hubs (`RedisPeer`), when this gateway runs
+    /// the Redis front end.
+    fn redis_peer(&self) -> Option<crate::redis::hub::RedisPeerService> {
         None
     }
     /// Decides a handed-off login (chapter 14, "Credential residency").
@@ -333,12 +339,16 @@ pub async fn serve(
         .map_err(|e| SprigError::internal("peer listener address").with_source(e))?;
     let queue_peer = host.queue_peer();
     let logic_peer = host.logic_peer();
+    let redis_peer = host.redis_peer();
     let mut routes = tonic::service::Routes::new(GatewayPeerServer::new(Service { host }));
     if let Some(q) = queue_peer {
         routes = routes.add_service(q.server());
     }
     if let Some(l) = logic_peer {
         routes = routes.add_service(l.server());
+    }
+    if let Some(r) = redis_peer {
+        routes = routes.add_service(r.server());
     }
     let routes = routes.prepare();
     tracing::info!(bind = %local, mtls = acceptor.is_some(), "peer service listening");

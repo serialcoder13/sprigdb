@@ -70,6 +70,9 @@ pub struct AdminApi {
     gateway_id: String,
     peers: Option<Arc<crate::peer::Peers>>,
     drain: DrainFn,
+    /// `[gateway] controller_token_file`: the credential for calls this
+    /// gateway makes on its own behalf (decision ST12).
+    internal_token: Option<String>,
 }
 
 impl std::fmt::Debug for AdminApi {
@@ -101,7 +104,50 @@ impl AdminApi {
             gateway_id,
             peers,
             drain,
+            internal_token: None,
         }
+    }
+
+    /// With the internal credential read from `path` (`[gateway]
+    /// controller_token_file`).
+    ///
+    /// # Errors
+    /// 39998 if the file can't be read or is empty.
+    pub fn with_internal_token_file(mut self, path: Option<&std::path::Path>) -> Result<Self> {
+        if let Some(p) = path {
+            let t = std::fs::read_to_string(p).map_err(|e| {
+                SprigError::new(
+                    SprigCode::ConfigInvalid,
+                    format!("[gateway] controller_token_file {}: {e}", p.display()),
+                )
+            })?;
+            let t = t.trim().to_owned();
+            if t.is_empty() {
+                return Err(SprigError::new(
+                    SprigCode::ConfigInvalid,
+                    format!("[gateway] controller_token_file {} is empty", p.display()),
+                ));
+            }
+            self.internal_token = Some(t);
+        }
+        Ok(self)
+    }
+
+    /// Forwards a call this gateway makes on its own behalf (Studio's
+    /// views, after the gateway checked the caller), with the internal
+    /// credential when one is configured.
+    ///
+    /// # Errors
+    /// As [`AdminApi::forward`].
+    pub async fn forward_internal(
+        &self,
+        method: &Method,
+        path_and_query: &str,
+        body: Bytes,
+    ) -> Result<Reply> {
+        let auth = self.internal_token.as_ref().map(|t| format!("Bearer {t}"));
+        self.forward(method, path_and_query, auth.as_deref(), body)
+            .await
     }
 
     /// The Admin address of the controller to ask.

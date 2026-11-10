@@ -1,0 +1,174 @@
+// sprig.v1: the Vectors API (chapter 34, "Vectors API"; chapter 37).
+// A standalone index is a table of one logical database holding an id, a
+// vector, metadata (a JSON object, filtered with MongoDB's query language)
+// and, for geo indexes, a location (chapter 36). Calls run in the caller's
+// session, with its privileges.
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/api/annotations.proto";
+
+// Standalone vector indexes.
+service Vectors {
+  // Creates an index (and its database when missing).
+  rpc CreateIndex(CreateVectorIndexRequest) returns (VectorIndex) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/vectorIndexes"
+      body: "*"
+    };
+  }
+  // Describes an index.
+  rpc GetIndex(GetVectorIndexRequest) returns (VectorIndex) {
+    option (google.api.http) = {
+      get: "/v1/databases/{database}/vectorIndexes/{index}"
+    };
+  }
+  // Drops an index and its items.
+  rpc DropIndex(GetVectorIndexRequest) returns (DropVectorIndexResponse) {
+    option (google.api.http) = {
+      delete: "/v1/databases/{database}/vectorIndexes/{index}"
+    };
+  }
+  // Inserts or replaces items.
+  rpc Upsert(UpsertVectorsRequest) returns (UpsertVectorsResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/vectorIndexes/{index}:upsert"
+      body: "*"
+    };
+  }
+  // Deletes items by id.
+  rpc Delete(DeleteVectorsRequest) returns (DeleteVectorsResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/vectorIndexes/{index}:delete"
+      body: "*"
+    };
+  }
+  // The k nearest items, with optional metadata and location filters.
+  rpc Search(SearchVectorsRequest) returns (SearchVectorsResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/vectorIndexes/{index}:search"
+      body: "*"
+    };
+  }
+}
+
+message CreateVectorIndexRequest {
+  string database = 1;
+  string index = 2;
+  uint32 dimensions = 3;
+  // euclidean (default), cosine or dotProduct.
+  string similarity = 4;
+  // HNSW's M; 0 for vector.default_m.
+  uint32 m = 5;
+  // auto (default), on or off.
+  string ann_mode = 6;
+  // Items carry locations (chapter 36).
+  bool geo = 7;
+}
+
+message GetVectorIndexRequest {
+  string database = 1;
+  string index = 2;
+}
+
+message VectorIndex {
+  string database = 1;
+  string index = 2;
+  uint32 dimensions = 3;
+  string similarity = 4;
+  uint32 m = 5;
+  string ann_mode = 6;
+  // none, building or ready.
+  string ann_state = 7;
+  bool geo = 8;
+  // Recall at 10 measured when the graph was last validated; 0 if never.
+  double recall = 9;
+  uint64 rows = 10;
+}
+
+message DropVectorIndexResponse {
+  bool dropped = 1;
+}
+
+message LatLng {
+  double latitude = 1;
+  double longitude = 2;
+}
+
+message VectorItem {
+  bytes id = 1;
+  repeated float vector = 2;
+  // A JSON object (MongoDB Extended JSON accepted); empty for none.
+  string metadata = 3;
+  // Geo indexes: the item's location.
+  LatLng location = 4;
+}
+
+message UpsertVectorsRequest {
+  string database = 1;
+  string index = 2;
+  repeated VectorItem items = 3;
+}
+
+message UpsertVectorsResponse {
+  uint64 upserted = 1;
+}
+
+message DeleteVectorsRequest {
+  string database = 1;
+  string index = 2;
+  repeated bytes ids = 3;
+}
+
+message DeleteVectorsResponse {
+  uint64 deleted = 1;
+}
+
+// A location filter (chapter 36): a circle (center and radius_m), a box
+// (south_west and north_east), or a polygon (three or more vertices).
+message GeoFilter {
+  LatLng center = 1;
+  double radius_m = 2;
+  LatLng south_west = 3;
+  LatLng north_east = 4;
+  repeated LatLng polygon = 5;
+}
+
+// Fusion with a full-text search (chapter 39); not offered in this release.
+message HybridText {
+  string search_index = 1;
+  string query = 2;
+  float vector_weight = 3;
+  float text_weight = 4;
+}
+
+message SearchVectorsRequest {
+  string database = 10;
+  string index = 1;
+  repeated float query = 2;
+  uint32 k = 3;
+  uint32 num_candidates = 4;
+  bool exact = 5;
+  // A MongoDB query on the metadata, Extended JSON.
+  string filter = 6;
+  // A type and its subtypes (chapter 32); not offered in this release.
+  string type = 7;
+  GeoFilter geo = 8;
+  HybridText text = 9;
+}
+
+message VectorHit {
+  bytes id = 1;
+  float distance = 2;
+  float score = 3;
+  // The metadata as relaxed Extended JSON; empty for none.
+  string metadata = 4;
+  LatLng location = 5;
+}
+
+message SearchVectorsResponse {
+  repeated VectorHit hits = 1;
+  // exact, prefilter_exact, ann or ann_overfetch.
+  string plan = 2;
+}

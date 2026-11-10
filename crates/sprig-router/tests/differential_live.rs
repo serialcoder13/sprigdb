@@ -4478,6 +4478,8 @@ async fn differential_against_one_unsharded_mariadb() {
     }
     r3_in_txn(&mut sut, &mut reference, &mut tally, &mut r3).await;
     let r3_before_split = r3.line("before the split");
+    // R3 part 4: analytic reads in DataFusion.
+    let analytics_line = analytics_reads(&mut sut, &mut reference, &mut tally).await;
     let (ddl_have, ddl_of_n) =
         ddl_across_shards(&e, &w, &mut sut, &mut reference, &mut tally).await;
     if ddl_have != ddl_of_n {
@@ -4688,11 +4690,242 @@ async fn differential_against_one_unsharded_mariadb() {
     );
     println!("skipped by reason: {:?}", tally.reasons);
     println!("{r3_before_split}");
+    println!("{analytics_line}");
     println!("{}", r3_after.line("after the split"));
     println!("ddl: ALTER TABLE reached {ddl_have} of {ddl_of_n} shards");
     if env("SPRIG_TEST_R1_KILL").is_some() {
         println!("kill test: COMMIT failed after a killed branch: {killed}");
     }
+    for m in &tally.mismatches {
+        println!("{m}");
+    }
+    if env("SPRIG_TEST_R1_KEEP").is_none() {
+        teardown(&e, &w, &mut sut).await;
+    }
+    drop(sut);
+    assert!(
+        tally.mismatches.is_empty(),
+        "{} mismatches",
+        tally.mismatches.len()
+    );
+}
+
+/// R3 part 4's analytic corpus (chapter 17, "Analytic reads (R3)"):
+/// joins across groups, large aggregations, windows over gathered rows,
+/// DISTINCT, LEFT JOIN and statements the analytic guard refuses (they are
+/// gathered instead). Each runs as written and with the hint
+/// `/*+ SPRIG_ANALYTICS */`; every answer must match the reference.
+fn analytics_corpus() -> Vec<(String, Cmp)> {
+    use Cmp::{Bag, Ordered};
+    let mut v: Vec<(String, Cmp)> = Vec::new();
+    let mut add = |s: &str, m: Cmp| v.push((s.to_owned(), m));
+    // Joins across groups (orders in 901, products in 902) with aggregates.
+    add(
+        "SELECT p.cat, COUNT(*), SUM(o.amount), AVG(o.qty), MIN(p.pname), MAX(o.amount), \
+         COUNT(DISTINCT o.cid) FROM orders o JOIN products p ON p.pid = o.pid \
+         GROUP BY p.cat ORDER BY p.cat",
+        Ordered,
+    );
+    add(
+        "SELECT p.pid, p.price, COUNT(o.oid) AS n, SUM(o.qty) FROM products p \
+         LEFT JOIN orders o ON o.pid = p.pid GROUP BY p.pid, p.price ORDER BY n DESC, p.pid",
+        Ordered,
+    );
+    add(
+        "SELECT c.region, p.cat, SUM(o.qty) AS q, COUNT(*) FROM customers c \
+         JOIN orders o ON o.cid = c.cid JOIN products p ON p.pid = o.pid \
+         WHERE o.qty > 0 GROUP BY c.region, p.cat ORDER BY c.region, p.cat",
+        Ordered,
+    );
+    add(
+        "SELECT p.cat, c.region, COUNT(*) AS n FROM customers c JOIN orders o ON o.cid = c.cid \
+         JOIN products p ON p.pid = o.pid GROUP BY p.cat, c.region \
+         ORDER BY n DESC, p.cat, c.region LIMIT 5",
+        Ordered,
+    );
+    add(
+        "SELECT COUNT(DISTINCT o.cid), COUNT(*), SUM(o.qty), AVG(o.amount) FROM orders o \
+         JOIN products p ON p.pid = o.pid WHERE p.price > 50",
+        Bag,
+    );
+    add(
+        "SELECT DISTINCT p.cat FROM orders o JOIN products p ON p.pid = o.pid ORDER BY p.cat",
+        Ordered,
+    );
+    add(
+        "SELECT p.pid, p.pname, MIN(o.amount), MAX(o.qty), COUNT(o.note) FROM products p \
+         JOIN orders o ON o.pid = p.pid GROUP BY p.pid, p.pname ORDER BY p.pid",
+        Ordered,
+    );
+    // Strings under PAD SPACE, case- and accent-insensitive and
+    // case-sensitive multi-level collations as group keys.
+    add(
+        "SELECT c.name, COUNT(*), SUM(o.amount) FROM customers c JOIN orders o ON o.cid = c.cid \
+         JOIN products p ON p.pid = o.pid GROUP BY c.name ORDER BY c.name",
+        Ordered,
+    );
+    add(
+        "SELECT o.note, COUNT(*), MIN(p.price) FROM orders o JOIN products p ON p.pid = o.pid \
+         GROUP BY o.note ORDER BY o.note",
+        Ordered,
+    );
+    add(
+        "SELECT c.created, COUNT(*) FROM customers c JOIN orders o ON o.cid = c.cid \
+         JOIN products p ON p.pid = o.pid GROUP BY c.created ORDER BY c.created",
+        Ordered,
+    );
+    // Windows over gathered rows.
+    add(
+        "SELECT cid, score, RANK() OVER (PARTITION BY region ORDER BY score DESC) AS r, \
+         DENSE_RANK() OVER (ORDER BY flag) AS d FROM customers ORDER BY cid",
+        Ordered,
+    );
+    add(
+        "SELECT cid, created, ROW_NUMBER() OVER (ORDER BY created, cid) AS rn, \
+         COUNT(*) OVER (PARTITION BY region) AS n FROM customers ORDER BY cid",
+        Ordered,
+    );
+    add(
+        "SELECT o.oid, o.cid, SUM(o.amount) OVER (PARTITION BY p.cat ORDER BY o.cid, o.oid) AS run, \
+         DENSE_RANK() OVER (PARTITION BY p.cat ORDER BY o.qty DESC) AS d \
+         FROM orders o JOIN products p ON p.pid = o.pid ORDER BY o.cid, o.oid",
+        Ordered,
+    );
+    add(
+        "SELECT o.oid, o.cid, p.pname FROM orders o JOIN products p ON p.pid = o.pid \
+         WHERE o.amount BETWEEN 10 AND 900 ORDER BY o.cid, o.oid",
+        Ordered,
+    );
+    // Shapes the analytic guard refuses: answered as gathered reads.
+    add(
+        "SELECT p.cat, SUM(o.amount * o.qty) FROM orders o JOIN products p ON p.pid = o.pid \
+         GROUP BY p.cat",
+        Bag,
+    );
+    add(
+        "SELECT c.region, MAX(c.rating) FROM customers c JOIN orders o ON o.cid = c.cid \
+         JOIN products p ON p.pid = o.pid GROUP BY c.region",
+        Bag,
+    );
+    add(
+        "SELECT p.cat, COUNT(*) FROM orders o JOIN products p ON p.pid = o.pid GROUP BY p.cat \
+         HAVING COUNT(*) > 2",
+        Bag,
+    );
+    v
+}
+
+/// `sql` with the analytic hint after its `SELECT`.
+fn hinted(sql: &str) -> String {
+    sql.replacen("SELECT ", "SELECT /*+ SPRIG_ANALYTICS */ ", 1)
+}
+
+/// A gateway counter's value from its Prometheus page
+/// (`SPRIG_TEST_R1_GW_METRICS`, such as `127.0.0.1:52190`), summed over
+/// the series whose line starts with `prefix`.
+async fn gw_counter(prefix: &str) -> Option<f64> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let addr = env("SPRIG_TEST_R1_GW_METRICS")?;
+    let mut c = tokio::net::TcpStream::connect(&addr).await.ok()?;
+    c.write_all(format!("GET /metrics HTTP/1.0\r\nHost: {addr}\r\n\r\n").as_bytes())
+        .await
+        .ok()?;
+    let mut body = String::new();
+    c.read_to_string(&mut body).await.ok()?;
+    Some(
+        body.lines()
+            .filter(|l| l.starts_with(prefix))
+            .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+            .sum(),
+    )
+}
+
+/// Runs the analytic corpus plainly and hinted; returns the summary line.
+/// A 39420 or 39421 answer is a refusal (counted); any other difference
+/// from the reference, column types included, is a mismatch.
+async fn analytics_reads(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -> String {
+    let corpus = analytics_corpus();
+    let done0 = gw_counter("sprig_router_analytics_total{result=\"done\"").await;
+    let mut refused = [0usize; 2];
+    let mut sut_ms: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    let mut ref_ms = Vec::new();
+    for (s, mode) in &corpus {
+        let t = Instant::now();
+        let b = run(reference, s).await;
+        ref_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        for (k, text) in [s.clone(), hinted(s)].iter().enumerate() {
+            let t = Instant::now();
+            let a = run(sut, text).await;
+            if matches!(a, Outcome::Err(39420 | 39421, _)) {
+                refused[k] += 1;
+                println!("ANALYTICS REFUSED {text}: {a:?}");
+                continue;
+            }
+            sut_ms[k].push(t.elapsed().as_secs_f64() * 1000.0);
+            if let (Outcome::Rows(ta, _), Outcome::Rows(tb, _)) = (&a, &b)
+                && ta != tb
+            {
+                tally.compared += 1;
+                tally.mismatches.push(format!(
+                    "MISMATCH (column types) {text}\n  sut: {ta:?}\n  reference: {tb:?}"
+                ));
+                continue;
+            }
+            tally.check(text, *mode, &a, &b);
+        }
+    }
+    let done1 = gw_counter("sprig_router_analytics_total{result=\"done\"").await;
+    let by_df = match (done0, done1) {
+        (Some(a), Some(b)) => format!(", {} answered by DataFusion", b - a),
+        _ => String::new(),
+    };
+    format!(
+        "analytics: {} statements, twice (plain, hinted); refused {} plain and {} hinted{by_df}; \
+         gateway p50 {:.1} ms plain {:.1} ms hinted, reference p50 {:.1} ms",
+        corpus.len(),
+        refused[0],
+        refused[1],
+        R3Stats::pct(&sut_ms[0], 0.5),
+        R3Stats::pct(&sut_ms[1], 0.5),
+        R3Stats::pct(&ref_ms, 0.5),
+    )
+}
+
+/// The analytic corpus alone, on the seeded world (quick; the settings
+/// `router.analytics.mode` and `router.gather.max_rows` are set from
+/// outside to compare refusals before and after).
+#[tokio::test]
+async fn analytics_against_one_unsharded_mariadb() {
+    let Some(e) = Env::load() else {
+        eprintln!(
+            "analytics_against_one_unsharded_mariadb: set the SPRIG_TEST_R1_* variables to run"
+        );
+        return;
+    };
+    let seed_value: u64 = env("SPRIG_TEST_R1_SEED")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4242);
+    let mut sut = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
+    let w = setup(&e, &mut sut).await;
+    let mut reference = connect(
+        &e.cluster(0).1,
+        "root",
+        &e.root_password,
+        Some(&e.reference_db()),
+    )
+    .await;
+    for c in [&mut sut, &mut reference] {
+        c.query_drop("SET NAMES utf8mb4").await.unwrap();
+    }
+    let mut r = Rng(seed_value);
+    let mut tally = Tally::default();
+    for s in seed(&mut r) {
+        let a = run(&mut sut, &s).await;
+        let b = run(&mut reference, &s).await;
+        tally.check(&s, Cmp::Bag, &a, &b);
+    }
+    let line = analytics_reads(&mut sut, &mut reference, &mut tally).await;
+    println!("{line}");
     for m in &tally.mismatches {
         println!("{m}");
     }

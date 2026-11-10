@@ -892,7 +892,7 @@ impl Conn<'_> {
                         consumer_count: 0,
                     }
                 } else if d.queue.starts_with(REPLY_PREFIX) {
-                    if !d.passive || !self.svc.replies.alive(&d.queue) {
+                    if !d.passive || !self.svc.replies.alive(&d.queue, self.principal.tenant_id) {
                         return Err(MqError::not_found(format!(
                             "no queue '{}' in vhost '{}'",
                             d.queue,
@@ -1177,9 +1177,13 @@ impl Conn<'_> {
                     "reply consumer already set",
                 ));
             }
-            self.svc
-                .replies
-                .register(self.key, ch, id, self.events_tx.clone());
+            self.svc.replies.register(
+                self.key,
+                ch,
+                id,
+                self.events_tx.clone(),
+                self.principal.tenant_id,
+            );
         } else {
             let priority = c
                 .arguments
@@ -1327,7 +1331,11 @@ impl Conn<'_> {
         }
         let published = if msg.exchange.is_empty() && msg.routing_key.starts_with(REPLY_PREFIX) {
             let rk = msg.routing_key.clone();
-            match self.svc.replies.deliver(&rk, msg.clone()) {
+            match self
+                .svc
+                .replies
+                .deliver(&rk, msg.clone(), self.principal.tenant_id)
+            {
                 Some(_) => crate::backend::Published::done(1),
                 None => crate::backend::Published::done(0),
             }

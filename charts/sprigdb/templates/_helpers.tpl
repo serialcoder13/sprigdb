@@ -10,7 +10,8 @@ sprigdb.io/dc: {{ .Values.dc.id }}
 {{/* The etcd DC tier's client endpoints. */}}
 {{- define "sprigdb.dcSeeds" -}}
 {{- $n := int .Values.etcd.replicas -}}
-[{{- range $i, $_ := until $n -}}{{ if $i }}, {{ end }}"https://sprigdb-etcd-dc-{{ $i }}.sprigdb-etcd-dc.{{ $.Release.Namespace }}.svc:2379"{{- end -}}]
+{{- $scheme := ternary "https" "http" .Values.tls.enabled -}}
+[{{- range $i, $_ := until $n -}}{{ if $i }}, {{ end }}"{{ $scheme }}://sprigdb-etcd-dc-{{ $i }}.sprigdb-etcd-dc.{{ $.Release.Namespace }}.svc:2379"{{- end -}}]
 {{- end -}}
 {{/* Pod security every SprigDB role shares. */}}
 {{- define "sprigdb.podSecurity" -}}
@@ -21,15 +22,19 @@ securityContext:
   seccompProfile: {type: RuntimeDefault}
 {{- end -}}
 {{- define "sprigdb.tlsVolumes" -}}
+{{- if .root.Values.tls.enabled }}
 - name: tls
   secret: {secretName: {{ .secret }}}
 - name: ca-bundle
   configMap: {name: {{ .root.Values.tls.bundleConfigMap }}}
+{{- end }}
 - name: config
   configMap: {name: sprigdb-{{ .role }}}
 {{- end -}}
 {{- define "sprigdb.tlsMounts" -}}
+{{- if .Values.tls.enabled }}
 - {name: tls, mountPath: /etc/sprigdb/tls, readOnly: true}
 - {name: ca-bundle, mountPath: /etc/sprigdb/ca, readOnly: true}
+{{- end }}
 - {name: config, mountPath: /etc/sprigdb/config, readOnly: true}
 {{- end -}}

@@ -149,6 +149,8 @@ pub struct SqlSession {
     session: Session,
     exec: Box<dyn SessionExec>,
     proto: ProtoState,
+    /// The principal's tenant (0 for none).
+    tenant: u64,
     /// A transaction is open (`startTransaction`).
     pub in_txn: bool,
 }
@@ -204,6 +206,7 @@ impl SqlSession {
             session,
             exec,
             proto,
+            tenant: principal.tenant.map_or(0, |t| t.0),
             in_txn: false,
         })
     }
@@ -251,5 +254,9 @@ impl SqlRunner for SqlSession {
 
     async fn exec(&mut self, sql: &str) -> std::result::Result<Done, SqlError> {
         Ok(self.run(sql).await?.ok.unwrap_or_default())
+    }
+
+    fn tenant(&self) -> u64 {
+        self.tenant
     }
 }

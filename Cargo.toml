@@ -116,6 +116,13 @@ proptest = { version = "1.7", default-features = false, features = ["std"] }
 sprig-sql = { path = "crates/sprig-sql" }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 
+# DataFusion for analytic reads (chapter 17, "Analytic reads (R3)"; Kiran's
+# answer "both" to R3's Q1; approved in brief rule 14). Apache-2.0; without
+# default features (no Parquet, no compression codecs). Its 230 transitive
+# crates are MIT, Apache-2.0, BSD, Zlib or Unicode, or offer one of them;
+# tiny-keccak (CC0) was already in the tree through const-random.
+datafusion = { version = "=55.2.0", default-features = false, features = ["sql"] }
+
 # sprig-workload (chapter 12, M0.4: fingerprints, shapes, the recorder). No new
 # third-party crates: it uses serde, serde_json, sqlparser, twox-hash (xxh3_64
 # digests) and proptest from above.

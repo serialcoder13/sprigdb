@@ -146,6 +146,139 @@ pub static ROUTES: &[Route] = &[
         "CallRequest"
     ),
     r!(
+        "sprig.v1.KeyValue",
+        "Get",
+        "POST",
+        "/v1/databases/{database}/namespaces/{namespace}:get",
+        "KvGetRequest"
+    ),
+    r!(
+        "sprig.v1.KeyValue",
+        "Put",
+        "POST",
+        "/v1/databases/{database}/namespaces/{namespace}:put",
+        "KvPutRequest"
+    ),
+    r!(
+        "sprig.v1.KeyValue",
+        "Delete",
+        "POST",
+        "/v1/databases/{database}/namespaces/{namespace}:delete",
+        "KvDeleteRequest"
+    ),
+    r!(
+        "sprig.v1.KeyValue",
+        "Scan",
+        "POST",
+        "/v1/databases/{database}/namespaces/{namespace}:scan",
+        "KvScanRequest"
+    ),
+    r!(
+        "sprig.v1.KeyValue",
+        "Exec",
+        "POST",
+        "/v1/databases/{database}/namespaces/{namespace}:exec",
+        "KvExecRequest"
+    ),
+    r!(
+        "sprig.v1.Vectors",
+        "CreateIndex",
+        "POST",
+        "/v1/databases/{database}/vectorIndexes",
+        "CreateVectorIndexRequest"
+    ),
+    r!(
+        "sprig.v1.Vectors",
+        "GetIndex",
+        "GET",
+        "/v1/databases/{database}/vectorIndexes/{index}",
+        "GetVectorIndexRequest"
+    ),
+    r!(
+        "sprig.v1.Vectors",
+        "DropIndex",
+        "DELETE",
+        "/v1/databases/{database}/vectorIndexes/{index}",
+        "GetVectorIndexRequest"
+    ),
+    r!(
+        "sprig.v1.Vectors",
+        "Upsert",
+        "POST",
+        "/v1/databases/{database}/vectorIndexes/{index}:upsert",
+        "UpsertVectorsRequest"
+    ),
+    r!(
+        "sprig.v1.Vectors",
+        "Delete",
+        "POST",
+        "/v1/databases/{database}/vectorIndexes/{index}:delete",
+        "DeleteVectorsRequest"
+    ),
+    r!(
+        "sprig.v1.Vectors",
+        "Search",
+        "POST",
+        "/v1/databases/{database}/vectorIndexes/{index}:search",
+        "SearchVectorsRequest"
+    ),
+    r!(
+        "sprig.v1.Analytics",
+        "CreateModel",
+        "POST",
+        "/v1/databases/{database}/models",
+        "ModelRequest"
+    ),
+    r!(
+        "sprig.v1.Analytics",
+        "GetModel",
+        "GET",
+        "/v1/databases/{database}/models/{model}",
+        "GetModelRequest"
+    ),
+    r!(
+        "sprig.v1.Analytics",
+        "ListModels",
+        "GET",
+        "/v1/databases/{database}/models",
+        "ListModelsRequest"
+    ),
+    r!(
+        "sprig.v1.Analytics",
+        "UpdateModel",
+        "PUT",
+        "/v1/databases/{database}/models/{model}",
+        "ModelRequest"
+    ),
+    r!(
+        "sprig.v1.Analytics",
+        "DropModel",
+        "DELETE",
+        "/v1/databases/{database}/models/{model}",
+        "GetModelRequest"
+    ),
+    r!(
+        "sprig.v1.Analytics",
+        "Query",
+        "POST",
+        "/v1/databases/{database}/models/{model}:query",
+        "AnalyticsQuery"
+    ),
+    r!(
+        "sprig.v1.Analytics",
+        "Explain",
+        "POST",
+        "/v1/databases/{database}/models/{model}:explain",
+        "AnalyticsQuery"
+    ),
+    r!(
+        "sprig.v1.Analytics",
+        "Drill",
+        "POST",
+        "/v1/databases/{database}/models/{model}:drill",
+        "DrillRequest"
+    ),
+    r!(
         "sprig.admin.v1.Clusters",
         "RegisterCluster",
         "POST",
@@ -587,11 +720,27 @@ pub fn openapi(admin: bool) -> Value {
     } else {
         "SprigDB data API (sprig.v1)"
     };
+    // Every message a route names has a schema: one written above, or a
+    // plain object for messages not described yet, so generated clients
+    // resolve every reference.
+    let mut all = schemas();
+    for r in ROUTES.iter().filter(|r| r.is_admin() == admin) {
+        for name in [r.request, reply(r)] {
+            if let Some(m) = all.as_object_mut()
+                && !m.contains_key(name)
+            {
+                m.insert(
+                    name.to_owned(),
+                    json!({"type": "object", "description": format!("The {name} message as JSON (proto3 mapping)")}),
+                );
+            }
+        }
+    }
     json!({
         "openapi": "3.0.3",
         "info": {"title": title, "version": "v1"},
         "paths": paths,
-        "components": {"schemas": schemas()},
+        "components": {"schemas": all},
     })
 }
 
@@ -605,11 +754,27 @@ fn response_type(r: &Route) -> &'static str {
 
 fn reply(r: &Route) -> &'static str {
     match (r.service, r.rpc) {
+        ("sprig.v1.Analytics", "Query") => "AnalyticsResult",
         (_, "Query") => "QueryResponse",
         (_, "Execute") => "ExecuteResponse",
         (_, "Begin") => "Transaction",
         ("sprig.v1.Transactions", _) => "EndTransactionResponse",
         ("sprig.v1.Functions", "Call") => "CallResponse",
+        ("sprig.v1.KeyValue", "Get") => "KvGetResponse",
+        ("sprig.v1.KeyValue", "Put") => "KvPutResponse",
+        ("sprig.v1.KeyValue", "Delete") => "KvDeleteResponse",
+        ("sprig.v1.KeyValue", "Scan") => "KvScanResponse",
+        ("sprig.v1.KeyValue", "Exec") => "KvExecResponse",
+        ("sprig.v1.Vectors", "CreateIndex" | "GetIndex") => "VectorIndex",
+        ("sprig.v1.Vectors", "DropIndex") => "DropVectorIndexResponse",
+        ("sprig.v1.Vectors", "Upsert") => "UpsertVectorsResponse",
+        ("sprig.v1.Vectors", "Delete") => "DeleteVectorsResponse",
+        ("sprig.v1.Vectors", "Search") => "SearchVectorsResponse",
+        ("sprig.v1.Analytics", "CreateModel" | "GetModel" | "UpdateModel") => "ModelInfo",
+        ("sprig.v1.Analytics", "ListModels") => "ListModelsResponse",
+        ("sprig.v1.Analytics", "DropModel") => "DropModelResponse",
+        ("sprig.v1.Analytics", "Explain") => "AnalyticsExplain",
+        ("sprig.v1.Analytics", "Drill") => "AnalyticsQuery",
         _ => "JsonReply",
     }
 }
@@ -650,7 +815,8 @@ fn schemas() -> Value {
     let row = json!({"type": "array", "items": {"type": "string", "nullable": true}});
     json!({
         "QueryRequest": s(json!({"database": string, "sql": string, "transaction": string,
-                                 "multi_statements": {"type": "boolean"}})),
+                                 "multi_statements": {"type": "boolean"},
+                                 "max_rows": u64s, "max_bytes": u64s, "timeout_ms": u64s})),
         "Column": s(json!({"name": string, "org_name": string, "table": string,
             "org_table": string, "database": string, "type": string,
             "mysql_type": {"type": "integer"}, "flags": {"type": "integer"},
@@ -658,7 +824,8 @@ fn schemas() -> Value {
             "length": u64s, "binary": {"type": "boolean"}})),
         "Result": s(json!({"columns": {"type": "array", "items": {"$ref": "#/components/schemas/Column"}},
             "rows": {"type": "array", "items": row}, "affected_rows": u64s,
-            "last_insert_id": u64s, "warnings": {"type": "integer"}, "info": string})),
+            "last_insert_id": u64s, "warnings": {"type": "integer"}, "info": string,
+            "truncated": {"type": "boolean"}})),
         "ExecuteResponse": s(json!({"results": {"type": "array", "items": {"$ref": "#/components/schemas/Result"}}})),
         "QueryResponse": s(json!({"header": {"type": "object"}, "rows": {"type": "object"}, "end": {"type": "object"}})),
         "BeginRequest": s(json!({"database": string, "read_only": {"type": "boolean"}})),

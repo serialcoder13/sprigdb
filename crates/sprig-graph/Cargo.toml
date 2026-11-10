@@ -10,10 +10,18 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+# Bookmarks: base64url bodies with an HMAC-SHA256 tag (both already in
+# the workspace).
+base64.workspace = true
+# Temporal values and named time zones. Both already in Cargo.lock
+# (through sprig-logic); MIT/Apache-2.0.
+chrono = "0.4.45"
+chrono-tz = "0.10.4"
 metrics.workspace = true
 mysql_async.workspace = true
 # `=~` in Cypher. Already in Cargo.lock (through kirun); MIT/Apache-2.0.
 regex = "1.13"
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sprig-catalog.workspace = true

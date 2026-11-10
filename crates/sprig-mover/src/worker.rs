@@ -166,13 +166,17 @@ impl JobRuntime {
                 continue;
             }
             // A retaining job waits for its retention to end without a
-            // worker (the engine gives it back).
-            if rec.state == JobState::Retaining
-                && rec
-                    .retain_until_ms
-                    .is_some_and(|u| u > self.store.now_ms() + 60_000)
-            {
-                continue;
+            // worker (the engine gives it back). The end follows
+            // `mover.source_retain_hours` as it resolves now.
+            if rec.state == JobState::Retaining {
+                let now = self.store.now_ms();
+                let retain = self.factory.settings(&rec).source_retain;
+                if rec
+                    .retain_until(retain, now)
+                    .is_some_and(|u| u > now + 60_000)
+                {
+                    continue;
+                }
             }
             if self.store.owner(&rec.job_id).await?.is_some() {
                 continue;
@@ -191,6 +195,10 @@ impl JobRuntime {
             let clock = self.clock();
             let h = tokio::spawn(async move {
                 let settings = factory.settings(&claim.rec);
+                let source: crate::engine::SettingsSource = {
+                    let (f, rec) = (factory.clone(), claim.rec.clone());
+                    Arc::new(move || f.settings(&rec))
+                };
                 let env = match factory.env(&claim.rec).await {
                     Ok(e) => e,
                     Err(e) => {
@@ -200,7 +208,11 @@ impl JobRuntime {
                     }
                 };
                 let releaser = claim.clone();
-                match Engine::new(claim, env, clock, settings).run().await {
+                match Engine::new(claim, env, clock, settings)
+                    .with_settings_source(source)
+                    .run()
+                    .await
+                {
                     Ok(state) => tracing::info!(job = %id.0, %state, "job stopped"),
                     Err(e) if matches!(e.kind, ErrorKind::Sprig(SprigCode::JobLeaseLost)) => {
                         tracing::warn!(job = %id.0, "job lost to another worker");

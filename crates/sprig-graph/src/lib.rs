@@ -14,12 +14,16 @@
 //! - [`catalog`]: the `graph` catalog module and graph DDL (step 2).
 //! - [`settings`]: the `graph.*` keys.
 //! - [`neo4j`]: Neo4j status codes for errors.
+//! - [`bookmark`]: signed Bolt bookmarks.
+//! - [`schema`]: indexes and uniqueness constraints.
+//! - [`temporal`]: temporal and spatial values.
 
 // An interpreter: evaluator and executor functions are one match or one
 // step-by-step walk each, with the short names of the algorithms.
 #![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
 pub mod ast;
+pub mod bookmark;
 pub mod catalog;
 pub mod eval;
 pub mod exec;
@@ -27,11 +31,13 @@ pub mod maria;
 pub mod mem;
 pub mod neo4j;
 pub mod parser;
+pub mod schema;
 pub mod settings;
 pub mod store;
+pub mod temporal;
 pub mod value;
 
-pub use exec::{Budgets, Output};
+pub use exec::{Budgets, Output, RowSink, VecSink, run_stream, streamable};
 
 /// Parses and runs `text` over `store`.
 ///

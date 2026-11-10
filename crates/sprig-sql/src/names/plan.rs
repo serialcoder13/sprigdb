@@ -219,10 +219,24 @@ pub fn plan(sql: &[u8], ctx: &PlanCtx<'_>) -> Result<Plan, NameError> {
     for info in &rewritten.statements {
         let r = map_offset(&rewritten.edits, info.range.start)
             ..map_offset(&rewritten.edits, info.range.end);
+        let lead = rewritten.sql.get(..r.start).unwrap_or_default();
         let text = rewritten.sql.get(r).unwrap_or_default().to_vec();
         let (show, mut action) = plan_statement(text, info, current.as_deref(), ctx)?;
         if let Action::Forward { mapper, sql } = &mut action {
             mapper.set_persona(ctx.rewrite.lex.persona);
+            // Chapter 38's statement comment (`/*sprig h=.. o=..*/`) is
+            // kept in front of the gateway's own internal statements, so
+            // the change feed reads it from the binlog; a client's
+            // leading comments are dropped as before.
+            if ctx.rewrite.internal
+                && statements.is_empty()
+                && let Some(c) = sprig_comment(lead)
+            {
+                let mut v = c.to_vec();
+                v.push(b' ');
+                v.extend_from_slice(sql);
+                *sql = v;
+            }
             // Chapter 07 step 12: caught error text, where the cluster has
             // the mapping function.
             if ctx.stored_names
@@ -246,6 +260,17 @@ pub fn plan(sql: &[u8], ctx: &PlanCtx<'_>) -> Result<Plan, NameError> {
         statements,
         rewritten,
     })
+}
+
+/// The `/*sprig ...*/` comment `lead` starts with, if any.
+fn sprig_comment(lead: &[u8]) -> Option<&[u8]> {
+    let start = lead.iter().position(|b| !b.is_ascii_whitespace())?;
+    let rest = lead.get(start..)?;
+    if !rest.starts_with(b"/*sprig ") {
+        return None;
+    }
+    let end = rest.windows(2).position(|w| w == b"*/")?;
+    rest.get(..end + 2)
 }
 
 fn forward(sql: Vec<u8>, mapper: ResultMapper) -> Action {

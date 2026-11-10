@@ -16,6 +16,10 @@ spec:
         {{- include "sprigdb.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      # Kubernetes' service-link variables (SPRIGDB_CONTROLLER_PORT=tcp://...)
+      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process
+      # (found by r2close's helm install).
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 90
       {{- include "sprigdb.podSecurity" . | nindent 6 }}
       containers:
@@ -43,8 +47,16 @@ spec:
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           volumeMounts:
             {{- include "sprigdb.tlsMounts" . | nindent 12 }}
+            # Catalog reads and database DDL run as each cluster's sprig_ctl
+            # (found by r2close's helm install: logins failed without it).
+            - {name: creds, mountPath: /etc/sprigdb/creds, readOnly: true}
+            - {name: backends, mountPath: /etc/sprigdb/backends, readOnly: true}
       volumes:
         {{- include "sprigdb.tlsVolumes" (dict "root" . "role" "gateway" "secret" "sprigdb-gateway-tls") | nindent 8 }}
+        - name: creds
+          secret: {secretName: sprigdb-cluster-credentials, optional: true}
+        - name: backends
+          secret: {secretName: sprigdb-gateway-backends}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

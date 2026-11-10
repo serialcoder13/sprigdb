@@ -110,6 +110,10 @@ pub struct ChangeEvent {
     /// For DDL: the statement with logical names, when it could be
     /// rewritten.
     pub ddl: Option<String>,
+    /// The operation hint of the row's statement (chapter 38, "Statement
+    /// comments"), when its writer sent one: `Replace` on an `Update` is a
+    /// whole-document replacement (a MongoDB `replace` event).
+    pub hint: Option<sprig_binlog::OpHint>,
 }
 
 /// One item of a feed.

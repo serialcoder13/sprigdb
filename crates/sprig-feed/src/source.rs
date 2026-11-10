@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use sprig_binlog::{Gtid, GtidPos, RowImage};
+use sprig_binlog::{Gtid, GtidPos, OpHint, RowImage};
 use sprig_common::Result;
 use sprig_common::ids::{ClusterId, TenantId};
 
@@ -48,6 +48,10 @@ pub struct RawRow {
     pub before: Option<RowImage>,
     /// The row after.
     pub after: Option<RowImage>,
+    /// The operation hint (`o=`) of the statement's SprigDB comment, when
+    /// it had one (chapter 38, "Statement comments"): a replacement shows
+    /// as `r` on an update.
+    pub hint: Option<OpHint>,
 }
 
 /// A statement event (`QUERY`) that the feed may turn into an object event.

@@ -30,9 +30,16 @@
 //! writes made during and after the rebuild. Then an operator's
 //! `sprigctl cluster rebuild` of the healthy replica `db3` from `db1`,
 //! and the refusal to rebuild the writer.
+//!
+//! With `SPRIG_TEST_INTERNAL_TLS=1` (r2final, decision RC2) every process
+//! gets a `[tls]` section from a test CA (etcd runs with client
+//! certificates too): the agents' internal services are mutual TLS, the
+//! backups stream over it, and the test checks that a plain-HTTP request
+//! and a client certificate from another CA get nothing.
 
 #![allow(
     clippy::too_many_lines,
+    clippy::many_single_char_names,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::doc_markdown
@@ -69,6 +76,62 @@ const AGENT_SVC: [u16; 3] = [41430, 41431, 41432];
 const AGENT_TEL: [u16; 3] = [41440, 41441, 41442];
 /// The rebuild stream's cap for the test, MB/s.
 const RATE_MB: u64 = 20;
+
+/// `SPRIG_TEST_INTERNAL_TLS=1`: every process with `[tls]` (RC2).
+fn internal_tls() -> bool {
+    std::env::var_os("SPRIG_TEST_INTERNAL_TLS").is_some_and(|v| v == "1")
+}
+
+/// The test PKI in `dir`: `ca.pem`, `etcd(-key).pem` and `node(-key).pem`
+/// (every process's identity: server and client, for 127.0.0.1), and a
+/// `rogue(-key).pem` from another CA.
+fn write_pki(dir: &Path) {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose,
+        IsCa, KeyPair,
+    };
+    std::fs::create_dir_all(dir).expect("pki dir");
+    let ca = |name: &str| {
+        let mut p = CertificateParams::new(Vec::<String>::new()).expect("ca");
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        p.distinguished_name.push(DnType::CommonName, name);
+        CertifiedIssuer::self_signed(p, KeyPair::generate().expect("key")).expect("ca")
+    };
+    let leaf = |issuer: &CertifiedIssuer<'static, KeyPair>, cn: &str, file: &str| {
+        let mut p = CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+            .expect("leaf");
+        p.distinguished_name.push(DnType::CommonName, cn);
+        p.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        let key = KeyPair::generate().expect("key");
+        let cert = p.signed_by(&key, issuer).expect("sign");
+        std::fs::write(dir.join(format!("{file}.pem")), cert.pem()).expect("pem");
+        std::fs::write(dir.join(format!("{file}-key.pem")), key.serialize_pem()).expect("pem");
+    };
+    let main = ca("r2final internal CA");
+    std::fs::write(dir.join("ca.pem"), main.pem()).expect("ca");
+    leaf(&main, "etcd", "etcd");
+    leaf(&main, "sprig-node", "node");
+    let rogue = ca("someone else");
+    std::fs::write(dir.join("rogue-ca.pem"), rogue.pem()).expect("ca");
+    leaf(&rogue, "stranger", "rogue");
+}
+
+/// `[tls]` for a process, when the test runs with TLS.
+fn tls_section(work: &Path) -> String {
+    if !internal_tls() {
+        return String::new();
+    }
+    let d = work.join("pki");
+    format!(
+        "[tls]\nca = \"{}\"\ncert = \"{}\"\nkey = \"{}\"\n",
+        d.join("ca.pem").display(),
+        d.join("node.pem").display(),
+        d.join("node-key.pem").display()
+    )
+}
 
 fn bins() -> Option<(PathBuf, PathBuf)> {
     let target = std::env::var("CARGO_TARGET_DIR").map_or_else(
@@ -383,8 +446,9 @@ bootstrap_addr = "127.0.0.1:{CTL_TEL}"
 [audit]
 spool_dir = "{w}/audit"
 sink_dir = "{w}/audit-sink"
-"#,
-        w = work.display()
+{tls}"#,
+        w = work.display(),
+        tls = tls_section(work)
     )
 }
 
@@ -404,12 +468,13 @@ extract_key_file = "{w}/extract.keys"
 bootstrap_log_level = "info"
 log_format = "pretty"
 bootstrap_addr = "127.0.0.1:{WORKER_TEL}"
-"#,
-        w = work.display()
+{tls}"#,
+        w = work.display(),
+        tls = tls_section(work)
     )
 }
 
-fn agent_toml(seed: &str, cluster: &str, db: &Db, i: usize) -> String {
+fn agent_toml(seed: &str, cluster: &str, db: &Db, i: usize, work: &Path) -> String {
     let container = db.c.name();
     format!(
         r#"[node]
@@ -432,10 +497,11 @@ staging_dir = "/var/lib/sprig-rebuild"
 bootstrap_log_level = "info"
 log_format = "pretty"
 bootstrap_addr = "127.0.0.1:{tel}"
-"#,
+{tls}"#,
         node = db.name,
         svc = AGENT_SVC[i],
         tel = AGENT_TEL[i],
+        tls = tls_section(work),
     )
 }
 
@@ -459,22 +525,46 @@ async fn deploy() -> Option<Deployment> {
     std::fs::create_dir_all(&work).expect("work dir");
     let ep = free_port();
     let etcd_pub = format!("127.0.0.1:{ep}:2379");
-    let etcd = OwnContainer::run(
-        "r2close-etcd",
-        &[
-            "--memory",
-            "256m",
-            "-p",
-            &etcd_pub,
-            "quay.io/coreos/etcd:v3.6.5",
-            "etcd",
-            "--listen-client-urls=http://0.0.0.0:2379",
-            "--advertise-client-urls=http://r2close-etcd.invalid:2379",
-        ],
-    )
-    .expect("etcd");
-    let seed = format!("http://127.0.0.1:{ep}");
+    let tls = internal_tls();
+    let pki = work.join("pki");
+    if tls {
+        write_pki(&pki);
+    }
+    let mount = format!("{}:/pki:ro", pki.display());
+    let mut eargs: Vec<String> = vec!["--memory".into(), "256m".into(), "-p".into(), etcd_pub];
+    if tls {
+        eargs.extend(["-v".into(), mount]);
+    }
+    eargs.extend(["quay.io/coreos/etcd:v3.6.5".into(), "etcd".into()]);
+    if tls {
+        eargs.extend([
+            "--listen-client-urls=https://0.0.0.0:2379".into(),
+            "--advertise-client-urls=https://r2close-etcd.invalid:2379".into(),
+            "--client-cert-auth".into(),
+            "--trusted-ca-file=/pki/ca.pem".into(),
+            "--cert-file=/pki/etcd.pem".into(),
+            "--key-file=/pki/etcd-key.pem".into(),
+        ]);
+    } else {
+        eargs.extend([
+            "--listen-client-urls=http://0.0.0.0:2379".into(),
+            "--advertise-client-urls=http://r2close-etcd.invalid:2379".into(),
+        ]);
+    }
+    let eargs: Vec<&str> = eargs.iter().map(String::as_str).collect();
+    let etcd = OwnContainer::run("r2close-etcd", &eargs).expect("etcd");
+    let seed = format!("{}://127.0.0.1:{ep}", if tls { "https" } else { "http" });
     let mut cfg = EtcdConfig::new(vec![seed.clone()]);
+    if tls {
+        cfg.tls = Some(
+            sprig_meta::EtcdTls::from_files(&sprig_common::config::TlsConfig {
+                ca: pki.join("ca.pem"),
+                cert: pki.join("node.pem"),
+                key: pki.join("node-key.pem"),
+            })
+            .expect("etcd tls"),
+        );
+    }
     cfg.request_timeout = Duration::from_secs(2);
     let store: Arc<dyn MetaStore> = loop {
         match EtcdStore::connect(Tier::Global, &cfg).await {
@@ -558,7 +648,10 @@ impl Deployment {
             if c["admin_state"] == "active" {
                 break;
             }
-            assert!(t0.elapsed() < Duration::from_secs(90), "{id} never active: {c}");
+            assert!(
+                t0.elapsed() < Duration::from_secs(90),
+                "{id} never active: {c}"
+            );
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         id
@@ -588,11 +681,15 @@ impl Deployment {
             if matches!(state.as_str(), "succeeded" | "failed" | "cancelled") {
                 return j;
             }
-            let phase = j["progress"]["phase"].as_str().unwrap_or_default().to_owned();
+            let phase = j["progress"]["phase"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
             if phase != last_phase {
                 eprintln!(
                     "  job {id}: {state} {phase} ({} bytes) at {:?}",
-                    j["progress"]["bytes"], t0.elapsed()
+                    j["progress"]["bytes"],
+                    t0.elapsed()
                 );
                 last_phase = phase;
             }
@@ -614,7 +711,12 @@ impl Deployment {
 
 /// A writer that inserts into `SCHEMA.kv` on `url` every few ms, counting
 /// acknowledged rows; it reconnects after errors.
-fn writer(url: String, from: u64, stop: Arc<AtomicBool>, acked: Arc<AtomicU64>) -> tokio::task::JoinHandle<()> {
+fn writer(
+    url: String,
+    from: u64,
+    stop: Arc<AtomicBool>,
+    acked: Arc<AtomicU64>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut k = from;
         let mut conn: Option<mysql_async::Conn> = None;
@@ -649,7 +751,10 @@ static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn bins_diverged_writer_is_extracted_and_rebuilt() {
     if !skip::flag(skip::DOCKER) {
-        skip::report_missing(skip::DOCKER, "bins_diverged_writer_is_extracted_and_rebuilt");
+        skip::report_missing(
+            skip::DOCKER,
+            "bins_diverged_writer_is_extracted_and_rebuilt",
+        );
         return;
     }
     let _one = ONE_AT_A_TIME.lock().await;
@@ -672,7 +777,7 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
     let cluster = d.register("r2close-pr", &dbs).await;
     eprintln!("cluster {cluster}: db1 primary, db2 and db3 semi-sync replicas");
     for (i, db) in dbs.iter().enumerate() {
-        let toml = agent_toml(&d.seed, &cluster, db, i);
+        let toml = agent_toml(&d.seed, &cluster, db, i, &d.work);
         d.procs.start(&format!("agent-{}", db.name), "agent", &toml);
         assert!(
             ready(AGENT_TEL[i], Duration::from_secs(60)).await,
@@ -680,7 +785,13 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
             db.name
         );
     }
-    wait_for(&db1.root(), "SELECT @@read_only", "0", Duration::from_secs(30)).await;
+    wait_for(
+        &db1.root(),
+        "SELECT @@read_only",
+        "0",
+        Duration::from_secs(30),
+    )
+    .await;
 
     // ---- data: ~40 MB so the stream's rate cap shows ----
     exec(
@@ -693,7 +804,9 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
     )
     .await;
     {
-        let mut c = mysql_async::Conn::new(opts(&db1.root())).await.expect("connect");
+        let mut c = mysql_async::Conn::new(opts(&db1.root()))
+            .await
+            .expect("connect");
         for _ in 0..40 {
             c.query_drop(format!(
                 "INSERT INTO {SCHEMA}.blob_t (b) SELECT RANDOM_BYTES(1024) FROM {SCHEMA}.seq_1_to_1000"
@@ -709,7 +822,13 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
         let _ = c.disconnect().await;
     }
     for r in [&db2, &db3] {
-        wait_for(&r.root(), &format!("SELECT COUNT(*) FROM {SCHEMA}.kv"), "2000", Duration::from_secs(60)).await;
+        wait_for(
+            &r.root(),
+            &format!("SELECT COUNT(*) FROM {SCHEMA}.kv"),
+            "2000",
+            Duration::from_secs(60),
+        )
+        .await;
     }
     eprintln!("base data replicated");
 
@@ -717,17 +836,25 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
     for r in [&db2, &db3] {
         exec(&r.root(), &["STOP SLAVE IO_THREAD"]).await;
     }
-    exec(&db1.root(), &["SET GLOBAL rpl_semi_sync_master_timeout = 300"]).await;
+    exec(
+        &db1.root(),
+        &["SET GLOBAL rpl_semi_sync_master_timeout = 300"],
+    )
+    .await;
     let errant = [
         format!("INSERT INTO {SCHEMA}.kv (k, v) VALUES (900001, 'errant-1')"),
         format!("INSERT INTO {SCHEMA}.kv (k, v) VALUES (900002, 'errant-2'), (900003, 'errant-3')"),
         format!("UPDATE {SCHEMA}.kv SET v = 'errant-update' WHERE k = 7"),
         format!("DELETE FROM {SCHEMA}.kv WHERE k = 8"),
-        format!("INSERT INTO {SCHEMA}.kv (k, v) VALUES (900004, 'errant-4'), (900005, 'it''s errant')"),
+        format!(
+            "INSERT INTO {SCHEMA}.kv (k, v) VALUES (900004, 'errant-4'), (900005, 'it''s errant')"
+        ),
     ];
     let errant_refs: Vec<&str> = errant.iter().map(String::as_str).collect();
     exec(&db1.root(), &errant_refs).await;
-    let db1_pos = scalar(&db1.root(), "SELECT @@gtid_binlog_pos").await.unwrap_or_default();
+    let db1_pos = scalar(&db1.root(), "SELECT @@gtid_binlog_pos")
+        .await
+        .unwrap_or_default();
     eprintln!("db1 diverged: 5 transactions, 7 row changes, at {db1_pos}");
     docker(&["kill", "-s", "KILL", db1.c.name()]).expect("kill");
     eprintln!("--- db1 killed (-9)");
@@ -743,12 +870,23 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
     let new = rec["history"][0]["to"].as_str().expect("to").to_owned();
     eprintln!("failed over to {new} after {:?}", t0.elapsed());
     let newdb = by_name[new.as_str()];
-    wait_for(&newdb.root(), "SELECT @@read_only", "0", Duration::from_secs(30)).await;
+    wait_for(
+        &newdb.root(),
+        "SELECT @@read_only",
+        "0",
+        Duration::from_secs(30),
+    )
+    .await;
     let source = if new == "db2" { "db3" } else { "db2" };
     // Writes go on at the new writer through the whole recovery.
     let stop = Arc::new(AtomicBool::new(false));
     let acked = Arc::new(AtomicU64::new(0));
-    let wtask = writer(newdb.root(), 1_000_000, Arc::clone(&stop), Arc::clone(&acked));
+    let wtask = writer(
+        newdb.root(),
+        1_000_000,
+        Arc::clone(&stop),
+        Arc::clone(&acked),
+    );
 
     // ---- db1 returns: diverged -> extracted -> rebuilt ----
     let back = Instant::now();
@@ -776,7 +914,10 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
             former != "rejoined",
             "db1 was rejoined though it diverged: {ev}"
         );
-        assert!(t0.elapsed() < Duration::from_secs(600), "db1 not rebuilt in 10 min: {r}");
+        assert!(
+            t0.elapsed() < Duration::from_secs(600),
+            "db1 not rebuilt in 10 min: {r}"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
     let rebuilt_after = back.elapsed();
@@ -806,7 +947,9 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
         ],
     )
     .expect("extract-open");
-    let text = opened.as_str().map(str::to_owned).unwrap_or_else(|| opened.to_string());
+    let text = opened
+        .as_str()
+        .map_or_else(|| opened.to_string(), str::to_owned);
     let lines: Vec<Value> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -815,35 +958,94 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
     eprintln!("extract: {} lines, e.g. {}", lines.len(), lines[0]);
     assert_eq!(lines.len(), 7);
     let sqls: Vec<&str> = lines.iter().filter_map(|l| l["sql"].as_str()).collect();
-    assert!(sqls.iter().any(|s| s.contains("VALUES (900001, 'errant-1')")), "{sqls:?}");
-    assert!(sqls.iter().any(|s| s.contains("'it''s errant'")), "{sqls:?}");
-    assert!(sqls.iter().any(|s| s.starts_with("UPDATE") && s.contains("'errant-update'")), "{sqls:?}");
-    assert!(sqls.iter().any(|s| s.starts_with("DELETE") && s.contains("`k` = 8")), "{sqls:?}");
+    assert!(
+        sqls.iter()
+            .any(|s| s.contains("VALUES (900001, 'errant-1')")),
+        "{sqls:?}"
+    );
+    assert!(
+        sqls.iter().any(|s| s.contains("'it''s errant'")),
+        "{sqls:?}"
+    );
+    assert!(
+        sqls.iter()
+            .any(|s| s.starts_with("UPDATE") && s.contains("'errant-update'")),
+        "{sqls:?}"
+    );
+    assert!(
+        sqls.iter()
+            .any(|s| s.starts_with("DELETE") && s.contains("`k` = 8")),
+        "{sqls:?}"
+    );
     // A wrong key doesn't open it.
     let bad_keys = d.work.join("bad.keys");
-    std::fs::write(&bad_keys, "1 0000000000000000000000000000000000000000000000000000000000000001\n").expect("bad keys");
+    std::fs::write(
+        &bad_keys,
+        "1 0000000000000000000000000000000000000000000000000000000000000001\n",
+    )
+    .expect("bad keys");
     assert!(
-        ctl(&d.sprigctl, &["cluster", "extract-open", tenant_file["location"].as_str().expect("loc"), "--key-file", bad_keys.to_str().expect("p")]).is_err(),
+        ctl(
+            &d.sprigctl,
+            &[
+                "cluster",
+                "extract-open",
+                tenant_file["location"].as_str().expect("loc"),
+                "--key-file",
+                bad_keys.to_str().expect("p")
+            ]
+        )
+        .is_err(),
         "a wrong key opens nothing"
     );
     // The rebuild.
-    let rj = d.job(ev["rebuild_job"].as_str().expect("rebuild job")).await;
+    let rj = d
+        .job(ev["rebuild_job"].as_str().expect("rebuild job"))
+        .await;
     eprintln!("node_rebuild: {}", rj["progress"]);
-    assert_eq!(rj["progress"]["source"], source, "streamed from the other replica, never the writer");
+    assert_eq!(
+        rj["progress"]["source"], source,
+        "streamed from the other replica, never the writer"
+    );
     let bytes = rj["progress"]["bytes"].as_u64().unwrap_or(0);
     let secs = rj["progress"]["seconds"].as_f64().unwrap_or(0.0);
-    assert!(bytes > 30 * 1024 * 1024, "the backup carries the data ({bytes} bytes)");
+    assert!(
+        bytes > 30 * 1024 * 1024,
+        "the backup carries the data ({bytes} bytes)"
+    );
     let mbps = bytes as f64 / 1_048_576.0 / secs;
-    assert!(mbps <= RATE_MB as f64 * 1.1, "the rate cap holds ({mbps:.1} MB/s)");
-    wait_for(&db1.root(), "SELECT @@read_only", "1", Duration::from_secs(10)).await;
-    assert_eq!(master_host(&db1.root()).await.as_deref(), Some(new.as_str()));
+    assert!(
+        mbps <= RATE_MB as f64 * 1.1,
+        "the rate cap holds ({mbps:.1} MB/s)"
+    );
+    wait_for(
+        &db1.root(),
+        "SELECT @@read_only",
+        "1",
+        Duration::from_secs(10),
+    )
+    .await;
     assert_eq!(
-        scalar(&db1.root(), &format!("SELECT COUNT(*) FROM {SCHEMA}.kv WHERE k BETWEEN 900001 AND 900005")).await.as_deref(),
+        master_host(&db1.root()).await.as_deref(),
+        Some(new.as_str())
+    );
+    assert_eq!(
+        scalar(
+            &db1.root(),
+            &format!("SELECT COUNT(*) FROM {SCHEMA}.kv WHERE k BETWEEN 900001 AND 900005")
+        )
+        .await
+        .as_deref(),
         Some("0"),
         "the diverged rows are gone from db1"
     );
     assert_eq!(
-        scalar(&db1.root(), &format!("SELECT v FROM {SCHEMA}.kv WHERE k = 7")).await.as_deref(),
+        scalar(
+            &db1.root(),
+            &format!("SELECT v FROM {SCHEMA}.kv WHERE k = 7")
+        )
+        .await
+        .as_deref(),
         Some("base-7")
     );
     // db1 follows the writer: the live rows written during the rebuild and after.
@@ -851,36 +1053,154 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
     stop.store(true, Ordering::SeqCst);
     let _ = wtask.await;
     let n = acked.load(Ordering::SeqCst);
-    let want = scalar(&newdb.root(), &format!("SELECT COUNT(*) FROM {SCHEMA}.kv WHERE k >= 1000000")).await.expect("count");
-    assert_eq!(want, n.to_string(), "every acknowledged live write is on the writer");
-    wait_for(&db1.root(), &format!("SELECT COUNT(*) FROM {SCHEMA}.kv WHERE k >= 1000000"), &want, Duration::from_secs(60)).await;
+    let want = scalar(
+        &newdb.root(),
+        &format!("SELECT COUNT(*) FROM {SCHEMA}.kv WHERE k >= 1000000"),
+    )
+    .await
+    .expect("count");
+    assert_eq!(
+        want,
+        n.to_string(),
+        "every acknowledged live write is on the writer"
+    );
+    wait_for(
+        &db1.root(),
+        &format!("SELECT COUNT(*) FROM {SCHEMA}.kv WHERE k >= 1000000"),
+        &want,
+        Duration::from_secs(60),
+    )
+    .await;
     eprintln!("db1 holds all {n} rows written at {new} during and after the rebuild");
     // The old data directory went, since the extract was verified.
-    let left = docker(&["exec", db1.c.name(), "sh", "-c", "ls -d /var/lib/mysql.pre-rebuild-* 2>/dev/null | wc -l"]).unwrap_or_default();
+    let left = docker(&[
+        "exec",
+        db1.c.name(),
+        "sh",
+        "-c",
+        "ls -d /var/lib/mysql.pre-rebuild-* 2>/dev/null | wc -l",
+    ])
+    .unwrap_or_default();
     assert_eq!(left.trim(), "0", "old data directory removed");
     // The ticket is gone.
     assert!(
-        get(&*d.store, &format!("/sprig/dc/{DC}/rebuilds/{}", ev["rebuild_job"].as_str().unwrap_or_default())).await.is_none()
+        get(
+            &*d.store,
+            &format!(
+                "/sprig/dc/{DC}/rebuilds/{}",
+                ev["rebuild_job"].as_str().unwrap_or_default()
+            )
+        )
+        .await
+        .is_none()
     );
 
     // ---- an operator's rebuild of a healthy replica, and refusals ----
     let other = by_name[source];
     let t0 = Instant::now();
-    let v = ctl(&d.sprigctl, &["cluster", "rebuild", &cluster, source, "--from", "db1"]).expect("rebuild");
+    let v = ctl(
+        &d.sprigctl,
+        &["cluster", "rebuild", &cluster, source, "--from", "db1"],
+    )
+    .expect("rebuild");
     let jid = v["job_id"].as_str().expect("job id").to_owned();
     let j = d.wait_job(&jid, Duration::from_secs(600)).await;
     assert_eq!(j["state"], "succeeded", "{j}");
-    eprintln!("operator rebuild of {source} from db1: {:?}, {}", t0.elapsed(), j["progress"]);
+    eprintln!(
+        "operator rebuild of {source} from db1: {:?}, {}",
+        t0.elapsed(),
+        j["progress"]
+    );
     assert_eq!(j["progress"]["source"], "db1");
-    assert_eq!(master_host(&other.root()).await.as_deref(), Some(new.as_str()));
-    wait_for(&other.root(), &format!("SELECT COUNT(*) FROM {SCHEMA}.kv WHERE k >= 1000000"), &want, Duration::from_secs(60)).await;
+    assert_eq!(
+        master_host(&other.root()).await.as_deref(),
+        Some(new.as_str())
+    );
+    wait_for(
+        &other.root(),
+        &format!("SELECT COUNT(*) FROM {SCHEMA}.kv WHERE k >= 1000000"),
+        &want,
+        Duration::from_secs(60),
+    )
+    .await;
     let v = ctl(&d.sprigctl, &["cluster", "rebuild", &cluster, &new]).expect("submitted");
-    let j = d.wait_job(v["job_id"].as_str().expect("id"), Duration::from_secs(60)).await;
+    let j = d
+        .wait_job(v["job_id"].as_str().expect("id"), Duration::from_secs(60))
+        .await;
     assert_eq!(j["state"], "failed");
-    assert!(j["error"].as_str().unwrap_or_default().contains("is the writer"), "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is the writer"),
+        "{j}"
+    );
     eprintln!("rebuilding the writer is refused: {}", j["error"]);
+
+    if internal_tls() {
+        tls_checks(&d, &cluster).await;
+    }
 
     drop([db1, db2, db3]);
     drop(net);
     d.done();
+}
+
+/// RC2: the agents publish `https://` services, plain HTTP gets nothing,
+/// a client certificate from another CA gets nothing, and one of the
+/// internal CA does (a refused token: 403, never a backup).
+async fn tls_checks(d: &Deployment, cluster: &str) {
+    use sprig_cluster::failover::internal_tls::{InternalTls, split_url};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let pki = d.work.join("pki");
+    let read = |f: &str| std::fs::read(pki.join(f)).expect("pki");
+    let mine = InternalTls::from_pems(&read("ca.pem"), &read("node.pem"), &read("node-key.pem"))
+        .expect("tls");
+    let stranger =
+        InternalTls::from_pems(&read("ca.pem"), &read("rogue.pem"), &read("rogue-key.pem"))
+            .expect("tls");
+    let agents = d.store.list(&key(&format!("/sprig/dc/{DC}/agents/")), sprig_meta::ListOpts::default()).await.expect("agents");
+    let mut urls = Vec::new();
+    for kv in agents.kvs {
+        let v: Value = serde_json::from_slice(&kv.value).unwrap_or_default();
+        let body = if v.get("body").is_some() { v["body"].clone() } else { v };
+        if body["cluster_id"] == cluster || body["cluster"] == cluster {
+            if let Some(u) = body["internal_url"].as_str() {
+                urls.push(u.to_owned());
+            }
+        }
+    }
+    assert!(!urls.is_empty(), "no agent registrations with a service");
+    for url in &urls {
+        assert!(url.starts_with("https://"), "{url} isn't TLS");
+        let (_, host, port) = split_url(url).expect("url");
+        let req = format!(
+            "GET /internal/v1/backup?job=x&token=y HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\n\r\n"
+        );
+        // Plain HTTP: the TLS server answers no HTTP.
+        let mut plain = tokio::net::TcpStream::connect((host.as_str(), port)).await.expect("tcp");
+        let _ = plain.write_all(req.as_bytes()).await;
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), plain.read_to_end(&mut buf)).await;
+        assert!(!buf.starts_with(b"HTTP/1.1"), "plain HTTP got an answer from {url}");
+        // A certificate from another CA: refused at the handshake.
+        let r = match stranger.connect(&host, port).await {
+            Ok(mut t) => {
+                let _ = t.write_all(req.as_bytes()).await;
+                let mut b = Vec::new();
+                let _ = tokio::time::timeout(Duration::from_secs(5), t.read_to_end(&mut b)).await;
+                b
+            }
+            Err(_) => Vec::new(),
+        };
+        assert!(!r.starts_with(b"HTTP/1.1"), "a foreign certificate got an answer from {url}");
+        // The internal CA's: in, and the token still guards the stream.
+        let mut t = mine.connect(&host, port).await.expect("mutual TLS");
+        t.write_all(req.as_bytes()).await.expect("write");
+        let mut b = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), t.read_to_end(&mut b)).await;
+        let head = String::from_utf8_lossy(&b[..b.len().min(40)]).to_string();
+        assert!(head.starts_with("HTTP/1.1 4"), "{url}: {head}");
+        eprintln!("{url}: plain HTTP and a foreign certificate refused; the CA's certificate in, a bad token answered {}", &head[..12.min(head.len())]);
+    }
 }

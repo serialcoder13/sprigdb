@@ -205,6 +205,14 @@ pub struct GatewayConfig {
     /// "Registration records"). Unset: the hostname.
     #[serde(default)]
     pub advertise_addr: Option<String>,
+    /// A file holding the internal credential this gateway presents to the
+    /// controllers' Admin port for calls it makes on its own behalf
+    /// (Studio's automatic-indexing and workload views, chapter 44;
+    /// decision ST12): the controller's `[controller] gateway_token_file`
+    /// or `admin_token_file`. Unset: those calls carry no credential, as in
+    /// R0, and fail against a controller that wants one.
+    #[serde(default)]
+    pub controller_token_file: Option<PathBuf>,
 }
 
 /// `[gateway] login_mode`.
@@ -254,6 +262,14 @@ pub struct ControllerConfig {
     /// one, `admin_addr` must be a loopback address.
     #[serde(default)]
     pub admin_token_file: Option<PathBuf>,
+    /// A file holding the internal credential gateways present for the
+    /// calls they make on their own behalf (`[gateway]
+    /// controller_token_file`; decision ST12). Accepted only on the tenant
+    /// routes Studio's views read and act through (indexes,
+    /// recommendations, explanations, decisions, workload), never on the
+    /// rest of the Admin API. Unset: only `admin_token_file` is accepted.
+    #[serde(default)]
+    pub gateway_token_file: Option<PathBuf>,
     /// Chapter 12's sealed parameter samples: the same file of versioned
     /// master secrets as the gateway's `[gateway] workload_key_file`, from
     /// which automatic-index validation opens the samples it replays
@@ -289,6 +305,7 @@ impl Default for ControllerConfig {
             global_candidate: false,
             admin_addr: default_admin_addr(),
             admin_token_file: None,
+            gateway_token_file: None,
             workload_key_file: None,
             autoindex_test_clock_file: None,
             internal_addr: default_internal_addr(),

@@ -25,7 +25,9 @@
 //! 9. the agent took the lease over -> done: record the failover
 //! returning former writer (after 9, once it answers):
 //!    nothing diverged -> rejoin as a replica (read_only stays on);
-//!    diverged -> report into the record, keep it out, alert
+//!    diverged -> report into the record, keep it out, alert; then
+//!    (failover.mode auto, r2close) an errant_extract job, and once its
+//!    extract is verified a node_rebuild job; `rebuilt` when it succeeds
 //! galera
 //! 1. probe every node; GaleraQuorum::observe; writers are re-picked by the
 //!    registry loop's writer set
@@ -46,8 +48,9 @@
 //! can't do). Gateways don't report connect failures yet, so the sources
 //! are the probes and the agent. The RPO is the cluster's
 //! `failover.rpo_seconds` (dc and global scopes); tenant-scoped RPOs live
-//! in catalogs and aren't read here yet. A diverged former writer stays out
-//! until an operator rebuilds it: `node_rebuild` isn't built.
+//! in catalogs and aren't read here yet. A failed extract or rebuild isn't
+//! retried on its own: its reason goes into the record, and an operator
+//! runs `sprigctl cluster extract|rebuild`.
 
 // s, w, f, c, p: the settings, the watch, the facts, the cluster, the
 // promotion, in every step.
@@ -1224,8 +1227,7 @@ impl ClusterFailover {
                 Some(FormerWriter::Diverged | FormerWriter::Rebuilding)
             )
         {
-            if w
-                .recovery_checked
+            if w.recovery_checked
                 .is_some_and(|t| t.elapsed() < RECOVERY_EVERY)
             {
                 return Ok(());
@@ -1340,7 +1342,9 @@ impl ClusterFailover {
                             ev.extract_job = Some(j.job_id.to_string());
                             ev.recovery_error = None;
                         }
-                        Err(e) => ev.recovery_error = Some(format!("extract job {}: {e}", j.job_id)),
+                        Err(e) => {
+                            ev.recovery_error = Some(format!("extract job {}: {e}", j.job_id));
+                        }
                     }
                 }
                 Some(j) if j.state.is_final() => {
@@ -1428,12 +1432,15 @@ impl ClusterFailover {
             }
             None if auto && verified => {
                 if let Some(l) = cx.leadership.as_ref() {
-                    let rate = self.live.as_ref().map_or(fs::REBUILD_MAX_MB_PER_SECOND.default, |l| {
-                        l.snapshot().get(
-                            &fs::REBUILD_MAX_MB_PER_SECOND,
-                            &SettingCtx::process(&self.dc).with_cluster(c),
-                        )
-                    });
+                    let rate =
+                        self.live
+                            .as_ref()
+                            .map_or(fs::REBUILD_MAX_MB_PER_SECOND.default, |l| {
+                                l.snapshot().get(
+                                    &fs::REBUILD_MAX_MB_PER_SECOND,
+                                    &SettingCtx::process(&self.dc).with_cluster(c),
+                                )
+                            });
                     let mut spec = serde_json::to_value(rebuild::NodeRebuildSpec {
                         cluster: c.clone(),
                         node: node.clone(),

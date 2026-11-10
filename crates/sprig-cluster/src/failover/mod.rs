@@ -20,7 +20,9 @@
 //! - [`rebuild`]: `node_rebuild`'s ticket, token, phases and the
 //!   restored node's attach, shared by the worker and the agents;
 //! - [`writer`]: the writer lease and the agent's registration, shared by
-//!   the agent and the controller's `cluster_failover` loop.
+//!   the agent and the controller's `cluster_failover` loop;
+//! - [`internal_tls`]: mutual TLS for the agents' internal service (the
+//!   backup stream), shared by the agents and the workers.
 //!
 //! These are the operations the controller's `cluster_failover` loop
 //! drives; they hold no state of their own beyond what is passed in, so a
@@ -37,6 +39,7 @@
 pub mod damper;
 pub mod extract;
 pub mod galera;
+pub mod internal_tls;
 pub mod primary_replica;
 pub mod rebuild;
 pub mod topology;

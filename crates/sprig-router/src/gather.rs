@@ -304,6 +304,33 @@ fn select_expr(c: &Col) -> String {
     }
 }
 
+/// Every column name of a `SHOW CREATE TABLE` (generated ones too), lower
+/// case: what an analytic read resolves names against (chapter 17,
+/// "Analytic reads (R3)"). Empty when the text doesn't read that way.
+pub(crate) fn column_names_of_ddl(show: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for l in show.lines().skip(1) {
+        let Some(rest) = l.strip_prefix("  `") else {
+            continue;
+        };
+        let mut name = String::new();
+        let mut it = rest.chars().peekable();
+        loop {
+            match it.next() {
+                Some('`') if it.peek() == Some(&'`') => {
+                    it.next();
+                    name.push('`');
+                }
+                Some('`') => break,
+                Some(c) => name.push(c),
+                None => return Vec::new(),
+            }
+        }
+        out.push(name.to_lowercase());
+    }
+    out
+}
+
 /// The columns a copy writes, read from `SHOW CREATE TABLE`'s column lines
 /// (two spaces, then a backquoted name); generated columns left out.
 /// Empty when the text doesn't read that way.
@@ -391,6 +418,8 @@ pub struct GatherLimits {
     pub max_rows: u64,
     /// `router.gather.max_concurrent`.
     pub max_concurrent: usize,
+    /// Analytic reads in DataFusion (chapter 17, "Analytic reads (R3)").
+    pub analytics: crate::analytics::AnalyticsLimits,
 }
 
 impl Default for GatherLimits {
@@ -398,6 +427,7 @@ impl Default for GatherLimits {
         Self {
             max_rows: 0,
             max_concurrent: 4,
+            analytics: crate::analytics::AnalyticsLimits::default(),
         }
     }
 }

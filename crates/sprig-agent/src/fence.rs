@@ -310,12 +310,16 @@ struct FormerView {
 /// lease, even if the lease is free (chapter 25 step 2: a returning
 /// former writer is checked, then rejoined or rebuilt, never served).
 fn kept_out(v: &FailoverView, node: &str) -> bool {
-    v.history.iter().rev().find(|e| e.from == node).is_some_and(|e| {
-        matches!(
-            e.former.as_deref(),
-            Some("fenced" | "diverged" | "rebuilding")
-        )
-    })
+    v.history
+        .iter()
+        .rev()
+        .find(|e| e.from == node)
+        .is_some_and(|e| {
+            matches!(
+                e.former.as_deref(),
+                Some("fenced" | "diverged" | "rebuilding")
+            )
+        })
 }
 
 /// The agent's fence (see the module docs).

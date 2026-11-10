@@ -32,13 +32,17 @@
 //! [`rest`]. Authentication is [`auth`]'s.
 
 pub mod admin;
+pub mod analytics;
 pub mod auth;
 pub mod functions;
 pub mod grpc;
+pub mod kv;
 pub mod rest;
 pub mod settings;
 pub mod sink;
 pub mod sql;
+pub mod studio;
+pub mod vectors;
 
 #[cfg(test)]
 mod drain_tests;
@@ -101,6 +105,8 @@ pub struct Core {
     pub auth: Arc<dyn HttpAuthenticator>,
     /// The Admin API.
     pub admin: Arc<AdminApi>,
+    /// Studio: its files, browser sessions and API additions (chapter 44).
+    pub studio: Arc<studio::StudioState>,
 }
 
 impl std::fmt::Debug for Core {
@@ -123,6 +129,24 @@ impl Core {
         tenant: Option<String>,
         host: Option<String>,
     ) -> Result<Caller> {
+        // A Studio session token (chapter 44); anything else is chapter
+        // 14's Basic or API key.
+        if studio::is_session_token(authorization.as_deref()) {
+            let token = studio::bearer(authorization.as_deref()).unwrap_or_default();
+            let s = self
+                .studio
+                .verify(token, info.peer.ip(), info.tls.is_some())
+                .await?;
+            return Ok(Caller {
+                principal: s.principal,
+                peer: info.peer,
+                tls: info.tls.clone(),
+                listener: info.listener,
+                generation: info.generation,
+                authorization,
+                client_dc: None,
+            });
+        }
         let creds = info.credentials(authorization.clone(), tenant, host);
         let principal = self.auth.authenticate(&creds).await?;
         Ok(Caller {
@@ -193,7 +217,11 @@ async fn route(
             }
         }
     } else {
-        rest::handle(&core, &info, req).await
+        // Studio's files and API additions first (chapter 44).
+        match studio::handle(&core, &info, req).await {
+            Ok(r) => r,
+            Err(req) => rest::handle(&core, &info, req).await,
+        }
     };
     metrics::histogram!("sprig_api_request_duration_seconds", "protocol" => protocol)
         .record(started.elapsed().as_secs_f64());

@@ -111,20 +111,34 @@ fn digest_of(t: &TableMeta, r: MyRow) -> RowDigest {
 /// exactly-once markers of after-commit triggers (`__sprig_ldone`), which
 /// must stay in the same schema as the writes they commit with, and
 /// chapter 50's queue tables (messages, owner state, delayed messages and
-/// the queue outbox), whose rows commit with the shard's writes.
+/// the queue outbox), and chapter 42's cross-tenant outbox
+/// (`__sprig_xo`), whose rows commit with the shard's writes.
 pub const MOVED_INTERNAL: &[&str] = &[
     "__sprig_ldone",
     "__sprig_qm",
     "__sprig_qs",
     "__sprig_qd",
     "__sprig_qo",
+    "__sprig_xo",
 ];
 
 /// Prefixes of internal tables that move with their shard like user
 /// tables: chapter 45's stream outboxes (`__sprig_eo_<stream>`), stream
 /// logs (`__sprig_sl_<stream>`) and their checkpoints (`__sprig_sl_ckpt`),
-/// whose rows commit with the shard's writes and the sequencer's position.
-pub const MOVED_INTERNAL_PREFIXES: &[&str] = &["__sprig_eo_", "__sprig_sl_"];
+/// whose rows commit with the shard's writes and the sequencer's position;
+/// and chapter 43's native graph tables: nodes (`__sprig_gn_<graph>`),
+/// edges (`__sprig_ge_`), label rows (`__sprig_gl_`) and mirrors
+/// (`__sprig_gm_`), routed by `_sprig_rk` like a group's tables, and the id
+/// counter (`__sprig_gq_`, copied whole with its default-group schema).
+pub const MOVED_INTERNAL_PREFIXES: &[&str] = &[
+    "__sprig_eo_",
+    "__sprig_sl_",
+    "__sprig_gn_",
+    "__sprig_ge_",
+    "__sprig_gl_",
+    "__sprig_gm_",
+    "__sprig_gq_",
+];
 
 /// `SET NAMES` for a stored program's `character_set_client` and
 /// `collation_connection` (`SHOW CREATE` columns 3 and 4), so the target

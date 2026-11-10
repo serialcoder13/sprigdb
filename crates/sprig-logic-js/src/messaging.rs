@@ -11,6 +11,7 @@
 //! | Call | Statement |
 //! |---|---|
 //! | `db.publish(stream, key, value, headers?)` | `INSERT INTO [db.]stream (key, value, headers) VALUES (...)`: an outbox row (chapter 45) |
+//! | `db.publish(stream, key, value, headers, {tenant: 't'})` | `INSERT INTO [db.]stream FOR TENANT t (...) VALUES (...)`: into member `t`'s instance of an inherited stream (chapter 42); KIRun's `tenant` parameter |
 //! | `db.commitOffset(group, stream, partition, offset)` | `CALL sprig.commit_offset(...)` (chapter 45) |
 //! | `db.mq.publish(exchange, routingKey, body, props?)` | `CALL sprig.mq_publish(...)`: an outbox row inside a transaction (chapter 50) |
 //! | `db.mq.get(queue, {max, leaseMs})` | `CALL sprig.mq_get(...)` |
@@ -84,7 +85,7 @@ impl MsgOp {
     #[must_use]
     pub const fn params(self) -> &'static [&'static str] {
         match self {
-            MsgOp::Publish => &["stream", "key", "value", "headers"],
+            MsgOp::Publish => &["stream", "key", "value", "headers", "tenant"],
             MsgOp::CommitOffset => &["group", "stream", "partition", "offset"],
             MsgOp::MqPublish => &["exchange", "routingKey", "body", "properties"],
             MsgOp::MqGet => &["queue", "max", "leaseMs"],
@@ -176,8 +177,22 @@ pub fn op(op: MsgOp, args: &[Value], default_db: Option<&str>) -> Result<DbOp> {
                 Value::Object(o) => Value::String(Value::Object(o).to_string()),
                 _ => return Err(bad(op, "headers must be an object of strings")),
             };
+            // Chapter 42 (R9): `{tenant: 't'}` (or KIRun's `tenant`) names
+            // the member whose instance of an inherited stream gets it.
+            let tenant = match arg(4) {
+                Value::Null => None,
+                Value::String(t) if !t.is_empty() => Some(t),
+                Value::Object(o) => match o.get("tenant") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(t)) if !t.is_empty() => Some(t.clone()),
+                    Some(_) => return Err(bad(op, "options.tenant must be a tenant's name")),
+                },
+                _ => return Err(bad(op, "the options are {tenant: 'name'}")),
+            };
+            let target_clause =
+                tenant.map_or_else(String::new, |t| format!(" FOR TENANT {}", ident(&t)));
             format!(
-                "INSERT INTO {target} (key, value, headers) VALUES ({}, {}, {})",
+                "INSERT INTO {target}{target_clause} (key, value, headers) VALUES ({}, {}, {})",
                 literal(&text_of(&arg(1))),
                 literal(&text_of(&arg(2))),
                 literal(&headers)
@@ -365,6 +380,38 @@ pub async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publish_for_a_tenant() {
+        for opts in [json!({"tenant": "client_x"}), json!("client_x")] {
+            let s = op(
+                MsgOp::Publish,
+                &[
+                    json!("user_events"),
+                    json!(1),
+                    json!("v"),
+                    Value::Null,
+                    opts,
+                ],
+                Some("security"),
+            )
+            .unwrap();
+            assert!(
+                s.sql
+                    .starts_with("INSERT INTO `security`.`user_events` FOR TENANT `client_x` (key"),
+                "{}",
+                s.sql
+            );
+        }
+        assert!(
+            op(
+                MsgOp::Publish,
+                &[json!("s"), json!(1), json!("v"), Value::Null, json!(5)],
+                None
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn publish_statements() {

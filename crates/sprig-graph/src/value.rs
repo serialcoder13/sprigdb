@@ -8,8 +8,11 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::{Map, Value as Json};
 use sprig_common::{Result, SprigCode, SprigError};
+
+use crate::temporal::{Dur, Point, Zoned};
 
 /// Properties of a node or relationship.
 pub type Props = BTreeMap<String, Value>;
@@ -83,6 +86,20 @@ pub enum Value {
     Rel(Arc<Rel>),
     /// A path.
     Path(Arc<Path>),
+    /// A `DATE`.
+    Date(NaiveDate),
+    /// A `LOCAL TIME`.
+    LocalTime(NaiveTime),
+    /// A `ZONED TIME`: the time and its offset in seconds.
+    Time(NaiveTime, i32),
+    /// A `LOCAL DATETIME`.
+    LocalDateTime(NaiveDateTime),
+    /// A `ZONED DATETIME`.
+    DateTime(Box<Zoned>),
+    /// A `DURATION`.
+    Duration(Dur),
+    /// A `POINT`.
+    Point(Point),
 }
 
 /// Element id of a node: `n:<graph>:<rk hex>:<id>`.
@@ -156,6 +173,9 @@ pub enum Key {
     Rel(u64),
     /// A path by its relationship and node ids.
     Path(Vec<u64>),
+    /// A temporal value or point by its type and text (a zoned datetime
+    /// by its instant).
+    Other(u8, String),
 }
 
 impl Value {
@@ -185,6 +205,13 @@ impl Value {
             Value::Node(_) => "NODE",
             Value::Rel(_) => "RELATIONSHIP",
             Value::Path(_) => "PATH",
+            Value::Date(_) => "DATE",
+            Value::LocalTime(_) => "LOCAL TIME",
+            Value::Time(..) => "ZONED TIME",
+            Value::LocalDateTime(_) => "LOCAL DATETIME",
+            Value::DateTime(_) => "ZONED DATETIME",
+            Value::Duration(_) => "DURATION",
+            Value::Point(_) => "POINT",
         }
     }
 
@@ -214,6 +241,10 @@ impl Value {
                     .map(|n| n.id)
                     .chain(p.rels.iter().map(|r| r.id))
                     .collect(),
+            ),
+            other => Key::Other(
+                other.order_rank(),
+                crate::temporal::text(other).unwrap_or_default(),
             ),
         }
     }
@@ -262,7 +293,16 @@ impl Value {
             (Value::Node(a), Value::Node(b)) => Some(a.id == b.id),
             (Value::Rel(a), Value::Rel(b)) => Some(a.id == b.id),
             (Value::Path(_), Value::Path(_)) => Some(self.key() == o.key()),
-            _ => Some(false),
+            (Value::Duration(a), Value::Duration(b)) => Some(a == b),
+            (Value::Point(a), Value::Point(b)) => Some(a == b),
+            // Zoned values are equal only in the same zone (Neo4j).
+            (Value::DateTime(a), Value::DateTime(b)) => {
+                Some(a.epoch() == b.epoch() && a.offset == b.offset && a.zone == b.zone)
+            }
+            (Value::Time(a, o), Value::Time(b, p)) => Some(a == b && o == p),
+            (a, b) => {
+                Some(crate::temporal::compare(a, b).is_some_and(|x| x == std::cmp::Ordering::Equal))
+            }
         }
     }
 
@@ -286,23 +326,32 @@ impl Value {
                 }
                 Some(a.len().cmp(&b.len()))
             }
-            _ => None,
+            (a, b) => crate::temporal::compare(a, b),
         }
     }
 
     fn order_rank(&self) -> u8 {
         // Cypher's ascending global order: maps, nodes, relationships,
-        // lists, paths, strings, booleans, numbers, then null last.
+        // lists, paths, points, zoned datetimes, local datetimes, dates,
+        // zoned times, local times, durations, strings, booleans, numbers,
+        // then null last.
         match self {
             Value::Map(_) => 0,
             Value::Node(_) => 1,
             Value::Rel(_) => 2,
             Value::List(_) => 3,
             Value::Path(_) => 4,
-            Value::String(_) => 5,
-            Value::Bool(_) => 6,
-            Value::Int(_) | Value::Float(_) => 7,
-            Value::Null => 9,
+            Value::Point(_) => 5,
+            Value::DateTime(_) => 6,
+            Value::LocalDateTime(_) => 7,
+            Value::Date(_) => 8,
+            Value::Time(..) => 9,
+            Value::LocalTime(_) => 10,
+            Value::Duration(_) => 11,
+            Value::String(_) => 12,
+            Value::Bool(_) => 13,
+            Value::Int(_) | Value::Float(_) => 14,
+            Value::Null => 16,
         }
     }
 
@@ -329,6 +378,15 @@ impl Value {
             }
             (Value::Node(x), Value::Node(y)) => x.id.cmp(&y.id),
             (Value::Rel(x), Value::Rel(y)) => x.id.cmp(&y.id),
+            (Value::Duration(x), Value::Duration(y)) => {
+                (x.months, x.days, x.secs, x.nanos).cmp(&(y.months, y.days, y.secs, y.nanos))
+            }
+            (Value::Point(x), Value::Point(y)) => x
+                .srid
+                .cmp(&y.srid)
+                .then(x.x.total_cmp(&y.x))
+                .then(x.y.total_cmp(&y.y))
+                .then(x.z.unwrap_or(0.0).total_cmp(&y.z.unwrap_or(0.0))),
             _ => self
                 .cypher_cmp(o)
                 .unwrap_or_else(|| self.key().cmp(&o.key())),
@@ -373,6 +431,7 @@ impl Value {
             Value::Node(n) => format!("(:{} {})", n.labels.join(":"), props_literal(&n.props)),
             Value::Rel(r) => format!("[:{} {}]", r.rtype, props_literal(&r.props)),
             Value::Path(p) => format!("<path of {}>", p.rels.len()),
+            other => crate::temporal::text(other).unwrap_or_default(),
         }
     }
 
@@ -434,7 +493,18 @@ pub fn type_error(msg: impl Into<String>) -> SprigError {
 /// 39909 otherwise.
 pub fn check_property(key: &str, v: &Value) -> Result<()> {
     match v {
-        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => Ok(()),
+        Value::Null
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::Date(_)
+        | Value::LocalTime(_)
+        | Value::Time(..)
+        | Value::LocalDateTime(_)
+        | Value::DateTime(_)
+        | Value::Duration(_)
+        | Value::Point(_) => Ok(()),
         Value::List(l) => {
             let mut kind: Option<&'static str> = None;
             for x in l {
@@ -489,6 +559,13 @@ fn to_json_inner(v: &Value, path: &str, types: &mut Map<String, Json>) -> Json {
                 .collect(),
         ),
         Value::Node(_) | Value::Rel(_) | Value::Path(_) => Json::String(v.display()),
+        other => match crate::temporal::to_stored(other) {
+            Some((kind, j)) => {
+                types.insert(path.to_owned(), Json::from(kind));
+                j
+            }
+            None => Json::Null,
+        },
     }
 }
 
@@ -513,6 +590,12 @@ pub fn props_to_json(p: &Props) -> (Json, Option<Json>) {
 }
 
 fn from_json_inner(j: &Json, path: &str, types: Option<&Map<String, Json>>) -> Value {
+    if let Some(kind) = types.and_then(|t| t.get(path)).and_then(Json::as_str)
+        && kind != "float"
+        && let Some(v) = crate::temporal::from_stored(kind, j)
+    {
+        return v;
+    }
     match j {
         Json::Null => Value::Null,
         Json::Bool(b) => Value::Bool(*b),
@@ -581,6 +664,13 @@ pub fn to_plain_json(v: &Value) -> Json {
             "relationships": p.rels.iter().map(|r| to_plain_json(&Value::Rel(r.clone()))).collect::<Vec<_>>(),
         }),
         Value::List(l) => Json::Array(l.iter().map(to_plain_json).collect()),
+        Value::Point(_) => crate::temporal::to_stored(v).map_or(Json::Null, |(_, j)| j),
+        Value::Date(_)
+        | Value::LocalTime(_)
+        | Value::Time(..)
+        | Value::LocalDateTime(_)
+        | Value::DateTime(_)
+        | Value::Duration(_) => Json::String(v.display()),
         Value::Map(m) => Json::Object(
             m.iter()
                 .map(|(k, x)| (k.clone(), to_plain_json(x)))

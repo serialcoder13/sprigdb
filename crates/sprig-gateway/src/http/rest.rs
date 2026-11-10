@@ -286,6 +286,8 @@ async fn run_local(
         .unwrap_or_else(|| s(body, "transaction"));
     match rpc {
         "Sql.Execute" | "Sql.Query" => {
+            // Caps and timeout asked for, clamped for Studio (chapter 44).
+            let caps = core.studio.caps_for(caller, &database, super::studio::asked_caps(body));
             let call = SqlCall {
                 database,
                 sql: s(body, "sql"),
@@ -295,7 +297,7 @@ async fn run_local(
             let e2 = Arc::clone(engine);
             let c2 = caller.clone();
             let txn = (!transaction.is_empty()).then_some(transaction);
-            tokio::spawn(async move { e2.run(&c2, call, txn.as_deref(), tx).await });
+            tokio::spawn(async move { e2.run_capped(&c2, call, txn.as_deref(), caps, tx).await });
             if rpc == "Sql.Query" && ndjson {
                 return Ok((200, Local::Stream(ndjson_response(rx))));
             }
@@ -328,6 +330,18 @@ async fn run_local(
                 &transaction,
             )
             .await?;
+            Ok((200, Local::Json(v)))
+        }
+        r if r.starts_with("KeyValue.") => {
+            let v = super::kv::call(engine, caller, r, &request_json(m, body)).await?;
+            Ok((200, Local::Json(v)))
+        }
+        r if r.starts_with("Vectors.") => {
+            let v = super::vectors::call(engine, caller, r, &request_json(m, body)).await?;
+            Ok((200, Local::Json(v)))
+        }
+        r if r.starts_with("Analytics.") => {
+            let v = super::analytics::call(engine, caller, r, &request_json(m, body)).await?;
             Ok((200, Local::Json(v)))
         }
         "Transactions.Begin" => {
@@ -381,6 +395,7 @@ fn split_parts(r: &sprig_api::proto::v1::ExecuteResponse) -> Vec<Value> {
                 warnings: res.warnings,
                 info: res.info.clone(),
                 more_results: i + 1 < n,
+                truncated: res.truncated,
             })),
         }));
     }

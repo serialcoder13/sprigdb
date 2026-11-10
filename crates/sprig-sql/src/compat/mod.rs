@@ -20,9 +20,12 @@
 
 pub mod collation;
 pub mod errmap;
+pub mod funcs;
 pub mod geo;
+pub mod groupby;
 pub mod keywords;
 pub mod meta;
+pub mod rowsyntax;
 pub mod schema;
 pub mod setvar;
 pub mod sqlmode;
@@ -437,7 +440,7 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
     }
     let mut out: Option<Vec<u8>> =
         lex::versioned::expand_text_for_mariadb(sql, opts, backend_version);
-    let steps: [TextStep; 5] = [
+    let steps: [TextStep; 6] = [
         rewrite_json_casts,
         name_checks,
         rewrite_srid_attribute,
@@ -445,6 +448,9 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
         // as SET STATEMENT.
         rewrite_index_visibility,
         setvar::rewrite_hints,
+        // R4 (r4close): `TABLE t`, `VALUES ROW(...)` and the row alias of
+        // `ON DUPLICATE KEY UPDATE`.
+        rowsyntax::rewrite,
     ];
     for step in steps {
         if let Some(v) = step(out.as_deref().unwrap_or(sql), opts) {

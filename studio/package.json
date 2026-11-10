@@ -1,0 +1,55 @@
+{
+  "name": "sprig-studio",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SprigDB Studio: the web client served by the gateway at /studio/ (LLD chapter 44)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22.22.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build && node scripts/compress.mjs dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "test": "vitest run",
+    "licences": "node scripts/check-licences.mjs",
+    "gen:api": "node scripts/gen-api.mjs",
+    "e2e": "playwright test",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm licences && node scripts/gen-api.mjs --check"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.105.0",
+    "@tanstack/react-virtual": "3.14.23",
+    "echarts": "6.1.0",
+    "monaco-editor": "0.56.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-intl": "12.1.5",
+    "react-router": "8.5.0",
+    "zustand": "5.0.16"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.1",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.8",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "eslint": "10.13.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.13.0",
+    "jsdom": "30.1.3",
+    "openapi-typescript": "7.13.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.5",
+    "vitest": "4.1.12"
+  }
+}

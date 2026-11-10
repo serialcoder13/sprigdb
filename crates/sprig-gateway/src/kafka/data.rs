@@ -57,6 +57,9 @@ use uuid::Uuid;
 
 use crate::tenant::TenantServices;
 
+// Chapter 42 (R9): inherited streams over Kafka.
+mod inherit;
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -537,7 +540,20 @@ impl StreamData for GatewayData {
         name: &str,
         access: Access,
     ) -> Result<DataTopic, TopicError> {
-        self.resolve(p, name, access).await.map(|r| r.topic)
+        match self.resolve(p, name, access).await {
+            // Chapter 42 (R9): an inherited stream's topic.
+            Err(e) if e.code == err::UNKNOWN_TOPIC_OR_PARTITION => {
+                match self
+                    .inherited_topic(p, name, access == Access::Write)
+                    .await?
+                {
+                    inherit::Inh::Retry => self.resolve(p, name, access).await.map(|r| r.topic),
+                    inherit::Inh::Def(t) => Ok(t),
+                    inherit::Inh::Unknown => Err(e),
+                }
+            }
+            r => r.map(|r| r.topic),
+        }
     }
 
     async fn topic_by_id(
@@ -582,7 +598,19 @@ impl StreamData for GatewayData {
         records: Vec<ProduceRecord>,
         producer: Option<ProducerBatch>,
     ) -> Result<AppendTicket, TopicError> {
+        // Chapter 42 (R9): a definition's topic, by `x-sprig-tenant`.
+        if t.stream_id & inherit::DEF_FLAG != 0 {
+            return self.append_by_tenant(p, t, partition, records).await;
+        }
+        let mut records = records;
         let r = self.resolve_t(p, t).await?;
+        // ...and a member's own instance: its headers stamped.
+        if crate::inherited::state_of(&r.cat)
+            .instance_by_id(sprig_inherit::msg::DefKind::Stream, r.def.id.0)
+            .is_some()
+        {
+            Self::stamp_member(p, &mut records)?;
+        }
         let schema = Self::outbox_schema(&r)?;
         let pn = Self::part(partition)?;
         let count = records.len();

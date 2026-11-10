@@ -40,6 +40,7 @@ use sprig_common::ids::UserId;
 use crate::account::HostPattern;
 use crate::apikey::{ApiKey, ApiKeyRow};
 use crate::scram::{ScramKind, ScramVerifier};
+use crate::token::TokenSession;
 use crate::store::{
     AUTH_MIGRATIONS, AuthStore, MODULE, Slot, TempLock, UserRow, VerifierKind, VerifierRow,
 };
@@ -175,6 +176,8 @@ pub struct TenantAuth {
     locks: Arc<HashMap<UserId, TempLock>>,
     /// API keys by visible id (revoked ones too, until they're deleted).
     api_keys: Arc<HashMap<String, Arc<ApiKey>>>,
+    /// Live token sessions by id (chapter 14; [`crate::token`]).
+    sessions: Arc<HashMap<[u8; 16], Arc<TokenSession>>>,
     bytes: usize,
 }
 
@@ -203,6 +206,7 @@ impl PartialEq for TenantAuth {
             && order(self) == order(other)
             && self.locks == other.locks
             && self.api_keys == other.api_keys
+            && self.sessions == other.sessions
     }
 }
 
@@ -284,6 +288,7 @@ impl TenantAuth {
             by_name,
             locks: Arc::new(locks),
             api_keys: Arc::clone(&self.api_keys),
+            sessions: Arc::clone(&self.sessions),
             bytes,
         }
     }
@@ -309,10 +314,51 @@ impl TenantAuth {
         self
     }
 
+    /// The same state with `changed` token sessions replacing their
+    /// entries (`full`: replacing every session). Revoked and expired
+    /// sessions leave.
+    #[must_use]
+    pub fn with_sessions(mut self, changed: Vec<TokenSession>, full: bool) -> Self {
+        if changed.is_empty() && !full {
+            return self;
+        }
+        let now = std::time::SystemTime::now();
+        let mut m = if full {
+            HashMap::new()
+        } else {
+            (*self.sessions).clone()
+        };
+        let old = self.sessions.len();
+        m.retain(|_, s| s.live(now));
+        for s in changed {
+            if s.live(now) {
+                m.insert(s.sid, Arc::new(s));
+            } else {
+                m.remove(&s.sid);
+            }
+        }
+        self.bytes = self.bytes.saturating_sub(old * SESSION_BYTES) + m.len() * SESSION_BYTES;
+        self.sessions = Arc::new(m);
+        self
+    }
+
+    /// The live token session `sid`, as of this snapshot (check
+    /// [`TokenSession::live`] against the time of use).
+    #[must_use]
+    pub fn session(&self, sid: &[u8; 16]) -> Option<&Arc<TokenSession>> {
+        self.sessions.get(sid)
+    }
+
     /// The API key `key_id`, revoked or not.
     #[must_use]
     pub fn api_key(&self, key_id: &str) -> Option<&Arc<ApiKey>> {
         self.api_keys.get(key_id)
+    }
+
+    /// Every API key, revoked or not, in no order (Studio's key list,
+    /// chapter 44).
+    pub fn api_keys(&self) -> impl Iterator<Item = &Arc<ApiKey>> {
+        self.api_keys.values()
     }
 
     /// The live user `id`.
@@ -361,6 +407,7 @@ impl TenantAuth {
 
 const LOCK_BYTES: usize = 64;
 const KEY_BYTES: usize = 256;
+const SESSION_BYTES: usize = 160;
 
 /// `sprig-auth`'s catalog module: the auth tables' migrations, and
 /// [`TenantAuth`] in every snapshot.
@@ -403,13 +450,18 @@ impl CatalogExtension for AuthExtension {
                 store.verifiers_of(conn, &ids).await?
             };
             let keys = crate::apikey::keys_since(&store, conn, Some(since)).await?;
+            let sessions = crate::token::sessions::sessions_since(&store, conn, Some(since)).await?;
             prev.apply(users, &verifiers, locks)
                 .with_api_keys(keys, false)
+                .with_sessions(sessions, false)
         } else {
             let users = store.users_since(conn, None).await?;
             let verifiers = store.all_verifiers(conn).await?;
             let keys = crate::apikey::keys_since(&store, conn, None).await?;
-            TenantAuth::build(users, &verifiers, locks).with_api_keys(keys, true)
+            let sessions = crate::token::sessions::sessions_since(&store, conn, None).await?;
+            TenantAuth::build(users, &verifiers, locks)
+                .with_api_keys(keys, true)
+                .with_sessions(sessions, true)
         };
         Ok(Arc::new(state))
     }

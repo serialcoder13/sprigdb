@@ -32,6 +32,9 @@ tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "ma
 # brings webpki-roots (CDLA-Permissive-2.0, outside the allowed licences).
 mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "openssl-tls", "zstd-compression", "snappy-compression", "zlib-compression"] }
 futures-util = "0.3"
+# The unified spec-test runner (tests/spec_live.rs): the JSON test files.
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

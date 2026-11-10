@@ -16,6 +16,7 @@
 * exclude testsuite.simple.BlobTest.* :: as BlobRegressionTest
 * exclude testsuite.regression.StressRegressionTest.* :: many concurrent connections; a stress test, not a compatibility test
 * exclude testsuite.regression.MicroPerformanceRegressionTest.* :: timing thresholds on a shared, loaded host
+* exclude testsuite.simple.DateTimeTest.* :: 18 tests over every time zone and connection-property combination: more than 30 minutes on MySQL 8.4 alone (r4close, 9 November); run it on its own (SPRIG_CLIENTS_FILTER=DateTimeTest)
 
 # JDK 21 differs from the suite's expected Unicode tables.
 * fail testsuite.simple.SaslPrepTest.unassignedCodePoints :: JDK 21's Unicode data (fails on plain MySQL 8.4 too)

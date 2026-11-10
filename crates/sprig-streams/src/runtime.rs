@@ -240,6 +240,35 @@ pub async fn resolve_retention<Q: Queryable + Send>(
     db: DbId,
     object: ObjectId,
 ) -> Result<Retention> {
+    resolve_retention_over(q, catalog, db, object, Retention::default()).await
+}
+
+/// The `stream.*` retention keys at the global scope of `etcd` (what a
+/// catalog row doesn't set falls back to), resolved in `dc`.
+#[must_use]
+pub fn global_retention(etcd: &sprig_settings::MemSettings<'_>, dc: &sprig_common::ids::DcId) -> Retention {
+    use crate::settings::{COMPACTION_LAG_MINUTES, RETENTION_BYTES, RETENTION_HOURS, TOMBSTONE_HOURS};
+    let ctx = sprig_settings::SettingCtx::process(dc);
+    Retention {
+        hours: etcd.get(&RETENTION_HOURS, &ctx),
+        bytes: etcd.get(&RETENTION_BYTES, &ctx),
+        compaction_lag_minutes: etcd.get(&COMPACTION_LAG_MINUTES, &ctx),
+        tombstone_hours: etcd.get(&TOMBSTONE_HOURS, &ctx),
+    }
+}
+
+/// As [`resolve_retention`], over `base` (the global values) instead of
+/// the defaults: object > database > tenant > `base`.
+///
+/// # Errors
+/// The backend's.
+pub async fn resolve_retention_over<Q: Queryable + Send>(
+    q: &mut Q,
+    catalog: &str,
+    db: DbId,
+    object: ObjectId,
+    base: Retention,
+) -> Result<Retention> {
     let rows: Vec<(String, u64, String, Option<String>)> = q
         .exec(
             format!(
@@ -268,7 +297,7 @@ pub async fn resolve_retention<Q: Queryable + Send>(
         }
     }
     let get = |k: &str, d: u64| best.get(k).map_or(d, |(_, v)| *v);
-    let def = Retention::default();
+    let def = base;
     Ok(Retention {
         hours: get("stream.retention_hours", def.hours),
         bytes: get("stream.retention_bytes", def.bytes),
@@ -297,6 +326,11 @@ pub trait JobEnv: Send + Sync {
     fn dc(&self) -> Arc<dyn MetaStore>;
     /// The tenant's name, for change envelopes.
     async fn tenant_name(&self, tenant: TenantId) -> Option<String>;
+    /// The worker's live settings (etcd scopes) and its DC: global
+    /// `stream.*` values under the catalog's rows. `None`: the defaults.
+    fn settings(&self) -> Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)> {
+        None
+    }
 }
 
 /// Where a job reports progress (chapter 23's job runtime).
@@ -492,7 +526,15 @@ async fn maintain_once(
         let mut c = cat_pool.get_conn().await.map_err(crate::maria::map_err)?;
         let live = StreamsStore::new(cat_schema).get(&mut c, def.id).await?;
         (
-            resolve_retention(&mut c, cat_schema, def.db, settings_object).await?,
+            resolve_retention_over(
+                &mut c,
+                cat_schema,
+                def.db,
+                settings_object,
+                env.settings()
+                    .map_or_else(Retention::default, |(s, dc)| global_retention(&s, &dc)),
+            )
+            .await?,
             live,
         )
     };

@@ -160,8 +160,12 @@ impl TenantServices {
             Arc::new(sprig_graph::catalog::GraphExtension),
             // Chapter 42: spaces, inheritable objects and shares.
             Arc::new(sprig_inherit::InheritExtension),
+            // Chapter 42 (R9): inherited messaging objects.
+            Arc::new(sprig_inherit::msg::MsgExtension),
             // Chapter 15's table groups, for the router (chapter 17).
             Arc::new(crate::exec::router::ShardingExtension),
+            // Chapter 31: collections, their indexes and field columns (R5).
+            Arc::new(crate::mongo::catalog::DocExtension),
         ];
         let source = MariaSource::new(Arc::clone(&dyn_locator), extensions)?;
         let feed = DirectoryWatch::start(Arc::clone(&global))?;
@@ -203,7 +207,7 @@ impl TenantServices {
             Arc::clone(&live.stores().global),
             Arc::clone(&live.stores().dc),
         )));
-        Ok(Arc::new(Self {
+        let svc = Arc::new(Self {
             cache,
             settings,
             dc,
@@ -219,7 +223,12 @@ impl TenantServices {
             authz: authz::AuthzServices::default(),
             mq: std::sync::OnceLock::new(),
             _follow: follow,
-        }))
+        });
+        // Chapter 42 (R9): rows of cross-tenant outboxes a lost commit hook
+        // left behind.
+        crate::inherited::outbox::start_sweeper(&svc);
+        crate::inherited::broadcast::start_fan_out(&svc);
+        Ok(svc)
     }
 }
 

@@ -1,0 +1,27 @@
+# php-pdo-mysql (versions.txt) through run.sh: every outcome other than pass.
+# Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (summarize.py). Test ids are run-tests.php's JUnit names.
+
+# Statements of several MiB: they OOM-killed a 768 MB MySQL 8.4 reference
+# (r4close, 10 November) and would send 16 MiB and more to the shared
+# development clusters through a gateway (gaps row 30; r4-interim C1).
+
+# Measured on 10 November 2026 (r4close): MySQL 8.4.11 and MariaDB 11.8.9
+# containers as root, and a debug gateway built from the tree (47406/47407)
+# on the shared dev cluster dc-a-c1, tenant r4close. `flaky` lines are tests
+# that met the shared cluster's outages during that run; rerun them.
+gateway-mysql fail *bug66528.phpt* :: not investigated (r4close): 001- SQLSTATE[HY000]: General error: 2014 Cannot execute queries while other unbuffered queries are active.  Consider using PDOStatement:fetchAll().  
+gateway-mysql flaky *pdo_mysql___construct.phpt* :: shared dev cluster unavailable during the run (39030 'no usable writer' / 39500 etcd timeouts / 39071 a DDL left pending by them; r4close, 10 November); rerun
+gateway-mysql fail *pdo_mysql_commit.phpt* :: not investigated (r4close): 001+ [002] There is already an active transaction, [00000] 00000
+gateway-mysql fail *pdo_mysql_exec.phpt* :: gaps row 53: VERSION() inside a stored procedure is the backend's
+gateway-mysql fail *pdo_mysql_stmt_multiquery.phpt* :: not investigated (r4close): --
+gateway-mysql fail *pdo_mysql_stmt_nextrowset.phpt* :: not investigated (r4close): Emulated PS...
+gateway-mariadb fail *bug66528.phpt* :: not investigated (r4close): 001- SQLSTATE[HY000]: General error: 2014 Cannot execute queries while other unbuffered queries are active.  Consider using PDOStatement:fetchAll().  
+*-mariadb fail *bug76815.phpt* :: fails on plain MariaDB 11.8.9 too: 001- SQLSTATE[22001]: String data, right truncated: 1406 Data too long for column 'bug76815_pdo_mysql_f()' at row 1
+gateway-mariadb flaky *pdo_mysql___construct.phpt* :: shared dev cluster unavailable during the run (39030 'no usable writer' / 39500 etcd timeouts / 39071 a DDL left pending by them; r4close, 10 November); rerun
+gateway-mariadb fail *pdo_mysql_commit.phpt* :: not investigated (r4close): 001+ [002] There is already an active transaction, [00000] 00000
+gateway-mariadb fail *pdo_mysql_exec.phpt* :: gaps row 53: VERSION() inside a stored procedure is the backend's
+*-mariadb fail *pdo_mysql_prepare_native_clear_error.phpt* :: fails on plain MariaDB 11.8.9 too: 001- Warning: PDOStatement:execute(): SQLSTATE[42S22]: Column not found: 1054 Unknown column 'unknown_column' in 'field list' in %s on line %d
+gateway-mariadb fail *pdo_mysql_stmt_multiquery.phpt* :: not investigated (r4close): --
+gateway-mariadb fail *pdo_mysql_stmt_nextrowset.phpt* :: not investigated (r4close): Emulated PS...
+gateway-mariadb fail *pdo_mysql_types.phpt* :: not investigated (r4close): 001- done!

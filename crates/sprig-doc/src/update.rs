@@ -893,12 +893,6 @@ fn bitop(k: &str, a: i64, b: i64) -> i64 {
 pub fn upsert_seed(query: &Pred) -> Result<Document, MongoError> {
     let mut fields = Vec::new();
     query.equality_fields(&mut fields);
-    // MongoDB adds the equality fields in path order (a `FieldRefSet`),
-    // `_id` first.
-    fields.sort_by(|(a, _), (b, _)| {
-        let key = |p: &str| (p != "_id" && !p.starts_with("_id."), p.split('.').map(str::to_owned).collect::<Vec<_>>());
-        key(a).cmp(&key(b))
-    });
     let mut d = Document::new();
     for (p, v) in fields {
         if p.split('.').any(|x| x.starts_with('$')) {

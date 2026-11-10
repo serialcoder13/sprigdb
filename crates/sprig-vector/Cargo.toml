@@ -8,5 +8,25 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+bson = "=2.15.0"
+serde_json.workspace = true
+sprig-common.workspace = true
+# Metadata filters: chapter 31's parser, SQL translation and recheck.
+sprig-doc = { path = "../sprig-doc" }
+sprig-geo = { path = "../sprig-geo" }
+sprig-kv = { path = "../sprig-kv" }
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+base64.workspace = true
+# The API's live test: REST over HTTP/1.1, gRPC over h2c.
+sprig-api.workspace = true
+prost-types.workspace = true
+tonic = { workspace = true, features = ["channel", "codegen"] }
+mysql_async.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
 [lints]
 workspace = true

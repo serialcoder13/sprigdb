@@ -5,8 +5,10 @@
 #
 #   run.sh <suite> <host> <port> <persona>
 #
-# <suite>    go-sql-driver, mysql2, pymysql, mysqlclient, mariadb-connector-j
-#            or mysql-connector-j (versions.txt pins each to a release tag)
+# <suite>    go-sql-driver, mysql2, pymysql, mysqlclient, mariadb-connector-j,
+#            mysql-connector-j, php-mysqli or php-pdo-mysql (versions.txt
+#            pins each to a release tag; the PHP suites come from the
+#            source tarball inside the connector matrix's PHP image)
 # <persona>  mysql or mariadb: which server the endpoint stands for
 #
 # The suite is cloned once (depth 1, at its tag) into .src/ and runs in an
@@ -64,6 +66,10 @@ SRC_ROOT=${SPRIG_CLIENTS_SRC:-$HERE/.src}
 RESULTS=${SPRIG_CLIENTS_RESULTS:-$HERE/results}/$SUITE/$TARGET_LABEL
 FILTER=${SPRIG_CLIENTS_FILTER:-}
 MEM=768m
+# Images, pinned to exact tags (override with SPRIG_CLIENTS_PY_IMAGE,
+# SPRIG_CLIENTS_MAVEN_IMAGE).
+PY_IMAGE=${SPRIG_CLIENTS_PY_IMAGE:-python:3.12.12-slim-bookworm}
+MAVEN_IMAGE=${SPRIG_CLIENTS_MAVEN_IMAGE:-maven:3.9.11-eclipse-temurin-21}
 PREFIX=${SPRIG_CLIENTS_PREFIX:-sprig-clients}
 
 # A tenant login is <tenant>.<user>: logins the suite creates get the same
@@ -75,7 +81,13 @@ line=$(grep -E "^$SUITE[[:space:]]" "$HERE/versions.txt" || true)
 [[ -n $line ]] || { echo "unknown suite $SUITE (see versions.txt)" >&2; exit 2; }
 read -r _ REPO TAG <<<"$line"
 SRC=$SRC_ROOT/$SUITE-$TAG
-if [[ ! -d $SRC ]]; then
+if [[ $REPO == image:* ]]; then
+  # The suite ships inside an image (the PHP extensions' tests are in the
+  # official image's /usr/src/php.tar.xz): nothing to clone.
+  mkdir -p "$SRC"
+  docker image inspect "${REPO#image:}" >/dev/null 2>&1 ||
+    docker build -q -t "${REPO#image:}" "$HERE/../connectors/php" >/dev/null
+elif [[ ! -d $SRC ]]; then
   mkdir -p "$SRC_ROOT"
   git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$TAG" "$REPO" "$SRC"
 fi
@@ -124,7 +136,7 @@ suite_run() {
 
 # Tests the expected file excludes on this target (`exclude` lines): for
 # example ones whose load would hurt a shared development cluster.
-EXCLUDES=$(docker run --rm --name "$PREFIX-excludes-$$" --memory 128m -v "$HERE:/clients:ro" python:3.12-slim-bookworm \
+EXCLUDES=$(docker run --rm --name "$PREFIX-excludes-$$" --memory 128m -v "$HERE:/clients:ro" "$PY_IMAGE" \
   python3 -I /clients/summarize.py excludes "/clients/expected/$SUITE.txt" "$TARGET_LABEL")
 [[ -n $EXCLUDES ]] && echo "$SUITE $TARGET_LABEL: excluded: $(echo $EXCLUDES)"
 printf '%s\n' "$EXCLUDES" | sed '/^$/d' >"$RESULTS/raw/excludes.txt"
@@ -175,7 +187,7 @@ case $SUITE in
     fi
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/pip"
-    suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -- python:3.12-slim-bookworm \
+    suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -- "$PY_IMAGE" \
       sh -c 'K=$FILTER; [ -n "$EXCLUDE_RE" ] && K="${K:+($K) and }not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))";
              mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
              pip install -q -r requirements-dev.txt > /out/pip.log 2>&1 &&
@@ -192,7 +204,7 @@ case $SUITE in
     [[ $setup == 1 ]] && sql -e "DROP DATABASE IF EXISTS mysqldb_test; CREATE DATABASE mysqldb_test"
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/pip"
-    suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -- python:3.12-slim-bookworm \
+    suite_run -v "$SRC_ROOT/.cache/pip:/root/.cache/pip" -- "$PY_IMAGE" \
       sh -c 'K=$FILTER; [ -n "$EXCLUDE_RE" ] && K="${K:+($K) and }not ($(echo "$EXCLUDE_RE" | sed "s/|/ or /g"))";
              mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
              (apt-get update -q && apt-get install -y -q gcc pkg-config libmariadb-dev) > /out/apt.log 2>&1 &&
@@ -208,7 +220,7 @@ case $SUITE in
     [[ $setup == 1 ]] && sql -e "DROP DATABASE IF EXISTS testj; CREATE DATABASE testj"
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/m2"
-    suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -e MAVEN_OPTS="-Xmx160m -XX:+UseSerialGC" -e TEST_DB_DATABASE=testj -- maven:3.9-eclipse-temurin-21 \
+    suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -e MAVEN_OPTS="-Xmx160m -XX:+UseSerialGC" -e TEST_DB_DATABASE=testj -- "$MAVEN_IMAGE" \
       sh -c 'export TEST_DB_HOST=$TARGET_HOST TEST_DB_PORT=$TARGET_PORT TEST_DB_USER=$TARGET_USER TEST_DB_PASSWORD=$TARGET_PASS;
              mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
              sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" -e "s|^|**/|" /out/excludes.txt > /tmp/excludes;
@@ -226,13 +238,35 @@ case $SUITE in
     FORMAT=junit
     mkdir -p "$SRC_ROOT/.cache/m2"
     suite_run -v "$SRC_ROOT/.cache/m2:/root/.m2" -v "$HERE/mysql-connector-j/pom.xml:/pom.xml:ro" \
-      -e MAVEN_OPTS="-Xmx448m -XX:+UseSerialGC -XX:MaxMetaspaceSize=192m -Xss512k -Dfile.encoding=UTF-8" -- maven:3.9-eclipse-temurin-21 \
+      -e MAVEN_OPTS="-Xmx448m -XX:+UseSerialGC -XX:MaxMetaspaceSize=192m -Xss512k -Dfile.encoding=UTF-8" -- "$MAVEN_IMAGE" \
       sh -c 'mkdir -p /work/src && cp /pom.xml /work/ && cp -r /src/src/test /work/src/ && cd /work &&
              url="jdbc:mysql://$TARGET_HOST:$TARGET_PORT/cjtest?user=$TARGET_USER&password=$TARGET_PASS&sslMode=DISABLED&allowPublicKeyRetrieval=true";
              sed -e "s/[.]\([^.]*\)\$/#\1/" -e "s/^.*[.]\([^.#]*#\)/\1/" -e "s|^|**/|" /out/excludes.txt > /tmp/excludes;
              mvn -B test -Dsurefire.excludesFile=/tmp/excludes -Dtestsuite.url="$url" -Dsurefire.timeout=1500 \
                ${FILTER:+-Dtest="$FILTER" -Dsurefire.failIfNoSpecifiedTests=false} > /out/mvn.log 2>&1;
              mkdir -p /out/junit && cp target/surefire-reports/*.xml /out/junit/ 2>/dev/null; true' ||
+      true
+    ;;
+  php-mysqli | php-pdo-mysql)
+    # php-src's own tests of the two extensions (ext/mysqli/tests;
+    # ext/pdo_mysql/tests, which also runs ext/pdo/tests through
+    # common.phpt), from the tarball of the PHP version the image pins,
+    # with run-tests.php as php-src CI runs them: a database, a login with
+    # every privilege on it, no TLS, one worker.
+    [[ $setup == 1 ]] && sql -e "DROP DATABASE IF EXISTS phptest; CREATE DATABASE phptest"
+    FORMAT=junit
+    case $SUITE in
+      php-mysqli) DIRS=ext/mysqli/tests ;;
+      *) DIRS=ext/pdo_mysql/tests ;;
+    esac
+    suite_run --entrypoint sh -e DIRS="$DIRS" -e PHPVER="$TAG" -- "${REPO#image:}" \
+      -c 'mkdir /work && cd /work &&
+          tar -xJf /usr/src/php.tar.xz --strip-components=1 php-$PHPVER/run-tests.php php-$PHPVER/ext/mysqli/tests php-$PHPVER/ext/pdo_mysql/tests php-$PHPVER/ext/pdo/tests &&
+          for t in $(grep -o "[A-Za-z0-9_]*[.]phpt" /out/excludes.txt); do rm -f ext/*/tests/$t; done;
+          export MYSQL_TEST_HOST=$TARGET_HOST MYSQL_TEST_PORT=$TARGET_PORT MYSQL_TEST_USER=$TARGET_USER MYSQL_TEST_PASSWD=$TARGET_PASS MYSQL_TEST_DB=phptest MYSQL_TEST_SKIP_CONNECT_FAILURE=0;
+          export PDO_MYSQL_TEST_DSN="mysql:host=$TARGET_HOST;port=$TARGET_PORT;dbname=phptest" PDO_MYSQL_TEST_USER=$TARGET_USER PDO_MYSQL_TEST_PASS=$TARGET_PASS PDO_MYSQL_TEST_HOST=$TARGET_HOST PDO_MYSQL_TEST_PORT=$TARGET_PORT PDO_MYSQL_TEST_DB=phptest;
+          TEST_PHP_EXECUTABLE=/usr/local/bin/php TEST_PHP_JUNIT=/out/junit.xml NO_INTERACTION=1 \
+            php -d memory_limit=512M run-tests.php -q -j1 --no-color -d memory_limit=512M ${FILTER:-$DIRS} > /out/run-tests.log 2>&1; true' ||
       true
     ;;
   *)
@@ -243,5 +277,5 @@ esac
 echo "$SUITE $TARGET_LABEL ($HOST:$PORT): $(($(date +%s) - start)) s" >"$RESULTS/raw/elapsed.txt"
 
 docker run --rm --name "$PREFIX-summary-$$" --memory 256m -v "$HERE:/clients:ro" -v "$RESULTS:/results" \
-  python:3.12-slim-bookworm python3 -I /clients/summarize.py "$SUITE" "$TARGET_LABEL" "$FORMAT" /results \
+  "$PY_IMAGE" python3 -I /clients/summarize.py "$SUITE" "$TARGET_LABEL" "$FORMAT" /results \
   "/clients/expected/$SUITE.txt"

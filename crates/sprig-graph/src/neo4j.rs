@@ -25,6 +25,7 @@ pub fn status_code(e: &SprigError) -> String {
             SprigCode::BoltProtocol => "Neo.ClientError.Request.Invalid".into(),
             SprigCode::BoltAuthScheme => "Neo.ClientError.Security.Unauthorized".into(),
             SprigCode::BoltImpersonation => "Neo.ClientError.Security.Forbidden".into(),
+            SprigCode::BoltBookmarkInvalid => "Neo.ClientError.Transaction.InvalidBookmark".into(),
             SprigCode::GatewayDraining | SprigCode::TenantNotReady => {
                 "Neo.TransientError.General.DatabaseUnavailable".into()
             }

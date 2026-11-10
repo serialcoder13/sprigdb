@@ -567,6 +567,83 @@ async fn read_your_writes_on_primary_and_replicas() {
     b.close().await;
 }
 
+/// A commit on a connection with a fixed `timestamp` (Sprig 2PC's held
+/// branches fix their clock, and so may clients): MariaDB 11.8 reports
+/// `timestamp` in place of `last_gtid` after the commit, so the gateway
+/// reads the GTID itself. Without that the session's causal position
+/// didn't move and another session's next read went to a replica that
+/// hadn't applied the commit (R3: the read-your-writes bug found by the
+/// differential suite under Sprig 2PC).
+#[tokio::test]
+async fn read_your_writes_after_a_commit_under_a_fixed_timestamp() {
+    let u = need!(
+        skip::MARIADB_REPLICATION,
+        "read_your_writes_after_a_commit_under_a_fixed_timestamp"
+    );
+    let addrs: Vec<String> = u.iter().map(|x| x.addr.clone()).collect();
+    let rig = rig(
+        TopologyKind::PrimaryReplica,
+        &u[0].user,
+        &u[0].pass,
+        &addrs,
+        fast_settings(),
+    );
+    let db = unique_ident("sprig_bt");
+    // The schema through a connection of its own: MariaDB drops
+    // `last_gtid` only on a connection whose first tracked change is the
+    // fixed clock, so the session's connection must not commit first.
+    let mut s = side(&u[0]).await;
+    s.query_drop(&format!("CREATE DATABASE {db}"))
+        .await
+        .unwrap();
+    s.query_drop(&format!("CREATE TABLE {db}.t (v INT)"))
+        .await
+        .unwrap();
+    // A read starts the node monitor; it commits nothing.
+    let mut b = rig.session(Persona::MariaDb);
+    ok(&mut b, "SELECT 1").await;
+    rig.wait_roles(&[NodeRole::Writer, NodeRole::Replica, NodeRole::Replica])
+        .await;
+    let mut a = rig.session(Persona::MariaDb);
+    let mut replica_reads = 0;
+    for i in 1..=30 {
+        let before = a.causal().clone();
+        ok(&mut a, "SET timestamp = 1794242775.483399").await;
+        ok(&mut a, "START TRANSACTION").await;
+        ok(&mut a, &format!("INSERT INTO {db}.t VALUES ({i})")).await;
+        ok(&mut a, "COMMIT").await;
+        assert!(
+            !before.covers(a.causal()),
+            "commit {i}: the causal position didn't move ({before} → {})",
+            a.causal()
+        );
+        ok(&mut a, "SET timestamp = DEFAULT").await;
+        // An autocommit write under a fixed clock too.
+        ok(&mut a, "SET timestamp = 1794242775.483399").await;
+        let before = a.causal().clone();
+        ok(&mut a, &format!("INSERT INTO {db}.t VALUES ({})", 1000 + i)).await;
+        assert!(
+            !before.covers(a.causal()),
+            "autocommit write {i}: the causal position didn't move"
+        );
+        ok(&mut a, "SET timestamp = DEFAULT").await;
+        // Another session of the same account, through this gateway.
+        let r = ok(&mut b, &format!("SELECT COUNT(*) FROM {db}.t")).await;
+        assert_eq!(
+            r.cell(0, 0),
+            Some((2 * i).to_string().as_str()),
+            "read {i} missed a commit"
+        );
+        if matches!(r.out.route, RouteKind::Replica | RouteKind::ReplicaWait) {
+            replica_reads += 1;
+        }
+    }
+    eprintln!("replica reads: {replica_reads}/30");
+    a.close().await;
+    b.close().await;
+    s.query_drop(&format!("DROP DATABASE {db}")).await.unwrap();
+}
+
 /// With `autocommit = 0` a plain read opens a transaction, so it runs on
 /// the writer and pins there (chapter 06, "Pins"); before the fix it went
 /// to a replica, opened the transaction there, and the gateway discarded

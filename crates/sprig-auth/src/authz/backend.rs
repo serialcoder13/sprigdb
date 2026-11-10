@@ -407,9 +407,60 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
         }
         add(BackendTarget::Db(tenant_pattern.clone()), compiled_tenant);
         redo_marker_grants(&mut grants, &tenant_pattern);
+        doc_session_grants(&mut grants, &tenant_pattern);
         out.insert(account(tenant, uid), grants);
     }
     out
+}
+
+/// Chapter 30's retryable-write records (R5, `decisions/r5-interim.md`
+/// D12): a MongoDB write and its record in the database's
+/// `__sprig_doc_sessions` commit in one MariaDB transaction on the
+/// session's own account, so a user who may write some table of a schema
+/// but whose schema-level grants don't cover the records table gets
+/// `SELECT`, `INSERT`, `UPDATE` and `DELETE` on it there (with `CREATE`,
+/// so the grant holds before the table exists and the engine may create
+/// it). Clients never reach the table: chapter 07 refuses `__sprig_`
+/// names outside the gateway's internal statements.
+pub const DOC_SESSIONS_TABLE: &str = "__sprig_doc_sessions";
+
+fn doc_session_grants(grants: &mut BTreeMap<BackendTarget, ActionSet>, tenant_pattern: &str) {
+    let need = ActionSet::of(&[
+        Action::Select,
+        Action::Insert,
+        Action::Update,
+        Action::Delete,
+    ]);
+    let covered = |grants: &BTreeMap<BackendTarget, ActionSet>, pattern: &str| {
+        grants.iter().any(|(t, a)| {
+            matches!(t, BackendTarget::Db(p) if p == pattern) && a.intersect(need) == need
+        })
+    };
+    if covered(grants, tenant_pattern) {
+        return;
+    }
+    let writes = ActionSet::of(&[Action::Insert, Action::Update, Action::Delete]);
+    let schemas: BTreeSet<String> = grants
+        .iter()
+        .filter(|(_, a)| !a.intersect(writes).is_empty())
+        .filter_map(|(t, _)| match t {
+            BackendTarget::Table(s, n) | BackendTarget::Column(s, n, _)
+                if n != DOC_SESSIONS_TABLE && n != "__sprig_redo" =>
+            {
+                Some(s.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for s in schemas {
+        if covered(grants, &escape_db(&s)) {
+            continue;
+        }
+        let t = BackendTarget::Table(s, DOC_SESSIONS_TABLE.into());
+        let a = need.with(Action::Create).intersect(t.accepts());
+        let e = grants.entry(t).or_default();
+        *e = e.union(a);
+    }
 }
 
 /// Chapter 18's Sprig 2PC (R3): a held branch commits with a marker row in
@@ -828,6 +879,51 @@ mod tests {
             ActionSet::of(&[Action::Insert]),
         );
         redo_marker_grants(&mut g, "t1\\_d%");
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn table_level_writers_reach_the_doc_session_records() {
+        let mut g = BTreeMap::new();
+        g.insert(
+            BackendTarget::Table("t1_d1_g1_s1".into(), "orders".into()),
+            ActionSet::of(&[Action::Select, Action::Update]),
+        );
+        g.insert(
+            BackendTarget::Table("t1_d2_g1_s1".into(), "audit".into()),
+            ActionSet::of(&[Action::Select]),
+        );
+        doc_session_grants(&mut g, "t1\\_d%");
+        let rec = BackendTarget::Table("t1_d1_g1_s1".into(), DOC_SESSIONS_TABLE.into());
+        assert_eq!(
+            g.get(&rec).copied(),
+            Some(ActionSet::of(&[
+                Action::Select,
+                Action::Insert,
+                Action::Update,
+                Action::Delete,
+                Action::Create
+            ]))
+        );
+        // Read-only grants write no records.
+        let ro = BackendTarget::Table("t1_d2_g1_s1".into(), DOC_SESSIONS_TABLE.into());
+        assert!(!g.contains_key(&ro));
+        // Schema-level DML covers the table already.
+        let mut g = BTreeMap::new();
+        g.insert(
+            BackendTarget::Table("t1_d1_g1_s1".into(), "orders".into()),
+            ActionSet::of(&[Action::Insert]),
+        );
+        g.insert(
+            BackendTarget::Db("t1\\_d1\\_g1\\_s1".into()),
+            ActionSet::of(&[
+                Action::Select,
+                Action::Insert,
+                Action::Update,
+                Action::Delete,
+            ]),
+        );
+        doc_session_grants(&mut g, "t1\\_d%");
         assert_eq!(g.len(), 2);
     }
 

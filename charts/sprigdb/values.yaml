@@ -13,6 +13,10 @@ etcd:
 controller:
   replicas: 3
   globalCandidate: true
+  # The deployment's first DC writes the deployment id, its DC record and
+  # the tenant id counter once (guarded; safe on every replica). Without it
+  # the controllers wait for another DC to bootstrap (found on kind, r2close).
+  bootstrap: false
 gateway:
   autoscaling: {minReplicas: 3, maxReplicas: 30, targetCPUUtilizationPercentage: 60}
   service: {type: LoadBalancer}
@@ -31,6 +35,9 @@ operator:
 # (a single-host cluster such as kind); nodes are advertised as host:nodePort.
 nodeServices: {type: LoadBalancer, nodePortHost: ""}
 tls:
+  # false: development only (kind): no cert-manager Certificates, etcd and
+  # the roles without TLS, mariadb-operator's own CA (r2close).
+  enabled: true
   issuerRef: {kind: ClusterIssuer, name: sprig-fra1-ca}
   # trust-manager Bundle with every DC's CA, mounted as ca.crt.
   bundleConfigMap: sprigdb-ca-bundle

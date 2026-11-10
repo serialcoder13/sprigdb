@@ -11,11 +11,42 @@ use async_trait::async_trait;
 use sprig_common::CancellationToken;
 use sprig_proto_bolt::client::BoltClient;
 use sprig_proto_bolt::server::{
-    BoltFailure, BoltService, BoltSession, Config, ConnInfo, End, QueryResult, serve,
+    BoltFailure, BoltService, BoltSession, Config, ConnInfo, End, QueryResult, RecordStream,
+    StreamEnd, serve,
 };
 use sprig_proto_bolt::{PackValue, Request, Response};
 
 struct Svc;
+
+/// `n` records produced one by one; fails at record `fail_at` if set.
+struct Counter {
+    next: i64,
+    n: i64,
+    fail_at: Option<i64>,
+}
+
+#[async_trait]
+impl RecordStream for Counter {
+    async fn next(&mut self) -> Result<Option<Vec<PackValue>>, BoltFailure> {
+        if self.fail_at == Some(self.next) {
+            return Err(BoltFailure::new(
+                "Neo.ClientError.Statement.SprigGraphBudgetExceeded",
+                "rows",
+            ));
+        }
+        if self.next >= self.n {
+            return Ok(None);
+        }
+        self.next += 1;
+        Ok(Some(vec![PackValue::Int(self.next - 1)]))
+    }
+    fn end(&mut self) -> StreamEnd {
+        StreamEnd {
+            stats: [("nodes-created".to_owned(), 0)].into_iter().collect(),
+            bookmark: Some("SB1:streamed".into()),
+        }
+    }
+}
 
 struct Sess {
     in_tx: bool,
@@ -62,6 +93,22 @@ impl BoltSession for Sess {
                 "Neo.ClientError.Statement.SyntaxError",
                 "bad",
             ));
+        }
+        if let Some(rest) = query.strip_prefix('S') {
+            let (n, fail_at) = match rest.split_once('!') {
+                Some((a, b)) => (a.parse().unwrap_or(0), b.parse().ok()),
+                None => (rest.parse().unwrap_or(0), None),
+            };
+            return Ok(QueryResult {
+                fields: vec!["x".into()],
+                qtype: "r",
+                stream: Some(Box::new(Counter {
+                    next: 0,
+                    n,
+                    fail_at,
+                })),
+                ..QueryResult::default()
+            });
         }
         let n: i64 = query.parse().unwrap_or(1);
         Ok(QueryResult {
@@ -278,4 +325,74 @@ async fn no_common_version_answers_zeros() {
         .expect_err("refused");
     assert!(e.message.contains("no Bolt version"));
     assert_eq!(h.await.expect("join"), End::NoVersion);
+}
+
+#[tokio::test]
+async fn streamed_results_pull_discard_and_buffer() {
+    let (mut c, _h) = start(None).await;
+    c.login("u", "pw").await.expect("login");
+    // All of a stream, with its summary.
+    let r = c.query("S5", vec![], vec![]).await.expect("stream");
+    assert_eq!(r.records.len(), 5);
+    assert_eq!(
+        r.summary.get("bookmark").and_then(PackValue::as_str),
+        Some("SB1:streamed")
+    );
+    // PULL {n}: has_more exact even when n is the stream's length.
+    c.send(&Request::Run {
+        query: "S2".into(),
+        params: PackValue::Map(vec![]),
+        extra: PackValue::Map(vec![]),
+    })
+    .await
+    .expect("send");
+    assert!(matches!(c.recv().await.expect("run"), Response::Success(_)));
+    c.send(&Request::Pull(PackValue::map([("n", PackValue::Int(2))])))
+        .await
+        .expect("pull");
+    let mut recs = 0;
+    loop {
+        match c.recv().await.expect("recv") {
+            Response::Record(_) => recs += 1,
+            Response::Success(m) => {
+                assert_eq!(m.get("has_more"), None, "{m:?}");
+                break;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(recs, 2);
+    // A failure in the middle of a stream: records, then FAILURE.
+    let e = c.query("S10!4", vec![], vec![]).await.expect_err("fails");
+    assert_eq!(e.code, "Neo.ClientError.Statement.SprigGraphBudgetExceeded");
+    // In a transaction, a second RUN buffers the first stream.
+    c.begin(vec![]).await.expect("begin");
+    for q in ["S3", "S4"] {
+        c.send(&Request::Run {
+            query: q.into(),
+            params: PackValue::Map(vec![]),
+            extra: PackValue::Map(vec![]),
+        })
+        .await
+        .expect("send");
+        assert!(matches!(c.recv().await.expect("run"), Response::Success(_)));
+    }
+    for (qid, want) in [(0, 3), (1, 4)] {
+        c.send(&Request::Pull(PackValue::map([
+            ("n", PackValue::Int(-1)),
+            ("qid", PackValue::Int(qid)),
+        ])))
+        .await
+        .expect("pull");
+        let mut recs = 0;
+        loop {
+            match c.recv().await.expect("recv") {
+                Response::Record(_) => recs += 1,
+                Response::Success(_) => break,
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(recs, want, "qid {qid}");
+    }
+    c.commit().await.expect("commit");
 }

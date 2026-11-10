@@ -739,7 +739,6 @@ impl BackendSession {
             return Ok(o);
         }
 
-        tracing::debug!(r3d_dbg = "fin", node = %node, gtid = ?cur.tracked.gtid, vars = cur.tracked.vars.len(), ok = cur.last_ok.is_some(), err = ?cur.error.as_ref().map(|e| e.code), effects = ?cur.stmt.effects, "R3D");
         // Session tracking: schema, variables, commit GTIDs, untracked state.
         let mut observed = state::observe(&cur.tracked);
         if Self::drop_set_statement_reports(&mut cur, &mut observed) {
@@ -791,6 +790,36 @@ impl BackendSession {
             self.connection_gone();
             return Ok(o);
         }
+        // MariaDB 11.8 reports another variable (`timestamp`, on a
+        // connection with a fixed clock: a held branch, or a client's `SET
+        // timestamp`) in place of `last_gtid` after a commit. A statement
+        // that may have committed and reported variables but no GTID reads
+        // the GTID itself, or the session's next read could go to a
+        // replica that hasn't applied its own commit (R3, agent r3d).
+        let committing = cur.stmt.effects.contains(&Effect::Commit)
+            || (cur.stmt.class == StmtClass::Write
+                && !cur
+                    .status
+                    .is_some_and(|st| st.contains(StatusFlags::IN_TRANS)));
+        if committing
+            && cur.error.is_none()
+            && observed.gtid.is_none()
+            && !cur.tracked.vars.is_empty()
+        {
+            match cur.lease.conn().capture_last_gtid().await {
+                Ok(g) if !g.is_empty() => observed.gtid = Some(g),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(node = %node, error = %e, "reading last_gtid after a commit failed; closing the connection");
+                    let o = outcome(&cur, false);
+                    drop(cur);
+                    self.connection_gone();
+                    return Ok(o);
+                }
+            }
+            metrics::counter!("sprig_backend_gtid_reads_total", "cluster" => self.target.cluster.to_string())
+                .increment(1);
+        }
         if let Some(g) = observed
             .gtid
             .as_deref()
@@ -800,7 +829,6 @@ impl BackendSession {
             self.backends
                 .watermarks
                 .advance(&self.target.cluster, &self.target.user, &g);
-            tracing::debug!(r3d_dbg = "gtid", cluster = %self.target.cluster, user = %self.target.user, gtid = %g, class = ?cur.stmt.class, "R3D");
         }
         if let Some(ok) = &cur.last_ok {
             if ok.last_insert_id != 0 && !cur.explicit_ids {
@@ -1216,7 +1244,6 @@ impl BackendSession {
             let (node, route, wait) = if plain {
                 let target = self.causal_target(settings);
                 let pool = &self.backends.pools;
-                tracing::debug!(r3d_dbg = "read", cluster = %view.id, user = %self.target.user, target = %target, "R3D");
                 let load = |k: &NodeKey| pool.node_counts(k).1;
                 let choice = reads::choose(
                     view,
@@ -1393,9 +1420,6 @@ impl BackendSession {
             };
             let node_key = lease.key().node_key();
             self.inflight = Some((node_key.clone(), lease.conn_ref().thread_id));
-            if let Req::Text(sql) = &req {
-                tracing::debug!(r3d_dbg = "stmt", node = %node_key, route = ?route, sql = %String::from_utf8_lossy(&sql[..sql.len().min(70)]), "R3D");
-            }
             let conn = lease.conn();
             if self.vars.schema.is_none()
                 && conn.applied.schema.is_some()

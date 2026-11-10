@@ -45,12 +45,13 @@ spec:
           args:
             - --name=$(POD_NAME)
             - --data-dir=/var/lib/etcd
-            - --listen-client-urls=https://0.0.0.0:2379
-            - --advertise-client-urls=https://$(POD_NAME).sprigdb-etcd-dc.{{ .Release.Namespace }}.svc:2379
-            - --listen-peer-urls=https://0.0.0.0:2380
-            - --initial-advertise-peer-urls=https://$(POD_NAME).sprigdb-etcd-dc.{{ .Release.Namespace }}.svc:2380
-            - --initial-cluster={{- range $i, $_ := until (int .Values.etcd.replicas) -}}{{ if $i }},{{ end }}sprigdb-etcd-dc-{{ $i }}=https://sprigdb-etcd-dc-{{ $i }}.sprigdb-etcd-dc.{{ $.Release.Namespace }}.svc:2380{{- end }}
+            - --listen-client-urls={{ $s := ternary "https" "http" .Values.tls.enabled }}{{ $s }}://0.0.0.0:2379
+            - --advertise-client-urls={{ $s }}://$(POD_NAME).sprigdb-etcd-dc.{{ .Release.Namespace }}.svc:2379
+            - --listen-peer-urls={{ $s }}://0.0.0.0:2380
+            - --initial-advertise-peer-urls={{ $s }}://$(POD_NAME).sprigdb-etcd-dc.{{ .Release.Namespace }}.svc:2380
+            - --initial-cluster={{- range $i, $_ := until (int .Values.etcd.replicas) -}}{{ if $i }},{{ end }}sprigdb-etcd-dc-{{ $i }}={{ $s }}://sprigdb-etcd-dc-{{ $i }}.sprigdb-etcd-dc.{{ $.Release.Namespace }}.svc:2380{{- end }}
             - --initial-cluster-state=new
+            {{- if .Values.tls.enabled }}
             - --client-cert-auth
             - --trusted-ca-file=/etc/etcd/ca/ca.crt
             - --cert-file=/etc/etcd/tls/tls.crt
@@ -59,18 +60,23 @@ spec:
             - --peer-trusted-ca-file=/etc/etcd/ca/ca.crt
             - --peer-cert-file=/etc/etcd/tls/tls.crt
             - --peer-key-file=/etc/etcd/tls/tls.key
+            {{- end }}
           ports:
             - {name: client, containerPort: 2379}
             - {name: peer, containerPort: 2380}
           volumeMounts:
             - {name: data, mountPath: /var/lib/etcd}
+            {{- if .Values.tls.enabled }}
             - {name: tls, mountPath: /etc/etcd/tls, readOnly: true}
             - {name: ca, mountPath: /etc/etcd/ca, readOnly: true}
+            {{- end }}
+      {{- if .Values.tls.enabled }}
       volumes:
         - name: tls
           secret: {secretName: sprigdb-etcd-dc-tls}
         - name: ca
           configMap: {name: {{ .Values.tls.bundleConfigMap }}}
+      {{- end }}
   volumeClaimTemplates:
     - metadata: {name: data}
       spec:

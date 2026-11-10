@@ -15,16 +15,26 @@ data:
     dc_seeds = {{ include "sprigdb.dcSeeds" $ }}
     global_seeds = {{ $.Values.global.endpoints | toJson }}
     deployment_id = "{{ $.Values.deploymentId }}"
+    {{- if $.Values.tls.enabled }}
     [tls]
     ca = "/etc/sprigdb/ca/ca.crt"
     cert = "/etc/sprigdb/tls/tls.crt"
     key = "/etc/sprigdb/tls/tls.key"
+    {{- end }}
     [telemetry]
     bootstrap_addr = "0.0.0.0:9180"
+    {{- if eq $role "gateway" }}
+    [gateway]
+    backends_file = "/etc/sprigdb/backends/backends.toml"
+    {{- end }}
     {{- if eq $role "controller" }}
     [controller]
     global_candidate = {{ $.Values.controller.globalCandidate }}
+    bootstrap = {{ $.Values.controller.bootstrap | default false }}
     admin_addr = "0.0.0.0:7480"
+    # Permits, peer pings and observations (chapter 25) on the book's port;
+    # each pod publishes its own IP (SPRIGDB_CONTROLLER_INTERNAL_ADVERTISE).
+    internal_addr = "0.0.0.0:7400"
     admin_token_file = "/etc/sprigdb/admin/token"
     {{- end }}
 {{- end }}

@@ -1372,7 +1372,22 @@ where
                 // internal-mode statements.
                 let doc_engine = name.name.len() > 12
                     && name.name.as_bytes()[..12].eq_ignore_ascii_case(b"__sprig_doc_");
-                if is_internal_object(&name.name) && !doc_engine {
+                // Chapter 33's element tables (`__sprig_ke_`, `__sprig_kz_`)
+                // and chapter 40's scripts table, from the key-value
+                // engine's internal-mode statements likewise; chapter 35's
+                // model table (`__sprig_dim_models`, R6) too.
+                let kv_engine = [
+                    "__sprig_ke_",
+                    "__sprig_kz_",
+                    "__sprig_redis_",
+                    "__sprig_dim_",
+                ]
+                .iter()
+                .any(|p| {
+                    name.name.len() > p.len()
+                        && name.name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+                });
+                if is_internal_object(&name.name) && !doc_engine && !kv_engine {
                     return Err(SprigError::new(
                         SprigCode::ReservedName,
                         format!("'{}' is a reserved name", name.name),

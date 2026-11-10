@@ -1,0 +1,2744 @@
+{
+  "components": {
+    "schemas": {
+      "AnalyticsExplain": {
+        "description": "The AnalyticsExplain message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "AnalyticsQuery": {
+        "description": "The AnalyticsQuery message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "AnalyticsResult": {
+        "description": "The AnalyticsResult message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "BeginRequest": {
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "read_only": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "BodyRequest": {
+        "description": "The call's JSON body (see the route's documentation)",
+        "type": "object"
+      },
+      "CallRequest": {
+        "properties": {
+          "args": {
+            "description": "A list (by position), an object (by parameter name) or one value"
+          },
+          "database": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "transaction": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CallResponse": {
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "result": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "Column": {
+        "properties": {
+          "binary": {
+            "type": "boolean"
+          },
+          "charset": {
+            "type": "integer"
+          },
+          "database": {
+            "type": "string"
+          },
+          "decimals": {
+            "type": "integer"
+          },
+          "flags": {
+            "type": "integer"
+          },
+          "length": {
+            "format": "uint64",
+            "type": "string"
+          },
+          "mysql_type": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_name": {
+            "type": "string"
+          },
+          "org_table": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateApiKeyRequest": {
+        "properties": {
+          "allowed_cidrs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "expires_days": {
+            "type": "integer"
+          },
+          "host": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "CreateVectorIndexRequest": {
+        "description": "The CreateVectorIndexRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "CreatedApiKey": {
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key_id",
+          "key",
+          "name"
+        ],
+        "type": "object"
+      },
+      "DeleteVectorsRequest": {
+        "description": "The DeleteVectorsRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "DeleteVectorsResponse": {
+        "description": "The DeleteVectorsResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "DrillRequest": {
+        "description": "The DrillRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "DropModelResponse": {
+        "description": "The DropModelResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "DropVectorIndexResponse": {
+        "description": "The DropVectorIndexResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "EndTransactionRequest": {
+        "properties": {
+          "transaction": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "EndTransactionResponse": {
+        "properties": {},
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "sqlstate": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ExecuteResponse": {
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/Result"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ExportTicket": {
+        "properties": {
+          "expires_in": {
+            "type": "integer"
+          },
+          "ticket": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticket",
+          "expires_in"
+        ],
+        "type": "object"
+      },
+      "ExportTicketRequest": {
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "format": {
+            "enum": [
+              "csv",
+              "ndjson"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql",
+          "format"
+        ],
+        "type": "object"
+      },
+      "GetModelRequest": {
+        "description": "The GetModelRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "GetVectorIndexRequest": {
+        "description": "The GetVectorIndexRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "IndexActionRequest": {
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "JsonReply": {
+        "description": "The call's JSON reply",
+        "type": "object"
+      },
+      "KvDeleteRequest": {
+        "description": "The KvDeleteRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvDeleteResponse": {
+        "description": "The KvDeleteResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvExecRequest": {
+        "description": "The KvExecRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvExecResponse": {
+        "description": "The KvExecResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvGetRequest": {
+        "description": "The KvGetRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvGetResponse": {
+        "description": "The KvGetResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvPutRequest": {
+        "description": "The KvPutRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvPutResponse": {
+        "description": "The KvPutResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvScanRequest": {
+        "description": "The KvScanRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "KvScanResponse": {
+        "description": "The KvScanResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "ListModelsRequest": {
+        "description": "The ListModelsRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "ListModelsResponse": {
+        "description": "The ListModelsResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "ListRequest": {
+        "properties": {},
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "client": {
+            "enum": [
+              "studio",
+              "api"
+            ],
+            "type": "string"
+          },
+          "login": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "refresh_transport": {
+            "enum": [
+              "cookie",
+              "body"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "password"
+        ],
+        "type": "object"
+      },
+      "LogoutReply": {
+        "properties": {
+          "ended": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ended"
+        ],
+        "type": "object"
+      },
+      "ModelInfo": {
+        "description": "The ModelInfo message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "ModelRequest": {
+        "description": "The ModelRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "NameRequest": {
+        "description": "The call's JSON body (see the route's documentation)",
+        "type": "object"
+      },
+      "QueryRequest": {
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "format": "uint64",
+            "type": "string"
+          },
+          "max_rows": {
+            "format": "uint64",
+            "type": "string"
+          },
+          "multi_statements": {
+            "type": "boolean"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "type": "string"
+          },
+          "transaction": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "QueryResponse": {
+        "properties": {
+          "end": {
+            "type": "object"
+          },
+          "header": {
+            "type": "object"
+          },
+          "rows": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "RefreshRequest": {
+        "properties": {
+          "refresh_token": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "Result": {
+        "properties": {
+          "affected_rows": {
+            "format": "uint64",
+            "type": "string"
+          },
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/Column"
+            },
+            "type": "array"
+          },
+          "info": {
+            "type": "string"
+          },
+          "last_insert_id": {
+            "format": "uint64",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "items": {
+                "nullable": true,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "warnings": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SearchVectorsRequest": {
+        "description": "The SearchVectorsRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "SearchVectorsResponse": {
+        "description": "The SearchVectorsResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "SetPasswordRequest": {
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "password"
+        ],
+        "type": "object"
+      },
+      "TenantNode": {
+        "properties": {
+          "id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "path": {
+            "nullable": true,
+            "type": "string"
+          },
+          "relation": {
+            "enum": [
+              "home",
+              "admin",
+              "foreign"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "relation"
+        ],
+        "type": "object"
+      },
+      "TenantObjectRequest": {
+        "description": "The call's JSON body",
+        "type": "object"
+      },
+      "TenantRequest": {
+        "description": "The call's JSON body",
+        "type": "object"
+      },
+      "TokenReply": {
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer"
+          },
+          "refresh_token": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "Transaction": {
+        "properties": {
+          "deadline_ms": {
+            "format": "int64",
+            "type": "string"
+          },
+          "idle_deadline_ms": {
+            "format": "int64",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UpsertVectorsRequest": {
+        "description": "The UpsertVectorsRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "UpsertVectorsResponse": {
+        "description": "The UpsertVectorsResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "VectorIndex": {
+        "description": "The VectorIndex message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "WhoAmI": {
+        "properties": {
+          "amr": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "gateway": {
+            "properties": {
+              "dc": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "studio_build": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "grants": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "platform_roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "principal": {
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "login": {
+                "type": "string"
+              },
+              "tenant": {
+                "nullable": true,
+                "type": "string"
+              },
+              "tenant_id": {
+                "nullable": true,
+                "type": "string"
+              },
+              "user": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "user",
+              "host",
+              "login"
+            ],
+            "type": "object"
+          },
+          "privileges": {
+            "properties": {
+              "create_user": {
+                "type": "boolean"
+              },
+              "grant_option": {
+                "type": "boolean"
+              },
+              "index_all": {
+                "type": "boolean"
+              },
+              "index_dbs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "settings_admin": {
+                "type": "boolean"
+              },
+              "tenant_admin": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "tenant_admin",
+              "settings_admin",
+              "create_user",
+              "grant_option",
+              "index_all",
+              "index_dbs"
+            ],
+            "type": "object"
+          },
+          "session": {
+            "properties": {
+              "access_ttl_seconds": {
+                "type": "integer"
+              },
+              "client": {
+                "type": "string"
+              },
+              "created_at_ms": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "idle_minutes": {
+                "type": "integer"
+              },
+              "max_hours": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "idle_minutes",
+              "max_hours",
+              "access_ttl_seconds"
+            ],
+            "type": "object"
+          },
+          "studio": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "tenants": {
+            "items": {
+              "$ref": "#/components/schemas/TenantNode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "principal",
+          "amr",
+          "session",
+          "tenants",
+          "grants",
+          "privileges",
+          "platform_roles",
+          "studio"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "SprigDB data API (sprig.v1)",
+    "version": "v1"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/v1/api-keys": {
+      "get": {
+        "operationId": "ApiKeys.ListKeys",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "API keys, never their secrets",
+        "tags": [
+          "sprig.v1.ApiKeys"
+        ]
+      },
+      "post": {
+        "operationId": "ApiKeys.CreateKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiKey"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Creates a key; the reply is the only time it is shown",
+        "tags": [
+          "sprig.v1.ApiKeys"
+        ]
+      }
+    },
+    "/v1/api-keys/{key_id}:revoke": {
+      "post": {
+        "operationId": "ApiKeys.RevokeKey",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Revokes a key",
+        "tags": [
+          "sprig.v1.ApiKeys"
+        ]
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "operationId": "Auth.Login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Password login; the refresh token comes as an HttpOnly cookie (refresh_transport cookie, needs X-Sprig-CSRF) or in the body",
+        "tags": [
+          "sprig.v1.Auth"
+        ]
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "operationId": "Auth.Logout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Ends the session",
+        "tags": [
+          "sprig.v1.Auth"
+        ]
+      }
+    },
+    "/v1/auth/me": {
+      "get": {
+        "operationId": "Auth.WhoAmI",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmI"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The principal, session, tenant tree, grants and studio.* settings",
+        "tags": [
+          "sprig.v1.Auth"
+        ]
+      }
+    },
+    "/v1/auth/refresh": {
+      "post": {
+        "operationId": "Auth.Refresh",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Rotates the refresh token (cookie with X-Sprig-CSRF, or refresh_token in the body)",
+        "tags": [
+          "sprig.v1.Auth"
+        ]
+      }
+    },
+    "/v1/databases/{database}/functions/{name}:call": {
+      "post": {
+        "operationId": "Functions.Call",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Functions"
+        ]
+      }
+    },
+    "/v1/databases/{database}/models": {
+      "get": {
+        "operationId": "Analytics.ListModels",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filters, as the route documents them",
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListModelsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Analytics"
+        ]
+      },
+      "post": {
+        "operationId": "Analytics.CreateModel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfo"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Analytics"
+        ]
+      }
+    },
+    "/v1/databases/{database}/models/{model}": {
+      "delete": {
+        "operationId": "Analytics.DropModel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DropModelResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Analytics"
+        ]
+      },
+      "get": {
+        "operationId": "Analytics.GetModel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filters, as the route documents them",
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfo"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Analytics"
+        ]
+      },
+      "put": {
+        "operationId": "Analytics.UpdateModel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfo"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Analytics"
+        ]
+      }
+    },
+    "/v1/databases/{database}/models/{model}:drill": {
+      "post": {
+        "operationId": "Analytics.Drill",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DrillRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsQuery"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Analytics"
+        ]
+      }
+    },
+    "/v1/databases/{database}/models/{model}:explain": {
+      "post": {
+        "operationId": "Analytics.Explain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyticsQuery"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsExplain"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Analytics"
+        ]
+      }
+    },
+    "/v1/databases/{database}/models/{model}:query": {
+      "post": {
+        "operationId": "Analytics.Query",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyticsQuery"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Analytics"
+        ]
+      }
+    },
+    "/v1/databases/{database}/namespaces/{namespace}:delete": {
+      "post": {
+        "operationId": "KeyValue.Delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KvDeleteRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KvDeleteResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.KeyValue"
+        ]
+      }
+    },
+    "/v1/databases/{database}/namespaces/{namespace}:exec": {
+      "post": {
+        "operationId": "KeyValue.Exec",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KvExecRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KvExecResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.KeyValue"
+        ]
+      }
+    },
+    "/v1/databases/{database}/namespaces/{namespace}:get": {
+      "post": {
+        "operationId": "KeyValue.Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KvGetRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KvGetResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.KeyValue"
+        ]
+      }
+    },
+    "/v1/databases/{database}/namespaces/{namespace}:put": {
+      "post": {
+        "operationId": "KeyValue.Put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KvPutRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KvPutResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.KeyValue"
+        ]
+      }
+    },
+    "/v1/databases/{database}/namespaces/{namespace}:scan": {
+      "post": {
+        "operationId": "KeyValue.Scan",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KvScanRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KvScanResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.KeyValue"
+        ]
+      }
+    },
+    "/v1/databases/{database}/sql:execute": {
+      "post": {
+        "operationId": "Sql.Execute",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecuteResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Sql"
+        ]
+      }
+    },
+    "/v1/databases/{database}/sql:query": {
+      "post": {
+        "operationId": "Sql.Query",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Sql"
+        ]
+      }
+    },
+    "/v1/databases/{database}/transactions": {
+      "post": {
+        "operationId": "Transactions.Begin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeginRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Transaction"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Transactions"
+        ]
+      }
+    },
+    "/v1/databases/{database}/vectorIndexes": {
+      "post": {
+        "operationId": "Vectors.CreateIndex",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateVectorIndexRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VectorIndex"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Vectors"
+        ]
+      }
+    },
+    "/v1/databases/{database}/vectorIndexes/{index}": {
+      "delete": {
+        "operationId": "Vectors.DropIndex",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DropVectorIndexResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Vectors"
+        ]
+      },
+      "get": {
+        "operationId": "Vectors.GetIndex",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filters, as the route documents them",
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VectorIndex"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Vectors"
+        ]
+      }
+    },
+    "/v1/databases/{database}/vectorIndexes/{index}:delete": {
+      "post": {
+        "operationId": "Vectors.Delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteVectorsRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteVectorsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Vectors"
+        ]
+      }
+    },
+    "/v1/databases/{database}/vectorIndexes/{index}:search": {
+      "post": {
+        "operationId": "Vectors.Search",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchVectorsRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchVectorsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Vectors"
+        ]
+      }
+    },
+    "/v1/databases/{database}/vectorIndexes/{index}:upsert": {
+      "post": {
+        "operationId": "Vectors.Upsert",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertVectorsRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpsertVectorsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Vectors"
+        ]
+      }
+    },
+    "/v1/exports:ticket": {
+      "post": {
+        "operationId": "Exports.CreateTicket",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportTicketRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportTicket"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A short-lived ticket for a form POST /v1/exports (form field ticket)",
+        "tags": [
+          "sprig.v1.Exports"
+        ]
+      }
+    },
+    "/v1/indexing/decisions/{id}": {
+      "get": {
+        "operationId": "Indexing.GetDecision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A decision-log entry",
+        "tags": [
+          "sprig.v1.Indexing"
+        ]
+      }
+    },
+    "/v1/indexing/indexes": {
+      "get": {
+        "operationId": "Indexing.ListIndexes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "db",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "table",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The caller's tenant's automatic indexes",
+        "tags": [
+          "sprig.v1.Indexing"
+        ]
+      }
+    },
+    "/v1/indexing/indexes/{index}": {
+      "get": {
+        "operationId": "Indexing.GetIndex",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One index with its evidence and history",
+        "tags": [
+          "sprig.v1.Indexing"
+        ]
+      },
+      "post": {
+        "operationId": "Indexing.Act",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IndexActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "index:approve|apply|reject|dismiss|pin|freeze|unpin|unfreeze|drop, for users who could create the index",
+        "tags": [
+          "sprig.v1.Indexing"
+        ]
+      }
+    },
+    "/v1/indexing/queries/{fingerprint}": {
+      "get": {
+        "operationId": "Indexing.ExplainQuery",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fingerprint",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "fingerprint:explain",
+        "tags": [
+          "sprig.v1.Indexing"
+        ]
+      }
+    },
+    "/v1/indexing/recommendations": {
+      "get": {
+        "operationId": "Indexing.ListRecommendations",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "db",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "table",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Recommendations awaiting approval",
+        "tags": [
+          "sprig.v1.Indexing"
+        ]
+      }
+    },
+    "/v1/users": {
+      "get": {
+        "operationId": "Users.ListUsers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The tenant's accounts (all for CREATE USER or SPRIG_TENANT_ADMIN, else the caller)",
+        "tags": [
+          "sprig.v1.Users"
+        ]
+      }
+    },
+    "/v1/users:setPassword": {
+      "post": {
+        "operationId": "Users.SetPassword",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "ALTER USER ... IDENTIFIED BY, run as the caller, without the password in statement text",
+        "tags": [
+          "sprig.v1.Users"
+        ]
+      }
+    },
+    "/v1/{transaction}:commit": {
+      "post": {
+        "operationId": "Transactions.Commit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transaction",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EndTransactionRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndTransactionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Transactions"
+        ]
+      }
+    },
+    "/v1/{transaction}:rollback": {
+      "post": {
+        "operationId": "Transactions.Rollback",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transaction",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EndTransactionRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndTransactionResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Transactions"
+        ]
+      }
+    }
+  }
+}

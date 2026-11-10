@@ -55,6 +55,20 @@ use sprig_workload::window::{SampleValue, SampledLiterals};
 use crate::pipeline::{Request, WorkloadHook, WorkloadOutcome, WorkloadToken};
 use crate::session::Session;
 
+tokio::task_local! {
+    /// The workload caller of statements run in this task: `caller =
+    /// studio` while the HTTP engine runs a Studio session's statement
+    /// (chapter 12; chapter 44: Studio's runs are kept apart and count
+    /// toward automatic indexing only with `auto_index.include_studio`).
+    pub static CALLER: Option<sprig_workload::fingerprint::Caller>;
+}
+
+/// The workload caller of the running task ([`CALLER`]), if one is set.
+#[must_use]
+pub fn task_caller() -> Option<sprig_workload::fingerprint::Caller> {
+    CALLER.try_with(|c| *c).ok().flatten()
+}
+
 /// What the capture path reads besides the recorder's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureSettings {

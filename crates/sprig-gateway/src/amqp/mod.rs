@@ -254,7 +254,18 @@ impl QueueBackend for GatewayQueues {
         events: EventSender,
     ) -> std::result::Result<Arc<dyn Vhost>, MqError> {
         if let Some(e) = &self.engine {
-            return e.open_vhost(principal, vhost, conn, events).await;
+            // Chapter 42: a member's inherited exchanges, queues and
+            // bindings are made on its first use of the vhost, and
+            // publishes into them are stamped (or targeted, from above).
+            let db = self.database(vhost);
+            if let Some(t) = &self.tenants {
+                crate::inherited::mq::before_open(t, TenantId(principal.tenant_id), &db).await;
+            }
+            let v = e.open_vhost(principal, vhost, conn, events).await?;
+            if let Some(t) = &self.tenants {
+                return crate::inherited::mq::wrap_vhost(t, principal, &db, v).await;
+            }
+            return Ok(v);
         }
         let db = self.database(vhost);
         if let Some(t) = &self.tenants {

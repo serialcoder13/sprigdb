@@ -160,6 +160,8 @@ struct Group {
     txn: RawTxn,
     flags: GtidFlags,
     xa: Option<String>,
+    /// The current statement's operation hint.
+    hint: Option<sprig_binlog::OpHint>,
 }
 
 /// One cluster's committed groups for one tenant, from a binlog dump.
@@ -266,12 +268,19 @@ impl TxnSource for BinlogTxns {
                         ),
                         flags,
                         xa: xa.map(|x| x.to_string()),
+                        hint: None,
                     });
                 }
                 Event::Annotate(text) => {
                     // Only the comment is kept; the statement is dropped here.
-                    if let (Some(c), Some(g)) = (parse_comment(&text), self.group.as_mut()) {
-                        g.txn.stamps.push(c.hlc);
+                    // Its operation hint applies to the rows that follow,
+                    // up to the next statement's annotation.
+                    let c = parse_comment(&text);
+                    if let Some(g) = self.group.as_mut() {
+                        g.hint = c.as_ref().map(|c| c.op);
+                        if let Some(c) = c {
+                            g.txn.stamps.push(c.hlc);
+                        }
                     }
                 }
                 Event::TableMap(tm) => {
@@ -309,6 +318,7 @@ impl TxnSource for BinlogTxns {
                             kind,
                             before: r.before,
                             after: r.after,
+                            hint: g.hint,
                         });
                     }
                 }

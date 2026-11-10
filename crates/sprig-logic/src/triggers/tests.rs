@@ -69,6 +69,7 @@ fn event(seq: u64, table: &str, k: i64, v: i64, op: Op) -> FeedItem {
         hlc: seq,
         txn: g,
         ddl: None,
+        hint: None,
     }))
 }
 
@@ -182,6 +183,7 @@ fn opts() -> RunOpts {
         retry_max: Duration::from_millis(20),
         ack_every: Duration::from_millis(10),
         max_in_flight: 64,
+        live: None,
     }
 }
 

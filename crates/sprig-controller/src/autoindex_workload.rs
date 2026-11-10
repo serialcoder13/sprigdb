@@ -249,7 +249,15 @@ impl qualify::WorkloadSource for StoreSource {
             .window(tenant, from, to)
             .await?
             .into_iter()
-            .map(SourcedWindow::client)
+            // Studio's runs (`caller = studio`, chapter 12) are their own
+            // bucket: they count only with auto_index.include_studio.
+            .map(|w| {
+                if w.caller.is_some_and(|c| c.is_studio()) {
+                    SourcedWindow::studio(w)
+                } else {
+                    SourcedWindow::client(w)
+                }
+            })
             .collect())
     }
 

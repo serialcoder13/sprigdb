@@ -184,6 +184,7 @@ pub(super) async fn trigger_worker(
         retry_max: Duration::from_millis(400),
         ack_every: Duration::from_millis(200),
         max_in_flight: 2_000,
+        live: None,
     };
     // Every table of the database, every operation.
     let filter = Filter {

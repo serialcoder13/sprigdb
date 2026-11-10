@@ -15,6 +15,10 @@ spec:
         {{- include "sprigdb.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      # Kubernetes' service-link variables (SPRIGDB_CONTROLLER_PORT=tcp://...)
+      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process
+      # (found by r2close's helm install).
+      enableServiceLinks: false
       {{- include "sprigdb.podSecurity" . | nindent 6 }}
       containers:
         - name: worker

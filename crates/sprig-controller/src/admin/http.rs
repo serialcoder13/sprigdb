@@ -32,12 +32,29 @@ use crate::autoindex_admin::view::{Action as IndexAction, IndexActionRequest};
 struct App {
     svc: Arc<AdminService>,
     token: Option<String>,
+    /// `[controller] gateway_token_file`: accepted on the tenant routes
+    /// gateways call on their own behalf ([`authorize_gateway`]).
+    gateway_token: Option<String>,
 }
 
 /// The `/admin/v1/` routes over `svc`; with `token`, every call must
 /// present it as a bearer token.
 pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
-    let app = Arc::new(App { svc, token });
+    router_with(svc, token, None)
+}
+
+/// [`router`], also accepting `gateway_token` on the tenant routes gateways
+/// call for Studio (decision ST12).
+pub fn router_with(
+    svc: Arc<AdminService>,
+    token: Option<String>,
+    gateway_token: Option<String>,
+) -> Router {
+    let app = Arc::new(App {
+        svc,
+        token,
+        gateway_token,
+    });
     Router::new()
         .route(
             "/admin/v1/clusters",
@@ -214,11 +231,8 @@ fn respond<T: Serialize>(r: Result<T>) -> Response {
     }
 }
 
-/// Constant-time comparison of the presented token.
-fn authorize(app: &App, headers: &HeaderMap) -> Result<()> {
-    let Some(want) = &app.token else {
-        return Ok(());
-    };
+/// Constant-time comparison of a presented token with `want`.
+fn token_matches(headers: &HeaderMap, want: &str) -> bool {
     let got = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -229,14 +243,38 @@ fn authorize(app: &App, headers: &HeaderMap) -> Result<()> {
     for (i, x) in b.iter().enumerate() {
         diff |= x ^ a.get(i).copied().unwrap_or(0);
     }
-    if diff == 0 {
-        Ok(())
-    } else {
-        Err(SprigError::new(
-            SprigCode::AdminUnauthenticated,
-            "a valid bearer token is required",
-        ))
+    diff == 0
+}
+
+fn unauthenticated() -> SprigError {
+    SprigError::new(
+        SprigCode::AdminUnauthenticated,
+        "a valid bearer token is required",
+    )
+}
+
+/// The Admin token, when one is configured.
+fn authorize(app: &App, headers: &HeaderMap) -> Result<()> {
+    match &app.token {
+        None => Ok(()),
+        Some(want) if token_matches(headers, want) => Ok(()),
+        Some(_) => Err(unauthenticated()),
     }
+}
+
+/// The Admin token, or the gateways' internal credential (decision ST12):
+/// the tenant routes Studio's views read and act through. A gateway calls
+/// them only for the caller's own tenant, after checking the caller's
+/// privileges, and records the caller as the actor.
+fn authorize_gateway(app: &App, headers: &HeaderMap) -> Result<()> {
+    if app
+        .gateway_token
+        .as_deref()
+        .is_some_and(|g| token_matches(headers, g))
+    {
+        return Ok(());
+    }
+    authorize(app, headers)
 }
 
 fn parse<T: DeserializeOwned + Default>(body: &Bytes, allow_empty: bool) -> Result<T> {
@@ -905,7 +943,7 @@ async fn list_indexes(
     uri: Uri,
 ) -> Response {
     let r = async {
-        authorize(&app, &headers)?;
+        authorize_gateway(&app, &headers)?;
         app.svc.list_indexes(&name, query(&uri)?, false).await
     };
     respond(r.await)
@@ -918,7 +956,7 @@ async fn list_recommendations(
     uri: Uri,
 ) -> Response {
     let r = async {
-        authorize(&app, &headers)?;
+        authorize_gateway(&app, &headers)?;
         app.svc.list_indexes(&name, query(&uri)?, true).await
     };
     respond(r.await)
@@ -930,7 +968,7 @@ async fn get_index(
     UrlPath((name, index)): UrlPath<(String, String)>,
 ) -> Response {
     let r = async {
-        authorize(&app, &headers)?;
+        authorize_gateway(&app, &headers)?;
         app.svc.get_index(&name, &index).await
     };
     respond(r.await)
@@ -945,7 +983,7 @@ async fn index_method(
     body: Bytes,
 ) -> Response {
     let r = async {
-        authorize(&app, &headers)?;
+        authorize_gateway(&app, &headers)?;
         let Some((index, action)) = index
             .rsplit_once(':')
             .and_then(|(i, m)| Some((i, IndexAction::parse(m)?)))
@@ -968,7 +1006,7 @@ async fn explain_query(
     UrlPath((name, fp)): UrlPath<(String, String)>,
 ) -> Response {
     let r = async {
-        authorize(&app, &headers)?;
+        authorize_gateway(&app, &headers)?;
         let Some((fp, "explain")) = fp.rsplit_once(':') else {
             return Err(invalid(format!(
                 "GET /admin/v1/tenants/{name}/queries/{fp}: expected {{fingerprint}}:explain"
@@ -1027,7 +1065,7 @@ async fn explain_decision(
     UrlPath((name, id)): UrlPath<(String, String)>,
 ) -> Response {
     let r = async {
-        authorize(&app, &headers)?;
+        authorize_gateway(&app, &headers)?;
         let id: u64 = id
             .parse()
             .map_err(|_| invalid(format!("decision id {id:?} is not a number")))?;

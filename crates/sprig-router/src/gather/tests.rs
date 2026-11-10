@@ -212,6 +212,7 @@ impl ShardBackend for Fake {
         GatherLimits {
             max_rows: self.max_rows,
             max_concurrent: 2,
+            ..GatherLimits::default()
         }
     }
 }

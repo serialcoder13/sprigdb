@@ -79,6 +79,10 @@ pub struct PersonaVars {
     /// more than its cluster's (chapter 05, "Packet limit"); `None`
     /// leaves it to the backend.
     pub max_allowed_packet: Option<u64>,
+    /// `max_connections`: a tenant session's connection limit
+    /// (`limits.tenant_connections`, chapter 04); `None` leaves it to the
+    /// backend, whose limit doesn't bound the client's sessions.
+    pub max_connections: Option<u64>,
 }
 
 impl PersonaVars {
@@ -92,7 +96,15 @@ impl PersonaVars {
             max_execution_time: None,
             current_role: None,
             max_allowed_packet: None,
+            max_connections: None,
         }
+    }
+
+    /// With the tenant's connection limit.
+    #[must_use]
+    pub fn with_max_connections(mut self, n: Option<u64>) -> Self {
+        self.max_connections = n;
+        self
     }
 
     /// With the session's packet limit.
@@ -160,6 +172,7 @@ impl PersonaVars {
                 self.max_execution_time.map(|v| Cow::Owned(v.to_string()))
             }
             (_, "max_allowed_packet") => self.max_allowed_packet.map(|v| Cow::Owned(v.to_string())),
+            (_, "max_connections") => self.max_connections.map(|v| Cow::Owned(v.to_string())),
             _ => None,
         }
     }
@@ -174,6 +187,9 @@ impl PersonaVars {
         ];
         if let Some(m) = &self.sql_mode {
             rows.push(("sql_mode", m.clone()));
+        }
+        if let Some(n) = self.max_connections {
+            rows.push(("max_connections", n.to_string()));
         }
         if let Some(n) = self.max_allowed_packet {
             rows.push(("max_allowed_packet", n.to_string()));
@@ -264,7 +280,7 @@ pub fn rewrite_reads(
                     .trim_matches('`');
                 if let Some(v) = vars.value_at(name, global) {
                     // A number stays a number (its column's type).
-                    let lit = if name == "max_allowed_packet" {
+                    let lit = if name == "max_allowed_packet" || name == "max_connections" {
                         v.into_owned()
                     } else {
                         sql_literal(&v, nbe)
@@ -395,6 +411,18 @@ mod tests {
         );
         // Without a limit the backend answers.
         assert!(rw("SELECT @@max_allowed_packet", &my()).is_none());
+    }
+
+    #[test]
+    fn max_connections_is_the_tenants_limit() {
+        let vars = my().with_max_connections(Some(2000));
+        let (sql, _) = rw("SELECT @@max_connections", &vars).unwrap();
+        assert_eq!(sql, "SELECT 2000");
+        assert!(
+            vars.show_rows()
+                .contains(&("max_connections", "2000".to_owned()))
+        );
+        assert!(rw("SELECT @@max_connections", &my()).is_none());
     }
 
     #[test]

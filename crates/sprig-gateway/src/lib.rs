@@ -69,6 +69,7 @@ pub mod frontend;
 // Chapter 43 (R8): native graphs in the tenant catalog.
 pub mod graphs;
 pub mod http;
+pub mod inherited;
 pub mod kafka;
 pub mod lifecycle;
 pub mod limits;
@@ -80,6 +81,7 @@ pub mod offload;
 pub mod peer;
 pub mod pipeline;
 pub mod reads;
+pub mod redis;
 pub mod registry;
 pub mod session;
 pub mod tenant;
@@ -315,7 +317,19 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             gateway_id.clone(),
             Some(Arc::clone(&peers)),
             Arc::new(move |reason: &str| drain_lc.request_drain(reason)),
-        )),
+        )
+        .with_internal_token_file(ctx.config.gateway.controller_token_file.as_deref())?),
+        // Studio (chapter 44): files, browser sessions, API additions.
+        studio: Arc::new(http::studio::StudioState::new(
+            http::studio::StudioSource::Live {
+                live: live.clone(),
+                dc: dc.clone(),
+            },
+            Some(Arc::clone(&login)),
+            Some(Arc::clone(&stores.global)),
+        )
+        .with_tenants(tenants.clone())
+        .with_gateway(&gateway_id)),
     });
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
     // Kafka on 9092 (chapter 45, R9): catalog logins only, since topics are
@@ -387,9 +401,21 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             live: Some((live.clone(), dc.clone())),
             gateway_id: gateway_id.clone(),
             draining: lifecycle.flag(),
+            tenants: tenants.clone(),
+            dc_store: Some(Arc::clone(&stores.dc)),
         },
         stop.clone(),
     ));
+    // Redis (chapter 40, R6): catalog logins through AUTH; commands run as
+    // SQL in the user's executor session.
+    let redis_fe = Arc::new(redis::RedisFrontend::new(redis::RedisDeps {
+        login: Arc::clone(&login),
+        executor: Arc::clone(&shared_exec),
+        sessions: Arc::clone(&sessions),
+        live: live.clone(),
+        dc: dc.clone(),
+        gateway_id: gateway_id.clone(),
+    }));
     let amqp_fe = Arc::new(amqp::AmqpFrontend::with_replies(
         Arc::new(amqp::identity::AmqpIdentity::new(
             Arc::clone(&login),
@@ -414,6 +440,14 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             dc.clone(),
         ),
     )));
+    // Chapter 40's pub/sub hubs between gateways, on the peer service.
+    let redis_peer = redis::hub::RedisPeerService::new(
+        gateway_id.clone(),
+        Arc::clone(&stores.dc),
+        peer_tls.clone(),
+        redis::mesh_opts(&live, &dc),
+    );
+    let redis_env = Arc::clone(redis_fe.env());
     let peer_host = Arc::new(PeerHost {
         login: Arc::clone(&login),
         core: Arc::clone(&core),
@@ -421,6 +455,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         gateway_id: gateway_id.clone(),
         lifecycle: lifecycle.clone(),
         queue_peer,
+        redis_peer: Some(redis_peer.clone()),
     });
     let binds = bind_overrides(&ctx)?;
     let peer_bind = match binds.get("peer") {
@@ -433,6 +468,9 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         })?,
     };
     let peer_server = peer::serve(peer_bind, peer_tls, peer_host, stop.clone()).await?;
+    if peer_server.is_some() {
+        redis_peer.start(&redis_env, stop.clone());
+    }
     let peer_port = peer_server.as_ref().map(|(a, _)| a.port());
 
     let listeners = Arc::new(
@@ -443,6 +481,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
                     .with(http_fe as Arc<dyn frontend::Frontend>)
                     .with(amqp_fe as Arc<dyn frontend::Frontend>)
                     .with(mongo_fe as Arc<dyn frontend::Frontend>)
+                    .with(redis_fe as Arc<dyn frontend::Frontend>)
                     .with(bolt_fe as Arc<dyn frontend::Frontend>);
                 match kafka_fe {
                     Some(k) => fes.with(k as Arc<dyn frontend::Frontend>),
@@ -591,12 +630,18 @@ struct PeerHost {
     lifecycle: lifecycle::Lifecycle,
     /// Chapter 50's queue relay, when the queue engine runs here.
     queue_peer: Option<amqp::peer::QueuePeerService>,
+    /// Chapter 40's pub/sub hubs.
+    redis_peer: Option<redis::hub::RedisPeerService>,
 }
 
 #[async_trait::async_trait]
 impl peer::PeerHost for PeerHost {
     fn queue_peer(&self) -> Option<amqp::peer::QueuePeerService> {
         self.queue_peer.clone()
+    }
+
+    fn redis_peer(&self) -> Option<redis::hub::RedisPeerService> {
+        self.redis_peer.clone()
     }
 
     fn logic_peer(&self) -> Option<triggers::LogicPeerService> {

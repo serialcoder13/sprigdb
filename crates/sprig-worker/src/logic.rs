@@ -53,12 +53,12 @@ pub struct LogicEnv {
     pub locator: Arc<ShardMapLocator>,
     /// Binlog sources for the feed.
     pub clusters: Arc<RegistryClusters>,
-    /// The runner's settings.
+    /// The runner's settings, following the worker's live settings
+    /// ([`crate::settings::WorkerSettings::run_opts`]).
     pub opts: RunOpts,
-    /// `logic.trigger_budget_ms`.
-    pub trigger_budget: Duration,
-    /// `logic.job_budget_ms`.
-    pub job_budget: Duration,
+    /// The worker's live settings: `logic.trigger_budget_ms` when a
+    /// trigger job starts, `logic.job_budget_ms` per scheduled run.
+    pub settings: crate::settings::WorkerSettings,
 }
 
 impl std::fmt::Debug for LogicEnv {
@@ -269,7 +269,7 @@ impl LogicTrigger {
                 pools: Arc::clone(&env.pools),
             }),
             versions,
-            budget: env.trigger_budget,
+            budget: env.settings.trigger_budget(),
         });
         let out = Arc::new(CatalogOutcomes {
             locator: Arc::clone(&locator),
@@ -428,7 +428,7 @@ impl JobHandler for LogicSchedule {
             &schema,
             module_id,
             run,
-            env.job_budget,
+            env.settings.job_budget(),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -453,24 +453,16 @@ impl JobHandler for LogicSchedule {
     }
 }
 
-/// The runner's settings: chapter 41's defaults, which the worker can't
-/// resolve live yet (its settings are the defaults, as for the mover), so
-/// `SPRIG_LOGIC_TRIGGER_MAX_ATTEMPTS`, `SPRIG_LOGIC_TRIGGER_RETRY_INITIAL_MS`
-/// and `SPRIG_LOGIC_TRIGGER_RETRY_MAX_MS` override
-/// `logic.trigger_max_attempts`, `logic.trigger_retry_initial_ms` and
-/// `logic.trigger_retry_max_ms` for tests.
+/// The runner's settings at the global scope, with the
+/// `SPRIG_LOGIC_TRIGGER_*` test overrides; a running worker uses
+/// [`crate::settings::WorkerSettings::run_opts`], which follows changes.
 #[must_use]
 pub fn run_opts_from_env() -> RunOpts {
-    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
-    let mut o = RunOpts::default();
-    if let Some(n) = env("SPRIG_LOGIC_TRIGGER_MAX_ATTEMPTS") {
-        o.max_attempts = u32::try_from(n).unwrap_or(u32::MAX).max(1);
-    }
-    if let Some(ms) = env("SPRIG_LOGIC_TRIGGER_RETRY_INITIAL_MS") {
-        o.retry_initial = Duration::from_millis(ms);
-    }
-    if let Some(ms) = env("SPRIG_LOGIC_TRIGGER_RETRY_MAX_MS") {
-        o.retry_max = Duration::from_millis(ms);
-    }
-    o
+    let dc = sprig_common::ids::DcId::new("none").ok();
+    dc.and_then(|dc| crate::settings::WorkerSettings::defaults(dc).ok())
+        .map_or_else(RunOpts::default, |s| {
+            let mut o = s.run_opts();
+            o.live = None;
+            o
+        })
 }

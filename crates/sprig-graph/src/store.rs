@@ -13,7 +13,7 @@ use serde_json::Value as Json;
 use sprig_common::Result;
 use sprig_shard::{KeyClass, KeySpec, KeyValue, hash_key};
 
-use crate::ast::Dir;
+use crate::ast::{Dir, Entity, IndexKind, Schema};
 
 /// A node row.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +51,38 @@ pub struct EdgeRow {
     pub types: Option<Json>,
 }
 
+/// What deleting an edge needs: its id, its ends and their routing
+/// hashes (the edge lives on its source's shard, its mirror on its
+/// destination's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeKey {
+    /// `id`.
+    pub id: u64,
+    /// Source node.
+    pub src: u64,
+    /// Destination node.
+    pub dst: u64,
+    /// Type id.
+    pub rtype: u32,
+    /// The source's routing hash.
+    pub src_rk: u64,
+    /// The destination's routing hash.
+    pub dst_rk: u64,
+}
+
+impl From<&EdgeRow> for EdgeKey {
+    fn from(e: &EdgeRow) -> Self {
+        Self {
+            id: e.id,
+            src: e.src,
+            dst: e.dst,
+            rtype: e.rtype,
+            src_rk: e.src_rk,
+            dst_rk: e.dst_rk,
+        }
+    }
+}
+
 /// A node scan: the start point of a pattern.
 #[derive(Debug, Clone, Default)]
 pub struct Scan {
@@ -63,6 +95,8 @@ pub struct Scan {
     pub props_eq: Vec<(String, Vec<Json>)>,
     /// At most this many rows (the row budget plus one).
     pub limit: Option<usize>,
+    /// Paging (streamed results): only ids above this one, in id order.
+    pub after: Option<u64>,
 }
 
 /// One row of a reach (CTE) call.
@@ -95,6 +129,40 @@ pub struct StoreStats {
     /// Of which recursive CTEs.
     pub cte_queries: u64,
 }
+
+/// A property index or uniqueness constraint of a native graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDef {
+    /// `graph_indexes.index_id`: names its columns (`_sprig_i<id>_<k>`).
+    pub id: u32,
+    /// The name (shared by a constraint and its index).
+    pub name: String,
+    /// A uniqueness constraint.
+    pub unique: bool,
+    /// Range or text.
+    pub kind: IndexKind,
+    /// Nodes or relationships.
+    pub entity: Entity,
+    /// The label or relationship type.
+    pub token: String,
+    /// Its id.
+    pub token_id: u32,
+    /// The properties.
+    pub props: Vec<String>,
+    /// `building` or `online`.
+    pub state: String,
+}
+
+impl IndexDef {
+    /// Whether `other` covers the same entity, token and properties.
+    #[must_use]
+    pub fn same_schema(&self, other: &IndexDef) -> bool {
+        self.entity == other.entity && self.token == other.token && self.props == other.props
+    }
+}
+
+/// The counters a schema command changed (`indexes-added`, ...).
+pub type SchemaCounts = Vec<(&'static str, i64)>;
 
 /// The routing hash of a node's `part` (chapter 15's numeric class).
 #[must_use]
@@ -173,8 +241,8 @@ pub trait GraphStore: Send {
     /// Rewrites an edge's properties.
     async fn update_edge(&mut self, row: &EdgeRow) -> Result<()>;
 
-    /// Deletes edges by id.
-    async fn delete_edges(&mut self, ids: &[u64]) -> Result<u64>;
+    /// Deletes edges (and their mirrors).
+    async fn delete_edges(&mut self, edges: &[EdgeKey]) -> Result<u64>;
 
     /// Deletes nodes (and their label rows) by id.
     async fn delete_nodes(&mut self, ids: &[u64]) -> Result<u64>;
@@ -196,4 +264,23 @@ pub trait GraphStore: Send {
 
     /// Every relationship type, by name.
     fn all_types(&self) -> Vec<String>;
+
+    /// The graph's indexes and constraints.
+    fn indexes(&self) -> Vec<IndexDef> {
+        Vec::new()
+    }
+
+    /// Runs an index or constraint command (outside the data
+    /// transaction): the counters it changed.
+    ///
+    /// # Errors
+    /// 39901 where the store has no schema support; 39908 for a name in
+    /// use or an equivalent index; 1062 when existing data violates a new
+    /// constraint.
+    async fn schema(&mut self, _cmd: &Schema) -> Result<SchemaCounts> {
+        Err(sprig_common::SprigError::new(
+            sprig_common::SprigCode::GraphUnsupported,
+            "index and constraint commands are not supported on this store",
+        ))
+    }
 }

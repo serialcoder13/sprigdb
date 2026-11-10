@@ -608,10 +608,19 @@ async fn corpus(db: &Database) -> Vec<(String, Bson)> {
     );
     step!(
         "upserted doc",
+        // MongoDB 8.0 builds the seed in the query's order on most runs
+        // and in path order on others (a fresh server), so the fields are
+        // compared sorted.
         m.find_one(doc! {"k": "new"})
             .projection(doc! {"_id": 0})
             .await
-            .map(|d| d.map_or(Bson::Null, Bson::Document))
+            .map(|d| {
+                d.map_or(Bson::Null, |d| {
+                    let mut v: Vec<(String, Bson)> = d.into_iter().collect();
+                    v.sort_by(|a, b| a.0.cmp(&b.0));
+                    Bson::Document(v.into_iter().collect())
+                })
+            })
     );
     step!(
         "findOneAndUpdate before",
@@ -740,6 +749,339 @@ async fn corpus(db: &Database) -> Vec<(String, Bson)> {
             .await
             .map(|n| Bson::Int64(n as i64))
     );
+    out.extend(bulk_corpus(db).await);
+    out.extend(stream_corpus(db).await);
+    out.extend(retry_corpus(db).await);
+    out
+}
+
+/// Change streams (chapter 30 step 9): the events of a few writes, with
+/// the resume token and times masked.
+async fn stream_corpus(db: &Database) -> Vec<(String, Bson)> {
+    use futures_util::StreamExt;
+    let mut out: Vec<(String, Bson)> = Vec::new();
+    let c = db.collection::<Document>("cs");
+    c.insert_one(doc! {"_id": 0}).await.unwrap();
+    let mut s = c
+        .watch()
+        .full_document(mongodb::options::FullDocumentType::UpdateLookup)
+        .await
+        .unwrap()
+        .with_type::<Document>();
+    c.insert_one(doc! {"_id": 1, "a": 1, "b": "x", "d": Decimal128::from_str("1.50").unwrap(), "t": [1], "o": {"p": 1, "q": 2}})
+        .await
+        .unwrap();
+    c.update_one(
+        doc! {"_id": 1},
+        doc! {"$set": {"a": 2, "o.q": 3}, "$unset": {"b": ""}, "$push": {"t": 2}},
+    )
+    .await
+    .unwrap();
+    c.update_one(doc! {"_id": 1}, doc! {"$inc": {"a": 1}, "$pop": {"t": 1}})
+        .await
+        .unwrap();
+    // A replacement: a `replace` event (r5-interim D14).
+    c.replace_one(doc! {"_id": 1}, doc! {"r": 1, "s": "x"})
+        .await
+        .unwrap();
+    c.delete_one(doc! {"_id": 1}).await.unwrap();
+    let mut evs = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while evs.len() < 5 {
+        match tokio::time::timeout_at(deadline, s.next()).await {
+            Ok(Some(Ok(d))) => evs.push(d),
+            _ => break,
+        }
+    }
+    for (i, e) in evs.iter().enumerate() {
+        let mut v = Document::new();
+        for k in [
+            "operationType",
+            "ns",
+            "documentKey",
+            "fullDocument",
+            "updateDescription",
+        ] {
+            // updateLookup: MongoDB reads the document when it sends the
+            // event (null here, as it is deleted by then); SprigDB sends
+            // the document as that update left it (r5-interim D14).
+            if k == "fullDocument" && e.get_str("operationType") == Ok("update") {
+                continue;
+            }
+            if let Some(x) = e.get(k) {
+                v.insert(k, x.clone());
+            }
+        }
+        // The order of updatedFields carries no meaning: compare sorted.
+        if let Ok(ud) = v.get_document_mut("updateDescription")
+            && let Ok(u) = ud.get_document("updatedFields")
+        {
+            let mut f: Vec<(String, Bson)> = u.clone().into_iter().collect();
+            f.sort_by(|a, b| a.0.cmp(&b.0));
+            ud.insert("updatedFields", f.into_iter().collect::<Document>());
+        }
+        out.push((format!("change event {i}"), Bson::Document(v)));
+    }
+    out.push((
+        "change events".to_owned(),
+        Bson::Int32(i32::try_from(evs.len()).unwrap()),
+    ));
+    out
+}
+
+/// The parts of a write reply the differential compares: counts,
+/// upserted ids, write errors (index and code), `findAndModify`'s image.
+fn write_view(d: &Document) -> Bson {
+    let mut o = Document::new();
+    for k in ["n", "nModified", "upserted", "value", "lastErrorObject"] {
+        if let Some(v) = d.get(k) {
+            o.insert(k, v.clone());
+        }
+    }
+    if let Ok(w) = d.get_array("writeErrors") {
+        let v: Vec<Bson> = w
+            .iter()
+            .filter_map(|e| e.as_document())
+            .map(|e| Bson::Document(doc! {"index": e.get("index").cloned().unwrap_or(Bson::Null), "code": e.get("code").cloned().unwrap_or(Bson::Null)}))
+            .collect();
+        o.insert("writeErrors", v);
+    }
+    Bson::Document(o)
+}
+
+/// Retryable writes (chapter 30 step 7): the same `lsid` and `txnNumber`
+/// sent twice answer the same and write once; an older `txnNumber` is
+/// refused with 225. Needs a replica set on the reference side.
+async fn retry_corpus(db: &Database) -> Vec<(String, Bson)> {
+    let mut out: Vec<(String, Bson)> = Vec::new();
+    // Runs last: the session's lsid, with txnNumbers chosen here, goes
+    // back to the driver's pool, and a later implicit retryable write on
+    // it would be too old.
+    let client = db.client().clone();
+    let mut s = client.start_session().await.unwrap();
+    let c = db.collection::<Document>("retry");
+    let mut run = async |name: &str, cmd: Document, s: &mut mongodb::ClientSession| {
+        let r = match db.run_command(cmd).session(s).await {
+            Ok(d) => write_view(&d),
+            Err(e) => Bson::String(format!("error {}", code_of(&e))),
+        };
+        out.push((name.to_owned(), r));
+    };
+    let steps: Vec<(&str, Document)> = vec![
+        (
+            "retry insert",
+            doc! {"insert": "retry", "documents": [{"_id": 1, "v": 0}], "txnNumber": 1001i64},
+        ),
+        (
+            "retry insert again",
+            doc! {"insert": "retry", "documents": [{"_id": 1, "v": 0}], "txnNumber": 1001i64},
+        ),
+        (
+            "retry inc",
+            doc! {"update": "retry", "updates": [{"q": {"_id": 1}, "u": {"$inc": {"v": 1}}}], "txnNumber": 1002i64},
+        ),
+        (
+            "retry inc again",
+            doc! {"update": "retry", "updates": [{"q": {"_id": 1}, "u": {"$inc": {"v": 1}}}], "txnNumber": 1002i64},
+        ),
+        (
+            "retry too old",
+            doc! {"insert": "retry", "documents": [{"_id": 2}], "txnNumber": 1001i64},
+        ),
+        (
+            "retry upsert",
+            doc! {"update": "retry", "updates": [{"q": {"_id": 3}, "u": {"$set": {"v": 3}}, "upsert": true}], "txnNumber": 1003i64},
+        ),
+        (
+            "retry upsert again",
+            doc! {"update": "retry", "updates": [{"q": {"_id": 3}, "u": {"$set": {"v": 3}}, "upsert": true}], "txnNumber": 1003i64},
+        ),
+        (
+            "retry fam",
+            doc! {"findAndModify": "retry", "query": {"_id": 1}, "update": {"$inc": {"v": 5}}, "new": true, "txnNumber": 1004i64},
+        ),
+        (
+            "retry fam again",
+            doc! {"findAndModify": "retry", "query": {"_id": 1}, "update": {"$inc": {"v": 5}}, "new": true, "txnNumber": 1004i64},
+        ),
+        (
+            "retry partial",
+            doc! {"insert": "retry", "documents": [{"_id": 10}, {"_id": 11}, {"_id": 1}, {"_id": 12}], "txnNumber": 1005i64},
+        ),
+        (
+            "retry partial again",
+            doc! {"insert": "retry", "documents": [{"_id": 10}, {"_id": 11}, {"_id": 1}, {"_id": 12}], "txnNumber": 1005i64},
+        ),
+        (
+            "retry unordered",
+            doc! {"insert": "retry", "documents": [{"_id": 20}, {"_id": 1}, {"_id": 21}], "ordered": false, "txnNumber": 1006i64},
+        ),
+        (
+            "retry unordered again",
+            doc! {"insert": "retry", "documents": [{"_id": 20}, {"_id": 1}, {"_id": 21}], "ordered": false, "txnNumber": 1006i64},
+        ),
+        (
+            "retry delete",
+            doc! {"delete": "retry", "deletes": [{"q": {"_id": 3}, "limit": 1}], "txnNumber": 1007i64},
+        ),
+        (
+            "retry delete again",
+            doc! {"delete": "retry", "deletes": [{"q": {"_id": 3}, "limit": 1}], "txnNumber": 1007i64},
+        ),
+    ];
+    for (name, cmd) in steps {
+        run(name, cmd, &mut s).await;
+    }
+    // bulkWrite as a retryable write (r5-interim D17): sent twice with
+    // one txnNumber, it runs once and answers the same.
+    let admin = client.database("admin");
+    let ns = format!("{}.retry", db.name());
+    for name in ["retry bulkWrite", "retry bulkWrite again"] {
+        let cmd = doc! {"bulkWrite": 1, "ops": [{"insert": 0, "document": {"_id": 40}}, {"update": 0, "filter": {"_id": 40}, "updateMods": {"$inc": {"v": 1}}}, {"insert": 0, "document": {"_id": 40}}], "nsInfo": [{"ns": &ns}], "ordered": false, "txnNumber": 1008i64};
+        let r = match admin.run_command(cmd).session(&mut s).await {
+            Ok(d) => bulk_view(&d),
+            Err(e) => Bson::String(format!("error {}", code_of(&e))),
+        };
+        out.push((name.to_owned(), r));
+    }
+    let all: Vec<Document> = match c.find(doc! {}).sort(doc! {"_id": 1}).await {
+        Ok(cur) => cur.try_collect().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    out.push((
+        "retry state".to_owned(),
+        Bson::Array(all.into_iter().map(Bson::Document).collect()),
+    ));
+    out
+}
+
+/// The parts of a `bulkWrite` reply the differential compares: the
+/// totals and each result's `ok`, `idx`, counts, upserted id and code
+/// (not the message).
+fn bulk_view(d: &Document) -> Bson {
+    let mut o = Document::new();
+    for k in [
+        "nErrors",
+        "nInserted",
+        "nMatched",
+        "nModified",
+        "nUpserted",
+        "nDeleted",
+        "ok",
+    ] {
+        if let Some(v) = d.get(k) {
+            o.insert(k, v.clone());
+        }
+    }
+    let items: Vec<Bson> = d
+        .get_document("cursor")
+        .ok()
+        .and_then(|c| c.get_array("firstBatch").ok())
+        .map(|a| {
+            a.iter()
+                .filter_map(Bson::as_document)
+                .map(|r| {
+                    let mut x = Document::new();
+                    for k in [
+                        "ok",
+                        "idx",
+                        "n",
+                        "nModified",
+                        "upserted",
+                        "code",
+                        "keyPattern",
+                        "keyValue",
+                    ] {
+                        if let Some(v) = r.get(k) {
+                            x.insert(k, v.clone());
+                        }
+                    }
+                    Bson::Document(x)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    o.insert("results", items);
+    if let Ok(c) = d.get_document("cursor") {
+        o.insert("cursor id", c.get("id").cloned().unwrap_or(Bson::Null));
+        o.insert("cursor ns", c.get("ns").cloned().unwrap_or(Bson::Null));
+    }
+    Bson::Document(o)
+}
+
+/// MongoDB 8.0's `bulkWrite` (r5-interim D17): mixed ops over two
+/// collections, ordered and unordered, `errorsOnly`, refusals.
+async fn bulk_corpus(db: &Database) -> Vec<(String, Bson)> {
+    let admin = db.client().database("admin");
+    let a = format!("{}.bw", db.name());
+    let b = format!("{}.bw2", db.name());
+    let steps: Vec<(&str, Document)> = vec![
+        (
+            "bulkWrite mixed unordered",
+            doc! {"bulkWrite": 1, "ops": [
+                {"insert": 0, "document": {"_id": 1, "a": 1}},
+                {"insert": 0, "document": {"_id": 1}},
+                {"update": 0, "filter": {"_id": 1}, "updateMods": {"$set": {"a": 2}}},
+                {"update": 1, "filter": {"_id": 9}, "updateMods": {"b": 1}, "upsert": true},
+                {"update": 0, "filter": {"_id": 1}, "updateMods": {"$set": {"_id": 2}}},
+                {"delete": 0, "filter": {"_id": 1}, "multi": false},
+            ], "nsInfo": [{"ns": &a}, {"ns": &b}], "ordered": false},
+        ),
+        (
+            "bulkWrite ordered stops",
+            doc! {"bulkWrite": 1, "ops": [
+                {"insert": 0, "document": {"_id": 20}},
+                {"insert": 0, "document": {"_id": 20}},
+                {"insert": 0, "document": {"_id": 21}},
+            ], "nsInfo": [{"ns": &a}]},
+        ),
+        (
+            "bulkWrite errorsOnly",
+            doc! {"bulkWrite": 1, "ops": [
+                {"insert": 0, "document": {"_id": 30}},
+                {"insert": 0, "document": {"_id": 30}},
+            ], "nsInfo": [{"ns": &a}], "errorsOnly": true, "ordered": false},
+        ),
+        (
+            "bulkWrite multi",
+            doc! {"bulkWrite": 1, "ops": [
+                {"update": 0, "filter": {}, "updateMods": {"$inc": {"m": 1}}, "multi": true},
+                {"update": 0, "filter": {"_id": 404}, "updateMods": {"$inc": {"m": 1}}},
+                {"delete": 1, "filter": {}, "multi": true},
+            ], "nsInfo": [{"ns": &a}, {"ns": &b}]},
+        ),
+        (
+            "bulkWrite empty",
+            doc! {"bulkWrite": 1, "ops": [], "nsInfo": [{"ns": &a}]},
+        ),
+        (
+            "bulkWrite bad nsInfo index",
+            doc! {"bulkWrite": 1, "ops": [{"insert": 3, "document": {}}], "nsInfo": [{"ns": &a}]},
+        ),
+    ];
+    let mut out = Vec::new();
+    for (name, cmd) in steps {
+        let r = match admin.run_command(cmd).await {
+            Ok(d) => bulk_view(&d),
+            Err(e) => Bson::String(format!("error {}", code_of(&e))),
+        };
+        out.push((name.to_owned(), r));
+    }
+    for coll in ["bw", "bw2"] {
+        let all: Vec<Document> = match db
+            .collection::<Document>(coll)
+            .find(doc! {})
+            .sort(doc! {"_id": 1})
+            .await
+        {
+            Ok(cur) => cur.try_collect().await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        out.push((
+            format!("bulkWrite state {coll}"),
+            Bson::Array(all.into_iter().map(Bson::Document).collect()),
+        ));
+    }
     out
 }
 

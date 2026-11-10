@@ -71,6 +71,37 @@ jobs:
       - run: cargo nextest run --workspace --locked --no-tests=pass
       - run: cargo test --workspace --locked --doc
 
+  studio:
+    # Chapter 44 step 1: Studio's type check, lint, unit tests, licence and
+    # package allowlists and generated-client check (`pnpm check`), the
+    # production build with its first-screen budget, then sprig-studio's
+    # tests against that build (headers, CSP, OpenAPI drift).
+    name: S0 Studio
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: studio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # pnpm at package.json's packageManager version (10.32.1).
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm build
+      - run: rustup toolchain install
+        working-directory: .
+      - uses: Swatinem/rust-cache@v2
+      - run: SPRIG_STUDIO_DIST=$PWD/studio/dist cargo test --locked -p sprig-studio
+        working-directory: .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: studio-dist
+          path: studio/dist
+          if-no-files-found: error
+
   deny:
     name: S0 cargo-deny
     runs-on: ubuntu-latest

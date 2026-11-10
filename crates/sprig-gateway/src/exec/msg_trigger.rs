@@ -341,6 +341,21 @@ impl PassSession {
         } else {
             self.run_queue_trigger(cx, &req).await
         };
+        // Chapter 42 (R9): an inherited trigger lacking a privilege waits
+        // for the grant (39242) instead of failing its records.
+        let reply = match self.tenant.as_deref() {
+            Some(ts) => {
+                crate::inherited::triggers::on_run(
+                    ts.services(),
+                    ts.tenant,
+                    &ts.principal.user,
+                    req.source.binding_id,
+                    reply,
+                )
+                .await
+            }
+            None => reply,
+        };
         if !matches!(
             reply.outcome,
             RunOutcome::Ok | RunOutcome::Empty | RunOutcome::Moved
@@ -461,6 +476,10 @@ impl PassSession {
         };
         let run = program.run(args, host, limits);
         tokio::pin!(run);
+        // Chapter 42 (R9): a statement the definer may not run fails the
+        // run with that error, whatever the code did with it, so an
+        // inherited trigger can wait for the grant (39242).
+        let mut denied: Option<SprigError> = None;
         let outcome = loop {
             tokio::select! {
                 biased;
@@ -469,10 +488,24 @@ impl PassSession {
                     let op: DbOp = op;
                     let r: oneshot::Sender<Result<sprig_logic::engine::bridge::Reply>> = reply;
                     let x = self.engine_db(cx, op, wire).await;
+                    if let Err(e) = &x
+                        && crate::inherited::triggers::is_privilege_error(e)
+                    {
+                        denied.get_or_insert_with(|| SprigError {
+                            kind: e.kind,
+                            message: e.message.clone(),
+                            retryable: e.retryable,
+                            source: None,
+                        });
+                    }
                     let _ = r.send(x);
                 }
             }
-        }?;
+        };
+        if let Some(e) = denied {
+            return Err(e);
+        }
+        let outcome = outcome?;
         // An `error` or `reject` event fails the run, as for after-commit
         // triggers (39865).
         if matches!(outcome.event.as_str(), "error" | "reject") {

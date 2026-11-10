@@ -13,8 +13,11 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use async_trait::async_trait;
 use sprig_common::Result;
 
-use crate::ast::Dir;
-use crate::store::{EdgeRow, GraphStore, IdKind, NodeRow, Reach, Scan, StoreStats};
+use crate::ast::{Dir, Entity, Schema};
+use crate::schema::{index_value, plan_create, plan_drop};
+use crate::store::{
+    EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, NodeRow, Reach, Scan, SchemaCounts, StoreStats,
+};
 
 /// The in-memory store.
 #[derive(Debug, Clone, Default)]
@@ -27,8 +30,40 @@ pub struct MemStore {
     next_node: u64,
     next_edge: u64,
     stats: StoreStats,
+    indexes: Vec<IndexDef>,
     /// Statements per shard, for tests.
     pub per_shard: HashMap<usize, u64>,
+}
+
+/// The unique key of `props` under `d`: `None` if a property is missing
+/// or of a type the index doesn't hold.
+fn unique_key(d: &IndexDef, props: &serde_json::Value) -> Option<Vec<String>> {
+    d.props
+        .iter()
+        .map(|p| props.get(p).and_then(|v| index_value(v, d.kind)))
+        .collect()
+}
+
+fn duplicate(d: &IndexDef, what: &str, id: u64) -> sprig_common::SprigError {
+    sprig_common::SprigError::backend(
+        1062,
+        *b"23000",
+        format!(
+            "{what}({id}) already exists with {} `{}` and propert{} {}",
+            if d.entity == Entity::Node {
+                "label"
+            } else {
+                "type"
+            },
+            d.token,
+            if d.props.len() == 1 { "y" } else { "ies" },
+            d.props
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )
 }
 
 impl MemStore {
@@ -68,6 +103,51 @@ impl MemStore {
     pub fn edge_count(&self) -> usize {
         self.edges.len()
     }
+
+    /// The unique constraint `row` (a node, or an edge with `rtype`)
+    /// breaks against the other rows, if any.
+    fn violates(
+        &self,
+        id: u64,
+        labels: &[u32],
+        rtype: Option<u32>,
+        props: &serde_json::Value,
+    ) -> Option<sprig_common::SprigError> {
+        for d in self.indexes.iter().filter(|d| d.unique) {
+            let applies = match (d.entity, rtype) {
+                (Entity::Node, None) => labels.contains(&d.token_id),
+                (Entity::Relationship, Some(t)) => t == d.token_id,
+                _ => false,
+            };
+            if !applies {
+                continue;
+            }
+            let Some(k) = unique_key(d, props) else {
+                continue;
+            };
+            let clash = match rtype {
+                None => self.nodes.values().any(|n| {
+                    n.id != id
+                        && n.labels.contains(&d.token_id)
+                        && unique_key(d, &n.props).as_ref() == Some(&k)
+                }),
+                Some(_) => self.edges.values().any(|e| {
+                    e.id != id
+                        && e.rtype == d.token_id
+                        && unique_key(d, &e.props).as_ref() == Some(&k)
+                }),
+            };
+            if clash {
+                let what = if rtype.is_none() {
+                    "Node"
+                } else {
+                    "Relationship"
+                };
+                return Some(duplicate(d, what, id));
+            }
+        }
+        None
+    }
 }
 
 /// The shard of `rk` among `n` equal ranges.
@@ -101,6 +181,9 @@ impl GraphStore for MemStore {
         }
         let mut out = Vec::new();
         for n in self.nodes.values() {
+            if s.after.is_some_and(|a| n.id <= a) {
+                continue;
+            }
             if let Some(ids) = &s.ids
                 && !ids.contains(&n.id)
             {
@@ -258,6 +341,9 @@ impl GraphStore for MemStore {
 
     async fn insert_nodes(&mut self, rows: &[NodeRow]) -> Result<()> {
         for r in rows {
+            if let Some(e) = self.violates(r.id, &r.labels, None, &r.props) {
+                return Err(e);
+            }
             self.nodes.insert(r.id, r.clone());
         }
         Ok(())
@@ -265,25 +351,101 @@ impl GraphStore for MemStore {
 
     async fn insert_edges(&mut self, rows: &[EdgeRow]) -> Result<()> {
         for r in rows {
+            if let Some(e) = self.violates(r.id, &[], Some(r.rtype), &r.props) {
+                return Err(e);
+            }
             self.edges.insert(r.id, r.clone());
         }
         Ok(())
     }
 
     async fn update_node(&mut self, row: &NodeRow, _old: &[u32]) -> Result<()> {
+        if let Some(e) = self.violates(row.id, &row.labels, None, &row.props) {
+            return Err(e);
+        }
         self.nodes.insert(row.id, row.clone());
         Ok(())
     }
 
     async fn update_edge(&mut self, row: &EdgeRow) -> Result<()> {
+        if let Some(e) = self.violates(row.id, &[], Some(row.rtype), &row.props) {
+            return Err(e);
+        }
         self.edges.insert(row.id, row.clone());
         Ok(())
     }
 
-    async fn delete_edges(&mut self, ids: &[u64]) -> Result<u64> {
+    fn indexes(&self) -> Vec<IndexDef> {
+        self.indexes.clone()
+    }
+
+    async fn schema(&mut self, cmd: &Schema) -> Result<SchemaCounts> {
+        if let Schema::Drop { .. } = cmd {
+            let Some(d) = plan_drop(&self.indexes, cmd)? else {
+                return Ok(vec![]);
+            };
+            self.indexes.retain(|x| x.name != d.name);
+            return Ok(vec![(
+                if d.unique {
+                    "constraints-removed"
+                } else {
+                    "indexes-removed"
+                },
+                1,
+            )]);
+        }
+        let Some(mut d) = plan_create(&self.indexes, cmd)? else {
+            return Ok(vec![]);
+        };
+        d.token_id = match d.entity {
+            Entity::Node => self.label_id(&d.token, true).await?,
+            Entity::Relationship => self.type_id(&d.token, true).await?,
+        }
+        .unwrap_or(0);
+        d.id = self.indexes.iter().map(|x| x.id).max().unwrap_or(0) + 1;
+        d.state = "online".into();
+        if d.unique {
+            let mut seen = HashSet::new();
+            let keys: Vec<Vec<String>> = match d.entity {
+                Entity::Node => self
+                    .nodes
+                    .values()
+                    .filter(|n| n.labels.contains(&d.token_id))
+                    .filter_map(|n| unique_key(&d, &n.props))
+                    .collect(),
+                Entity::Relationship => self
+                    .edges
+                    .values()
+                    .filter(|e| e.rtype == d.token_id)
+                    .filter_map(|e| unique_key(&d, &e.props))
+                    .collect(),
+            };
+            if keys.into_iter().any(|k| !seen.insert(k)) {
+                return Err(sprig_common::SprigError::new(
+                    sprig_common::SprigCode::GraphDefinitionInvalid,
+                    format!(
+                        "[Neo.ClientError.Schema.ConstraintCreationFailed] Unable to create constraint {}: existing data has duplicate values",
+                        d.name
+                    ),
+                ));
+            }
+        }
+        let unique = d.unique;
+        self.indexes.push(d);
+        Ok(vec![(
+            if unique {
+                "constraints-added"
+            } else {
+                "indexes-added"
+            },
+            1,
+        )])
+    }
+
+    async fn delete_edges(&mut self, edges: &[EdgeKey]) -> Result<u64> {
         let mut n = 0;
-        for i in ids {
-            n += u64::from(self.edges.remove(i).is_some());
+        for e in edges {
+            n += u64::from(self.edges.remove(&e.id).is_some());
         }
         Ok(n)
     }

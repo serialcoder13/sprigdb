@@ -34,8 +34,8 @@ x-mariadb: &mariadb
   # Seven servers share one Docker VM (often 8 GB, shared with other work).
   # A cap makes a runaway test restart its own server instead of the kernel
   # killing an unrelated container. Override with MARIADB_MEM_LIMIT.
-  mem_limit: ${MARIADB_MEM_LIMIT:-1g}
-  memswap_limit: ${MARIADB_MEMSWAP_LIMIT:-1536m}
+  mem_limit: ${MARIADB_MEM_LIMIT:-1536m}
+  memswap_limit: ${MARIADB_MEMSWAP_LIMIT:-2g}
   healthcheck: &mariadb-health
     test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
     interval: 5s

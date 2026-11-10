@@ -538,3 +538,286 @@ async fn properties_keep_their_types() {
     assert!(o.rows.is_empty());
     let _ = BTreeMap::<String, Value>::new();
 }
+
+#[tokio::test]
+async fn map_projections_subqueries_and_foreach() {
+    for shards in [1, 4] {
+        let mut s = social(shards).await;
+        let o = q(
+            &mut s,
+            "MATCH (a:Person {name: 'Alice'}) RETURN a {.name, .age, k: 1, .nope} AS m",
+        )
+        .await;
+        assert_eq!(show(&o), ["{age: 30, k: 1, name: \"Alice\", nope: null}"]);
+        let o = q(&mut s, "MATCH (a:Person {name: 'Bob'}) RETURN a {.*} AS m").await;
+        assert_eq!(show(&o), ["{age: 25, name: \"Bob\"}"]);
+        // CALL { } with an importing WITH, a scope clause, a unit subquery.
+        let o = q(
+            &mut s,
+            "MATCH (p:Person) CALL { WITH p MATCH (p)-[:BOUGHT]->(x) RETURN count(x) AS n } RETURN p.name, n ORDER BY p.name",
+        )
+        .await;
+        assert_eq!(show(&o), ["Alice|1", "Bob|1", "Carol|2", "Dave|1", "Eve|0"]);
+        let o = q(
+            &mut s,
+            "MATCH (p:Person {name: 'Carol'}) CALL (p) { MATCH (p)-[:BOUGHT]->(x) RETURN x.name AS x ORDER BY x } RETURN x",
+        )
+        .await;
+        assert_eq!(show(&o), ["Desk", "Pen"]);
+        let o = q(
+            &mut s,
+            "CALL { RETURN 1 AS x UNION RETURN 2 AS x } RETURN sum(x) AS s",
+        )
+        .await;
+        assert_eq!(show(&o), ["3"]);
+        // A non-importing subquery doesn't see the outer variable.
+        let o = q(
+            &mut s,
+            "MATCH (p:Person {name: 'Eve'}) CALL { MATCH (p:Product) RETURN count(p) AS c } RETURN c",
+        )
+        .await;
+        assert_eq!(show(&o), ["3"]);
+        // Expression subqueries.
+        let o = q(
+            &mut s,
+            "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:BOUGHT]->(x) WHERE x.price > 50 } RETURN p.name ORDER BY p.name",
+        )
+        .await;
+        assert_eq!(show(&o), ["Bob", "Carol"]);
+        let o = q(
+            &mut s,
+            "MATCH (p:Person) RETURN p.name, COUNT { (p)-[:BOUGHT]->() } AS n ORDER BY p.name",
+        )
+        .await;
+        assert_eq!(show(&o), ["Alice|1", "Bob|1", "Carol|2", "Dave|1", "Eve|0"]);
+        let o = q(
+            &mut s,
+            "MATCH (p:Person {name: 'Carol'}) RETURN COLLECT { MATCH (p)-[:BOUGHT]->(x) RETURN x.name ORDER BY x.name } AS xs",
+        )
+        .await;
+        assert_eq!(show(&o), ["[\"Desk\", \"Pen\"]"]);
+        // FOREACH.
+        let o = q(
+            &mut s,
+            "MATCH (a:Person {name: 'Alice'}) FOREACH (i IN range(1, 3) | CREATE (a)-[:HAS]->(:Item {i: i}))",
+        )
+        .await;
+        assert_eq!(o.stats.get("nodes-created"), Some(&3));
+        let o = q(
+            &mut s,
+            "MATCH (:Person {name: 'Alice'})-[:HAS]->(i) RETURN sum(i.i) AS s",
+        )
+        .await;
+        assert_eq!(show(&o), ["6"]);
+        q(
+            &mut s,
+            "MATCH (i:Item) FOREACH (x IN CASE WHEN i.i > 1 THEN [1] ELSE [] END | SET i.big = true)",
+        )
+        .await;
+        let o = q(&mut s, "MATCH (i:Item) WHERE i.big RETURN count(*) AS c").await;
+        assert_eq!(show(&o), ["2"]);
+    }
+}
+
+#[tokio::test]
+async fn indexes_and_uniqueness_constraints() {
+    for shards in [1, 4] {
+        let mut s = social(shards).await;
+        let o = q(
+            &mut s,
+            "CREATE CONSTRAINT person_email FOR (p:Person) REQUIRE p.email IS UNIQUE",
+        )
+        .await;
+        assert_eq!(o.qtype, "s");
+        assert_eq!(o.stats.get("constraints-added"), Some(&1));
+        q(&mut s, "CREATE INDEX FOR (p:Product) ON (p.name)").await;
+        q(
+            &mut s,
+            "CREATE INDEX IF NOT EXISTS FOR (p:Product) ON (p.name)",
+        )
+        .await;
+        let o = q(
+            &mut s,
+            "SHOW INDEXES YIELD name, type, entityType, labelsOrTypes, properties, owningConstraint RETURN * ORDER BY name",
+        )
+        .await;
+        assert_eq!(o.rows.len(), 4, "{:?}", show(&o));
+        let o = q(
+            &mut s,
+            "SHOW CONSTRAINTS YIELD name, type RETURN name, type",
+        )
+        .await;
+        assert_eq!(show(&o), ["person_email|UNIQUENESS"]);
+        // Violations.
+        let e = crate::execute(
+            &mut s,
+            "CREATE (:Person {email: 'alice@example.com'})",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("duplicate");
+        assert!(
+            matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1062, .. }),
+            "{e}"
+        );
+        let e = crate::execute(
+            &mut s,
+            "MATCH (b:Person {name: 'Bob'}) SET b.email = 'alice@example.com'",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("duplicate set");
+        assert!(e.to_string().contains("already exists"), "{e}");
+        // MERGE finds rather than duplicates.
+        let o = q(
+            &mut s,
+            "MERGE (p:Person {email: 'alice@example.com'}) ON MATCH SET p.seen = true RETURN p.name",
+        )
+        .await;
+        assert_eq!(show(&o), ["Alice"]);
+        // Name clashes and drops.
+        let e = crate::execute(
+            &mut s,
+            "CREATE INDEX person_email FOR (p:Person) ON (p.name)",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("name");
+        assert_eq!(e.code(), Some(SprigCode::GraphDefinitionInvalid));
+        let e = crate::execute(
+            &mut s,
+            "DROP INDEX person_email",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("owned");
+        assert!(e.message.contains("IndexDropFailed"), "{e}");
+        let o = q(&mut s, "DROP CONSTRAINT person_email").await;
+        assert_eq!(o.stats.get("constraints-removed"), Some(&1));
+        q(&mut s, "DROP CONSTRAINT person_email IF EXISTS").await;
+        q(&mut s, "CREATE (:Person {email: 'alice@example.com'})").await;
+        let e = crate::execute(
+            &mut s,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("existing duplicates");
+        assert!(e.message.contains("ConstraintCreationFailed"), "{e}");
+        // Relationship uniqueness.
+        q(
+            &mut s,
+            "CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE",
+        )
+        .await;
+        let e = crate::execute(
+            &mut s,
+            "MATCH (a {name: 'Bob'}), (b {name: 'Eve'}) CREATE (a)-[:KNOWS {since: 2010}]->(b)",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("rel duplicate");
+        assert!(e.to_string().contains("Relationship"), "{e}");
+    }
+}
+
+/// G19 (round 3): `1` and `1.0` are one value for uniqueness and index
+/// lookups, as Neo4j's equality says; `'1'` is another.
+#[tokio::test]
+async fn numeric_keys_are_equal_across_integer_and_float() {
+    for shards in [1, 4] {
+        let mut s = MemStore::new(shards);
+        q(&mut s, "CREATE CONSTRAINT FOR (n:N) REQUIRE n.k IS UNIQUE").await;
+        q(&mut s, "CREATE (:N {k: 1, name: 'int'})").await;
+        let e = crate::execute(
+            &mut s,
+            "CREATE (:N {k: 1.0})",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("1.0 duplicates 1");
+        assert!(e.to_string().contains("already exists"), "{e}");
+        // A string '1' is another value.
+        q(&mut s, "CREATE (:N {k: '1', name: 'str'})").await;
+        // Lookups through the index find the integer with a float.
+        let o = q(&mut s, "MATCH (n:N {k: 1.0}) RETURN n.name").await;
+        assert_eq!(show(&o), ["int"]);
+        let o = q(&mut s, "MATCH (n:N) WHERE n.k IN [1.0, 2] RETURN n.name").await;
+        assert_eq!(show(&o), ["int"]);
+        // MERGE on 1.0 matches the node stored with 1.
+        let o = q(
+            &mut s,
+            "MERGE (n:N {k: 1.0}) ON MATCH SET n.seen = true RETURN n.name, n.seen",
+        )
+        .await;
+        assert_eq!(show(&o), ["int|true"]);
+        let o = q(&mut s, "MATCH (n:N) RETURN count(n)").await;
+        assert_eq!(show(&o), ["2"]);
+        // Floats that aren't integers stay apart from their neighbours.
+        q(&mut s, "CREATE (:N {k: 1.5})").await;
+        q(&mut s, "CREATE (:N {k: 2})").await;
+    }
+}
+
+#[tokio::test]
+async fn temporal_and_spatial_values() {
+    let mut s = MemStore::new(2);
+    let o = q(
+        &mut s,
+        "RETURN toString(date('2020-01-31') + duration('P1M')) AS a, \
+         date('2020-02-29').dayOfWeek AS b, \
+         toString(duration.between(date('2020-01-01'), date('2021-03-04'))) AS c, \
+         datetime('2020-01-05T10:00:00+01:00').epochSeconds AS d, \
+         toString(datetime({year: 2020, month: 1, day: 1, timezone: '+05:30'})) AS e, \
+         localtime('12:00') < localtime('13:00') AS f, \
+         toString(point({x: 1, y: 2})) AS g, \
+         point.distance(point({x: 0, y: 0}), point({x: 3, y: 4})) AS h, \
+         point({latitude: 1, longitude: 2}).srid AS i, \
+         duration('PT90M').minutes AS j",
+    )
+    .await;
+    assert_eq!(
+        show(&o),
+        [
+            "2020-02-29|6|P1Y2M3D|1578214800|2020-01-01T00:00:00+05:30|true|point({x: 1.0, y: 2.0, crs: 'cartesian'})|5.0|4326|90"
+        ]
+    );
+    // Stored and read back as themselves; compared and ordered.
+    q(
+        &mut s,
+        "CREATE (:E {at: date('2021-05-01'), t: localtime('09:30:00.25'), d: duration('P2D'), p: point({x: 1.5, y: 2}), ds: [date('2020-01-01'), date('2020-01-02')]}), \
+                (:E {at: date('2020-05-01'), t: localtime('10:00'), d: duration('P1D'), p: point({x: 0, y: 0})})",
+    )
+    .await;
+    let o = q(
+        &mut s,
+        "MATCH (e:E) RETURN toString(e.at) AS at, toString(e.t) AS t, toString(e.d) AS d, e.p.x AS x, size(e.ds) AS n ORDER BY e.at",
+    )
+    .await;
+    assert_eq!(
+        show(&o),
+        [
+            "2020-05-01|10:00:00|P1D|0.0|null",
+            "2021-05-01|09:30:00.25|P2D|1.5|2"
+        ]
+    );
+    let o = q(
+        &mut s,
+        "MATCH (e:E) WHERE e.at > date('2021-01-01') RETURN e.at.year AS y",
+    )
+    .await;
+    assert_eq!(show(&o), ["2021"]);
+    let o = q(
+        &mut s,
+        "MATCH (e:E) RETURN max(e.at) AS m, count(DISTINCT e.p) AS n",
+    )
+    .await;
+    assert_eq!(show(&o), ["2021-05-01|2"]);
+}

@@ -151,6 +151,29 @@ pub struct Caller {
     pub version: u64,
 }
 
+impl Caller {
+    /// The reserved function id of statements run from Studio (chapter
+    /// 44; chapter 12: "recorded with `caller = studio` in their own
+    /// statistics bucket"). No logic function has it: function ids are
+    /// allocated from 1 upwards.
+    pub const STUDIO_FUNCTION_ID: u64 = u64::MAX;
+
+    /// `caller = studio`.
+    #[must_use]
+    pub const fn studio() -> Self {
+        Self {
+            function_id: Self::STUDIO_FUNCTION_ID,
+            version: 0,
+        }
+    }
+
+    /// Whether this is [`Caller::studio`].
+    #[must_use]
+    pub const fn is_studio(&self) -> bool {
+        self.function_id == Self::STUDIO_FUNCTION_ID
+    }
+}
+
 /// Per-fingerprint flags, the `workload_fingerprints.flags` SET.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[allow(clippy::struct_excessive_bools)]

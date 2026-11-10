@@ -314,10 +314,11 @@ pub struct MsgEnv {
     pub pools: Arc<dyn ClusterPools>,
     /// The gateways runs go to.
     pub gateways: Arc<Gateways>,
-    /// Retries, attempts, lanes.
+    /// Retries, attempts, lanes (following the worker's live settings).
     pub opts: RunOpts,
-    /// `logic.trigger_budget_ms`.
-    pub budget: Duration,
+    /// The worker's live settings: `logic.trigger_budget_ms` when a
+    /// trigger job starts.
+    pub settings: crate::settings::WorkerSettings,
 }
 
 impl std::fmt::Debug for MsgEnv {
@@ -415,16 +416,17 @@ impl MsgEnv {
     }
 
     fn template(&self, tenant: TenantId, l: &Loaded) -> Template {
+        let budget = self.settings.trigger_budget();
         Template {
             req: RunRequest {
                 tenant: tenant.0,
                 source: l.source.clone(),
                 version: l.version,
                 record: None,
-                max_attempts: self.opts.max_attempts,
+                max_attempts: self.opts.current().max_attempts,
                 lease_ms: 30_000
-                    .max(u64::try_from(self.budget.as_millis()).unwrap_or(30_000) + 5_000),
-                budget_ms: u64::try_from(self.budget.as_millis()).unwrap_or(30_000),
+                    .max(u64::try_from(budget.as_millis()).unwrap_or(30_000) + 5_000),
+                budget_ms: u64::try_from(budget.as_millis()).unwrap_or(30_000),
             },
             version: Arc::new(AtomicU64::new(l.version)),
         }

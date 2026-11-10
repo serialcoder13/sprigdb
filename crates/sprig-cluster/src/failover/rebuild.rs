@@ -114,8 +114,7 @@ fn hex(b: &[u8]) -> String {
 
 fn constant_eq(a: &str, b: &str) -> bool {
     a.len() == b.len()
-        && a
-            .bytes()
+        && a.bytes()
             .zip(b.bytes())
             .fold(0u8, |acc, (x, y)| acc | (x ^ y))
             == 0

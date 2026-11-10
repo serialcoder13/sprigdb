@@ -1,0 +1,135 @@
+// sprig.v1: the key-value API (chapter 33, "Interfaces"; chapter 37). A
+// namespace is a table of one logical database; string keys are read and
+// written with versions, preconditions and expiry, and `Exec` runs one
+// Redis command (chapter 40) on the namespace, so structures are reachable
+// too. Calls run in the caller's session, with its privileges.
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/struct.proto";
+
+// Reads and writes key-value namespaces.
+service KeyValue {
+  // Reads a string key.
+  rpc Get(KvGetRequest) returns (KvGetResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/namespaces/{namespace}:get"
+      body: "*"
+    };
+  }
+  // Writes a string key, with an optional precondition and expiry.
+  rpc Put(KvPutRequest) returns (KvPutResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/namespaces/{namespace}:put"
+      body: "*"
+    };
+  }
+  // Deletes a key of any type.
+  rpc Delete(KvDeleteRequest) returns (KvDeleteResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/namespaces/{namespace}:delete"
+      body: "*"
+    };
+  }
+  // Lists keys in key order, by prefix, a page at a time.
+  rpc Scan(KvScanRequest) returns (KvScanResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/namespaces/{namespace}:scan"
+      body: "*"
+    };
+  }
+  // Runs one Redis command on the namespace.
+  rpc Exec(KvExecRequest) returns (KvExecResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/namespaces/{namespace}:exec"
+      body: "*"
+    };
+  }
+}
+
+message KvEntry {
+  string key = 1;
+  // The value; `text` too when it is UTF-8.
+  bytes value = 2;
+  string text = 3;
+  // `string`, `hash`, `list`, `set` or `zset` (`Scan` lists every type).
+  string type = 4;
+  // Changes on every write; for `if_version`.
+  uint64 version = 5;
+  // Expiry in ms since the epoch; 0 for none.
+  int64 expires_at_ms = 6;
+}
+
+message KvGetRequest {
+  string database = 1;
+  string namespace = 2;
+  string key = 3;
+}
+
+message KvGetResponse {
+  // Absent when the key is.
+  KvEntry entry = 1;
+  bool found = 2;
+}
+
+message KvPutRequest {
+  string database = 1;
+  string namespace = 2;
+  string key = 3;
+  // The value as bytes, or `text` as UTF-8 (one of the two).
+  bytes value = 4;
+  string text = 5;
+  // Write only when the key's version is this (0: the key must be absent).
+  optional uint64 if_version = 6;
+  // Write only when the key is absent, or only when it exists.
+  bool if_absent = 7;
+  bool if_exists = 8;
+  // Expire after this many ms; 0 for none.
+  int64 ttl_ms = 9;
+}
+
+message KvPutResponse {
+  uint64 version = 1;
+}
+
+message KvDeleteRequest {
+  string database = 1;
+  string namespace = 2;
+  string key = 3;
+  optional uint64 if_version = 4;
+}
+
+message KvDeleteResponse {
+  bool deleted = 1;
+}
+
+message KvScanRequest {
+  string database = 1;
+  string namespace = 2;
+  string prefix = 3;
+  // The page token: the last key of the previous page.
+  string page_token = 4;
+  // Keys per page, 1 to 1000 (default 100).
+  uint32 limit = 5;
+}
+
+message KvScanResponse {
+  repeated KvEntry entries = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}
+
+message KvExecRequest {
+  string database = 1;
+  string namespace = 2;
+  // The command and its arguments, as text.
+  repeated string command = 3;
+}
+
+message KvExecResponse {
+  // The reply, RESP3 mapped to JSON: maps are objects (keys as text),
+  // errors `{"error": "..."}`, doubles numbers, nulls null.
+  google.protobuf.Value reply = 1;
+}

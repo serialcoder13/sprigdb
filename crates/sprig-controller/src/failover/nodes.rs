@@ -13,12 +13,21 @@
 //! - [`report_diverged`]: the diverged-transaction report of a returning
 //!   copy, written into the failover record.
 //!
-//! **Where it differs from the book.** A standby here is a cluster in the
-//! standby DC that replicates the home cluster (set up by the operator,
-//! `sprigctl tenant standby`), not chapter 10's `Continuous` mover jobs per
-//! unit, which aren't built. Every tenant on such a cluster moves with it:
-//! promoting one stops the replication for all of them, and the others'
-//! standby lag then grows until they are promoted too or set up again.
+//! Two kinds of standby are promoted here:
+//!
+//! - **job standbys** (r2final, [`crate::standby`]): a `Continuous` mover
+//!   job in the standby DC's tier keeps a copy of the tenant on a cluster
+//!   there. The promotion waits (up to 30 s) until the job has applied the
+//!   source's binlog position when the source still answers, so a fenced
+//!   home loses nothing, then stops the job (it ends `done`, the copy
+//!   kept) and records its `applied_source_gtid`. The copy is on a
+//!   primary of the standby DC already: nothing is reset;
+//! - **replica-cluster standbys** (decision W3): a cluster in the standby
+//!   DC that replicates the home cluster (set up by the operator,
+//!   `sprigctl tenant standby`). Every tenant on such a cluster moves with
+//!   it: promoting one stops the replication for all of them, and the
+//!   others' standby lag then grows until they are promoted too or set up
+//!   again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -43,6 +52,83 @@ use super::recovery::{CopyFence, errant_report};
 const NODE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a standby may take to apply its relay log before it stops.
 const STANDBY_DRAIN: Duration = Duration::from_secs(30);
+
+/// `domain -> seq` of a GTID position text (`0-1-5,1-101-62`).
+fn gtid_seqs(pos: &str) -> BTreeMap<u32, u64> {
+    pos.split(',')
+        .filter_map(|g| {
+            let mut it = g.trim().split('-');
+            let d = it.next()?.parse().ok()?;
+            let _server = it.next()?;
+            let n = it.next()?.parse().ok()?;
+            Some((d, n))
+        })
+        .collect()
+}
+
+/// Whether `have` has applied everything in `want`, domain by domain.
+fn gtid_reached(have: &str, want: &str) -> bool {
+    let h = gtid_seqs(have);
+    gtid_seqs(want)
+        .iter()
+        .all(|(d, n)| h.get(d).is_some_and(|m| m >= n))
+}
+
+/// The tenant's `Continuous` mover jobs in `tier` (its job standbys there).
+async fn standby_jobs(
+    tier: &Arc<dyn MetaStore>,
+    tenant: Option<TenantId>,
+) -> Result<Vec<sprig_mover::JobRecord>> {
+    let js = sprig_mover::JobStore::new(
+        Arc::clone(tier),
+        Arc::new(sprig_common::time::SystemClock),
+    );
+    Ok(js
+        .all()
+        .await?
+        .into_iter()
+        .map(|(r, _)| r)
+        .filter(|r| r.spec.cutover == sprig_mover::CutoverMode::Continuous)
+        .filter(|r| tenant.is_none_or(|t| r.tenant_id == t))
+        .collect())
+}
+
+/// The newest binlog position among `id`'s nodes that answer within 2 s
+/// (the writer's, or a replica's that has more), per domain; `None` when
+/// none answers (a lost DC).
+async fn source_position(
+    global: &Arc<dyn MetaStore>,
+    tier: &Arc<dyn MetaStore>,
+    id: &ClusterId,
+) -> Option<String> {
+    let rec = cluster(global, tier, id).await.ok()??;
+    let mut best: BTreeMap<u32, String> = BTreeMap::new();
+    for ep in ctl_endpoints(&rec).ok()? {
+        let Ok(mut s) = ProbeSession::connect(&ep, Duration::from_secs(2)).await else {
+            continue;
+        };
+        let pos = s
+            .scalar("SELECT @@gtid_binlog_pos")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        s.close().await;
+        for g in pos.split(',').map(str::trim).filter(|g| !g.is_empty()) {
+            let seqs = gtid_seqs(g);
+            let Some((d, n)) = seqs.into_iter().next() else {
+                continue;
+            };
+            if best
+                .get(&d)
+                .is_none_or(|cur| gtid_seqs(cur).get(&d).is_some_and(|m| *m < n))
+            {
+                best.insert(d, g.to_owned());
+            }
+        }
+    }
+    (!best.is_empty()).then(|| best.into_values().collect::<Vec<_>>().join(","))
+}
 
 /// Accounts a fence never touches: SprigDB's own and MariaDB's.
 const SYSTEM_USERS: [&str; 6] = [
@@ -141,6 +227,85 @@ impl std::fmt::Debug for ClusterHooks {
 }
 
 impl ClusterHooks {
+    /// Stops `tenant`'s job standbys in `tier`: for each, waits (up to
+    /// [`STANDBY_DRAIN`]) until it has applied the source's position when
+    /// the source answers, stops it (`Mover::cut_over`: a `Continuous` job
+    /// ends `done`, its copy kept) and returns `applied_source_gtid` per
+    /// source cluster. A job already `done` (a resumed promotion) only
+    /// reports its position.
+    async fn stop_job_standbys(
+        &self,
+        tenant: TenantId,
+        tier: &Arc<dyn MetaStore>,
+        jobs: Vec<sprig_mover::JobRecord>,
+    ) -> Result<BTreeMap<String, String>> {
+        use sprig_mover::{JobState, Mover};
+        let mover = sprig_mover::MetaMover::new(sprig_mover::JobStore::new(
+            Arc::clone(tier),
+            Arc::new(sprig_common::time::SystemClock),
+        ));
+        let blocked = |m: String| SprigError::new(sprig_common::SprigCode::FailoverBlocked, m);
+        let mut applied = BTreeMap::new();
+        for rec in jobs {
+            let job = rec.job_id;
+            let Some(source) = rec.spec.source_cluster().cloned() else {
+                continue;
+            };
+            if rec.state == JobState::RolledBack {
+                continue;
+            }
+            if rec.state != JobState::Done {
+                // 1. Drain: a source that still answers (fenced, or frozen
+                //    above MariaDB) has nothing the copy must miss.
+                let t0 = std::time::Instant::now();
+                if let Some(want) = source_position(&self.global, tier, &source).await {
+                    loop {
+                        let st = mover.status(&job).await?;
+                        let have = st.progress.applied_source_gtid.clone().unwrap_or_default();
+                        if gtid_reached(&have, &want) {
+                            tracing::info!(%tenant, %job, %source, %want, waited_ms = t0.elapsed().as_millis(), "job standby drained to the source's position");
+                            break;
+                        }
+                        if t0.elapsed() >= STANDBY_DRAIN {
+                            tracing::warn!(%tenant, %job, %source, %want, %have, "job standby didn't reach the source's position; stopping it anyway (the lag was within the RPO)");
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                } else {
+                    tracing::warn!(%tenant, %job, %source, "the standby's source doesn't answer: stopping at what it applied");
+                }
+                // 2. Stop.
+                mover.cut_over(&job).await?;
+                let t1 = std::time::Instant::now();
+                loop {
+                    let st = mover.status(&job).await?;
+                    match st.state {
+                        JobState::Done => break,
+                        JobState::RolledBack => {
+                            return Err(blocked(format!(
+                                "standby job {job} of tenant {tenant} rolled back: {}",
+                                st.error.unwrap_or_default()
+                            )));
+                        }
+                        _ if t1.elapsed() >= STANDBY_DRAIN => {
+                            return Err(blocked(format!(
+                                "standby job {job} of tenant {tenant} didn't stop within {STANDBY_DRAIN:?} (state {})",
+                                st.state
+                            )));
+                        }
+                        _ => tokio::time::sleep(Duration::from_millis(200)).await,
+                    }
+                }
+            }
+            let st = mover.status(&job).await?;
+            let pos = st.progress.applied_source_gtid.unwrap_or_default();
+            tracing::info!(%tenant, %job, %source, %pos, "job standby stopped");
+            applied.insert(source.to_string(), pos);
+        }
+        Ok(applied)
+    }
+
     async fn standby_nodes(
         &self,
         tenant: TenantId,
@@ -191,6 +356,12 @@ impl PromoteHooks for ClusterHooks {
                 }
             }
         }
+        // Job standbys (r2final): drain, then stop.
+        let tier = (self.dc_tier)(to);
+        let jobs = standby_jobs(&tier, Some(tenant)).await?;
+        if !jobs.is_empty() {
+            return self.stop_job_standbys(tenant, &tier, jobs).await;
+        }
         let mut applied = BTreeMap::new();
         for (id, ep) in self.standby_nodes(tenant, to).await? {
             let mut s = ProbeSession::connect(&ep, NODE_TIMEOUT)
@@ -239,7 +410,17 @@ impl PromoteHooks for ClusterHooks {
     }
 
     async fn make_writable(&self, tenant: TenantId, to: &DcId) -> Result<()> {
+        // A job standby's copy is on a primary of `to` already, which its
+        // agent keeps writable: nothing to reset.
+        let job_targets: BTreeSet<ClusterId> = standby_jobs(&(self.dc_tier)(to), Some(tenant))
+            .await?
+            .iter()
+            .filter_map(|r| r.spec.target_cluster().cloned())
+            .collect();
         for (id, ep) in self.standby_nodes(tenant, to).await? {
+            if job_targets.contains(&id) {
+                continue;
+            }
             let mut s = ProbeSession::connect(&ep, NODE_TIMEOUT)
                 .await
                 .map_err(node_err)?;
@@ -418,7 +599,32 @@ pub async fn standby_lags(
     }
     let mut lag_of: BTreeMap<ClusterId, u32> = BTreeMap::new();
     let mut out = Vec::new();
+    // Job standbys (r2final): the lag from the job's progress.
+    let jobs = standby_jobs(tier, None).await?;
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
     for (tenant, ids) in by_tenant {
+        let mine: Vec<&sprig_mover::JobRecord> = jobs
+            .iter()
+            .filter(|r| r.tenant_id.0 == tenant && !r.state.is_terminal())
+            .collect();
+        if !mine.is_empty() {
+            let worst = mine
+                .iter()
+                .map(|r| job_lag(r, now))
+                .max()
+                .unwrap_or(u32::MAX);
+            out.push(StandbyLag {
+                tenant_id: tenant,
+                lag_ms: worst,
+            });
+            continue;
+        }
         let mut worst = 0u32;
         for id in ids {
             let l = if let Some(l) = lag_of.get(&id) {
@@ -436,6 +642,21 @@ pub async fn standby_lags(
         });
     }
     Ok(out)
+}
+
+/// A job standby's lag: `now − source_seen_ms + lag_ms` while it streams
+/// (how long ago the source was last heard, plus how far behind it the
+/// copy was then); unbounded while it still copies or catches up.
+fn job_lag(r: &sprig_mover::JobRecord, now_ms: u64) -> u32 {
+    if r.state != sprig_mover::JobState::Streaming {
+        return u32::MAX;
+    }
+    match (r.progress.source_seen_ms, r.progress.lag_ms) {
+        (Some(seen), Some(lag)) => {
+            u32::try_from(now_ms.saturating_sub(seen).saturating_add(lag)).unwrap_or(u32::MAX)
+        }
+        _ => u32::MAX,
+    }
 }
 
 async fn cluster_lag(
@@ -608,6 +829,35 @@ pub async fn report_diverged(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn job_standby_positions_and_lag() {
+        assert!(gtid_reached("1-101-62", "1-101-62"));
+        assert!(gtid_reached("0-1-9,1-101-70", "1-101-62"));
+        assert!(!gtid_reached("1-101-61", "1-101-62"));
+        // A domain the copy never saw isn't reached.
+        assert!(!gtid_reached("1-101-62", "1-101-62,2-201-1"));
+        assert!(gtid_reached("", ""));
+        let mut r = sprig_mover::JobRecord {
+            ..serde_json::from_value(serde_json::json!({
+                "job_id": "01a1c13f24f77067bb914ff2ed2cb273", "kind": "move_shard", "tenant_id": 5,
+                "spec": serde_json::to_value(sprig_mover::JobSpec::move_tenant(
+                    TenantId(5),
+                    ClusterId::new("fra1-c1").unwrap(),
+                    ClusterId::new("ams1-c1").unwrap(),
+                ).with_cutover(sprig_mover::CutoverMode::Continuous)).unwrap(),
+                "state": "streaming", "created_ms": 0, "updated_ms": 0
+            }))
+            .unwrap()
+        };
+        // Streaming, heard 300 ms ago, 80 ms behind then: 380 ms.
+        r.progress.source_seen_ms = Some(10_000);
+        r.progress.lag_ms = Some(80);
+        assert_eq!(job_lag(&r, 10_300), 380);
+        // Not streaming yet (copying): unbounded, so the RPO check skips it.
+        r.state = sprig_mover::JobState::Copying;
+        assert_eq!(job_lag(&r, 10_300), u32::MAX);
+    }
 
     #[test]
     fn tenant_patterns_match_only_the_tenants_schemas() {

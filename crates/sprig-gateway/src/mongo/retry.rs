@@ -154,16 +154,16 @@ struct Guarded<'a> {
     broken: Option<SqlError>,
 }
 
-impl Guarded<'_> {
-    fn refused(&self) -> SqlError {
-        SqlError {
-            errno: Some(1213),
-            message: "the retryable write's transaction was rolled back".into(),
-            mongo: None,
-        }
+fn refused() -> SqlError {
+    SqlError {
+        errno: Some(1213),
+        message: "the retryable write's transaction was rolled back".into(),
+        mongo: None,
     }
+}
 
-    fn note(&mut self, r: &Result<(), &SqlError>) {
+impl Guarded<'_> {
+    fn note(&mut self, r: Result<(), &SqlError>) {
         if let Err(e) = r
             && breaks_txn(e)
             && self.broken.is_none()
@@ -177,20 +177,24 @@ impl Guarded<'_> {
 impl SqlRunner for Guarded<'_> {
     async fn query(&mut self, sql: &str) -> Result<Rows, SqlError> {
         if self.broken.is_some() {
-            return Err(self.refused());
+            return Err(refused());
         }
         let r = self.s.query(sql).await;
-        self.note(&r.as_ref().map(|_| ()));
+        self.note(r.as_ref().map(|_| ()));
         r
     }
 
     async fn exec(&mut self, sql: &str) -> Result<Done, SqlError> {
         if self.broken.is_some() {
-            return Err(self.refused());
+            return Err(refused());
         }
         let r = self.s.exec(sql).await;
-        self.note(&r.as_ref().map(|_| ()));
+        self.note(r.as_ref().map(|_| ()));
         r
+    }
+
+    fn tenant(&self) -> u64 {
+        self.s.tenant()
     }
 }
 
@@ -214,12 +218,12 @@ async fn rollback(s: &mut SqlSession) {
 
 /// Makes sure `db`'s record table exists. `false` when the database
 /// doesn't exist (a write that can't create anything, on nothing).
-async fn ensure_table(
-    c: &Conn,
+pub(super) async fn ensure_table(
+    records: &Records,
     s: &mut SqlSession,
     key: &(u64, String),
 ) -> Result<bool, MongoError> {
-    if c.shared.records.known(key) {
+    if records.known(key) {
         return Ok(true);
     }
     let db = &key.1;
@@ -238,7 +242,7 @@ async fn ensure_table(
         },
         Err(e) => return Err(mongo_error(&e)),
     }
-    c.shared.records.learn(key.clone());
+    records.learn(key.clone());
     Ok(true)
 }
 
@@ -262,6 +266,7 @@ pub async fn run(
         .map_err(labelled)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_inner(
     c: &mut Conn,
     s: &mut SqlSession,
@@ -271,26 +276,26 @@ async fn run_inner(
     lsid: &[u8],
     txn_number: i64,
 ) -> Result<Document, MongoError> {
-    let engine = c.shared.engine;
+    let engine = c.shared.engine.clone();
     let who = super::commands::owner(c);
     let uid = uid_of(&who);
+    // `bulkWrite` (on `admin`) keeps its record with its first namespace.
+    let request_db = db;
+    let record_db = writes::record_db(name, body, db);
+    let db = record_db.as_str();
     let key = (who.tenant, db.to_owned());
     // 1. Collections a statement may create exist before the transaction.
-    if writes::creates(name, body) {
-        let ns = sprig_doc::engine::Ns {
-            db: db.to_owned(),
-            coll: super::commands::coll_of(body, name)?,
-        };
+    for ns in writes::created_namespaces(name, body, request_db) {
         if engine.meta(s, &ns).await?.is_none() {
-            engine
-                .create(s, &ns, Document::new(), false)
-                .await?;
+            engine.create(s, &ns, Document::new(), false).await?;
         }
     }
-    if !ensure_table(c, s, &key).await? {
+    if !ensure_table(&c.shared.records, s, &key).await? {
         // Nothing exists to write or to record.
         let done = StmtResults::new();
-        return Ok(writes::run(engine, s, name, body, db, &done).await?.reply);
+        return Ok(writes::run(&engine, s, name, body, request_db, &done)
+            .await?
+            .reply);
     }
     let cfg = c.shared.settings();
     let mut attempt = 0u32;
@@ -308,12 +313,25 @@ async fn run_inner(
                 rollback(s).await;
                 c.shared.records.forget(&key);
                 recreated = true;
-                if !ensure_table(c, s, &key).await? {
+                if !ensure_table(&c.shared.records, s, &key).await? {
                     let done = StmtResults::new();
-                    return Ok(writes::run(engine, s, name, body, db, &done).await?.reply);
+                    return Ok(writes::run(&engine, s, name, body, request_db, &done)
+                        .await?
+                        .reply);
                 }
                 attempt -= 1;
                 continue;
+            }
+            Err(e) if matches!(e.errno, Some(1142 | 1143 | 1044)) => {
+                // Every writer of a database reaches its records table
+                // (chapter 29's backend grants and the gateway's check,
+                // decisions/r5-interim.md D12). Should a grant still be
+                // missing, the write is refused rather than run without
+                // its record, which a retry could run twice.
+                rollback(s).await;
+                metrics::counter!("sprig_mongo_retryable_unrecorded_total", "command" => name.to_owned())
+                    .increment(1);
+                return Err(mongo_error(&e));
             }
             Err(e) => {
                 rollback(s).await;
@@ -333,7 +351,9 @@ async fn run_inner(
                 ..Record::default()
             },
         };
-        if rec.txn_number > txn_number || (rec.txn_number == txn_number && rec.committed) {
+        if rec.txn_number > txn_number
+            || (rec.txn_number == txn_number && (rec.committed || rec.aborted))
+        {
             rollback(s).await;
             return Err(MongoError::new(
                 code::TRANSACTION_TOO_OLD,
@@ -354,7 +374,7 @@ async fn run_inner(
                 s: &mut *s,
                 broken: None,
             };
-            let r = writes::run(engine, &mut g, name, body, db, &done).await;
+            let r = writes::run(&engine, &mut g, name, body, request_db, &done).await;
             (r, g.broken)
         };
         let transient = broken
@@ -393,7 +413,9 @@ async fn run_inner(
                 }
             };
             if let Err(e) = s
-                .exec(&sessions::upsert_sql(db, lsid, &uid, txn_number, &bytes, false))
+                .exec(&sessions::upsert_sql(
+                    db, lsid, &uid, txn_number, &bytes, false,
+                ))
                 .await
             {
                 rollback(s).await;
@@ -472,6 +494,9 @@ mod tests {
             "insert",
             &bson::doc! {"insert": "c", "lsid": {"id": 1}, "txnNumber": 1i64, "autocommit": false}
         ));
-        assert!(!applies("find", &bson::doc! {"find": "c", "lsid": {"id": 1}, "txnNumber": 1i64}));
+        assert!(!applies(
+            "find",
+            &bson::doc! {"find": "c", "lsid": {"id": 1}, "txnNumber": 1i64}
+        ));
     }
 }

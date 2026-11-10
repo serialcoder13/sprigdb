@@ -23,6 +23,8 @@ sprig-common.workspace = true
 sprig-meta.workspace = true
 sprig-provision.workspace = true
 tokio = { workspace = true, features = ["process", "io-util"] }
+# Mutual TLS on the internal service (chapter 25, RC2).
+tokio-rustls.workspace = true
 tracing.workspace = true
 
 [lints]

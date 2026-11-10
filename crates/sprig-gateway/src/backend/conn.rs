@@ -628,6 +628,26 @@ impl BackendConn {
         Ok(out)
     }
 
+    /// `@@last_gtid`, after a statement that committed without reporting
+    /// it: MariaDB 11.8's tracker reports `timestamp` in its place on a
+    /// connection with a fixed `timestamp` (a held branch's clock, or a
+    /// client's `SET timestamp`), so the commit's GTID must be read.
+    ///
+    /// # Errors
+    /// Connection errors; the server's ERR.
+    pub async fn capture_last_gtid(&mut self) -> Result<String, ClientError> {
+        let row = self
+            .client
+            .query_first("SELECT @@session.last_gtid")
+            .await?;
+        self.client.take_changes();
+        Ok(text(
+            row.as_ref()
+                .and_then(|r| r.first())
+                .and_then(Option::as_ref),
+        ))
+    }
+
     /// `@@collation_connection`, after a statement changed the character
     /// sets (session tracking reports the character set's name only). It
     /// leaves the statement's warnings in place.

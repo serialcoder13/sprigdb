@@ -22,7 +22,9 @@
 //! - [`moves`]: the tenant-move check for shares (39361);
 //! - [`guard`]: "Schema changes while an object is shared" (39895);
 //! - [`show`]: what schema tools see;
-//! - [`reference`]: the merged view as a Rust model, for tests.
+//! - [`reference`]: the merged view as a Rust model, for tests;
+//! - [`msg`]: inherited messaging objects (`FOR EACH TENANT`, R9): the
+//!   definitions, overrides and instances every kind shares.
 //!
 //! [`handle`] is the entry point: the gateway calls it for each statement
 //! of a tenant session before chapter 32's type layer and chapter 07's name
@@ -47,6 +49,7 @@ pub mod grammar;
 pub mod guard;
 pub mod model;
 pub mod moves;
+pub mod msg;
 pub mod plan;
 pub mod reference;
 pub mod rewrite;

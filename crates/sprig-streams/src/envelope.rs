@@ -210,6 +210,7 @@ mod tests {
             hlc: 1_762_508_100 << 32,
             txn: gtid,
             ddl: None,
+            hint: None,
         }
     }
 

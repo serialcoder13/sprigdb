@@ -52,12 +52,17 @@ pub struct RecoveryJobResponse {
 }
 
 impl AdminService {
-    async fn failover_record(&self, id: &sprig_common::ids::ClusterId) -> Result<Option<ClusterFailoverRecord>> {
+    async fn failover_record(
+        &self,
+        id: &sprig_common::ids::ClusterId,
+    ) -> Result<Option<ClusterFailoverRecord>> {
         let key = record_key(self.stores.dc.tier(), id)?;
-        Ok(match self.stores.dc.get(&key, Consistency::Linearizable).await? {
-            Some(kv) => Some(Record::<ClusterFailoverRecord>::decode(&kv.value)?.body),
-            None => None,
-        })
+        Ok(
+            match self.stores.dc.get(&key, Consistency::Linearizable).await? {
+                Some(kv) => Some(Record::<ClusterFailoverRecord>::decode(&kv.value)?.body),
+                None => None,
+            },
+        )
     }
 
     async fn submit_recovery(
@@ -98,7 +103,11 @@ impl AdminService {
     /// # Errors
     /// 39504 off the leader; 39104 unknown cluster; 39792 when the node
     /// isn't a former writer or nothing diverged.
-    pub async fn extract_node(&self, id: &str, req: ExtractNodeRequest) -> Result<RecoveryJobResponse> {
+    pub async fn extract_node(
+        &self,
+        id: &str,
+        req: ExtractNodeRequest,
+    ) -> Result<RecoveryJobResponse> {
         let id = Self::parse_id(id)?;
         let rec = self
             .registry()
@@ -140,7 +149,11 @@ impl AdminService {
     /// # Errors
     /// 39504 off the leader; 39104 unknown cluster; 39792 for a node that
     /// isn't the cluster's.
-    pub async fn rebuild_node(&self, id: &str, req: RebuildNodeRequest) -> Result<RecoveryJobResponse> {
+    pub async fn rebuild_node(
+        &self,
+        id: &str,
+        req: RebuildNodeRequest,
+    ) -> Result<RecoveryJobResponse> {
         let id = Self::parse_id(id)?;
         let rec = self
             .registry()

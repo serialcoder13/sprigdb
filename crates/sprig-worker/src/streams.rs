@@ -32,6 +32,8 @@ pub struct StreamsEnv {
     pools: Arc<dyn ClusterPools>,
     locator: Arc<ShardMapLocator>,
     clusters: Arc<RegistryClusters>,
+    /// The worker's live settings (global `stream.*`).
+    settings: crate::settings::WorkerSettings,
 }
 
 impl std::fmt::Debug for StreamsEnv {
@@ -49,6 +51,7 @@ impl StreamsEnv {
             pools: Arc::clone(&env.pools),
             locator: Arc::clone(&env.locator),
             clusters: Arc::clone(&env.clusters),
+            settings: env.settings.clone(),
         }
     }
 }
@@ -130,6 +133,10 @@ impl JobEnv for StreamsEnv {
 
     async fn tenant_name(&self, _tenant: TenantId) -> Option<String> {
         None
+    }
+
+    fn settings(&self) -> Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)> {
+        Some((self.settings.snapshot(), self.settings.dc().clone()))
     }
 }
 

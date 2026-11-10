@@ -1,6 +1,6 @@
 //! The write commands, statement by statement (chapter 30, "Dispatch" and
-//! "Retryable writes, exactly once"): `insert`, `update`, `delete` and
-//! `findAndModify` over `sprig-doc`'s engine.
+//! "Retryable writes, exactly once"): `insert`, `update`, `delete`,
+//! `findAndModify` and MongoDB 8.0's `bulkWrite` over `sprig-doc`'s engine.
 //!
 //! Each runs the statements whose ids (positions in the command) are not
 //! in `done` and reports, beside the reply, the result of every statement
@@ -48,8 +48,99 @@ fn count(n: u64) -> i32 {
 pub fn is_write(name: &str) -> bool {
     matches!(
         name,
-        "insert" | "update" | "delete" | "findAndModify" | "findandmodify"
+        "insert" | "update" | "delete" | "findAndModify" | "findandmodify" | "bulkWrite"
     )
+}
+
+/// `bulkWrite`'s namespaces, by `nsInfo` index.
+///
+/// # Errors
+/// 73 for a namespace without a database and a collection.
+pub fn namespaces(body: &Document) -> Result<Vec<Ns>, MongoError> {
+    docs_of(body, "nsInfo")
+        .iter()
+        .map(|d| {
+            let ns = d.get_str("ns").unwrap_or_default();
+            match ns.split_once('.') {
+                Some((db, coll)) if !db.is_empty() && !coll.is_empty() => Ok(Ns {
+                    db: db.to_owned(),
+                    coll: coll.to_owned(),
+                }),
+                _ => Err(MongoError::new(
+                    code::INVALID_NAMESPACE,
+                    format!("Invalid namespace specified '{ns}'"),
+                )),
+            }
+        })
+        .collect()
+}
+
+/// The databases a write command writes: the request's, or `bulkWrite`'s
+/// (by name, once each).
+#[must_use]
+pub fn target_dbs(name: &str, body: &Document, db: &str) -> Vec<String> {
+    match name {
+        "bulkWrite" => namespaces(body)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| n.db)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        n if is_write(n) => vec![db.to_owned()],
+        _ => Vec::new(),
+    }
+}
+
+/// The database whose records table holds a retryable write's record:
+/// the request's, or for `bulkWrite` (sent to `admin`) the first
+/// namespace's.
+#[must_use]
+pub fn record_db(name: &str, body: &Document, db: &str) -> String {
+    if name == "bulkWrite" {
+        if let Some(n) = namespaces(body).ok().and_then(|v| v.into_iter().next()) {
+            return n.db;
+        }
+    }
+    db.to_owned()
+}
+
+/// The collections a command's statements may create (inserts and
+/// upserts), which must exist before a transaction starts.
+#[must_use]
+pub fn created_namespaces(name: &str, body: &Document, db: &str) -> Vec<Ns> {
+    if name == "bulkWrite" {
+        let Ok(nss) = namespaces(body) else {
+            return Vec::new();
+        };
+        let mut out: Vec<Ns> = Vec::new();
+        for op in docs_of(body, "ops") {
+            let idx = if let Some(i) = op.get("insert").and_then(as_i64) {
+                Some(i)
+            } else if op.get_bool("upsert").unwrap_or(false) {
+                op.get("update").and_then(as_i64)
+            } else {
+                None
+            };
+            if let Some(ns) = idx
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| nss.get(i))
+                && !out.contains(ns)
+            {
+                out.push(ns.clone());
+            }
+        }
+        return out;
+    }
+    if creates(name, body)
+        && let Ok(coll) = coll_of(body, name)
+    {
+        return vec![Ns {
+            db: db.to_owned(),
+            coll,
+        }];
+    }
+    Vec::new()
 }
 
 /// Runs write command `name` on `db`, skipping the statements in `done`.
@@ -58,13 +149,16 @@ pub fn is_write(name: &str) -> bool {
 /// Errors that stop the whole command; statement errors are in the
 /// reply's `writeErrors`.
 pub async fn run(
-    engine: Engine,
+    engine: &Engine,
     sql: &mut dyn SqlRunner,
     name: &str,
     body: &Document,
     db: &str,
     done: &StmtResults,
 ) -> Result<Outcome, MongoError> {
+    if name == "bulkWrite" {
+        return bulk_write(engine, sql, body, done).await;
+    }
     let ns = Ns {
         db: db.to_owned(),
         coll: coll_of(body, name)?,
@@ -78,7 +172,7 @@ pub async fn run(
 }
 
 async fn insert(
-    engine: Engine,
+    engine: &Engine,
     sql: &mut dyn SqlRunner,
     ns: &Ns,
     body: &Document,
@@ -134,7 +228,7 @@ async fn insert(
 }
 
 async fn update(
-    engine: Engine,
+    engine: &Engine,
     sql: &mut dyn SqlRunner,
     ns: &Ns,
     body: &Document,
@@ -216,7 +310,7 @@ async fn update(
 }
 
 async fn delete(
-    engine: Engine,
+    engine: &Engine,
     sql: &mut dyn SqlRunner,
     ns: &Ns,
     body: &Document,
@@ -236,10 +330,8 @@ async fn delete(
         match engine.delete(sql, ns, &q, one, None).await {
             Ok((k, _)) => {
                 n += k;
-                out.executed.insert(
-                    idx(i),
-                    doc! {"n": i64::try_from(k).unwrap_or(i64::MAX)},
-                );
+                out.executed
+                    .insert(idx(i), doc! {"n": i64::try_from(k).unwrap_or(i64::MAX)});
             }
             Err(e) => {
                 errors.push(Bson::Document(e.write_error(i)));
@@ -259,7 +351,7 @@ async fn delete(
 }
 
 async fn find_and_modify(
-    engine: Engine,
+    engine: &Engine,
     sql: &mut dyn SqlRunner,
     ns: &Ns,
     body: &Document,
@@ -328,6 +420,173 @@ async fn find_and_modify(
     let mut executed = StmtResults::new();
     executed.insert(0, reply.clone());
     Ok(Outcome { reply, executed })
+}
+
+/// One `bulkWrite` result: `ok: 0`, its `idx`, the error's fields, and
+/// zero counts, as MongoDB 8.0 sends them.
+fn bulk_error(e: &MongoError, i: usize, update: bool) -> Document {
+    let mut d = doc! {"ok": 0.0, "idx": idx(i), "code": e.code, "errmsg": e.message.clone()};
+    if let Some(x) = &e.extra {
+        for (k, v) in x.iter() {
+            d.insert(k.clone(), v.clone());
+        }
+    }
+    d.insert("n", 0);
+    if update {
+        d.insert("nModified", 0);
+    }
+    d
+}
+
+/// MongoDB 8.0's `bulkWrite` (chapter 30, "Dispatch"): `ops` over the
+/// collections of `nsInfo`, one statement per op (its index is its
+/// statement id), with a cursor of per-op results and the totals.
+async fn bulk_write(
+    engine: &Engine,
+    sql: &mut dyn SqlRunner,
+    body: &Document,
+    done: &StmtResults,
+) -> Result<Outcome, MongoError> {
+    let nss = namespaces(body)?;
+    let ops = docs_of(body, "ops");
+    if ops.is_empty() || ops.len() > 100_000 {
+        return Err(MongoError::new(
+            INVALID_LENGTH,
+            format!(
+                "Write batch sizes must be between 1 and 100000. Got {} operations.",
+                ops.len()
+            ),
+        ));
+    }
+    // Every op names a namespace and a kind before anything runs.
+    let mut parsed = Vec::with_capacity(ops.len());
+    for op in &ops {
+        let (kind, ix) = match op.iter().next() {
+            Some((k, v)) if matches!(k.as_str(), "insert" | "update" | "delete") => {
+                (k.clone(), as_i64(v))
+            }
+            _ => {
+                return Err(MongoError::new(
+                    code::FAILED_TO_PARSE,
+                    format!("Unrecognized bulkWrite op {op}"),
+                ));
+            }
+        };
+        let Some(ns) = ix
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| nss.get(i))
+        else {
+            return Err(MongoError::new(
+                code::BAD_VALUE,
+                format!("BulkWrite ops entry {op} has an invalid nsInfo index."),
+            ));
+        };
+        parsed.push((kind, ns.clone()));
+    }
+    let ordered = body.get_bool("ordered").unwrap_or(true);
+    let errors_only = body.get_bool("errorsOnly").unwrap_or(false);
+    let (mut ins, mut matched, mut modified, mut ups, mut del, mut errs) =
+        (0i64, 0i64, 0i64, 0i64, 0i64, 0i32);
+    let mut out = Outcome::default();
+    let mut batch = Vec::new();
+    for (i, (op, (kind, ns))) in ops.iter().zip(parsed).enumerate() {
+        let r: Result<Document, MongoError> = if let Some(r) = done.get(&idx(i)) {
+            Ok(r.clone())
+        } else {
+            let r = match kind.as_str() {
+                "insert" => {
+                    let d = op.get_document("document").cloned().unwrap_or_default();
+                    match engine.insert(sql, &ns, vec![d], true).await {
+                        Ok((_, e)) if !e.is_empty() => Err(e[0].1.clone()),
+                        Ok(_) => Ok(doc! {"ok": 1.0, "idx": idx(i), "n": 1}),
+                        Err(e) => Err(e),
+                    }
+                }
+                "update" => {
+                    let q = op.get_document("filter").cloned().unwrap_or_default();
+                    match op.get("updateMods") {
+                        None => Err(MongoError::new(
+                            code::FAILED_TO_PARSE,
+                            "BSON field 'bulkWrite.ops.updateMods' is missing but a required field",
+                        )),
+                        Some(spec) => engine
+                            .update(
+                                sql,
+                                &ns,
+                                &q,
+                                spec,
+                                op.get_bool("multi").unwrap_or(false),
+                                op.get_bool("upsert").unwrap_or(false),
+                                &docs_of(op, "arrayFilters"),
+                                None,
+                            )
+                            .await
+                            .map(|o| {
+                                let mut d = doc! {
+                                    "ok": 1.0,
+                                    "idx": idx(i),
+                                    "n": i32::try_from(o.matched).unwrap_or(i32::MAX)
+                                        + i32::from(o.upserted.is_some()),
+                                    "nModified": i32::try_from(o.modified).unwrap_or(i32::MAX),
+                                };
+                                if let Some(id) = o.upserted {
+                                    d.insert("upserted", doc! {"_id": id});
+                                }
+                                d
+                            }),
+                    }
+                }
+                _ => {
+                    let q = op.get_document("filter").cloned().unwrap_or_default();
+                    let multi = op.get_bool("multi").unwrap_or(false);
+                    engine
+                        .delete(sql, &ns, &q, !multi, None)
+                        .await
+                        .map(|(n, _)| doc! {"ok": 1.0, "idx": idx(i), "n": i32::try_from(n).unwrap_or(i32::MAX)})
+                }
+            };
+            if let Ok(d) = &r {
+                out.executed.insert(idx(i), d.clone());
+            }
+            r
+        };
+        match r {
+            Ok(d) => {
+                let n = d.get("n").and_then(as_i64).unwrap_or(0);
+                match kind.as_str() {
+                    "insert" => ins += n,
+                    "update" if d.contains_key("upserted") => ups += 1,
+                    "update" => {
+                        matched += n;
+                        modified += d.get("nModified").and_then(as_i64).unwrap_or(0);
+                    }
+                    _ => del += n,
+                }
+                if !errors_only {
+                    batch.push(Bson::Document(d));
+                }
+            }
+            Err(e) => {
+                errs += 1;
+                batch.push(Bson::Document(bulk_error(&e, i, kind == "update")));
+                if ordered {
+                    break;
+                }
+            }
+        }
+    }
+    let c = |n: i64| i32::try_from(n).unwrap_or(i32::MAX);
+    out.reply = doc! {
+        "cursor": {"id": 0i64, "firstBatch": batch, "ns": "admin.$cmd.bulkWrite"},
+        "nErrors": errs,
+        "nInserted": c(ins),
+        "nMatched": c(matched),
+        "nModified": c(modified),
+        "nUpserted": c(ups),
+        "nDeleted": c(del),
+        "ok": 1.0,
+    };
+    Ok(out)
 }
 
 /// Whether the command's statements may create its collection (an insert
