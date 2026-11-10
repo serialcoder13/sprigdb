@@ -239,6 +239,13 @@ impl SqlSession {
         Ok(sink)
     }
 
+    /// The session's shared half: its kill flags, for the stall guard
+    /// ([`crate::offload::run_for`]).
+    #[must_use]
+    pub fn handle(&self) -> std::sync::Arc<crate::session::SessionHandle> {
+        std::sync::Arc::clone(self.session.handle())
+    }
+
     /// Closes the session (rolls back).
     pub async fn close(mut self) {
         self.session.set_state(SessionState::Closing);

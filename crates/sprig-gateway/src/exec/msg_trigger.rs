@@ -534,6 +534,7 @@ impl PassSession {
         }
         let c = Commit {
             group: offsets::logic_group(req.source.binding_id),
+            instance: 0,
             stream: req.source.object_id,
             partition: r.partition,
             offset: r.offset + 1,

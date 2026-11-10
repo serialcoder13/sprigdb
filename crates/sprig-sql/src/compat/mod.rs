@@ -24,6 +24,7 @@ pub mod funcs;
 pub mod geo;
 pub mod groupby;
 pub mod intmeta;
+pub mod jsontext;
 pub mod keywords;
 pub mod locks;
 pub mod meta;

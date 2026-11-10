@@ -81,13 +81,29 @@ pub const DDL_STREAM_OFFSETS: &str = "CREATE TABLE IF NOT EXISTS stream_offsets 
   PRIMARY KEY (group_name, stream_id, partition_no)
 ) ENGINE=InnoDB";
 
+/// `stream_offsets.instance_tenant_id` (chapter 45, R9 fan-in): the member
+/// whose instance a fan-in reader's position is on; 0 for the tenant's own
+/// streams. Running it again rebuilds the same key.
+pub const ALTER_STREAM_OFFSETS_INSTANCE: &str = "ALTER TABLE stream_offsets \
+  ADD COLUMN IF NOT EXISTS instance_tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER group_name, \
+  DROP PRIMARY KEY, \
+  ADD PRIMARY KEY (group_name, instance_tenant_id, stream_id, partition_no)";
+
 /// The module's migrations.
-pub static STREAMS_MIGRATIONS: &[Migration] = &[Migration {
-    format: 1,
-    phase: Phase::Expand,
-    name: "streams, stream_groups and stream_offsets",
-    statements: &[DDL_STREAMS, DDL_STREAM_GROUPS, DDL_STREAM_OFFSETS],
-}];
+pub static STREAMS_MIGRATIONS: &[Migration] = &[
+    Migration {
+        format: 1,
+        phase: Phase::Expand,
+        name: "streams, stream_groups and stream_offsets",
+        statements: &[DDL_STREAMS, DDL_STREAM_GROUPS, DDL_STREAM_OFFSETS],
+    },
+    Migration {
+        format: 2,
+        phase: Phase::Expand,
+        name: "stream_offsets.instance_tenant_id (fan-in positions)",
+        statements: &[ALTER_STREAM_OFFSETS_INSTANCE],
+    },
+];
 
 /// The `streams` module, for [`Migrator::new`].
 pub const STREAMS_MODULE: Module = Module {
@@ -241,7 +257,10 @@ fn def_of(r: &Row) -> Result<StreamDef> {
 pub struct CommittedOffset {
     /// The consumer group.
     pub group: String,
-    /// The stream.
+    /// The member whose instance `stream` is (fan-in, R9); 0 for the
+    /// tenant's own stream.
+    pub instance_tenant: u64,
+    /// The stream (in `instance_tenant`'s id space when that isn't 0).
     pub stream: StreamId,
     /// The partition.
     pub partition: PartitionNo,
@@ -438,7 +457,7 @@ impl StreamsStore {
     pub async fn delete<Q: Queryable + Send>(&self, q: &mut Q, id: StreamId) -> Result<()> {
         q.exec_drop(
             format!(
-                "DELETE FROM {} WHERE stream_id = ?",
+                "DELETE FROM {} WHERE instance_tenant_id = 0 AND stream_id = ?",
                 self.t("stream_offsets")
             ),
             (id.0,),
@@ -466,8 +485,9 @@ impl StreamsStore {
     ) -> Result<()> {
         q.exec_drop(
             format!(
-                "INSERT INTO {} (group_name, stream_id, partition_no, offset_no, leader_epoch, \
-                 metadata, committed_at) VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3)) \
+                "INSERT INTO {} (group_name, instance_tenant_id, stream_id, partition_no, \
+                 offset_no, leader_epoch, metadata, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?, \
+                 UTC_TIMESTAMP(3)) \
                  ON DUPLICATE KEY UPDATE offset_no = VALUES(offset_no), \
                  leader_epoch = VALUES(leader_epoch), metadata = VALUES(metadata), \
                  committed_at = VALUES(committed_at)",
@@ -475,6 +495,7 @@ impl StreamsStore {
             ),
             (
                 o.group.as_str(),
+                o.instance_tenant,
                 o.stream.0,
                 o.partition.0,
                 o.offset,
@@ -496,11 +517,12 @@ impl StreamsStore {
         q: &mut Q,
         group: &str,
     ) -> Result<Vec<CommittedOffset>> {
-        let rows: Vec<(u64, u32, u64, Option<u32>, Option<String>)> = q
+        let rows: Vec<(u64, u64, u32, u64, Option<u32>, Option<String>)> = q
             .exec(
                 format!(
-                    "SELECT stream_id, partition_no, offset_no, leader_epoch, metadata FROM {} \
-                     WHERE group_name = ? ORDER BY stream_id, partition_no",
+                    "SELECT instance_tenant_id, stream_id, partition_no, offset_no, leader_epoch, \
+                     metadata FROM {} WHERE group_name = ? \
+                     ORDER BY instance_tenant_id, stream_id, partition_no",
                     self.t("stream_offsets")
                 ),
                 (group,),
@@ -509,8 +531,9 @@ impl StreamsStore {
             .map_err(map_err)?;
         Ok(rows
             .into_iter()
-            .map(|(s, p, o, e, m)| CommittedOffset {
+            .map(|(it, s, p, o, e, m)| CommittedOffset {
                 group: group.to_owned(),
+                instance_tenant: it,
                 stream: StreamId(s),
                 partition: PartitionNo(p),
                 offset: o,
@@ -627,7 +650,8 @@ impl StreamsStore {
             .exec(
                 format!(
                     "SELECT partition_no, offset_no, leader_epoch, metadata FROM {} \
-                     WHERE group_name = ? AND stream_id = ? ORDER BY partition_no",
+                     WHERE group_name = ? AND instance_tenant_id = 0 AND stream_id = ? \
+                     ORDER BY partition_no",
                     self.t("stream_offsets")
                 ),
                 (group, stream.0),
@@ -638,6 +662,7 @@ impl StreamsStore {
             .into_iter()
             .map(|(p, o, e, m)| CommittedOffset {
                 group: group.to_owned(),
+                instance_tenant: 0,
                 stream,
                 partition: PartitionNo(p),
                 offset: o,

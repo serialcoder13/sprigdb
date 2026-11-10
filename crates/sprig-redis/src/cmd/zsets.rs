@@ -988,6 +988,10 @@ async fn zalgebra(
         Agg::Min => acc.min(x),
         Agg::Max => acc.max(x),
     };
+    // Chapter 04 (decision bugfix-1): combining and sorting large sets
+    // runs off the runtime's worker threads.
+    let n: usize = srcs.iter().map(|s| s.as_ref().map_or(0, Vec::len)).sum();
+    let out = sprig_common::cpu::heavy(n, move || {
     let mut out: Vec<(Vec<u8>, f64)> = Vec::new();
     match op {
         ZOp::Union => {
@@ -1040,6 +1044,8 @@ async fn zalgebra(
         }
     }
     out.sort_by(|x, y| x.1.total_cmp(&y.1).then_with(|| x.0.cmp(&y.0)));
+    out
+    });
     Ok((out, withscores))
 }
 

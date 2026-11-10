@@ -33,6 +33,10 @@ use sprig_common::{Result, SprigCode, SprigError};
 /// The procedure's name in `t<tenant>_sprig`.
 pub const PROCEDURE: &str = "__sprig_commit_offset";
 
+/// The fan-in reader's procedure (R9): [`PROCEDURE`] with the member whose
+/// instance the position is on (`stream_offsets.instance_tenant_id`).
+pub const PROCEDURE_FAN_IN: &str = "__sprig_commit_offset_fi";
+
 /// Consumer groups of triggers on streams start with this.
 pub const LOGIC_GROUP_PREFIX: &str = "__sprig_logic_";
 
@@ -94,11 +98,59 @@ pub fn procedure_sql(schema: &str) -> String {
     )
 }
 
+/// `CREATE PROCEDURE IF NOT EXISTS` of [`PROCEDURE_FAN_IN`] in catalog
+/// `schema`: a compare-and-set (or an upsert without `p_expect`) of a
+/// fan-in reader's position on member `p_instance`'s instance.
+#[must_use]
+pub fn procedure_fan_in_sql(schema: &str) -> String {
+    let t = format!("{}.stream_offsets", quote(schema));
+    format!(
+        "CREATE PROCEDURE IF NOT EXISTS {}.{} (\n\
+         IN p_group VARCHAR(255), IN p_instance BIGINT UNSIGNED, IN p_stream BIGINT UNSIGNED,\n\
+         IN p_partition INT UNSIGNED, IN p_offset BIGINT UNSIGNED, IN p_expect BIGINT)\n\
+         MODIFIES SQL DATA SQL SECURITY DEFINER\n\
+         COMMENT 'SprigDB: chapter 45 fan-in positions inside the caller''s transaction'\n\
+         BEGIN\n\
+           IF p_expect IS NULL OR p_expect < 0 THEN\n\
+             INSERT INTO {t} (group_name, instance_tenant_id, stream_id, partition_no,\n\
+                              offset_no, committed_at)\n\
+               VALUES (p_group, p_instance, p_stream, p_partition, p_offset, UTC_TIMESTAMP(3))\n\
+               ON DUPLICATE KEY UPDATE offset_no = VALUES(offset_no),\n\
+                 committed_at = VALUES(committed_at);\n\
+           ELSE\n\
+             UPDATE {t} SET offset_no = p_offset, committed_at = UTC_TIMESTAMP(3)\n\
+               WHERE group_name = p_group AND instance_tenant_id = p_instance\n\
+                 AND stream_id = p_stream AND partition_no = p_partition\n\
+                 AND offset_no = p_expect;\n\
+             IF ROW_COUNT() = 0 THEN\n\
+               SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = {MOVED_ERRNO},\n\
+                 MESSAGE_TEXT = 'ER_SPRIG_LOGIC_TRIGGER_POSITION_MOVED: the consumer group is no longer at this offset';\n\
+             END IF;\n\
+           END IF;\n\
+         END",
+        quote(schema),
+        quote(PROCEDURE_FAN_IN),
+    )
+}
+
+/// The procedure `c` calls, made if it is missing.
+#[must_use]
+pub fn procedure_for(schema: &str, c: &Commit) -> String {
+    if c.instance == 0 {
+        procedure_sql(schema)
+    } else {
+        procedure_fan_in_sql(schema)
+    }
+}
+
 /// One commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
     /// The consumer group.
     pub group: String,
+    /// The member whose instance `stream` is (a fan-in reader, R9); 0 for
+    /// the tenant's own stream.
+    pub instance: u64,
     /// The stream.
     pub stream: u64,
     /// The partition.
@@ -132,6 +184,19 @@ fn text_literal(s: &str) -> String {
 #[must_use]
 pub fn call_sql(schema: &str, c: &Commit) -> String {
     let opt_u = |v: Option<u64>| v.map_or_else(|| "NULL".to_owned(), |v| v.to_string());
+    if c.instance != 0 {
+        return format!(
+            "CALL {}.{}({}, {}, {}, {}, {}, {})",
+            quote(schema),
+            quote(PROCEDURE_FAN_IN),
+            text_literal(&c.group),
+            c.instance,
+            c.stream,
+            c.partition,
+            c.offset,
+            opt_u(c.expect),
+        );
+    }
     format!(
         "CALL {}.{}({}, {}, {}, {}, {}, {}, {})",
         quote(schema),
@@ -155,11 +220,17 @@ pub fn grant_sql(schema: &str, tenant: TenantId, user: &str) -> Vec<String> {
     let r = role(tenant);
     vec![
         procedure_sql(schema),
+        procedure_fan_in_sql(schema),
         format!("CREATE ROLE IF NOT EXISTS '{r}'"),
         format!(
             "GRANT EXECUTE ON PROCEDURE {}.{} TO '{r}'",
             quote(schema),
             quote(PROCEDURE)
+        ),
+        format!(
+            "GRANT EXECUTE ON PROCEDURE {}.{} TO '{r}'",
+            quote(schema),
+            quote(PROCEDURE_FAN_IN)
         ),
         format!("GRANT '{r}' TO '{}'@'%'", user.replace('\'', "''")),
     ]
@@ -249,13 +320,29 @@ pub async fn positions<Q: Queryable + Send>(
     group: &str,
     stream: u64,
 ) -> Result<Vec<(u32, u64)>> {
+    positions_of(q, schema, group, 0, stream).await
+}
+
+/// [`positions`] on member `instance`'s instance `stream` (a fan-in
+/// reader, R9; 0 for the tenant's own stream).
+///
+/// # Errors
+/// The backend's.
+pub async fn positions_of<Q: Queryable + Send>(
+    q: &mut Q,
+    schema: &str,
+    group: &str,
+    instance: u64,
+    stream: u64,
+) -> Result<Vec<(u32, u64)>> {
     q.exec(
         format!(
             "SELECT partition_no, offset_no FROM {}.stream_offsets \
-             WHERE group_name = ? AND stream_id = ? ORDER BY partition_no",
+             WHERE group_name = ? AND instance_tenant_id = ? AND stream_id = ? \
+             ORDER BY partition_no",
             quote(schema)
         ),
-        (group, stream),
+        (group, instance, stream),
     )
     .await
     .map_err(crate::maria::map_err)
@@ -273,15 +360,30 @@ pub async fn init_positions<Q: Queryable + Send>(
     stream: u64,
     start: &[(u32, u64)],
 ) -> Result<()> {
+    init_positions_of(q, schema, group, 0, stream, start).await
+}
+
+/// [`init_positions`] on member `instance`'s instance `stream`.
+///
+/// # Errors
+/// The backend's.
+pub async fn init_positions_of<Q: Queryable + Send>(
+    q: &mut Q,
+    schema: &str,
+    group: &str,
+    instance: u64,
+    stream: u64,
+    start: &[(u32, u64)],
+) -> Result<()> {
     for (p, o) in start {
         q.exec_drop(
             format!(
-                "INSERT IGNORE INTO {}.stream_offsets (group_name, stream_id, partition_no, \
-                 offset_no, leader_epoch, metadata, committed_at) \
-                 VALUES (?, ?, ?, ?, NULL, NULL, UTC_TIMESTAMP(3))",
+                "INSERT IGNORE INTO {}.stream_offsets (group_name, instance_tenant_id, \
+                 stream_id, partition_no, offset_no, leader_epoch, metadata, committed_at) \
+                 VALUES (?, ?, ?, ?, ?, NULL, NULL, UTC_TIMESTAMP(3))",
                 quote(schema)
             ),
-            (group, stream, *p, *o),
+            (group, instance, stream, *p, *o),
         )
         .await
         .map_err(crate::maria::map_err)?;
@@ -304,13 +406,32 @@ pub async fn advance(
     expect: u64,
     to: u64,
 ) -> Result<bool> {
+    advance_of(q, schema, group, 0, stream, partition, expect, to).await
+}
+
+/// [`advance`] on member `instance`'s instance `stream`.
+///
+/// # Errors
+/// The backend's.
+#[allow(clippy::too_many_arguments)]
+pub async fn advance_of(
+    q: &mut mysql_async::Conn,
+    schema: &str,
+    group: &str,
+    instance: u64,
+    stream: u64,
+    partition: u32,
+    expect: u64,
+    to: u64,
+) -> Result<bool> {
     q.exec_drop(
         format!(
             "UPDATE {}.stream_offsets SET offset_no = ?, committed_at = UTC_TIMESTAMP(3) \
-             WHERE group_name = ? AND stream_id = ? AND partition_no = ? AND offset_no = ?",
+             WHERE group_name = ? AND instance_tenant_id = ? AND stream_id = ? \
+             AND partition_no = ? AND offset_no = ?",
             quote(schema)
         ),
-        (to, group, stream, partition, expect),
+        (to, group, instance, stream, partition, expect),
     )
     .await
     .map_err(crate::maria::map_err)?;
@@ -365,6 +486,7 @@ mod tests {
     fn call_text_is_literal() {
         let c = Commit {
             group: "g'1".into(),
+            instance: 0,
             stream: 41,
             partition: 3,
             offset: 1206,
@@ -382,6 +504,18 @@ mod tests {
         );
         assert!(sql.contains("MYSQL_ERRNO = 39877"));
         let g = grant_sql("t9_sprig", TenantId(9), "t9_u3");
-        assert_eq!(g[3], "GRANT 't9_sprig_offsets' TO 't9_u3'@'%'");
+        assert_eq!(g[5], "GRANT 't9_sprig_offsets' TO 't9_u3'@'%'");
+        assert!(g[4].contains("`__sprig_commit_offset_fi`"));
+        // A fan-in reader's position names the member.
+        let f = Commit {
+            instance: 26_306_000_003,
+            ..c
+        };
+        assert_eq!(
+            call_sql("t9_sprig", &f),
+            "CALL `t9_sprig`.`__sprig_commit_offset_fi`(_utf8mb4 X'672731', 26306000003, 41, 3, 1206, 1205)"
+        );
+        assert!(procedure_for("t9_sprig", &f).contains("instance_tenant_id = p_instance"));
+        assert!(super::super::store::ALTER_STREAM_OFFSETS_INSTANCE.contains("ADD PRIMARY KEY (group_name, instance_tenant_id"));
     }
 }

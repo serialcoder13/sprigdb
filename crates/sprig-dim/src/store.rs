@@ -346,23 +346,32 @@ pub async fn query(
         }
         Err(e) => return Err(backend(e)),
     };
-    let mut levels = Vec::new();
-    for (j, s) in c.levels.iter().enumerate() {
-        let r = sql.query(s).await.map_err(backend)?;
-        levels.push(merge::rows_of(&c, j, &r));
+    let mut level_rows = Vec::with_capacity(c.levels.len());
+    for s in &c.levels {
+        level_rows.push(sql.query(s).await.map_err(backend)?);
     }
-    let rows = merge::merge(
-        &Spec {
-            compiled: &c,
-            measures: &q.measures,
-            order: &q.order,
-            totals: q.totals,
-            limit: q.limit,
-            max_groups,
-        },
-        merge::rows_of(&c, c.keys, &detail),
-        levels,
-    )?;
+    // Chapter 04 (decision bugfix-1): a large merge runs off the
+    // runtime's worker threads.
+    let n = detail.len() + level_rows.iter().map(Vec::len).sum::<usize>();
+    let rows = sprig_common::cpu::heavy(n, || {
+        let levels = level_rows
+            .iter()
+            .enumerate()
+            .map(|(j, r)| merge::rows_of(&c, j, r))
+            .collect();
+        merge::merge(
+            &Spec {
+                compiled: &c,
+                measures: &q.measures,
+                order: &q.order,
+                totals: q.totals,
+                limit: q.limit,
+                max_groups,
+            },
+            merge::rows_of(&c, c.keys, &detail),
+            levels,
+        )
+    })?;
     Ok(Answer { rows, compiled: c })
 }
 
@@ -426,4 +435,96 @@ pub fn drill(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use serde_json::json;
+    use sprig_kv::SqlError;
+
+    use super::*;
+
+    /// Answers the model row and a detail of `n` groups.
+    struct Fake {
+        n: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl SqlRunner for Fake {
+        async fn query(&mut self, sql: &str) -> std::result::Result<Vec<sprig_kv::Row>, SqlError> {
+            if sql.starts_with("SELECT definition") {
+                let d = json!({"model": "sales", "time_zone": "UTC",
+                    "dimensions": [{"name": "product", "table": "product", "key": "id", "levels": ["cat"]}],
+                    "facts": [{"name": "sales", "table": "sales", "key": ["id"],
+                        "links": [{"dimension": "product", "column": "product_id"}],
+                        "measures": [{"name": "revenue", "expr": "amount", "agg": "sum"}]}]});
+                return Ok(vec![vec![
+                    Some(d.to_string().into_bytes()),
+                    Some(b"1".to_vec()),
+                    Some(b"active".to_vec()),
+                ]]);
+            }
+            Ok((0..self.n)
+                .map(|i| vec![Some(format!("c{i:07}").into_bytes()), Some(b"12.50".to_vec())])
+                .collect())
+        }
+
+        async fn exec(&mut self, _sql: &str) -> std::result::Result<u64, SqlError> {
+            Ok(0)
+        }
+    }
+
+    /// Two large subtotal merges at once on a two-worker runtime leave a
+    /// ticker on it running (chapter 04, decision bugfix-1). Before they
+    /// were offloaded, each held a worker for the whole merge.
+    #[test]
+    fn large_merges_leave_the_workers_free() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let stop = Arc::new(AtomicBool::new(false));
+            let s2 = Arc::clone(&stop);
+            let ticker = tokio::spawn(async move {
+                let mut worst = Duration::ZERO;
+                let mut last = Instant::now();
+                while !s2.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    worst = worst.max(last.elapsed());
+                    last = Instant::now();
+                }
+                worst
+            });
+            let q = Query::parse(&json!({"model": "sales", "measures": ["revenue"], "totals": true,
+                "dimensions": [{"dimension": "product", "level": "cat"}]}))
+            .unwrap();
+            let run = |q: Query| {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    let t = Instant::now();
+                    let a = query(&mut Fake { n: 50_000 }, "shop", &q, 1_000_000)
+                        .await
+                        .unwrap();
+                    (a.rows.len(), t.elapsed())
+                })
+            };
+            let (a, b) = (run(q.clone()), run(q));
+            let (ra, ta) = a.await.unwrap();
+            let (rb, _) = b.await.unwrap();
+            stop.store(true, Ordering::Relaxed);
+            let worst = ticker.await.unwrap();
+            assert_eq!(ra, 50_001, "every group and the total");
+            assert_eq!(rb, 50_001);
+            assert!(
+                worst < Duration::from_millis(200),
+                "ticker stalled {worst:?} while each merge took {ta:?}"
+            );
+        });
+    }
 }

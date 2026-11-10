@@ -905,6 +905,9 @@ pub struct Acc {
     best: Option<Bson>,
     list: Vec<Bson>,
     any_num: bool,
+    /// `$addToSet`: the equality keys already in `list` (linear, not
+    /// quadratic, in the group's size).
+    seen: std::collections::HashSet<Vec<u8>>,
 }
 
 impl Acc {
@@ -918,6 +921,7 @@ impl Acc {
             best: None,
             list: Vec::new(),
             any_num: false,
+            seen: std::collections::HashSet::new(),
         }
     }
 
@@ -974,7 +978,7 @@ impl Acc {
                 }
             }
             "$addToSet" => {
-                if !missing(&v) && !self.list.iter().any(|x| equal(x, &v)) {
+                if !missing(&v) && self.seen.insert(crate::keyenc::eq_key(&v)) {
                     self.list.push(v);
                 }
             }

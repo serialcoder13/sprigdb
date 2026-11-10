@@ -416,6 +416,7 @@ pub const fn all_at(level: Level, object: ObjectType) -> ActionSet {
         (Level::Object, ObjectType::Table) => TABLE_ACTIONS,
         (Level::Object, _) => ROUTINE_ACTIONS,
         (Level::Column, _) => COLUMN_ACTIONS,
+        (Level::GraphElement, _) => ActionSet::of(&[Action::Select]),
     };
     set.minus(ActionSet::of(&[Action::GrantOption]))
 }

@@ -25,6 +25,7 @@ pub mod engine;
 pub mod filter;
 /// MongoDB's geospatial operators (chapter 36, R6 round 3).
 pub mod geo;
+pub mod heavy;
 pub mod json;
 pub mod keyenc;
 pub mod meta;

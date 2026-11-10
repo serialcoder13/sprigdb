@@ -206,7 +206,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                 }
                 Frame::Msg(m) => {
                     let more = m.flags & FLAG_MORE_TO_COME != 0;
-                    let (name, body) = st.dispatch(m).await;
+                    let (name, body) = st.guarded_dispatch(m, msg.len()).await;
                     if st.close_now {
                         return Ok(());
                     }
@@ -546,6 +546,48 @@ impl Conn {
             .ok_or_else(|| MongoError::new(code::INTERNAL_ERROR, "no session"))
     }
 
+    /// [`Self::dispatch`] guarded as SQL statements are (decision
+    /// bugfix-1, G40): a request of `gateway.large_statement_bytes` or more
+    /// runs on a blocking thread; one whose polls used 100 ms of a worker
+    /// moves to one for the rest of its way; and a stalled runtime names
+    /// the connection's session and stops its command, which answers 11601
+    /// `Interrupted`. The command's executor session is dropped then (its
+    /// backend connection closes and rolls back); the next command opens
+    /// another.
+    pub(crate) async fn guarded_dispatch(&mut self, m: OpMsg, size: usize) -> (String, Document) {
+        let threshold = usize::try_from(self.shared.large_request_bytes()).unwrap_or(usize::MAX);
+        let Some(h) = self.sql.as_ref().map(SqlSession::handle) else {
+            return crate::offload::run(size, threshold, self.dispatch(m)).await;
+        };
+        h.flags().take_kill_query();
+        let name = m
+            .body
+            .iter()
+            .next()
+            .and_then(std::result::Result::ok)
+            .map(|(k, _)| k.to_owned())
+            .unwrap_or_default();
+        let r = crate::offload::run_for(&h, size, threshold, async {
+            tokio::select! {
+                biased;
+                r = self.dispatch(m) => Some(r),
+                () = h.flags().query_killed() => None,
+            }
+        })
+        .await;
+        match r {
+            Some(r) => r,
+            None => {
+                h.flags().take_kill_query();
+                metrics::counter!("sprig_mongo_commands_total", "command" => name.clone(), "result" => "interrupted").increment(1);
+                (
+                    name,
+                    MongoError::new(code::INTERRUPTED, "operation was interrupted").to_doc(),
+                )
+            }
+        }
+    }
+
     /// Dispatches one `OP_MSG`: returns the command name and the reply.
     pub(crate) async fn dispatch(&mut self, m: OpMsg) -> (String, Document) {
         let started = std::time::Instant::now();
@@ -823,4 +865,5 @@ fn cluster_time() -> bson::Timestamp {
 mod code {
     pub(crate) use sprig_proto_mongo::errors::code::*;
     pub(crate) const PROTOCOL_ERROR_OR_AUTH: i32 = 17;
+    pub(crate) const INTERRUPTED: i32 = 11601;
 }

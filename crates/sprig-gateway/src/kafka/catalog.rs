@@ -599,7 +599,12 @@ impl GroupStore for CatalogGroups {
                     &mut tx,
                     &sprig_streams::store::CommittedOffset {
                         group: group.to_owned(),
-                        stream: sprig_streams::StreamId(o.stream_id),
+                        // A fan-in topic's position is on its member's
+                        // instance (chapter 45, R9).
+                        instance_tenant: super::data::fanin_parts(o.stream_id).map_or(0, |x| x.0),
+                        stream: sprig_streams::StreamId(
+                            super::data::fanin_parts(o.stream_id).map_or(o.stream_id, |x| x.1),
+                        ),
                         partition: sprig_streams::PartitionNo(
                             u32::try_from(o.partition).unwrap_or(0),
                         ),
@@ -627,12 +632,18 @@ impl GroupStore for CatalogGroups {
             .map_err(store_err)?;
         Ok(rows
             .into_iter()
-            .map(|o| CommittedOffset {
-                stream_id: o.stream.0,
+            .filter_map(|o| {
+                Some(CommittedOffset {
+                    stream_id: if o.instance_tenant == 0 {
+                        o.stream.0
+                    } else {
+                        super::data::fanin_id(o.instance_tenant, o.stream.0)?
+                    },
                 partition: i32::try_from(o.partition.0).unwrap_or(i32::MAX),
                 offset: i64::try_from(o.offset).unwrap_or(i64::MAX),
                 leader_epoch: o.leader_epoch.and_then(|e| i32::try_from(e).ok()),
                 metadata: o.metadata,
+                })
             })
             .filter(|c| only.is_none_or(|k| k.contains(&(c.stream_id, c.partition))))
             .collect())

@@ -363,6 +363,7 @@ impl PassSession {
             cx,
             &Commit {
                 group,
+                instance: 0,
                 stream: def.id.0,
                 partition,
                 offset,
@@ -412,7 +413,7 @@ impl PassSession {
                 if !missing {
                     return Err(moved_or(sprig_streams::maria::map_err(e)));
                 }
-                conn.query_drop(offsets::procedure_sql(&schema))
+                conn.query_drop(offsets::procedure_for(&schema, c))
                     .await
                     .map_err(sprig_streams::maria::map_err)?;
                 conn.query_drop(&call)

@@ -22,8 +22,10 @@
 //! - **Privileges.** A graph is an object with the table actions: reading
 //!   needs `SELECT`, `CREATE`/`MERGE` need `INSERT`, `SET`/`REMOVE`
 //!   `UPDATE`, `DELETE` `DELETE` on the graph or its database;
-//!   `CREATE GRAPH` needs `CREATE`, `DROP GRAPH` `DROP`. Per-label grants
-//!   (`GRANT READ ON GRAPH ... NODES ...`) are not built.
+//!   `CREATE GRAPH` needs `CREATE`, `DROP GRAPH` `DROP`. Without `SELECT`
+//!   on the graph, reads may rest on grants of single labels and types
+//!   (`GRANT READ ON GRAPH db.g NODES L`, decision G42): the statement
+//!   then sees only those, through `sprig_graph::access`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -451,6 +453,24 @@ impl GatewayGraphs {
                 },
             )
         })
+    }
+
+    /// What `g`'s grants on single labels and relationship types of graph
+    /// `graph` let it read (decision G42); `None` when they give nothing.
+    #[must_use]
+    pub fn visible(g: &dyn SessionGrants, graph: u64) -> Option<sprig_graph::access::Visible> {
+        let mut v = sprig_graph::access::Visible::default();
+        for (rels, name, a) in g.graph_elements(ObjectId(graph)) {
+            if !a.has(Action::Select) {
+                continue;
+            }
+            if rels {
+                v.types.insert(name);
+            } else {
+                v.labels.insert(name);
+            }
+        }
+        (!v.labels.is_empty() || !v.types.is_empty()).then_some(v)
     }
 
     /// Resolves `db.name` in `cat`: `None` if there is no such graph.

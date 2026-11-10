@@ -211,12 +211,17 @@ async fn data(
     let (status_code, v) = run_local(core, &caller, rpc, &m, &body, ndjson).await?;
     match v {
         Local::Json(v) => Ok(json_response(status_code, &v)),
+        Local::Rows(v, rows) => Ok(sprig_common::cpu::heavy(rows, || {
+            json_response(status_code, &v)
+        })),
         Local::Stream(resp) => Ok(resp),
     }
 }
 
 enum Local {
     Json(Value),
+    /// A SQL result of this many rows.
+    Rows(Value, usize),
     Stream(Response<Body>),
 }
 
@@ -304,11 +309,15 @@ async fn run_local(
                 return Ok((200, Local::Stream(ndjson_response(rx))));
             }
             let reply = collect(rx, api.max_buffered, engine.charge(caller)).await?;
+            // Chapter 04 (decision bugfix-1): a large buffered result is
+            // rendered, and later encoded, off the runtime's workers.
+            let rows: usize = reply.results.iter().map(|r| r.rows.len()).sum();
             if rpc == "Sql.Query" {
-                let parts = split_parts(&reply);
-                return Ok((200, Local::Json(Value::Array(parts))));
+                let parts = sprig_common::cpu::heavy(rows, || split_parts(&reply));
+                return Ok((200, Local::Rows(Value::Array(parts), rows)));
             }
-            Ok((200, Local::Json(results::execute_json(&reply))))
+            let v = sprig_common::cpu::heavy(rows, || results::execute_json(&reply));
+            Ok((200, Local::Rows(v, rows)))
         }
         "Functions.Call" => {
             // Forwarded gRPC calls say so; anything else is REST.
@@ -480,6 +489,7 @@ pub async fn forwarded(core: &Arc<Core>, req: ForwardRequest) -> ForwardReply {
         let (status_code, out) = run_local(core, &caller, &req.method, &m, &body, false).await?;
         match out {
             Local::Json(v) => Ok((status_code, v)),
+            Local::Rows(v, _) => Ok((status_code, v)),
             Local::Stream(_) => Err(SprigError::internal("a forwarded call can't stream")),
         }
     }

@@ -37,7 +37,9 @@ use sprig_graph::ast::{Clause, Query};
 use sprig_graph::bookmark::{self, Bookmark};
 use sprig_graph::catalog::backend_error;
 use sprig_graph::eval::Params;
+use sprig_graph::access::{FilteredStore, Visible};
 use sprig_graph::maria::{GraphShards, MariaStore, ShardConns, check_deleted};
+use sprig_graph::store::GraphStore;
 use sprig_proto_bolt::PackValue;
 use sprig_proto_bolt::server::{BoltFailure, BoltSession, QueryResult};
 use sprig_txn::{BeginOptions, TxnCoordinator};
@@ -104,6 +106,44 @@ struct Prepared {
     cat: Arc<TenantCatalog>,
     budgets: sprig_graph::Budgets,
     read_mode: bool,
+    /// Per-label and per-type read grants, when the graph-wide ones don't
+    /// give `SELECT` (decision G42).
+    visible: Option<Visible>,
+}
+
+/// Runs `q` on `store`, filtered by `vis` when given.
+async fn run_on(
+    store: &mut dyn GraphStore,
+    vis: Option<Visible>,
+    q: &Query,
+    p: &Params,
+    b: &sprig_graph::Budgets,
+) -> Result<sprig_graph::Output> {
+    match vis {
+        None => sprig_graph::exec::run(store, q, p, b).await,
+        Some(v) => {
+            let mut f = FilteredStore::new(store, v).await?;
+            sprig_graph::exec::run(&mut f, q, p, b).await
+        }
+    }
+}
+
+/// [`run_on`] for a streamed read.
+async fn stream_on(
+    store: &mut dyn GraphStore,
+    vis: Option<Visible>,
+    q: &Query,
+    p: &Params,
+    b: &sprig_graph::Budgets,
+    sink: &mut dyn sprig_graph::RowSink,
+) -> Result<sprig_graph::Output> {
+    match vis {
+        None => sprig_graph::run_stream(store, q, p, b, sink).await,
+        Some(v) => {
+            let mut f = FilteredStore::new(store, v).await?;
+            sprig_graph::run_stream(&mut f, q, p, b, sink).await
+        }
+    }
 }
 
 enum Prep {
@@ -573,11 +613,22 @@ impl GwSession {
         let Some(g) = graph else {
             return Err(SprigError::internal("graph missing"));
         };
+        let mut visible = None;
         for a in actions(&q) {
             if !self
                 .graphs
                 .allows(grants.as_deref(), &cat, &g.db, g.db_id, Some(g.graph_id), a)
             {
+                // Reads may rest on grants of single labels and types.
+                if a == Action::Select
+                    && g.def.kind != "mapped"
+                    && let Some(v) = grants
+                        .as_deref()
+                        .and_then(|gr| GatewayGraphs::visible(gr, g.graph_id))
+                {
+                    visible = Some(v);
+                    continue;
+                }
                 return Err(SprigError::standard(
                     1142,
                     *b"42000",
@@ -642,6 +693,7 @@ impl GwSession {
             cat,
             budgets,
             read_mode: read_mode(extra),
+            visible,
         })))
     }
 
@@ -654,6 +706,7 @@ impl GwSession {
             cat,
             budgets,
             read_mode,
+            visible,
         } = pr;
         let writes = has_writes(&q);
         if g.def.kind == "mapped" {
@@ -703,7 +756,7 @@ impl GwSession {
                                 MariaStore::new(&mut rc, layout, labels, types, dict, ids)
                                     .with_schema(indexes, None);
                             let mut sink = ChanSink { tx: tx.clone() };
-                            sprig_graph::run_stream(&mut store, &q, &p, &budgets, &mut sink).await
+                            stream_on(&mut store, visible, &q, &p, &budgets, &mut sink).await
                         };
                         rc.end().await;
                         let end = r.map(|o| summary(o.stats, None)).map_err(|e| failure(&e));
@@ -715,7 +768,7 @@ impl GwSession {
                     let mut store =
                         MariaStore::new(&mut rc, Arc::clone(&g.shards), labels, types, dict, ids)
                             .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)));
-                    sprig_graph::exec::run(&mut store, &q, &p, &budgets).await
+                    run_on(&mut store, visible.clone(), &q, &p, &budgets).await
                 };
                 rc.end().await;
                 let out = r?;
@@ -737,7 +790,7 @@ impl GwSession {
                     let mut store =
                         MariaStore::new(&mut cc, Arc::clone(&g.shards), labels, types, dict, ids)
                             .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)));
-                    sprig_graph::exec::run(&mut store, &q, &p, &budgets).await
+                    run_on(&mut store, visible.clone(), &q, &p, &budgets).await
                 };
                 match r {
                     Ok(o) => check_deleted(&mut cc, &g.shards, &o.deleted_nodes)
@@ -822,7 +875,7 @@ impl GwSession {
                     };
                     let mut store = MariaStore::new(sc, layout, labels, types, dict, ids)
                         .with_schema(indexes, None);
-                    sprig_graph::run_stream(&mut store, &q, &p, &budgets, &mut sink).await
+                    stream_on(&mut store, visible, &q, &p, &budgets, &mut sink).await
                 };
                 let _ = back_tx.send(conns);
                 let end = r.map(|o| summary(o.stats, None)).map_err(|e| failure(&e));
@@ -849,7 +902,7 @@ impl GwSession {
             };
             let mut store = MariaStore::new(sc, Arc::clone(&g.shards), labels, types, dict, ids)
                 .with_schema(g.def.indexes.clone(), Some(ops));
-            sprig_graph::exec::run(&mut store, &q, &p, &budgets).await
+            run_on(&mut store, visible.clone(), &q, &p, &budgets).await
         };
         let Some(t) = self.tx.as_mut() else {
             return Err(SprigError::internal("no transaction"));

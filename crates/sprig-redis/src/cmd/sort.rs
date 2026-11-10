@@ -80,24 +80,17 @@ pub async fn sort(cx: &mut Ctx<'_>, a: &[Bytes], ro: bool) -> R<Frame> {
     let is_set = row.as_ref().is_some_and(|r| r.t == KeyType::Set);
     // Redis sorts a set even with BY nosort, so the output is stable.
     if !nosort || is_set {
-        if alpha {
-            items.sort();
-        } else {
-            let mut keyed = Vec::with_capacity(items.len());
-            for it in items {
-                let Some(v) = parse_f64(&it) else {
-                    return fail(Frame::err(
-                        "One or more scores can't be converted into double",
-                    ));
-                };
-                keyed.push((v, it));
+        // Chapter 04 (decision bugfix-1): a large sort runs off the
+        // runtime's worker threads.
+        let n = items.len();
+        items = match sprig_common::cpu::heavy(n, || sorted(items, alpha, desc)) {
+            Some(v) => v,
+            None => {
+                return fail(Frame::err(
+                    "One or more scores can't be converted into double",
+                ));
             }
-            keyed.sort_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.1.cmp(&y.1)));
-            items = keyed.into_iter().map(|(_, it)| it).collect();
-        }
-        if desc {
-            items.reverse();
-        }
+        };
     }
     if let Some((o, c)) = limit {
         let len = items.len() as i64;
@@ -114,4 +107,37 @@ pub async fn sort(cx: &mut Ctx<'_>, a: &[Bytes], ro: bool) -> R<Frame> {
     Ok(Frame::Array(
         items.into_iter().map(|v| Frame::Bulk(v.into())).collect(),
     ))
+}
+
+/// `items` sorted as `SORT` does: as numbers (`None` when one isn't),
+/// equal numbers by their bytes, or as bytes with `ALPHA`; reversed for
+/// `DESC`.
+fn sorted(mut items: Vec<Vec<u8>>, alpha: bool, desc: bool) -> Option<Vec<Vec<u8>>> {
+    if alpha {
+        items.sort();
+    } else {
+        let mut keyed = Vec::with_capacity(items.len());
+        for it in items {
+            keyed.push((parse_f64(&it)?, it));
+        }
+        keyed.sort_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.1.cmp(&y.1)));
+        items = keyed.into_iter().map(|(_, it)| it).collect();
+    }
+    if desc {
+        items.reverse();
+    }
+    Some(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sorted;
+
+    #[test]
+    fn sorts_as_redis_does() {
+        let v = |s: &[&str]| s.iter().map(|x| x.as_bytes().to_vec()).collect::<Vec<_>>();
+        assert_eq!(sorted(v(&["10", "9", "2.5", "-1"]), false, false), Some(v(&["-1", "2.5", "9", "10"])));
+        assert_eq!(sorted(v(&["10", "9", "a"]), true, true), Some(v(&["a", "9", "10"])));
+        assert_eq!(sorted(v(&["1", "x"]), false, false), None);
+    }
 }

@@ -44,6 +44,9 @@ pub struct StreamSource {
     catalog: Pool,
     catalog_schema: String,
     log: LogReader,
+    /// The member whose instance `stream` is (a fan-in sink, R9); 0 for
+    /// the sink's own tenant's stream.
+    instance: u64,
     stream: StreamId,
     partitions: Vec<u32>,
     group: String,
@@ -81,6 +84,40 @@ impl StreamSource {
         start: StartAt,
         sink: SinkId,
     ) -> Result<Self> {
+        Self::open_instance(
+            shard,
+            catalog,
+            catalog_schema,
+            log_schema,
+            0,
+            stream,
+            partitions,
+            group,
+            start,
+            sink,
+        )
+        .await
+    }
+
+    /// [`Self::open`] over member `instance`'s instance `stream` (a fan-in
+    /// sink, chapter 51): `shard` is the member's cluster, the positions
+    /// are the sink's, in its own catalog, with `instance_tenant_id`.
+    ///
+    /// # Errors
+    /// The catalog's or the shard's.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_instance(
+        shard: Pool,
+        catalog: Pool,
+        catalog_schema: String,
+        log_schema: String,
+        instance: u64,
+        stream: StreamId,
+        partitions: Vec<u32>,
+        group: String,
+        start: StartAt,
+        sink: SinkId,
+    ) -> Result<Self> {
         let log = LogReader { schema: log_schema };
         let store = StreamsStore::new(catalog_schema.clone());
         let mut c = catalog.get_conn().await.map_err(backend)?;
@@ -91,7 +128,9 @@ impl StreamSource {
         for p in &partitions {
             if let Some(o) = committed
                 .iter()
-                .find(|o| o.stream == stream && o.partition.0 == *p)
+                .find(|o| {
+                    o.instance_tenant == instance && o.stream == stream && o.partition.0 == *p
+                })
             {
                 at.insert(*p, o.offset);
                 continue;
@@ -114,6 +153,7 @@ impl StreamSource {
                     &mut c,
                     &CommittedOffset {
                         group: group.clone(),
+                        instance_tenant: instance,
                         stream,
                         partition: PartitionNo(p),
                         offset: o,
@@ -128,6 +168,7 @@ impl StreamSource {
             catalog,
             catalog_schema,
             log,
+            instance,
             stream,
             partitions,
             group,
@@ -278,6 +319,7 @@ impl SourceReader for StreamSource {
                     &mut c,
                     &CommittedOffset {
                         group: self.group.clone(),
+                        instance_tenant: self.instance,
                         stream: self.stream,
                         partition: PartitionNo(p),
                         offset: o,

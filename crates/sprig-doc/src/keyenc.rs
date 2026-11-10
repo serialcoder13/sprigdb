@@ -417,6 +417,16 @@ pub fn equal(a: &Bson, b: &Bson) -> bool {
     compare(a, b) == Ordering::Equal
 }
 
+/// A hash key for [`equal`]: two values are equal exactly when their
+/// keys are (null and undefined share one), for hash sets and joins.
+#[must_use]
+pub fn eq_key(v: &Bson) -> Vec<u8> {
+    if cmp_class(v) == class::NULL {
+        return vec![class::NULL];
+    }
+    key(v)
+}
+
 /// Inverts every byte (descending key components).
 pub fn complement(k: &mut [u8]) {
     for b in k {

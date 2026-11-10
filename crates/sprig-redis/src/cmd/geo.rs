@@ -399,23 +399,31 @@ async fn run_search(cx: &mut Ctx<'_>, src: &[u8], mut s: Search) -> R<Frame> {
     }
     let (cx0, cy0) = s.center.unwrap_or((0.0, 0.0));
     let shape = s.shape.unwrap_or(Shape::Radius(0.0));
+    if s.count.is_some_and(|(_, any)| !any) && s.sort.is_none() {
+        s.sort = Some(true);
+    }
+    // Chapter 04 (decision bugfix-1): testing and sorting a large set's
+    // members runs off the runtime's worker threads.
+    let n = all.len();
+    let (conv, sort) = (s.conv, s.sort);
+    let mut hits = sprig_common::cpu::heavy(n, move || {
     let mut hits = Vec::new();
     for (m, sc) in all {
         let (x, y) = decode(sc as u64);
         let d = match shape {
             Shape::Radius(r) => {
                 let d = distance(cx0, cy0, x, y);
-                if d > r * s.conv {
+                if d > r * conv {
                     continue;
                 }
                 d
             }
             Shape::Box(w, h) => {
                 let lat_d = EARTH_RADIUS * (rad(cy0) - rad(y)).abs();
-                if lat_d > h * s.conv / 2.0 {
+                if lat_d > h * conv / 2.0 {
                     continue;
                 }
-                if distance(x, y, cx0, y) > w * s.conv / 2.0 {
+                if distance(x, y, cx0, y) > w * conv / 2.0 {
                     continue;
                 }
                 distance(cx0, cy0, x, y)
@@ -423,14 +431,13 @@ async fn run_search(cx: &mut Ctx<'_>, src: &[u8], mut s: Search) -> R<Frame> {
         };
         hits.push((m, sc, d, x, y));
     }
-    if s.count.is_some_and(|(_, any)| !any) && s.sort.is_none() {
-        s.sort = Some(true);
-    }
-    match s.sort {
+    match sort {
         Some(true) => hits.sort_by(|a, b| a.2.total_cmp(&b.2)),
         Some(false) => hits.sort_by(|a, b| b.2.total_cmp(&a.2)),
         None => {}
     }
+    hits
+    });
     if let Some((n, _)) = s.count {
         hits.truncate(usize::try_from(n).unwrap_or(usize::MAX));
     }

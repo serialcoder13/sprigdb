@@ -804,7 +804,7 @@ impl Engine {
         let mut docs = self
             .scan(sql, ns, &m.table, &pred, &sqlp, self.cfg.max_sort_bytes)
             .await?;
-        agg::sort_docs(&mut docs, &sort);
+        crate::heavy::run(docs.len(), || agg::sort_docs(&mut docs, &sort));
         let skip = usize::try_from(spec.skip).unwrap_or(usize::MAX);
         let docs: Vec<Document> = docs
             .into_iter()
@@ -1237,7 +1237,7 @@ impl Engine {
             let mut docs = self
                 .scan(sql, ns, &m.table, pred, sqlp, self.cfg.max_sort_bytes)
                 .await?;
-            agg::sort_docs(&mut docs, &spec);
+            crate::heavy::run(docs.len(), || agg::sort_docs(&mut docs, &spec));
             return Ok(docs.into_iter().next());
         }
         let mut last = None;
@@ -1866,7 +1866,8 @@ impl Engine {
                     }
                     Vec::new()
                 }
-                _ => agg::run_stage(docs, s, &lim)?,
+                // A large set leaves the worker thread (heavy::HEAVY_DOCS).
+                _ => crate::heavy::run(docs.len(), || agg::run_stage(docs, s, &lim))?,
             };
         }
         models::strip_scores(&mut docs);
@@ -1978,7 +1979,11 @@ impl Engine {
             .map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect())
             .unwrap_or_default();
         let mut out = Vec::with_capacity(docs.len());
-        // Batches of input documents query the foreign side with $in.
+        let mut bytes = 0usize;
+        // Batches of input documents query the foreign side with $in;
+        // each batch joins through a hash of the foreign values (equality
+        // keys), not a nested loop, and the output counts against
+        // `doc.agg_stage_memory_bytes`.
         for chunk in docs.chunks(500) {
             let foreign_docs = match (local, foreign) {
                 (Some(l), Some(f)) => {
@@ -2000,38 +2005,88 @@ impl Engine {
                 }
                 _ => Box::pin(self.aggregate(sql, &fns, &pipe)).await?,
             };
-            for d in chunk {
-                let matched: Vec<Bson> = match (local, foreign) {
-                    (Some(l), Some(f)) => {
-                        let lv = filter::values_at(d, l);
-                        foreign_docs
-                            .iter()
-                            .filter(|fd| {
-                                let fv = filter::values_at(fd, f);
-                                if lv.vals.is_empty() {
-                                    return fv.vals.is_empty()
-                                        || fv.vals.iter().any(|x| matches!(x, Bson::Null));
-                                }
-                                lv.vals
-                                    .iter()
-                                    .any(|a| fv.vals.iter().any(|b| crate::keyenc::equal(a, b)))
-                            })
-                            .map(|x| Bson::Document(x.clone()))
-                            .collect()
-                    }
-                    _ => foreign_docs
-                        .iter()
-                        .map(|x| Bson::Document(x.clone()))
-                        .collect(),
-                };
-                let mut n = d.clone();
-                update::set_path(&mut n, as_f, Bson::Array(matched))?;
-                out.push(n);
-            }
+            let joined = crate::heavy::run(chunk.len() * foreign_docs.len().max(1), || {
+                join_chunk(chunk, &foreign_docs, local.zip(foreign), as_f, lim, &mut bytes)
+            })?;
+            out.extend(joined);
         }
-        let _ = lim;
         Ok(out)
     }
+}
+
+/// One batch of `$lookup`: each local document with the foreign
+/// documents whose `foreign` values equal one of its `local` values
+/// (a missing or null local value matches missing or null foreign ones),
+/// in foreign order; every foreign document without fields.
+fn join_chunk(
+    chunk: &[Document],
+    foreign_docs: &[Document],
+    fields: Option<(&str, &str)>,
+    as_f: &str,
+    lim: &AggLimits,
+    bytes: &mut usize,
+) -> Result<Vec<Document>, MongoError> {
+    let null_key = crate::keyenc::eq_key(&Bson::Null);
+    // Foreign values to the positions of their documents.
+    let mut index: std::collections::HashMap<Vec<u8>, Vec<usize>> =
+        std::collections::HashMap::new();
+    if let Some((_, f)) = fields {
+        for (i, fd) in foreign_docs.iter().enumerate() {
+            let fv = filter::values_at(fd, f);
+            if fv.vals.is_empty() {
+                index.entry(null_key.clone()).or_default().push(i);
+            }
+            for v in fv.vals {
+                let e = index.entry(crate::keyenc::eq_key(v)).or_default();
+                if e.last() != Some(&i) {
+                    e.push(i);
+                }
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(chunk.len());
+    for d in chunk {
+        let matched: Vec<Bson> = match fields {
+            Some((l, _)) => {
+                let lv = filter::values_at(d, l);
+                let mut hits: Vec<usize> = Vec::new();
+                if lv.vals.is_empty() {
+                    if let Some(v) = index.get(&null_key) {
+                        hits.extend(v);
+                    }
+                } else {
+                    for v in lv.vals {
+                        if let Some(v) = index.get(&crate::keyenc::eq_key(v)) {
+                            hits.extend(v);
+                        }
+                    }
+                }
+                hits.sort_unstable();
+                hits.dedup();
+                hits.into_iter()
+                    .map(|i| Bson::Document(foreign_docs[i].clone()))
+                    .collect()
+            }
+            None => foreign_docs
+                .iter()
+                .map(|x| Bson::Document(x.clone()))
+                .collect(),
+        };
+        let mut n = d.clone();
+        update::set_path(&mut n, as_f, Bson::Array(matched))?;
+        *bytes += bson::to_vec(&n).map_or(0, |v| v.len());
+        if *bytes > lim.stage_bytes {
+            return Err(MongoError::new(
+                code::QUERY_EXCEEDED_MEMORY_LIMIT,
+                format!(
+                    "$lookup exceeded memory limit of {} bytes (doc.agg_stage_memory_bytes)",
+                    lim.stage_bytes
+                ),
+            ));
+        }
+        out.push(n);
+    }
+    Ok(out)
 }
 
 /// What one update statement did.

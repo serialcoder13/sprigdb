@@ -245,6 +245,16 @@ impl Shared {
             .is_some_and(|(l, dc)| l.get(&failpoint::TEST_COMMANDS, &SettingCtx::process(dc)))
     }
 
+    /// `gateway.large_statement_bytes`: requests this big run on a
+    /// blocking thread ([`crate::offload`]).
+    #[must_use]
+    pub fn large_request_bytes(&self) -> u64 {
+        match &self.d.live {
+            Some((l, dc)) => l.get(&crate::offload::LARGE_STATEMENT_BYTES, &SettingCtx::process(dc)),
+            None => crate::offload::LARGE_STATEMENT_BYTES.default,
+        }
+    }
+
     /// The settings now.
     #[must_use]
     pub fn settings(&self) -> MongoSettings {

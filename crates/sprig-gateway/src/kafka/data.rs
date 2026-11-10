@@ -60,6 +60,8 @@ use crate::tenant::TenantServices;
 // Chapter 42 (R9): inherited streams over Kafka.
 mod inherit;
 
+pub(crate) use inherit::{FANIN_PREFIX, fanin_id, fanin_parts};
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -136,9 +138,11 @@ impl Marks {
     fn beyond(&self, tenant: u64, wants: &[(u64, i32, i64)]) -> bool {
         let m = lock(&self.map);
         wants.iter().any(|(s, p, o)| {
+            // A fan-in topic's marks are its member's.
+            let (tenant, s) = fanin_parts(*s).unwrap_or((tenant, *s));
             u32::try_from(*p)
                 .ok()
-                .and_then(|p| m.get(&(tenant, *s, p)))
+                .and_then(|p| m.get(&(tenant, s, p)))
                 .is_some_and(|hw| i64::try_from(*hw).is_ok_and(|hw| hw > *o))
         })
     }
@@ -424,6 +428,10 @@ impl GatewayData {
     }
 
     async fn resolve_t(&self, p: &Principal, t: &DataTopic) -> Result<Resolved, TopicError> {
+        // Chapter 42 (R9): a fan-in topic reads its member's instance.
+        if fanin_parts(t.stream_id).is_some() {
+            return self.resolve_fanin(t).await;
+        }
         // The caller resolved it with its access already; again for the
         // tables' places (cached snapshot).
         let cat = self.catalog(p).await?;
@@ -540,6 +548,9 @@ impl StreamData for GatewayData {
         name: &str,
         access: Access,
     ) -> Result<DataTopic, TopicError> {
+        if name.starts_with(FANIN_PREFIX) {
+            return self.fanin_topic(p, name, access == Access::Write).await;
+        }
         match self.resolve(p, name, access).await {
             // Chapter 42 (R9): an inherited stream's topic.
             Err(e) if e.code == err::UNKNOWN_TOPIC_OR_PARTITION => {
@@ -566,6 +577,12 @@ impl StreamData for GatewayData {
         let no = || TopicError::new(err::UNKNOWN_TOPIC_ID, format!("no topic with id {id}"));
         if tenant != p.tenant_id {
             return Err(no());
+        }
+        if fanin_parts(stream).is_some() {
+            return self
+                .fanin_topic_by_id(p, stream, access == Access::Write)
+                .await
+                .map_err(|_| no());
         }
         let cat = self.catalog(p).await?;
         let state = cat
@@ -742,7 +759,7 @@ impl StreamData for GatewayData {
     ) -> Result<Bounds, TopicError> {
         let r = self.resolve_t(p, t).await?;
         let reader = Self::log_reader(&r, partition)?;
-        let mut c = self.conn(p.tenant_id).await?;
+        let mut c = self.conn(r.cat.tenant.0).await?;
         let b = reader
             .bounds(&mut c, r.def.id, Self::part(partition)?)
             .await
@@ -766,7 +783,7 @@ impl StreamData for GatewayData {
                 format!("39947 ER_SPRIG_STREAM_OFFSET_OUT_OF_RANGE: offset {offset}"),
             )
         })?;
-        let mut c = self.conn(p.tenant_id).await?;
+        let mut c = self.conn(r.cat.tenant.0).await?;
         let lim = ReadLimits {
             max_records: u32::try_from((max_bytes / 32).clamp(1, 10_000)).unwrap_or(10_000),
             max_bytes: u64::try_from(max_bytes).unwrap_or(u64::MAX),
@@ -815,7 +832,7 @@ impl StreamData for GatewayData {
     ) -> Result<Option<(i64, i64)>, TopicError> {
         let r = self.resolve_t(p, t).await?;
         let reader = Self::log_reader(&r, partition)?;
-        let mut c = self.conn(p.tenant_id).await?;
+        let mut c = self.conn(r.cat.tenant.0).await?;
         let found = reader
             .offset_for_time(
                 &mut c,
@@ -840,7 +857,7 @@ impl StreamData for GatewayData {
         }
         let r = self.resolve_t(p, t).await?;
         let reader = Self::log_reader(&r, partition)?;
-        let mut c = self.conn(p.tenant_id).await?;
+        let mut c = self.conn(r.cat.tenant.0).await?;
         let (e, o) = reader
             .epoch_end(
                 &mut c,

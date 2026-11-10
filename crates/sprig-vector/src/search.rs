@@ -306,40 +306,12 @@ pub async fn search(
             .await
             .map_err(backend)?;
         let returned = rows.len();
-        let mut kept: Vec<Row> = Vec::with_capacity(returned.min(k * 4));
-        for r in rows {
-            let id = r.first().and_then(Clone::clone).unwrap_or_default();
-            let d = cell_f64(r.get(1).and_then(Option::as_ref));
-            let doc = metadata_doc(
-                r.get(2).and_then(Option::as_deref),
-                r.get(3).and_then(Option::as_deref),
-            );
-            let loc = if def.geo {
-                match (
-                    r.get(4).and_then(Option::as_ref),
-                    r.get(5).and_then(Option::as_ref),
-                ) {
-                    (Some(a), Some(b)) => Some((cell_f64(Some(a)), cell_f64(Some(b)))),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            if let Some(pred) = &residual
-                && !pred.matches(&doc)
-            {
-                continue;
-            }
-            if let Some(g) = geo
-                && !loc.is_some_and(|(la, lo)| g.contains(la, lo))
-            {
-                continue;
-            }
-            kept.push(Row { id, d, doc, loc });
-            if !p.approximate() && kept.len() == k {
-                break;
-            }
-        }
+        // Chapter 04 (decision bugfix-1): an exact search with a residual
+        // filter reads every row the pushed filter passes; decoding and
+        // testing them runs off the runtime's worker threads.
+        let mut kept = sprig_common::cpu::heavy(returned, || {
+            keep_rows(rows, def, residual.as_ref(), geo, k, p.approximate())
+        });
         if p.approximate() {
             kept.sort_by(|a, b| a.d.total_cmp(&b.d).then_with(|| a.id.cmp(&b.id)));
             kept.truncate(k);
@@ -370,6 +342,94 @@ pub async fn search(
     }
 }
 
+/// The rows of one search statement that pass the residual filter and the
+/// exact geo test, decoded; an exact plan stops at `k`.
+fn keep_rows(
+    rows: Vec<sprig_kv::Row>,
+    def: &IndexDef,
+    residual: Option<&Pred>,
+    geo: Option<&dyn GeoFilter>,
+    k: usize,
+    approximate: bool,
+) -> Vec<Row> {
+    let mut kept: Vec<Row> = Vec::with_capacity(rows.len().min(k * 4));
+    for r in rows {
+        let id = r.first().and_then(Clone::clone).unwrap_or_default();
+        let d = cell_f64(r.get(1).and_then(Option::as_ref));
+        let doc = metadata_doc(
+            r.get(2).and_then(Option::as_deref),
+            r.get(3).and_then(Option::as_deref),
+        );
+        let loc = if def.geo {
+            match (
+                r.get(4).and_then(Option::as_ref),
+                r.get(5).and_then(Option::as_ref),
+            ) {
+                (Some(a), Some(b)) => Some((cell_f64(Some(a)), cell_f64(Some(b)))),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(pred) = residual
+            && !pred.matches(&doc)
+        {
+            continue;
+        }
+        if let Some(g) = geo
+            && !loc.is_some_and(|(la, lo)| g.contains(la, lo))
+        {
+            continue;
+        }
+        kept.push(Row { id, d, doc, loc });
+        if !approximate && kept.len() == k {
+            break;
+        }
+    }
+    kept
+}
+
+/// `(id, vector)` of the rows `id, VEC_ToText(v)`, decoded off the
+/// runtime's worker threads when there are many.
+fn decode_vectors(rows: Vec<sprig_kv::Row>) -> Vec<(Vec<u8>, Vec<f32>)> {
+    sprig_common::cpu::heavy(rows.len(), || {
+        rows.into_iter()
+            .filter_map(|r| {
+                let id = r.first()?.clone()?;
+                let t = String::from_utf8(r.get(1)?.clone()?).ok()?;
+                let v: Vec<f32> = serde_json::from_str(&t).ok()?;
+                Some((id, v))
+            })
+            .collect()
+    })
+}
+
+/// About `n` items' ids and vectors, spread evenly over the index by id:
+/// MariaDB picks every `step`-th row, so only the sample travels and is
+/// decoded (chapter 34's recall check).
+///
+/// # Errors
+/// The backend's.
+pub async fn sample_vectors(
+    sql: &mut dyn SqlRunner,
+    def: &IndexDef,
+    rows: u64,
+    n: usize,
+) -> Result<Vec<(Vec<u8>, Vec<f32>)>> {
+    let n = n.max(1);
+    let step = (rows / n as u64).max(1);
+    let got = sql
+        .query(&format!(
+            "SELECT id, VEC_ToText(v) FROM (SELECT id, v, \
+             ROW_NUMBER() OVER (ORDER BY id) AS _n FROM {}) x \
+             WHERE MOD(_n - 1, {step}) = 0 ORDER BY _n LIMIT {n}",
+            def.table()
+        ))
+        .await
+        .map_err(backend)?;
+    Ok(decode_vectors(got))
+}
+
 /// Every item's id and vector (recall validation and tests).
 ///
 /// # Errors
@@ -382,15 +442,7 @@ pub async fn all_vectors(
         .query(&format!("SELECT id, VEC_ToText(v) FROM {}", def.table()))
         .await
         .map_err(backend)?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|r| {
-            let id = r.first()?.clone()?;
-            let t = String::from_utf8(r.get(1)?.clone()?).ok()?;
-            let v: Vec<f32> = serde_json::from_str(&t).ok()?;
-            Some((id, v))
-        })
-        .collect())
+    Ok(decode_vectors(rows))
 }
 
 /// Chapter 34's automatic graph for an `ann_mode = auto` index: once it
@@ -411,15 +463,15 @@ pub async fn auto_ann(
     if def.ann_mode != AnnMode::Auto || def.ann_state == AnnState::Ready {
         return Ok(None);
     }
-    if crate::index::rows(sql, def).await? < s.ann_min_rows {
+    let rows = crate::index::rows(sql, def).await?;
+    if rows < s.ann_min_rows {
         return Ok(None);
     }
     set_ann(sql, def, true).await?;
-    let all = all_vectors(sql, def).await?;
-    let step = (all.len() / samples.max(1)).max(1);
+    let picked = sample_vectors(sql, def, rows, samples).await?;
     let mut total = 0.0;
     let mut n = 0;
-    for (_, q) in all.iter().step_by(step).take(samples) {
+    for (_, q) in picked.iter().take(samples) {
         let exact = search(
             sql,
             def,
@@ -461,4 +513,160 @@ pub async fn auto_ann(
     }
     set_ann(sql, def, keep).await?;
     Ok(Some(recall))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use sprig_kv::SqlError;
+
+    use super::*;
+    use crate::index::{AnnMode, Similarity};
+
+    /// Answers every search with `n` rows and records the statements.
+    struct Fake {
+        n: usize,
+        sent: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl SqlRunner for Fake {
+        async fn query(&mut self, sql: &str) -> std::result::Result<Vec<sprig_kv::Row>, SqlError> {
+            self.sent.push(sql.to_owned());
+            Ok((0..self.n)
+                .map(|i| {
+                    vec![
+                        Some(format!("id{i:07}").into_bytes()),
+                        Some(b"0.5".to_vec()),
+                        None,
+                        None,
+                        Some(b"19.0".to_vec()),
+                        Some(b"72.8".to_vec()),
+                    ]
+                })
+                .collect())
+        }
+
+        async fn exec(&mut self, _sql: &str) -> std::result::Result<u64, SqlError> {
+            Ok(0)
+        }
+    }
+
+    /// A region nothing is inside, slow enough per row to show a stall.
+    struct Nowhere;
+
+    impl GeoFilter for Nowhere {
+        fn ranges(&self) -> Vec<(u64, u64)> {
+            vec![(1, 2)]
+        }
+
+        fn contains(&self, lat: f64, _lng: f64) -> bool {
+            let until = Instant::now() + Duration::from_micros(10);
+            let mut x = lat;
+            while Instant::now() < until {
+                x = x.mul_add(1.000_001, 0.5);
+            }
+            x < -1e300
+        }
+    }
+
+    fn def() -> IndexDef {
+        IndexDef::new("shop", "emb", 2, Similarity::Cosine, 16, AnnMode::Off, true).unwrap()
+    }
+
+    /// Two exact searches whose geo test reads 100,000 rows each, at once
+    /// on a two-worker runtime, leave a ticker running (chapter 04,
+    /// decision bugfix-1): the residual loop runs off the workers.
+    #[test]
+    fn residual_loops_leave_the_workers_free() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let stop = Arc::new(AtomicBool::new(false));
+            let s2 = Arc::clone(&stop);
+            let ticker = tokio::spawn(async move {
+                let mut worst = Duration::ZERO;
+                let mut last = Instant::now();
+                while !s2.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    worst = worst.max(last.elapsed());
+                    last = Instant::now();
+                }
+                worst
+            });
+            let run = || {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    let mut sql = Fake {
+                        n: 100_000,
+                        sent: Vec::new(),
+                    };
+                    let spec = SearchSpec {
+                        query: vec![1.0, 0.0],
+                        k: 5,
+                        num_candidates: None,
+                        exact: true,
+                        filter: None,
+                        geo: Some(Box::new(Nowhere)),
+                    };
+                    let t = Instant::now();
+                    let out = search(&mut sql, &def(), &spec, &Settings::default())
+                        .await
+                        .unwrap();
+                    (out.hits.len(), t.elapsed())
+                })
+            };
+            let (a, b) = (run(), run());
+            let (ha, ta) = a.await.unwrap();
+            let (hb, _) = b.await.unwrap();
+            stop.store(true, Ordering::Relaxed);
+            let worst = ticker.await.unwrap();
+            assert_eq!((ha, hb), (0, 0));
+            assert!(
+                worst < Duration::from_millis(200),
+                "ticker stalled {worst:?} while each search took {ta:?}"
+            );
+        });
+    }
+
+    /// The recall check's sample is picked by MariaDB: every 50th of 1,000
+    /// rows, 20 of them, decoded.
+    #[tokio::test]
+    async fn samples_are_picked_in_sql() {
+        struct Two(Vec<String>);
+        #[async_trait::async_trait]
+        impl SqlRunner for Two {
+            async fn query(
+                &mut self,
+                sql: &str,
+            ) -> std::result::Result<Vec<sprig_kv::Row>, SqlError> {
+                self.0.push(sql.to_owned());
+                Ok(vec![
+                    vec![Some(b"a".to_vec()), Some(b"[1,2]".to_vec())],
+                    vec![Some(b"b".to_vec()), Some(b"[0.5,-1]".to_vec())],
+                ])
+            }
+            async fn exec(&mut self, _sql: &str) -> std::result::Result<u64, SqlError> {
+                Ok(0)
+            }
+        }
+        let mut sql = Two(Vec::new());
+        let got = sample_vectors(&mut sql, &def(), 1000, 20).await.unwrap();
+        assert_eq!(
+            got,
+            [
+                (b"a".to_vec(), vec![1.0, 2.0]),
+                (b"b".to_vec(), vec![0.5, -1.0])
+            ]
+        );
+        let q = &sql.0[0];
+        assert!(q.contains("WHERE MOD(_n - 1, 50) = 0 ORDER BY _n LIMIT 20"), "{q}");
+        assert!(q.starts_with("SELECT id, VEC_ToText(v) FROM (SELECT id, v,"), "{q}");
+    }
 }

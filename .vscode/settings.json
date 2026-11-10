@@ -1,0 +1,21 @@
+{
+  // Keep VS Code's search and file watcher out of build output, agent work dirs and
+  // runtime state. target/ alone holds tens of GB (agents' builds, downloaded suites),
+  // and a workspace search over it spawned ~580 ripgrep processes on 10 Nov 2026.
+  "search.exclude": {
+    "**/target": true,
+    "**/node_modules": true,
+    "studio/dist": true,
+    "deploy/compose/.gateway-dev": true,
+    "deploy/compose/m07/.state": true
+  },
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/node_modules/**": true,
+    "studio/dist/**": true,
+    "deploy/compose/.gateway-dev/**": true,
+    "deploy/compose/m07/.state/**": true
+  },
+  "search.followSymlinks": false,
+  "rust-analyzer.files.excludeDirs": ["target", "studio/node_modules"]
+}

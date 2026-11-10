@@ -326,6 +326,13 @@ impl GatewayData {
     /// exists), or the declaring tenant's definition topic; `None` for
     /// anything else, or one the principal may neither read nor write.
     pub(crate) async fn inherited_info(&self, p: &Principal, name: &str) -> Option<InheritedTopic> {
+        if name.starts_with(FANIN_PREFIX) {
+            let t = self.fanin_topic(p, name, false).await.ok()?;
+            return Some(InheritedTopic {
+                stream_id: t.stream_id,
+                partitions: t.partitions,
+            });
+        }
         let (db, stream) = sprig_proto_kafka::mem::split_topic(name).ok()?;
         let cat = self.catalog(p).await.ok()?;
         let chain = inherited::chain(&self.svc, &cat).await.ok()?;
@@ -388,8 +395,313 @@ impl GatewayData {
                 out.push(format!("{}.{}", d.db_name, d.name));
             }
         }
+        // Fan-in topics of the members below (SPRIG_FAN_IN).
+        out.extend(self.fanin_names(p).await);
         out.sort();
         out.dedup();
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fan-in topics (chapter 45, "The Kafka view"; chapter 42, "Fan-in"; R9,
+// r9next): in an ancestor P holding SPRIG_FAN_IN and SELECT on an inherited
+// stream's name, each existing instance of a descendant member T is also
+// the read-only topic `__t.<T>.<db>.<stream>`. A consumer group subscribing
+// to the pattern `__t\..*\.<db>\.<stream>` reads every member; its offsets
+// go to P's `stream_offsets` with `instance_tenant_id = T`. The topic's
+// stream id carries the member: [`FANIN_FLAG`] | T << 24 | the instance's
+// stream id in T, so the broker's group code (keyed by stream id) needs no
+// change. Members whose residency sets `deny_remote_access` are left out.
+// ---------------------------------------------------------------------------
+
+/// Marks a fan-in topic's stream id.
+pub(crate) const FANIN_FLAG: u64 = 1 << 62;
+/// A fan-in topic's name starts with this.
+pub(crate) const FANIN_PREFIX: &str = "__t.";
+const FANIN_STREAM_BITS: u32 = 24;
+const FANIN_TENANT_LIMIT: u64 = 1 << 38;
+
+/// The stream id of member `member`'s instance stream `stream` as a fan-in
+/// topic; `None` when the ids don't fit (tenant ids up to 2^38, instance
+/// stream ids up to 2^24).
+#[must_use]
+pub(crate) fn fanin_id(member: u64, stream: u64) -> Option<u64> {
+    (member < FANIN_TENANT_LIMIT && stream < (1 << FANIN_STREAM_BITS))
+        .then_some(FANIN_FLAG | (member << FANIN_STREAM_BITS) | stream)
+}
+
+/// `(member, stream)` of a fan-in topic's stream id.
+#[must_use]
+pub(crate) fn fanin_parts(id: u64) -> Option<(u64, u64)> {
+    (id & FANIN_FLAG != 0 && id & DEF_FLAG == 0).then(|| {
+        (
+            (id & !FANIN_FLAG) >> FANIN_STREAM_BITS,
+            id & ((1 << FANIN_STREAM_BITS) - 1),
+        )
+    })
+}
+
+/// `__t.<tenant>.<db>.<stream>`.
+#[must_use]
+pub(crate) fn fanin_name(tenant: &str, db: &str, stream: &str) -> String {
+    format!("{FANIN_PREFIX}{tenant}.{db}.{stream}")
+}
+
+/// `(tenant, db, stream)` of a fan-in topic name.
+#[must_use]
+pub(crate) fn parse_fanin_name(name: &str) -> Option<(&str, &str, &str)> {
+    let rest = name.strip_prefix(FANIN_PREFIX)?;
+    let (tenant, rest) = rest.split_once('.')?;
+    let (db, stream) = rest.split_once('.')?;
+    (!tenant.is_empty() && !db.is_empty() && !stream.is_empty()).then_some((tenant, db, stream))
+}
+
+fn fanin_denied(name: &str) -> TopicError {
+    TopicError::new(
+        err::TOPIC_AUTHORIZATION_FAILED,
+        format!(
+            "1227 Access denied; you need (at least one of) the SPRIG_FAN_IN privilege(s) for \
+             topic '{name}'"
+        ),
+    )
+}
+
+impl GatewayData {
+    /// Whether `p` holds `SPRIG_FAN_IN`.
+    fn fanin_allowed(&self, p: &Principal, cat: &sprig_catalog::TenantCatalog) -> bool {
+        let g = self.grants(p, cat);
+        g.unrestricted()
+            || g.allows(
+                sprig_auth::authz::Action::FanIn,
+                sprig_auth::authz::Target::Tenant,
+            )
+    }
+
+    /// Whether `p` may `SELECT` the name `db.stream` in its tenant.
+    fn may_select(
+        &self,
+        p: &Principal,
+        cat: &sprig_catalog::TenantCatalog,
+        db: &str,
+        stream: &str,
+    ) -> bool {
+        let g = self.grants(p, cat);
+        let lctn = self.lctn(cat);
+        let db_key = sprig_catalog::ddl::database_key(db, lctn);
+        let name_key =
+            sprig_catalog::ddl::object_key(sprig_catalog::store::ObjectKind::Table, stream, lctn);
+        g.unrestricted()
+            || g.allows(
+                sprig_auth::authz::Action::Select,
+                sprig_auth::authz::Target::Named {
+                    db_key: &db_key,
+                    name_key: &name_key,
+                },
+            )
+            || g.allows(
+                sprig_auth::authz::Action::Select,
+                sprig_auth::authz::Target::Database { db_key: &db_key },
+            )
+    }
+
+    /// The stream definitions `p` may fan in: its tenant's own, and those
+    /// reaching it as an intermediate member, with `SELECT` on the name.
+    async fn fanin_defs(&self, p: &Principal) -> Vec<Arc<Definition>> {
+        let Ok(cat) = self.catalog(p).await else {
+            return Vec::new();
+        };
+        if !self.fanin_allowed(p, &cat) {
+            return Vec::new();
+        }
+        let Ok(chain) = inherited::chain(&self.svc, &cat).await else {
+            return Vec::new();
+        };
+        let own = inherited::state_of(&cat);
+        own.defs
+            .values()
+            .filter(|d| d.kind == DefKind::Stream)
+            .cloned()
+            .chain(chain.reaching(DefKind::Stream))
+            .filter(|d| self.may_select(p, &cat, &d.db_name, &d.name))
+            .collect()
+    }
+
+    /// Member `t` of `def` below `p`'s tenant that fan-in may read: its
+    /// name, or `None` (not below, residency, no directory entry).
+    async fn fanin_member(&self, p: &Principal, t: sprig_common::ids::TenantId) -> Option<String> {
+        if t.0 == p.tenant_id {
+            return None;
+        }
+        let d = inherited::dir_entry(&self.svc, t).await.ok()??;
+        if !d.path_ids().contains(&p.tenant_id) {
+            return None;
+        }
+        if sprig_auth::TenantResidency::of(&d.residency).is_some_and(|r| r.deny_remote_access) {
+            metrics::counter!("sprig_inherit_fanin_skipped_total", "reason" => "residency")
+                .increment(1);
+            return None;
+        }
+        Some(d.name)
+    }
+
+    /// Every fan-in topic name `p` may read (Metadata), sorted.
+    pub(crate) async fn fanin_names(&self, p: &Principal) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in self.fanin_defs(p).await {
+            let Ok(list) = inherited::instances_of(&self.svc, d.key()).await else {
+                continue;
+            };
+            for e in list {
+                if e.kind != DefKind::Stream {
+                    continue;
+                }
+                if let Some(name) = self.fanin_member(p, e.tenant).await {
+                    out.push(fanin_name(&name, &d.db_name, &d.name));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// A fan-in topic by name (see above). Read only.
+    ///
+    /// # Errors
+    /// Unknown for a name `p` can't see; 1227 without `SPRIG_FAN_IN`;
+    /// `TOPIC_AUTHORIZATION_FAILED` for a write.
+    pub(super) async fn fanin_topic(
+        &self,
+        p: &Principal,
+        name: &str,
+        write: bool,
+    ) -> Result<DataTopic, TopicError> {
+        let (tname, db, stream) = parse_fanin_name(name).ok_or_else(|| unknown(name))?;
+        let cat = self.catalog(p).await?;
+        if !self.fanin_allowed(p, &cat) {
+            return Err(fanin_denied(name));
+        }
+        if write {
+            return Err(TopicError::new(
+                err::TOPIC_AUTHORIZATION_FAILED,
+                format!("39897 ER_SPRIG_INHERIT_NOT_OVERRIDABLE: fan-in topic {name} is read only"),
+            ));
+        }
+        let def = self
+            .fanin_defs(p)
+            .await
+            .into_iter()
+            .find(|d| d.db_name == db && d.name == stream)
+            .ok_or_else(|| unknown(name))?;
+        let t = inherited::tenant_by_name(&self.svc, tname)
+            .await
+            .map_err(|e| kafka_err(&e))?
+            .ok_or_else(|| unknown(name))?;
+        if self.fanin_member(p, t).await.is_none() {
+            return Err(unknown(name));
+        }
+        let tcat = inherited::catalog(&self.svc, t)
+            .await
+            .map_err(|e| kafka_err(&e))?;
+        let inst = inherited::state_of(&tcat)
+            .instances
+            .get(&def.key())
+            .filter(|i| i.state == sprig_inherit::msg::InstanceState::Active)
+            .cloned()
+            .ok_or_else(|| unknown(name))?;
+        let s = tcat
+            .ext
+            .get::<sprig_streams::StreamsState>(sprig_streams::MODULE)
+            .and_then(|st| st.all().find(|s| s.id.0 == inst.instance_id).cloned())
+            .ok_or_else(|| unknown(name))?;
+        let id = fanin_id(t.0, s.id.0).ok_or_else(|| unknown(name))?;
+        let max = self.svc.settings.get(
+            &sprig_streams::settings::MAX_MESSAGE_BYTES,
+            &tcat.setting_ctx(&self.svc.dc),
+            Some(&tcat.settings),
+        );
+        Ok(DataTopic {
+            name: name.to_owned(),
+            stream_id: id,
+            topic_id: Uuid::from_u64_pair(p.tenant_id, id),
+            partitions: i32::try_from(s.partitions).unwrap_or(i32::MAX),
+            kind: TopicKind::Events,
+            compact: s.cleanup == sprig_streams::Cleanup::Compact,
+            max_message_bytes: usize::try_from(max).unwrap_or(usize::MAX),
+        })
+    }
+
+    /// The fan-in topic whose stream id is `id`, by id (Fetch v13+).
+    ///
+    /// # Errors
+    /// As [`Self::fanin_topic`].
+    pub(super) async fn fanin_topic_by_id(
+        &self,
+        p: &Principal,
+        id: u64,
+        write: bool,
+    ) -> Result<DataTopic, TopicError> {
+        let no = || unknown("");
+        let (member, stream) = fanin_parts(id).ok_or_else(no)?;
+        let t = sprig_common::ids::TenantId(member);
+        let tname = self.fanin_member(p, t).await.ok_or_else(no)?;
+        let tcat = inherited::catalog(&self.svc, t)
+            .await
+            .map_err(|e| kafka_err(&e))?;
+        let s = tcat
+            .ext
+            .get::<sprig_streams::StreamsState>(sprig_streams::MODULE)
+            .and_then(|st| st.all().find(|s| s.id.0 == stream).cloned())
+            .ok_or_else(no)?;
+        let db = tcat.databases.get(s.db).ok_or_else(no)?;
+        let name = fanin_name(&tname, &db.name, &s.name);
+        self.fanin_topic(p, &name, write).await
+    }
+
+    /// The member's catalog and stream of a fan-in topic, for reads.
+    pub(super) async fn resolve_fanin(&self, t: &DataTopic) -> Result<super::Resolved, TopicError> {
+        let (member, stream) = fanin_parts(t.stream_id).ok_or_else(|| unknown(&t.name))?;
+        let cat = inherited::catalog(&self.svc, sprig_common::ids::TenantId(member))
+            .await
+            .map_err(|e| kafka_err(&e))?;
+        let def = cat
+            .ext
+            .get::<sprig_streams::StreamsState>(sprig_streams::MODULE)
+            .and_then(|st| {
+                st.all()
+                    .find(|d| d.id.0 == stream && d.state == sprig_streams::StreamState::Active)
+                    .cloned()
+            })
+            .ok_or_else(|| unknown(&t.name))?;
+        Ok(super::Resolved {
+            cat,
+            def,
+            topic: t.clone(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod fanin_tests {
+    use super::*;
+
+    #[test]
+    fn fan_in_ids_and_names() {
+        let id = fanin_id(26_306_000_003, 41).unwrap();
+        assert_eq!(fanin_parts(id), Some((26_306_000_003, 41)));
+        assert!(id & DEF_FLAG == 0, "never a definition's topic");
+        assert_eq!(fanin_parts(41), None);
+        assert_eq!(fanin_parts(DEF_FLAG | 41), None);
+        assert_eq!(fanin_id(1 << 38, 1), None);
+        assert_eq!(fanin_id(1, 1 << 24), None);
+        let n = fanin_name("client_x", "security", "user_events");
+        assert_eq!(n, "__t.client_x.security.user_events");
+        assert_eq!(
+            parse_fanin_name(&n),
+            Some(("client_x", "security", "user_events"))
+        );
+        assert_eq!(parse_fanin_name("security.user_events"), None);
+        assert_eq!(parse_fanin_name("__t.x.y"), None);
     }
 }
