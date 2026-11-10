@@ -185,7 +185,9 @@ impl VectorIndex {
                         .get("numDimensions")
                         .and_then(num)
                         .filter(|n| *n >= 1.0 && *n <= 8192.0 && n.fract() == 0.0)
-                        .ok_or_else(|| bad("numDimensions must be a whole number from 1 to 8192"))?;
+                        .ok_or_else(|| {
+                            bad("numDimensions must be a whole number from 1 to 8192")
+                        })?;
                     let similarity = f.get_str("similarity").unwrap_or("").to_owned();
                     if !matches!(similarity.as_str(), "euclidean" | "cosine" | "dotProduct") {
                         return Err(bad(
@@ -270,6 +272,7 @@ impl Engine {
     /// `find` with `$near` or `$nearSphere`: candidates through the
     /// `2dsphere` index's box, sorted by distance (then by `sort`, which
     /// MongoDB lets re-order them), skipped, limited and projected.
+    #[allow(clippy::too_many_arguments)] // the find's parts, as `find` holds them
     pub(super) async fn find_near(
         &self,
         sql: &mut dyn SqlRunner,
@@ -391,9 +394,9 @@ impl Engine {
         ns: &Ns,
         spec: &Document,
     ) -> Result<Vec<Document>, MongoError> {
-        let field = spec.get_str("distanceField").map_err(|_| {
-            MongoError::new(25_278, "$geoNear requires a 'distanceField' argument")
-        })?;
+        let field = spec
+            .get_str("distanceField")
+            .map_err(|_| MongoError::new(25_278, "$geoNear requires a 'distanceField' argument"))?;
         let near_v = spec
             .get("near")
             .ok_or_else(|| MongoError::new(5_860_400, "$geoNear requires a 'near' argument"))?;
@@ -530,7 +533,8 @@ impl Engine {
             str_lit(&ns.coll)
         );
         if let Some(n) = name {
-            q.push_str(&format!(" AND name = {}", str_lit(n)));
+            q.push_str(" AND name = ");
+            q.push_str(&str_lit(n));
         }
         q.push_str(" ORDER BY name");
         let rows = match sql.query(&q).await {
@@ -541,11 +545,13 @@ impl Engine {
         Ok(rows
             .into_iter()
             .map(|r| {
-                let def = serde_json::from_str::<serde_json::Value>(&text(r.get(3).and_then(Option::as_ref)))
-                    .ok()
-                    .and_then(|v| Bson::try_from(v).ok())
-                    .and_then(|b| b.as_document().cloned())
-                    .unwrap_or_default();
+                let def = serde_json::from_str::<serde_json::Value>(&text(
+                    r.get(3).and_then(Option::as_ref),
+                ))
+                .ok()
+                .and_then(|v| Bson::try_from(v).ok())
+                .and_then(|b| b.as_document().cloned())
+                .unwrap_or_default();
                 (
                     text(r.first().and_then(Option::as_ref)),
                     text(r.get(1).and_then(Option::as_ref)),
@@ -620,7 +626,9 @@ impl Engine {
                 ));
             }
             let id = bson::oid::ObjectId::new().to_hex();
-            let json = Bson::Document(def.clone()).into_relaxed_extjson().to_string();
+            let json = Bson::Document(def.clone())
+                .into_relaxed_extjson()
+                .to_string();
             sql.exec(&format!(
                 "INSERT INTO {}.{} (coll, name, type, id, def) VALUES ({}, {}, 'vectorSearch', {}, {})",
                 ident(&ns.db),
@@ -649,7 +657,9 @@ impl Engine {
         def: &Document,
     ) -> Result<(), MongoError> {
         VectorIndex::parse(def)?;
-        let json = Bson::Document(def.clone()).into_relaxed_extjson().to_string();
+        let json = Bson::Document(def.clone())
+            .into_relaxed_extjson()
+            .to_string();
         let r = sql
             .exec(&format!(
                 "UPDATE {}.{} SET def = {} WHERE coll = {} AND name = {}",
@@ -738,13 +748,21 @@ impl Engine {
             .get("limit")
             .and_then(num)
             .filter(|n| *n >= 1.0 && n.fract() == 0.0)
-            .ok_or_else(|| MongoError::new(39_738, "$vectorSearch 'limit' must be a positive whole number"))?;
+            .ok_or_else(|| {
+                MongoError::new(
+                    39_738,
+                    "$vectorSearch 'limit' must be a positive whole number",
+                )
+            })?;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let limit = limit as usize;
         let exact = spec.get_bool("exact").unwrap_or(false);
         if !exact {
             let nc = spec.get("numCandidates").and_then(num).ok_or_else(|| {
-                MongoError::new(39_738, "$vectorSearch requires 'numCandidates' unless exact is true")
+                MongoError::new(
+                    39_738,
+                    "$vectorSearch requires 'numCandidates' unless exact is true",
+                )
             })?;
             #[allow(clippy::cast_precision_loss)]
             if nc < limit as f64 || nc > 10_000.0 {
@@ -780,7 +798,10 @@ impl Engine {
             ));
         }
         if vx.similarity == "dotProduct" && qv.iter().all(|x| *x == 0.0) {
-            return Err(MongoError::new(39_737, "a zero queryVector has no direction under dotProduct"));
+            return Err(MongoError::new(
+                39_737,
+                "a zero queryVector has no direction under dotProduct",
+            ));
         }
         let fdoc = spec.get_document("filter").cloned().unwrap_or_default();
         let pred = filter::parse(&fdoc)?;
@@ -800,7 +821,11 @@ impl Engine {
         let dist = vx.distance_sql(&q);
         let cond = format!("{} AND ({})", vx.valid_sql(), sqlp.sql);
         let cx = AggExpr { now: now_date() };
-        let page = if sqlp.exact { limit } else { (limit * 4).max(100) };
+        let page = if sqlp.exact {
+            limit
+        } else {
+            (limit * 4).max(100)
+        };
         let mut out = Vec::new();
         let mut offset = 0usize;
         loop {
@@ -824,7 +849,9 @@ impl Engine {
                 if !pred.matches_with(&d, &cx) {
                     continue;
                 }
-                let dv: f64 = text(r.get(3).and_then(Option::as_ref)).parse().unwrap_or(f64::MAX);
+                let dv: f64 = text(r.get(3).and_then(Option::as_ref))
+                    .parse()
+                    .unwrap_or(f64::MAX);
                 d.insert(SCORE_FIELD, Bson::Double(vx.score(dv)));
                 out.push(d);
                 if out.len() >= limit {

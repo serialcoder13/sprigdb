@@ -197,6 +197,8 @@ enum Call {
     Database,
     CurrentUser,
     User,
+    /// `VERSION()`: the persona's version string (gaps row 53).
+    Version,
 }
 
 fn call_of(word: &[u8]) -> Option<Call> {
@@ -207,14 +209,25 @@ fn call_of(word: &[u8]) -> Option<Call> {
         (b"USER", Call::User),
         (b"SESSION_USER", Call::User),
         (b"SYSTEM_USER", Call::User),
+        (b"VERSION", Call::Version),
     ]
     .into_iter()
     .find(|(n, _)| n.eq_ignore_ascii_case(word))
     .map(|(_, c)| c)
 }
 
+/// `VERSION()` in a body: the version the creating session's persona
+/// reports, as a constant inside a group [`restore`] recognizes. The
+/// aggregate gives one row whatever the view holds, and the `WHERE` is
+/// never true, so nothing is read.
+fn version_lookup(func: &str, version: &str, nbe: bool) -> String {
+    let v = super::rewrite::sql_string(version, nbe);
+    format!("(SELECT COALESCE(MAX(NULL), {v}) FROM {VIEW_REF} WHERE {func}() IS NULL)")
+}
+
 fn lookup(call: Call, func: &str) -> String {
     match call {
+        Call::Version => unreachable!("version_lookup"),
         Call::Database => format!("(SELECT `logical` FROM {VIEW_REF} WHERE `name` = {func}())"),
         Call::CurrentUser => format!(
             "(SELECT `account` FROM {VIEW_REF} WHERE `name` = SUBSTRING_INDEX({func}(), '@', 1))"
@@ -282,8 +295,23 @@ pub fn substitute(sql: &str, lex_opts: &LexOptions) -> Option<String> {
 /// created under `sql_mode=ORACLE` (`oracle`), where it is the caught
 /// error's text (elsewhere it is an ordinary name).
 #[must_use]
-#[allow(clippy::too_many_lines)] // one pass over the tokens
 pub fn substitute_with(sql: &str, lex_opts: &LexOptions, oracle: bool) -> Option<String> {
+    substitute_full(sql, lex_opts, oracle, None)
+}
+
+/// [`substitute_with`], with `VERSION()` also replaced by `version`, the
+/// version string the creating session's persona reports (gaps row 53:
+/// MariaDB would answer its own, `11.8.9-MariaDB-...`, on both ports).
+/// The value is fixed when the program is created; [`restore`] shows the
+/// call again.
+#[must_use]
+#[allow(clippy::too_many_lines)] // one pass over the tokens
+pub fn substitute_full(
+    sql: &str,
+    lex_opts: &LexOptions,
+    oracle: bool,
+    version: Option<&str>,
+) -> Option<String> {
     let src = sql.as_bytes();
     let opts = lex_opts.version(999_999);
     let toks: Vec<Token> = lex(src, &opts)
@@ -350,7 +378,7 @@ pub fn substitute_with(sql: &str, lex_opts: &LexOptions, oracle: bool) -> Option
         {
             *s = false;
         }
-        let Some(call) = call_of(b) else {
+        let Some(call) = call_of(b).filter(|c| *c != Call::Version || version.is_some()) else {
             i += 1;
             continue;
         };
@@ -371,7 +399,10 @@ pub fn substitute_with(sql: &str, lex_opts: &LexOptions, oracle: bool) -> Option
         }
         let last = if parens { i + 2 } else { i };
         let func = String::from_utf8_lossy(b).into_owned();
-        let mut rep = lookup(call, &func);
+        let mut rep = match (call, version) {
+            (Call::Version, Some(v)) => version_lookup(&func, v, lex_opts.no_backslash_escapes),
+            _ => lookup(call, &func),
+        };
         // A whole select item without an alias keeps the call's name.
         let in_list = select_list.last().copied().unwrap_or(false);
         let starts_item =
@@ -752,13 +783,14 @@ fn groups(text: &[u8]) -> Vec<Range<usize>> {
 /// The call a lookup stands for, as written inside it (`current_user()`
 /// in MariaDB's canonical view text, `CURRENT_USER()` in a routine's).
 fn call_in(group: &[u8]) -> Option<String> {
-    let names: [&[u8]; 6] = [
+    let names: [&[u8]; 7] = [
         b"CURRENT_USER(",
         b"SESSION_USER(",
         b"SYSTEM_USER(",
         b"DATABASE(",
         b"SCHEMA(",
         b"USER(",
+        b"VERSION(",
     ];
     let mut best: Option<(usize, usize)> = None;
     for n in names {

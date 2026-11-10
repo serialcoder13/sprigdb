@@ -72,7 +72,9 @@ impl ShardSessions for CtlShards {
             .iter()
             .find(|(s, _)| s == schema)
             .map(|(_, c)| c.clone())
-            .ok_or_else(|| SprigError::internal(format!("{schema} isn't a shard of this deploy")))?;
+            .ok_or_else(|| {
+                SprigError::internal(format!("{schema} isn't a shard of this deploy"))
+            })?;
         let key = cluster.to_string();
         if !self.conns.contains_key(&key) {
             let pool = self.locator.ctl_pool(&cluster).await?;

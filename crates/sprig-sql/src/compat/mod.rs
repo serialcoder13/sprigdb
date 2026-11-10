@@ -23,6 +23,7 @@ pub mod errmap;
 pub mod funcs;
 pub mod geo;
 pub mod groupby;
+pub mod intmeta;
 pub mod keywords;
 pub mod meta;
 pub mod rowsyntax;

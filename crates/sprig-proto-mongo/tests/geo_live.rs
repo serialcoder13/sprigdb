@@ -17,7 +17,9 @@
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::float_cmp
+    clippy::float_cmp,
+    clippy::many_single_char_names,
+    clippy::similar_names
 )]
 
 use futures_util::TryStreamExt;
@@ -72,15 +74,26 @@ fn data() -> Vec<Document> {
         let loc: Bson = match i % 20 {
             0..=13 => Bson::Document(pt(x, y)),
             14 | 15 => Bson::Array(vec![Bson::Double(x), Bson::Double(y)]),
-            16 => Bson::Document(doc! {"type": "LineString", "coordinates": [[x, y], [x + g.range(-0.2, 0.2), y + g.range(-0.2, 0.2)]]}),
+            16 => Bson::Document(
+                doc! {"type": "LineString", "coordinates": [[x, y], [x + g.range(-0.2, 0.2), y + g.range(-0.2, 0.2)]]},
+            ),
             17 => {
                 let h = g.range(0.01, 0.08);
-                Bson::Document(poly(&[(x - h, y - h), (x + h, y - h), (x + h, y + h), (x - h, y + h)]))
+                Bson::Document(poly(&[
+                    (x - h, y - h),
+                    (x + h, y - h),
+                    (x + h, y + h),
+                    (x - h, y + h),
+                ]))
             }
             // MongoDB reads an array of GeoJSON points as a malformed
             // legacy pair, so arrays aren't in the data.
-            18 => Bson::Document(doc! {"type": "MultiLineString", "coordinates": [[[x, y], [x + 0.1, y]], [[x, y + 0.1], [x + 0.1, y + 0.15]]]}),
-            _ => Bson::Document(doc! {"type": "MultiPoint", "coordinates": [[x, y], [x + 0.05, y - 0.05]]}),
+            18 => Bson::Document(
+                doc! {"type": "MultiLineString", "coordinates": [[[x, y], [x + 0.1, y]], [[x, y + 0.1], [x + 0.1, y + 0.15]]]},
+            ),
+            _ => Bson::Document(
+                doc! {"type": "MultiPoint", "coordinates": [[x, y], [x + 0.05, y - 0.05]]},
+            ),
         };
         let kind = if i % 3 == 0 { "a" } else { "b" };
         out.push(doc! {"_id": i, "kind": kind, "loc": loc});
@@ -95,7 +108,10 @@ fn data() -> Vec<Document> {
 async fn ids(c: &Collection<Document>, filter: Document) -> Result<Vec<i32>, i32> {
     let r = c.find(filter).await.map_err(|e| code_of(&e))?;
     let docs: Vec<Document> = r.try_collect().await.map_err(|e| code_of(&e))?;
-    Ok(docs.iter().map(|d| d.get_i32("_id").unwrap_or(-1)).collect())
+    Ok(docs
+        .iter()
+        .map(|d| d.get_i32("_id").unwrap_or(-1))
+        .collect())
 }
 
 async fn agg(c: &Collection<Document>, p: Vec<Document>) -> Result<Vec<Document>, i32> {
@@ -110,8 +126,14 @@ async fn geo_matches_mongodb() {
         eprintln!("SPRIG_TEST_MONGO_URI or SPRIG_TEST_MONGO_REF_URI not set: skipped");
         return;
     };
-    let s = Client::with_uri_str(&s_uri).await.unwrap().database("r6three_geo");
-    let r = Client::with_uri_str(&r_uri).await.unwrap().database("r6three_geo");
+    let s = Client::with_uri_str(&s_uri)
+        .await
+        .unwrap()
+        .database("r6three_geo");
+    let r = Client::with_uri_str(&r_uri)
+        .await
+        .unwrap()
+        .database("r6three_geo");
     for db in [&s, &r] {
         db.drop().await.unwrap();
         let c = db.collection::<Document>("places");
@@ -146,7 +168,8 @@ async fn geo_matches_mongodb() {
         let li = |db: &mongodb::Database| {
             let c = db.collection::<Document>("places");
             async move {
-                let v: Vec<IndexModel> = c.list_indexes().await.unwrap().try_collect().await.unwrap();
+                let v: Vec<IndexModel> =
+                    c.list_indexes().await.unwrap().try_collect().await.unwrap();
                 v.into_iter()
                     .map(|i| {
                         let mut d = mongodb::bson::to_document(&i).unwrap();
@@ -170,9 +193,21 @@ async fn geo_matches_mongodb() {
         let (w, h) = (g.range(0.1, 0.6), g.range(0.1, 0.6));
         let ring = if k % 3 == 2 {
             // A concave "L".
-            vec![(x - w, y - h), (x + w, y - h), (x + w, y), (x, y), (x, y + h), (x - w, y + h)]
+            vec![
+                (x - w, y - h),
+                (x + w, y - h),
+                (x + w, y),
+                (x, y),
+                (x, y + h),
+                (x - w, y + h),
+            ]
         } else {
-            vec![(x - w, y - h), (x + w, y - h), (x + w, y + h), (x - w, y + h)]
+            vec![
+                (x - w, y - h),
+                (x + w, y - h),
+                (x + w, y + h),
+                (x - w, y + h),
+            ]
         };
         filters.push((
             format!("within polygon {k}"),
@@ -187,11 +222,15 @@ async fn geo_matches_mongodb() {
     filters.push((
         "within polygon with a hole".into(),
         doc! {"loc": {"$geoWithin": {"$geometry": {"type": "Polygon", "coordinates": [
-            [[72.5, 18.5], [73.5, 18.5], [73.5, 19.5], [72.5, 19.5], [72.5, 18.5]],
-            [[72.8, 18.8], [73.2, 18.8], [73.2, 19.2], [72.8, 19.2], [72.8, 18.8]]]}}}},
+        [[72.5, 18.5], [73.5, 18.5], [73.5, 19.5], [72.5, 19.5], [72.5, 18.5]],
+        [[72.8, 18.8], [73.2, 18.8], [73.2, 19.2], [72.8, 19.2], [72.8, 18.8]]]}}}},
     ));
     for k in 0..4 {
-        let (x, y, rad) = (g.range(72.2, 73.8), g.range(18.2, 19.8), g.range(0.002, 0.01));
+        let (x, y, rad) = (
+            g.range(72.2, 73.8),
+            g.range(18.2, 19.8),
+            g.range(0.002, 0.01),
+        );
         filters.push((
             format!("centerSphere {k}"),
             doc! {"loc": {"$geoWithin": {"$centerSphere": [[x, y], rad]}}},
@@ -292,19 +331,46 @@ async fn geo_matches_mongodb() {
             _ => false,
         };
         if !same {
-            bad.push(format!("geoNear {k}: {stage}\n  sprig {a:?}\n  mongo {b:?}"));
+            bad.push(format!(
+                "geoNear {k}: {stage}\n  sprig {a:?}\n  mongo {b:?}"
+            ));
         }
     }
     // Error codes.
     let errs: Vec<(&str, Vec<Document>)> = vec![
-        ("geoNear without an index", vec![doc! {"$geoNear": {"near": pt(73.0, 19.0), "distanceField": "d"}}]),
-        ("geoNear without distanceField", vec![doc! {"$geoNear": {"near": pt(73.0, 19.0)}}]),
-        ("geoNear not first", vec![doc! {"$match": {"kind": "a"}}, doc! {"$geoNear": {"near": pt(73.0, 19.0), "distanceField": "d"}}]),
-        ("geoNear legacy flat", vec![doc! {"$geoNear": {"near": [73.0, 19.0], "distanceField": "d"}}]),
-        ("count with near", vec![doc! {"$match": {"loc": {"$near": {"$geometry": pt(73.0, 19.0)}}}}, doc! {"$count": "n"}]),
+        (
+            "geoNear without an index",
+            vec![doc! {"$geoNear": {"near": pt(73.0, 19.0), "distanceField": "d"}}],
+        ),
+        (
+            "geoNear without distanceField",
+            vec![doc! {"$geoNear": {"near": pt(73.0, 19.0)}}],
+        ),
+        (
+            "geoNear not first",
+            vec![
+                doc! {"$match": {"kind": "a"}},
+                doc! {"$geoNear": {"near": pt(73.0, 19.0), "distanceField": "d"}},
+            ],
+        ),
+        (
+            "geoNear legacy flat",
+            vec![doc! {"$geoNear": {"near": [73.0, 19.0], "distanceField": "d"}}],
+        ),
+        (
+            "count with near",
+            vec![
+                doc! {"$match": {"loc": {"$near": {"$geometry": pt(73.0, 19.0)}}}},
+                doc! {"$count": "n"},
+            ],
+        ),
     ];
     for (name, p) in errs {
-        let coll = if name.contains("without an index") { "plain" } else { "places" };
+        let coll = if name.contains("without an index") {
+            "plain"
+        } else {
+            "places"
+        };
         let a = agg(&s.collection(coll), p.clone()).await.err();
         let b = agg(&r.collection(coll), p.clone()).await.err();
         checks += 1;
@@ -313,10 +379,19 @@ async fn geo_matches_mongodb() {
         }
     }
     for (name, f) in [
-        ("near under $or", doc! {"$or": [{"loc": {"$near": {"$geometry": pt(73.0, 19.0)}}}, {"_id": 1}]}),
+        (
+            "near under $or",
+            doc! {"$or": [{"loc": {"$near": {"$geometry": pt(73.0, 19.0)}}}, {"_id": 1}]},
+        ),
         ("near legacy", doc! {"loc": {"$near": [73.0, 19.0]}}),
-        ("within a point", doc! {"loc": {"$geoWithin": {"$geometry": pt(73.0, 19.0)}}}),
-        ("open loop", doc! {"loc": {"$geoIntersects": {"$geometry": {"type": "Polygon", "coordinates": [[[72, 18], [74, 18], [74, 20], [72, 20]]]}}}}),
+        (
+            "within a point",
+            doc! {"loc": {"$geoWithin": {"$geometry": pt(73.0, 19.0)}}},
+        ),
+        (
+            "open loop",
+            doc! {"loc": {"$geoIntersects": {"$geometry": {"type": "Polygon", "coordinates": [[[72, 18], [74, 18], [74, 20], [72, 20]]]}}}},
+        ),
     ] {
         let a = ids(&s.collection("places"), f.clone()).await.err();
         let b = ids(&r.collection("places"), f.clone()).await.err();
@@ -346,7 +421,10 @@ async fn vector_search_matches_brute_force() {
         eprintln!("SPRIG_TEST_MONGO_URI not set: skipped");
         return;
     };
-    let db = Client::with_uri_str(&s_uri).await.unwrap().database("r6three_vec");
+    let db = Client::with_uri_str(&s_uri)
+        .await
+        .unwrap()
+        .database("r6three_vec");
     db.drop().await.unwrap();
     let c = db.collection::<Document>("items");
     let mut g = Rng(99);
@@ -367,15 +445,17 @@ async fn vector_search_matches_brute_force() {
     c.insert_many(docs).await.unwrap();
     let r = db
         .run_command(doc! {"createSearchIndexes": "items", "indexes": [
-            {"name": "vx", "type": "vectorSearch", "definition": {"fields": [
-                {"type": "vector", "path": "v", "numDimensions": dims, "similarity": "cosine"},
-                {"type": "filter", "path": "cat"}]}},
-            {"name": "ve", "type": "vectorSearch", "definition": {"fields": [
-                {"type": "vector", "path": "v", "numDimensions": dims, "similarity": "euclidean"}]}}]})
+        {"name": "vx", "type": "vectorSearch", "definition": {"fields": [
+            {"type": "vector", "path": "v", "numDimensions": dims, "similarity": "cosine"},
+            {"type": "filter", "path": "cat"}]}},
+        {"name": "ve", "type": "vectorSearch", "definition": {"fields": [
+            {"type": "vector", "path": "v", "numDimensions": dims, "similarity": "euclidean"}]}}]})
         .await
         .unwrap();
     assert_eq!(r.get_array("indexesCreated").unwrap().len(), 2);
-    let listed = agg(&c, vec![doc! {"$listSearchIndexes": {}}]).await.unwrap();
+    let listed = agg(&c, vec![doc! {"$listSearchIndexes": {}}])
+        .await
+        .unwrap();
     assert_eq!(listed.len(), 2, "{listed:?}");
     let mut bad = Vec::new();
     let mut checks = 0;
@@ -389,7 +469,11 @@ async fn vector_search_matches_brute_force() {
                 let n = |x: &[f64]| x.iter().map(|a| a * a).sum::<f64>().sqrt();
                 1.0 - dot / (n(v) * n(&qv))
             } else {
-                v.iter().zip(&qv).map(|(a, b)| (a - b) * (a - b)).sum::<f64>().sqrt()
+                v.iter()
+                    .zip(&qv)
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f64>()
+                    .sqrt()
             }
         };
         let mut want: Vec<(f64, i32)> = vecs
@@ -400,7 +484,7 @@ async fn vector_search_matches_brute_force() {
         want.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         want.truncate(10);
         let mut stage = doc! {"index": if cosine { "vx" } else { "ve" }, "path": "v",
-            "queryVector": qv.clone(), "numCandidates": 100, "limit": 10};
+        "queryVector": qv.clone(), "numCandidates": 100, "limit": 10};
         if filter {
             stage.insert("filter", doc! {"cat": {"$eq": 2}});
         }
@@ -417,19 +501,50 @@ async fn vector_search_matches_brute_force() {
         let ok = got.len() == want.len()
             && got.iter().zip(&want).all(|(d, (dw, iw))| {
                 let score = d.get_f64("score").unwrap_or(-1.0);
-                let ws = if cosine { 1.0 - dw / 2.0 } else { 1.0 / (1.0 + dw) };
+                let ws = if cosine {
+                    1.0 - dw / 2.0
+                } else {
+                    1.0 / (1.0 + dw)
+                };
                 d.get_i32("_id").ok() == Some(*iw) && (score - ws).abs() < 1e-5
             });
         if !ok {
-            bad.push(format!("query {q} (cosine {cosine}, filter {filter}): got {got:?}, want {want:?}"));
+            bad.push(format!(
+                "query {q} (cosine {cosine}, filter {filter}): got {got:?}, want {want:?}"
+            ));
         }
     }
     // Errors: undeclared filter, wrong dimensions, not first, numCandidates.
     let errs: Vec<(&str, Vec<Document>, i32)> = vec![
-        ("undeclared filter", vec![doc! {"$vectorSearch": {"index": "ve", "path": "v", "queryVector": vec![0.5; 8], "numCandidates": 50, "limit": 5, "filter": {"cat": 1}}}], 39739),
-        ("dimensions", vec![doc! {"$vectorSearch": {"index": "vx", "path": "v", "queryVector": [1.0, 2.0], "numCandidates": 50, "limit": 5}}], 39736),
-        ("numCandidates", vec![doc! {"$vectorSearch": {"index": "vx", "path": "v", "queryVector": vec![0.5; 8], "numCandidates": 3, "limit": 5}}], 39738),
-        ("not first", vec![doc! {"$match": {"cat": 1}}, doc! {"$vectorSearch": {"index": "vx", "path": "v", "queryVector": vec![0.5; 8], "numCandidates": 50, "limit": 5}}], 40602),
+        (
+            "undeclared filter",
+            vec![
+                doc! {"$vectorSearch": {"index": "ve", "path": "v", "queryVector": vec![0.5; 8], "numCandidates": 50, "limit": 5, "filter": {"cat": 1}}},
+            ],
+            39739,
+        ),
+        (
+            "dimensions",
+            vec![
+                doc! {"$vectorSearch": {"index": "vx", "path": "v", "queryVector": [1.0, 2.0], "numCandidates": 50, "limit": 5}},
+            ],
+            39736,
+        ),
+        (
+            "numCandidates",
+            vec![
+                doc! {"$vectorSearch": {"index": "vx", "path": "v", "queryVector": vec![0.5; 8], "numCandidates": 3, "limit": 5}},
+            ],
+            39738,
+        ),
+        (
+            "not first",
+            vec![
+                doc! {"$match": {"cat": 1}},
+                doc! {"$vectorSearch": {"index": "vx", "path": "v", "queryVector": vec![0.5; 8], "numCandidates": 50, "limit": 5}},
+            ],
+            40602,
+        ),
     ];
     for (name, p, want) in errs {
         let e = agg(&c, p).await.err();
@@ -440,8 +555,12 @@ async fn vector_search_matches_brute_force() {
     }
     // An unknown index finds nothing (as in Atlas); a dropped one too.
     let none = agg(&c, vec![doc! {"$vectorSearch": {"index": "nope", "path": "v", "queryVector": vec![0.5; 8], "numCandidates": 50, "limit": 5}}]).await.unwrap();
-    db.run_command(doc! {"dropSearchIndex": "items", "name": "ve"}).await.unwrap();
-    let after = agg(&c, vec![doc! {"$listSearchIndexes": {}}]).await.unwrap();
+    db.run_command(doc! {"dropSearchIndex": "items", "name": "ve"})
+        .await
+        .unwrap();
+    let after = agg(&c, vec![doc! {"$listSearchIndexes": {}}])
+        .await
+        .unwrap();
     checks += 2;
     if !none.is_empty() || after.len() != 1 {
         bad.push(format!("unknown index {none:?}; after drop {after:?}"));

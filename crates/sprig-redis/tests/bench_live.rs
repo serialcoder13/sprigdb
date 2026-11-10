@@ -83,7 +83,8 @@ async fn measure(url: &str, name: &str, clients: usize, secs: u64) -> (f64, f64,
             let mut i = 0u64;
             while Instant::now() < deadline {
                 let t = Instant::now();
-                let r: redis::RedisResult<redis::Value> = command(&name, c, i).query_async(&mut k).await;
+                let r: redis::RedisResult<redis::Value> =
+                    command(&name, c, i).query_async(&mut k).await;
                 if let Err(e) = r {
                     eprintln!("{name}: {e}");
                 }
@@ -120,8 +121,8 @@ async fn throughput() {
     let secs: u64 = var("SPRIG_BENCH_SECONDS")
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
-    let cmds = var("SPRIG_BENCH_COMMANDS")
-        .unwrap_or_else(|| "SET,GET,INCR,HSET,LPUSH,LPOP,ZADD".into());
+    let cmds =
+        var("SPRIG_BENCH_COMMANDS").unwrap_or_else(|| "SET,GET,INCR,HSET,LPUSH,LPOP,ZADD".into());
     for t in targets.split(',') {
         let Some((label, url)) = t.split_once('=') else {
             continue;

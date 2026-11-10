@@ -473,6 +473,22 @@ impl PassSession {
                     ))
                     .await
                 }
+                // 3306: MySQL's integer result types (chapter 28, R4).
+                None if self.persona == Persona::MySql84
+                    && super::compat_sink::IntMetaSink::wanted(&piece) =>
+                {
+                    let lex = self.lex_opts().0;
+                    let mut wrapped = super::compat_sink::IntMetaSink::new(&mut *out, &piece, lex);
+                    Box::pin(self.tenant_text(
+                        cx,
+                        &piece,
+                        attrs,
+                        i + 1 < n,
+                        RowFormat::Text,
+                        &mut wrapped,
+                    ))
+                    .await
+                }
                 None => {
                     Box::pin(self.tenant_text(cx, &piece, attrs, i + 1 < n, RowFormat::Text, out))
                         .await
@@ -1965,6 +1981,10 @@ impl PassSession {
                 s.columns.clone_from(&meta.columns);
                 s.logical = Some(sql.clone());
                 s.recheck = recheck;
+            }
+            // 3306: MySQL's integer result types (chapter 28, R4).
+            if self.persona == Persona::MySql84 {
+                super::compat_sink::prepared_columns(&sql, &lex, &mut meta.columns);
             }
         }
         Ok(summary)

@@ -363,6 +363,7 @@ proptest! {
 
 /// R6 round 3: spatial and vector candidates (chapter 13, "Other models").
 #[test]
+#[allow(clippy::too_many_lines)]
 fn spatial_and_vector_candidates() {
     use crate::autoindex::stats::ColumnInfo;
     let mut t = TableStats {
@@ -413,7 +414,10 @@ fn spatial_and_vector_candidates() {
     };
     // A geodesic distance on a NOT NULL point: a spatial index.
     let c = model_candidates(
-        &f(serde_json::json!([{"t": "p", "col": "loc", "op": "unsargable", "why": "function:ST_DISTANCE"}]), false),
+        &f(
+            serde_json::json!([{"t": "p", "col": "loc", "op": "unsargable", "why": "function:ST_DISTANCE"}]),
+            false,
+        ),
         "p",
         object,
         &t,
@@ -425,13 +429,18 @@ fn spatial_and_vector_candidates() {
         format!("SPATIAL INDEX IF NOT EXISTS `{}` (`loc`)", c[0].def.name())
     );
     // A nullable polygon: none (it would need the companion box).
-    assert!(model_candidates(
-        &f(serde_json::json!([{"t": "p", "col": "area", "op": "spatial"}]), false),
-        "p",
-        object,
-        &t
-    )
-    .is_empty());
+    assert!(
+        model_candidates(
+            &f(
+                serde_json::json!([{"t": "p", "col": "area", "op": "spatial"}]),
+                false
+            ),
+            "p",
+            object,
+            &t
+        )
+        .is_empty()
+    );
     // Ordering by a cosine distance with a LIMIT: a cosine vector index.
     let v = model_candidates(
         &f(
@@ -446,15 +455,25 @@ fn spatial_and_vector_candidates() {
     );
     assert_eq!(v.len(), 1);
     assert_eq!(v[0].def.kind, IndexKind::Vector);
-    assert!(v[0].def.add_clause().ends_with("(`emb`) M=8 DISTANCE=cosine"), "{}", v[0].def.add_clause());
+    assert!(
+        v[0].def
+            .add_clause()
+            .ends_with("(`emb`) M=8 DISTANCE=cosine"),
+        "{}",
+        v[0].def.add_clause()
+    );
     // The cost model predicts the run reads about the rows it returns.
-    let ctx_inputs = vec![f(serde_json::json!([{"t": "p", "col": "loc", "op": "spatial"}]), false)];
+    let ctx_inputs = vec![f(
+        serde_json::json!([{"t": "p", "col": "loc", "op": "spatial"}]),
+        false,
+    )];
     let ctx = crate::autoindex::cost::TableContext::new(
         object,
         &t,
         &ctx_inputs,
         crate::autoindex::cost::CostParams::default(),
     );
-    let e = crate::autoindex::cost::CostModel::estimate(&crate::autoindex::cost::Model, &c[0], &ctx);
+    let e =
+        crate::autoindex::cost::CostModel::estimate(&crate::autoindex::cost::Model, &c[0], &ctx);
     assert!(e.benefit_ms_h > 0.0, "{e:?}");
 }

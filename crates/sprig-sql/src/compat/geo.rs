@@ -442,6 +442,7 @@ impl Cx<'_> {
 /// Andoyer test still decides. The box ([`sprig_geo::mysql::grow`]) holds
 /// every point within `r` metres; a box crossing a pole or ±180° adds
 /// nothing.
+#[allow(clippy::too_many_lines, clippy::trivially_copy_pass_by_ref)] // one token walk; `LexOptions` as the module passes it
 fn boxes(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     let toks = lex::lex(sql, opts).ok()?;
     let sig: Vec<usize> = (0..toks.len())
@@ -492,13 +493,13 @@ fn boxes(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
         let column = |from: usize, to: usize| -> Option<String> {
             // `c`, `t.c` or `d.t.c`, plain or quoted.
             let n = to - from;
-            if n == 0 || n > 5 || n % 2 == 0 {
+            if n == 0 || n > 5 || n.is_multiple_of(2) {
                 return None;
             }
             let mut out = String::new();
             for j in from..to {
                 let k = toks[sig[j]].kind;
-                let want_name = (j - from) % 2 == 0;
+                let want_name = (j - from).is_multiple_of(2);
                 if want_name && !matches!(k, TokenKind::Word | TokenKind::QuotedIdent) {
                     return None;
                 }
@@ -515,8 +516,10 @@ fn boxes(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
                 return None;
             }
             let name = String::from_utf8_lossy(text(from)).to_ascii_uppercase();
-            if !matches!(name.as_str(), "ST_GEOMFROMTEXT" | "ST_GEOMETRYFROMTEXT" | "ST_POINTFROMTEXT")
-                || !is(from + 1, TokenKind::Punct, b"(")
+            if !matches!(
+                name.as_str(),
+                "ST_GEOMFROMTEXT" | "ST_GEOMETRYFROMTEXT" | "ST_POINTFROMTEXT"
+            ) || !is(from + 1, TokenKind::Punct, b"(")
                 || toks[sig[from + 2]].kind != TokenKind::String
                 || !is(from + 3, TokenKind::Punct, b",")
                 || !is(from + 4, TokenKind::Number, b"4326")
@@ -541,7 +544,11 @@ fn boxes(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
             let w = lex::string_value(text(from + 2), opts.no_backslash_escapes)?;
             let w = String::from_utf8(w).ok()?;
             let up = w.trim().to_ascii_uppercase();
-            let inner = up.strip_prefix("POINT")?.trim().strip_prefix('(')?.strip_suffix(')')?;
+            let inner = up
+                .strip_prefix("POINT")?
+                .trim()
+                .strip_prefix('(')?
+                .strip_suffix(')')?;
             let mut nums = inner.split_whitespace().map(str::parse::<f64>);
             let (a, b) = (nums.next()?.ok()?, nums.next()?.ok()?);
             if nums.next().is_some() {
@@ -570,7 +577,8 @@ fn boxes(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
             let start = toks[sig[i]].start as usize;
             let end = toks[sig[close + 2]].end as usize;
             let original = String::from_utf8_lossy(&sql[start..end]).into_owned();
-            let poly = format!("POLYGON(({w:e} {s:e},{e:e} {s:e},{e:e} {n:e},{w:e} {n:e},{w:e} {s:e}))");
+            let poly =
+                format!("POLYGON(({w:e} {s:e},{e:e} {s:e},{e:e} {n:e},{w:e} {n:e},{w:e} {s:e}))");
             edits.push((
                 start,
                 end,
@@ -625,19 +633,16 @@ impl Knn {
     pub fn with_radius(&self, sql: &[u8], r: f64) -> Vec<u8> {
         let pred = format!("{} <= {r:e}", self.call);
         let mut out = KNN_MARK.as_bytes().to_vec();
-        match self.cond {
-            Some((a, b)) => {
-                out.extend_from_slice(&sql[..a]);
-                out.extend_from_slice(b" (");
-                out.extend_from_slice(&sql[a..b]);
-                out.extend_from_slice(format!(") AND {pred} ").as_bytes());
-                out.extend_from_slice(&sql[b..]);
-            }
-            None => {
-                out.extend_from_slice(&sql[..self.order]);
-                out.extend_from_slice(format!("WHERE {pred} ").as_bytes());
-                out.extend_from_slice(&sql[self.order..]);
-            }
+        if let Some((a, b)) = self.cond {
+            out.extend_from_slice(&sql[..a]);
+            out.extend_from_slice(b" (");
+            out.extend_from_slice(&sql[a..b]);
+            out.extend_from_slice(format!(") AND {pred} ").as_bytes());
+            out.extend_from_slice(&sql[b..]);
+        } else {
+            out.extend_from_slice(&sql[..self.order]);
+            out.extend_from_slice(format!("WHERE {pred} ").as_bytes());
+            out.extend_from_slice(&sql[self.order..]);
         }
         out
     }
@@ -656,12 +661,19 @@ impl Knn {
 
 /// The nearest-neighbour shape of `sql`, when it has it (see [`Knn`]).
 #[must_use]
+#[allow(clippy::too_many_lines, clippy::trivially_copy_pass_by_ref)] // one token walk
 pub fn knn(sql: &[u8], opts: &LexOptions) -> Option<Knn> {
-    if sql.starts_with(KNN_MARK.as_bytes()) || !sql.windows(11).any(|w| w.eq_ignore_ascii_case(b"st_distance")) {
+    if sql.starts_with(KNN_MARK.as_bytes())
+        || !sql
+            .windows(11)
+            .any(|w| w.eq_ignore_ascii_case(b"st_distance"))
+    {
         return None;
     }
     let toks = lex::lex(sql, opts).ok()?;
-    let sig: Vec<usize> = (0..toks.len()).filter(|&i| !toks[i].kind.is_trivia()).collect();
+    let sig: Vec<usize> = (0..toks.len())
+        .filter(|&i| !toks[i].kind.is_trivia())
+        .collect();
     let word = |i: usize, w: &[u8]| {
         sig.get(i).is_some_and(|&j| {
             toks[j].kind == TokenKind::Word && toks[j].bytes(sql).eq_ignore_ascii_case(w)
@@ -693,8 +705,17 @@ pub fn knn(sql: &[u8], opts: &LexOptions) -> Option<Knn> {
             return None;
         }
         for w in [
-            b"JOIN".as_slice(), b"UNION", b"GROUP", b"HAVING", b"INTO", b"FOR", b"LOCK",
-            b"EXCEPT", b"INTERSECT", b"WINDOW", b"OFFSET",
+            b"JOIN".as_slice(),
+            b"UNION",
+            b"GROUP",
+            b"HAVING",
+            b"INTO",
+            b"FOR",
+            b"LOCK",
+            b"EXCEPT",
+            b"INTERSECT",
+            b"WINDOW",
+            b"OFFSET",
         ] {
             if word(i, w) {
                 return None;
@@ -731,7 +752,10 @@ pub fn knn(sql: &[u8], opts: &LexOptions) -> Option<Knn> {
     let (close, comma) = (close?, comma?);
     // One argument a column, the other a constant point: what the box
     // pass narrows (checked by running it on a probe predicate).
-    let call = String::from_utf8_lossy(&sql[toks[sig[order + 2]].start as usize..toks[sig[close]].end as usize]).into_owned();
+    let call = String::from_utf8_lossy(
+        &sql[toks[sig[order + 2]].start as usize..toks[sig[close]].end as usize],
+    )
+    .into_owned();
     let _ = comma;
     let test = format!("SELECT 1 FROM t WHERE {call} < 1000");
     boxes(test.as_bytes(), opts)?;
@@ -742,8 +766,12 @@ pub fn knn(sql: &[u8], opts: &LexOptions) -> Option<Knn> {
     if !word(i, b"LIMIT") {
         return None;
     }
-    let lim = sig.get(i + 1).filter(|&&j| toks[j].kind == TokenKind::Number)?;
-    let k: u64 = String::from_utf8_lossy(toks[*lim].bytes(sql)).parse().ok()?;
+    let lim = sig
+        .get(i + 1)
+        .filter(|&&j| toks[j].kind == TokenKind::Number)?;
+    let k: u64 = String::from_utf8_lossy(toks[*lim].bytes(sql))
+        .parse()
+        .ok()?;
     let rest = &sig[i + 2..];
     if !(rest.is_empty() || (rest.len() == 1 && punct(i + 2, b";"))) || k == 0 {
         return None;
@@ -811,6 +839,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn nearest_shapes() {
         let o = LexOptions::mysql84();
         let q = "SELECT id FROM place p WHERE kind = 'a' ORDER BY ST_Distance(p.loc, ST_GeomFromText('POINT(19 72)', 4326)) LIMIT 5";
@@ -820,10 +849,18 @@ mod tests {
         assert!(w.starts_with(KNN_MARK), "{w}");
         assert!(w.contains("WHERE ( kind = 'a' ) AND ST_Distance(p.loc, ST_GeomFromText('POINT(19 72)', 4326)) <= 1e3 ORDER BY"), "{w}");
         let p = String::from_utf8(k.probe(q.as_bytes(), 1000.0)).unwrap();
-        assert!(p.contains("SELECT COUNT(*) FROM (/*sprig:knn*/ SELECT id"), "{p}");
+        assert!(
+            p.contains("SELECT COUNT(*) FROM (/*sprig:knn*/ SELECT id"),
+            "{p}"
+        );
         assert!(knn(w.as_bytes(), &o).is_none());
         let q2 = "SELECT id FROM place ORDER BY ST_Distance(loc, ST_GeomFromText('POINT(19 72)', 4326)) ASC LIMIT 3;";
-        let w2 = String::from_utf8(knn(q2.as_bytes(), &o).unwrap().with_radius(q2.as_bytes(), 4000.0)).unwrap();
+        let w2 = String::from_utf8(
+            knn(q2.as_bytes(), &o)
+                .unwrap()
+                .with_radius(q2.as_bytes(), 4000.0),
+        )
+        .unwrap();
         assert!(w2.contains("FROM place WHERE ST_Distance(loc,"), "{w2}");
         for bad in [
             "SELECT id FROM a, b ORDER BY ST_Distance(loc, ST_GeomFromText('POINT(19 72)', 4326)) LIMIT 3",
@@ -841,7 +878,10 @@ mod tests {
         let s = rw(
             "SELECT id FROM place WHERE ST_Distance(loc, ST_GeomFromText('POINT(19.07 72.87)', 4326)) < 5000",
         );
-        assert!(s.contains("(MBRIntersects(loc, ST_GeomFromText('POLYGON(("), "{s}");
+        assert!(
+            s.contains("(MBRIntersects(loc, ST_GeomFromText('POLYGON(("),
+            "{s}"
+        );
         // The box is in stored order (longitude first), around 72.87 19.07.
         assert!(s.contains("7.28") && s.contains("1.90"), "{s}");
         assert!(s.contains("AND IF("), "{s}");

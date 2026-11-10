@@ -19,15 +19,30 @@
 //!   `ER_SPRIG_SESSION_MOVED` (SQLSTATE 08S01) and must reconnect;
 //! - every other session moves transparently: `USE`, variables and
 //!   prepared statements are replayed on the new home's connections.
+//!
+//! **A DC failover holds too (RL13, r2harden).** From the promotion's
+//! commit point the directory names the new home, whose map stays
+//! `standby` until the promotion has drained the copy (its job reached
+//! the old home's last position), given the tenant's accounts their
+//! write privileges back and turned the map `home`. While the followed
+//! map is `standby`, every statement of the tenant waits (prepares and
+//! reads too: a `PREPARE` of an `INSERT` is checked against the copy's
+//! revoked grants, and a read would see a copy that isn't caught up), up
+//! to [`PROMOTION_HOLD`]; past it the statement gets 1205, never the copy.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use sprig_catalog::placement::MapRole;
 use sprig_common::{Result, SprigError};
 
 use super::PassSession;
 
 /// The longest one statement waits for a hold, whatever its deadline says.
 const MAX_WAIT: Duration = Duration::from_secs(10);
+
+/// The longest one statement waits for a promotion to make the new home
+/// writable (RL13).
+pub(super) const PROMOTION_HOLD: Duration = MAX_WAIT;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -56,10 +71,31 @@ impl PassSession {
         let mut changes = locator.placement_changes_for(tenant);
         let started = std::time::Instant::now();
         let mut waited = false;
+        let mut promotion: Option<std::time::Instant> = None;
         loop {
             let Some(p) = locator.placement_followed(tenant).await else {
                 return Ok(()); // no map copy yet: route as before
             };
+            // RL13: a promotion is still draining the new home's copy.
+            if locator.followed_role(tenant) == Some(MapRole::Standby) {
+                if promotion.is_none() {
+                    promotion = Some(std::time::Instant::now());
+                    metrics::counter!("sprig_gateway_promotion_holds_total").increment(1);
+                }
+                if started.elapsed() < PROMOTION_HOLD {
+                    let _ = tokio::time::timeout(Duration::from_millis(200), changes.changed())
+                        .await;
+                    changes = locator.placement_changes_for(tenant);
+                    continue;
+                }
+                metrics::counter!("sprig_gateway_promotion_hold_timeouts_total").increment(1);
+                return Err(promotion_held_too_long());
+            }
+            if let Some(t) = promotion.take() {
+                metrics::histogram!("sprig_gateway_promotion_hold_seconds")
+                    .record(t.elapsed().as_secs_f64());
+                tracing::debug!(%tenant, held_ms = t.elapsed().as_millis(), "statement released after the tenant's promotion");
+            }
             let in_trx = self.bs.as_ref().is_some_and(|b| b.pins().in_transaction());
             if let Some(h) = &p.hold
                 && !in_trx

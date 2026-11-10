@@ -1251,14 +1251,24 @@ impl PassSession {
                 } else {
                     None
                 };
-                match dup_table.as_deref() {
-                    Some(table) => {
+                // 3306: MySQL's integer result types (chapter 28, R4).
+                let logical = (self.persona == Persona::MySql84 && dup_table.is_none())
+                    .then(|| self.stmts.get_mut(stmt).ok().and_then(|s| s.logical.clone()))
+                    .flatten()
+                    .filter(|l| compat_sink::IntMetaSink::wanted(l));
+                match (dup_table.as_deref(), logical) {
+                    (Some(table), _) => {
                         let mut wrapped = compat_sink::DupKeySink { inner: out, table };
                         self.execute(cx, stmt, &raw, &params, &mut wrapped)
                             .await
                             .map_err(|e| compat_sink::map(e, Some(table)))
                     }
-                    None => self.execute(cx, stmt, &raw, &params, out).await,
+                    (None, Some(l)) => {
+                        let lex = self.lex_opts().0;
+                        let mut wrapped = compat_sink::IntMetaSink::new(out, &l, lex);
+                        self.execute(cx, stmt, &raw, &params, &mut wrapped).await
+                    }
+                    (None, None) => self.execute(cx, stmt, &raw, &params, out).await,
                 }
             }
             Request::Fetch { stmt, rows } => self.fetch(cx, stmt, rows, out).await,

@@ -1427,12 +1427,24 @@ async fn wire_bytes_pubsub_and_blocking_match_redis() {
 
 /// A random command of the guarded-batch set (R6 round 3, R23), with the
 /// options and values that reach every branch of the batches.
+#[allow(clippy::many_single_char_names)]
 fn random_batched(g: &mut Rng) -> Vec<String> {
     let keys = ["b:s", "b:h", "b:l", "b:z", "b:x", "{b}:y"];
     let k = g.pick(&keys).to_owned();
     let vals = [
-        "1", "0", "-0", "007", "12\n", "-5", "x", "", "9223372036854775806",
-        "9223372036854775807", "-9223372036854775808", "18446744073709551616", "3.5",
+        "1",
+        "0",
+        "-0",
+        "007",
+        "12\n",
+        "-5",
+        "x",
+        "",
+        "9223372036854775806",
+        "9223372036854775807",
+        "-9223372036854775808",
+        "18446744073709551616",
+        "3.5",
     ];
     let v = |g: &mut Rng| g.pick(&vals).to_owned();
     let s = |x: &str| x.to_owned();
@@ -1452,7 +1464,11 @@ fn random_batched(g: &mut Rng) -> Vec<String> {
         }
         2 => vec![s("INCR"), k],
         3 => vec![s("DECR"), k],
-        4 => vec![s("INCRBY"), k, s(g.pick(&["5", "-7", "9223372036854775807", "-9223372036854775808"]))],
+        4 => vec![
+            s("INCRBY"),
+            k,
+            s(g.pick(&["5", "-7", "9223372036854775807", "-9223372036854775808"])),
+        ],
         5 => vec![s("DECRBY"), k, s(g.pick(&["3", "-9223372036854775807"]))],
         6 | 7 => {
             let mut c = vec![s(g.pick(&["HSET", "HMSET"])), k];
@@ -1490,7 +1506,9 @@ fn random_batched(g: &mut Rng) -> Vec<String> {
                     continue;
                 }
                 used.push(m);
-                c.push(s(g.pick(&["1", "2", "-1.5", "+inf", "-inf", "0", "-0", "1e300"])));
+                c.push(s(
+                    g.pick(&["1", "2", "-1.5", "+inf", "-inf", "0", "-0", "1e300"])
+                ));
                 c.push(s(m));
             }
             c
@@ -1539,7 +1557,9 @@ async fn batched_writes_match_redis() {
         let ds = dump(&mut s).await;
         let dr = dump(&mut r).await;
         if ds != dr {
-            bad.push(format!("final state differs:\n sprig {ds:?}\n redis {dr:?}"));
+            bad.push(format!(
+                "final state differs:\n sprig {ds:?}\n redis {dr:?}"
+            ));
         }
         for b in bad.iter().take(20) {
             eprintln!("seed {seed} MISMATCH {b}");
@@ -1556,8 +1576,15 @@ async fn batched_writes_match_redis() {
             let mut s = conn(&url).await;
             for i in 0..50 {
                 run(&mut s, &["INCR", "b:ctr"]).await.unwrap();
-                run(&mut s, &["RPUSH", "b:q", &format!("{c}-{i}")]).await.unwrap();
-                run(&mut s, &["ZADD", "b:zz", &i.to_string(), &format!("{c}-{i}")]).await.unwrap();
+                run(&mut s, &["RPUSH", "b:q", &format!("{c}-{i}")])
+                    .await
+                    .unwrap();
+                run(
+                    &mut s,
+                    &["ZADD", "b:zz", &i.to_string(), &format!("{c}-{i}")],
+                )
+                .await
+                .unwrap();
             }
         }));
     }

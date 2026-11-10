@@ -382,7 +382,14 @@ pub fn model_candidates(
         if spatial
             && not_null(
                 &col,
-                &["geometry", "point", "polygon", "linestring", "multi", "collection"],
+                &[
+                    "geometry",
+                    "point",
+                    "polygon",
+                    "linestring",
+                    "multi",
+                    "collection",
+                ],
             )
         {
             add(

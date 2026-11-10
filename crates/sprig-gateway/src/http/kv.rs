@@ -343,10 +343,7 @@ pub async fn call(
 /// `{latitude, longitude}`.
 fn lat_lng(v: Option<&Value>) -> Option<(f64, f64)> {
     let v = v?;
-    Some((
-        v.get("latitude")?.as_f64()?,
-        v.get("longitude")?.as_f64()?,
-    ))
+    Some((v.get("latitude")?.as_f64()?, v.get("longitude")?.as_f64()?))
 }
 
 /// The namespace's location columns, once per gateway (chapter 36, R6

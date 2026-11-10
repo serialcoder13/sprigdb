@@ -254,7 +254,11 @@ async fn for_each_tenant_end_to_end() {
     .await;
     ok(&mut sys, SYNC_USERS).await;
     ok(&mut sys, SYNC_USERS_APPB).await;
-    let defs = ok(&mut sys, "SHOW INHERITED DEFINITIONS").await;
+    let defs: Vec<_> = ok(&mut sys, "SHOW INHERITED DEFINITIONS")
+        .await
+        .into_iter()
+        .filter(|r| r[1].as_deref() == Some("security"))
+        .collect();
     println!("definitions ({:?}): {defs:?}", t0.elapsed());
     assert_eq!(defs.len(), 3, "{defs:?}");
     // Nothing exists in members yet.

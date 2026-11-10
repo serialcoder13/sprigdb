@@ -210,6 +210,7 @@ pub async fn put(
 ///
 /// # Errors
 /// As [`put`]; 39765 for a location out of range.
+#[allow(clippy::too_many_lines)] // the write's cases, in order
 pub async fn put_at(
     s: &mut dyn SqlRunner,
     ns: &Namespace,
@@ -358,8 +359,8 @@ pub async fn delete(
                 ns.keys(),
                 key_pred(&ns, &k, "")
             ))
-                .await
-                .map_err(|e| sql(&e))?;
+            .await
+            .map_err(|e| sql(&e))?;
             drop_elements(s, &ns, &k, t, g).await?;
             Ok(true)
         })

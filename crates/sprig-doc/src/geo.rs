@@ -63,6 +63,9 @@ pub enum Within {
     Polygon(Vec<(f64, f64)>),
 }
 
+/// A latitude range and longitude ranges, degrees.
+pub type Boxes = ((f64, f64), Vec<(f64, f64)>);
+
 /// `$near` and `$nearSphere` (and the `$geoNear` stage).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Near {
@@ -186,9 +189,7 @@ fn rings(v: &Bson) -> Result<Vec<Vec<LatLng>>, MongoError> {
 /// # Errors
 /// 2 `BadValue` for a malformed geometry.
 pub fn geojson(d: &Document) -> Result<Geom, MongoError> {
-    let t = d
-        .get_str("type")
-        .map_err(|_| bad("unknown GeoJSON type"))?;
+    let t = d.get_str("type").map_err(|_| bad("unknown GeoJSON type"))?;
     if t == "GeometryCollection" {
         let Ok(gs) = d.get_array("geometries") else {
             return Err(bad("GeometryCollection needs geometries"));
@@ -429,16 +430,14 @@ pub fn intersects(x: &Geom, y: &Geom) -> bool {
     if px.iter().any(|p| py.contains(p)) {
         return true;
     }
-    if px
-        .iter()
-        .any(|p| ey.iter().any(|(a, b)| on_edge(*a, *b, *p)) || gy.iter().any(|g| in_polygon(g, *p)))
-    {
+    if px.iter().any(|p| {
+        ey.iter().any(|(a, b)| on_edge(*a, *b, *p)) || gy.iter().any(|g| in_polygon(g, *p))
+    }) {
         return true;
     }
-    if py
-        .iter()
-        .any(|p| ex.iter().any(|(a, b)| on_edge(*a, *b, *p)) || gx.iter().any(|g| in_polygon(g, *p)))
-    {
+    if py.iter().any(|p| {
+        ex.iter().any(|(a, b)| on_edge(*a, *b, *p)) || gx.iter().any(|g| in_polygon(g, *p))
+    }) {
         return true;
     }
     ex.iter()
@@ -464,7 +463,10 @@ impl Within {
                 !pts.is_empty() && pts.iter().all(|p| s2::angle(c, v3(*p)) <= *r)
             }
             Self::Box(lo, hi) => flat_point(g).is_some_and(|(x, y)| {
-                x >= lo.0.min(hi.0) && x <= lo.0.max(hi.0) && y >= lo.1.min(hi.1) && y <= lo.1.max(hi.1)
+                x >= lo.0.min(hi.0)
+                    && x <= lo.0.max(hi.0)
+                    && y >= lo.1.min(hi.1)
+                    && y <= lo.1.max(hi.1)
             }),
             Self::Center(c, r) => {
                 flat_point(g).is_some_and(|(x, y)| (x - c.0).hypot(y - c.1) <= *r)
@@ -538,7 +540,7 @@ impl GeoOp {
     /// A latitude range and longitude ranges holding every point of the
     /// region; `None` when the region is too large to help.
     #[must_use]
-    pub fn boxes(&self) -> Option<((f64, f64), Vec<(f64, f64)>)> {
+    pub fn boxes(&self) -> Option<Boxes> {
         if let Self::Within(Within::Box(lo, hi)) = self {
             return Some((
                 (lo.1.min(hi.1), lo.1.max(hi.1)),
@@ -643,7 +645,9 @@ pub fn parse(op: &str, v: &Bson, siblings: &Document) -> Result<GeoOp, MongoErro
                     }
                     let g = geometry_arg(d)?;
                     if polygons_of(&g).is_empty() {
-                        return Err(bad("$geoWithin $geometry must be a Polygon or MultiPolygon"));
+                        return Err(bad(
+                            "$geoWithin $geometry must be a Polygon or MultiPolygon",
+                        ));
                     }
                     Within::Geometry(g)
                 }
@@ -652,9 +656,11 @@ pub fn parse(op: &str, v: &Bson, siblings: &Document) -> Result<GeoOp, MongoErro
                         return Err(bad("$centerSphere must be an array"));
                     };
                     let (lng, lat) = coords_pair(x.first().unwrap_or(&Bson::Null))?;
-                    let r = x.get(1).and_then(num).filter(|r| *r >= 0.0).ok_or_else(|| {
-                        bad("radius must be a non-negative number")
-                    })?;
+                    let r = x
+                        .get(1)
+                        .and_then(num)
+                        .filter(|r| *r >= 0.0)
+                        .ok_or_else(|| bad("radius must be a non-negative number"))?;
                     Within::CenterSphere((lat, lng), r)
                 }
                 "$box" => {
@@ -671,9 +677,11 @@ pub fn parse(op: &str, v: &Bson, siblings: &Document) -> Result<GeoOp, MongoErro
                         return Err(bad("$center must be an array"));
                     };
                     let c = coords_pair(x.first().unwrap_or(&Bson::Null))?;
-                    let r = x.get(1).and_then(num).filter(|r| *r >= 0.0).ok_or_else(|| {
-                        bad("radius must be a non-negative number")
-                    })?;
+                    let r = x
+                        .get(1)
+                        .and_then(num)
+                        .filter(|r| *r >= 0.0)
+                        .ok_or_else(|| bad("radius must be a non-negative number"))?;
                     Within::Center(c, r)
                 }
                 "$polygon" => {
@@ -866,14 +874,24 @@ mod tests {
     #[test]
     fn within_and_intersects() {
         let poly = square((10.0, 20.0), 1.0);
-        let op = parse("$geoWithin", &Bson::Document(doc! {"$geometry": poly.clone()}), &doc! {}).unwrap();
+        let op = parse(
+            "$geoWithin",
+            &Bson::Document(doc! {"$geometry": poly.clone()}),
+            &doc! {},
+        )
+        .unwrap();
         let pt = |x: f64, y: f64| bson::bson!({"type": "Point", "coordinates": [x, y]});
         assert!(op.eval(&[&pt(10.2, 20.3)]));
         assert!(!op.eval(&[&pt(12.0, 20.0)]));
         assert!(op.eval(&[&bson::bson!([10.5, 19.5])]));
         let line = bson::bson!({"type": "LineString", "coordinates": [[9.5, 20.0], [12.0, 20.0]]});
         assert!(!op.eval(&[&line]));
-        let i = parse("$geoIntersects", &Bson::Document(doc! {"$geometry": poly}), &doc! {}).unwrap();
+        let i = parse(
+            "$geoIntersects",
+            &Bson::Document(doc! {"$geometry": poly}),
+            &doc! {},
+        )
+        .unwrap();
         assert!(i.eval(&[&line]));
         assert!(!i.eval(&[&pt(30.0, 0.0)]));
         // An array of locations: any of them.

@@ -143,13 +143,22 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                         .to_document()
                         .map_err(|e| codec_err(&codec::CodecError::Malformed(e.to_string())))?;
                     let name = cmd.keys().next().cloned().unwrap_or_default();
-                    // The handshake, and the authentication of drivers
-                    // from before MongoDB 6.0 (Java 3.x, as in YCSB), which
-                    // send `saslStart` and `saslContinue` this way.
+                    // The handshake, and what drivers from before MongoDB
+                    // 6.0 (Java 3.x, as in YCSB) send this way before they
+                    // switch to OP_MSG: `buildinfo`, `getlasterror`,
+                    // `saslStart` and `saslContinue`.
                     if !q.full_collection_name.ends_with(".$cmd")
                         || !matches!(
                             name.as_str(),
-                            "hello" | "isMaster" | "ismaster" | "saslStart" | "saslContinue"
+                            "hello"
+                                | "isMaster"
+                                | "ismaster"
+                                | "buildinfo"
+                                | "buildInfo"
+                                | "getlasterror"
+                                | "getLastError"
+                                | "saslStart"
+                                | "saslContinue"
                         )
                     {
                         return Err(SprigError::new(
@@ -168,6 +177,13 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                     let r = match name.as_str() {
                         "saslStart" => st.sasl_start(&cmd).await,
                         "saslContinue" => st.sasl_continue(&cmd).await,
+                        "buildinfo" | "buildInfo" => {
+                            super::commands::run(&mut st, &name, &cmd).await
+                        }
+                        // Java 3.x reads its connection id this way.
+                        "getlasterror" | "getLastError" => Ok(
+                            doc! {"connectionId": st.id, "n": 0, "err": Bson::Null, "ok": 1.0},
+                        ),
                         _ => st.hello(&cmd, true).await,
                     };
                     let body = match r {

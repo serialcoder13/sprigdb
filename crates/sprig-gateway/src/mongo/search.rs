@@ -44,7 +44,9 @@ pub async fn command(
                 ));
             }
             let created = engine.create_search_indexes(sql, &ns, &specs).await?;
-            Ok(doc! {"indexesCreated": created.into_iter().map(Bson::Document).collect::<Vec<_>>(), "ok": 1.0})
+            Ok(
+                doc! {"indexesCreated": created.into_iter().map(Bson::Document).collect::<Vec<_>>(), "ok": 1.0},
+            )
         }
         "updateSearchIndex" => {
             let n = body

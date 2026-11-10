@@ -31,6 +31,9 @@
 //! sends `ROLLBACK` (a statement error inside a compound statement leaves
 //! the transaction open).
 
+// The batches are SQL text built piece by piece.
+#![allow(clippy::format_push_string)]
+
 use bytes::Bytes;
 use sprig_kv::layout::{KeyType, MAX_ELEMENT_BYTES, MAX_KEY_BYTES, Namespace};
 use sprig_kv::sql::{cell_i64, lit};
@@ -366,7 +369,15 @@ fn drop_key(ns: &Namespace, k: &str) -> String {
 }
 
 /// A new key row of type `t`; `g` from `@g`, `_v` = `ver`.
-fn insert_key(ns: &Namespace, key: &[u8], t: KeyType, v: &str, n: &str, exp: &str, ver: u64) -> String {
+fn insert_key(
+    ns: &Namespace,
+    key: &[u8],
+    t: KeyType,
+    v: &str,
+    n: &str,
+    exp: &str,
+    ver: u64,
+) -> String {
     format!(
         "INSERT INTO {} (k, type, v, n, lh, lt, g, _v, expires_at, _sprig_dk, _sprig_rk) \
          VALUES ({}, '{}', {v}, {n}, @lh, @lt, @g, {ver}, {exp}, {}, {}); ",
@@ -641,10 +652,7 @@ impl Plan {
             2 => return Some((reply::wrongtype(), false)),
             3 => return Some((reply::not_int(), false)),
             4 => {
-                return Some((
-                    Frame::err("increment or decrement would overflow"),
-                    false,
-                ));
+                return Some((Frame::err("increment or decrement would overflow"), false));
             }
             _ => {}
         }
@@ -736,7 +744,9 @@ mod tests {
     use super::*;
 
     fn args(v: &[&str]) -> Vec<Bytes> {
-        v.iter().map(|s| Bytes::copy_from_slice(s.as_bytes())).collect()
+        v.iter()
+            .map(|s| Bytes::copy_from_slice(s.as_bytes()))
+            .collect()
     }
 
     #[test]
@@ -748,10 +758,21 @@ mod tests {
         assert!(plan(&ns, "hset", &args(&["hset", "k", "f"])).is_none());
         assert!(plan(&ns, "zadd", &args(&["zadd", "k", "1", "a", "2", "a"])).is_none());
         assert!(plan(&ns, "zadd", &args(&["zadd", "k", "INCR", "1", "a"])).is_none());
-        assert!(plan(&ns, "decrby", &args(&["decrby", "k", "-9223372036854775808"])).is_none());
+        assert!(
+            plan(
+                &ns,
+                "decrby",
+                &args(&["decrby", "k", "-9223372036854775808"])
+            )
+            .is_none()
+        );
         assert!(plan(&ns, "lpop", &args(&["lpop", "k", "-1"])).is_none());
         assert_eq!(
-            plan(&ns, "hset", &args(&["hset", "k", "f", "1", "g", "2", "f", "3"])),
+            plan(
+                &ns,
+                "hset",
+                &args(&["hset", "k", "f", "1", "g", "2", "f", "3"])
+            ),
             Some(Plan::Hset {
                 k: Bytes::from_static(b"k"),
                 pairs: vec![
@@ -788,15 +809,30 @@ mod tests {
     fn replies() {
         let ns = Namespace::redis("redis", 0);
         let p = plan(&ns, "incr", &args(&["incr", "k"])).unwrap();
-        let row = |v: &[Option<&str>]| -> Row { v.iter().map(|c| c.map(|s| s.as_bytes().to_vec())).collect() };
-        assert_eq!(p.reply(&[row(&[Some("0"), Some("7")])]), Some((Frame::Integer(7), false)));
-        assert_eq!(p.reply(&[row(&[Some("2"), None])]).map(|r| r.0), Some(reply::wrongtype()));
+        let row = |v: &[Option<&str>]| -> Row {
+            v.iter().map(|c| c.map(|s| s.as_bytes().to_vec())).collect()
+        };
+        assert_eq!(
+            p.reply(&[row(&[Some("0"), Some("7")])]),
+            Some((Frame::Integer(7), false))
+        );
+        assert_eq!(
+            p.reply(&[row(&[Some("2"), None])]).map(|r| r.0),
+            Some(reply::wrongtype())
+        );
         let p = plan(&ns, "rpop", &args(&["rpop", "k", "3"])).unwrap();
         assert_eq!(
-            p.reply(&[row(&[Some("0"), Some("c")]), row(&[Some("0"), Some("b")])]).map(|r| r.0),
+            p.reply(&[row(&[Some("0"), Some("c")]), row(&[Some("0"), Some("b")])])
+                .map(|r| r.0),
             Some(Frame::Array(vec![Frame::bulk("c"), Frame::bulk("b")]))
         );
-        assert_eq!(p.reply(&[row(&[Some("1"), None])]).map(|r| r.0), Some(Frame::null_array()));
-        assert_eq!(p.reply(&[row(&[Some("0"), None])]).map(|r| r.0), Some(Frame::Array(vec![])));
+        assert_eq!(
+            p.reply(&[row(&[Some("1"), None])]).map(|r| r.0),
+            Some(Frame::null_array())
+        );
+        assert_eq!(
+            p.reply(&[row(&[Some("0"), None])]).map(|r| r.0),
+            Some(Frame::Array(vec![]))
+        );
     }
 }

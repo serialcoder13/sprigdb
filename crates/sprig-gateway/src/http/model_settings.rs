@@ -155,8 +155,10 @@ impl Drop for Admitted {
 }
 
 fn take(c: &AtomicUsize, limit: usize) -> bool {
-    c.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < limit).then_some(n + 1))
-        .is_ok()
+    c.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        (n < limit).then_some(n + 1)
+    })
+    .is_ok()
 }
 
 /// Admits a query of `tenant` under the limits now, waiting up to a

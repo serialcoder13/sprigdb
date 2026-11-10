@@ -370,7 +370,8 @@ fn parse_ops(d: &Document) -> Result<Vec<FieldOp>, MongoError> {
             {
                 continue;
             }
-            "$where" | "$text" | "$bitsAllSet" | "$bitsAnySet" | "$bitsAllClear" | "$bitsAnyClear" => {
+            "$where" | "$text" | "$bitsAllSet" | "$bitsAnySet" | "$bitsAllClear"
+            | "$bitsAnyClear" => {
                 return Err(MongoError::new(
                     code::SPRIG_DOC_FEATURE_UNSUPPORTED,
                     format!("{k} is not supported in this release"),

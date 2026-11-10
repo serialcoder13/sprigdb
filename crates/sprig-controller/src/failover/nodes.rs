@@ -128,6 +128,71 @@ async fn source_position(
     (!best.is_empty()).then(|| best.into_values().collect::<Vec<_>>().join(","))
 }
 
+/// RL13 (r2harden): before a promotion reads the position its job standby
+/// must reach, the old home's copy stops taking the tenant's writes, on
+/// every node of `source` that answers within 2 s: the tenant's accounts
+/// lose their write privileges there and their sessions end, as a
+/// returning DC's fence does (decision W7). A write a gateway still sent
+/// there either committed before its session ended, and so is in the
+/// position read next, or fails: none is acknowledged after it. The
+/// sessions are given up to 2 s to be gone before the position is read (a
+/// killed session may still be finishing its commit). A source that
+/// doesn't answer is skipped (a lost DC: the RPO check accepted its lag).
+async fn fence_source(
+    global: &Arc<dyn MetaStore>,
+    tier: &Arc<dyn MetaStore>,
+    source: &ClusterId,
+    tenant: TenantId,
+) {
+    let Ok(Some(rec)) = cluster(global, tier, source).await else {
+        return;
+    };
+    let Ok(eps) = ctl_endpoints(&rec) else {
+        return;
+    };
+    for ep in eps {
+        match tokio::time::timeout(Duration::from_secs(2), fence_tenant_on(&ep, tenant)).await {
+            Ok(Ok((revoked, killed))) => {
+                tracing::info!(%tenant, cluster = %source, node = %ep.node, revoked, killed, "old home's copy fenced before the standby drains");
+                if killed > 0 {
+                    sessions_gone(&ep, tenant, Duration::from_secs(2)).await;
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(%tenant, cluster = %source, node = %ep.node, error = %e, "old home's copy not fenced");
+            }
+            Err(_) => {
+                tracing::debug!(%tenant, cluster = %source, node = %ep.node, "old home's node didn't answer the fence");
+            }
+        }
+    }
+}
+
+/// Waits (up to `within`) until no session of the tenant's accounts is
+/// left on `ep`.
+async fn sessions_gone(ep: &NodeEndpoint, tenant: TenantId, within: Duration) {
+    let Ok(mut s) = ProbeSession::connect(ep, NODE_TIMEOUT).await else {
+        return;
+    };
+    let like = literal(&format!("t{tenant}\\_%"));
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < within {
+        let n = s
+            .scalar(&format!(
+                "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER LIKE {like}"
+            ))
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if n == "0" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    s.close().await;
+}
+
 /// Accounts a fence never touches: SprigDB's own and MariaDB's.
 const SYSTEM_USERS: [&str; 6] = [
     "system user",
@@ -254,8 +319,11 @@ impl ClusterHooks {
             }
             if rec.state != JobState::Done {
                 // 1. Drain: a source that still answers (fenced, or frozen
-                //    above MariaDB) has nothing the copy must miss.
+                //    above MariaDB) has nothing the copy must miss. RL13:
+                //    it is fenced for the tenant first, so no write is
+                //    acknowledged there after the position read next.
                 let t0 = std::time::Instant::now();
+                fence_source(&self.global, tier, &source, tenant).await;
                 if let Some(want) = source_position(&self.global, tier, &source).await {
                     loop {
                         let st = mover.status(&job).await?;

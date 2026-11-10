@@ -16,9 +16,9 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use sprig_common::{Result, SprigError};
+use sprig_proto_mysql::ColumnDef;
 use sprig_proto_mysql::command::QueryAttrs;
 use sprig_proto_mysql::packets::OkPacket;
-use sprig_proto_mysql::ColumnDef;
 use sprig_sql::lex::LexOptions;
 
 use super::PassSession;
@@ -86,7 +86,9 @@ impl ResultSink for Count {
         Ok(())
     }
     async fn local_infile_request(&mut self, _f: &[u8]) -> Result<()> {
-        Err(SprigError::internal("LOAD DATA in a nearest-neighbour probe"))
+        Err(SprigError::internal(
+            "LOAD DATA in a nearest-neighbour probe",
+        ))
     }
     async fn local_infile_read(&mut self) -> Result<Bytes> {
         Ok(Bytes::new())
@@ -102,6 +104,7 @@ impl ResultSink for Count {
 impl PassSession {
     /// Runs a nearest-neighbour statement with a growing radius; `None`
     /// when `text` isn't one.
+    #[allow(clippy::too_many_arguments)] // `tenant_text`'s, passed on
     pub(super) async fn tenant_geo_knn(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -135,19 +138,20 @@ impl PassSession {
                 Some(n) if !c.failed && n >= k.k => break Some(r),
                 Some(_) if !c.failed => r *= 4.0,
                 _ => {
-                    tracing::debug!("nearest-neighbour probe failed; running the statement as sent");
+                    tracing::debug!(
+                        "nearest-neighbour probe failed; running the statement as sent"
+                    );
                     break None;
                 }
             }
         };
         metrics::histogram!("sprig_geo_knn_rounds").record(f64::from(rounds));
-        let text = match chosen {
-            Some(r) => Bytes::from(k.with_radius(text, r)),
-            None => {
-                let mut t = sprig_sql::compat::geo::KNN_MARK.as_bytes().to_vec();
-                t.extend_from_slice(text);
-                Bytes::from(t)
-            }
+        let text = if let Some(r) = chosen {
+            Bytes::from(k.with_radius(text, r))
+        } else {
+            let mut t = sprig_sql::compat::geo::KNN_MARK.as_bytes().to_vec();
+            t.extend_from_slice(text);
+            Bytes::from(t)
         };
         Box::pin(self.tenant_text(cx, &text, attrs, more, format, out))
             .await

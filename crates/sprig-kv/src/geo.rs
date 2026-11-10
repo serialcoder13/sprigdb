@@ -111,8 +111,14 @@ async fn candidates(
     Ok(rows
         .into_iter()
         .filter_map(|r| {
-            let lat = r.get(5).and_then(Option::as_ref).map(|c| cell_f64(Some(c)))?;
-            let lng = r.get(6).and_then(Option::as_ref).map(|c| cell_f64(Some(c)))?;
+            let lat = r
+                .get(5)
+                .and_then(Option::as_ref)
+                .map(|c| cell_f64(Some(c)))?;
+            let lng = r
+                .get(6)
+                .and_then(Option::as_ref)
+                .map(|c| cell_f64(Some(c)))?;
             if !region.contains(lat, lng) {
                 return None;
             }
@@ -187,7 +193,11 @@ pub async fn nearest(
     let cap = max_m.unwrap_or(EARTH_COVERED_M).min(EARTH_COVERED_M);
     let mut r = KNN_INITIAL_RADIUS_M.min(cap);
     loop {
-        let region = Region::Circle { lat, lng, radius_m: r };
+        let region = Region::Circle {
+            lat,
+            lng,
+            radius_m: r,
+        };
         let mut hits = candidates(s, ns, &region).await?;
         if hits.len() >= k || r >= cap {
             rank(&mut hits, Some((lat, lng)), k);
@@ -246,7 +256,10 @@ mod tests {
         let ns = Namespace::redis("redis", 0);
         assert!(ddl(&ns).contains("ADD INDEX IF NOT EXISTS _sprig_s2"));
         let s = set_sql(Some((19.07, 72.87)));
-        assert!(s.starts_with("loc = POINT(7.287e1, 1.907e1), _sprig_s2 = "), "{s}");
+        assert!(
+            s.starts_with("loc = POINT(7.287e1, 1.907e1), _sprig_s2 = "),
+            "{s}"
+        );
         assert!(check(91.0, 0.0).is_err());
     }
 }

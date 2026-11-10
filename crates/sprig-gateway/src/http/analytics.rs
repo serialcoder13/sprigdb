@@ -19,7 +19,6 @@ use tonic::{Request, Response, Status};
 use super::sql::{Caller, SqlEngine};
 use crate::redis::SqlSession;
 
-
 fn s(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").to_owned()
 }
@@ -91,11 +90,9 @@ pub async fn call(
             let q = Query::parse(body)?;
             // Live `analytics.*` settings (R6 round 3).
             let limits = super::model_settings::analytics(&engine.api);
-            let _admitted = super::model_settings::admit(
-                caller.principal.tenant.map_or(0, |t| t.0),
-                limits,
-            )
-            .await?;
+            let _admitted =
+                super::model_settings::admit(caller.principal.tenant.map_or(0, |t| t.0), limits)
+                    .await?;
             let t = std::time::Instant::now();
             let a = tokio::time::timeout(
                 limits.timeout,

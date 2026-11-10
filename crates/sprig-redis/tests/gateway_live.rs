@@ -491,7 +491,11 @@ async fn kv_geo_search() {
                 .all(|(h, w)| (h["distance_m"].as_f64().unwrap_or(-1.0) - w.0).abs() < 1e-3)
         });
         if st != 200 || keys_of(&r) != want_keys || !close {
-            bad.push(format!("circle {k}: {st} {} vs {}", keys_of(&r).len(), want_keys.len()));
+            bad.push(format!(
+                "circle {k}: {st} {} vs {}",
+                keys_of(&r).len(),
+                want_keys.len()
+            ));
         }
         // A box, in key order.
         let (s, w) = (clat - 0.05, clng - 0.07);
@@ -509,7 +513,11 @@ async fn kv_geo_search() {
             bad.push(format!("box {k}: {st} {:?} vs {want:?}", keys_of(&r)));
         }
         // A triangle, ordered from `near`.
-        let tri = [(clat - 0.05, clng - 0.05), (clat - 0.03, clng + 0.06), (clat + 0.06, clng)];
+        let tri = [
+            (clat - 0.05, clng - 0.05),
+            (clat - 0.03, clng + 0.06),
+            (clat + 0.06, clng),
+        ];
         let (st, r) = http(&http_addr, &auth, &format!("{base}:geoSearch"), &json!({
             "region": {"polygon": tri.iter().map(|(a, b)| json!({"latitude": a, "longitude": b})).collect::<Vec<_>>()},
             "near": {"latitude": clat, "longitude": clng}, "limit": 1000})).await;
@@ -526,8 +534,14 @@ async fn kv_geo_search() {
             bad.push(format!("polygon {k}: {st} {:?} vs {want:?}", keys_of(&r)));
         }
         // The 10 nearest keys anywhere.
-        let (st, r) = http(&http_addr, &auth, &format!("{base}:geoSearch"), &json!({
-            "near": {"latitude": clat, "longitude": clng}, "limit": 10})).await;
+        let (st, r) = http(
+            &http_addr,
+            &auth,
+            &format!("{base}:geoSearch"),
+            &json!({
+            "near": {"latitude": clat, "longitude": clng}, "limit": 10}),
+        )
+        .await;
         let mut all: Vec<(f64, String)> = pts
             .iter()
             .map(|(key, la, lo)| (dist(clat, clng, *la, *lo), key.clone()))
@@ -540,8 +554,14 @@ async fn kv_geo_search() {
         }
     }
     // A bad region.
-    let (st, _) = http(&http_addr, &auth, &format!("{base}:geoSearch"), &json!({
-        "region": {"center": {"latitude": 95.0, "longitude": 0.0}, "radius_m": 10.0}})).await;
+    let (st, _) = http(
+        &http_addr,
+        &auth,
+        &format!("{base}:geoSearch"),
+        &json!({
+        "region": {"center": {"latitude": 95.0, "longitude": 0.0}, "radius_m": 10.0}}),
+    )
+    .await;
     checks += 1;
     if st != 400 {
         bad.push(format!("bad region: {st}"));
@@ -554,7 +574,9 @@ async fn kv_geo_search() {
         let mut c = mysql_async::Conn::new(mysql_async::Opts::from_url(&sql).unwrap())
             .await
             .unwrap();
-        c.query_drop("DROP DATABASE IF EXISTS r6three_kvgeo").await.unwrap();
+        c.query_drop("DROP DATABASE IF EXISTS r6three_kvgeo")
+            .await
+            .unwrap();
         c.disconnect().await.unwrap();
     }
     assert!(bad.is_empty());

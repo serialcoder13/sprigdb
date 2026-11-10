@@ -361,21 +361,16 @@ impl PassSession {
             }
         } else if decl.kind == sprig_logic::declare::Kind::Function {
             // An earlier version's SELECT function would call old code.
-            match shards.as_mut() {
-                Some(sh) => {
-                    for (s, _) in &shard_list {
-                        let plan =
-                            sprig_logic::deploy::plan_select(s, &decl.name, String::new(), "");
-                        if let Ok(c) = sprig_logic::deploy::ShardSessions::session(sh, s).await {
-                            sprig_logic::deploy::undo(c, &plan).await;
-                        }
+            if let Some(sh) = shards.as_mut() {
+                for (s, _) in &shard_list {
+                    let plan = sprig_logic::deploy::plan_select(s, &decl.name, String::new(), "");
+                    if let Ok(c) = sprig_logic::deploy::ShardSessions::session(sh, s).await {
+                        sprig_logic::deploy::undo(c, &plan).await;
                     }
                 }
-                None => {
-                    let plan =
-                        sprig_logic::deploy::plan_select(&schema, &decl.name, String::new(), "");
-                    sprig_logic::deploy::undo(&mut ctl, &plan).await;
-                }
+            } else {
+                let plan = sprig_logic::deploy::plan_select(&schema, &decl.name, String::new(), "");
+                sprig_logic::deploy::undo(&mut ctl, &plan).await;
             }
             notes.push(format!(
                 "SELECT {}(...) isn't available: the function writes data; use CALL",

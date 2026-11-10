@@ -419,6 +419,10 @@ pub async fn ensure_vhost(
     }
     let mut all: Vec<(TopoChange, u64)> = changes;
     all.extend(binds.into_iter().map(|b| (b, 0)));
+    // The catalog writer connection goes back before the catalog change:
+    // anything it still holds (a migration's lock) would make the change's
+    // begin wait for it.
+    drop(conn);
     if !all.is_empty() || !arg_updates.is_empty() {
         let mut c = svc.catalog.change(t, VersionKind::Catalog).await?;
         let r = {
