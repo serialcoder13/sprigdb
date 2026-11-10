@@ -1405,9 +1405,9 @@ impl LogicStore {
     }
 
     /// `sprigctl logic dead-letters replay`: marks dead letters of
-    /// after-commit triggers `replaying` (their job runs them), and counts
-    /// those of triggers on streams and queues, which stay `dead`: their
-    /// replay isn't built (R7 close-out; chapter 41, "As built in R9").
+    /// after-commit triggers and of triggers on streams and queues
+    /// `replaying` (their jobs run them, in order, with the active version;
+    /// RC11, R9), and counts those of other kinds, which stay `dead`.
     /// Returns (queued, left dead).
     ///
     /// # Errors
@@ -1432,7 +1432,7 @@ impl LogicStore {
         c.exec_drop(
             format!(
                 "UPDATE {} d JOIN {} b ON b.binding_id = d.binding_id SET d.state = 'replaying' \
-                 WHERE d.state = 'dead' AND b.timing = 'after_commit' \
+                 WHERE d.state = 'dead' AND b.timing IN ('after_commit', 'on_message') \
                  AND (? IS NULL OR d.binding_id = ?) AND {list}",
                 self.dead, self.bindings
             ),
@@ -1445,7 +1445,7 @@ impl LogicStore {
             .exec_first(
                 format!(
                     "SELECT COUNT(*) FROM {} d JOIN {} b ON b.binding_id = d.binding_id \
-                     WHERE d.state = 'dead' AND b.timing <> 'after_commit' \
+                     WHERE d.state = 'dead' AND b.timing NOT IN ('after_commit', 'on_message') \
                      AND (? IS NULL OR d.binding_id = ?) AND {list}",
                     self.dead, self.bindings
                 ),

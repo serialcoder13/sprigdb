@@ -73,8 +73,7 @@ pub fn rewrite(sql: &[u8], max_columns: usize) -> Option<String> {
     let GroupByExpr::Expressions(keys, mods) = &sel.group_by else {
         return None;
     };
-    if !mods.contains(&GroupByWithModifier::Rollup) || keys.is_empty() || keys.len() > max_columns
-    {
+    if !mods.contains(&GroupByWithModifier::Rollup) || keys.is_empty() || keys.len() > max_columns {
         return None;
     }
     let grouping = has_grouping(&q);
@@ -476,8 +475,9 @@ mod tests {
              SUM(c) AS `_sprig_c1` FROM t GROUP BY a WITH ROLLUP) AS `_sprig_r` \
              ORDER BY `_sprig_c0` DESC"
         );
-        let s = rw("SELECT a, b, SUM(c) AS s FROM t GROUP BY a, b WITH ROLLUP ORDER BY s DESC LIMIT 3")
-            .unwrap();
+        let s =
+            rw("SELECT a, b, SUM(c) AS s FROM t GROUP BY a, b WITH ROLLUP ORDER BY s DESC LIMIT 3")
+                .unwrap();
         assert!(s.ends_with("ORDER BY `_sprig_c2` DESC LIMIT 3"), "{s}");
         // By position and by the same expression.
         assert!(
@@ -505,7 +505,10 @@ mod tests {
             s.contains("SELECT a AS `_sprig_c0`, NULL AS `_sprig_c1`, 1 AS `_sprig_c2`, SUM(a) AS `_sprig_c3`"),
             "{s}"
         );
-        assert!(s.contains("NULL AS `_sprig_c0`, NULL AS `_sprig_c1`, 3 AS `_sprig_c2`"), "{s}");
+        assert!(
+            s.contains("NULL AS `_sprig_c0`, NULL AS `_sprig_c1`, 3 AS `_sprig_c2`"),
+            "{s}"
+        );
     }
 
     #[test]

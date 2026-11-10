@@ -251,7 +251,8 @@ impl StandbyLoop {
                 fo.and_then(|f| f.get("mode"))
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-                fo.and_then(|f| f.get("rpo_seconds")).and_then(Value::as_u64),
+                fo.and_then(|f| f.get("rpo_seconds"))
+                    .and_then(Value::as_u64),
             )
         };
         if have(&e.raw) == (want_mode.clone(), want_rpo) {

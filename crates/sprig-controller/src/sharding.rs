@@ -13,9 +13,11 @@
 //!
 //! Every proposal and advisor run is a decision in the tenant's log.
 
+mod graphs;
 mod ops;
 mod rekey;
 pub use ops::{GroupView, ManualJob, ShardRow, design_from_json};
+pub use graphs::{GraphIndexRow, GraphPartition, GraphRow, GraphShardRow, GraphView};
 pub use rekey::RekeyRequest;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

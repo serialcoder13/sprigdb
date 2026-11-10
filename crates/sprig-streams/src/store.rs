@@ -483,6 +483,30 @@ impl StreamsStore {
         q: &mut Q,
         o: &CommittedOffset,
     ) -> Result<()> {
+        if o.instance_tenant == 0 {
+            // Catalogs not yet migrated to `instance_tenant_id` take this.
+            return q
+                .exec_drop(
+                    format!(
+                        "INSERT INTO {} (group_name, stream_id, partition_no, offset_no, \
+                         leader_epoch, metadata, committed_at) VALUES (?, ?, ?, ?, ?, ?, \
+                         UTC_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE offset_no = VALUES(offset_no), \
+                         leader_epoch = VALUES(leader_epoch), metadata = VALUES(metadata), \
+                         committed_at = VALUES(committed_at)",
+                        self.t("stream_offsets")
+                    ),
+                    (
+                        o.group.as_str(),
+                        o.stream.0,
+                        o.partition.0,
+                        o.offset,
+                        o.leader_epoch,
+                        o.metadata.as_deref(),
+                    ),
+                )
+                .await
+                .map_err(map_err);
+        }
         q.exec_drop(
             format!(
                 "INSERT INTO {} (group_name, instance_tenant_id, stream_id, partition_no, \

@@ -273,9 +273,15 @@ fn version_becomes_the_personas_constant_and_restores() {
         "CREATE PROCEDURE p(OUT v VARCHAR(255)) BEGIN SELECT VERSION() AS `VERSION()` INTO v; SELECT version() AS `version()`, CONCAT(VERSION(), 'x'); END"
     );
     // Substituted again: nothing nests.
-    assert_eq!(substitute_full(&s, &lex, false, Some("8.4.8-SprigDB")), None);
+    assert_eq!(
+        substitute_full(&s, &lex, false, Some("8.4.8-SprigDB")),
+        None
+    );
     // Without a version (and through `substitute`), VERSION() stays.
-    assert_eq!(substitute_full("CREATE VIEW v AS SELECT VERSION()", &lex, false, None), None);
+    assert_eq!(
+        substitute_full("CREATE VIEW v AS SELECT VERSION()", &lex, false, None),
+        None
+    );
     assert_eq!(substitute("CREATE VIEW v AS SELECT VERSION()", &lex), None);
     // MariaDB's canonical view text restores too.
     let canon = "select (select coalesce(max(NULL),'8.4.8-SprigDB') from `__sprig_sys`.`__sprig_names_v` where version() is null) AS `VERSION()`";

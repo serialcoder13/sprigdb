@@ -581,12 +581,8 @@ impl TenantKnobs {
                 &COWRITE_MIN_PER_HOUR,
                 ctx,
             ),
-            auto_size_limit_bytes: crate::shards::settings::layered(
-                s,
-                r,
-                &AUTO_SIZE_LIMIT_GB,
-                ctx,
-            ) as f64
+            auto_size_limit_bytes: crate::shards::settings::layered(s, r, &AUTO_SIZE_LIMIT_GB, ctx)
+                as f64
                 * GB,
             max_cooldown_secs: crate::shards::settings::layered(s, r, &MAX_COOLDOWN_DAYS, ctx)
                 * 86_400,

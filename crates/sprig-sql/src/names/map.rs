@@ -235,10 +235,7 @@ impl NameMap for WithGroups<'_> {
     }
 
     fn table_schema(&self, db: DbId, table: &str) -> Option<SchemaName> {
-        self.groups
-            .tables
-            .get(&(db, table.to_lowercase()))
-            .copied()
+        self.groups.tables.get(&(db, table.to_lowercase())).copied()
     }
 }
 

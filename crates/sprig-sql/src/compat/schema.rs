@@ -577,16 +577,44 @@ pub fn show_index_sql(schema: &str, table: &str, filter: Option<&[u8]>, lit: Lit
 /// Captured from MySQL 8.4.11 on 10 November 2026.
 const MYSQL_ENGINES: &[(&str, &str, Option<[&str; 3]>)] = &[
     ("ndbcluster", "Clustered, fault-tolerant tables", None),
-    ("MEMORY", "Hash based, stored in memory, useful for temporary tables", Some(["NO", "NO", "NO"])),
-    ("InnoDB", "Supports transactions, row-level locking, and foreign keys", Some(["YES", "YES", "YES"])),
-    ("PERFORMANCE_SCHEMA", "Performance Schema", Some(["NO", "NO", "NO"])),
+    (
+        "MEMORY",
+        "Hash based, stored in memory, useful for temporary tables",
+        Some(["NO", "NO", "NO"]),
+    ),
+    (
+        "InnoDB",
+        "Supports transactions, row-level locking, and foreign keys",
+        Some(["YES", "YES", "YES"]),
+    ),
+    (
+        "PERFORMANCE_SCHEMA",
+        "Performance Schema",
+        Some(["NO", "NO", "NO"]),
+    ),
     ("MyISAM", "MyISAM storage engine", Some(["NO", "NO", "NO"])),
     ("FEDERATED", "Federated MySQL storage engine", None),
-    ("ndbinfo", "MySQL Cluster system information storage engine", None),
-    ("MRG_MYISAM", "Collection of identical MyISAM tables", Some(["NO", "NO", "NO"])),
-    ("BLACKHOLE", "/dev/null storage engine (anything you write to it disappears)", Some(["NO", "NO", "NO"])),
+    (
+        "ndbinfo",
+        "MySQL Cluster system information storage engine",
+        None,
+    ),
+    (
+        "MRG_MYISAM",
+        "Collection of identical MyISAM tables",
+        Some(["NO", "NO", "NO"]),
+    ),
+    (
+        "BLACKHOLE",
+        "/dev/null storage engine (anything you write to it disappears)",
+        Some(["NO", "NO", "NO"]),
+    ),
     ("CSV", "CSV storage engine", Some(["NO", "NO", "NO"])),
-    ("ARCHIVE", "Archive storage engine", Some(["NO", "NO", "NO"])),
+    (
+        "ARCHIVE",
+        "Archive storage engine",
+        Some(["NO", "NO", "NO"]),
+    ),
 ];
 
 /// Whether `text` is `SHOW [STORAGE] ENGINES` (MySQL takes no filter).
@@ -597,7 +625,9 @@ pub fn is_show_engines(text: &[u8]) -> bool {
         .filter(|w| !w.is_empty())
         .collect();
     match words.as_slice() {
-        [show, engines] => show.eq_ignore_ascii_case(b"SHOW") && engines.eq_ignore_ascii_case(b"ENGINES"),
+        [show, engines] => {
+            show.eq_ignore_ascii_case(b"SHOW") && engines.eq_ignore_ascii_case(b"ENGINES")
+        }
         [show, storage, engines] => {
             show.eq_ignore_ascii_case(b"SHOW")
                 && storage.eq_ignore_ascii_case(b"STORAGE")

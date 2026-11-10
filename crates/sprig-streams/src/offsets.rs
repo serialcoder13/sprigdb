@@ -335,6 +335,22 @@ pub async fn positions_of<Q: Queryable + Send>(
     instance: u64,
     stream: u64,
 ) -> Result<Vec<(u32, u64)>> {
+    // A tenant's own stream: the statement of catalogs not yet migrated
+    // to `instance_tenant_id` (a fan-in reader's group has only fan-in
+    // rows, so its stream ids never mix with these).
+    if instance == 0 {
+        return q
+            .exec(
+                format!(
+                    "SELECT partition_no, offset_no FROM {}.stream_offsets \
+                     WHERE group_name = ? AND stream_id = ? ORDER BY partition_no",
+                    quote(schema)
+                ),
+                (group, stream),
+            )
+            .await
+            .map_err(crate::maria::map_err);
+    }
     q.exec(
         format!(
             "SELECT partition_no, offset_no FROM {}.stream_offsets \
@@ -376,6 +392,20 @@ pub async fn init_positions_of<Q: Queryable + Send>(
     start: &[(u32, u64)],
 ) -> Result<()> {
     for (p, o) in start {
+        if instance == 0 {
+            q.exec_drop(
+                format!(
+                    "INSERT IGNORE INTO {}.stream_offsets (group_name, stream_id, partition_no, \
+                     offset_no, leader_epoch, metadata, committed_at) \
+                     VALUES (?, ?, ?, ?, NULL, NULL, UTC_TIMESTAMP(3))",
+                    quote(schema)
+                ),
+                (group, stream, *p, *o),
+            )
+            .await
+            .map_err(crate::maria::map_err)?;
+            continue;
+        }
         q.exec_drop(
             format!(
                 "INSERT IGNORE INTO {}.stream_offsets (group_name, instance_tenant_id, \
@@ -424,6 +454,19 @@ pub async fn advance_of(
     expect: u64,
     to: u64,
 ) -> Result<bool> {
+    if instance == 0 {
+        q.exec_drop(
+            format!(
+                "UPDATE {}.stream_offsets SET offset_no = ?, committed_at = UTC_TIMESTAMP(3) \
+                 WHERE group_name = ? AND stream_id = ? AND partition_no = ? AND offset_no = ?",
+                quote(schema)
+            ),
+            (to, group, stream, partition, expect),
+        )
+        .await
+        .map_err(crate::maria::map_err)?;
+        return Ok(q.affected_rows() > 0);
+    }
     q.exec_drop(
         format!(
             "UPDATE {}.stream_offsets SET offset_no = ?, committed_at = UTC_TIMESTAMP(3) \

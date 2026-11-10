@@ -857,3 +857,45 @@ async fn gql_forms_answer_as_their_cypher() {
         assert_eq!(o.stats.get("nodes-created"), Some(&1));
     }
 }
+
+/// Round 4 (G44): one search from a start node to many ends gives the same
+/// lengths as one bidirectional search per pair, on 1 and 4 shards.
+#[tokio::test]
+async fn shortest_paths_to_many_ends_match_pairwise_searches() {
+    for shards in [1, 4] {
+        let mut s = MemStore::new(shards);
+        q(&mut s, "UNWIND range(0, 79) AS i CREATE (:P {i: i})").await;
+        q(
+            &mut s,
+            "MATCH (a:P), (b:P) WHERE b.i = (a.i * 7 + 3) % 80 OR b.i = (a.i + 11) % 80 CREATE (a)-[:K]->(b)",
+        )
+        .await;
+        let batch = q(
+            &mut s,
+            "MATCH (a:P {i: 5}), (b:P) WHERE b <> a MATCH p = shortestPath((a)-[:K*1..3]-(b)) RETURN b.i, length(p) ORDER BY b.i",
+        )
+        .await;
+        let mut pairwise = Vec::new();
+        for j in 0..80 {
+            if j == 5 {
+                continue;
+            }
+            let o = qp(
+                &mut s,
+                "MATCH (a:P {i: 5}), (b:P {i: $j}) MATCH p = shortestPath((a)-[:K*1..3]-(b)) RETURN b.i, length(p)",
+                &[("j", Value::Int(j))],
+            )
+            .await;
+            pairwise.extend(show(&o));
+        }
+        assert_eq!(show(&batch), pairwise, "{shards} shards");
+        assert!(pairwise.len() > 20, "{}", pairwise.len());
+        // Directed paths run from the start to each end.
+        let o = q(
+            &mut s,
+            "MATCH (a:P {i: 0}), (b:P) WHERE b <> a MATCH p = shortestPath((a)-[:K*1..4]->(b)) RETURN nodes(p)[0] = a AND last(nodes(p)) = b AND size(nodes(p)) = length(p) + 1 AS ok, count(*) AS n",
+        )
+        .await;
+        assert_eq!(show(&o)[0].split('|').next(), Some("true"), "{:?}", show(&o));
+    }
+}

@@ -5,9 +5,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use sprig_settings::{
-    Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx, TenantSettings,
-};
+use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx, TenantSettings};
 
 /// Tenant and global.
 const TENANT_GLOBAL: Scopes = Scopes(0b10_0100);

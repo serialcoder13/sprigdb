@@ -5351,6 +5351,7 @@ dependencies = [
  "sprig-geo",
  "sprig-proto-mongo",
  "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]

@@ -74,6 +74,37 @@ impl AdminService {
         self.sharding()?.shards(t).await
     }
 
+    /// `sprigctl graph list <tenant>` (chapter 43).
+    ///
+    /// # Errors
+    /// The tenant lookup's and the loop's errors.
+    pub async fn list_graphs(&self, tenant: &str) -> Result<Vec<crate::sharding::GraphRow>> {
+        let t = self.get_tenant(tenant).await?.tenant_id;
+        self.sharding()?.graphs(t).await
+    }
+
+    /// `sprigctl graph show <tenant> <db.graph>`.
+    ///
+    /// # Errors
+    /// 39902 and the loop's errors.
+    pub async fn show_graph(&self, tenant: &str, graph: &str) -> Result<crate::sharding::GraphView> {
+        let t = self.get_tenant(tenant).await?.tenant_id;
+        self.sharding()?.graph_show(t, graph).await
+    }
+
+    /// `sprigctl graph partition <tenant> <db.graph>`.
+    ///
+    /// # Errors
+    /// 39902, 39904 and the loop's errors.
+    pub async fn graph_partition(
+        &self,
+        tenant: &str,
+        graph: &str,
+    ) -> Result<crate::sharding::GraphPartition> {
+        let t = self.get_tenant(tenant).await?.tenant_id;
+        self.sharding()?.graph_partition(t, graph).await
+    }
+
     /// `sprigctl shard split|merge|move`: the new mover job.
     ///
     /// # Errors

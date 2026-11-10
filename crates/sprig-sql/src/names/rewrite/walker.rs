@@ -2525,7 +2525,9 @@ impl Walker<'_, '_> {
                 .find(|e| matches!(e.kind, EditKind::Schema { .. }))
                 .map(|e| e.range.clone());
             match (c, from_db) {
-                (Some(c), Some(r)) if c.n == 1 && !c.star => self.grouped_table(c.parts[0], Some(r)),
+                (Some(c), Some(r)) if c.n == 1 && !c.star => {
+                    self.grouped_table(c.parts[0], Some(r))
+                }
                 (c, _) => self.grouped_chain(c),
             }
             return Ok(StmtKind::Show);

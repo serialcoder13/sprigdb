@@ -309,15 +309,7 @@ async fn run_local(
                 return Ok((200, Local::Stream(ndjson_response(rx))));
             }
             let reply = collect(rx, api.max_buffered, engine.charge(caller)).await?;
-            // Chapter 04 (decision bugfix-1): a large buffered result is
-            // rendered, and later encoded, off the runtime's workers.
-            let rows: usize = reply.results.iter().map(|r| r.rows.len()).sum();
-            if rpc == "Sql.Query" {
-                let parts = sprig_common::cpu::heavy(rows, || split_parts(&reply));
-                return Ok((200, Local::Rows(Value::Array(parts), rows)));
-            }
-            let v = sprig_common::cpu::heavy(rows, || results::execute_json(&reply));
-            Ok((200, Local::Rows(v, rows)))
+            Ok((200, render_sql(rpc == "Sql.Query", &reply)))
         }
         "Functions.Call" => {
             // Forwarded gRPC calls say so; anything else is REST.
@@ -372,6 +364,21 @@ async fn run_local(
             format!("{rpc} has no REST form"),
         )),
     }
+}
+
+/// A buffered `Sql.Execute` (or, with `parts`, `Sql.Query`) reply as
+/// JSON. Chapter 04 (decision bugfix-1): a large result is rendered here,
+/// and encoded later, off the runtime's worker threads.
+fn render_sql(parts: bool, reply: &sprig_api::proto::v1::ExecuteResponse) -> Local {
+    let rows: usize = reply.results.iter().map(|r| r.rows.len()).sum();
+    let v = sprig_common::cpu::heavy(rows, || {
+        if parts {
+            Value::Array(split_parts(reply))
+        } else {
+            results::execute_json(reply)
+        }
+    });
+    Local::Rows(v, rows)
 }
 
 /// `Sql.Query`'s messages for a buffered reply.
@@ -506,5 +513,89 @@ pub async fn forwarded(core: &Arc<Core>, req: ForwardRequest) -> ForwardReply {
                 body_json: serde_json::to_string(&body).unwrap_or_default(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use prost_types::ListValue;
+    use sprig_api::proto::v1::{Column, ExecuteResponse, Result as SqlResult};
+
+    use super::{Local, render_sql};
+
+    fn reply(n: usize) -> ExecuteResponse {
+        let row = |i: usize| ListValue {
+            values: vec![
+                sprig_api::results::cell(Some(i.to_string().as_bytes()), false),
+                sprig_api::results::cell(Some(b"some text of a row"), false),
+            ],
+        };
+        ExecuteResponse {
+            results: vec![SqlResult {
+                columns: vec![
+                    Column {
+                        name: "id".into(),
+                        ..Column::default()
+                    },
+                    Column {
+                        name: "note".into(),
+                        ..Column::default()
+                    },
+                ],
+                rows: (0..n).map(row).collect(),
+                ..SqlResult::default()
+            }],
+        }
+    }
+
+    /// Two large buffered results rendered at once on a two-worker
+    /// runtime leave a ticker running (chapter 04, decision bugfix-1).
+    #[test]
+    fn large_results_render_off_the_workers() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let big = Arc::new(reply(300_000));
+        rt.block_on(async {
+            let stop = Arc::new(AtomicBool::new(false));
+            let s2 = Arc::clone(&stop);
+            let ticker = tokio::spawn(async move {
+                let mut worst = Duration::ZERO;
+                let mut last = Instant::now();
+                while !s2.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    worst = worst.max(last.elapsed());
+                    last = Instant::now();
+                }
+                worst
+            });
+            let run = |parts: bool| {
+                let r = Arc::clone(&big);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    let t = Instant::now();
+                    let Local::Rows(v, n) = render_sql(parts, &r) else {
+                        panic!("rows expected");
+                    };
+                    (v.to_string().len() > n, t.elapsed())
+                })
+            };
+            let (a, b) = (run(false), run(true));
+            let (ok_a, ta) = a.await.unwrap();
+            let (ok_b, _) = b.await.unwrap();
+            stop.store(true, Ordering::Relaxed);
+            let worst = ticker.await.unwrap();
+            assert!(ok_a && ok_b);
+            assert!(
+                worst < Duration::from_millis(200),
+                "ticker stalled {worst:?} while a render took {ta:?}"
+            );
+        });
     }
 }

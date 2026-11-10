@@ -1027,6 +1027,12 @@ async fn drop_database_forwards_the_outbox_first() {
     ))
     .await
     .unwrap();
+    // R9 next: the outbox is empty, but the definition lives in obx (39895,
+    // naming it) until it is dropped.
+    let (code, msg) = sql(&mut sys, "DROP DATABASE obx").await.unwrap_err();
+    assert_eq!(code, 39895, "{msg}");
+    assert!(msg.contains("stream obx.drop_events"), "{msg}");
+    ok(&mut sys, "DROP STREAM obx.drop_events IMMEDIATE").await;
     let t = Instant::now();
     ok(&mut sys, "DROP DATABASE obx").await;
     println!("DROP DATABASE after the outbox emptied: {:?}", t.elapsed());
@@ -1043,7 +1049,6 @@ async fn drop_database_forwards_the_outbox_first() {
             vec![Some("v0".into())]
         ]
     );
-    ok(&mut sys, "DROP STREAM obx.drop_events IMMEDIATE").await;
     let _ = sql(&mut c0, "DROP DATABASE IF EXISTS obx").await;
 }
 
@@ -1900,4 +1905,136 @@ async fn broadcast_retry_and_the_drop_database_guard() {
         assert_eq!(row[6].as_deref(), Some(ms.len().to_string().as_str()), "{row:?}");
     }
     ok(&mut sys, "DROP STREAM security.rt_events IMMEDIATE CASCADE").await;
+}
+
+const FAN_IN_AUDIT: &str = r"
+CREATE TRIGGER r9naudit.fi_audit ON STREAM security.fi_events FAN IN
+  LANGUAGE javascript AS $$
+export default function (ctx) {
+  db.exec('INSERT INTO r9naudit.seen (tenant, p, o, v) VALUES (?, ?, ?, ?)',
+          [ctx.record.headers['x-sprig-tenant'] || '', ctx.record.partition,
+           ctx.record.offset, ctx.record.value]);
+}
+$$";
+
+async fn publish_fi(c: &mut Conn, tenant: &str, from: u64, to: u64) {
+    let rows: Vec<String> = (from..to).map(|i| format!("('{i}', 'v{i}')")).collect();
+    for chunk in rows.chunks(50) {
+        ok(
+            c,
+            &format!(
+                "INSERT INTO security.fi_events FOR TENANT {tenant} (key, value) VALUES {}",
+                chunk.join(", ")
+            ),
+        )
+        .await;
+    }
+}
+
+/// R9 next (r9next): a `FAN IN` trigger in the declaring tenant runs once
+/// per record of every member's instance (those made after it from their
+/// start, those before it from then on), with its own positions per
+/// instance, through a `kill -9` of the worker; a member created later
+/// joins.
+#[tokio::test]
+async fn fan_in_trigger_end_to_end() {
+    let Some(e) = env("fan_in_trigger_end_to_end") else {
+        return;
+    };
+    let mut sys = conn(&e.addr, &e.system).await;
+    let ms = e.members.clone();
+    let _ = sql(&mut sys, "DROP TRIGGER r9naudit.fi_audit").await;
+    let _ = sql(&mut sys, "DROP STREAM security.fi_events IMMEDIATE CASCADE").await;
+    let _ = sql(&mut sys, "CREATE DATABASE IF NOT EXISTS security").await;
+    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9naudit").await;
+    ok(&mut sys, "CREATE DATABASE r9naudit").await;
+    ok(
+        &mut sys,
+        "CREATE TABLE r9naudit.seen (id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant VARCHAR(64), \
+         p INT, o BIGINT, v VARCHAR(64))",
+    )
+    .await;
+    ok(
+        &mut sys,
+        "CREATE STREAM security.fi_events FOR EACH TENANT PARTITIONS 2",
+    )
+    .await;
+    // Before the trigger: m0's instance and 5 records it never sees.
+    publish_fi(&mut sys, &ms[0], 0, 5).await;
+    // SPRIG_FAN_IN is needed.
+    let _ = sql(&mut sys, "REVOKE SPRIG_FAN_IN ON *.* FROM app").await;
+    let (code, msg) = sql(&mut sys, FAN_IN_AUDIT).await.unwrap_err();
+    println!("FAN IN trigger without SPRIG_FAN_IN: {code} {msg}");
+    assert_eq!(code, 1227, "{msg}");
+    ok(&mut sys, "GRANT SPRIG_FAN_IN ON *.* TO app").await;
+    let notes = ok(&mut sys, FAN_IN_AUDIT).await;
+    println!("FAN IN trigger: {notes:?}");
+    let t = Instant::now();
+    for m in &ms {
+        publish_fi(&mut sys, m, 100, 140).await;
+    }
+    let q = "SELECT COUNT(*) FROM r9naudit.seen";
+    let half = wait_count(&mut sys, q, 60, 120).await;
+    // The worker dies mid-stream.
+    let killed = kill_worker(&e);
+    println!("{half} runs before the kill -9 (killed: {killed})");
+    for m in &ms {
+        publish_fi(&mut sys, m, 200, 220).await;
+    }
+    if killed {
+        start_worker(&e);
+    }
+    let want = (ms.len() * 60) as u64;
+    let got = wait_count(&mut sys, q, want, 180).await;
+    println!(
+        "fan-in trigger: {got} of {want} runs, {:?} after the first publish",
+        t.elapsed()
+    );
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let twice = count(
+        &mut sys,
+        "SELECT COUNT(*) FROM (SELECT tenant, v FROM r9naudit.seen GROUP BY tenant, v HAVING \
+         COUNT(*) > 1) d",
+    )
+    .await;
+    let per = ok(
+        &mut sys,
+        "SELECT tenant, COUNT(*) FROM r9naudit.seen GROUP BY tenant ORDER BY tenant",
+    )
+    .await;
+    println!("per member: {per:?}, applied twice: {twice}");
+    assert_eq!(twice, 0, "exactly once");
+    assert_eq!(per.len(), ms.len());
+    for r in &per {
+        assert_eq!(r[1].as_deref(), Some("60"), "{r:?}");
+    }
+    let early = count(
+        &mut sys,
+        "SELECT COUNT(*) FROM r9naudit.seen WHERE v IN ('v0','v1','v2','v3','v4')",
+    )
+    .await;
+    assert_eq!(early, 0, "records before the trigger aren't run");
+    // A member created later joins.
+    if e.create.is_some() {
+        let late = format!(
+            "{}fi",
+            e.late.clone().unwrap_or_else(|| format!("{}late", e.system))
+        );
+        create_tenant(&e, &late);
+        let t = Instant::now();
+        publish_fi(&mut sys, &late, 0, 10).await;
+        let n = wait_count(
+            &mut sys,
+            &format!("SELECT COUNT(*) FROM r9naudit.seen WHERE tenant = '{late}'"),
+            10,
+            90,
+        )
+        .await;
+        println!("{late} (new): {n} of 10 runs, {:?} after its first publish", t.elapsed());
+        assert_eq!(n, 10);
+    }
+    let _ = sql(&mut sys, "DROP TRIGGER r9naudit.fi_audit").await;
+    ok(&mut sys, "DROP STREAM security.fi_events IMMEDIATE").await;
+    ok(&mut sys, "REVOKE SPRIG_FAN_IN ON *.* FROM app").await;
+    ok(&mut sys, "DROP DATABASE r9naudit").await;
 }

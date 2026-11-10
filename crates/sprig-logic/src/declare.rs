@@ -96,6 +96,11 @@ pub struct MessageSource {
     pub db: Option<String>,
     /// The stream or queue.
     pub name: String,
+    /// `ON STREAM s FAN IN` (chapter 41, "Fan-in triggers"; R9): `s` is an
+    /// inherited stream's definition, and the trigger reads every member's
+    /// instance below its tenant.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fan_in: bool,
 }
 
 /// `CREATE SCHEDULE`'s clauses.
@@ -668,10 +673,23 @@ pub fn parse(sql: &str) -> Result<Declaration> {
             if r.name.is_empty() {
                 return Err(syntax("a trigger reads a named stream or queue"));
             }
+            // `ON STREAM s FAN IN` (R9).
+            let mut fan_in = false;
+            if p.eat("fan") {
+                p.expect("in")?;
+                if kind != SourceKind::Stream {
+                    return Err(syntax(
+                        "FAN IN triggers read streams; a queue's members are read by an AMQP \
+                         consumer with x-sprig-fan-in",
+                    ));
+                }
+                fan_in = true;
+            }
             d.source = Some(MessageSource {
                 kind,
                 db: r.db,
                 name: r.name,
+                fan_in,
             });
         }
         Kind::Trigger => {
@@ -851,6 +869,20 @@ pub fn parse(sql: &str) -> Result<Declaration> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn fan_in_trigger_source() {
+        let s = "CREATE TRIGGER audit ON STREAM security.user_events FAN IN LANGUAGE javascript \
+                 AS $$ return 1; $$";
+        let d = parse(s).unwrap();
+        let src = d.source.unwrap();
+        assert!(src.fan_in);
+        assert_eq!(src.db.as_deref(), Some("security"));
+        assert_eq!(src.name, "user_events");
+        let d = parse("CREATE TRIGGER t ON STREAM s LANGUAGE javascript AS $$ 1 $$").unwrap();
+        assert!(!d.source.unwrap().fan_in);
+        assert!(parse("CREATE TRIGGER t ON QUEUE q FAN IN LANGUAGE javascript AS $$ 1 $$").is_err());
+    }
 
     #[test]
     fn kirun_procedure() {

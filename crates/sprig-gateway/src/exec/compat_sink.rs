@@ -226,9 +226,7 @@ impl Rows {
                     return None;
                 }
                 Some(encode_text_row(
-                    vals.iter()
-                        .zip(&fixed)
-                        .map(|(v, f)| f.as_deref().or(*v)),
+                    vals.iter().zip(&fixed).map(|(v, f)| f.as_deref().or(*v)),
                 ))
             }
             RowFormat::Binary => {
@@ -351,7 +349,11 @@ impl ResultSink for IntMetaSink<'_> {
 
 /// The prepared statement's columns as MySQL types them (see
 /// [`IntMetaSink`]).
-pub(super) fn prepared_columns(sql: &[u8], lex: &sprig_sql::lex::LexOptions, cols: &mut [ColumnDef]) {
+pub(super) fn prepared_columns(
+    sql: &[u8],
+    lex: &sprig_sql::lex::LexOptions,
+    cols: &mut [ColumnDef],
+) {
     use sprig_sql::compat::intmeta;
     if IntMetaSink::wanted(sql)
         && intmeta::candidates(cols)

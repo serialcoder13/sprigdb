@@ -53,6 +53,7 @@ mod dcmove;
 mod export;
 mod failover;
 mod gateway;
+mod graph;
 mod index;
 mod logic;
 mod mover;
@@ -446,7 +447,8 @@ fn cli() -> Command {
         .subcommand(logic::group())
         .subcommand(space::group())
         .subcommand(txn::group())
-        .subcommand(sink::group());
+        .subcommand(sink::group())
+        .subcommand(graph::group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -492,7 +494,7 @@ fn main() -> ExitCode {
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
-        | "shard" | "space" | "txn" | "sink" => true,
+        | "shard" | "space" | "txn" | "sink" | "graph" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "logic" => logic::implemented(&name),
@@ -545,6 +547,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "sink" => sink::run(sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "graph" => graph::run(&client, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "txn" => txn::run(&client, sub, output(&matches))

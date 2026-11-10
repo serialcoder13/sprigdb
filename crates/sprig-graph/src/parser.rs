@@ -259,6 +259,7 @@ pub fn parse(src: &str) -> Result<Query> {
     if !matches!(p.peek(), Tok::Eof) {
         return Err(p.err("end of statement"));
     }
+    crate::semantic::check(&q)?;
     Ok(q)
 }
 

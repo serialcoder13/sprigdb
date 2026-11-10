@@ -136,8 +136,14 @@ mod tests {
     #[test]
     fn sorts_as_redis_does() {
         let v = |s: &[&str]| s.iter().map(|x| x.as_bytes().to_vec()).collect::<Vec<_>>();
-        assert_eq!(sorted(v(&["10", "9", "2.5", "-1"]), false, false), Some(v(&["-1", "2.5", "9", "10"])));
-        assert_eq!(sorted(v(&["10", "9", "a"]), true, true), Some(v(&["a", "9", "10"])));
+        assert_eq!(
+            sorted(v(&["10", "9", "2.5", "-1"]), false, false),
+            Some(v(&["-1", "2.5", "9", "10"]))
+        );
+        assert_eq!(
+            sorted(v(&["10", "9", "a"]), true, true),
+            Some(v(&["a", "9", "10"]))
+        );
         assert_eq!(sorted(v(&["1", "x"]), false, false), None);
     }
 }

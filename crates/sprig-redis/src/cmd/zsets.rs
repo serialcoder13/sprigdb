@@ -992,59 +992,59 @@ async fn zalgebra(
     // runs off the runtime's worker threads.
     let n: usize = srcs.iter().map(|s| s.as_ref().map_or(0, Vec::len)).sum();
     let out = sprig_common::cpu::heavy(n, move || {
-    let mut out: Vec<(Vec<u8>, f64)> = Vec::new();
-    match op {
-        ZOp::Union => {
-            let mut map: HashMap<Vec<u8>, f64> = HashMap::new();
-            for (j, s) in srcs.into_iter().enumerate() {
-                for (m, sc) in s.unwrap_or_default() {
-                    let v = fix(sc * weights[j]);
-                    map.entry(m)
-                        .and_modify(|acc| *acc = combine(*acc, v))
-                        .or_insert(v);
+        let mut out: Vec<(Vec<u8>, f64)> = Vec::new();
+        match op {
+            ZOp::Union => {
+                let mut map: HashMap<Vec<u8>, f64> = HashMap::new();
+                for (j, s) in srcs.into_iter().enumerate() {
+                    for (m, sc) in s.unwrap_or_default() {
+                        let v = fix(sc * weights[j]);
+                        map.entry(m)
+                            .and_modify(|acc| *acc = combine(*acc, v))
+                            .or_insert(v);
+                    }
+                }
+                out.extend(map);
+            }
+            ZOp::Inter => {
+                if srcs.iter().any(Option::is_none) {
+                    return Vec::new();
+                }
+                let srcs: Vec<Vec<(Vec<u8>, f64)>> =
+                    srcs.into_iter().map(Option::unwrap_or_default).collect();
+                let maps: Vec<HashMap<&[u8], f64>> = srcs
+                    .iter()
+                    .map(|s| s.iter().map(|(m, sc)| (m.as_slice(), *sc)).collect())
+                    .collect();
+                for (m, sc) in &srcs[0] {
+                    let mut acc = fix(sc * weights[0]);
+                    let mut all = true;
+                    for (j, mp) in maps.iter().enumerate().skip(1) {
+                        let Some(x) = mp.get(m.as_slice()) else {
+                            all = false;
+                            break;
+                        };
+                        acc = combine(acc, fix(x * weights[j]));
+                    }
+                    if all {
+                        out.push((m.clone(), acc));
+                    }
                 }
             }
-            out.extend(map);
-        }
-        ZOp::Inter => {
-            if srcs.iter().any(Option::is_none) {
-                return Ok((Vec::new(), withscores));
-            }
-            let srcs: Vec<Vec<(Vec<u8>, f64)>> =
-                srcs.into_iter().map(Option::unwrap_or_default).collect();
-            let maps: Vec<HashMap<&[u8], f64>> = srcs
-                .iter()
-                .map(|s| s.iter().map(|(m, sc)| (m.as_slice(), *sc)).collect())
-                .collect();
-            for (m, sc) in &srcs[0] {
-                let mut acc = fix(sc * weights[0]);
-                let mut all = true;
-                for (j, mp) in maps.iter().enumerate().skip(1) {
-                    let Some(x) = mp.get(m.as_slice()) else {
-                        all = false;
-                        break;
-                    };
-                    acc = combine(acc, fix(x * weights[j]));
-                }
-                if all {
-                    out.push((m.clone(), acc));
-                }
+            ZOp::Diff => {
+                let mut it = srcs.into_iter();
+                let first = it.next().flatten().unwrap_or_default();
+                let others: Vec<std::collections::HashSet<Vec<u8>>> = it
+                    .map(|s| s.unwrap_or_default().into_iter().map(|(m, _)| m).collect())
+                    .collect();
+                out = first
+                    .into_iter()
+                    .filter(|(m, _)| !others.iter().any(|o| o.contains(m)))
+                    .collect();
             }
         }
-        ZOp::Diff => {
-            let mut it = srcs.into_iter();
-            let first = it.next().flatten().unwrap_or_default();
-            let others: Vec<std::collections::HashSet<Vec<u8>>> = it
-                .map(|s| s.unwrap_or_default().into_iter().map(|(m, _)| m).collect())
-                .collect();
-            out = first
-                .into_iter()
-                .filter(|(m, _)| !others.iter().any(|o| o.contains(m)))
-                .collect();
-        }
-    }
-    out.sort_by(|x, y| x.1.total_cmp(&y.1).then_with(|| x.0.cmp(&y.0)));
-    out
+        out.sort_by(|x, y| x.1.total_cmp(&y.1).then_with(|| x.0.cmp(&y.0)));
+        out
     });
     Ok((out, withscores))
 }

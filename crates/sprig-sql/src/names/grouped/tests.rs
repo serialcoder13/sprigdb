@@ -69,7 +69,10 @@ fn show_tables_lists_every_group() {
     let s = sql("SHOW TABLES");
     assert!(s.starts_with("SELECT * FROM (SELECT `TABLE_NAME` AS `Tables_in_billing` FROM ("));
     reads_every_group(&s);
-    assert!(s.ends_with("ORDER BY CAST(`Tables_in_billing` AS BINARY)"), "{s}");
+    assert!(
+        s.ends_with("ORDER BY CAST(`Tables_in_billing` AS BINARY)"),
+        "{s}"
+    );
     // FROM, LIKE (case-sensitive, as MariaDB's) and FULL.
     let s = sql("SHOW FULL TABLES FROM billing LIKE 'o%'");
     reads_every_group(&s);
@@ -77,7 +80,10 @@ fn show_tables_lists_every_group() {
     assert!(s.contains("`TABLE_NAME` LIKE BINARY 'o%'"), "{s}");
     // WHERE stays over the result's column, as the client wrote it.
     let s = sql("SHOW TABLES WHERE `Tables_in_billing` <> 'x';");
-    assert!(s.contains("AS `t` WHERE `Tables_in_billing` <> 'x' ORDER BY"), "{s}");
+    assert!(
+        s.contains("AS `t` WHERE `Tables_in_billing` <> 'x' ORDER BY"),
+        "{s}"
+    );
 }
 
 #[test]
@@ -90,31 +96,61 @@ fn table_status_and_triggers_list_every_group() {
     assert!(!s.contains("Max_index_length"), "MySQL's 18 columns: {s}");
     let s = sql("SHOW TRIGGERS FROM billing LIKE 'orders'");
     assert!(s.contains("`EVENT_OBJECT_SCHEMA` = 't42_d1_g3_s2'"), "{s}");
-    assert!(s.contains("`EVENT_OBJECT_TABLE` LIKE BINARY 'orders'"), "{s}");
-    assert!(s.starts_with("SELECT `Trigger`, `Event`, `Table`, `Statement`"), "{s}");
+    assert!(
+        s.contains("`EVENT_OBJECT_TABLE` LIKE BINARY 'orders'"),
+        "{s}"
+    );
+    assert!(
+        s.starts_with("SELECT `Trigger`, `Event`, `Table`, `Statement`"),
+        "{s}"
+    );
 }
 
 #[test]
 fn other_databases_and_maps_keep_show() {
-    assert_eq!(sql("SHOW TABLES FROM crm"), "SHOW TABLES FROM `t42_d2_g2_s2`");
-    assert_eq!(sql_on("SHOW TABLES", Persona::MariaDb, false), "SHOW TABLES");
+    assert_eq!(
+        sql("SHOW TABLES FROM crm"),
+        "SHOW TABLES FROM `t42_d2_g2_s2`"
+    );
+    assert_eq!(
+        sql_on("SHOW TABLES", Persona::MariaDb, false),
+        "SHOW TABLES"
+    );
     assert_eq!(sql("SHOW EVENTS"), "SHOW EVENTS");
 }
 
 #[test]
 fn one_table_reads_its_groups_schema() {
     for (text, want) in [
-        ("SHOW CREATE TABLE orders", "SHOW CREATE TABLE `t42_d1_g3_s2`.orders"),
-        ("SHOW CREATE TABLE billing.Orders", "SHOW CREATE TABLE `t42_d1_g3_s2`.Orders"),
-        ("SHOW CREATE TABLE countries", "SHOW CREATE TABLE `t42_d1_ref`.countries"),
+        (
+            "SHOW CREATE TABLE orders",
+            "SHOW CREATE TABLE `t42_d1_g3_s2`.orders",
+        ),
+        (
+            "SHOW CREATE TABLE billing.Orders",
+            "SHOW CREATE TABLE `t42_d1_g3_s2`.Orders",
+        ),
+        (
+            "SHOW CREATE TABLE countries",
+            "SHOW CREATE TABLE `t42_d1_ref`.countries",
+        ),
         ("SHOW CREATE TABLE invoices", "SHOW CREATE TABLE invoices"),
-        ("SHOW CREATE TABLE crm.orders", "SHOW CREATE TABLE `t42_d2_g2_s2`.orders"),
-        ("SHOW FULL COLUMNS FROM orders", "SHOW FULL COLUMNS FROM `t42_d1_g3_s2`.orders"),
+        (
+            "SHOW CREATE TABLE crm.orders",
+            "SHOW CREATE TABLE `t42_d2_g2_s2`.orders",
+        ),
+        (
+            "SHOW FULL COLUMNS FROM orders",
+            "SHOW FULL COLUMNS FROM `t42_d1_g3_s2`.orders",
+        ),
         (
             "SHOW COLUMNS FROM orders FROM billing",
             "SHOW COLUMNS FROM orders FROM `t42_d1_g3_s2`",
         ),
-        ("SHOW INDEX FROM billing.order_items", "SHOW INDEX FROM `t42_d1_g3_s2`.order_items"),
+        (
+            "SHOW INDEX FROM billing.order_items",
+            "SHOW INDEX FROM `t42_d1_g3_s2`.order_items",
+        ),
         ("DESCRIBE orders", "DESCRIBE `t42_d1_g3_s2`.orders"),
         ("DESC billing.orders id", "DESC `t42_d1_g3_s2`.orders id"),
     ] {
@@ -128,7 +164,13 @@ fn one_table_reads_its_groups_schema() {
 
 #[test]
 fn information_schema_reads_every_group() {
-    for table in ["TABLES", "COLUMNS", "STATISTICS", "KEY_COLUMN_USAGE", "TABLE_CONSTRAINTS"] {
+    for table in [
+        "TABLES",
+        "COLUMNS",
+        "STATISTICS",
+        "KEY_COLUMN_USAGE",
+        "TABLE_CONSTRAINTS",
+    ] {
         let s = sql(&format!(
             "SELECT * FROM information_schema.{table} WHERE TABLE_SCHEMA = 'billing'"
         ));

@@ -107,6 +107,12 @@ pub fn router_with(
             "/admin/v1/tenants/{name}/shards",
             get(list_shards).post(submit_shard_job),
         )
+        .route("/admin/v1/tenants/{name}/graphs", get(list_graphs))
+        .route("/admin/v1/tenants/{name}/graphs/{graph}", get(show_graph))
+        .route(
+            "/admin/v1/tenants/{name}/graphs/{graph}/partition",
+            get(graph_partition),
+        )
         .route("/admin/v1/tenants/{name}/advisor", get(advisor_show))
         .route("/admin/v1/tenants/{name}/advisor:run", post(advisor_run))
         .route("/admin/v1/tenants/{name}/advisor:apply", post(advisor_apply))
@@ -1070,6 +1076,42 @@ async fn explain_decision(
             .parse()
             .map_err(|_| invalid(format!("decision id {id:?} is not a number")))?;
         app.svc.explain_decision(&name, id).await
+    };
+    respond(r.await)
+}
+
+async fn list_graphs(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.list_graphs(&name).await
+    };
+    respond(r.await)
+}
+
+async fn show_graph(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath((name, graph)): UrlPath<(String, String)>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.show_graph(&name, &graph).await
+    };
+    respond(r.await)
+}
+
+async fn graph_partition(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath((name, graph)): UrlPath<(String, String)>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.graph_partition(&name, &graph).await
     };
     respond(r.await)
 }

@@ -79,7 +79,10 @@ fn named_db(e: &SprigError) -> Option<String> {
     let end = start + m[start..].find('\'')?;
     let quoted = &m[start..end];
     Some(match e.protocol().mysql_errno {
-        1146 => quoted.split_once('.').map_or(quoted, |(db, _)| db).to_owned(),
+        1146 => quoted
+            .split_once('.')
+            .map_or(quoted, |(db, _)| db)
+            .to_owned(),
         _ => quoted.to_owned(),
     })
 }
@@ -276,8 +279,8 @@ impl PassSession {
                 let token = locator.maps_token(ts.tenant);
                 (locator, ts.tenant, ts.map(), token)
             });
-            let in_trx = self.router.in_txn()
-                || self.bs.as_ref().is_some_and(|b| b.pins().in_transaction());
+            let in_trx =
+                self.router.in_txn() || self.bs.as_ref().is_some_and(|b| b.pins().in_transaction());
             let mut fs = FenceSink::new(out, watch.is_some());
             let r = match gate {
                 Some(f) => {

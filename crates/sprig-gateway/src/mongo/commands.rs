@@ -171,11 +171,87 @@ pub(super) fn docs_of(body: &Document, k: &str) -> Vec<Document> {
         .unwrap_or_default()
 }
 
+/// The command with its `let` variables bound (chapter 31, R5 round 4):
+/// each `$$name` the command's filters, pipelines and pipeline updates
+/// read becomes the value's `$literal`. `None` when it has no `let`.
+///
+/// # Errors
+/// The `let` expressions' own.
+pub(super) fn bind_lets(name: &str, body: &Document) -> Result<Option<Document>, MongoError> {
+    use sprig_doc::agg::{bind_filter, bind_pipeline, let_values};
+    let Ok(lets) = body.get_document("let") else {
+        return Ok(None);
+    };
+    let lets = let_values(lets, bson::DateTime::now())?;
+    let filter = |d: &mut Document, k: &str| {
+        if let Ok(f) = d.get_document(k) {
+            let f = bind_filter(f, &lets);
+            d.insert(k, f);
+        }
+    };
+    let pipeline = |d: &mut Document, k: &str| {
+        if let Ok(p) = d.get_array(k) {
+            let p: Vec<Document> = p.iter().filter_map(|x| x.as_document().cloned()).collect();
+            let p: Vec<Bson> = bind_pipeline(&p, &lets)
+                .into_iter()
+                .map(Bson::Document)
+                .collect();
+            d.insert(k, p);
+        }
+    };
+    let mut b = body.clone();
+    match name {
+        "find" => filter(&mut b, "filter"),
+        "count" | "distinct" => filter(&mut b, "query"),
+        "aggregate" => pipeline(&mut b, "pipeline"),
+        "findAndModify" | "findandmodify" => {
+            filter(&mut b, "query");
+            pipeline(&mut b, "update");
+        }
+        "update" | "delete" | "bulkWrite" => {
+            let list = match name {
+                "update" => "updates",
+                "delete" => "deletes",
+                _ => "ops",
+            };
+            if let Ok(a) = b.get_array(list) {
+                let a: Vec<Bson> = a
+                    .iter()
+                    .map(|x| match x {
+                        Bson::Document(d) => {
+                            let mut d = d.clone();
+                            filter(&mut d, "q");
+                            filter(&mut d, "filter");
+                            pipeline(&mut d, "u");
+                            pipeline(&mut d, "updateMods");
+                            Bson::Document(d)
+                        }
+                        o => o.clone(),
+                    })
+                    .collect();
+                b.insert(list, a);
+            }
+        }
+        _ => return Ok(None),
+    }
+    b.remove("let");
+    Ok(Some(b))
+}
+
 /// Runs a command after authentication.
 ///
 /// # Errors
 /// The command's.
 pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, MongoError> {
+    let bound = bind_lets(name, body)?;
+    let body = bound.as_ref().unwrap_or(body);
+    // The command's collation (chapter 31): every comparison it makes.
+    // Writes carry theirs per statement (`writes`).
+    let coll = sprig_doc::collation::Collation::of(body)?;
+    sprig_doc::collation::scope(coll, run_inner(c, name, body)).await
+}
+
+async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document, MongoError> {
     let db = body.get_str("$db").unwrap_or("admin").to_owned();
     if let Ok(api) = body.get_str("apiVersion")
         && api != "1"

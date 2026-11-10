@@ -21,6 +21,7 @@
 //! - [`gql`]: the GQL subset, rewritten into Cypher before parsing.
 //! - [`temporal`]: temporal and spatial values.
 //! - [`access`]: per-label and per-type read grants.
+//! - [`semantic`]: compile-time semantic checks (the TCK's errors).
 
 // An interpreter: evaluator and executor functions are one match or one
 // step-by-step walk each, with the short names of the algorithms.
@@ -40,6 +41,7 @@ pub mod neo4j;
 pub mod parser;
 pub mod pgq;
 pub mod schema;
+pub mod semantic;
 pub mod settings;
 pub mod store;
 pub mod temporal;

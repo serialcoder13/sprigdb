@@ -867,7 +867,6 @@ async fn user_and_schema(sprigctl: &Path, dc: &str, t: &str) {
     }
 }
 
-
 // ============================================================================
 // r2harden: metrics, binlog order, stored programs
 // ============================================================================
@@ -879,7 +878,9 @@ async fn http_get(port: u16, path: &str) -> String {
         return String::new();
     };
     let _ = s
-        .write_all(format!("GET {path} HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n").as_bytes(),
+        )
         .await;
     let mut buf = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut buf)).await;
@@ -893,9 +894,7 @@ async fn metric(port: u16, name: &str) -> f64 {
         .await
         .lines()
         .filter(|l| !l.starts_with('#'))
-        .filter(|l| {
-            l.split(|c| c == '{' || c == ' ').next() == Some(name)
-        })
+        .filter(|l| l.split(['{', ' ']).next() == Some(name))
         .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
         .sum()
 }
@@ -996,7 +995,10 @@ async fn wait_job(store: &dyn MetaStore, dc: &str, id: &str, within: Duration) -
 /// `(group, [(shard, cluster)])` of `tenant`'s first table group.
 fn shards_of(sprigctl: &Path, dc: &str, tenant: &str) -> Option<(u64, Vec<u64>)> {
     let l = ctl(sprigctl, dc, &["shard", "list", tenant]).ok()?;
-    let g = l.as_array()?.iter().find(|g| g["group"].as_u64() != Some(0))?;
+    let g = l
+        .as_array()?
+        .iter()
+        .find(|g| g["group"].as_u64() != Some(0))?;
     Some((
         g["group"].as_u64()?,
         g["shards"]
@@ -1090,7 +1092,10 @@ static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn bins_r2harden_holds_fences_and_stored_programs() {
     if !skip::flag(skip::DOCKER) {
-        skip::report_missing(skip::DOCKER, "bins_r2harden_holds_fences_and_stored_programs");
+        skip::report_missing(
+            skip::DOCKER,
+            "bins_r2harden_holds_fences_and_stored_programs",
+        );
         return;
     }
     let _one = ONE_AT_A_TIME.lock().await;
@@ -1233,14 +1238,25 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         work: work.clone(),
         kids: Vec::new(),
     };
-    procs.start("ctl-fra1", "controller", &controller_toml("fra1", &seed, &work));
+    procs.start(
+        "ctl-fra1",
+        "controller",
+        &controller_toml("fra1", &seed, &work),
+    );
     assert!(
         ready(ports("fra1").ctl_tel, Duration::from_secs(120)).await,
         "ctl-fra1 ready"
     );
-    let next_id = get(&*store, "/sprig/g/ids/tenant").await.unwrap_or_default();
+    let next_id = get(&*store, "/sprig/g/ids/tenant")
+        .await
+        .unwrap_or_default();
     if next_id["next"].as_u64().unwrap_or(0) < base {
-        put(&*store, "/sprig/g/ids/tenant", json!({"v": 1, "next": base})).await;
+        put(
+            &*store,
+            "/sprig/g/ids/tenant",
+            json!({"v": 1, "next": base}),
+        )
+        .await;
     }
     let mut fra1 = get(&*store, "/sprig/g/dcs/fra1").await.expect("dcs/fra1");
     fra1["global_voter"] = json!(true);
@@ -1250,28 +1266,47 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         ctl_retry(
             &sprigctl,
             "fra1",
-            &["dc", "register", d, "--global-voter", "--tags", &format!("jurisdiction={j}")],
+            &[
+                "dc",
+                "register",
+                d,
+                "--global-voter",
+                "--tags",
+                &format!("jurisdiction={j}"),
+            ],
             Duration::from_secs(30),
         )
         .await;
     }
     for d in ["ams1", "sin1"] {
-        procs.start(&format!("ctl-{d}"), "controller", &controller_toml(d, &seed, &work));
+        procs.start(
+            &format!("ctl-{d}"),
+            "controller",
+            &controller_toml(d, &seed, &work),
+        );
     }
     for d in ["ams1", "sin1"] {
-        assert!(ready(ports(d).ctl_tel, Duration::from_secs(120)).await, "ctl-{d} ready");
+        assert!(
+            ready(ports(d).ctl_tel, Duration::from_secs(120)).await,
+            "ctl-{d} ready"
+        );
     }
     let t0 = Instant::now();
     loop {
         let mut all = true;
         for d in DCS {
-            let v = get(&*store, &format!("/sprig/g/dcs/{d}")).await.unwrap_or_default();
+            let v = get(&*store, &format!("/sprig/g/dcs/{d}"))
+                .await
+                .unwrap_or_default();
             all &= v["state"] == "active";
         }
         if all {
             break;
         }
-        assert!(t0.elapsed() < Duration::from_secs(180), "DCs never activated");
+        assert!(
+            t0.elapsed() < Duration::from_secs(180),
+            "DCs never activated"
+        );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
@@ -1283,13 +1318,25 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
             &sprigctl,
             d,
             &[
-                "cluster", "register", &format!("{d}-db"), "--topology", "single", "--node",
-                &format!("127.0.0.1:{}", db_port[d]), "--credentials", &cred, "--storage-gb", "1",
+                "cluster",
+                "register",
+                &format!("{d}-db"),
+                "--topology",
+                "single",
+                "--node",
+                &format!("127.0.0.1:{}", db_port[d]),
+                "--credentials",
+                &cred,
+                "--storage-gb",
+                "1",
             ],
             Duration::from_secs(30),
         )
         .await;
-        let c = v["cluster"]["cluster_id"].as_str().expect("cluster id").to_owned();
+        let c = v["cluster"]["cluster_id"]
+            .as_str()
+            .expect("cluster id")
+            .to_owned();
         let t0 = Instant::now();
         loop {
             let v = ctl(&sprigctl, d, &["cluster", "list"]).unwrap_or_default();
@@ -1304,21 +1351,47 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         procs.start(&format!("agent-{d}"), "agent", &agent_toml(d, &seed, &c));
-        assert!(ready(ports(d).agent_tel, Duration::from_secs(60)).await, "agent-{d}");
+        assert!(
+            ready(ports(d).agent_tel, Duration::from_secs(60)).await,
+            "agent-{d}"
+        );
         cluster.insert(d, c);
     }
     for p in db_port.values() {
-        wait_for(&root_url(*p), "SELECT @@read_only", "0", Duration::from_secs(60)).await;
+        wait_for(
+            &root_url(*p),
+            "SELECT @@read_only",
+            "0",
+            Duration::from_secs(60),
+        )
+        .await;
     }
     for d in DCS {
-        procs.start(&format!("gw-{d}"), "gateway", &gateway_toml(d, &seed, &backends));
-        procs.start(&format!("worker-{d}"), "worker", &worker_toml(d, &seed, &work));
+        procs.start(
+            &format!("gw-{d}"),
+            "gateway",
+            &gateway_toml(d, &seed, &backends),
+        );
+        procs.start(
+            &format!("worker-{d}"),
+            "worker",
+            &worker_toml(d, &seed, &work),
+        );
     }
     for d in DCS {
-        assert!(ready(ports(d).gw_tel, Duration::from_secs(180)).await, "gw-{d}");
-        assert!(ready(ports(d).worker_tel, Duration::from_secs(180)).await, "worker-{d}");
+        assert!(
+            ready(ports(d).gw_tel, Duration::from_secs(180)).await,
+            "gw-{d}"
+        );
+        assert!(
+            ready(ports(d).worker_tel, Duration::from_secs(180)).await,
+            "worker-{d}"
+        );
     }
-    eprintln!("clusters {cluster:?}; all processes ready ({:?})", t_all.elapsed());
+    eprintln!(
+        "clusters {cluster:?}; all processes ready ({:?})",
+        t_all.elapsed()
+    );
 
     // ---- tenants ----
     let mut ids: BTreeMap<String, u64> = BTreeMap::new();
@@ -1358,7 +1431,9 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         async move {
             let mut c = mysql_async::Conn::new(opts(&url)).await.expect("root");
             for q in qs {
-                c.query_drop(&q).await.unwrap_or_else(|e| panic!("{q}: {e}"));
+                c.query_drop(&q)
+                    .await
+                    .unwrap_or_else(|e| panic!("{q}: {e}"));
             }
             let _ = c.disconnect().await;
         }
@@ -1385,10 +1460,16 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         {
             break j;
         }
-        assert!(raised.elapsed() < Duration::from_secs(300), "S got no standby: {e}");
+        assert!(
+            raised.elapsed() < Duration::from_secs(300),
+            "S got no standby: {e}"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
-    eprintln!("1. S's standby streaming in ams1 {:?} after failover.standby_dcs = 1", raised.elapsed());
+    eprintln!(
+        "1. S's standby streaming in ams1 {:?} after failover.standby_dcs = 1",
+        raised.elapsed()
+    );
     // A second trigger and a row while the copy streams: the copy gets the
     // row (with the tag the home's trigger set) and no trigger of its own.
     run_root(
@@ -1410,7 +1491,9 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     .await;
     let copy_triggers = count(
         &ams1_url,
-        &format!("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '{s_schema}'"),
+        &format!(
+            "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '{s_schema}'"
+        ),
     )
     .await;
     let copy_event = scalar(
@@ -1418,9 +1501,18 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         &format!("SELECT STATUS FROM information_schema.EVENTS WHERE EVENT_SCHEMA = '{s_schema}' AND EVENT_NAME = 'ev_one'"),
     )
     .await;
-    eprintln!("1. while streaming, the copy has {copy_triggers} triggers and ev_one {copy_event:?}");
-    assert_eq!(copy_triggers, 0, "no trigger on a copy that rows are applied to");
-    assert_ne!(copy_event.as_deref(), Some("ENABLED"), "the copy's event stays disabled");
+    eprintln!(
+        "1. while streaming, the copy has {copy_triggers} triggers and ev_one {copy_event:?}"
+    );
+    assert_eq!(
+        copy_triggers, 0,
+        "no trigger on a copy that rows are applied to"
+    );
+    assert_ne!(
+        copy_event.as_deref(),
+        Some("ENABLED"),
+        "the copy's event stays disabled"
+    );
 
     // =====================================================================
     // 2. RL14 and RL3: moves of T and splits of G under load
@@ -1465,7 +1557,16 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     let g_tally = Arc::new(Mutex::new(Tally::default()));
     let mut clients = Vec::new();
     for d in DCS {
-        clients.extend(workload(d, "r2h-t", 2, 2, Duration::from_millis(25), &stop, &next, &t_tally));
+        clients.extend(workload(
+            d,
+            "r2h-t",
+            2,
+            2,
+            Duration::from_millis(25),
+            &stop,
+            &next,
+            &t_tally,
+        ));
         let pl = pool(d, "r2h-g");
         for i in 0..4u64 {
             clients.push(tokio::spawn(paced_g(
@@ -1528,7 +1629,10 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         }
         v
     };
-    eprintln!("2. steps {steps:?}; shards now {:?}", shards_of(&sprigctl, "fra1", "r2h-g"));
+    eprintln!(
+        "2. steps {steps:?}; shards now {:?}",
+        shards_of(&sprigctl, "fra1", "r2h-g")
+    );
     eprintln!(
         "2. T: {t_acked} acknowledged appends, {} lost, {} unknown; errors {:?}",
         t_lost.len(),
@@ -1542,12 +1646,25 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         gt.errors
     );
     eprintln!("2. gateways' fence handling: {fence_lines:?}");
-    assert!(t_lost.is_empty(), "T: acknowledged appends lost: {t_lost:?}");
-    assert!(forbidden(&tt).is_empty(), "RL14: T's clients saw {:?}", forbidden(&tt));
-    assert!(forbidden(&gt).is_empty(), "RL14: G's clients saw {:?}", forbidden(&gt));
+    assert!(
+        t_lost.is_empty(),
+        "T: acknowledged appends lost: {t_lost:?}"
+    );
+    assert!(
+        forbidden(&tt).is_empty(),
+        "RL14: T's clients saw {:?}",
+        forbidden(&tt)
+    );
+    assert!(
+        forbidden(&gt).is_empty(),
+        "RL14: G's clients saw {:?}",
+        forbidden(&gt)
+    );
     // G's acknowledged appends: each on the shard schema its row is in.
     {
-        let mut c = mysql_async::Conn::new(opts(&root_url(fra1_port))).await.expect("root");
+        let mut c = mysql_async::Conn::new(opts(&root_url(fra1_port)))
+            .await
+            .expect("root");
         let schemas: Vec<String> = c
             .query(format!(
                 "SELECT TABLE_SCHEMA FROM information_schema.TABLES WHERE TABLE_NAME = 'cust' AND TABLE_SCHEMA LIKE 't{g_id}\\_%'"
@@ -1573,7 +1690,11 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
             .flat_map(|(k, vs)| vs.iter().map(move |v| (*k, *v)))
             .filter(|(k, v)| !have.get(k).is_some_and(|s| s.contains(v)))
             .collect();
-        eprintln!("2. G's rows on {} shard schemas; {} acknowledged appends lost", schemas.len(), lost.len());
+        eprintln!(
+            "2. G's rows on {} shard schemas; {} acknowledged appends lost",
+            schemas.len(),
+            lost.len()
+        );
         assert!(lost.is_empty(), "G: acknowledged appends lost: {lost:?}");
     }
 
@@ -1582,15 +1703,44 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     // =====================================================================
     let recorded = count(
         &ams1_url,
-        &format!("SELECT COUNT(*) FROM __sprig_sys.__sprig_standby_objects WHERE tenant_id = {s_id}"),
+        &format!(
+            "SELECT COUNT(*) FROM __sprig_sys.__sprig_standby_objects WHERE tenant_id = {s_id}"
+        ),
     )
     .await;
     eprintln!("3. RL12: {recorded} statements recorded on the copy for S's promotion");
     let s_stop = Arc::new(AtomicBool::new(false));
     let s_tally = Arc::new(Mutex::new(Tally::default()));
-    let mut s_clients = workload("fra1", "r2h-s", 0, 3, Duration::from_millis(20), &s_stop, &next, &s_tally);
-    s_clients.extend(workload("ams1", "r2h-s", 2, 3, Duration::from_millis(20), &s_stop, &next, &s_tally));
-    s_clients.extend(workload("sin1", "r2h-s", 1, 2, Duration::from_millis(20), &s_stop, &next, &s_tally));
+    let mut s_clients = workload(
+        "fra1",
+        "r2h-s",
+        0,
+        3,
+        Duration::from_millis(20),
+        &s_stop,
+        &next,
+        &s_tally,
+    );
+    s_clients.extend(workload(
+        "ams1",
+        "r2h-s",
+        2,
+        3,
+        Duration::from_millis(20),
+        &s_stop,
+        &next,
+        &s_tally,
+    ));
+    s_clients.extend(workload(
+        "sin1",
+        "r2h-s",
+        1,
+        2,
+        Duration::from_millis(20),
+        &s_stop,
+        &next,
+        &s_tally,
+    ));
     tokio::time::sleep(Duration::from_secs(15)).await;
     let holds_before = metric(ports("ams1").gw_tel, "sprig_gateway_promotion_holds_total").await
         + metric(ports("sin1").gw_tel, "sprig_gateway_promotion_holds_total").await;
@@ -1611,7 +1761,9 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let promoted_after = promoted_after.expect("S must be promoted");
-    eprintln!("3. S: failover committed {committed_after:?}, active {promoted_after:?} after the freeze");
+    eprintln!(
+        "3. S: failover committed {committed_after:?}, active {promoted_after:?} after the freeze"
+    );
     tokio::time::sleep(Duration::from_secs(10)).await;
     procs.signal("fra1", "-CONT");
     tokio::time::sleep(Duration::from_secs(10)).await;
@@ -1633,7 +1785,10 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         hold_lines.extend(metric_lines(ports(d).gw_tel, "sprig_gateway_promotion_hold").await);
     }
     // The longest acknowledged write around the promotion, and the gap.
-    let window = (frozen_ms, frozen_ms + promoted_after.as_millis() as u64 + 10_000);
+    let window = (
+        frozen_ms,
+        frozen_ms + promoted_after.as_millis() as u64 + 10_000,
+    );
     let (gap, longest) = gaps(&st, window.0, window.1);
     let (last_job, first_client) = binlog_order(&ams1_url, &s_schema).await;
     eprintln!(
@@ -1643,12 +1798,24 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         st.errors,
         holds - holds_before
     );
-    eprintln!("3. RL13: on ams1's binlog, the job's last write at {last_job:?}, the first client write at {first_client:?}");
+    eprintln!(
+        "3. RL13: on ams1's binlog, the job's last write at {last_job:?}, the first client write at {first_client:?}"
+    );
     assert!(lost.is_empty(), "acknowledged appends lost: {lost:?}");
-    assert!(forbidden(&st).is_empty(), "RL13: S's clients saw {:?}", forbidden(&st));
-    assert!(holds - holds_before > 0.0, "RL13: the promotion held statements");
+    assert!(
+        forbidden(&st).is_empty(),
+        "RL13: S's clients saw {:?}",
+        forbidden(&st)
+    );
+    assert!(
+        holds - holds_before > 0.0,
+        "RL13: the promotion held statements"
+    );
     if let (Some(j), Some(c)) = (&last_job, &first_client) {
-        assert!(c > j, "RL13: a client write reached the copy before the job's last write");
+        assert!(
+            c > j,
+            "RL13: a client write reached the copy before the job's last write"
+        );
     } else {
         panic!("binlog order not found: {last_job:?} {first_client:?}");
     }
@@ -1656,7 +1823,9 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     // and routine; a trigger fires on a write through ams1's gateway.
     let trig = count(
         &ams1_url,
-        &format!("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '{s_schema}'"),
+        &format!(
+            "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '{s_schema}'"
+        ),
     )
     .await;
     let ev = scalar(
@@ -1683,14 +1852,26 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         ],
     )
     .await;
-    let tag = scalar(&ams1_url, &format!("SELECT tag FROM `{s_schema}`.tr WHERE id = 3")).await;
+    let tag = scalar(
+        &ams1_url,
+        &format!("SELECT tag FROM `{s_schema}`.tr WHERE id = 3"),
+    )
+    .await;
     eprintln!(
         "3. RL12: on the promoted copy: {trig} triggers, ev_one {ev:?}, view {view}, procedure {proc_n}; a new row's tag after insert and update: {tag:?}"
     );
     assert_eq!(trig, 2, "both triggers on the promoted copy");
-    assert_eq!(ev.as_deref(), Some("ENABLED"), "the event enabled as at home");
+    assert_eq!(
+        ev.as_deref(),
+        Some("ENABLED"),
+        "the event enabled as at home"
+    );
     assert_eq!((view, proc_n), (1, 1), "view and procedure");
-    assert_eq!(tag.as_deref(), Some("trig2"), "the triggers fire on the new home");
+    assert_eq!(
+        tag.as_deref(),
+        Some("trig2"),
+        "the triggers fire on the new home"
+    );
     eprintln!("summary: all parts passed in {:?}", t_all.elapsed());
 
     drop(procs);

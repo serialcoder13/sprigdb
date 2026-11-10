@@ -21,6 +21,8 @@
 
 pub mod agg;
 pub mod catalog;
+/// Collations (chapter 31, R5 round 4).
+pub mod collation;
 pub mod engine;
 pub mod filter;
 /// MongoDB's geospatial operators (chapter 36, R6 round 3).

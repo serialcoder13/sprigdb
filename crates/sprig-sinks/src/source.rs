@@ -38,6 +38,13 @@ fn backend(e: mysql_async::Error) -> sprig_common::SprigError {
     x
 }
 
+/// Catalog schemas whose streams module this process migrated.
+fn migrated() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
 /// A stream source for one task.
 pub struct StreamSource {
     shard: Pool,
@@ -121,6 +128,18 @@ impl StreamSource {
         let log = LogReader { schema: log_schema };
         let store = StreamsStore::new(catalog_schema.clone());
         let mut c = catalog.get_conn().await.map_err(backend)?;
+        // `stream_offsets.instance_tenant_id` (R9) before the first read.
+        if !migrated()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&catalog_schema)
+        {
+            sprig_streams::store::migrate(&mut c, &catalog_schema).await?;
+            migrated()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(catalog_schema.clone());
+        }
         let committed = store.group_offsets(&mut c, &group).await?;
         let mut sc = shard.get_conn().await.map_err(backend)?;
         let mut at = HashMap::new();

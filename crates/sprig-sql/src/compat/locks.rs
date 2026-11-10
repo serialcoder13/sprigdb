@@ -30,12 +30,28 @@ use crate::lex::{LexOptions, Token, TokenKind, lex};
 use crate::names::rewrite::sql_string;
 use sprig_proto_mysql::Persona;
 
-const TARGETS: &[&[u8]] = &[b"GET_LOCK", b"RELEASE_LOCK", b"IS_FREE_LOCK", b"IS_USED_LOCK"];
+const TARGETS: &[&[u8]] = &[
+    b"GET_LOCK",
+    b"RELEASE_LOCK",
+    b"IS_FREE_LOCK",
+    b"IS_USED_LOCK",
+];
 
 /// Words that end a select item.
 const ITEM_END: &[&[u8]] = &[
-    b"FROM", b"INTO", b"WHERE", b"UNION", b"EXCEPT", b"INTERSECT", b"ORDER", b"GROUP", b"HAVING",
-    b"LIMIT", b"WINDOW", b"FOR", b"LOCK",
+    b"FROM",
+    b"INTO",
+    b"WHERE",
+    b"UNION",
+    b"EXCEPT",
+    b"INTERSECT",
+    b"ORDER",
+    b"GROUP",
+    b"HAVING",
+    b"LIMIT",
+    b"WINDOW",
+    b"FOR",
+    b"LOCK",
 ];
 
 /// Words that may stand between `SELECT` and the first item.
@@ -182,7 +198,8 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions, prefix: &str) -> Option<Vec<u8>> {
             || punct(n, b')')
             || ITEM_END.iter().any(|w| word(n, w));
         if in_list && starts && ends {
-            let text = String::from_utf8_lossy(&sql[sig[j].start as usize..sig[close].end as usize]);
+            let text =
+                String::from_utf8_lossy(&sql[sig[j].start as usize..sig[close].end as usize]);
             let alias = format!(" AS `{}`", text.replace('`', "``"));
             let at = sig[close].end as usize;
             edits.push((at, at, alias.into_bytes()));
@@ -225,7 +242,10 @@ mod tests {
             "SELECT GET_LOCK(CONCAT('t42:', LEFT(SHA2(LOWER('jobs'), 256), 50)), 10) AS `GET_LOCK('jobs', 10)`"
         );
         assert_eq!(
-            rw("select release_lock(?) as r, is_free_lock(@n)", Persona::MariaDb),
+            rw(
+                "select release_lock(?) as r, is_free_lock(@n)",
+                Persona::MariaDb
+            ),
             "select release_lock(CONCAT('t42:', LEFT(SHA2(?, 256), 50))) as r, \
              is_free_lock(CONCAT('t42:', LEFT(SHA2(@n, 256), 50))) AS `is_free_lock(@n)`"
         );
@@ -249,7 +269,10 @@ mod tests {
             "SELECT db.get_lock('x')",
             "LOCK TABLES t WRITE",
         ] {
-            assert!(rewrite(s.as_bytes(), &LexOptions::mysql84(), "t42:").is_none(), "{s}");
+            assert!(
+                rewrite(s.as_bytes(), &LexOptions::mysql84(), "t42:").is_none(),
+                "{s}"
+            );
         }
     }
 }

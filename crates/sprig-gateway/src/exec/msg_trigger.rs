@@ -176,7 +176,46 @@ impl PassSession {
             SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
         })?;
         let source_db = src.db.clone().unwrap_or_else(|| db.clone());
+        // R9 (r9next): `ON STREAM s FAN IN` reads every member instance of
+        // the inherited stream `s` below this tenant.
+        let mut fanin_def = None;
         let (source_db_row, object_id, stream_def) = match src.kind {
+            SourceKind::Stream if src.fan_in => {
+                if !grants.unrestricted()
+                    && !grants.allows(
+                        sprig_auth::authz::Action::FanIn,
+                        sprig_auth::authz::Target::Tenant,
+                    )
+                {
+                    return Err(SprigError::standard(
+                        1227,
+                        *b"42000",
+                        "Access denied; you need (at least one of) the SPRIG_FAN_IN privilege(s) \
+                         for this operation",
+                    ));
+                }
+                let chain = crate::inherited::chain(&svc, &cat).await?;
+                let own = crate::inherited::state_of(&cat);
+                let def = crate::inherited::fanin::definition(&chain, &own, &source_db, &src.name)
+                    .filter(|d| d.state == sprig_inherit::msg::DefState::Active)
+                    .ok_or_else(|| {
+                        crate::inherited::target_err(format!(
+                            "no inherited stream {source_db}.{} to fan in",
+                            src.name
+                        ))
+                    })?;
+                if !allows(sprig_auth::authz::Action::Select, &def.db_name, &def.name) {
+                    return Err(denied(ts, "SELECT", &def.db_name, &def.name));
+                }
+                let id = messages::fanin_source_id(def.declarer.0, def.object_id)
+                    .ok_or_else(|| SprigError::internal("a definition id too large for fan-in"))?;
+                let r = cat
+                    .database(&database_key(&def.db_name, lctn))
+                    .cloned()
+                    .unwrap_or_else(|| row.clone());
+                fanin_def = Some(def);
+                (r, id, None)
+            }
             SourceKind::Stream => {
                 let streams = cat
                     .ext
@@ -298,6 +337,22 @@ impl PassSession {
                 ));
             }
         }
+        if let Some(def) = &fanin_def {
+            let n = crate::inherited::fanin_triggers::attach_existing(
+                &svc,
+                tenant,
+                deployed.binding_id,
+                def,
+            )
+            .await?;
+            notes.push(format!(
+                "fan-in over {n} member instance{} of {}.{} (each from its high watermark; \
+                 instances made later from their start)",
+                if n == 1 { "" } else { "s" },
+                def.db_name,
+                def.name
+            ));
+        }
         messages::put_index(
             svc.locator.dc_store().as_ref(),
             &MsgIndex {
@@ -336,7 +391,10 @@ impl PassSession {
             );
             return Ok(Some(self.fail(out, &e).await?));
         };
-        let reply = if req.record.is_some() {
+        let reply = if let Some(rp) = &req.replay {
+            // RC11: a dead letter's replay.
+            self.run_replay(cx, &req, rp).await
+        } else if req.record.is_some() {
             self.run_stream_trigger(cx, &req).await
         } else {
             self.run_queue_trigger(cx, &req).await
@@ -522,6 +580,58 @@ impl PassSession {
         Ok(Vec::new())
     }
 
+    /// A dead letter's replay (RC11): its event with the active version, in
+    /// a transaction that moves its marker in the replay group from 0 to 1
+    /// (39877 when a repeat finds it moved: `Moved`), outside the trigger's
+    /// own position.
+    async fn run_replay(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        req: &RunRequest,
+        rp: &messages::ReplayRun,
+    ) -> RunReply {
+        if let Err(e) = self.trigger_stmt(cx, "START TRANSACTION").await {
+            return RunReply::failed(&e);
+        }
+        let c = Commit {
+            group: messages::replay_group(req.source.binding_id),
+            instance: 0,
+            stream: rp.dl_id,
+            partition: 0,
+            offset: 1,
+            epoch: None,
+            metadata: None,
+            expect: Some(0),
+        };
+        if let Err(e) = self.commit_offset_internal(cx, &c).await {
+            self.rollback_quietly(cx).await;
+            if e.code() == Some(SprigCode::LogicTriggerPositionMoved) {
+                return RunReply::of(RunOutcome::Moved);
+            }
+            return RunReply::failed(&e);
+        }
+        let arg = match req.source.kind {
+            SourceKind::Stream => "record",
+            SourceKind::Queue => "message",
+        };
+        match self.run_version(cx, req, arg, rp.event.clone()).await {
+            Ok(logs) => match self.trigger_stmt(cx, "COMMIT").await {
+                Ok(()) => RunReply {
+                    logs,
+                    ..RunReply::of(RunOutcome::Ok)
+                },
+                Err(e) => {
+                    self.rollback_quietly(cx).await;
+                    RunReply::failed(&e)
+                }
+            },
+            Err(e) => {
+                self.rollback_quietly(cx).await;
+                RunReply::failed(&e)
+            }
+        }
+    }
+
     /// One record of a stream (see the module docs).
     async fn run_stream_trigger(&mut self, cx: &mut ExecCtx<'_>, req: &RunRequest) -> RunReply {
         let Some(r) = &req.record else {
@@ -534,7 +644,8 @@ impl PassSession {
         }
         let c = Commit {
             group: offsets::logic_group(req.source.binding_id),
-            instance: 0,
+            // A fan-in trigger's position is on the member's instance (R9).
+            instance: req.instance_tenant,
             stream: req.source.object_id,
             partition: r.partition,
             offset: r.offset + 1,

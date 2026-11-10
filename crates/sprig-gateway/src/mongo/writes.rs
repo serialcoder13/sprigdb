@@ -256,19 +256,28 @@ async fn update(
                 break;
             };
             let afs = docs_of(u, "arrayFilters");
-            match engine
-                .update(
-                    sql,
-                    ns,
-                    &q,
-                    spec,
-                    u.get_bool("multi").unwrap_or(false),
-                    u.get_bool("upsert").unwrap_or(false),
-                    &afs,
-                    None,
-                )
-                .await
-            {
+            // Per statement: its collation, and MongoDB 8.0's `sort` for
+            // an update of one document.
+            let r = match sprig_doc::collation::Collation::of(u) {
+                Ok(coll) => {
+                    sprig_doc::collation::scope(
+                        coll,
+                        engine.update(
+                            sql,
+                            ns,
+                            &q,
+                            spec,
+                            u.get_bool("multi").unwrap_or(false),
+                            u.get_bool("upsert").unwrap_or(false),
+                            &afs,
+                            u.get_document("sort").ok(),
+                        ),
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+            match r {
                 Ok(o) => {
                     let mut r = doc! {
                         "n": i64::try_from(o.matched).unwrap_or(i64::MAX),
@@ -327,7 +336,13 @@ async fn delete(
         }
         let q = d.get_document("q").cloned().unwrap_or_default();
         let one = d.get("limit").and_then(as_i64) == Some(1);
-        match engine.delete(sql, ns, &q, one, None).await {
+        let r = match sprig_doc::collation::Collation::of(d) {
+            Ok(coll) => {
+                sprig_doc::collation::scope(coll, engine.delete(sql, ns, &q, one, None)).await
+            }
+            Err(e) => Err(e),
+        };
+        match r {
             Ok((k, _)) => {
                 n += k;
                 out.executed
@@ -509,19 +524,26 @@ async fn bulk_write(
                             code::FAILED_TO_PARSE,
                             "BSON field 'bulkWrite.ops.updateMods' is missing but a required field",
                         )),
-                        Some(spec) => engine
-                            .update(
-                                sql,
-                                &ns,
-                                &q,
-                                spec,
-                                op.get_bool("multi").unwrap_or(false),
-                                op.get_bool("upsert").unwrap_or(false),
-                                &docs_of(op, "arrayFilters"),
-                                None,
-                            )
-                            .await
-                            .map(|o| {
+                        Some(spec) => match sprig_doc::collation::Collation::of(op) {
+                            Ok(coll) => {
+                                sprig_doc::collation::scope(
+                                    coll,
+                                    engine.update(
+                                        sql,
+                                        &ns,
+                                        &q,
+                                        spec,
+                                        op.get_bool("multi").unwrap_or(false),
+                                        op.get_bool("upsert").unwrap_or(false),
+                                        &docs_of(op, "arrayFilters"),
+                                        op.get_document("sort").ok(),
+                                    ),
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        }
+                        .map(|o| {
                                 let mut d = doc! {
                                     "ok": 1.0,
                                     "idx": idx(i),
@@ -539,10 +561,17 @@ async fn bulk_write(
                 _ => {
                     let q = op.get_document("filter").cloned().unwrap_or_default();
                     let multi = op.get_bool("multi").unwrap_or(false);
-                    engine
-                        .delete(sql, &ns, &q, !multi, None)
-                        .await
-                        .map(|(n, _)| doc! {"ok": 1.0, "idx": idx(i), "n": i32::try_from(n).unwrap_or(i32::MAX)})
+                    match sprig_doc::collation::Collation::of(op) {
+                        Ok(coll) => {
+                            sprig_doc::collation::scope(
+                                coll,
+                                engine.delete(sql, &ns, &q, !multi, None),
+                            )
+                            .await
+                        }
+                        Err(e) => Err(e),
+                    }
+                    .map(|(n, _)| doc! {"ok": 1.0, "idx": idx(i), "n": i32::try_from(n).unwrap_or(i32::MAX)})
                 }
             };
             if let Ok(d) = &r {

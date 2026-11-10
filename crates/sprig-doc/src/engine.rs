@@ -314,6 +314,8 @@ pub struct CursorPlan {
     /// Post-processing stages of an aggregation, already applied to a
     /// buffer.
     pub exhausted: bool,
+    /// The command's collation, for the rechecks of later batches.
+    collation: Option<crate::collation::Collation>,
 }
 
 impl CursorPlan {
@@ -334,6 +336,7 @@ impl CursorPlan {
             remaining: None,
             exhausted: docs.is_empty(),
             kind: PlanKind::Buffer(docs.into()),
+            collation: None,
         }
     }
 
@@ -799,6 +802,7 @@ impl Engine {
                     to_skip: spec.skip,
                     done: false,
                 },
+                collation: crate::collation::active(),
             });
         }
         let mut docs = self
@@ -978,10 +982,11 @@ impl Engine {
                     let short = rows.len() < chunk;
                     let total = rows.len();
                     let mut used = 0;
+                    let coll = plan.collation.or_else(crate::collation::active);
                     for (k, d) in rows {
                         used += 1;
                         *last = Some(k);
-                        if !plan.pred.matches_with(&d, &cx) {
+                        if !crate::collation::sync_scope(coll, || plan.pred.matches_with(&d, &cx)) {
                             continue;
                         }
                         if *to_skip > 0 {
@@ -1107,24 +1112,27 @@ impl Engine {
         let docs = self
             .scan(sql, ns, &m.table, &pred, &sqlp, self.cfg.max_sort_bytes)
             .await?;
-        let mut seen: Vec<(Vec<u8>, Bson)> = Vec::new();
+        // Every value, sorted in MongoDB order (under the active
+        // collation), then one of each run of equal values: n log n, not
+        // quadratic.
+        let mut all: Vec<Bson> = Vec::new();
         for d in &docs {
             let vs = filter::values_at(d, key);
             for v in vs.leaves {
-                let items: Vec<&Bson> = match v {
-                    Bson::Array(a) => a.iter().collect(),
-                    other => vec![other],
-                };
-                for x in items {
-                    let k = crate::keyenc::key(x);
-                    if !seen.iter().any(|(s, _)| *s == k) {
-                        seen.push((k, x.clone()));
-                    }
+                match v {
+                    Bson::Array(a) => all.extend(a.iter().cloned()),
+                    other => all.push(other.clone()),
                 }
             }
         }
-        seen.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(seen.into_iter().map(|(_, v)| v).collect())
+        let coll = crate::collation::active();
+        Ok(crate::heavy::run(all.len(), move || {
+            crate::collation::sync_scope(coll, || {
+                all.sort_by(crate::keyenc::compare);
+                all.dedup_by(|a, b| crate::keyenc::equal(a, b));
+                all
+            })
+        }))
     }
 
     /// One update statement: `(matched, modified, upserted _id)`.

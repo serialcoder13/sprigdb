@@ -94,8 +94,8 @@ impl PassSession {
                     metrics::counter!("sprig_gateway_promotion_holds_total").increment(1);
                 }
                 if started.elapsed() < PROMOTION_HOLD {
-                    let _ = tokio::time::timeout(Duration::from_millis(200), changes.changed())
-                        .await;
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(200), changes.changed()).await;
                     changes = locator.placement_changes_for(tenant);
                     continue;
                 }

@@ -1026,7 +1026,9 @@ mod tests {
             "{}",
             o.sql
         );
-        assert!(names_in_body(&stmt(body, create(ObjectKind::Procedure)), lex, None, None).is_none());
+        assert!(
+            names_in_body(&stmt(body, create(ObjectKind::Procedure)), lex, None, None).is_none()
+        );
     }
 
     #[test]

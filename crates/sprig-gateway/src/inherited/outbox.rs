@@ -699,10 +699,10 @@ pub fn refuse_live_definitions(st: &sprig_inherit::msg::MsgState, db: &str) -> R
     ))
 }
 
-/// The `DROP DATABASE` hook: refused (39895) while `FOR EACH TENANT`
-/// definitions are active in `db`; then [`drain_for_drop`] over its shard
-/// schemas, waiting `inherit.outbox_drain_seconds`. Nothing to do for a
-/// database the tenant doesn't have, or whose schemas no outbox lists.
+/// The `DROP DATABASE` hook: [`drain_for_drop`] over database `db`'s shard
+/// schemas, waiting `inherit.outbox_drain_seconds`; then refused (39895)
+/// while `FOR EACH TENANT` definitions are active in `db`. Nothing to do
+/// for a database the tenant doesn't have.
 ///
 /// # Errors
 /// 39895; 39245; the catalog's and the clusters'.
@@ -716,10 +716,6 @@ pub async fn before_drop_database(
     let Some(row) = cat.database(&sprig_catalog::ddl::database_key(db, lctn)) else {
         return Ok(());
     };
-    // The lead's choice on r9fet3's question 1: a declarer's database
-    // isn't dropped from under its live definitions (every member's
-    // instances would go with them, too easily by accident).
-    refuse_live_definitions(&super::state_of(&cat), &row.name)?;
     let schemas: Vec<String> = sprig_catalog::ddl::shard_schemas(tenant, row)
         .iter()
         .map(ToString::to_string)
@@ -732,15 +728,20 @@ pub async fn before_drop_database(
         .map(|e| e.schema)
         .collect();
     let schemas: Vec<String> = schemas.into_iter().filter(|s| listed.contains(s)).collect();
-    if schemas.is_empty() {
-        return Ok(());
+    if !schemas.is_empty() {
+        let wait = svc.settings.get(
+            &sprig_inherit::msg::settings::OUTBOX_DRAIN_SECONDS,
+            &cat.setting_ctx(&svc.dc).with_db(row.db_id),
+            Some(&cat.settings),
+        );
+        drain_for_drop(svc, tenant, &row.name, &schemas, Duration::from_secs(wait)).await?;
     }
-    let wait = svc.settings.get(
-        &sprig_inherit::msg::settings::OUTBOX_DRAIN_SECONDS,
-        &cat.setting_ctx(&svc.dc).with_db(row.db_id),
-        Some(&cat.settings),
-    );
-    drain_for_drop(svc, tenant, &row.name, &schemas, Duration::from_secs(wait)).await
+    // The lead's choice on r9fet3's question 1: a declarer's database
+    // isn't dropped from under its live definitions (every member's
+    // instances would go with them, too easily by accident). After the
+    // outbox: its rows may be bound for those definitions' instances,
+    // which take no more publishes once the definitions are dropped.
+    refuse_live_definitions(&super::state_of(&cat), &row.name)
 }
 
 /// Every outbox schema this DC lists.

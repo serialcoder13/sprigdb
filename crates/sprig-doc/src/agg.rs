@@ -881,6 +881,133 @@ pub fn value_truthy(v: &Bson) -> bool {
     }
 }
 
+// --- `let` variables (chapter 31, R5 round 4) --------------------------------
+
+/// The values of a command's `let` option: each expression evaluated once
+/// (against an empty document, with `$$NOW`), as MongoDB does.
+///
+/// # Errors
+/// 17276 and the expressions' own errors; 9 for a name MongoDB refuses.
+pub fn let_values(lets: &Document, now: DateTime) -> Result<Document, MongoError> {
+    let empty = Document::new();
+    let vars = Vars::new(&empty, now);
+    let mut out = Document::new();
+    for (k, e) in lets {
+        if k.is_empty()
+            || !k.starts_with(|c: char| c.is_ascii_lowercase() || !c.is_ascii())
+            || !k.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            return Err(MongoError::new(
+                code::FAILED_TO_PARSE,
+                format!("'{k}' starts with an invalid character for a user variable name"),
+            ));
+        }
+        out.insert(k.clone(), eval(e, &vars)?);
+    }
+    Ok(out)
+}
+
+/// `expr` with every `$$name` (and `$$name.path`) of `lets` replaced by
+/// its value as a `$literal`: the command's `let` variables bound into an
+/// aggregation expression.
+#[must_use]
+pub fn bind_expr(expr: &Bson, lets: &Document) -> Bson {
+    match expr {
+        Bson::String(s) if s.starts_with("$$") => {
+            let rest = &s[2..];
+            let (name, path) = rest.split_once('.').unwrap_or((rest, ""));
+            match lets.get(name) {
+                Some(v) => {
+                    let parts: Vec<&str> = if path.is_empty() {
+                        Vec::new()
+                    } else {
+                        path.split('.').collect()
+                    };
+                    Bson::Document(doc! {"$literal": field_value(v, &parts)})
+                }
+                None => expr.clone(),
+            }
+        }
+        Bson::Array(a) => Bson::Array(a.iter().map(|x| bind_expr(x, lets)).collect()),
+        Bson::Document(d) => {
+            // `$literal` stays as written.
+            if d.len() == 1 && d.contains_key("$literal") {
+                return expr.clone();
+            }
+            Bson::Document(d.iter().map(|(k, v)| (k.clone(), bind_expr(v, lets))).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// A query filter with `lets` bound inside its `$expr` clauses (the only
+/// place a filter reads variables).
+#[must_use]
+pub fn bind_filter(filter: &Document, lets: &Document) -> Document {
+    filter
+        .iter()
+        .map(|(k, v)| {
+            let v = match (k.as_str(), v) {
+                ("$expr", e) => bind_expr(e, lets),
+                ("$and" | "$or" | "$nor", Bson::Array(a)) => Bson::Array(
+                    a.iter()
+                        .map(|x| match x {
+                            Bson::Document(d) => Bson::Document(bind_filter(d, lets)),
+                            o => o.clone(),
+                        })
+                        .collect(),
+                ),
+                _ => v.clone(),
+            };
+            (k.clone(), v)
+        })
+        .collect()
+}
+
+/// An aggregation pipeline (or a pipeline update) with `lets` bound:
+/// `$match` stages in their `$expr`, `$lookup` sub-pipelines and their
+/// own `let`, every other stage throughout.
+#[must_use]
+pub fn bind_pipeline(stages: &[Document], lets: &Document) -> Vec<Document> {
+    if lets.is_empty() {
+        return stages.to_vec();
+    }
+    stages
+        .iter()
+        .map(|st| {
+            st.iter()
+                .map(|(name, arg)| {
+                    let v = match (name.as_str(), arg) {
+                        ("$match", Bson::Document(f)) => Bson::Document(bind_filter(f, lets)),
+                        ("$lookup" | "$unionWith", Bson::Document(l)) => {
+                            let mut l = l.clone();
+                            if let Ok(p) = l.get_array("pipeline") {
+                                let p: Vec<Document> =
+                                    p.iter().filter_map(|x| x.as_document().cloned()).collect();
+                                l.insert(
+                                    "pipeline",
+                                    bind_pipeline(&p, lets)
+                                        .into_iter()
+                                        .map(Bson::Document)
+                                        .collect::<Vec<_>>(),
+                                );
+                            }
+                            if let Some(v) = l.get("let").map(|x| bind_expr(x, lets)) {
+                                l.insert("let", v);
+                            }
+                            Bson::Document(l)
+                        }
+                        // Output stages name collections, not values.
+                        ("$out" | "$merge", a) => a.clone(),
+                        (_, a) => bind_expr(a, lets),
+                    };
+                    (name.clone(), v)
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// `$expr` support for the matcher.
 #[derive(Debug, Clone, Copy)]
 pub struct AggExpr {

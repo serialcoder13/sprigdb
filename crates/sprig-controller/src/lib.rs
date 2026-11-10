@@ -397,22 +397,24 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
                 .budget("tenant_settings", 4),
         ),
     )?;
-    let balancer = Arc::new(balancer_loop::BalancerLoop::new(
-        dc.clone(),
-        ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?,
-        Arc::clone(&stores.dc),
-        Arc::new(
-            RegistryPools::new(registry_for_balancer, Some(Arc::clone(&monitor)))
-                .budget("balancer", catalogs::POOL_MAX),
-        ),
-        Arc::new(locator.clone()),
-        Directory::new(Arc::clone(&stores.global)),
-        Some(settings.live.clone()),
-        Arc::clone(&clock),
-        Some(move_exec),
-        cfg.node.id().clone(),
-    )
-    .with_tenant_scopes(Arc::clone(&tenant_scopes)));
+    let balancer = Arc::new(
+        balancer_loop::BalancerLoop::new(
+            dc.clone(),
+            ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?,
+            Arc::clone(&stores.dc),
+            Arc::new(
+                RegistryPools::new(registry_for_balancer, Some(Arc::clone(&monitor)))
+                    .budget("balancer", catalogs::POOL_MAX),
+            ),
+            Arc::new(locator.clone()),
+            Directory::new(Arc::clone(&stores.global)),
+            Some(settings.live.clone()),
+            Arc::clone(&clock),
+            Some(move_exec),
+            cfg.node.id().clone(),
+        )
+        .with_tenant_scopes(Arc::clone(&tenant_scopes)),
+    );
     // Chapters 16 and 20 (R1): the advisor's first design and automatic
     // split, merge and move, per tenant homed here.
     let sharding = Arc::new(

@@ -138,7 +138,7 @@ pub(crate) fn group() -> Command {
         )
         .subcommand(
             Command::new("dead-letters")
-                .about("After-commit trigger events that kept failing")
+                .about("Trigger events that kept failing (after-commit, stream and queue triggers)")
                 .subcommand_required(true)
                 .subcommand(
                     Command::new("list")
@@ -519,9 +519,9 @@ async fn dead_letters(m: &ArgMatches, out: Output) -> Result<(), Failed> {
             let (mut c, store) = catalog(m).await?;
             let binding = m.get_one::<u64>("binding").copied();
             if verb == "replay" {
-                // After-commit triggers' dead letters go back to their
-                // job; those of triggers on streams and queues stay dead
-                // (their replay isn't built), and the count says so.
+                // After-commit triggers' dead letters, and those of
+                // triggers on streams and queues (RC11), go back to their
+                // jobs, which run them in order with the active version.
                 let (n, left) = store
                     .replay_dead_letters(&mut c, binding, &ids)
                     .await
@@ -531,8 +531,8 @@ async fn dead_letters(m: &ArgMatches, out: Output) -> Result<(), Failed> {
                 );
                 if left > 0 {
                     println!(
-                        "{left} dead letters of triggers on streams or queues stay dead: their \
-                         replay isn't built yet; discard them, or publish the record or message again"
+                        "{left} dead letters of other kinds of triggers stay dead: they can't \
+                         be replayed; discard them"
                     );
                 }
                 let _ = c.disconnect().await;

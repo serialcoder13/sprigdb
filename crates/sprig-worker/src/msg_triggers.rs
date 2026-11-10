@@ -384,8 +384,12 @@ impl MsgEnv {
         if db_state.as_deref() != Some("active") {
             return Ok(None);
         }
-        // The source itself.
+        // The source itself (a fan-in trigger's: its definition, R9).
         let alive = match source.kind {
+            SourceKind::Stream if messages::fanin_source_parts(source.object_id).is_some() => {
+                let (dt, dobj) = messages::fanin_source_parts(source.object_id).unwrap_or((0, 0));
+                self.definition_active(TenantId(dt), dobj).await?
+            }
             SourceKind::Stream => StreamsStore::new(schema.clone())
                 .get(&mut c, StreamId(source.object_id))
                 .await?
@@ -415,6 +419,26 @@ impl MsgEnv {
         }))
     }
 
+    /// Whether definition `(declarer, object)` is active (a fan-in
+    /// trigger's source, R9).
+    async fn definition_active(&self, declarer: TenantId, object: u64) -> Result<bool> {
+        let ep = self.locator.writer(declarer).await?;
+        let mut c = ep.pool.get_conn().await.map_err(|e| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
+        })?;
+        let r: std::result::Result<Option<String>, _> = c
+            .exec_first(
+                format!(
+                    "SELECT CAST(state AS CHAR) FROM {}.inherited_defs WHERE object_id = ? AND \
+                     kind = 'stream'",
+                    quote(ep.store.schema())
+                ),
+                (object,),
+            )
+            .await;
+        Ok(matches!(r, Ok(Some(s)) if s == "active"))
+    }
+
     /// RL3 (r2harden): the tenant's own `logic.trigger_*` rows over the
     /// etcd scopes, as after-commit triggers read them (decision RF3); the
     /// worker-wide options when the worker reads no tenant rows (tests).
@@ -437,6 +461,8 @@ impl MsgEnv {
                 max_attempts: self.opts_for(tenant).current().max_attempts,
                 lease_ms: 30_000.max(u64::try_from(budget.as_millis()).unwrap_or(30_000) + 5_000),
                 budget_ms: u64::try_from(budget.as_millis()).unwrap_or(30_000),
+                instance_tenant: 0,
+                replay: None,
             },
             version: Arc::new(AtomicU64::new(l.version)),
         }
@@ -465,6 +491,7 @@ impl MsgEnv {
         t: &Template,
         stats: &MsgStats,
         stop: &sprig_common::CancellationToken,
+        gw: &Arc<dyn Gateway>,
     ) -> bool {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut last_reload = Instant::now();
@@ -492,6 +519,10 @@ impl MsgEnv {
                         if old != l.version {
                             tracing::info!(%tenant, binding, version = l.version, "trigger: new version");
                         }
+                        // RC11: dead letters marked for replay.
+                        if let Err(e) = replay_due(&l, t, gw.as_ref()).await {
+                            tracing::warn!(%tenant, binding, error = %e, "trigger: dead-letter replay stopped; retried");
+                        }
                     }
                     Ok(None) => {
                         tracing::info!(%tenant, binding, "trigger's binding or source is gone; its job ends");
@@ -506,6 +537,91 @@ impl MsgEnv {
     }
 }
 
+/// RC11 (R9): runs the binding's dead letters marked `replaying`, oldest
+/// first, with the active version, each once (its marker in
+/// [`messages::replay_group`]); `replayed` when it ran (or had); when one
+/// fails, it (one more attempt) and every later one go back to `dead`, so
+/// nothing runs out of order. Returns how many ran.
+async fn replay_due(l: &Loaded, t: &Template, gw: &dyn Gateway) -> Result<u64> {
+    let mut c = l.catalog.get_conn().await.map_err(db_err)?;
+    let store = LogicStore::new(&l.schema);
+    let rows = store
+        .dead_letters(&mut c, Some(l.source.binding_id), Some("replaying"), 100)
+        .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let group = messages::replay_group(l.source.binding_id);
+    let mut n = 0;
+    for r in rows {
+        offsets::init_positions(&mut c, &l.schema, &group, r.dl_id, &[(0, 0)]).await?;
+        let mut req = t.req.clone();
+        req.version = t.version.load(Ordering::Relaxed);
+        req.record = None;
+        req.replay = Some(messages::ReplayRun {
+            dl_id: r.dl_id,
+            event: r.event.clone(),
+        });
+        let reply = gw.run(&req).await?;
+        match reply.outcome {
+            messages::RunOutcome::Ok | messages::RunOutcome::Moved => {
+                store
+                    .set_dead_letters(
+                        &mut c,
+                        Some(l.source.binding_id),
+                        &[r.dl_id],
+                        "replaying",
+                        "replayed",
+                    )
+                    .await?;
+                let _ = store
+                    .log(
+                        &mut c,
+                        l.source.module_id,
+                        Some(req.version),
+                        "info",
+                        "trigger",
+                        &format!("dead letter {} ({}) replayed", r.dl_id, r.event_key),
+                    )
+                    .await;
+                n += 1;
+            }
+            _ => {
+                store
+                    .put_dead_letter(
+                        &mut c,
+                        l.source.binding_id,
+                        req.version,
+                        &r.event_key,
+                        b"",
+                        &r.event,
+                        1,
+                        reply.code,
+                        &reply.message,
+                    )
+                    .await?;
+                // In order: nothing after it runs; the later ones go back
+                // to `dead` with it, for the next replay.
+                store
+                    .set_dead_letters(
+                        &mut c,
+                        Some(l.source.binding_id),
+                        &[],
+                        "replaying",
+                        "dead",
+                    )
+                    .await?;
+                tracing::warn!(binding = l.source.binding_id, dead_letter = r.dl_id, code = reply.code, "a replayed dead letter failed again; the replay stops there");
+                break;
+            }
+        }
+    }
+    if n > 0 {
+        tracing::info!(binding = l.source.binding_id, replayed = n, "trigger dead letters replayed");
+    }
+    Ok(n)
+}
+
 /// A stream trigger's stream and offsets, as `sprig_ctl`.
 struct MariaSide {
     catalog: Pool,
@@ -513,6 +629,8 @@ struct MariaSide {
     shard: Pool,
     log_schema: String,
     group: String,
+    /// A fan-in trigger's member (R9); 0 for the tenant's own stream.
+    instance: u64,
     stream: StreamId,
     source: SourceRow,
     version: Arc<AtomicU64>,
@@ -527,7 +645,13 @@ impl StreamSide for MariaSide {
     async fn positions(&self) -> Result<HashMap<u32, u64>> {
         let mut c = self.catalog.get_conn().await.map_err(db_err)?;
         Ok(
-            offsets::positions(&mut c, &self.schema, &self.group, self.stream.0)
+            offsets::positions_of(
+                &mut c,
+                &self.schema,
+                &self.group,
+                self.instance,
+                self.stream.0,
+            )
                 .await?
                 .into_iter()
                 .collect(),
@@ -589,15 +713,24 @@ impl StreamSide for MariaSide {
 
     async fn init(&self, p: u32, at: u64) -> Result<()> {
         let mut c = self.catalog.get_conn().await.map_err(db_err)?;
-        offsets::init_positions(&mut c, &self.schema, &self.group, self.stream.0, &[(p, at)]).await
+        offsets::init_positions_of(
+            &mut c,
+            &self.schema,
+            &self.group,
+            self.instance,
+            self.stream.0,
+            &[(p, at)],
+        )
+        .await
     }
 
     async fn advance(&self, p: u32, expect: u64, to: u64) -> Result<bool> {
         let mut c = self.catalog.get_conn().await.map_err(db_err)?;
-        offsets::advance(
+        offsets::advance_of(
             &mut c,
             &self.schema,
             &self.group,
+            self.instance,
             self.stream.0,
             p,
             expect,
@@ -617,7 +750,11 @@ impl StreamSide for MariaSide {
                 &mut c,
                 self.source.binding_id,
                 version,
-                &format!("p{}:{}", r.partition, r.offset),
+                &if self.instance == 0 {
+                    format!("p{}:{}", r.partition, r.offset)
+                } else {
+                    format!("t{}:p{}:{}", self.instance, r.partition, r.offset)
+                },
                 b"",
                 &event,
                 attempts,
@@ -669,6 +806,9 @@ impl JobHandler for StreamTrigger {
             let _ = messages::delete_index(env.dc.as_ref(), tenant, binding).await;
             return Ok(json!({"end": "gone", "binding": binding}));
         };
+        if let Some(def) = messages::fanin_source_parts(l.source.object_id) {
+            return run_fan_in(env, cx, tenant, binding, &l, def).await;
+        }
         let def = {
             let mut c = l.catalog.get_conn().await.map_err(|e| e.to_string())?;
             StreamsStore::new(l.schema.clone())
@@ -686,6 +826,7 @@ impl JobHandler for StreamTrigger {
             shard,
             log_schema: log.slot.schema(tenant, def.db).to_string(),
             group: offsets::logic_group(binding),
+            instance: 0,
             stream: def.id,
             source: l.source.clone(),
             version: Arc::clone(&t.version),
@@ -714,7 +855,7 @@ impl JobHandler for StreamTrigger {
         tracing::info!(%tenant, binding, stream = def.id.0, partitions = def.partitions, "trigger on a stream started");
         let runner = msgrun::run_stream(
             side,
-            gw,
+            Arc::clone(&gw),
             t.clone(),
             env.opts_for(tenant),
             Arc::clone(&stats),
@@ -723,7 +864,7 @@ impl JobHandler for StreamTrigger {
             stop.clone(),
         );
         tokio::pin!(runner);
-        let sup = env.supervise(cx, tenant, binding, &t, &stats, &stop);
+        let sup = env.supervise(cx, tenant, binding, &t, &stats, &stop, &gw);
         tokio::pin!(sup);
         let (r, gone) = tokio::select! {
             r = &mut runner => {
@@ -743,6 +884,144 @@ impl JobHandler for StreamTrigger {
         }
         r.map(|()| out).map_err(|e| e.to_string())
     }
+}
+
+/// A fan-in trigger's job (R9; `sprig_logic::messages`' fan-in notes):
+/// one runner per listed member instance, all sharing the binding's
+/// version, stats and supervision; the list is read again every 5 s, and
+/// a runner that fails starts again at the next read.
+async fn run_fan_in(
+    env: &MsgEnv,
+    cx: &JobCtx,
+    tenant: TenantId,
+    binding: u64,
+    l: &Loaded,
+    def: (u64, u64),
+) -> std::result::Result<Value, String> {
+    let t = env.template(tenant, l);
+    let log = RunLog {
+        catalog: l.catalog.clone(),
+        schema: l.schema.clone(),
+        module_id: l.source.module_id,
+        version: Arc::clone(&t.version),
+    };
+    log.write(
+        "info",
+        &format!(
+            "fan-in trigger on stream {}.{} started (job {})",
+            l.source.db_name, l.source.name, cx.job_id
+        ),
+    )
+    .await;
+    let gw: Arc<dyn Gateway> = Arc::new(GwClient {
+        gws: Arc::clone(&env.gateways),
+        seed: binding,
+        log,
+    });
+    let stats = Arc::new(MsgStats::default());
+    let stop = cx.cancel.child_token();
+    let mut running: HashMap<u64, tokio::task::JoinHandle<Result<()>>> = HashMap::new();
+    let sup = env.supervise(cx, tenant, binding, &t, &stats, &stop, &gw);
+    tokio::pin!(sup);
+    let mut refresh = tokio::time::interval(RELOAD_EVERY);
+    tracing::info!(%tenant, binding, "fan-in trigger started");
+    let gone = loop {
+        tokio::select! {
+            gone = &mut sup => break gone,
+            _ = refresh.tick() => {}
+        }
+        running.retain(|member, h| {
+            if h.is_finished() {
+                tracing::warn!(%tenant, binding, member, "fan-in trigger: a member's runner ended; started again");
+                false
+            } else {
+                true
+            }
+        });
+        let members = match messages::fanin_members(env.dc.as_ref(), tenant, binding).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(error = %e, "fan-in trigger: the member list is unreadable");
+                continue;
+            }
+        };
+        for m in members {
+            if running.contains_key(&m.member.0) {
+                continue;
+            }
+            match fan_in_side(env, l, &t, binding, &m).await {
+                Ok((side, parts)) => {
+                    let mut mt = t.clone();
+                    mt.req.instance_tenant = m.member.0;
+                    let h = tokio::spawn(msgrun::run_stream(
+                        side,
+                        Arc::clone(&gw),
+                        mt,
+                        env.opts_for(tenant),
+                        Arc::clone(&stats),
+                        parts,
+                        Duration::from_millis(100),
+                        stop.child_token(),
+                    ));
+                    running.insert(m.member.0, h);
+                    tracing::info!(%tenant, binding, member = %m.member, stream = m.stream, "fan-in trigger reads a member's instance");
+                }
+                Err(e) => {
+                    tracing::debug!(member = %m.member, error = %e, "fan-in trigger: a member's instance isn't readable yet");
+                }
+            }
+        }
+    };
+    stop.cancel();
+    for (_, h) in running {
+        let _ = h.await;
+    }
+    let mut out = stats.json();
+    out["binding"] = json!(binding);
+    if gone {
+        let _ = messages::delete_fanin(env.dc.as_ref(), tenant, binding, def).await;
+        out["end"] = json!("gone");
+    }
+    Ok(out)
+}
+
+/// The side of one member instance of a fan-in trigger, and its
+/// partitions.
+async fn fan_in_side(
+    env: &MsgEnv,
+    l: &Loaded,
+    t: &Template,
+    binding: u64,
+    m: &messages::FanInMember,
+) -> Result<(Arc<dyn StreamSide>, u32)> {
+    let ep = env.locator.writer(m.member).await?;
+    let def = {
+        let mut c = ep.pool.get_conn().await.map_err(|e| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
+        })?;
+        StreamsStore::new(ep.store.schema().to_owned())
+            .get(&mut c, StreamId(m.stream))
+            .await?
+            .filter(|d| d.state == StreamState::Active)
+            .ok_or_else(|| SprigError::internal("the member's instance stream is gone"))?
+    };
+    let log = def
+        .log
+        .first()
+        .ok_or_else(|| SprigError::internal("the instance has no log shard"))?;
+    let shard = env.shard_pool(m.member).await?;
+    let side: Arc<dyn StreamSide> = Arc::new(MariaSide {
+        catalog: l.catalog.clone(),
+        schema: l.schema.clone(),
+        shard,
+        log_schema: log.slot.schema(m.member, def.db).to_string(),
+        group: offsets::logic_group(binding),
+        instance: m.member.0,
+        stream: def.id,
+        source: l.source.clone(),
+        version: Arc::clone(&t.version),
+    });
+    Ok((side, def.partitions))
 }
 
 /// `logic_queue_trigger` (see the module docs).
@@ -794,14 +1073,14 @@ impl JobHandler for QueueTrigger {
         let stop = cx.cancel.child_token();
         tracing::info!(%tenant, binding, queue = %l.source.name, lanes = env.opts_for(tenant).lanes, "trigger on a queue started");
         let runner = msgrun::run_queue(
-            gw,
+            Arc::clone(&gw),
             t.clone(),
             env.opts_for(tenant),
             Arc::clone(&stats),
             stop.clone(),
         );
         tokio::pin!(runner);
-        let sup = env.supervise(cx, tenant, binding, &t, &stats, &stop);
+        let sup = env.supervise(cx, tenant, binding, &t, &stats, &stop, &gw);
         tokio::pin!(sup);
         let gone = tokio::select! {
             () = &mut runner => {

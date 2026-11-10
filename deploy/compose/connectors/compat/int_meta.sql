@@ -12,6 +12,6 @@ SELECT COUNT(*), SUM(i), MAX(i), MIN(ti), MAX(ui), COUNT(DISTINCT i) FROM c_im_t
 SELECT ti, i, ti+0, i+0, -ti, ti*2, ABS(ti), YEAR(dt), MONTH(dt), ti = 1, bt + 0, IFNULL(ti, 0), COALESCE(i, ti), IF(ti, ti, si), COALESCE(i, 0) FROM c_im_t;
 SELECT x, x + 0 FROM (SELECT 1 AS x) d;
 SELECT i FROM c_im_t UNION SELECT 2;
-SELECT ROW_NUMBER() OVER (), MAX(i) OVER (), RANK() OVER () FROM c_im_t;
+SELECT ROW_NUMBER() OVER (), MAX(i) OVER (), RANK() OVER (ORDER BY i) FROM c_im_t;
 SELECT *, 1 FROM c_im_t;
 DROP TABLE c_im_t;

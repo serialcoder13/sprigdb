@@ -225,6 +225,205 @@ impl MsgIndex {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fan-in triggers (chapter 41, "Fan-in triggers"; R9, r9next):
+// `CREATE TRIGGER g ON STREAM s FAN IN` in tenant P runs once, in P, as P's
+// definer, over every member instance of the stream definition `s` below
+// P. Its source row's `object_id` carries the definition
+// ([`fanin_source_id`]); `logic-fanin/<P>/<binding>/<member>` in the DC
+// tier lists the instances it reads (written by gateways when the trigger
+// is declared and when an instance below P is made), and
+// `inherit-fanin-triggers/<def>/<P>.<binding>` lists the triggers of a
+// definition for that. Positions: the trigger's group in P's catalog, with
+// `instance_tenant_id` = the member.
+// ---------------------------------------------------------------------------
+
+/// Marks a fan-in trigger's source `object_id`.
+pub const FANIN_SOURCE_FLAG: u64 = 1 << 62;
+const FANIN_OBJECT_BITS: u32 = 24;
+
+/// A fan-in trigger's source id for definition `(declarer, object)`;
+/// `None` when the ids don't fit (declarer up to 2^38, object up to 2^24).
+#[must_use]
+pub fn fanin_source_id(declarer: u64, object: u64) -> Option<u64> {
+    (declarer < (1 << 38) && object < (1 << FANIN_OBJECT_BITS))
+        .then_some(FANIN_SOURCE_FLAG | (declarer << FANIN_OBJECT_BITS) | object)
+}
+
+/// `(declarer, object)` of a fan-in trigger's source id.
+#[must_use]
+pub fn fanin_source_parts(id: u64) -> Option<(u64, u64)> {
+    (id & FANIN_SOURCE_FLAG != 0 && id & (1 << 63) == 0).then(|| {
+        (
+            (id & !FANIN_SOURCE_FLAG) >> FANIN_OBJECT_BITS,
+            id & ((1 << FANIN_OBJECT_BITS) - 1),
+        )
+    })
+}
+
+/// `logic-fanin/<P>/<binding>/<member>`: one instance a fan-in trigger reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanInMember {
+    /// The trigger's tenant.
+    pub tenant: TenantId,
+    /// The binding.
+    pub binding: u64,
+    /// The member.
+    pub member: TenantId,
+    /// The instance's stream id in the member.
+    pub stream: u64,
+}
+
+impl Versioned for FanInMember {
+    const V: u32 = 1;
+}
+
+/// `inherit-fanin-triggers/<def tenant>.<def object>/<P>.<binding>`: a
+/// fan-in trigger of a definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanInTrigger {
+    /// The trigger's tenant.
+    pub tenant: TenantId,
+    /// The binding.
+    pub binding: u64,
+}
+
+impl Versioned for FanInTrigger {
+    const V: u32 = 1;
+}
+
+async fn put_rec<T: Versioned + Serialize>(store: &dyn MetaStore, key: Key, v: &T) -> Result<()>
+where
+    T: Clone,
+{
+    store
+        .txn(sprig_meta::Txn {
+            when: Vec::new(),
+            then: vec![sprig_meta::Op::Put {
+                key,
+                value: Record::new(v.clone()).encode()?,
+                lease: None,
+            }],
+            otherwise: Vec::new(),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Lists a fan-in trigger under its definition.
+///
+/// # Errors
+/// The store's.
+pub async fn put_fanin_trigger(
+    store: &dyn MetaStore,
+    def: (u64, u64),
+    t: &FanInTrigger,
+) -> Result<()> {
+    let key = store.tier().key(&format!(
+        "inherit-fanin-triggers/{}.{}/{}.{}",
+        def.0, def.1, t.tenant, t.binding
+    ))?;
+    put_rec(store, key, t).await
+}
+
+/// The fan-in triggers of definition `def`.
+///
+/// # Errors
+/// The store's.
+pub async fn fanin_triggers(store: &dyn MetaStore, def: (u64, u64)) -> Result<Vec<FanInTrigger>> {
+    let prefix = store
+        .tier()
+        .key(&format!("inherit-fanin-triggers/{}.{}/", def.0, def.1))?;
+    let page = store
+        .list(
+            &prefix,
+            ListOpts {
+                limit: 100_000,
+                ..ListOpts::default()
+            },
+        )
+        .await?;
+    Ok(page
+        .kvs
+        .iter()
+        .filter_map(|kv| Record::<FanInTrigger>::decode(&kv.value).ok().map(|r| r.body))
+        .collect())
+}
+
+/// Lists an instance a fan-in trigger reads.
+///
+/// # Errors
+/// The store's.
+pub async fn put_fanin_member(store: &dyn MetaStore, m: &FanInMember) -> Result<()> {
+    let key = store.tier().key(&format!(
+        "logic-fanin/{}/{}/{}",
+        m.tenant, m.binding, m.member
+    ))?;
+    put_rec(store, key, m).await
+}
+
+/// The instances fan-in trigger `binding` of `tenant` reads.
+///
+/// # Errors
+/// The store's.
+pub async fn fanin_members(
+    store: &dyn MetaStore,
+    tenant: TenantId,
+    binding: u64,
+) -> Result<Vec<FanInMember>> {
+    let prefix = store
+        .tier()
+        .key(&format!("logic-fanin/{tenant}/{binding}/"))?;
+    let page = store
+        .list(
+            &prefix,
+            ListOpts {
+                limit: 1_000_000,
+                ..ListOpts::default()
+            },
+        )
+        .await?;
+    Ok(page
+        .kvs
+        .iter()
+        .filter_map(|kv| Record::<FanInMember>::decode(&kv.value).ok().map(|r| r.body))
+        .collect())
+}
+
+/// Removes a fan-in trigger's keys (its instance list and its entry under
+/// its definition), when it is gone.
+///
+/// # Errors
+/// The store's.
+pub async fn delete_fanin(
+    store: &dyn MetaStore,
+    tenant: TenantId,
+    binding: u64,
+    def: (u64, u64),
+) -> Result<()> {
+    let mut ops = Vec::new();
+    for m in fanin_members(store, tenant, binding).await? {
+        ops.push(sprig_meta::Op::Delete(store.tier().key(&format!(
+            "logic-fanin/{tenant}/{binding}/{}",
+            m.member
+        ))?));
+    }
+    ops.push(sprig_meta::Op::Delete(store.tier().key(&format!(
+        "inherit-fanin-triggers/{}.{}/{tenant}.{binding}",
+        def.0, def.1
+    ))?));
+    for chunk in ops.chunks(64) {
+        store
+            .txn(sprig_meta::Txn {
+                when: Vec::new(),
+                then: chunk.to_vec(),
+                otherwise: Vec::new(),
+            })
+            .await?;
+    }
+    Ok(())
+}
+
 fn index_key(store: &dyn MetaStore, tenant: TenantId, binding: u64) -> Result<Key> {
     store.tier().key(&format!("logic/msg/{tenant}/{binding}"))
 }
@@ -696,6 +895,38 @@ pub struct RunRequest {
     pub lease_ms: u64,
     /// `logic.trigger_budget_ms`.
     pub budget_ms: u64,
+    /// A fan-in trigger's run (R9): the member whose instance `record` is
+    /// from; its position is the trigger's, with `instance_tenant_id`. 0
+    /// for the tenant's own stream.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub instance_tenant: u64,
+    /// A dead letter's replay (RC11): the event to run, outside the
+    /// consumer group's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayRun>,
+}
+
+/// A dead letter's replay run (RC11, R9): the stored event, run once with
+/// the active version in a transaction that moves the dead letter's own
+/// marker (group [`replay_group`], "stream" = the dead letter's id) from 0
+/// to 1, so a repeat finds it moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayRun {
+    /// The dead letter.
+    pub dl_id: u64,
+    /// Its event (`ctx.record` or `ctx.message`).
+    pub event: Value,
+}
+
+/// The marker group of binding `binding`'s dead-letter replays.
+#[must_use]
+pub fn replay_group(binding: u64) -> String {
+    format!("__sprig_logic_replay_{binding}")
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 /// What a run came to.
@@ -823,6 +1054,15 @@ pub fn record_value(stream: &str, r: &RecordIn) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fan_in_source_ids() {
+        let id = fanin_source_id(26_306_000_002, 77).unwrap();
+        assert_eq!(fanin_source_parts(id), Some((26_306_000_002, 77)));
+        assert_eq!(fanin_source_parts(77), None);
+        assert_eq!(fanin_source_id(1 << 38, 1), None);
+        assert_eq!(fanin_source_id(1, 1 << 24), None);
+    }
 
     #[test]
     fn records_and_args() {

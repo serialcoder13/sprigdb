@@ -370,7 +370,9 @@ mod tests {
     #[test]
     fn literals_and_operators() {
         assert_eq!(fixes("SELECT 1, -1, 0, TRUE, FALSE"), [L, L, L, L, L]);
-        for e in ["1+1", "1-2", "2*3", "7 DIV 2", "7 % 2", "~0", "1<<2", "5&3", "5|3", "5^3"] {
+        for e in [
+            "1+1", "1-2", "2*3", "7 DIV 2", "7 % 2", "~0", "1<<2", "5&3", "5|3", "5^3",
+        ] {
             assert_eq!(fixes(&format!("SELECT {e}")), [L], "{e}");
         }
         // sqlparser doesn't parse the infix `MOD`: such a statement keeps
@@ -385,7 +387,10 @@ mod tests {
         );
         assert_eq!(fixes("SELECT (1), (SELECT 1), @a := 2"), [L, L, L]);
         assert_eq!(fixes("SELECT 'a', 1.5, NULL"), [K; 3]);
-        assert_eq!(fixes("SELECT @a, @@max_connections, @@session.autocommit"), [L; 3]);
+        assert_eq!(
+            fixes("SELECT @a, @@max_connections, @@session.autocommit"),
+            [L; 3]
+        );
     }
 
     #[test]
@@ -442,7 +447,12 @@ mod tests {
 
     #[test]
     fn other_statements_have_no_plan() {
-        for s in ["SHOW TABLES", "CALL p()", "INSERT INTO t VALUES (1)", "DO 1"] {
+        for s in [
+            "SHOW TABLES",
+            "CALL p()",
+            "INSERT INTO t VALUES (1)",
+            "DO 1",
+        ] {
             assert!(plan(s.as_bytes(), &LexOptions::mysql84()).is_none(), "{s}");
         }
     }
@@ -475,11 +485,7 @@ mod tests {
             [ct::LONGLONG, ct::LONG, ct::YEAR, ct::LONGLONG]
         );
         assert!(after[2].is_unsigned());
-        let row = encode_binary_row(
-            &[V::Int(1), V::Int(7), V::Null, V::Int(-5)],
-            &before,
-        )
-        .unwrap();
+        let row = encode_binary_row(&[V::Int(1), V::Int(7), V::Null, V::Int(-5)], &before).unwrap();
         let out = widen_binary_row(&row, &before, &after).unwrap();
         assert_eq!(
             decode_binary_row(&out, &after).unwrap(),

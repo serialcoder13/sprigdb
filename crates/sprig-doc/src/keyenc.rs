@@ -406,7 +406,10 @@ pub fn compare(a: &Bson, b: &Bson) -> Ordering {
     }
     match (a, b) {
         (Bson::Int32(x), Bson::Int32(y)) => x.cmp(y),
-        (Bson::String(x), Bson::String(y)) => x.as_bytes().cmp(y.as_bytes()),
+        (Bson::String(x), Bson::String(y)) => match crate::collation::active() {
+            Some(c) => c.compare(x, y),
+            None => x.as_bytes().cmp(y.as_bytes()),
+        },
         _ => key(a).cmp(&key(b)),
     }
 }

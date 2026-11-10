@@ -1125,6 +1125,43 @@ impl Exec<'_> {
             "ShortestPath{}: bidirectional breadth-first search, tier gateway",
             if all { " (all)" } else { "" }
         ));
+        // IC1's shape (decision G44): many rows from one start node to
+        // different ends, a bounded `shortestPath`. One breadth-first
+        // search from the start serves them all, instead of one
+        // bidirectional search per row.
+        let mut many: HashMap<u64, HashMap<u64, Option<Path>>> = HashMap::new();
+        if !all && !unbounded && min == 1 {
+            let mut ends: HashMap<u64, (Arc<Node>, HashSet<u64>)> = HashMap::new();
+            for r in &rows {
+                if let (Some(Some(a)), Some(Some(b))) = (
+                    Self::bound_node(r, pat.start.var.as_ref()),
+                    Self::bound_node(r, end_pat.var.as_ref()),
+                ) && a.id != b.id
+                {
+                    ends.entry(a.id)
+                        .or_insert_with(|| (a.clone(), HashSet::new()))
+                        .1
+                        .insert(b.id);
+                }
+            }
+            for (aid, (a, targets)) in ends {
+                if targets.len() >= MANY_TARGETS {
+                    let found = self.bfs_many(&a, &targets, rp, &types, max).await?;
+                    let mut m: HashMap<u64, Option<Path>> =
+                        targets.into_iter().map(|t| (t, None)).collect();
+                    for (t, p) in found {
+                        m.insert(t, Some(p));
+                    }
+                    many.insert(aid, m);
+                }
+            }
+            if !many.is_empty() {
+                self.plan.push(format!(
+                    "ShortestPath: one breadth-first search per start node for {} start node(s)",
+                    many.len()
+                ));
+            }
+        }
         let mut out = Vec::new();
         for r in rows {
             let a = Self::bound_node(&r, pat.start.var.as_ref());
@@ -1150,9 +1187,13 @@ impl Exec<'_> {
             if !self.node_ok(&pat.start, &a, &r)? || !self.node_ok(end_pat, &b, &r)? {
                 continue;
             }
-            let paths = self
-                .bfs_paths(&a, &b, rp, &types, min, max, unbounded, all)
-                .await?;
+            let paths = match many.get(&a.id).and_then(|m| m.get(&b.id)) {
+                Some(p) => p.iter().cloned().collect(),
+                None => {
+                    self.bfs_paths(&a, &b, rp, &types, min, max, unbounded, all)
+                        .await?
+                }
+            };
             for (ns, rs) in paths {
                 let mut nr = r.clone();
                 if let Some(v) = &rp.var {
@@ -1167,6 +1208,69 @@ impl Exec<'_> {
                 out.push(nr);
             }
             self.check_rows(out.len())?;
+        }
+        Ok(out)
+    }
+
+    /// One breadth-first search from `a` over at most `max` hops: a
+    /// shortest path to each of `targets` it reaches (the first found at
+    /// the smallest depth).
+    async fn bfs_many(
+        &mut self,
+        a: &Arc<Node>,
+        targets: &HashSet<u64>,
+        rp: &RelPat,
+        types: &[u32],
+        max: u32,
+    ) -> Result<HashMap<u64, Path>> {
+        let empty = Row::new();
+        let mut side: Side = HashMap::from([(a.id, (0, vec![]))]);
+        let mut nodes: HashMap<u64, Arc<Node>> = HashMap::from([(a.id, a.clone())]);
+        let mut front = vec![a.id];
+        let mut left: HashSet<u64> = targets.clone();
+        let mut d = 0u32;
+        while d < max && !front.is_empty() && !left.is_empty() {
+            self.check_time()?;
+            if front.len() > self.b.max_frontier {
+                return Err(budget_error(
+                    "frontier",
+                    format!(
+                        "{} nodes in one level, graph.max_frontier = {}",
+                        front.len(),
+                        self.b.max_frontier
+                    ),
+                ));
+            }
+            let hops = self.hop_edges(&front, types, rp.dir).await?;
+            d += 1;
+            let mut next = Vec::new();
+            for near in &front {
+                for (rel, far) in hops.get(near).map_or(&[][..], Vec::as_slice) {
+                    if side.contains_key(&far.id) || !self.rel_ok(rp, rel, &empty)? {
+                        continue;
+                    }
+                    side.insert(far.id, (d, vec![(*near, rel.clone())]));
+                    nodes.entry(far.id).or_insert_with(|| far.clone());
+                    left.remove(&far.id);
+                    next.push(far.id);
+                }
+            }
+            front = next;
+        }
+        let mut out = HashMap::new();
+        for t in targets {
+            if !side.contains_key(t) {
+                continue;
+            }
+            if let Some((ns, rs)) = walk_back(&side, *t, 1).into_iter().next() {
+                let ns: Vec<Arc<Node>> = ns
+                    .iter()
+                    .rev()
+                    .filter_map(|i| nodes.get(i).cloned())
+                    .collect();
+                let rs: Vec<Arc<Rel>> = rs.into_iter().rev().collect();
+                out.insert(*t, (ns, rs));
+            }
         }
         Ok(out)
     }
@@ -1299,6 +1403,12 @@ impl Exec<'_> {
         Ok(out)
     }
 }
+
+/// A path: its nodes and relationships in order.
+type Path = (Vec<Arc<Node>>, Vec<Arc<Rel>>);
+
+/// Ends per start node from which one search serves every row (G44).
+const MANY_TARGETS: usize = 2;
 
 /// Every path from `m` back to its side's origin through the
 /// predecessors: node ids from `m`, relationships from `m`'s side.

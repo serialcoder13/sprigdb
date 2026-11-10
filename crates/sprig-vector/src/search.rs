@@ -666,7 +666,13 @@ mod tests {
             ]
         );
         let q = &sql.0[0];
-        assert!(q.contains("WHERE MOD(_n - 1, 50) = 0 ORDER BY _n LIMIT 20"), "{q}");
-        assert!(q.starts_with("SELECT id, VEC_ToText(v) FROM (SELECT id, v,"), "{q}");
+        assert!(
+            q.contains("WHERE MOD(_n - 1, 50) = 0 ORDER BY _n LIMIT 20"),
+            "{q}"
+        );
+        assert!(
+            q.starts_with("SELECT id, VEC_ToText(v) FROM (SELECT id, v,"),
+            "{q}"
+        );
     }
 }

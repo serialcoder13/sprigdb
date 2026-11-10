@@ -1108,6 +1108,34 @@ impl PassSession {
                 }
             };
         }
+        // Chapter 07 (R1): a SHOW or DESCRIBE of a grouped table whose
+        // group has no shard on this session's cluster runs where it is.
+        if !self.router.in_txn()
+            && !self.legacy_txn()
+            && let Some(c) = layout.metadata_cluster(&text, self.main_cluster().as_str())
+            && let Ok(c) = ClusterId::new(&c)
+        {
+            return match self
+                .forward_on(
+                    cx,
+                    Slot::Other(c),
+                    false,
+                    Bytes::from(sql),
+                    original,
+                    more,
+                    format,
+                    mapper,
+                    map,
+                    out,
+                )
+                .await?
+            {
+                Ran::Done(step) => Ok(step),
+                Ran::Stale(e) | Ran::ColumnGone(e) | Ran::Collision(e) | Ran::Regather(e, _) => {
+                    self.fail_mapped(out, e, map).await
+                }
+            };
+        }
         // `autocommit = 0`: a statement that reads or writes opens a
         // coordinator transaction, as MariaDB opens one (decision RR13).
         self.implicit_begin(&text);

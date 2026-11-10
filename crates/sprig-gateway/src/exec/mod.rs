@@ -1243,7 +1243,12 @@ impl PassSession {
                 };
                 // 3306: MySQL's integer result types (chapter 28, R4).
                 let logical = (self.persona == Persona::MySql84 && dup_table.is_none())
-                    .then(|| self.stmts.get_mut(stmt).ok().and_then(|s| s.logical.clone()))
+                    .then(|| {
+                        self.stmts
+                            .get_mut(stmt)
+                            .ok()
+                            .and_then(|s| s.logical.clone())
+                    })
                     .flatten()
                     .filter(|l| compat_sink::IntMetaSink::wanted(l));
                 match (dup_table.as_deref(), logical) {

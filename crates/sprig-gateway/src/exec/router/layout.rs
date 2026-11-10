@@ -403,6 +403,34 @@ impl TenantLayout {
         g
     }
 
+    /// Chapter 07 (R1): the cluster a `SHOW` or `DESCRIBE` of one grouped
+    /// table runs on when the table's schema (as [`Self::grouped_tables`]
+    /// picked it) has no copy on the session's cluster `main`; `None` when
+    /// it may run on `main`.
+    #[must_use]
+    pub(crate) fn metadata_cluster(&self, sql: &str, main: &str) -> Option<String> {
+        let first = sql.split_ascii_whitespace().next()?.to_ascii_uppercase();
+        if !matches!(first.as_str(), "SHOW" | "DESCRIBE" | "DESC") {
+            return None;
+        }
+        let mut found: Option<&str> = None;
+        for (_, e) in self.topo.entries() {
+            for s in &e.group.shards {
+                if !sql.contains(&format!("`{}`", s.schema)) {
+                    continue;
+                }
+                if s.cluster == main {
+                    return None;
+                }
+                match found {
+                    Some(c) if c != s.cluster => return None,
+                    _ => found = Some(&s.cluster),
+                }
+            }
+        }
+        found.map(str::to_owned)
+    }
+
     /// Whether nothing is sharded or referenced.
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
@@ -782,6 +810,26 @@ mod tests {
         assert_eq!(orders.as_deref(), Some("t7_d1_g3_s2"));
         assert_eq!(names("c1").1.as_deref(), Some("t7_d1_g3_s1"));
         assert_eq!(names("c9").1.as_deref(), Some("t7_d1_g3_s1"));
-        assert!(Arc::ptr_eq(&l.grouped_tables("c2"), &l.grouped_tables("c2")));
+        assert!(Arc::ptr_eq(
+            &l.grouped_tables("c2"),
+            &l.grouped_tables("c2")
+        ));
+        // A SHOW of a table whose schema is only elsewhere runs there.
+        let show = "SHOW CREATE TABLE `t7_d1_g3_s2`.orders";
+        assert_eq!(l.metadata_cluster(show, "c1").as_deref(), Some("c2"));
+        assert_eq!(l.metadata_cluster(show, "c2"), None);
+        assert_eq!(
+            l.metadata_cluster("DESCRIBE `t7_d1_g3_s2`.orders", "c9")
+                .as_deref(),
+            Some("c2")
+        );
+        assert_eq!(
+            l.metadata_cluster("SHOW CREATE TABLE `t7_d1_ref`.countries", "c1"),
+            None
+        );
+        assert_eq!(
+            l.metadata_cluster("SELECT 1 FROM `t7_d1_g3_s2`.orders", "c1"),
+            None
+        );
     }
 }

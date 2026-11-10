@@ -1,0 +1,19 @@
+MEMORY	YES	Hash based, stored in memory, useful for temporary tables	NO	NO	NO
+CSV	YES	Stores tables as CSV files	NO	NO	NO
+PERFORMANCE_SCHEMA	YES	Performance Schema	NO	NO	NO
+Aria	YES	Crash-safe tables with MyISAM heritage. Used for internal temporary tables and privilege tables	NO	NO	NO
+MyISAM	YES	Non-transactional engine with good performance and small data footprint	NO	NO	NO
+MRG_MyISAM	YES	Collection of identical MyISAM tables	NO	NO	NO
+InnoDB	DEFAULT	Supports transactions, row-level locking, foreign keys and encryption for tables	YES	YES	YES
+SEQUENCE	YES	Generated tables filled with sequential values	YES	NO	YES
+ERROR 1221 (HY000): Incorrect usage of CUBE/ROLLUP and ORDER BY
+ERROR 1221 (HY000): Incorrect usage of CUBE/ROLLUP and ORDER BY
+ERROR 1305 (42000): FUNCTION @DB@.GROUPING does not exist
+ERROR 1305 (42000): FUNCTION @DB@.GROUPING does not exist
+ERROR 1305 (42000): FUNCTION @DB@.GROUPING does not exist
+ERROR 1305 (42000): FUNCTION @DB@.GROUPING does not exist
+ERROR 1221 (HY000): Incorrect usage of CUBE/ROLLUP and ORDER BY
+1	1
+RETURN VERSION()
+1	0	1	1	1
+1	NULL	1

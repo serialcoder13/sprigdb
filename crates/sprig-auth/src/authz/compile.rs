@@ -429,4 +429,40 @@ mod tests {
         let c = CompiledPrivileges::compile(&AuthzState::unmigrated(), UserId(1), &[]);
         assert!(c.allows(Action::Drop, Target::Tenant));
     }
+
+    #[test]
+    fn graph_element_grants_compile_by_graph() {
+        let row = |rels, name: &str| PrivRow {
+            priv_id: 0,
+            grantee: Grantee::User(UserId(9)),
+            target: PrivTarget::GraphElement {
+                db: DbId(2),
+                graph: ObjectId(77),
+                rels,
+                name: name.into(),
+            },
+            actions: ActionSet::of(&[Action::Select]),
+        };
+        let st = AuthzState::new(AuthzRows {
+            roles: vec![],
+            edges: vec![],
+            privileges: vec![row(false, "Person"), row(true, "KNOWS")],
+        });
+        let c = CompiledPrivileges::compile(&st, UserId(9), &[]);
+        let e = c.graph_elements(ObjectId(77));
+        assert_eq!(e.len(), 2);
+        assert!(e.iter().any(|(r, n, a)| !r && n == "Person" && a.has(Action::Select)));
+        assert!(e.iter().any(|(r, n, _)| *r && n == "KNOWS"));
+        assert!(c.graph_elements(ObjectId(78)).is_empty());
+        // The database becomes visible, the graph itself isn't readable.
+        assert!(c.dbs_with_objects.contains(&DbId(2)));
+        assert!(!c.allows(
+            Action::Select,
+            Target::Object {
+                db_key: "g",
+                db: DbId(2),
+                object: ObjectId(77)
+            }
+        ));
+    }
 }

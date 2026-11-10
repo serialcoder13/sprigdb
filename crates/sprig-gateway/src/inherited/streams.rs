@@ -295,6 +295,8 @@ async fn after_use(
     }
     adopt_settings(svc, chain, def, si).await?;
     super::triggers::ensure_for_stream(svc, chain, def, si).await?;
+    // R9 (r9next): fan-in triggers above read the instance.
+    super::fanin_triggers::on_instance(svc, chain, def, si).await;
     super::put_index(
         svc,
         &InstanceIndex {

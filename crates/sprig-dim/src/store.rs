@@ -469,7 +469,12 @@ mod tests {
                 ]]);
             }
             Ok((0..self.n)
-                .map(|i| vec![Some(format!("c{i:07}").into_bytes()), Some(b"12.50".to_vec())])
+                .map(|i| {
+                    vec![
+                        Some(format!("c{i:07}").into_bytes()),
+                        Some(b"12.50".to_vec()),
+                    ]
+                })
                 .collect())
         }
 
@@ -501,8 +506,10 @@ mod tests {
                 }
                 worst
             });
-            let q = Query::parse(&json!({"model": "sales", "measures": ["revenue"], "totals": true,
-                "dimensions": [{"dimension": "product", "level": "cat"}]}))
+            let q = Query::parse(
+                &json!({"model": "sales", "measures": ["revenue"], "totals": true,
+                "dimensions": [{"dimension": "product", "level": "cat"}]}),
+            )
             .unwrap();
             let run = |q: Query| {
                 tokio::spawn(async move {

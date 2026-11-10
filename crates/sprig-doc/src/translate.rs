@@ -112,7 +112,9 @@ fn negate(inner: &SqlPred) -> SqlPred {
 }
 
 fn field(path: &str, op: &FieldOp, m: &CollMeta) -> SqlPred {
-    if !valid_path(path) {
+    // A collation (chapter 31) compares strings as `utf8mb4_bin` doesn't:
+    // nothing is pushed down, the gateway rechecks every candidate.
+    if !valid_path(path) || crate::collation::active().is_some() {
         return SqlPred::t();
     }
     if path == "_id" {
