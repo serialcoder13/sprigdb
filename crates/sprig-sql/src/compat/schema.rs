@@ -652,14 +652,15 @@ pub fn show_engines_sql(lit: Lit<'_>) -> Vec<u8> {
             rows.push_str(" UNION ALL ");
         }
         let [t, x, s] = match caps {
-            Some(c) => c.map(|v| lit(v)),
+            Some(c) => c.map(lit),
             None => [null.to_owned(), null.to_owned(), null.to_owned()],
         };
-        rows.push_str(&format!(
+        let _ = write!(
+            rows,
             "SELECT {i} AS `n`, {} AS `e`, {} AS `c`, {t} AS `t`, {x} AS `x`, {s} AS `s`",
             lit(name),
             lit(comment)
-        ));
+        );
     }
     format!(
         "SELECT m.`e` AS `Engine`, IFNULL(b.`SUPPORT`, {no}) AS `Support`, m.`c` AS `Comment`, \

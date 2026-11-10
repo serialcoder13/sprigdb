@@ -2038,3 +2038,153 @@ async fn fan_in_trigger_end_to_end() {
     ok(&mut sys, "REVOKE SPRIG_FAN_IN ON *.* FROM app").await;
     ok(&mut sys, "DROP DATABASE r9naudit").await;
 }
+
+/// The tenant id of `name` from the file `SPRIG_TEST_INHERIT_IDS` (lines
+/// `name id`).
+fn tenant_id_of(name: &str) -> Option<u64> {
+    let f = var("SPRIG_TEST_INHERIT_IDS")?;
+    std::fs::read_to_string(f)
+        .ok()?
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(n, _)| *n == name)
+        .filter_map(|(_, id)| id.trim().parse().ok())
+        .last()
+}
+
+const DL_TRIGGER: &str = r"
+CREATE TRIGGER r9ndl.on_ev ON STREAM r9ndl.ev LANGUAGE javascript AS $$
+export default function (ctx) {
+  const v = String(ctx.record.value);
+  const t = v.startsWith('bad') ? 'r9ndl.later' : 'r9ndl.applied';
+  db.exec('INSERT INTO ' + t + ' (v) VALUES (?)', [v]);
+}
+$$";
+
+/// RC11 (r9next): dead letters of a trigger on a stream are replayed with
+/// `sprigctl logic dead-letters replay`, in order, once each (a second
+/// replay of the same ones runs nothing), outside the trigger's position.
+#[tokio::test]
+async fn stream_trigger_dead_letter_replay() {
+    let Some(e) = env("stream_trigger_dead_letter_replay") else {
+        return;
+    };
+    let (Some(ctl), Some(sys_id)) = (var("SPRIG_TEST_SPRIGCTL"), tenant_id_of(&e.system)) else {
+        eprintln!("no SPRIG_TEST_SPRIGCTL or SPRIG_TEST_INHERIT_IDS: skipped");
+        return;
+    };
+    let root = var("SPRIG_TEST_INHERIT_ROOT").expect("SPRIG_TEST_INHERIT_ROOT");
+    let mut sys = conn(&e.addr, &e.system).await;
+    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9ndl").await;
+    ok(&mut sys, "CREATE DATABASE r9ndl").await;
+    ok(
+        &mut sys,
+        "CREATE TABLE r9ndl.applied (id BIGINT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(32))",
+    )
+    .await;
+    ok(&mut sys, "CREATE STREAM r9ndl.ev PARTITIONS 1").await;
+    ok(&mut sys, DL_TRIGGER).await;
+    let vals = ["g1", "bad1", "g2", "bad2", "g3", "bad3", "g4"];
+    for v in vals {
+        ok(
+            &mut sys,
+            &format!("INSERT INTO r9ndl.ev (key, value) VALUES ('k', '{v}')"),
+        )
+        .await;
+    }
+    // The good ones run; the bad ones dead-letter after their attempts.
+    assert_eq!(
+        wait_count(&mut sys, "SELECT COUNT(*) FROM r9ndl.applied", 4, 120).await,
+        4
+    );
+    let cat = format!("{root}/t{sys_id}_sprig");
+    let mut r = Conn::from_url(&cat).await.unwrap();
+    let end = Instant::now() + Duration::from_secs(120);
+    let binding: u64 = loop {
+        let b: Option<(u64, u64)> = r
+            .query_first(
+                "SELECT binding_id, COUNT(*) FROM logic_dead_letters WHERE state = 'dead' \
+                 GROUP BY binding_id ORDER BY binding_id DESC LIMIT 1",
+            )
+            .await
+            .unwrap();
+        if let Some((b, 3)) = b {
+            break b;
+        }
+        assert!(Instant::now() < end, "three dead letters: {b:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    // The cause fixed: the table exists now. Replay.
+    ok(
+        &mut sys,
+        "CREATE TABLE r9ndl.later (id BIGINT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(32))",
+    )
+    .await;
+    let replay = || {
+        let out = std::process::Command::new(&ctl)
+            .args([
+                "logic",
+                "dead-letters",
+                "replay",
+                "--all",
+                "--binding",
+                &binding.to_string(),
+                "--catalog",
+                &cat,
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let t = Instant::now();
+    println!("sprigctl: {}", replay().trim());
+    assert_eq!(
+        wait_count(&mut sys, "SELECT COUNT(*) FROM r9ndl.later", 3, 60).await,
+        3
+    );
+    println!("three dead letters replayed in {:?}", t.elapsed());
+    let order: Vec<String> = ok(&mut sys, "SELECT v FROM r9ndl.later ORDER BY id")
+        .await
+        .into_iter()
+        .map(|r| r[0].clone().unwrap())
+        .collect();
+    assert_eq!(order, ["bad1", "bad2", "bad3"], "in order");
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        let n: Option<u64> = r
+            .exec_first(
+                "SELECT COUNT(*) FROM logic_dead_letters WHERE binding_id = ? AND state = \
+                 'replayed'",
+                (binding,),
+            )
+            .await
+            .unwrap();
+        if n == Some(3) || Instant::now() > end {
+            assert_eq!(n, Some(3));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    // Marked for replay again (by hand): each finds its marker moved and
+    // runs nothing.
+    r.exec_drop(
+        "UPDATE logic_dead_letters SET state = 'replaying' WHERE binding_id = ?",
+        (binding,),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(count(&mut sys, "SELECT COUNT(*) FROM r9ndl.later").await, 3);
+    // The trigger's own position moved on meanwhile: a new record runs.
+    ok(
+        &mut sys,
+        "INSERT INTO r9ndl.ev (key, value) VALUES ('k', 'g5')",
+    )
+    .await;
+    assert_eq!(
+        wait_count(&mut sys, "SELECT COUNT(*) FROM r9ndl.applied", 5, 60).await,
+        5
+    );
+    assert_eq!(count(&mut sys, "SELECT COUNT(*) FROM r9ndl.later").await, 3);
+    ok(&mut sys, "DROP DATABASE r9ndl").await;
+}

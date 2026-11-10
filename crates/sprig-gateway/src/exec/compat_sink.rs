@@ -142,12 +142,18 @@ impl<'a> IntMetaSink<'a> {
         }
     }
 
-    /// Whether a statement can have a resultset worth checking: a query.
+    /// Whether a statement can have a resultset worth checking: a query,
+    /// `EXECUTE`, `CALL` or `TABLE`.
     pub(super) fn wanted(sql: &[u8]) -> bool {
         let t = sql.trim_ascii_start();
         let t = t.strip_prefix(b"(").unwrap_or(t).trim_ascii_start();
         let starts = |w: &[u8]| t.len() >= w.len() && t[..w.len()].eq_ignore_ascii_case(w);
-        starts(b"WITH") || starts(b"SELECT")
+        // `EXECUTE`, `CALL` and `TABLE`: no plan, but JSON values.
+        starts(b"WITH")
+            || starts(b"SELECT")
+            || starts(b"EXECUTE")
+            || starts(b"CALL")
+            || starts(b"TABLE")
     }
 
     /// `columns` as MySQL types them, if any changes.

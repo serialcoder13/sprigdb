@@ -374,9 +374,9 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     // Transactions.
     let lsid = lsid_of(body);
     let autocommit_false = body.get_bool("autocommit") == Ok(false);
-    // Snapshot reads need one point in time across commands
-    // (`atClusterTime`), which SprigDB has only inside a transaction
-    // (chapter 30, "Read preference, write concern, read concern").
+    // Snapshot reads outside transactions: one point in time across
+    // commands (`atClusterTime`), kept by `snapshot` (chapter 30, "Read
+    // preference, write concern, read concern").
     if !autocommit_false
         && body
             .get_document("readConcern")
@@ -384,10 +384,13 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             .and_then(|r| r.get_str("level").ok())
             == Some("snapshot")
     {
-        return Err(MongoError::new(
-            code::INVALID_OPTIONS,
-            "readConcern level snapshot is supported only in multi-document transactions",
-        ));
+        if !super::snapshot::reads(name, body) {
+            return Err(MongoError::new(
+                code::INVALID_OPTIONS,
+                format!("readConcern level snapshot is not supported for {name} outside multi-document transactions"),
+            ));
+        }
+        return snapshot_read(c, name, body, &db, lsid.as_deref()).await;
     }
     let txn_number = i64_of(body, "txnNumber");
     if name == "commitTransaction" || name == "abortTransaction" {
@@ -627,6 +630,60 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     };
     c.sql = Some(s);
     r
+}
+
+/// A read at a snapshot (`snapshot`): on the snapshot's own executor
+/// session, its time in the reply.
+async fn snapshot_read(
+    c: &mut Conn,
+    name: &str,
+    body: &Document,
+    db: &str,
+    lsid: Option<&[u8]>,
+) -> Result<Document, MongoError> {
+    let who = owner(c);
+    let entry = if let Some(at) = super::snapshot::at_of(body) {
+        c.shared.snapshots.get(&who, at).await?
+    } else {
+        let p = c
+            .principal
+            .clone()
+            .ok_or_else(|| MongoError::new(code::UNAUTHORIZED, "not authenticated"))?;
+        let mut s = SqlSession::open(
+            &c.shared.d.sessions,
+            &c.shared.d.executor,
+            &p,
+            c.listener,
+            c.generation,
+            c.peer,
+            c.tls.clone(),
+            64 * 1024 * 1024,
+        )
+        .map_err(|e| MongoError::new(code::INTERNAL_ERROR, e.message))?;
+        if let Err(e) = s
+            .exec("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
+            .await
+        {
+            s.close().await;
+            return Err(sprig_doc::engine::mongo_error(&e));
+        }
+        s.in_txn = true;
+        let at = super::conn::cluster_time();
+        c.shared.snapshots.put(who, at, s).await
+    };
+    let mut g = entry.lock().await;
+    let at = g.at;
+    let mut s = g.sql.take().ok_or_else(|| {
+        MongoError::new(
+            super::snapshot::SNAPSHOT_TOO_OLD,
+            "the snapshot was closed",
+        )
+    })?;
+    let r = exec(c, &mut s, name, body, db, lsid).await;
+    g.sql = Some(s);
+    let mut d = r?;
+    super::snapshot::stamp(&mut d, at);
+    Ok(d)
 }
 
 fn cursor_reply(id: i64, ns: &str, batch: Vec<Document>, first: bool) -> Document {

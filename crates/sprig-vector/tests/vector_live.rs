@@ -20,7 +20,7 @@
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::float_cmp,
+    clippy::float_cmp
 )]
 
 use async_trait::async_trait;

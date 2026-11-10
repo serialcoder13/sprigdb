@@ -8,9 +8,9 @@
 //!   ordered (and limited) outside it, by the output columns:
 //!
 //!   ```text
-//!   SELECT `_sprig_c0` AS `a`, `_sprig_c1` AS `SUM(c)` FROM (
-//!     SELECT a AS `_sprig_c0`, SUM(c) AS `_sprig_c1` FROM t GROUP BY a WITH ROLLUP
-//!   ) AS `_sprig_r` ORDER BY `_sprig_c0` DESC
+//!   SELECT `_ru_c0` AS `a`, `_ru_c1` AS `SUM(c)` FROM (
+//!     SELECT a AS `_ru_c0`, SUM(c) AS `_ru_c1` FROM t GROUP BY a WITH ROLLUP
+//!   ) AS `_ru_r` ORDER BY `_ru_c0` DESC
 //!   ```
 //!
 //! - **`GROUPING()`:** one branch per rollup level, from all `n` grouped
@@ -89,7 +89,7 @@ pub fn rewrite(sql: &[u8], max_columns: usize) -> Option<String> {
     let outer_cols = names
         .iter()
         .enumerate()
-        .map(|(i, n)| format!("`_sprig_c{i}` AS {}", quote(n)))
+        .map(|(i, n)| format!("`_ru_c{i}` AS {}", quote(n)))
         .collect::<Vec<_>>()
         .join(", ");
     let with = q.with.as_ref().map(|w| format!("{w} ")).unwrap_or_default();
@@ -110,12 +110,12 @@ pub fn rewrite(sql: &[u8], max_columns: usize) -> Option<String> {
         s.to_string()
     };
     let order = match order {
-        Some(o) => o,
-        None if grouping => (1..=keys.len())
-            .map(|j| format!("`_sprig_g{j}`, `_sprig_k{j}`"))
+        Order::Items(o) => o,
+        Order::None if grouping => (1..=keys.len())
+            .map(|j| format!("`_ru_g{j}`, `_ru_k{j}`"))
             .collect::<Vec<_>>()
             .join(", "),
-        None => String::new(),
+        Order::None => String::new(),
     };
     let order = if order.is_empty() {
         String::new()
@@ -123,7 +123,7 @@ pub fn rewrite(sql: &[u8], max_columns: usize) -> Option<String> {
         format!(" ORDER BY {order}")
     };
     Some(format!(
-        "{with}SELECT {outer_cols} FROM ({inner}) AS `_sprig_r`{order}{limit}"
+        "{with}SELECT {outer_cols} FROM ({inner}) AS `_ru_r`{order}{limit}"
     ))
 }
 
@@ -203,11 +203,9 @@ fn source(text: &str, e: &Expr) -> Option<String> {
         return None;
     }
     // A call's span can end before its `)`: close what it opened.
-    let open = |t: &str| {
-        t.bytes().filter(|c| *c == b'(').count() as isize
-            - t.bytes().filter(|c| *c == b')').count() as isize
-    };
-    let mut depth = open(&text[a..b]);
+    let opens = text[a..b].bytes().filter(|c| *c == b'(').count();
+    let closes = text[a..b].bytes().filter(|c| *c == b')').count();
+    let mut depth = opens.saturating_sub(closes);
     while depth > 0 {
         let rest = &text[b..];
         let ch = rest.chars().next()?;
@@ -244,11 +242,19 @@ fn item_expr(it: &SelectItem) -> Option<&Expr> {
     }
 }
 
-/// The client's `ORDER BY` over the output columns: `Some(None)` when
-/// there is none, `None` when an item names no output column.
-fn order_items(q: &Query, sel: &Select, names: &[String]) -> Option<Option<String>> {
+/// The client's `ORDER BY`, over the output columns.
+enum Order {
+    /// The statement has none.
+    None,
+    /// The items, as the outer query's `ORDER BY` list.
+    Items(String),
+}
+
+/// The client's `ORDER BY` over the output columns; `None` when an item
+/// names no output column.
+fn order_items(q: &Query, sel: &Select, names: &[String]) -> Option<Order> {
     let Some(ob) = &q.order_by else {
-        return Some(None);
+        return Some(Order::None);
     };
     let OrderByKind::Expressions(items) = &ob.kind else {
         return None;
@@ -256,14 +262,14 @@ fn order_items(q: &Query, sel: &Select, names: &[String]) -> Option<Option<Strin
     let mut out = Vec::with_capacity(items.len());
     for o in items {
         let i = column_of(&o.expr, sel, names)?;
-        let mut s = format!("`_sprig_c{i}`");
+        let mut s = format!("`_ru_c{i}`");
         let opts = o.options.to_string();
         if !opts.is_empty() {
             s.push_str(&opts);
         }
         out.push(s);
     }
-    Some(Some(out.join(", ")))
+    Some(Order::Items(out.join(", ")))
 }
 
 fn column_of(e: &Expr, sel: &Select, names: &[String]) -> Option<usize> {
@@ -298,7 +304,7 @@ fn column_of(e: &Expr, sel: &Select, names: &[String]) -> Option<usize> {
     }
 }
 
-/// Gives every select item the alias `_sprig_c<i>`.
+/// Gives every select item the alias `_ru_c<i>`.
 fn alias_items(s: &mut Select) {
     for (i, it) in s.projection.iter_mut().enumerate() {
         let e = match it {
@@ -307,7 +313,7 @@ fn alias_items(s: &mut Select) {
         };
         *it = SelectItem::ExprWithAlias {
             expr: e,
-            alias: sqlparser::ast::Ident::with_quote('`', format!("_sprig_c{i}")),
+            alias: sqlparser::ast::Ident::with_quote('`', format!("_ru_c{i}")),
         };
     }
 }
@@ -337,7 +343,8 @@ const AGGREGATES: &[&str] = &[
 /// `NULL` and `GROUPING(..)` with its value.
 struct Level<'a> {
     keys: &'a [String],
-    level: usize,
+    /// How many keys this branch groups by.
+    grouped: usize,
     in_aggregate: usize,
     failed: bool,
 }
@@ -352,17 +359,17 @@ impl Level<'_> {
 impl VisitorMut for Level<'_> {
     type Break = ();
 
-    fn pre_visit_expr(&mut self, e: &mut Expr) -> ControlFlow<()> {
-        if let Expr::Function(f) = e {
-            let name = fn_name(f);
+    fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+        if let Expr::Function(func) = expr {
+            let name = fn_name(func);
             if name == "GROUPING" {
-                let FunctionArguments::List(l) = &f.args else {
+                let FunctionArguments::List(list) = &func.args else {
                     self.failed = true;
                     return ControlFlow::Break(());
                 };
-                let mut v: u64 = 0;
-                for a in &l.args {
-                    let FunctionArg::Unnamed(FunctionArgExpr::Expr(x)) = a else {
+                let mut mask: u64 = 0;
+                for arg in &list.args {
+                    let FunctionArg::Unnamed(FunctionArgExpr::Expr(x)) = arg else {
                         self.failed = true;
                         return ControlFlow::Break(());
                     };
@@ -371,21 +378,21 @@ impl VisitorMut for Level<'_> {
                         self.failed = true;
                         return ControlFlow::Break(());
                     };
-                    v = (v << 1) | u64::from(j >= self.level);
+                    mask = (mask << 1) | u64::from(j >= self.grouped);
                 }
-                *e = Expr::value(Value::Number(v.to_string(), false));
+                *expr = Expr::value(Value::Number(mask.to_string(), false));
                 return ControlFlow::Continue(());
             }
-            if AGGREGATES.contains(&name.as_str()) || f.over.is_some() {
+            if AGGREGATES.contains(&name.as_str()) || func.over.is_some() {
                 self.in_aggregate += 1;
             }
             return ControlFlow::Continue(());
         }
         if self.in_aggregate == 0
-            && let Some(j) = self.key(e)
-            && j >= self.level
+            && let Some(j) = self.key(expr)
+            && j >= self.grouped
         {
-            *e = Expr::value(Value::Null);
+            *expr = Expr::value(Value::Null);
         }
         ControlFlow::Continue(())
     }
@@ -408,7 +415,7 @@ fn branch(sel: &Select, keys: &[Expr], level: usize) -> Option<String> {
     s.group_by = GroupByExpr::Expressions(keys[..level].to_vec(), Vec::new());
     let mut v = Level {
         keys: &shown,
-        level,
+        grouped: level,
         in_aggregate: 0,
         failed: false,
     };
@@ -445,7 +452,7 @@ fn branch(sel: &Select, keys: &[Expr], level: usize) -> Option<String> {
         let rolled = j >= level;
         s.projection.push(SelectItem::ExprWithAlias {
             expr: Expr::value(Value::Number(u8::from(rolled).to_string(), false)),
-            alias: sqlparser::ast::Ident::with_quote('`', format!("_sprig_g{}", j + 1)),
+            alias: sqlparser::ast::Ident::with_quote('`', format!("_ru_g{}", j + 1)),
         });
         s.projection.push(SelectItem::ExprWithAlias {
             expr: if rolled {
@@ -453,7 +460,7 @@ fn branch(sel: &Select, keys: &[Expr], level: usize) -> Option<String> {
             } else {
                 k.clone()
             },
-            alias: sqlparser::ast::Ident::with_quote('`', format!("_sprig_k{}", j + 1)),
+            alias: sqlparser::ast::Ident::with_quote('`', format!("_ru_k{}", j + 1)),
         });
     }
     Some(s.to_string())
@@ -471,19 +478,19 @@ mod tests {
     fn order_by_wraps_the_rollup() {
         assert_eq!(
             rw("SELECT a, SUM(c) FROM t GROUP BY a WITH ROLLUP ORDER BY a DESC").unwrap(),
-            "SELECT `_sprig_c0` AS `a`, `_sprig_c1` AS `SUM(c)` FROM (SELECT a AS `_sprig_c0`, \
-             SUM(c) AS `_sprig_c1` FROM t GROUP BY a WITH ROLLUP) AS `_sprig_r` \
-             ORDER BY `_sprig_c0` DESC"
+            "SELECT `_ru_c0` AS `a`, `_ru_c1` AS `SUM(c)` FROM (SELECT a AS `_ru_c0`, \
+             SUM(c) AS `_ru_c1` FROM t GROUP BY a WITH ROLLUP) AS `_ru_r` \
+             ORDER BY `_ru_c0` DESC"
         );
         let s =
             rw("SELECT a, b, SUM(c) AS s FROM t GROUP BY a, b WITH ROLLUP ORDER BY s DESC LIMIT 3")
                 .unwrap();
-        assert!(s.ends_with("ORDER BY `_sprig_c2` DESC LIMIT 3"), "{s}");
+        assert!(s.ends_with("ORDER BY `_ru_c2` DESC LIMIT 3"), "{s}");
         // By position and by the same expression.
         assert!(
             rw("SELECT a, sum( c ) FROM t GROUP BY a WITH ROLLUP ORDER BY 2, SUM(c)")
                 .unwrap()
-                .contains("`_sprig_c1` AS `sum( c )`")
+                .contains("`_ru_c1` AS `sum( c )`")
         );
     }
 
@@ -492,21 +499,21 @@ mod tests {
         let s = rw("SELECT a, GROUPING(a), SUM(c) FROM t GROUP BY a WITH ROLLUP").unwrap();
         assert_eq!(
             s,
-            "SELECT `_sprig_c0` AS `a`, `_sprig_c1` AS `GROUPING(a)`, `_sprig_c2` AS `SUM(c)` \
-             FROM (SELECT a AS `_sprig_c0`, 0 AS `_sprig_c1`, SUM(c) AS `_sprig_c2`, \
-             0 AS `_sprig_g1`, a AS `_sprig_k1` FROM t GROUP BY a UNION ALL \
-             SELECT NULL AS `_sprig_c0`, 1 AS `_sprig_c1`, SUM(c) AS `_sprig_c2`, \
-             1 AS `_sprig_g1`, NULL AS `_sprig_k1` FROM t HAVING COUNT(*) > 0) AS `_sprig_r` \
-             ORDER BY `_sprig_g1`, `_sprig_k1`"
+            "SELECT `_ru_c0` AS `a`, `_ru_c1` AS `GROUPING(a)`, `_ru_c2` AS `SUM(c)` \
+             FROM (SELECT a AS `_ru_c0`, 0 AS `_ru_c1`, SUM(c) AS `_ru_c2`, \
+             0 AS `_ru_g1`, a AS `_ru_k1` FROM t GROUP BY a UNION ALL \
+             SELECT NULL AS `_ru_c0`, 1 AS `_ru_c1`, SUM(c) AS `_ru_c2`, \
+             1 AS `_ru_g1`, NULL AS `_ru_k1` FROM t HAVING COUNT(*) > 0) AS `_ru_r` \
+             ORDER BY `_ru_g1`, `_ru_k1`"
         );
         let s = rw("SELECT a, b, GROUPING(a, b), SUM(a) FROM t GROUP BY a, b WITH ROLLUP").unwrap();
         // Level 1: b rolled up, a kept; aggregates keep their columns.
         assert!(
-            s.contains("SELECT a AS `_sprig_c0`, NULL AS `_sprig_c1`, 1 AS `_sprig_c2`, SUM(a) AS `_sprig_c3`"),
+            s.contains("SELECT a AS `_ru_c0`, NULL AS `_ru_c1`, 1 AS `_ru_c2`, SUM(a) AS `_ru_c3`"),
             "{s}"
         );
         assert!(
-            s.contains("NULL AS `_sprig_c0`, NULL AS `_sprig_c1`, 3 AS `_sprig_c2`"),
+            s.contains("NULL AS `_ru_c0`, NULL AS `_ru_c1`, 3 AS `_ru_c2`"),
             "{s}"
         );
     }

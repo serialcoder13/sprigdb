@@ -531,8 +531,8 @@ impl AuthzStore {
             format!(
                 "INSERT INTO {} (grantee_tenant_id, grantee_kind, grantee_id, level, db_id, \
                  object_id, column_name, name_pattern, restriction, actions, granted_by, \
-                 granted_at) \
-                 VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3)) \
+                 element, granted_at) \
+                 VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3)) \
                  ON DUPLICATE KEY UPDATE actions = actions | VALUES(actions), \
                  granted_by = VALUES(granted_by), granted_at = VALUES(granted_at)",
                 self.privileges

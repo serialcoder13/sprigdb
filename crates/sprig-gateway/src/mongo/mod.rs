@@ -31,6 +31,7 @@ pub mod logic;
 pub mod publish;
 pub mod retry;
 pub mod search;
+pub mod snapshot;
 pub mod sql;
 pub mod txn;
 pub mod users;
@@ -224,6 +225,7 @@ pub struct Shared {
     pub(crate) d: MongoDeps,
     pub(crate) cursors: cursors::CursorTable,
     pub(crate) txns: commands::TxnTable,
+    pub(crate) snapshots: snapshot::Snapshots,
     pub(crate) records: retry::Records,
     pub(crate) failpoints: failpoint::FailPoints,
     pub(crate) feed: Option<changes::ChangeFeed>,
@@ -320,6 +322,7 @@ impl MongoFrontend {
         let shared = Arc::new(Shared {
             cursors: cursors::CursorTable::new(&d.gateway_id),
             txns: commands::TxnTable::default(),
+            snapshots: snapshot::Snapshots::default(),
             records: retry::Records::default(),
             failpoints: failpoint::FailPoints::default(),
             engine: match &docs {
@@ -347,6 +350,7 @@ impl MongoFrontend {
                 let cfg = s.settings();
                 s.cursors.reap(cfg.cursor_timeout);
                 s.txns.reap(cfg.txn_lifetime).await;
+                s.snapshots.reap().await;
             }
         });
         Self { shared }

@@ -1569,3 +1569,321 @@ async fn bolt_sessions_in_processlist_and_kill() {
     s.query_drop("DROP GRAPH r8g3_kill.g").await.expect("drop");
     s.disconnect().await.expect("bye");
 }
+
+async fn sql_conn(sql: &str, user: &str, pw: &str) -> mysql_async::Conn {
+    let (host, port) = sql.split_once(':').expect("host:port");
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host)
+        .tcp_port(port.parse().expect("port"))
+        .user(Some(user.to_owned()))
+        .pass(Some(pw.to_owned()))
+        .ssl_opts(Some(
+            mysql_async::SslOpts::default()
+                .with_danger_accept_invalid_certs(true)
+                .with_danger_skip_domain_validation(true),
+        ));
+    mysql_async::Conn::new(opts).await.expect("sql login")
+}
+
+fn int0(r: &Rows) -> i64 {
+    r.records[0][0].as_int().expect("an integer")
+}
+
+/// Round 4 through a gateway: uniqueness across the shards of a graph
+/// spread over the three dev clusters (G32, decision G41: the claim
+/// table, its back-fill, concurrent `MERGE`), per-label read grants
+/// (decision G42) and `sprigctl graph`.
+///
+/// Needs the end-to-end variables plus `SPRIG_TEST_SPRIGCTL`;
+/// `SPRIG_TEST_TENANT` (default `acme`); `SPRIG_TEST_R4_MOVES=0` skips
+/// the two shard moves.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario, step by step
+async fn round_four_uniqueness_grants_and_sprigctl() {
+    let (Some(addr), Some(user), Some(pw), Some(sql), Some(ctl)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_SQL_ADDR"),
+        env("SPRIG_TEST_SPRIGCTL"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* / SPRIG_TEST_SQL_ADDR / SPRIG_TEST_SPRIGCTL not set");
+        return;
+    };
+    let tenant = env("SPRIG_TEST_TENANT").unwrap_or_else(|| "acme".into());
+    let mut s = sql_conn(&sql, &user, &pw).await;
+    s.query_drop("CREATE DATABASE IF NOT EXISTS r8four_u")
+        .await
+        .expect("db");
+    sprigctl(
+        &ctl,
+        &[
+            "settings",
+            "set",
+            "sharding.min_shards",
+            "4",
+            "--scope",
+            &format!("database:{tenant}.r8four_u"),
+        ],
+    );
+    s.query_drop("DROP GRAPH IF EXISTS r8four_u.g")
+        .await
+        .expect("drop");
+    s.query_drop("CREATE GRAPH r8four_u.g").await.expect("create");
+    let db = vec![("db", PackValue::str("r8four_u.g"))];
+    let mut c = connect(&addr, &user, &pw).await.expect("login");
+    let eid = c
+        .query("CREATE (n:Seed) RETURN elementId(n)", vec![], db.clone())
+        .await
+        .expect("seed");
+    let graph_id = eid.records[0][0]
+        .as_str()
+        .and_then(|x| x.split(':').nth(1))
+        .expect("graph id")
+        .to_owned();
+    let (gid, shards) = graph_shards(&ctl, &tenant, &format!("graph_{graph_id}"));
+    assert_eq!(shards.len(), 4, "{shards:?}");
+    if env("SPRIG_TEST_R4_MOVES").as_deref() != Some("0") {
+        for (shard, to) in [(2u64, "dc-a-c2"), (3, "dc-a-c3")] {
+            let j = sprigctl(
+                &ctl,
+                &[
+                    "shard",
+                    "move",
+                    &tenant,
+                    &gid.to_string(),
+                    &shard.to_string(),
+                    "--to",
+                    to,
+                ],
+            );
+            let id = j["id"].as_str().expect("job id").to_owned();
+            let took = wait_job(&ctl, &id).await;
+            eprintln!("moved shard {shard} to {to} in {took:?}");
+        }
+    }
+    let (_, shards) = graph_shards(&ctl, &tenant, &format!("graph_{graph_id}"));
+    eprintln!("graph {graph_id}: shards {shards:?}");
+
+    // Back-fill: a duplicate across shards refuses the constraint.
+    c.query(
+        "UNWIND range(1, 30) AS i CREATE (:U {k: i})",
+        vec![],
+        db.clone(),
+    )
+    .await
+    .expect("keys");
+    c.query("CREATE (:U {k: 5.0})", vec![], db.clone())
+        .await
+        .expect("duplicate before the constraint");
+    let e = c
+        .query(
+            "CREATE CONSTRAINT u_k FOR (n:U) REQUIRE n.k IS UNIQUE",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect_err("existing duplicate");
+    assert!(e.code.contains("ConstraintCreationFailed"), "{e:?}");
+    c.query("MATCH (n:U {k: 5.0}) WITH n ORDER BY id(n) DESC LIMIT 1 DELETE n", vec![], db.clone())
+        .await
+        .expect("drop the duplicate");
+    c.query(
+        "CREATE CONSTRAINT u_k FOR (n:U) REQUIRE n.k IS UNIQUE",
+        vec![],
+        db.clone(),
+    )
+    .await
+    .expect("constraint");
+    let show = sprigctl(&ctl, &["graph", "show", &tenant, "r8four_u.g"]);
+    let claims: u64 = show["shards"]
+        .as_array()
+        .expect("shards")
+        .iter()
+        .map(|x| x["claims"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(claims, 30, "{show}");
+    // Every second copy is refused, wherever its id puts it.
+    let mut refused = 0;
+    for i in 1..=30 {
+        let e = c
+            .query(
+                "CREATE (:U {k: $k})",
+                vec![("k", PackValue::Int(i))],
+                db.clone(),
+            )
+            .await
+            .expect_err("duplicate");
+        assert_eq!(e.code, "Neo.ClientError.Schema.ConstraintValidationFailed", "{e:?}");
+        refused += 1;
+    }
+    // Concurrent MERGEs on 25 new keys from 8 connections.
+    let t0 = Instant::now();
+    let mut tasks = Vec::new();
+    for w in 0..8i64 {
+        let (addr, user, pw, db) = (addr.clone(), user.clone(), pw.clone(), db.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut c = connect(&addr, &user, &pw).await.expect("login");
+            let mut retried = 0;
+            for j in 0..25i64 {
+                let k = 1000 + (j * 7 + w * 3) % 25;
+                loop {
+                    match c
+                        .query(
+                            "MERGE (n:U {k: $k}) ON CREATE SET n.by = $w ON MATCH SET n.seen = coalesce(n.seen, 0) + 1",
+                            vec![("k", PackValue::Int(k)), ("w", PackValue::Int(w))],
+                            db.clone(),
+                        )
+                        .await
+                    {
+                        Ok(_) => break,
+                        Err(e) if e.code.starts_with("Neo.TransientError") => retried += 1,
+                        Err(e) => panic!("merge {k}: {e:?}"),
+                    }
+                }
+            }
+            retried
+        }));
+    }
+    let mut retried = 0;
+    for t in tasks {
+        retried += t.await.expect("task");
+    }
+    let merge_time = t0.elapsed();
+    let r = c
+        .query(
+            "MATCH (n:U) WHERE n.k >= 1000 RETURN count(n), count(DISTINCT n.k), sum(coalesce(n.seen, 0))",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("count");
+    assert_eq!(rows_text(&r, true), ["25 | 25 | 175"]);
+    let show = sprigctl(&ctl, &["graph", "show", &tenant, "r8four_u.g"]);
+    let claims: u64 = show["shards"]
+        .as_array()
+        .expect("shards")
+        .iter()
+        .map(|x| x["claims"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(claims, 55, "{show}");
+    let clusters: std::collections::BTreeSet<String> = show["shards"]
+        .as_array()
+        .expect("shards")
+        .iter()
+        .map(|x| x["cluster"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    eprintln!(
+        "uniqueness: {refused} duplicates refused, 200 concurrent MERGEs in {merge_time:?} ({retried} transient retries), {claims} claims on clusters {clusters:?}"
+    );
+
+    // sprigctl graph.
+    let list = sprigctl(&ctl, &["graph", "list", &tenant]);
+    assert!(
+        list.as_array()
+            .expect("list")
+            .iter()
+            .any(|g| g["name"] == "g" && g["database"] == "r8four_u" && g["shards"] == 4),
+        "{list}"
+    );
+    c.query(
+        "MATCH (a:U), (b:U) WHERE b.k = a.k + 1 AND a.k < 30 CREATE (a)-[:NEXT]->(b)",
+        vec![],
+        db.clone(),
+    )
+    .await
+    .expect("edges");
+    let part = sprigctl(&ctl, &["graph", "partition", &tenant, "r8four_u.g"]);
+    assert_eq!(part["relationships"], 29, "{part}");
+    eprintln!(
+        "partition: {} of {} relationships cross shards ({}%)",
+        part["cross_shard"], part["relationships"], part["cross_shard_pct"]
+    );
+
+    // Per-label read grants.
+    c.query(
+        "CREATE (:Secret {k: 'x'})-[:HIDES]->(:U {k: 99}), (:Public {k: 'p'})",
+        vec![],
+        db.clone(),
+    )
+    .await
+    .expect("more");
+    let _ = s.query_drop("DROP USER IF EXISTS r8four_reader").await;
+    s.query_drop("CREATE USER r8four_reader IDENTIFIED BY 'r8four-reader-pw'")
+        .await
+        .expect("user");
+    s.query_drop("GRANT READ ON GRAPH r8four_u.g NODES U TO r8four_reader")
+        .await
+        .expect("grant nodes");
+    s.query_drop("GRANT READ ON GRAPH r8four_u.g RELATIONSHIPS NEXT TO r8four_reader")
+        .await
+        .expect("grant types");
+    let grants: Vec<String> = s
+        .query("SHOW GRANTS FOR r8four_reader")
+        .await
+        .expect("show grants");
+    assert!(
+        grants
+            .iter()
+            .any(|g| g.contains("GRANT READ ON GRAPH `r8four_u`.`g` NODES `U`")),
+        "{grants:?}"
+    );
+    let reader = format!("{tenant}.r8four_reader");
+    let mut rc = connect(&addr, &reader, "r8four-reader-pw")
+        .await
+        .expect("reader login");
+    let n = rc
+        .query("MATCH (n) RETURN count(n)", vec![], db.clone())
+        .await
+        .expect("reader count");
+    let all_u = c
+        .query("MATCH (n:U) RETURN count(n)", vec![], db.clone())
+        .await
+        .expect("u count");
+    assert_eq!(int0(&n), int0(&all_u));
+    let rels = rc
+        .query("MATCH ()-[r]->() RETURN type(r), count(*)", vec![], db.clone())
+        .await
+        .expect("reader rels");
+    assert_eq!(rows_text(&rels, true), ["'NEXT' | 29"]);
+    let hidden = rc
+        .query("MATCH (n:Secret) RETURN count(n)", vec![], db.clone())
+        .await
+        .expect("hidden label");
+    assert_eq!(int0(&hidden), 0);
+    let path = rc
+        .query(
+            "MATCH (a:U {k: 1})-[*1..40]->(b) RETURN count(DISTINCT b)",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("var-length");
+    assert_eq!(int0(&path), 29);
+    let e = rc
+        .query("CREATE (:U {k: 5000})", vec![], db.clone())
+        .await
+        .expect_err("no write grant");
+    assert!(e.message.contains("denied"), "{e:?}");
+    let _ = rc.goodbye().await;
+    s.query_drop("REVOKE READ ON GRAPH r8four_u.g NODES U FROM r8four_reader")
+        .await
+        .expect("revoke");
+    s.query_drop("REVOKE READ ON GRAPH r8four_u.g RELATIONSHIPS NEXT FROM r8four_reader")
+        .await
+        .expect("revoke types");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut rc = connect(&addr, &reader, "r8four-reader-pw")
+        .await
+        .expect("reader login");
+    let e = rc
+        .query("MATCH (n) RETURN count(n)", vec![], db.clone())
+        .await
+        .expect_err("revoked");
+    assert!(e.message.contains("denied"), "{e:?}");
+    let _ = rc.goodbye().await;
+    eprintln!("label grants: the reader saw {} U nodes, 29 NEXT, no Secret; revoked", int0(&n));
+    s.query_drop("DROP USER r8four_reader").await.expect("drop user");
+    let _ = c.goodbye().await;
+    s.disconnect().await.expect("bye");
+}

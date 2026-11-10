@@ -842,7 +842,7 @@ static CLUSTER_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// This gateway's cluster time: wall-clock seconds and a counter, never
 /// going backwards (the HLC of chapter 30, without gossip between
 /// gateways yet).
-fn cluster_time() -> bson::Timestamp {
+pub(crate) fn cluster_time() -> bson::Timestamp {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());

@@ -79,6 +79,7 @@ pub fn prefix(tenant_id: u64) -> String {
 /// `sql` with each lock function's name argument scoped to `prefix` (see
 /// the module docs), or `None` when it calls none.
 #[must_use]
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one walk over the tokens
 pub fn rewrite(sql: &[u8], opts: &LexOptions, prefix: &str) -> Option<Vec<u8>> {
     let lower = sql.to_ascii_lowercase();
     if !lower.windows(5).any(|w| w == b"_lock") {

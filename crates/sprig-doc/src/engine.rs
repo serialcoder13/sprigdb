@@ -886,36 +886,75 @@ impl Engine {
         desc: bool,
         n: usize,
     ) -> Result<Vec<(Vec<u8>, Document)>, MongoError> {
-        let mut cond = sqlp.sql.clone();
-        if let Some(k) = after {
-            cond = format!(
-                "({cond}) AND _id {} {}",
+        Ok(self
+            .read_rows(sql, ns, table, sqlp, after, desc, n, false)
+            .await?
+            .into_iter()
+            .map(|(k, d, _)| (k, d))
+            .collect())
+    }
+
+    /// [`Self::read_chunk`], with each row's `_v` when `with_v`.
+    #[allow(clippy::too_many_arguments)]
+    async fn read_rows(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        table: &str,
+        sqlp: &SqlPred,
+        after: Option<&[u8]>,
+        desc: bool,
+        n: usize,
+        with_v: bool,
+    ) -> Result<Vec<(Vec<u8>, Document, Option<String>)>, MongoError> {
+        let q = match after {
+            Some(k) => format!(
+                "SELECT _id, doc, _types{} FROM {}.{} WHERE ({}) AND _id {} {} ORDER BY _id{} LIMIT {n}",
+                if with_v { ", _v" } else { "" },
+                ident(&ns.db),
+                ident(table),
+                sqlp.sql,
                 if desc { "<" } else { ">" },
-                bin_lit(k)
-            );
-        }
-        let q = format!(
-            "SELECT _id, doc, _types FROM {}.{} WHERE {cond} ORDER BY _id{} LIMIT {n}",
-            ident(&ns.db),
-            ident(table),
-            if desc { " DESC" } else { "" }
-        );
+                bin_lit(k),
+                if desc { " DESC" } else { "" }
+            ),
+            None => format!(
+                "SELECT _id, doc, _types{} FROM {}.{} WHERE {} ORDER BY _id{} LIMIT {n}",
+                if with_v { ", _v" } else { "" },
+                ident(&ns.db),
+                ident(table),
+                sqlp.sql,
+                if desc { " DESC" } else { "" }
+            ),
+        };
         let rows = match sql.query(&q).await {
             Ok(r) => r,
             Err(e) if e.is(1146) => return Ok(Vec::new()),
             Err(e) => return Err(mongo_error(&e)),
         };
         rows.into_iter()
-            .map(|r| {
-                let key = r.first().cloned().flatten().unwrap_or_default();
+            .map(|mut r| {
+                let v = if with_v {
+                    r.get_mut(3)
+                        .and_then(Option::take)
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                } else {
+                    None
+                };
+                let key = r.first_mut().and_then(Option::take).unwrap_or_default();
+                let doc = r.get(1).and_then(Option::as_deref).unwrap_or_default();
                 let d = json::to_bson(
-                    &text(r[1].as_ref()),
+                    std::str::from_utf8(doc).map_or_else(
+                        |_| std::borrow::Cow::Owned(String::from_utf8_lossy(doc).into_owned()),
+                        std::borrow::Cow::Borrowed,
+                    )
+                    .as_ref(),
                     r.get(2)
                         .and_then(Option::as_ref)
                         .map(|b| String::from_utf8_lossy(b))
                         .as_deref(),
                 )?;
-                Ok((key, d))
+                Ok((key, d, v))
             })
             .collect()
     }
@@ -1174,19 +1213,24 @@ impl Engine {
             now,
         };
         let mut out = UpdateOutcome::default();
-        let targets: Vec<Document> = if multi {
+        // A single update keeps the `_v` its first read saw: the first
+        // write needs no second read (R5 round 4).
+        let targets: Vec<(Document, Option<String>)> = if multi {
             self.scan(sql, ns, &m.table, &pred, &sqlp, usize::MAX)
                 .await?
+                .into_iter()
+                .map(|d| (d, None))
+                .collect()
         } else {
-            self.first_match(sql, ns, &m, &pred, &sqlp, sort)
+            self.first_match_v(sql, ns, &m, &pred, &sqlp, sort)
                 .await?
                 .into_iter()
                 .collect()
         };
-        for old in targets {
+        for (old, v) in targets {
             out.matched += 1;
             let (changed, new_doc, old_doc) = self
-                .update_one_rmw(sql, ns, &mut m, old, &spec, &cx, &pred)
+                .update_one_rmw(sql, ns, &mut m, old, v, &spec, &cx, &pred)
                 .await?;
             if changed {
                 out.modified += 1;
@@ -1239,6 +1283,22 @@ impl Engine {
         sqlp: &SqlPred,
         sort: Option<&Document>,
     ) -> Result<Option<Document>, MongoError> {
+        Ok(self
+            .first_match_v(sql, ns, m, pred, sqlp, sort)
+            .await?
+            .map(|(d, _)| d))
+    }
+
+    /// The first match and, unless a sort read it, its `_v`.
+    async fn first_match_v(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        m: &CollMeta,
+        pred: &Pred,
+        sqlp: &SqlPred,
+        sort: Option<&Document>,
+    ) -> Result<Option<(Document, Option<String>)>, MongoError> {
         let cx = AggExpr { now: now_date() };
         if let Some(s) = sort.filter(|s| !s.is_empty()) {
             let spec = agg::parse_sort(s)?;
@@ -1246,19 +1306,19 @@ impl Engine {
                 .scan(sql, ns, &m.table, pred, sqlp, self.cfg.max_sort_bytes)
                 .await?;
             crate::heavy::run(docs.len(), || agg::sort_docs(&mut docs, &spec));
-            return Ok(docs.into_iter().next());
+            return Ok(docs.into_iter().next().map(|d| (d, None)));
         }
         let mut last = None;
         loop {
             let chunk = if sqlp.exact { 1 } else { 101 };
             let rows = self
-                .read_chunk(sql, ns, &m.table, sqlp, last.as_deref(), false, chunk)
+                .read_rows(sql, ns, &m.table, sqlp, last.as_deref(), false, chunk, true)
                 .await?;
             let k = rows.len();
-            for (key, d) in rows {
+            for (key, d, v) in rows {
                 last = Some(key);
                 if pred.matches_with(&d, &cx) {
-                    return Ok(Some(d));
+                    return Ok(Some((d, v)));
                 }
             }
             if k < chunk {
@@ -1275,31 +1335,39 @@ impl Engine {
         ns: &Ns,
         m: &mut CollMeta,
         first: Document,
+        first_v: Option<String>,
         spec: &UpdateSpec,
         cx: &ApplyCx<'_>,
         pred: &Pred,
     ) -> Result<(bool, Option<Document>, Option<Document>), MongoError> {
         let id = first.get("_id").cloned().unwrap_or(Bson::Null);
         let key = json::id_key(&id)?;
+        // The read that found the document, when it kept `_v`: it already
+        // matched the filter.
+        let mut seen = first_v.map(|v| (first, v));
         for _ in 0..=self.cfg.update_retry_max {
-            let q = format!(
-                "SELECT doc, _types, _v FROM {}.{} WHERE _id = {}",
-                ident(&ns.db),
-                ident(&m.table),
-                bin_lit(&key)
-            );
-            let rows = sql.query(&q).await.map_err(|e| mongo_error(&e))?;
-            let Some(r) = rows.first() else {
-                return Ok((false, None, None));
+            let (old, v) = if let Some(x) = seen.take() {
+                x
+            } else {
+                let q = format!(
+                    "SELECT doc, _types, _v FROM {}.{} WHERE _id = {}",
+                    ident(&ns.db),
+                    ident(&m.table),
+                    bin_lit(&key)
+                );
+                let rows = sql.query(&q).await.map_err(|e| mongo_error(&e))?;
+                let Some(r) = rows.first() else {
+                    return Ok((false, None, None));
+                };
+                let old = json::to_bson(
+                    &text(r[0].as_ref()),
+                    r[1].as_ref().map(|b| String::from_utf8_lossy(b)).as_deref(),
+                )?;
+                if !pred.matches_with(&old, &AggExpr { now: cx.now }) {
+                    return Ok((false, None, None));
+                }
+                (old, text(r[2].as_ref()))
             };
-            let old = json::to_bson(
-                &text(r[0].as_ref()),
-                r[1].as_ref().map(|b| String::from_utf8_lossy(b)).as_deref(),
-            )?;
-            if !pred.matches_with(&old, &AggExpr { now: cx.now }) {
-                return Ok((false, None, None));
-            }
-            let v = text(r[2].as_ref());
             let mut new = old.clone();
             let changed = update::apply(&mut new, spec, cx)?;
             if !changed {

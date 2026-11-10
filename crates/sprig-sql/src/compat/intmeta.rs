@@ -7,8 +7,8 @@
 //! once one of their values is such an expression. MariaDB 11.8 sends
 //! `LONG` (3) whenever the value fits in 32 bits. Drivers pick the
 //! language type from the column type: MySQL Connector/J's `getObject`
-//! gives `Long` on MySQL and `Integer` through MariaDB, mysql2 and
-//! PyMySQL report another type code, and a binary row carries 4 bytes
+//! gives `Long` on MySQL and `Integer` through MariaDB, `mysql2` and
+//! `PyMySQL` report another type code, and a binary row carries 4 bytes
 //! instead of 8. MySQL also types `YEAR(..)` as `YEAR` (13), where MariaDB
 //! sends `LONG`.
 //!
@@ -114,10 +114,8 @@ fn small_int_expr(c: &ColumnDef) -> bool {
 #[must_use]
 pub fn plan(sql: &[u8], opts: &LexOptions) -> Option<Plan> {
     let stmt = parse(sql, *opts)?;
-    let query = match &stmt {
-        Statement::Query(q) => q,
-        Statement::CreateTable(_) | Statement::Insert(_) => return None,
-        _ => return None,
+    let Statement::Query(query) = &stmt else {
+        return None;
     };
     let items = query_items(query)?;
     let mut p = Plan::default();
@@ -204,8 +202,8 @@ fn query_items(q: &Query) -> Option<Vec<Item>> {
     set_items(&q.body)
 }
 
-fn set_items(s: &SetExpr) -> Option<Vec<Item>> {
-    match s {
+fn set_items(set: &SetExpr) -> Option<Vec<Item>> {
+    match set {
         SetExpr::Select(sel) => Some(
             sel.projection
                 .iter()
@@ -221,14 +219,14 @@ fn set_items(s: &SetExpr) -> Option<Vec<Item>> {
         SetExpr::SetOperation { left, right, .. } => {
             // A union's column is MySQL's LONGLONG when any branch computes
             // it (measured: `SELECT i FROM t UNION SELECT 2`).
-            let l = set_items(left)?;
-            let r = set_items(right)?;
-            if l.len() != r.len() || l.contains(&Item::Star) || r.contains(&Item::Star) {
+            let lhs = set_items(left)?;
+            let rhs = set_items(right)?;
+            if lhs.len() != rhs.len() || lhs.contains(&Item::Star) || rhs.contains(&Item::Star) {
                 return None;
             }
             Some(
-                l.into_iter()
-                    .zip(r)
+                lhs.into_iter()
+                    .zip(rhs)
                     .map(|(a, b)| match (a, b) {
                         (Item::Fix(x), Item::Fix(y)) => Item::Fix(merge(x, y)),
                         _ => Item::Star,
@@ -266,6 +264,7 @@ fn passthrough(name: &str) -> bool {
     )
 }
 
+#[allow(clippy::match_same_arms)] // one arm per kind of expression, as measured
 fn fix_of(e: &Expr) -> Fix {
     match e {
         // User and system variables: MySQL's integers are LONGLONG, and so
@@ -279,15 +278,15 @@ fn fix_of(e: &Expr) -> Fix {
         // for `SELECT x FROM (SELECT 1 AS x) d`).
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => Fix::Keep,
         Expr::Nested(inner) => fix_of(inner),
-        Expr::Value(v) => match &v.value {
-            Value::Number(n, _) if !n.contains(['.', 'e', 'E']) => Fix::LongLong,
-            Value::Boolean(_) => Fix::LongLong,
-            _ => Fix::Keep,
-        },
-        Expr::UnaryOp { op, expr } => match op {
-            UnaryOperator::Plus => fix_of(expr),
-            _ => Fix::LongLong,
-        },
+        Expr::Value(v) if matches!(&v.value, Value::Number(n, _) if !n.contains(['.', 'e', 'E'])) => {
+            Fix::LongLong
+        }
+        Expr::Value(v) if matches!(v.value, Value::Boolean(_)) => Fix::LongLong,
+        Expr::Value(_) => Fix::Keep,
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => fix_of(expr),
         Expr::Collate { expr, .. } => fix_of(expr),
         Expr::Subquery(q) => match query_items(q).as_deref() {
             Some([Item::Fix(f)]) => *f,
@@ -341,10 +340,10 @@ fn fix_of(e: &Expr) -> Fix {
             values.iter().map(|e| fix_of(e)).fold(Fix::Keep, merge)
         }
         // `@a := 1`, arithmetic, comparisons, logic, bit operations.
-        Expr::BinaryOp { op, .. } => match op {
-            BinaryOperator::StringConcat => Fix::Keep,
-            _ => Fix::LongLong,
-        },
+        Expr::BinaryOp {
+            op: BinaryOperator::StringConcat,
+            ..
+        } => Fix::Keep,
         // Everything else MariaDB reports as a small integer is computed:
         // `IS NULL`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, `CAST`, `EXTRACT`,
         // `CEIL`, `POSITION`, ...

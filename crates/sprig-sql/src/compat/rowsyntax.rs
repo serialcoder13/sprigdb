@@ -110,6 +110,11 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     else {
         return apply(sql, edits);
     };
+    // MySQL 8.4 refuses a row alias after `VALUES ROW(..)` (1064, measured;
+    // Connector/J's Bug#33917022): left for MariaDB, which refuses it too.
+    if !edits.is_empty() {
+        return None;
+    }
     if !is_ident(as_at + 1) {
         return None;
     }
@@ -334,6 +339,15 @@ mod tests {
         assert_eq!(
             r("INSERT INTO t VALUES ROW(1, 'a'), ROW(?, ?)").as_deref(),
             Some("INSERT INTO t VALUES (1, 'a'), (?, ?)")
+        );
+    }
+
+    #[test]
+    fn row_alias_after_values_row_is_refused_as_mysql_does() {
+        assert_eq!(r("INSERT INTO t VALUES ROW(?, ?) AS new(v1, v2)"), None);
+        assert_eq!(
+            r("INSERT INTO t VALUES ROW(1, 2) AS n ON DUPLICATE KEY UPDATE b = n.b"),
+            None
         );
     }
 

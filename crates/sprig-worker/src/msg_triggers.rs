@@ -930,14 +930,21 @@ async fn run_fan_in(
             gone = &mut sup => break gone,
             _ = refresh.tick() => {}
         }
-        running.retain(|member, h| {
-            if h.is_finished() {
-                tracing::warn!(%tenant, binding, member, "fan-in trigger: a member's runner ended; started again");
-                false
-            } else {
-                true
+        let ended: Vec<u64> = running
+            .iter()
+            .filter(|(_, h)| h.is_finished())
+            .map(|(m, _)| *m)
+            .collect();
+        for member in ended {
+            if let Some(h) = running.remove(&member) {
+                let why = match h.await {
+                    Ok(Ok(())) => "ended".to_owned(),
+                    Ok(Err(e)) => e.to_string(),
+                    Err(e) => e.to_string(),
+                };
+                tracing::warn!(%tenant, binding, member, error = %why, "fan-in trigger: a member's runner ended; started again");
             }
-        });
+        }
         let members = match messages::fanin_members(env.dc.as_ref(), tenant, binding).await {
             Ok(m) => m,
             Err(e) => {

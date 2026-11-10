@@ -995,10 +995,12 @@ async fn wait_job(store: &dyn MetaStore, dc: &str, id: &str, within: Duration) -
 /// `(group, [(shard, cluster)])` of `tenant`'s first table group.
 fn shards_of(sprigctl: &Path, dc: &str, tenant: &str) -> Option<(u64, Vec<u64>)> {
     let l = ctl(sprigctl, dc, &["shard", "list", tenant]).ok()?;
-    let g = l
-        .as_array()?
+    let groups = l.as_array()?;
+    // The group `cust` roots (the advisor names groups after their root).
+    let g = groups
         .iter()
-        .find(|g| g["group"].as_u64() != Some(0))?;
+        .find(|g| g["name"].as_str().is_some_and(|n| n.contains("cust")))
+        .or_else(|| groups.iter().find(|g| g["group"].as_u64() != Some(0)))?;
     Some((
         g["group"].as_u64()?,
         g["shards"]
@@ -1520,6 +1522,8 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     // G: two shards from the start, by its own settings (RL3: the sharding
     // loop reads tenant-scope sharding.* and advisor.*).
     tenant_setting(&sprigctl, "fra1", "r2h-g", "advisor.mode", "off").await;
+    // An empty table has no distinct values to judge a key by.
+    tenant_setting(&sprigctl, "fra1", "r2h-g", "advisor.min_ndv_per_shard", "0").await;
     {
         let pl = pool("fra1", "r2h-g");
         let mut c = pl.get_conn().await.expect("g conn");
@@ -1548,7 +1552,7 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
     eprintln!(
-        "2. RL3: G's tenant-scope sharding.min_shards = 2 and advisor.mode = off: group {gid} has shards {first:?} {:?} after the set",
+        "2. RL3: G's tenant-scope sharding.min_shards = 2, advisor.mode = off and advisor.min_ndv_per_shard = 0: group {gid} has shards {first:?} {:?} after the set",
         set_at.elapsed()
     );
     let stop = Arc::new(AtomicBool::new(false));
