@@ -1707,3 +1707,197 @@ async fn detach_and_the_end_of_the_drop_grace() {
     }
     ok(&mut sys, "DROP DATABASE dt").await;
 }
+
+/// R9 next (r9next): a member whose broadcast delivery fails gets it later,
+/// once and in order, from the saved retry list; and `DROP DATABASE` of a
+/// declarer's database is refused while live definitions are in it.
+#[tokio::test]
+async fn broadcast_retry_and_the_drop_database_guard() {
+    let Some(e) = env("broadcast_retry_and_the_drop_database_guard") else {
+        return;
+    };
+    let Some(root) = var("SPRIG_TEST_INHERIT_ROOT") else {
+        eprintln!("no SPRIG_TEST_INHERIT_ROOT: skipped");
+        return;
+    };
+    let mut sys = conn(&e.addr, &e.system).await;
+    let mut ms = Vec::new();
+    for m in &e.members {
+        ms.push((m.clone(), conn(&e.addr, m).await));
+    }
+    // The guard: a database holding live definitions isn't dropped.
+    let _ = sql(&mut sys, "DROP STREAM r9nguard.g_events IMMEDIATE CASCADE").await;
+    let _ = sql(&mut sys, "DROP QUEUE r9nguard.g_jobs IMMEDIATE CASCADE").await;
+    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9nguard").await;
+    ok(&mut sys, "CREATE DATABASE r9nguard").await;
+    ok(
+        &mut sys,
+        "CREATE STREAM r9nguard.g_events FOR EACH TENANT PARTITIONS 1",
+    )
+    .await;
+    ok(&mut sys, "CREATE QUEUE r9nguard.g_jobs FOR EACH TENANT").await;
+    let (code, msg) = sql(&mut sys, "DROP DATABASE r9nguard").await.unwrap_err();
+    println!("DROP DATABASE with live definitions: {code} {msg}");
+    assert_eq!(code, 39895, "{msg}");
+    assert!(
+        msg.contains("stream r9nguard.g_events") && msg.contains("queue r9nguard.g_jobs"),
+        "{msg}"
+    );
+    // Dropped (here the stream into its grace, the queue at once): the
+    // database goes.
+    ok(&mut sys, "DROP STREAM r9nguard.g_events").await;
+    let (code, msg) = sql(&mut sys, "DROP DATABASE r9nguard").await.unwrap_err();
+    assert_eq!(code, 39895, "{msg}");
+    assert!(!msg.contains("g_events") && msg.contains("g_jobs"), "{msg}");
+    ok(&mut sys, "DROP QUEUE r9nguard.g_jobs IMMEDIATE").await;
+    let t = Instant::now();
+    ok(&mut sys, "DROP DATABASE r9nguard").await;
+    println!(
+        "DROP DATABASE after the definitions were dropped: {:?}",
+        t.elapsed()
+    );
+    let _ = sql(&mut sys, "DROP STREAM r9nguard.g_events IMMEDIATE CASCADE").await;
+
+    // Broadcast retry.
+    let _ = sql(&mut sys, "DROP STREAM security.rt_events IMMEDIATE CASCADE").await;
+    let _ = sql(&mut sys, "CREATE DATABASE IF NOT EXISTS security").await;
+    ok(
+        &mut sys,
+        "CREATE STREAM security.rt_events FOR EACH TENANT PARTITIONS 1",
+    )
+    .await;
+    let m1 = ms[1].0.clone();
+    ok(
+        &mut sys,
+        &format!("INSERT INTO security.rt_events FOR TENANT {m1} (key, value) VALUES ('k', 'first')"),
+    )
+    .await;
+    let q = "SELECT COUNT(*) FROM security.rt_events";
+    assert_eq!(wait_count(&mut ms[1].1, q, 1, 60).await, 1);
+    // m1's instance: the only one so far.
+    let mut r = Conn::from_url(&root).await.unwrap();
+    let cats: Vec<(String,)> = r
+        .query(
+            "SELECT table_schema FROM information_schema.tables WHERE table_name = \
+             'inherited_defs'",
+        )
+        .await
+        .unwrap();
+    let (mut sys_id, mut def_obj) = (0u64, 0u64);
+    for (c,) in cats {
+        let o: Option<u64> = r
+            .query_first(format!(
+                "SELECT object_id FROM `{c}`.inherited_defs WHERE name = 'rt_events' AND \
+                 db_name = 'security' AND state = 'active'"
+            ))
+            .await
+            .unwrap();
+        if let Some(o) = o {
+            sys_id = c[1..c.find('_').unwrap()].parse().unwrap();
+            def_obj = o;
+        }
+    }
+    assert!(sys_id > 0);
+    let rows: Vec<(String,)> = r
+        .query(format!(
+            "SELECT table_schema FROM information_schema.tables WHERE table_name = \
+             'inherited_instances' AND table_schema <> 't{sys_id}_sprig'"
+        ))
+        .await
+        .unwrap();
+    let (mut m1_id, mut iid) = (0u64, 0u64);
+    for (s,) in rows {
+        let i: Option<u64> = r
+            .query_first(format!(
+                "SELECT instance_id FROM `{s}`.inherited_instances WHERE def_object_id = \
+                 {def_obj} AND def_tenant_id = {sys_id}"
+            ))
+            .await
+            .unwrap();
+        if let Some(i) = i {
+            m1_id = s[1..s.find('_').unwrap()].parse().unwrap();
+            iid = i;
+        }
+    }
+    assert!(m1_id > 0 && iid > 0);
+    let (schema,): (String,) = r
+        .query_first(format!(
+            "SELECT table_schema FROM information_schema.tables WHERE table_name = \
+             '__sprig_eo_{iid}' AND table_schema LIKE 't{m1_id}\\_d%'"
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    // m1's outbox goes away for a while: its deliveries fail.
+    r.query_drop(format!(
+        "RENAME TABLE `{schema}`.`__sprig_eo_{iid}` TO `{schema}`.`__sprig_eo_{iid}_held`"
+    ))
+    .await
+    .unwrap();
+    let t = Instant::now();
+    for v in ["b1", "b2", "b3"] {
+        ok(
+            &mut sys,
+            &format!("INSERT INTO security.rt_events FOR ALL TENANTS (key, value) VALUES ('k', '{v}')"),
+        )
+        .await;
+    }
+    for (i, (m, c)) in ms.iter_mut().enumerate() {
+        if i == 1 {
+            continue;
+        }
+        assert_eq!(wait_count(c, q, 3, 60).await, 3, "{m}");
+    }
+    println!("the other members had the three broadcasts in {:?}", t.elapsed());
+    // Pending for m1, in the log.
+    let end = Instant::now() + Duration::from_secs(30);
+    let log = loop {
+        let log = ok(&mut sys, "SHOW INHERITED BROADCASTS FOR STREAM security.rt_events").await;
+        if log.iter().all(|r| r[5].as_deref() == Some("delivered"))
+            || Instant::now() > end
+        {
+            break log;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    println!("broadcast log while m1 fails: {log:?}");
+    assert_eq!(log.len(), 3);
+    for row in &log {
+        assert_eq!(row[5].as_deref(), Some("delivered"));
+        assert_eq!(row[9].as_deref(), Some("1"), "one member pending: {row:?}");
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    // m1's outbox back: the retries deliver the three, in order, once.
+    r.query_drop(format!(
+        "RENAME TABLE `{schema}`.`__sprig_eo_{iid}_held` TO `{schema}`.`__sprig_eo_{iid}`"
+    ))
+    .await
+    .unwrap();
+    let t = Instant::now();
+    assert_eq!(wait_count(&mut ms[1].1, q, 4, 120).await, 4);
+    println!("m1 caught up {:?} after its outbox came back", t.elapsed());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    for (i, (m, c)) in ms.iter_mut().enumerate() {
+        let vals: Vec<String> = ok(
+            c,
+            "SELECT CAST(value AS CHAR) FROM security.rt_events ORDER BY partition_no, offset_no",
+        )
+        .await
+        .into_iter()
+        .map(|r| r[0].clone().unwrap())
+        .collect();
+        let want: Vec<&str> = if i == 1 {
+            vec!["first", "b1", "b2", "b3"]
+        } else {
+            vec!["b1", "b2", "b3"]
+        };
+        assert_eq!(vals, want, "{m}: exactly once, in broadcast order");
+    }
+    let log = ok(&mut sys, "SHOW INHERITED BROADCASTS FOR STREAM security.rt_events").await;
+    println!("broadcast log after the retries: {log:?}");
+    for row in &log {
+        assert_eq!(row[9].as_deref(), Some("0"), "{row:?}");
+        assert_eq!(row[6].as_deref(), Some(ms.len().to_string().as_str()), "{row:?}");
+    }
+    ok(&mut sys, "DROP STREAM security.rt_events IMMEDIATE CASCADE").await;
+}

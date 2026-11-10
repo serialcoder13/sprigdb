@@ -508,6 +508,14 @@ impl PassSession {
         Some((layout, cache))
     }
 
+    /// Chapter 07 (R1): where this session's metadata statements read the
+    /// tenant's grouped tables; `None` when nothing is grouped.
+    pub(super) async fn grouped_tables(&self) -> Option<Arc<sprig_sql::names::GroupedTables>> {
+        let (layout, _) = self.router_layout().await?;
+        let g = layout.grouped_tables(self.main_cluster().as_str());
+        (!g.is_empty()).then_some(g)
+    }
+
     /// The coordinator, made for the session's first sharded statement,
     /// with the clusters' capabilities and the session's state current.
     async fn ensure_coord(&mut self, cx: &ExecCtx<'_>, layout: &TenantLayout) {

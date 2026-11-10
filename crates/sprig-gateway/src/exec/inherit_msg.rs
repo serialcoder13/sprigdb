@@ -2155,6 +2155,7 @@ impl PassSession {
                         "Delivered",
                         "Skipped",
                         "Error",
+                        "Pending",
                     ],
                     rows,
                 ))

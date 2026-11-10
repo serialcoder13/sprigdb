@@ -455,6 +455,24 @@ impl MsgState {
             .map(|(_, v)| v)
     }
 
+    /// The definitions still `active` in database `db` (every kind), by
+    /// kind and name: what keeps `DROP DATABASE db` refused in the
+    /// declarer (39895; the lead's choice on r9fet3's question 1). A
+    /// definition in its drop grace doesn't count: it is already dropped
+    /// for its declarer.
+    #[must_use]
+    pub fn live_defs_in_db(&self, db: &str) -> Vec<&Arc<Definition>> {
+        let k = db_key(db);
+        let mut v: Vec<&Arc<Definition>> = self
+            .defs
+            .iter()
+            .filter(|((d, _, _), def)| *d == k && def.state == DefState::Active)
+            .map(|(_, def)| def)
+            .collect();
+        v.sort_by(|a, b| (a.kind.as_str(), &a.name).cmp(&(b.kind.as_str(), &b.name)));
+        v
+    }
+
     /// The instance whose id in this tenant is `id`, of `kind`.
     #[must_use]
     pub fn instance_by_id(&self, kind: DefKind, id: u64) -> Option<&Arc<Instance>> {

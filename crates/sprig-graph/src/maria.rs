@@ -409,25 +409,183 @@ impl<'c> MariaStore<'c> {
         else {
             return e;
         };
-        SprigError::backend(
-            1062,
-            *b"23000",
-            format!(
-                "{what}({id}) already exists with {} `{}` and propert{} {}",
-                if d.entity == Entity::Node {
-                    "label"
-                } else {
-                    "type"
-                },
-                d.token,
-                if d.props.len() == 1 { "y" } else { "ies" },
-                d.props
-                    .iter()
-                    .map(|p| format!("`{p}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+        dup_error(d, what, id)
+    }
+
+    /// Uniqueness claims are kept (decision G41) for every grouped graph,
+    /// whatever its shard count, so splits and moves carry them; graphs
+    /// from rounds 1 and 2 are one schema, where MariaDB's `UNIQUE` index
+    /// is exact.
+    fn claims_kept(&self) -> bool {
+        self.layout.group != 0
+    }
+
+    /// The uniqueness constraints of `entity` writers maintain claims for
+    /// (`building` and `online`).
+    fn unique_defs(&self, entity: Entity) -> Vec<IndexDef> {
+        if !self.claims_kept() {
+            return Vec::new();
+        }
+        self.indexes
+            .iter()
+            .filter(|d| {
+                d.unique && d.entity == entity && matches!(d.state.as_str(), "building" | "online")
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Claims `key` of constraint `d` for element `owner` (on the shard of
+    /// `owner_rk`), in the statement's transaction (decision G41, chapter
+    /// 19's `claim` with Pre joined to Main): insert the claim row; when
+    /// one is there, lock it and check its owner with a locking read on
+    /// the owner's shard (which waits for an in-flight commit of it); a
+    /// live owner with the same key is a duplicate (1062), anything else
+    /// (an orphan) is taken over.
+    async fn claim(
+        &mut self,
+        d: &IndexDef,
+        key: &[u8],
+        what: &str,
+        owner: u64,
+        owner_rk: u64,
+    ) -> Result<()> {
+        let h = crate::schema::claim_rk(d.id, key);
+        let i = self.layout.index_of(h);
+        let table = self.t(i).claims.clone();
+        let ins = format!(
+            "INSERT INTO {table} (idx, k, owner, owner_rk, _sprig_rk) VALUES (?, ?, ?, ?, ?)"
+        );
+        let vals = || {
+            Params::Positional(vec![
+                MyValue::from(d.id),
+                MyValue::Bytes(key.to_vec()),
+                MyValue::from(owner),
+                MyValue::from(owner_rk),
+                MyValue::from(h),
+            ])
+        };
+        match self.run_at(i, ins.clone(), vals()).await {
+            Ok(_) => return Ok(()),
+            Err(e) if crate::exec::is_duplicate(&e) => {}
+            Err(e) => return Err(e),
+        }
+        let held = self
+            .write_rows_at(
+                i,
+                format!("SELECT owner, owner_rk FROM {table} WHERE idx = ? AND k = ? FOR UPDATE"),
+                Params::Positional(vec![MyValue::from(d.id), MyValue::Bytes(key.to_vec())]),
+            )
+            .await?;
+        let Some(mut row) = held.into_iter().next() else {
+            // Released meanwhile: insert again.
+            self.run_at(i, ins, vals()).await?;
+            return Ok(());
+        };
+        let (o0, rk0) = (u64_col(row.take(0)), u64_col(row.take(1)));
+        if o0 == owner {
+            return Ok(());
+        }
+        let live = match d.entity {
+            Entity::Node => self
+                .lock_nodes(&[o0], false)
+                .await?
+                .into_iter()
+                .any(|n| {
+                    n.labels.contains(&d.token_id)
+                        && crate::schema::claim_key(d, &n.props).as_deref() == Some(key)
+                }),
+            Entity::Relationship => {
+                let j = self.layout.index_of(rk0);
+                let sql = format!(
+                    "SELECT {EDGE_COLS} FROM {} e WHERE e.id = {o0} LOCK IN SHARE MODE",
+                    self.t(j).edges
+                );
+                self.write_rows_at(j, sql, Params::Empty)
+                    .await?
+                    .into_iter()
+                    .map(|mut r| edge_at(&mut r, 0))
+                    .any(|e| {
+                        e.rtype == d.token_id
+                            && crate::schema::claim_key(d, &e.props).as_deref() == Some(key)
+                    })
+            }
+        };
+        if live {
+            return Err(dup_error(d, what, o0));
+        }
+        self.run_at(
+            i,
+            format!("UPDATE {table} SET owner = ?, owner_rk = ? WHERE idx = ? AND k = ?"),
+            Params::Positional(vec![
+                MyValue::from(owner),
+                MyValue::from(owner_rk),
+                MyValue::from(d.id),
+                MyValue::Bytes(key.to_vec()),
+            ]),
         )
+        .await?;
+        Ok(())
+    }
+
+    /// Releases `key` of `d` held by `owner` (a no-op if someone else
+    /// holds it), in the statement's transaction.
+    async fn release(&mut self, d: &IndexDef, key: &[u8], owner: u64) -> Result<()> {
+        let h = crate::schema::claim_rk(d.id, key);
+        let i = self.layout.index_of(h);
+        let sql = format!(
+            "DELETE FROM {} WHERE idx = ? AND k = ? AND owner = ?",
+            self.t(i).claims
+        );
+        self.run_at(
+            i,
+            sql,
+            Params::Positional(vec![
+                MyValue::from(d.id),
+                MyValue::Bytes(key.to_vec()),
+                MyValue::from(owner),
+            ]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The claim key of a node under `d`, if it has the label and every
+    /// property.
+    fn node_key(d: &IndexDef, labels: &[u32], props: &Json) -> Option<Vec<u8>> {
+        if labels.contains(&d.token_id) {
+            crate::schema::claim_key(d, props)
+        } else {
+            None
+        }
+    }
+
+    /// The claim key of a relationship under `d`.
+    fn edge_key(d: &IndexDef, rtype: u32, props: &Json) -> Option<Vec<u8>> {
+        if rtype == d.token_id {
+            crate::schema::claim_key(d, props)
+        } else {
+            None
+        }
+    }
+
+    /// Edges by id on the shards of their sources' hashes.
+    async fn edges_on(&mut self, keys: &[(u64, u64)]) -> Result<Vec<EdgeRow>> {
+        let mut by: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+        for (id, rk) in keys {
+            by.entry(self.layout.index_of(*rk)).or_default().push(*id);
+        }
+        let mut out = Vec::new();
+        for (i, ids) in by {
+            let sql = format!(
+                "SELECT {EDGE_COLS} FROM {} e WHERE e.id IN ({})",
+                self.t(i).edges,
+                ids_list(&ids)
+            );
+            let rows = self.write_rows_at(i, sql, Params::Empty).await?;
+            out.extend(rows.into_iter().map(|mut r| edge_at(&mut r, 0)));
+        }
+        Ok(out)
     }
 
     /// An online node index whose first property is `key` on label `l`.
@@ -460,6 +618,15 @@ impl<'c> MariaStore<'c> {
         let at = self.layout.shards[i].clone();
         let conn = self.conns.conn(&at, true).await?;
         conn.exec(sql, Params::Empty).await.map_err(backend_error)
+    }
+
+    /// A read on the write connection (locking reads, and reads of rows
+    /// the transaction is changing).
+    async fn write_rows_at(&mut self, i: usize, sql: String, params: Params) -> Result<Vec<Row>> {
+        self.stats.shard_queries += 1;
+        let at = self.layout.shards[i].clone();
+        let conn = self.conns.conn(&at, true).await?;
+        conn.exec(sql, params).await.map_err(backend_error)
     }
 
     async fn run_at(&mut self, i: usize, sql: String, params: Params) -> Result<u64> {
@@ -603,6 +770,30 @@ impl<'c> MariaStore<'c> {
         }
         Ok(out)
     }
+}
+
+/// Neo4j's message for a uniqueness violation: the holder, the label (or
+/// type) and the properties (1062, `ConstraintValidationFailed`).
+fn dup_error(d: &IndexDef, what: &str, id: u64) -> SprigError {
+    SprigError::backend(
+        1062,
+        *b"23000",
+        format!(
+            "{what}({id}) already exists with {} `{}` and propert{} {}",
+            if d.entity == Entity::Node {
+                "label"
+            } else {
+                "type"
+            },
+            d.token,
+            if d.props.len() == 1 { "y" } else { "ies" },
+            d.props
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )
 }
 
 /// Sorts rows by id and keeps the first `limit`.
@@ -897,6 +1088,13 @@ impl GraphStore for MariaStore<'_> {
         if rows.is_empty() {
             return Ok(());
         }
+        for d in self.unique_defs(Entity::Node) {
+            for r in rows {
+                if let Some(k) = Self::node_key(&d, &r.labels, &r.props) {
+                    self.claim(&d, &k, "Node", r.id, r.rk).await?;
+                }
+            }
+        }
         let mut by: BTreeMap<usize, Vec<&NodeRow>> = BTreeMap::new();
         for r in rows {
             by.entry(self.layout.index_of(r.rk)).or_default().push(r);
@@ -951,6 +1149,13 @@ impl GraphStore for MariaStore<'_> {
     async fn insert_edges(&mut self, rows: &[EdgeRow]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
+        }
+        for d in self.unique_defs(Entity::Relationship) {
+            for r in rows {
+                if let Some(k) = Self::edge_key(&d, r.rtype, &r.props) {
+                    self.claim(&d, &k, "Relationship", r.id, r.src_rk).await?;
+                }
+            }
         }
         let mut by: BTreeMap<usize, Vec<&EdgeRow>> = BTreeMap::new();
         for r in rows {
@@ -1025,6 +1230,30 @@ impl GraphStore for MariaStore<'_> {
     }
 
     async fn update_node(&mut self, row: &NodeRow, old_labels: &[u32]) -> Result<()> {
+        let defs: Vec<IndexDef> = self
+            .unique_defs(Entity::Node)
+            .into_iter()
+            .filter(|d| row.labels.contains(&d.token_id) || old_labels.contains(&d.token_id))
+            .collect();
+        if !defs.is_empty() {
+            // The row as the transaction sees it (the caller locked it).
+            let old = self.lock_nodes(&[row.id], true).await?;
+            for d in &defs {
+                let was = old
+                    .first()
+                    .and_then(|o| Self::node_key(d, &o.labels, &o.props));
+                let now = Self::node_key(d, &row.labels, &row.props);
+                if was == now {
+                    continue;
+                }
+                if let Some(k) = &now {
+                    self.claim(d, k, "Node", row.id, row.rk).await?;
+                }
+                if let Some(k) = &was {
+                    self.release(d, k, row.id).await?;
+                }
+            }
+        }
         let i = self.layout.index_of(row.rk);
         let t = self.t(i).clone();
         let r = self
@@ -1090,6 +1319,30 @@ impl GraphStore for MariaStore<'_> {
     }
 
     async fn update_edge(&mut self, row: &EdgeRow) -> Result<()> {
+        let defs: Vec<IndexDef> = self
+            .unique_defs(Entity::Relationship)
+            .into_iter()
+            .filter(|d| d.token_id == row.rtype)
+            .collect();
+        if !defs.is_empty() {
+            let old = self.edges_on(&[(row.id, row.src_rk)]).await?;
+            for d in &defs {
+                let was = old
+                    .first()
+                    .and_then(|o| Self::edge_key(d, o.rtype, &o.props));
+                let now = Self::edge_key(d, row.rtype, &row.props);
+                if was == now {
+                    continue;
+                }
+                if let Some(k) = &now {
+                    self.claim(d, k, "Relationship", row.id, row.src_rk)
+                        .await?;
+                }
+                if let Some(k) = &was {
+                    self.release(d, k, row.id).await?;
+                }
+            }
+        }
         let i = self.layout.index_of(row.src_rk);
         let sql = format!(
             "UPDATE {} SET props = ?, _types = ?, _v = ? WHERE id = ?",
@@ -1118,6 +1371,21 @@ impl GraphStore for MariaStore<'_> {
     async fn delete_edges(&mut self, edges: &[EdgeKey]) -> Result<u64> {
         if edges.is_empty() {
             return Ok(0);
+        }
+        let defs: Vec<IndexDef> = self
+            .unique_defs(Entity::Relationship)
+            .into_iter()
+            .filter(|d| edges.iter().any(|e| e.rtype == d.token_id))
+            .collect();
+        if !defs.is_empty() {
+            let keys: Vec<(u64, u64)> = edges.iter().map(|e| (e.id, e.src_rk)).collect();
+            for e in self.edges_on(&keys).await? {
+                for d in &defs {
+                    if let Some(k) = Self::edge_key(d, e.rtype, &e.props) {
+                        self.release(d, &k, e.id).await?;
+                    }
+                }
+            }
         }
         let mut n = 0;
         let mut by: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
@@ -1155,6 +1423,16 @@ impl GraphStore for MariaStore<'_> {
     }
 
     async fn delete_nodes(&mut self, ids: &[u64]) -> Result<u64> {
+        let defs = self.unique_defs(Entity::Node);
+        if !defs.is_empty() && !ids.is_empty() {
+            for o in self.lock_nodes(ids, true).await? {
+                for d in &defs {
+                    if let Some(k) = Self::node_key(d, &o.labels, &o.props) {
+                        self.release(d, &k, o.id).await?;
+                    }
+                }
+            }
+        }
         let mut n = 0;
         for (i, part) in self.layout.by_shard(ids) {
             let l = ids_list(&part);

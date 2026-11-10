@@ -129,7 +129,8 @@ pub const MOVED_INTERNAL: &[&str] = &[
 /// and chapter 43's native graph tables: nodes (`__sprig_gn_<graph>`),
 /// edges (`__sprig_ge_`), label rows (`__sprig_gl_`) and mirrors
 /// (`__sprig_gm_`), routed by `_sprig_rk` like a group's tables, and the id
-/// counter (`__sprig_gq_`, copied whole with its default-group schema).
+/// counter (`__sprig_gq_`, copied whole with its default-group schema),
+/// and the uniqueness claims (`__sprig_gu_`, routed by the claim's hash).
 pub const MOVED_INTERNAL_PREFIXES: &[&str] = &[
     "__sprig_eo_",
     "__sprig_sl_",
@@ -138,6 +139,7 @@ pub const MOVED_INTERNAL_PREFIXES: &[&str] = &[
     "__sprig_gl_",
     "__sprig_gm_",
     "__sprig_gq_",
+    "__sprig_gu_",
 ];
 
 /// `SET NAMES` for a stored program's `character_set_client` and
@@ -353,6 +355,58 @@ impl MysqlSource {
         }
     }
 
+    /// Statements that create schema `s`'s events (RL12, r2harden): as the
+    /// source has them (`as_source`, the cutover's; `CREATE OR REPLACE`),
+    /// or disabled (a copy's start). Each runs under the event's own
+    /// `sql_mode`, time zone and character set.
+    async fn event_statements(&self, s: &str, as_source: bool) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        let names = self
+            .rows(
+                "SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?",
+                vec![Value::Bytes(s.as_bytes().to_vec())],
+            )
+            .await?;
+        for n in names.into_iter().filter_map(|r| r.get::<String, _>(0)) {
+            let rows = self
+                .rows(&format!("SHOW CREATE EVENT {}", qualified(s, &n)), Vec::new())
+                .await?;
+            let Some(r) = rows.into_iter().next() else {
+                continue;
+            };
+            // Event, sql_mode, time_zone, Create Event, character_set_client,
+            // collation_connection, Database Collation.
+            let mode: Option<String> = r.get(1);
+            let tz: Option<String> = r.get(2);
+            let Some(body) = r.get::<String, _>(3) else {
+                continue;
+            };
+            let body = if as_source {
+                body.replacen("CREATE ", "CREATE OR REPLACE ", 1)
+            } else {
+                body.replacen(" ENABLE DO ", " DISABLE DO ", 1)
+            };
+            out.push(format!("USE {}", quote(s)));
+            out.push(format!(
+                "SET SESSION sql_mode = '{}'",
+                mode.unwrap_or_default().replace('\'', "")
+            ));
+            out.push(format!(
+                "SET SESSION time_zone = '{}'",
+                tz.unwrap_or_else(|| "SYSTEM".to_owned()).replace('\'', "")
+            ));
+            if !as_source {
+                out.push(format!("DROP EVENT IF EXISTS {}", quote(&n)));
+            }
+            in_names(&mut out, set_names(r.get(4), r.get(5)), body);
+            if !as_source {
+                out.push(format!("ALTER EVENT {} DISABLE", quote(&n)));
+            }
+            out.push("SET SESSION time_zone = '+00:00'".to_owned());
+        }
+        Ok(out)
+    }
+
     /// Creation statements of the schemas' views and routines, and the
     /// tenant's backend accounts with their grants (until chapter 29's
     /// reconciler creates them on the target).
@@ -435,6 +489,9 @@ impl MysqlSource {
                     }
                 }
             }
+            // Chapter 10, prepare step 3 (RL12): events, disabled until the
+            // cutover (or a standby's promotion) enables them.
+            out.extend(self.event_statements(s, false).await?);
         }
         // The tenant's backend accounts and their grants.
         let like = format!("t{}\\_%", self.tenant);
@@ -555,6 +612,9 @@ impl SourceIo for MysqlSource {
                     }
                 }
             }
+            // Step 6's `ALTER EVENT ... ENABLE` (RL12): each event as the
+            // source has it, enabled or not, replacing the disabled copy.
+            out.extend(self.event_statements(&s, true).await?);
         }
         Ok(out)
     }

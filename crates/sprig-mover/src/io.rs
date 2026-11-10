@@ -261,6 +261,13 @@ pub trait TargetIo: Send + Sync {
     }
     /// Drops what [`Self::finalize`] created (an aborted cutover).
     async fn unfinalize(&self, triggers: &[String]) -> Result<()>;
+    /// RL12 (r2harden): a standby's target keeps the statements
+    /// [`Self::finalize`] would run (the source's triggers and events), so
+    /// its promotion can create them when the source is lost. Targets that
+    /// aren't standbys record nothing.
+    async fn record_cutover_statements(&self, _stmts: &[String]) -> Result<()> {
+        Ok(())
+    }
     /// Drops the job's target schemas and position rows (rollback), or
     /// only empties the tables when `keep_schemas` (a restarted copy).
     async fn reset(&self, job: JobId, keep_schemas: bool) -> Result<()>;

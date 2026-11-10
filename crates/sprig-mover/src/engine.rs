@@ -46,6 +46,10 @@ const POS_COMMIT_EVERY: Duration = Duration::from_secs(1);
 const STREAM_BUFFER: usize = 256;
 /// Consecutive failures before a job gives up and rolls back.
 const MAX_FAILURES: u32 = 200;
+/// How often a `Continuous` job records its source's triggers and events
+/// on its target (RL12).
+const RECORD_OBJECTS_EVERY: Duration = Duration::from_secs(30);
+
 /// A `Continuous` job's pump that runs this long is dropped (its source
 /// stalled), so a stop or cancel never waits on a lost source.
 const STREAM_STALL: Duration = Duration::from_secs(5);
@@ -1377,16 +1381,25 @@ impl Engine {
     /// shard map are never touched). A stop needs nothing from the source,
     /// so a standby whose home DC is lost stops at once.
     async fn streaming(&mut self) -> Result<Step> {
+        // RL12 (r2harden): when the source's triggers and events were last
+        // recorded on the target for a promotion.
+        let mut recorded: Option<std::time::Instant> = None;
         loop {
             self.check_cancel(false).await?;
             if self.cancelled() {
                 return self.rolling_back(None).await;
+            }
+            if recorded.is_none_or(|t| t.elapsed() >= RECORD_OBJECTS_EVERY) {
+                self.record_cutover_statements().await;
+                recorded = Some(std::time::Instant::now());
             }
             if self.claim.rec.go {
                 if self.reader.is_some() {
                     // What was read and not yet committed goes in first.
                     let _ = self.flush(true).await;
                 }
+                // A source that still answers gives its latest triggers.
+                self.record_cutover_statements().await;
                 // The target's own position row is the truth (a dropped
                 // pump may have committed past what this process saw).
                 let pos = match self.env.target.load_pos(self.job).await {
@@ -1420,6 +1433,25 @@ impl Engine {
                 self.claim.rec.progress.applied_source_gtid = Some(pos);
             }
             self.maybe_save().await?;
+        }
+    }
+
+    /// RL12 (r2harden): records the statements a cutover would run (the
+    /// source's triggers and events) on a `Continuous` job's target, for
+    /// a promotion that can't reach the source. Bounded by 2 s; a source
+    /// or target that doesn't answer keeps the last record.
+    async fn record_cutover_statements(&self) {
+        let r = tokio::time::timeout(Duration::from_secs(2), async {
+            let stmts = self.env.source.triggers().await?;
+            self.env.target.record_cutover_statements(&stmts).await
+        })
+        .await;
+        match r {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::debug!(job = %self.job.0, error = %e, "triggers and events not recorded");
+            }
+            Err(_) => tracing::debug!(job = %self.job.0, "triggers and events not recorded: no answer"),
         }
     }
 

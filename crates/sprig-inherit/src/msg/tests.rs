@@ -592,3 +592,22 @@ fn exchange_queue_and_binding_statements() {
     let v = serde_json::to_value(&b).unwrap();
     assert_eq!(serde_json::from_value::<BindingSpec>(v).unwrap(), b);
 }
+
+#[test]
+fn live_definitions_keep_their_database() {
+    let s = def(1, 10, DefKind::Stream, "user_events", Scope::default());
+    let g = def(1, 11, DefKind::Trigger, "sync_users", Scope::default());
+    let mut dropping = (*def(1, 12, DefKind::Queue, "jobs", Scope::default())).clone();
+    dropping.state = DefState::Dropping;
+    let mut other = (*def(1, 13, DefKind::Exchange, "x", Scope::default())).clone();
+    other.db_name = "billing".into();
+    let st = state_with(&[g, s, Arc::new(dropping), Arc::new(other)], Vec::new());
+    let live: Vec<String> = st
+        .live_defs_in_db("SECURITY")
+        .iter()
+        .map(|d| format!("{} {}", d.kind.as_str(), d.name))
+        .collect();
+    assert_eq!(live, ["stream user_events", "trigger sync_users"]);
+    assert!(st.live_defs_in_db("app").is_empty());
+    assert_eq!(st.live_defs_in_db("billing").len(), 1);
+}

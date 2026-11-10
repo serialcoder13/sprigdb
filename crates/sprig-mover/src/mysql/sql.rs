@@ -377,6 +377,61 @@ pub fn classify(sql: &str) -> QueryKind {
     }
 }
 
+/// A stored program a DDL statement creates or changes (RL12, r2harden).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramDdl {
+    /// `CREATE [OR REPLACE] TRIGGER` (or `ALTER`: none in MariaDB).
+    CreateTrigger,
+    /// `CREATE [OR REPLACE] EVENT` or `ALTER EVENT`.
+    CreateEvent,
+    /// `DROP TRIGGER` or `DROP EVENT`.
+    Drop,
+}
+
+/// Whether a DDL statement creates, changes or drops a trigger or an
+/// event. The stream doesn't apply creations: a trigger on a copy would
+/// fire on the rows the applier writes (their effects arrive as rows of
+/// their own), and an event would run there. The cutover creates them
+/// from the source (chapter 10, step 6); a standby records them for its
+/// promotion.
+#[must_use]
+pub fn program_ddl(sql: &str) -> Option<ProgramDdl> {
+    let s = strip_comments(sql);
+    let mut words = s.split_whitespace().map(str::to_ascii_uppercase);
+    let verb = words.next()?;
+    if !matches!(verb.as_str(), "CREATE" | "ALTER" | "DROP") {
+        return None;
+    }
+    let mut skip_value = false;
+    for w in words.take(12) {
+        if skip_value {
+            skip_value = w == "=";
+            continue;
+        }
+        match w.as_str() {
+            "OR" | "REPLACE" | "IF" | "NOT" | "EXISTS" => {}
+            "DEFINER" | "DEFINER=" => skip_value = true,
+            w if w.starts_with("DEFINER=") => {}
+            "TRIGGER" => {
+                return Some(if verb == "DROP" {
+                    ProgramDdl::Drop
+                } else {
+                    ProgramDdl::CreateTrigger
+                });
+            }
+            "EVENT" => {
+                return Some(if verb == "DROP" {
+                    ProgramDdl::Drop
+                } else {
+                    ProgramDdl::CreateEvent
+                });
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Whether `sql` names `word` as a whole identifier (quoted, or bare
 /// between non-identifier characters), ignoring ASCII case.
 #[must_use]
@@ -418,6 +473,26 @@ pub fn ddl_touches(db: &str, sql: &str, schemas: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_programs_are_recognised() {
+        use ProgramDdl::*;
+        for (q, want) in [
+            ("CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1", Some(CreateTrigger)),
+            ("CREATE DEFINER=`root`@`%` TRIGGER tr AFTER INSERT ON t FOR EACH ROW INSERT INTO a VALUES (1)", Some(CreateTrigger)),
+            ("CREATE OR REPLACE DEFINER = `u`@`%` TRIGGER tr AFTER UPDATE ON t FOR EACH ROW SET @x = 1", Some(CreateTrigger)),
+            ("/* c */ CREATE EVENT IF NOT EXISTS e ON SCHEDULE EVERY 1 MINUTE DO DELETE FROM t", Some(CreateEvent)),
+            ("ALTER DEFINER=`root`@`%` EVENT e ENABLE", Some(CreateEvent)),
+            ("DROP TRIGGER IF EXISTS s.tr", Some(Drop)),
+            ("DROP EVENT e", Some(Drop)),
+            ("CREATE TABLE event (trigger INT)", None),
+            ("CREATE DEFINER=`root`@`%` PROCEDURE p() SELECT 1", None),
+            ("CREATE OR REPLACE VIEW v AS SELECT 1", None),
+            ("ALTER TABLE t ADD COLUMN event INT", None),
+        ] {
+            assert_eq!(program_ddl(q), want, "{q}");
+        }
+    }
     use crate::model::ColumnMeta;
 
     fn t2() -> TableMeta {

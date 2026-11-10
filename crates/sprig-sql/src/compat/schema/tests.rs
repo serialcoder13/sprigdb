@@ -334,3 +334,15 @@ fn the_view_keeps_the_clients_spelling_of_the_table() {
     assert!(sql.starts_with("SELECT columns.table_schema FROM (SELECT"));
     assert!(sql.ends_with(") AS `columns` WHERE columns.table_schema = 'shop'"));
 }
+
+#[test]
+fn show_engines_is_mysqls_list() {
+    assert!(is_show_engines(b"SHOW ENGINES"));
+    assert!(is_show_engines(b"show storage engines;"));
+    assert!(!is_show_engines(b"SHOW ENGINE INNODB STATUS"));
+    let lit = |v: &str| format!("'{v}'");
+    let sql = String::from_utf8(show_engines_sql(&lit)).unwrap();
+    assert!(sql.contains("'MRG_MYISAM' AS `e`"), "{sql}");
+    assert!(!sql.contains("SEQUENCE") && !sql.contains("Aria"), "{sql}");
+    assert!(sql.ends_with("ORDER BY m.`n`"), "{sql}");
+}

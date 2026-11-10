@@ -81,6 +81,22 @@ pub trait NameMap: Send + Sync {
     /// Every database of the tenant, in the catalog's order.
     fn list(&self) -> Vec<&LogicalDb>;
 
+    /// The representative schemas of `db`'s other table groups (and its
+    /// reference schema), for metadata: the advisor moves a grouped table
+    /// out of the database's first shard into its group's schemas (chapter
+    /// 16), so `Purpose::Metadata` lists one schema per group. Empty when
+    /// nothing of `db` is grouped.
+    fn grouped_schemas(&self, _db: DbId) -> &[SchemaName] {
+        &[]
+    }
+
+    /// The representative schema of table `table` (matched ignoring case,
+    /// as the router does) of `db` when it is a member of a table group or
+    /// a reference table; `None` when it is in the database's own schema.
+    fn table_schema(&self, _db: DbId, _table: &str) -> Option<SchemaName> {
+        None
+    }
+
     /// The schemas `db` stands for, for `purpose`.
     ///
     /// # Errors
@@ -99,7 +115,15 @@ pub trait NameMap: Send + Sync {
                 ldb.shards.first().copied().into_iter().collect()
             }
             Purpose::Ddl => ldb.shards.clone(),
-            Purpose::Metadata => representatives(&ldb.shards),
+            Purpose::Metadata => {
+                let mut v = representatives(&ldb.shards);
+                for s in self.grouped_schemas(ldb.id) {
+                    if !v.contains(s) {
+                        v.push(*s);
+                    }
+                }
+                v
+            }
         };
         if purpose == Purpose::Ddl {
             set.extend(ldb.reference);
@@ -142,6 +166,78 @@ fn representatives(shards: &[SchemaName]) -> Vec<SchemaName> {
         }
     }
     best
+}
+
+/// Where a tenant's grouped tables are, for metadata (chapter 07,
+/// "Physical names"; R1). Built by the gateway from the router's layout
+/// for the cluster a session's metadata statements run on: per group, its
+/// lowest shard on that cluster, else its lowest shard.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupedTables {
+    /// Per database: one representative schema per group, each once, in
+    /// the order added.
+    schemas: HashMap<DbId, Vec<SchemaName>>,
+    /// Per database and lowercase table name: its group's representative.
+    tables: HashMap<(DbId, String), SchemaName>,
+}
+
+impl GroupedTables {
+    /// Records that table `table` of `db` is read, for metadata, in
+    /// `schema`.
+    pub fn add(&mut self, db: DbId, table: &str, schema: SchemaName) {
+        let v = self.schemas.entry(db).or_default();
+        if !v.contains(&schema) {
+            v.push(schema);
+        }
+        self.tables.insert((db, table.to_lowercase()), schema);
+    }
+
+    /// Whether no table is grouped.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty()
+    }
+}
+
+/// A [`NameMap`] that adds a tenant's [`GroupedTables`] to `base`.
+pub struct WithGroups<'a> {
+    /// The catalog's map.
+    pub base: &'a dyn NameMap,
+    /// The grouped tables.
+    pub groups: &'a GroupedTables,
+}
+
+impl NameMap for WithGroups<'_> {
+    fn tenant(&self) -> TenantId {
+        self.base.tenant()
+    }
+
+    fn version(&self) -> u64 {
+        self.base.version()
+    }
+
+    fn database(&self, db: &str) -> Option<&LogicalDb> {
+        self.base.database(db)
+    }
+
+    fn database_by_id(&self, id: DbId) -> Option<&LogicalDb> {
+        self.base.database_by_id(id)
+    }
+
+    fn list(&self) -> Vec<&LogicalDb> {
+        self.base.list()
+    }
+
+    fn grouped_schemas(&self, db: DbId) -> &[SchemaName] {
+        self.groups.schemas.get(&db).map_or(&[], Vec::as_slice)
+    }
+
+    fn table_schema(&self, db: DbId, table: &str) -> Option<SchemaName> {
+        self.groups
+            .tables
+            .get(&(db, table.to_lowercase()))
+            .copied()
+    }
 }
 
 /// An in-memory [`NameMap`] for tests and for the gateway until the
@@ -301,6 +397,47 @@ mod tests {
         let names: Vec<String> = meta.0.iter().map(ToString::to_string).collect();
         assert_eq!(names, ["t42_d3_g1_s2", "t42_d3_g5_s9"]);
         assert_eq!(m.physical("sharded", Purpose::Write).unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn grouped_tables_add_metadata_schemas() {
+        let m = acme();
+        let t = TenantId(42);
+        let mut g = GroupedTables::default();
+        let g3 = SchemaName::shard(t, DbId(1), GroupId(3), ShardId(2));
+        g.add(DbId(1), "Orders", g3);
+        g.add(DbId(1), "order_items", g3);
+        g.add(DbId(1), "countries", SchemaName::reference(t, DbId(1)));
+        let w = WithGroups {
+            base: &m,
+            groups: &g,
+        };
+        let names = |p| -> Vec<String> {
+            w.physical("billing", p)
+                .unwrap()
+                .0
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        assert_eq!(
+            names(Purpose::Metadata),
+            ["t42_d1_g1_s1", "t42_d1_g3_s2", "t42_d1_ref"]
+        );
+        // Statements keep the database's own schema.
+        assert_eq!(names(Purpose::Read), ["t42_d1_g1_s1"]);
+        assert_eq!(names(Purpose::Ddl), ["t42_d1_g1_s1"]);
+        assert_eq!(w.table_schema(DbId(1), "orders"), Some(g3));
+        assert_eq!(w.table_schema(DbId(1), "invoices"), None);
+        assert_eq!(w.table_schema(DbId(2), "orders"), None);
+        // Another database is unchanged.
+        assert_eq!(
+            w.physical("crm", Purpose::Metadata).unwrap().0.len(),
+            1,
+            "crm has no grouped tables"
+        );
+        assert!(m.table_schema(DbId(1), "orders").is_none());
+        assert_eq!(m.physical("billing", Purpose::Metadata).unwrap().0.len(), 1);
     }
 
     #[test]

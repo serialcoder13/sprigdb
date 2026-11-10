@@ -31,6 +31,7 @@
 
 pub mod autoindex;
 pub mod ddl;
+mod grouped;
 pub mod hide;
 pub mod infoschema;
 pub mod map;
@@ -48,7 +49,7 @@ pub use autoindex::{
 pub use ddl::{AlterOp, DdlKind, DdlName, DdlTarget};
 pub use hide::{Visibility, create_like_sql, filter_create_table};
 pub use infoschema::{ColumnRegistry, InfoSchemaCtx, TableClass, rewrite_information_schema};
-pub use map::{LogicalDb, MemoryNameMap, NameMap, Purpose, SchemaSet};
+pub use map::{GroupedTables, LogicalDb, MemoryNameMap, NameMap, Purpose, SchemaSet, WithGroups};
 pub use output::{
     AccountResolver, OutputCtx, map_bytes, map_column_def, map_message, map_text,
     physical_name_leaks,

@@ -17,6 +17,17 @@
 //!
 //! The record lives with the copy, not in etcd: the promotion runs in the
 //! copy's DC, which is the one that answers when the home DC is lost.
+//!
+//! **Triggers and events (RL12, r2harden).** A copy carries the tenant's
+//! views and routines from its start (the stream applies their later
+//! changes) and its events disabled, but no triggers: they would fire on
+//! the rows the job applies. A move creates triggers and enables events at
+//! its cutover; a standby never cuts over. So while it streams, its job
+//! records the statements the cutover would run (the source's triggers
+//! and events, as the source has them) in
+//! `__sprig_sys.__sprig_standby_objects` on the copy, at its start, every
+//! 30 s and when it is stopped ([`record_objects`]); the promotion runs
+//! them after the job stopped, with the grants ([`restore`]).
 
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
@@ -27,6 +38,17 @@ use sprig_common::{Result, SprigError};
 
 /// The record of revoked privileges, one row per grant.
 pub const GRANTS_TABLE: &str = "`__sprig_sys`.`__sprig_standby_grants`";
+
+/// The statements a promotion runs on the copy (RL12), in order.
+pub const OBJECTS_TABLE: &str = "`__sprig_sys`.`__sprig_standby_objects`";
+
+/// Creates [`OBJECTS_TABLE`].
+pub const OBJECTS_DDL: &str = "CREATE TABLE IF NOT EXISTS `__sprig_sys`.`__sprig_standby_objects` (\
+    tenant_id BIGINT UNSIGNED NOT NULL, \
+    seq INT UNSIGNED NOT NULL, \
+    stmt LONGTEXT NOT NULL, \
+    PRIMARY KEY (tenant_id, seq)\
+    ) ENGINE=InnoDB";
 
 /// Creates [`GRANTS_TABLE`].
 pub const GRANTS_DDL: &str = "CREATE TABLE IF NOT EXISTS `__sprig_sys`.`__sprig_standby_grants` (\
@@ -355,6 +377,12 @@ pub async fn restore(c: &mut Conn, tenant: TenantId) -> Result<usize> {
             Err(e) => return Err(err("restore a grant", &e)),
         }
     }
+    // RL12: the tenant's triggers and events, now that nothing applies
+    // rows to the copy any more.
+    let (made, failed) = create_objects(c, tenant).await?;
+    if made + failed > 0 {
+        tracing::info!(%tenant, made, failed, "standby's triggers and events created for its promotion");
+    }
     // A session opened while the grants were revoked keeps the revoked
     // database privileges until it changes database (MariaDB reads them
     // at `USE`): a gateway's pooled connection would go on getting 1142.
@@ -402,10 +430,106 @@ pub async fn forget(c: &mut Conn, tenant: TenantId) -> Result<()> {
         )
         .await
     {
+        Ok(()) => {}
+        Err(e) if super::errno(&e) == Some(1146) => {}
+        Err(e) => return Err(err("forget the record", &e)),
+    }
+    match c
+        .exec_drop(
+            format!("DELETE FROM {OBJECTS_TABLE} WHERE tenant_id = ?"),
+            (tenant.0,),
+        )
+        .await
+    {
         Ok(()) => Ok(()),
         Err(e) if super::errno(&e) == Some(1146) => Ok(()),
-        Err(e) => Err(err("forget the record", &e)),
+        Err(e) => Err(err("forget the recorded objects", &e)),
     }
+}
+
+/// The statements recorded for `tenant`'s promotion (RL12).
+///
+/// # Errors
+/// A statement failed (a missing table is none).
+pub async fn recorded_objects(c: &mut Conn, tenant: TenantId) -> Result<Vec<String>> {
+    match c
+        .exec(
+            format!("SELECT stmt FROM {OBJECTS_TABLE} WHERE tenant_id = ? ORDER BY seq"),
+            (tenant.0,),
+        )
+        .await
+    {
+        Ok(v) => Ok(v),
+        Err(e) if super::errno(&e) == Some(1146) => Ok(Vec::new()),
+        Err(e) => Err(err("read the recorded objects", &e)),
+    }
+}
+
+/// Records `stmts` as `tenant`'s triggers and events for its promotion,
+/// replacing an older record in one transaction; `false` when the record
+/// was the same already.
+///
+/// # Errors
+/// A statement failed.
+pub async fn record_objects(c: &mut Conn, tenant: TenantId, stmts: &[String]) -> Result<bool> {
+    if recorded_objects(c, tenant).await? == stmts {
+        return Ok(false);
+    }
+    c.query_drop("CREATE DATABASE IF NOT EXISTS `__sprig_sys`")
+        .await
+        .map_err(|e| err("create __sprig_sys", &e))?;
+    c.query_drop(OBJECTS_DDL)
+        .await
+        .map_err(|e| err("create the objects table", &e))?;
+    let mut tx = c
+        .start_transaction(mysql_async::TxOpts::default())
+        .await
+        .map_err(|e| err("begin", &e))?;
+    tx.exec_drop(
+        format!("DELETE FROM {OBJECTS_TABLE} WHERE tenant_id = ?"),
+        (tenant.0,),
+    )
+    .await
+    .map_err(|e| err("replace the recorded objects", &e))?;
+    for (i, q) in stmts.iter().enumerate() {
+        tx.exec_drop(
+            format!("INSERT INTO {OBJECTS_TABLE} (tenant_id, seq, stmt) VALUES (?, ?, ?)"),
+            (tenant.0, u32::try_from(i).unwrap_or(u32::MAX), q.as_str()),
+        )
+        .await
+        .map_err(|e| err("record an object", &e))?;
+    }
+    tx.commit().await.map_err(|e| err("commit", &e))?;
+    Ok(true)
+}
+
+/// Runs the statements recorded for `tenant` (its triggers, its events as
+/// the source had them) on the promoted copy. A trigger that exists
+/// already counts as made; a statement that fails otherwise is logged and
+/// skipped, so one broken definition never blocks a failover. Returns
+/// (statements run, statements failed); the session's `sql_mode` and
+/// character set are reset after.
+///
+/// # Errors
+/// The record can't be read.
+pub async fn create_objects(c: &mut Conn, tenant: TenantId) -> Result<(usize, usize)> {
+    let stmts = recorded_objects(c, tenant).await?;
+    let (mut made, mut failed) = (0, 0);
+    for q in &stmts {
+        match c.query_drop(q.as_str()).await {
+            Ok(()) => made += 1,
+            Err(e) if super::errno(&e) == Some(1359) => made += 1,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(%tenant, error = %e, statement = %q.chars().take(120).collect::<String>(), "a recorded trigger or event wasn't created on the promoted copy");
+            }
+        }
+    }
+    if !stmts.is_empty() {
+        let _ = c.query_drop("SET SESSION sql_mode = DEFAULT").await;
+        let _ = c.query_drop("SET NAMES utf8mb4").await;
+    }
+    Ok((made, failed))
 }
 
 #[cfg(test)]

@@ -1120,7 +1120,12 @@ fn account_view(table: &str, ctx: &InfoSchemaCtx<'_>) -> Option<String> {
 fn all_pairs(ctx: &InfoSchemaCtx<'_>) -> Vec<(String, String)> {
     let mut v = Vec::new();
     for db in ctx.map.list() {
-        for s in db.shards.iter().chain(db.reference.iter()) {
+        for s in db
+            .shards
+            .iter()
+            .chain(db.reference.iter())
+            .chain(ctx.map.grouped_schemas(db.id))
+        {
             v.push((s.to_string(), db.name.clone()));
         }
     }

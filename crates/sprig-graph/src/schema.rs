@@ -222,6 +222,50 @@ pub fn numeric_key(n: &serde_json::Number) -> String {
     }
 }
 
+/// Longest claim key kept as is; longer ones become `H` + their SHA-256.
+pub const MAX_CLAIM: usize = 512;
+
+/// The claim key of an element's `props` under uniqueness constraint `d`
+/// (decision G41: the cross-shard claim table): the index texts of its
+/// properties joined by `0x1f`, or `None` when a property is missing or
+/// of a type the constraint doesn't index (then nothing is claimed, as
+/// Neo4j checks uniqueness only when every property is present). The
+/// caller checks the label or type.
+#[must_use]
+pub fn claim_key(d: &IndexDef, props: &Json) -> Option<Vec<u8>> {
+    let mut k = Vec::new();
+    for (i, p) in d.props.iter().enumerate() {
+        let t = index_value(props.get(p)?, d.kind)?;
+        if i > 0 {
+            k.push(0x1f);
+        }
+        k.extend_from_slice(t.as_bytes());
+    }
+    if k.len() <= MAX_CLAIM {
+        return Some(k);
+    }
+    let h = ring::digest::digest(&ring::digest::SHA256, &k);
+    let mut s = String::with_capacity(65);
+    s.push('H');
+    for b in h.as_ref() {
+        let _ = write!(s, "{b:02x}");
+    }
+    Some(s.into_bytes())
+}
+
+/// The routing hash of a claim: where its row lives among the graph's
+/// shards (the first 8 bytes of SHA-256 over the index id and the key).
+#[must_use]
+pub fn claim_rk(index: u32, key: &[u8]) -> u64 {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    ctx.update(&index.to_be_bytes());
+    ctx.update(key);
+    let d = ctx.finish();
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&d.as_ref()[..8]);
+    u64::from_be_bytes(b)
+}
+
 /// Long texts become `h` + their SHA-256 (as MariaDB's `SHA2(t, 256)`).
 fn fit(t: String) -> String {
     if t.chars().count() <= MAX_INLINE {

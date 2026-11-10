@@ -16,7 +16,8 @@
 //! 4. drop the catalog (unless another tenant's mark is on it)
 //! 5. delete T's finished job records, then T's keys in the DC tier:
 //!    shardmaps/T/, pins/T, promotions/T, feed/{ownership,subs,checkpoints}/T/,
-//!    logic/schedules/T/, mover/shard-locks/T/  (each prefix ends in "/")
+//!    logic/schedules/T/, mover/shard-locks/T/, inherit-instances/T/,
+//!    inherit-xo/T/  (each prefix ends in "/")
 //! 6. delete the directory entry and its name
 //! ```
 
@@ -94,6 +95,10 @@ pub(crate) fn meta_prefixes(tenant: TenantId) -> Vec<String> {
         "feed/checkpoints",
         "logic/schedules",
         "mover/shard-locks",
+        // Chapter 42 (R9): the tenant's instances of inherited messaging
+        // objects, and its cross-tenant outbox schemas.
+        "inherit-instances",
+        "inherit-xo",
     ]
     .iter()
     .map(|p| format!("{p}/{tenant}/"))

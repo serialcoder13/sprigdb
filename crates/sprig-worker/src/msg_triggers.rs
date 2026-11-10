@@ -415,15 +415,26 @@ impl MsgEnv {
         }))
     }
 
+    /// RL3 (r2harden): the tenant's own `logic.trigger_*` rows over the
+    /// etcd scopes, as after-commit triggers read them (decision RF3); the
+    /// worker-wide options when the worker reads no tenant rows (tests).
+    fn opts_for(&self, tenant: TenantId) -> RunOpts {
+        if self.settings.tenant_scopes().is_some() {
+            self.settings.run_opts_for(tenant)
+        } else {
+            self.opts.clone()
+        }
+    }
+
     fn template(&self, tenant: TenantId, l: &Loaded) -> Template {
-        let budget = self.settings.trigger_budget();
+        let budget = self.settings.trigger_budget_for(tenant);
         Template {
             req: RunRequest {
                 tenant: tenant.0,
                 source: l.source.clone(),
                 version: l.version,
                 record: None,
-                max_attempts: self.opts.current().max_attempts,
+                max_attempts: self.opts_for(tenant).current().max_attempts,
                 lease_ms: 30_000.max(u64::try_from(budget.as_millis()).unwrap_or(30_000) + 5_000),
                 budget_ms: u64::try_from(budget.as_millis()).unwrap_or(30_000),
             },
@@ -705,7 +716,7 @@ impl JobHandler for StreamTrigger {
             side,
             gw,
             t.clone(),
-            env.opts.clone(),
+            env.opts_for(tenant),
             Arc::clone(&stats),
             def.partitions,
             Duration::from_millis(100),
@@ -767,7 +778,10 @@ impl JobHandler for QueueTrigger {
             "info",
             &format!(
                 "trigger on queue {} of vhost {} started (job {}, {} lanes)",
-                l.source.name, l.source.db_name, cx.job_id, env.opts.lanes
+                l.source.name,
+                l.source.db_name,
+                cx.job_id,
+                env.opts_for(tenant).lanes
             ),
         )
         .await;
@@ -778,11 +792,11 @@ impl JobHandler for QueueTrigger {
         });
         let stats = Arc::new(MsgStats::default());
         let stop = cx.cancel.child_token();
-        tracing::info!(%tenant, binding, queue = %l.source.name, lanes = env.opts.lanes, "trigger on a queue started");
+        tracing::info!(%tenant, binding, queue = %l.source.name, lanes = env.opts_for(tenant).lanes, "trigger on a queue started");
         let runner = msgrun::run_queue(
             gw,
             t.clone(),
-            env.opts.clone(),
+            env.opts_for(tenant),
             Arc::clone(&stats),
             stop.clone(),
         );

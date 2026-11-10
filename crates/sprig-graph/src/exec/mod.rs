@@ -22,6 +22,7 @@
 mod matcher;
 mod stream;
 mod write;
+pub(crate) use write::is_duplicate;
 
 pub use stream::{RowSink, VecSink, run_stream, streamable};
 

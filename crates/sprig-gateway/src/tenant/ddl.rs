@@ -47,6 +47,9 @@ pub struct GatewayDdl<'a> {
     ctl: MariaExecutor,
     /// `sprig_ctl`'s pool, to check stored programs' definers.
     ctl_pool: Option<mysql_async::Pool>,
+    /// The version string the session's persona reports: `VERSION()` in a
+    /// body becomes it (gaps row 53).
+    version: Option<String>,
 }
 
 impl std::fmt::Debug for GatewayDdl<'_> {
@@ -62,7 +65,16 @@ impl<'a> GatewayDdl<'a> {
             bs: Mutex::new(bs),
             ctl,
             ctl_pool: None,
+            version: None,
         }
+    }
+
+    /// `VERSION()` in views and stored programs gives `v`, the version the
+    /// session's persona reports (chapter 07 step 12; gaps row 53).
+    #[must_use]
+    pub fn reporting_version(mut self, v: String) -> Self {
+        self.version = Some(v);
+        self
     }
 
     /// Checks each stored program's recorded definer through `pool`
@@ -413,7 +425,12 @@ fn in_mode(sql: &str, mode: Option<&str>) -> String {
 /// `None` when there is nothing to change.
 /// `mode` is the `sql_mode` the body is created under: with `ORACLE`,
 /// `SQLERRM` is mapped too.
-fn names_in_body(stmt: &PhysicalDdl, lex: LexOptions, mode: Option<&str>) -> Option<PhysicalDdl> {
+fn names_in_body(
+    stmt: &PhysicalDdl,
+    lex: LexOptions,
+    mode: Option<&str>,
+    version: Option<&str>,
+) -> Option<PhysicalDdl> {
     let kind = match &stmt.effect {
         Effect::Create { kind, .. } | Effect::Alter { kind, .. } => *kind,
         _ => return None,
@@ -432,7 +449,7 @@ fn names_in_body(stmt: &PhysicalDdl, lex: LexOptions, mode: Option<&str>) -> Opt
         m.split(',')
             .any(|i| i.trim().eq_ignore_ascii_case("ORACLE"))
     });
-    let sql = sprig_sql::names::stored::substitute_with(&stmt.sql, &lex, oracle)?;
+    let sql = sprig_sql::names::stored::substitute_full(&stmt.sql, &lex, oracle, version)?;
     Some(PhysicalDdl {
         sql,
         ..stmt.clone()
@@ -489,7 +506,7 @@ fn not_sent(e: SprigError) -> SprigError {
 impl DdlExecutor for GatewayDdl<'_> {
     async fn execute(&self, stmt: &PhysicalDdl) -> Result<()> {
         let (mode, lex) = self.session_modes().await;
-        let sub = names_in_body(stmt, lex, mode.as_deref());
+        let sub = names_in_body(stmt, lex, mode.as_deref(), self.version.as_deref());
         let stmt = sub.as_ref().unwrap_or(stmt);
         if stored_program(&stmt.effect) {
             return self.stored_program(stmt, mode.as_deref()).await;
@@ -795,7 +812,7 @@ impl DdlExecutor for ShardedDdl<'_> {
             return self.inner.execute(stmt).await;
         };
         let (mode, lex) = self.inner.session_modes().await;
-        let sub = names_in_body(stmt, lex, mode.as_deref());
+        let sub = names_in_body(stmt, lex, mode.as_deref(), self.inner.version.as_deref());
         let stmt = sub.as_ref().unwrap_or(stmt);
         if stored_program(&stmt.effect) && !matches!(stmt.effect, Effect::Drop { .. }) {
             return self.stored_program_on(&pool, stmt, mode.as_deref()).await;
@@ -930,6 +947,7 @@ mod tests {
             ),
             lex,
             None,
+            None,
         )
         .unwrap();
         assert!(
@@ -944,6 +962,7 @@ mod tests {
             ),
             lex,
             None,
+            None,
         )
         .unwrap();
         assert!(p.sql.contains("WHERE `name` = DATABASE())"), "{}", p.sql);
@@ -955,6 +974,7 @@ mod tests {
                     create(ObjectKind::Table)
                 ),
                 lex,
+                None,
                 None
             )
             .is_none()
@@ -969,6 +989,7 @@ mod tests {
                     }
                 ),
                 lex,
+                None,
                 None
             )
             .is_none()
@@ -981,6 +1002,7 @@ mod tests {
                 create(ObjectKind::Function),
             ),
             lex,
+            None,
             None,
         )
         .unwrap();
@@ -995,6 +1017,7 @@ mod tests {
             &stmt(body, create(ObjectKind::Procedure)),
             lex,
             Some("PIPES_AS_CONCAT,ANSI_QUOTES,ORACLE"),
+            None,
         )
         .unwrap();
         assert!(
@@ -1003,7 +1026,7 @@ mod tests {
             "{}",
             o.sql
         );
-        assert!(names_in_body(&stmt(body, create(ObjectKind::Procedure)), lex, None).is_none());
+        assert!(names_in_body(&stmt(body, create(ObjectKind::Procedure)), lex, None, None).is_none());
     }
 
     #[test]

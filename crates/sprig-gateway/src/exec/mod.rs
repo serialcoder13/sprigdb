@@ -29,6 +29,8 @@ mod capture;
 mod compat_sink;
 mod dc;
 mod fence;
+// RL14 (r2harden): a mover's fence never reaches clients as 1146 or 1049.
+mod fence_retry;
 mod follow;
 pub mod relay;
 pub(crate) mod router;
@@ -983,26 +985,14 @@ impl SessionExec for PassSession {
         if let Some(r) = self.sprig_dc_set(cx, &req, out).await {
             return r;
         }
-        // Tenant sessions wait out a mover's hold and follow a move.
-        if let Err(e) = self.follow_tenant().await {
-            return Err(self.map_error(e));
-        }
-        // Chapter 25 (R2): writes of tenants homed here need the DC's
-        // permit, and so do their acknowledgements.
-        let gate = match self.dc_write_gate(&req).await {
-            Ok(g) => g,
-            Err(e) => return Err(self.map_error(e)),
-        };
-        self.count_traffic(cx, &req);
         // Chapter 50: acknowledgements held for this transaction learn how
         // it ended (the commit hook, after the request).
         let txn_word = queues::txn_word(&req);
-        let r = match gate {
-            Some(f) => {
-                let mut gated = crate::failover::GatedSink::new(out, f);
-                self.run_request(cx, req, &mut gated).await
-            }
-            None => self.run_request(cx, req, out).await,
+        // Holds, promotions (RL13), the DC's write gate (chapter 25), and
+        // a mover's fence met on the way (RL14): `fence_retry`.
+        let r = match self.run_followed(cx, req, out).await {
+            Ok(r) => r,
+            Err(e) => return Err(self.map_error(e)),
         };
         self.mq_after_request(u64::from(cx.session.id.0), txn_word, r.is_ok());
         // Chapter 42 (R9): cross-tenant publishes of the transaction go

@@ -154,6 +154,37 @@ impl GatewayLocator {
             .map(|m| m.role)
     }
 
+    /// RL14 (r2harden): a token of every map of `tenant` in the DC it is
+    /// followed in (the sum of their etcd revisions, so any hold, release,
+    /// cutover or split changes it), with that DC, and whether one of them
+    /// holds a range now. A statement that failed with 1146 or 1049 while
+    /// the token moved met a mover's fence, not a missing table.
+    #[must_use]
+    pub fn maps_token(&self, tenant: TenantId) -> (DcId, u64, bool) {
+        let dc = self.home_of(tenant);
+        let Ok(prefix) = Tier::Dc(dc.clone()).key(&format!("shardmaps/{tenant}/")) else {
+            return (dc, 0, false);
+        };
+        let (sum, held) = self.maps_of(&dc).with(|entries| {
+            let mut sum = 0u64;
+            let mut held = false;
+            for (k, kv) in entries.range(prefix.clone()..) {
+                if !k.starts_with(&prefix) {
+                    break;
+                }
+                sum = sum.wrapping_add(kv.mod_revision);
+                held |= Record::<ShardMap>::decode(&kv.value).is_ok_and(|m| {
+                    m.body
+                        .ranges
+                        .iter()
+                        .any(|r| r.state == sprig_catalog::placement::RangeState::Held)
+                });
+            }
+            (sum, held)
+        });
+        (dc, sum, held)
+    }
+
     /// The DC whose map this gateway follows for `tenant`: its home as last
     /// read, else this DC.
     #[must_use]

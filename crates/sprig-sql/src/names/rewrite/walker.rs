@@ -595,7 +595,15 @@ impl Walker<'_, '_> {
             name.to_owned()
         };
         let set = self.ctx.map.physical(&key, self.purpose)?;
-        let schema = set.single().ok_or_else(|| {
+        // Metadata lists one schema per table group; a name in a statement
+        // is the database's own (first) schema, and `grouped_table` moves
+        // a grouped table's to its group's.
+        let one = if self.purpose == Purpose::Metadata {
+            set.0.first().copied()
+        } else {
+            set.single()
+        };
+        let schema = one.ok_or_else(|| {
             NameError::Unsupported(format!(
                 "database '{key}' stands for several schemas in one statement"
             ))
@@ -609,6 +617,73 @@ impl Walker<'_, '_> {
             replacement: quote(&schema.to_string()),
         });
         Ok(Some(key))
+    }
+
+    /// Chapter 07 (R1): a metadata statement about one table (`SHOW CREATE
+    /// TABLE`, `SHOW COLUMNS`, `SHOW INDEX`, `DESCRIBE`) reads the table
+    /// where it is. The advisor moves a grouped table out of its
+    /// database's first shard into its group's schemas, so its name gets
+    /// the group's representative schema: the edit of its database part
+    /// (`db`, that part's range) changes, or a bare name is qualified.
+    fn grouped_table(&mut self, table_tok: usize, db: Option<std::ops::Range<usize>>) {
+        if self.no_subst() {
+            return;
+        }
+        let at = match &db {
+            Some(r) => match self.edits.iter().position(|e| e.range == *r) {
+                Some(i) => Some(i),
+                // A system schema or a name left alone.
+                None => return,
+            },
+            None => None,
+        };
+        let logical = match at {
+            Some(i) => match &self.edits[i].kind {
+                EditKind::Schema { logical, .. } => logical.clone(),
+                _ => return,
+            },
+            None => match &self.current {
+                Some(c) if self.ctx.lower_case_table_names => c.to_lowercase(),
+                Some(c) => c.clone(),
+                None => return,
+            },
+        };
+        let Some(dbid) = self.ctx.map.database(&logical).map(|d| d.id) else {
+            return;
+        };
+        let table = self.value(table_tok);
+        let Some(schema) = self.ctx.map.table_schema(dbid, &table) else {
+            return;
+        };
+        let replacement = quote(&schema.to_string());
+        if let Some(i) = at {
+            let e = &mut self.edits[i];
+            e.kind = EditKind::Schema { logical, schema };
+            e.replacement = replacement;
+        } else {
+            let start = self.t[table_tok].range().start;
+            let pos = self.edits.partition_point(|e| e.range.end <= start);
+            self.edits.insert(
+                pos,
+                Edit {
+                    range: start..start,
+                    kind: EditKind::Schema { logical, schema },
+                    replacement: format!("{replacement}."),
+                },
+            );
+        }
+    }
+
+    /// [`Self::grouped_table`] for the name `c` (one or two parts).
+    fn grouped_chain(&mut self, c: Option<Chain>) {
+        match c {
+            Some(c) if c.n == 1 && !c.star => self.grouped_table(c.parts[0], None),
+            Some(c) if c.n == 2 => {
+                let r = self.t[c.parts[0]].range();
+                self.grouped_table(c.parts[1], Some(r));
+            }
+            _ => {}
+        }
     }
 
     /// Fails for a reserved object name.
@@ -2423,8 +2498,12 @@ impl Walker<'_, '_> {
                 self.eat_if_not_exists();
                 self.database()?;
             } else if let Some(kind) = self.show_object_kind() {
+                let table = self.at(b"TABLE");
                 self.i += 1;
-                self.object(kind, false)?;
+                let c = self.object(kind, false)?;
+                if table {
+                    self.grouped_chain(c);
+                }
             }
             self.opaque();
             return Ok(StmtKind::Show);
@@ -2434,10 +2513,21 @@ impl Walker<'_, '_> {
             &[b"COLUMNS", b"FIELDS", b"INDEX", b"INDEXES", b"KEYS"],
         ) {
             self.i += 1;
+            let mut c = None;
             if self.eat(b"FROM") || self.eat(b"IN") {
-                self.object(ObjectKind::Table, false)?;
+                c = self.object(ObjectKind::Table, false)?;
             }
+            let before = self.edits.len();
             self.show_db_clauses()?;
+            // `SHOW COLUMNS FROM t FROM db`: the database's edit.
+            let from_db = self.edits[before..]
+                .iter()
+                .find(|e| matches!(e.kind, EditKind::Schema { .. }))
+                .map(|e| e.range.clone());
+            match (c, from_db) {
+                (Some(c), Some(r)) if c.n == 1 && !c.star => self.grouped_table(c.parts[0], Some(r)),
+                (c, _) => self.grouped_chain(c),
+            }
             return Ok(StmtKind::Show);
         }
         if self.kw_any(self.i, &[b"PROCEDURE", b"FUNCTION", b"PACKAGE"])
@@ -2501,7 +2591,8 @@ impl Walker<'_, '_> {
             || self.kw_any(self.i, OPTIONS)
             || self.at(b"FOR");
         if !stmt_next {
-            self.object(ObjectKind::Table, false)?;
+            let c = self.object(ObjectKind::Table, false)?;
+            self.grouped_chain(c);
             self.opaque();
             return Ok(StmtKind::Describe);
         }

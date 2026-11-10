@@ -26,6 +26,8 @@ use crate::route::ShardRoute;
 /// 1091, 1146, 1305, 1360), duplicate foreign key (1826).
 const ALREADY_APPLIED: &[u16] = &[
     1007, 1008, 1050, 1051, 1060, 1061, 1091, 1146, 1304, 1305, 1359, 1360, 1826,
+    // RL12: an event that exists already, or not at all (stream DDL).
+    1537, 1539,
 ];
 
 /// The target side of one job.
@@ -565,7 +567,17 @@ impl TargetIo for MysqlTarget {
                 format!("DDL on {}.{} during its copy-and-swap", d.schema, d.table),
             ));
         }
-        if self.swap.is_none() {
+        // RL12 (r2harden): triggers and events aren't created by the
+        // stream (they would fire on the applied rows, or run on the copy);
+        // the cutover creates them from the source, and a standby records
+        // them for its promotion. Drops still apply.
+        let program = super::sql::program_ddl(stmt);
+        if matches!(
+            program,
+            Some(super::sql::ProgramDdl::CreateTrigger | super::sql::ProgramDdl::CreateEvent)
+        ) {
+            tracing::info!(%db, "trigger or event DDL in the stream: created at the cutover, not now");
+        } else if self.swap.is_none() {
             let mut c = self.conn().await?;
             let runs: Vec<(String, String)> = match &self.route {
                 // DDL on a split or merged shard runs on each target, its
@@ -757,6 +769,13 @@ impl TargetIo for MysqlTarget {
                 None => triggers,
             };
             for q in triggers {
+                // RL12: an event of a split or merged group would run on
+                // every shard; only whole-tenant moves carry events.
+                if self.route.is_some()
+                    && super::sql::program_ddl(q) == Some(super::sql::ProgramDdl::CreateEvent)
+                {
+                    continue;
+                }
                 if let Err(e) = c.query_drop(q.as_str()).await {
                     match errno(&e) {
                         Some(1359) => {}
@@ -802,6 +821,31 @@ impl TargetIo for MysqlTarget {
                     .await
                     .map_err(|e| db_err("drop a trigger", &e))?;
             }
+            // RL12: events go back to disabled, as `prepare` made them.
+            let events: Vec<String> = c
+                .exec(
+                    "SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ? \
+                     AND STATUS = 'ENABLED'",
+                    (s.as_bytes().to_vec(),),
+                )
+                .await
+                .map_err(|e| db_err("list events", &e))?;
+            for n in events {
+                c.query_drop(format!("ALTER EVENT {} DISABLE", qualified(&s, &n)))
+                    .await
+                    .map_err(|e| db_err("disable an event", &e))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_cutover_statements(&self, stmts: &[String]) -> Result<()> {
+        let Some(tenant) = self.standby else {
+            return Ok(());
+        };
+        let mut c = self.conn().await?;
+        if super::standby::record_objects(&mut c, tenant, stmts).await? {
+            tracing::info!(%tenant, statements = stmts.len(), "standby's triggers and events recorded for its promotion");
         }
         Ok(())
     }

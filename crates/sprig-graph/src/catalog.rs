@@ -720,6 +720,8 @@ pub struct Tables {
     pub mirrors: String,
     /// Id counters.
     pub seq: String,
+    /// Uniqueness claims (decision G41), on the shard of each claim's hash.
+    pub claims: String,
 }
 
 impl Tables {
@@ -733,6 +735,7 @@ impl Tables {
             labels: q("gl"),
             mirrors: q("gm"),
             seq: q("gq"),
+            claims: q("gu"),
         }
     }
 
@@ -814,7 +817,24 @@ impl Tables {
 ) ENGINE=InnoDB",
                 self.mirrors
             ),
+            self.claims_ddl(),
         ]
+    }
+
+    /// `CREATE TABLE IF NOT EXISTS` for the uniqueness claims of one shard
+    /// (decision G41): a row per constraint and key, routed by the claim's
+    /// hash (`schema::claim_rk`), naming the element that holds the key.
+    #[must_use]
+    pub fn claims_ddl(&self) -> String {
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} (
+  idx INT UNSIGNED NOT NULL, k VARBINARY(600) NOT NULL,
+  owner BIGINT UNSIGNED NOT NULL, owner_rk BIGINT UNSIGNED NOT NULL,
+  _sprig_rk BIGINT UNSIGNED NULL INVISIBLE,
+  PRIMARY KEY (idx, k), KEY _sprig_rk (_sprig_rk)
+) ENGINE=InnoDB",
+            self.claims
+        )
     }
 
     /// The virtual column of property `k` of index `d`.
@@ -870,7 +890,7 @@ impl Tables {
             let t = format!("(CASE JSON_TYPE(JSON_EXTRACT(props, '$.\"{p}\"')) {cases} END)");
             let col = Self::index_column(d, k);
             parts.push(format!(
-                "ADD COLUMN IF NOT EXISTS `{col}` VARCHAR({max}) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin \
+                "ADD COLUMN IF NOT EXISTS `{col}` VARCHAR({max}) CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin \
                  AS (IF({cond}, IF(CHAR_LENGTH({t}) <= {max}, {t}, CONCAT('h', SHA2({t}, 256))), NULL)) VIRTUAL",
                 max = crate::schema::MAX_INLINE
             ));
@@ -906,8 +926,8 @@ impl Tables {
     #[must_use]
     pub fn drop_ddl(&self) -> String {
         format!(
-            "DROP TABLE IF EXISTS {}, {}, {}, {}, {}",
-            self.nodes, self.edges, self.labels, self.mirrors, self.seq
+            "DROP TABLE IF EXISTS {}, {}, {}, {}, {}, {}",
+            self.nodes, self.edges, self.labels, self.mirrors, self.seq, self.claims
         )
     }
 
@@ -915,8 +935,8 @@ impl Tables {
     #[must_use]
     pub fn shard_drop_ddl(&self) -> String {
         format!(
-            "DROP TABLE IF EXISTS {}, {}, {}, {}",
-            self.nodes, self.edges, self.labels, self.mirrors
+            "DROP TABLE IF EXISTS {}, {}, {}, {}, {}",
+            self.nodes, self.edges, self.labels, self.mirrors, self.claims
         )
     }
 }
@@ -1145,8 +1165,8 @@ mod tests {
         );
         let t = Tables::of("t1_d2_g3_s1", 901);
         assert!(t.nodes.ends_with("`__sprig_gn_901`"));
-        assert_eq!(t.create_ddl().len(), 6);
-        assert_eq!(t.shard_ddl().len(), 4);
+        assert_eq!(t.create_ddl().len(), 7);
+        assert_eq!(t.shard_ddl().len(), 5);
         assert!(t.mirrors.ends_with("`__sprig_gm_901`"));
     }
 }

@@ -525,11 +525,29 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
         .ok_or_else(|| MongoError::new(code::INTERNAL_ERROR, "no session"))?;
     // Retryable writes (chapter 30 step 7): the writes and their record
     // in one MariaDB transaction.
-    let r = match (&lsid, txn_number) {
-        (Some(l), Some(n)) if super::retry::applies(name, body) => {
-            super::retry::run(c, &mut s, name, body, &db, l, n).await
+    let mut tries = 0u64;
+    let r = loop {
+        let r = match (&lsid, txn_number) {
+            (Some(l), Some(n)) if super::retry::applies(name, body) => {
+                super::retry::run(c, &mut s, name, body, &db, l, n).await
+            }
+            _ => exec(c, &mut s, name, body, &db, lsid.as_deref()).await,
+        };
+        // Concurrent first writes to a new database: another session
+        // created it a moment ago, and this one's names may not show it
+        // yet (chapter 07's name map follows the catalog's watch).
+        match &r {
+            Err(e)
+                if e.code == code::NAMESPACE_NOT_FOUND
+                    && e.message.contains("Unknown database")
+                    && super::writes::is_write(name)
+                    && tries < 8 =>
+            {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(50 * tries)).await;
+            }
+            _ => break r,
         }
-        _ => exec(c, &mut s, name, body, &db, lsid.as_deref()).await,
     };
     c.sql = Some(s);
     r

@@ -972,8 +972,22 @@ impl PassSession {
         } else {
             text
         };
+        // Both ports: user-level locks per tenant (chapter 28, R4).
+        let scoped_locks;
+        let text: &Bytes = match self.tenant.as_deref().and_then(|ts| {
+            let p = sprig_sql::compat::locks::prefix(ts.tenant.0);
+            sprig_sql::compat::locks::rewrite(text, &lex, &p)
+        }) {
+            Some(t) => {
+                scoped_locks = Bytes::from(t);
+                &scoped_locks
+            }
+            None => text,
+        };
         let attr_owned = attr_pairs(attrs);
         let mut retried = false;
+        // Chapter 07 (R1): metadata of the tables the advisor grouped.
+        let grouped = self.grouped_tables().await;
         let planned = loop {
             let current = self.current_logical();
             let Some(ts) = self.tenant.as_deref() else {
@@ -991,7 +1005,15 @@ impl PassSession {
                     tenant: ts.tenant,
                     user: &ts.principal.user,
                 };
-                let mut rw = RewriteCtx::new(&*map, self.persona)
+                let with = grouped.as_deref().map(|g| sprig_sql::names::WithGroups {
+                    base: &*map,
+                    groups: g,
+                });
+                let names: &dyn NameMap = match &with {
+                    Some(w) => w,
+                    None => &*map,
+                };
+                let mut rw = RewriteCtx::new(names, self.persona)
                     .lex(lex)
                     .current_db(current.as_deref())
                     .account(AccountInfo {
@@ -1434,11 +1456,15 @@ impl PassSession {
             ))
         });
         self.tenant_bs(cx);
+        // Gaps row 53: `VERSION()` in a body gives this persona's version.
+        let version = self.settings.persona_version(self.persona);
         let Some(bs) = self.bs.as_mut() else {
             return Err(SprigError::internal("no backend session"));
         };
         let result = {
-            let exec = GatewayDdl::new(bs, ctl).checked_by(ctl_pool);
+            let exec = GatewayDdl::new(bs, ctl)
+                .checked_by(ctl_pool)
+                .reporting_version(version);
             match layout {
                 Some(layout) => {
                     let mut sharded = crate::tenant::ddl::ShardedDdl::new(
@@ -1875,13 +1901,30 @@ impl PassSession {
             Some(t) => Bytes::from(t),
             None => sql,
         };
+        // Both ports: user-level locks per tenant (chapter 28, R4).
+        let sql = match self.tenant.as_deref().and_then(|ts| {
+            let p = sprig_sql::compat::locks::prefix(ts.tenant.0);
+            sprig_sql::compat::locks::rewrite(&sql, &lex, &p)
+        }) {
+            Some(t) => Bytes::from(t),
+            None => sql,
+        };
+        let grouped = self.grouped_tables().await;
         let current = self.current_logical();
         let Some(ts) = self.tenant.as_deref() else {
             return Err(SprigError::internal("no tenant"));
         };
         let map = ts.map();
         let client_host = ts.principal.client_ip.to_string();
-        let mut rw = RewriteCtx::new(&*map, self.persona)
+        let with = grouped.as_deref().map(|g| sprig_sql::names::WithGroups {
+            base: &*map,
+            groups: g,
+        });
+        let names: &dyn NameMap = match &with {
+            Some(w) => w,
+            None => &*map,
+        };
+        let mut rw = RewriteCtx::new(names, self.persona)
             .lex(lex)
             .current_db(current.as_deref())
             .account(AccountInfo {

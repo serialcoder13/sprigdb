@@ -20,11 +20,13 @@ use sprig_catalog::{
     CatalogExtension, ExtState, Migration, SnapshotTx, TenantCatalog, VersionKind,
 };
 use sprig_common::ids::{ClusterId, DbId, DcId, GroupId, ObjectId, TenantId};
+use sprig_common::names::SchemaName;
 use sprig_common::{Result, SprigError};
 use sprig_meta::{MetaStore, Tier, TierView};
 use sprig_router::StaticTopology;
 use sprig_router::topology::catalog::{CatalogGroup, CatalogLookup, CatalogTable, Membership};
 use sprig_shard::{KeySpec, ShardMapCache};
+use sprig_sql::names::GroupedTables;
 
 /// One `table_groups` row the router reads.
 #[derive(Debug, Clone)]
@@ -362,9 +364,45 @@ pub(crate) struct TenantLayout {
     /// The catalog object of each table the router knows, by its default
     /// schema and name, lowercase (chapter 19's DDL path, R3).
     pub objects: HashMap<(String, String), u64>,
+    /// Chapter 07's metadata placement of the grouped tables, per cluster
+    /// a session runs metadata statements on (made at first use).
+    pub grouped: Mutex<HashMap<String, Arc<GroupedTables>>>,
 }
 
 impl TenantLayout {
+    /// Where metadata statements of a session on `cluster` read each
+    /// grouped table (chapter 07, "Physical names"): its group's lowest
+    /// shard on `cluster`, else its group's lowest shard; a reference
+    /// table's schema. Statements keep naming the database's own schema;
+    /// only `SHOW`, `DESCRIBE` and `information_schema` read these.
+    #[must_use]
+    pub(crate) fn grouped_tables(&self, cluster: &str) -> Arc<GroupedTables> {
+        let mut m = self.grouped.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(g) = m.get(cluster) {
+            return Arc::clone(g);
+        }
+        let mut g = GroupedTables::default();
+        for (_, e) in self.topo.entries() {
+            let pick = |local: bool| {
+                e.group
+                    .shards
+                    .iter()
+                    .filter(|s| !local || s.cluster == cluster)
+                    .min_by_key(|s| s.shard)
+            };
+            let Some(shard) = pick(true).or_else(|| pick(false)) else {
+                continue;
+            };
+            let Ok(schema) = shard.schema.parse::<SchemaName>() else {
+                continue;
+            };
+            g.add(DbId(e.group.db), &e.name, schema);
+        }
+        let g = Arc::new(g);
+        m.insert(cluster.to_owned(), Arc::clone(&g));
+        g
+    }
+
     /// Whether nothing is sharded or referenced.
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
@@ -647,6 +685,7 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
         missing,
         epochs,
         objects,
+        grouped: Mutex::new(HashMap::new()),
     }
 }
 

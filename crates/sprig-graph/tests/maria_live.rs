@@ -574,3 +574,199 @@ async fn four_shards_with_mirrors_agree_with_memory() {
     assert_eq!(edges, mirrors, "mirrors follow deletes");
     live.cleanup().await;
 }
+
+/// Round 4 (G32, decision G41): on a graph over four shard schemas, a
+/// uniqueness constraint holds across shards through the claim table:
+/// duplicates on other shards are refused, `MERGE` matches the holder,
+/// `SET` and `DELETE` release keys, a relationship constraint works the
+/// same way, and concurrent `MERGE`s on the same keys from separate
+/// transactions leave exactly one node per key.
+#[tokio::test]
+async fn four_shards_uniqueness_across_shards() {
+    use sprig_graph::ast::{Entity, IndexKind};
+    let Some(live) = setup("r8four_live4u", 4).await else {
+        eprintln!("skipped: SPRIG_TEST_MARIADB_SINGLE is not set");
+        return;
+    };
+    let label = live.dict.create(true, "U").await.expect("label");
+    let rtype = live.dict.create(false, "OWNS").await.expect("type");
+    let node_def = IndexDef {
+        id: 41,
+        name: "u_k".into(),
+        unique: true,
+        kind: IndexKind::Range,
+        entity: Entity::Node,
+        token: "U".into(),
+        token_id: label,
+        props: vec!["k".into()],
+        state: "online".into(),
+    };
+    let rel_def = IndexDef {
+        id: 42,
+        name: "owns_serial".into(),
+        unique: true,
+        kind: IndexKind::Range,
+        entity: Entity::Relationship,
+        token: "OWNS".into(),
+        token_id: rtype,
+        props: vec!["serial".into(), "kind".into()],
+        state: "online".into(),
+    };
+    let mut c = live.pool.get_conn().await.expect("conn");
+    for sh in &live.layout.shards {
+        for d in [&node_def, &rel_def] {
+            c.query_drop(sh.tables.index_ddl(d).expect("ddl"))
+                .await
+                .expect("alter");
+        }
+    }
+    drop(c);
+    live.indexes
+        .lock()
+        .expect("lock")
+        .extend([node_def.clone(), rel_def.clone()]);
+
+    // 40 keys, then each again: most second copies would land on another
+    // shard than the first (ids hash over four shards).
+    live.run("UNWIND range(1, 40) AS i CREATE (:U {k: i})").await;
+    let mut refused = 0;
+    let mut other_shard = 0;
+    for i in 1..=40 {
+        let q = format!("CREATE (n:U {{k: {i}.0}}) RETURN id(n)");
+        let e = live
+            .run_with(&q, &Budgets::default())
+            .await
+            .expect_err("duplicate across shards");
+        assert!(
+            matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1062, .. }),
+            "{q}: {e}"
+        );
+        assert!(e.message.contains("already exists with label `U`"), "{e}");
+        refused += 1;
+        // Where a new node would have gone: the next id's shard.
+        let o = live.run("CREATE (n:Tmp) WITH n, id(n) AS i DELETE n RETURN i").await;
+        let next: u64 = show(&o)[0].parse().expect("id");
+        let holder = live.run(&format!("MATCH (n:U {{k: {i}}}) RETURN id(n)")).await;
+        let h: u64 = show(&holder)[0].parse().expect("id");
+        if live.layout.index_of(sprig_graph::store::rk_of(next))
+            != live.layout.index_of(sprig_graph::store::rk_of(h))
+        {
+            other_shard += 1;
+        }
+    }
+    assert_eq!(refused, 40);
+    assert!(other_shard > 10, "only {other_shard} of 40 on another shard");
+    // MERGE on a held key matches the holder, wherever it is.
+    let o = live
+        .run("UNWIND range(1, 40) AS i MERGE (n:U {k: i}) ON MATCH SET n.seen = true RETURN count(*)")
+        .await;
+    assert_eq!(show(&o), ["40"]);
+    let o = live.run("MATCH (n:U) RETURN count(n), count(n.seen)").await;
+    assert_eq!(show(&o), ["40|40"]);
+    // SET moves a key: the old one is free, the new one is held.
+    live.run("MATCH (n:U {k: 1}) SET n.k = 1001").await;
+    live.run("CREATE (:U {k: 1})").await;
+    assert!(
+        live.run_with("CREATE (:U {k: 1001})", &Budgets::default())
+            .await
+            .is_err()
+    );
+    // Removing the label frees the key too; DELETE frees it.
+    live.run("MATCH (n:U {k: 2}) REMOVE n:U").await;
+    live.run("CREATE (:U {k: 2})").await;
+    live.run("MATCH (n:U {k: 3}) DELETE n").await;
+    live.run("CREATE (:U {k: 3})").await;
+    assert!(
+        live.run_with("CREATE (:U {k: 3})", &Budgets::default())
+            .await
+            .is_err()
+    );
+    // A node without the property, or with another type, claims nothing.
+    live.run("CREATE (:U), (:U), (:U {k: '3'})").await;
+    // Relationship constraints over two properties.
+    live.run("MATCH (a:U {k: 4}), (b:U {k: 5}) CREATE (a)-[:OWNS {serial: 7, kind: 'x'}]->(b)")
+        .await;
+    for (a, b) in [(6, 7), (8, 9), (10, 11)] {
+        let q = format!(
+            "MATCH (a:U {{k: {a}}}), (b:U {{k: {b}}}) CREATE (a)-[:OWNS {{serial: 7, kind: 'x'}}]->(b)"
+        );
+        assert!(live.run_with(&q, &Budgets::default()).await.is_err(), "{q}");
+    }
+    live.run("MATCH (a:U {k: 6}), (b:U {k: 7}) CREATE (a)-[:OWNS {serial: 7, kind: 'y'}]->(b)")
+        .await;
+    live.run("MATCH ()-[r:OWNS {kind: 'x'}]->() SET r.serial = 8").await;
+    live.run("MATCH (a:U {k: 8}), (b:U {k: 9}) CREATE (a)-[:OWNS {serial: 7, kind: 'x'}]->(b)")
+        .await;
+    live.run("MATCH ()-[r:OWNS {serial: 8}]->() DELETE r").await;
+    live.run("MATCH (a:U {k: 10}), (b:U {k: 11}) CREATE (a)-[:OWNS {serial: 8, kind: 'x'}]->(b)")
+        .await;
+    let o = live
+        .run("MATCH ()-[r:OWNS]->() RETURN r.serial, r.kind ORDER BY r.serial, r.kind")
+        .await;
+    assert_eq!(show(&o), ["7|x", "7|y", "8|x"]);
+
+    // Concurrent MERGEs: 8 writers, each its own transaction, MERGE the
+    // same 25 new keys in different orders.
+    let live = Arc::new(live);
+    let mut tasks = Vec::new();
+    for w in 0..8u64 {
+        let live = Arc::clone(&live);
+        tasks.push(tokio::spawn(async move {
+            let mut ok = 0;
+            for j in 0..25u64 {
+                let k = 500 + (j * 7 + w * 3) % 25;
+                let q = format!("MERGE (n:U {{k: {k}}}) ON CREATE SET n.by = {w} RETURN n.k");
+                for _ in 0..20 {
+                    match live.run_with(&q, &Budgets::default()).await {
+                        Ok(_) => {
+                            ok += 1;
+                            break;
+                        }
+                        // Deadlocks and lock waits are retryable.
+                        Err(e)
+                            if matches!(
+                                e.kind,
+                                sprig_common::ErrorKind::Backend {
+                                    errno: 1213 | 1205,
+                                    ..
+                                }
+                            ) => {}
+                        Err(e) => panic!("{q}: {e}"),
+                    }
+                }
+            }
+            ok
+        }));
+    }
+    let mut merged = 0;
+    for t in tasks {
+        merged += t.await.expect("task");
+    }
+    assert_eq!(merged, 8 * 25);
+    let o = live
+        .run("MATCH (n:U) WHERE n.k >= 500 AND n.k < 525 RETURN count(n), count(DISTINCT n.k)")
+        .await;
+    assert_eq!(show(&o), ["25|25"]);
+    // Every claim names a live holder with that key.
+    let mut c = live.pool.get_conn().await.expect("conn");
+    let mut claims = 0u64;
+    for sh in &live.layout.shards {
+        let n: Option<u64> = c
+            .query_first(format!("SELECT COUNT(*) FROM {} WHERE idx = 41", sh.tables.claims))
+            .await
+            .expect("claims");
+        claims += n.unwrap_or(0);
+    }
+    drop(c);
+    let o = live
+        .run("MATCH (n:U) WHERE n.k IS NOT NULL RETURN count(n)")
+        .await;
+    assert_eq!(show(&o), [claims.to_string()]);
+    eprintln!(
+        "uniqueness across 4 shards: {refused} duplicates refused ({other_shard} on another shard), {merged} concurrent MERGEs, {claims} claims"
+    );
+    match Arc::try_unwrap(live) {
+        Ok(l) => l.cleanup().await,
+        Err(_) => panic!("live still shared"),
+    }
+}

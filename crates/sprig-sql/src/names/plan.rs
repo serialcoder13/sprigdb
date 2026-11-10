@@ -503,8 +503,22 @@ fn plan_show(
                     .to_owned(),
             });
         }
+        // 3306: MySQL's engines (gaps row 48; chapter 28, R4).
+        ShowKind::Other
+            if persona == Persona::MySql84 && crate::compat::schema::is_show_engines(&text) =>
+        {
+            forward(
+                crate::compat::schema::show_engines_sql(&|v| sql_string(v, nbe)),
+                ResultMapper::scrub(),
+            )
+        }
         ShowKind::Grants | ShowKind::Other => forward(text, ResultMapper::scrub()),
         kind => {
+            // R1: a database whose tables the advisor grouped lists them
+            // from every group's schema (chapter 07, `grouped`).
+            if let Some(a) = super::grouped::listing(&info, &text, tokens, current, ctx)? {
+                return Ok((info, a));
+            }
             if kind == ShowKind::Tables
                 && let Some(f) = info.filter.clone()
             {

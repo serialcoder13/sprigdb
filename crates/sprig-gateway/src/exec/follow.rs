@@ -60,6 +60,17 @@ fn held_too_long() -> SprigError {
     )
 }
 
+/// 1205 for a statement held past [`PROMOTION_HOLD`] (RL13): the tenant's
+/// new home is still catching up; nothing was sent to it.
+fn promotion_held_too_long() -> SprigError {
+    SprigError::standard(
+        1205,
+        *b"HY000",
+        "Lock wait timeout exceeded; try restarting transaction (the tenant's failover to \
+         another data center is still catching its new home up)",
+    )
+}
+
 impl PassSession {
     /// Waits out a hold and follows a move; see the module docs.
     pub(super) async fn follow_tenant(&mut self) -> Result<()> {

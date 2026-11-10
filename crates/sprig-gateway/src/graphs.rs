@@ -226,10 +226,16 @@ impl GatewayGraphs {
                 .map_err(|e| SprigError::internal(format!("cluster id {}: {e}", sh.cluster)))?;
             let pool = self.pool(&cluster).await?;
             let mut c = pool.get_conn().await.map_err(backend_error)?;
-            match c
+            // With the uniqueness claim table (decision G41), which graphs
+            // made before round 4 lack.
+            let r = match c
                 .query_drop(sprig_catalog::ddl::dtx_table_sql(&sh.schema))
                 .await
             {
+                Ok(()) => c.query_drop(sh.tables.claims_ddl()).await,
+                Err(e) => Err(e),
+            };
+            match r {
                 Ok(()) => {
                     self.dtx_ready
                         .lock()
@@ -1395,6 +1401,12 @@ impl GatewayGraphs {
             }
             ch.commit().await?;
             self.on_shards(g, |t| Ok(t.index_drop_ddl(&d))).await?;
+            if d.unique && g.shards.group != 0 {
+                self.on_shards(g, |t| {
+                    Ok(format!("DELETE FROM {} WHERE idx = {}", t.claims, d.id))
+                })
+                .await?;
+            }
             tracing::info!(tenant = g.tenant.0, graph = g.graph_id, index = %d.name, "graph index dropped");
             return Ok(vec![(
                 if d.unique {
@@ -1437,7 +1449,10 @@ impl GatewayGraphs {
             }
         };
         ch.commit().await?;
-        let altered = self.on_shards(g, |t| t.index_ddl(&d)).await;
+        let mut altered = self.on_shards(g, |t| t.index_ddl(&d)).await;
+        if altered.is_ok() && d.unique && g.shards.group != 0 {
+            altered = self.backfill_claims(g, &d).await;
+        }
         let mut ch = self
             .svc
             .catalog
@@ -1459,6 +1474,13 @@ impl GatewayGraphs {
         ch.commit().await?;
         if let Err(e) = altered {
             let _ = self.on_shards(g, |t| Ok(t.index_drop_ddl(&d))).await;
+            if d.unique && g.shards.group != 0 {
+                let _ = self
+                    .on_shards(g, |t| {
+                        Ok(format!("DELETE FROM {} WHERE idx = {}", t.claims, d.id))
+                    })
+                    .await;
+            }
             return Err(match e.kind {
                 sprig_common::ErrorKind::Backend { errno: 1062, .. } => neo_schema(
                     "ConstraintCreationFailed",
@@ -1480,6 +1502,169 @@ impl GatewayGraphs {
             },
             1,
         )])
+    }
+}
+
+impl GatewayGraphs {
+    /// Claims every existing key of new constraint `d` (decision G41),
+    /// after its `ALTER TABLE` and while writers already claim (the
+    /// catalog says `building`): each shard's elements with the property
+    /// columns set, in pages of 1,000 ids, as autocommit inserts on the
+    /// claims' shards. A key held by another live element with the same
+    /// key is a duplicate across shards (1062).
+    ///
+    /// # Errors
+    /// 1062 naming the two elements; backend errors.
+    async fn backfill_claims(&self, g: &GraphRef, d: &IndexDef) -> Result<()> {
+        use sprig_graph::schema::{claim_key, claim_rk};
+        let layout = &g.shards;
+        let mut conns: HashMap<String, mysql_async::Conn> = HashMap::new();
+        async fn conn<'a>(
+            me: &GatewayGraphs,
+            conns: &'a mut HashMap<String, mysql_async::Conn>,
+            cluster: &str,
+        ) -> Result<&'a mut mysql_async::Conn> {
+            if !conns.contains_key(cluster) {
+                let id = ClusterId::new(cluster)
+                    .map_err(|e| SprigError::internal(format!("cluster id {cluster}: {e}")))?;
+                let c = me
+                    .pool(&id)
+                    .await?
+                    .get_conn()
+                    .await
+                    .map_err(backend_error)?;
+                conns.insert(cluster.to_owned(), c);
+            }
+            conns
+                .get_mut(cluster)
+                .ok_or_else(|| SprigError::internal("claim backfill connection"))
+        }
+        let col = Tables::index_column(d, 0);
+        let node = d.entity == Entity::Node;
+        let mut claimed = 0u64;
+        for sh in &layout.shards {
+            let mut after = 0u64;
+            loop {
+                let sql = if node {
+                    format!(
+                        "SELECT id, _sprig_rk, labels, props FROM {} WHERE id > {after} \
+                         AND `{col}` IS NOT NULL ORDER BY id LIMIT 1000",
+                        sh.tables.nodes
+                    )
+                } else {
+                    format!(
+                        "SELECT id, _sprig_rk, CAST(type AS CHAR), props FROM {} WHERE id > {after} \
+                         AND `{col}` IS NOT NULL ORDER BY id LIMIT 1000",
+                        sh.tables.edges
+                    )
+                };
+                let rows: Vec<(u64, u64, String, String)> = conn(self, &mut conns, &sh.cluster)
+                    .await?
+                    .query(sql)
+                    .await
+                    .map_err(backend_error)?;
+                let Some(last) = rows.last() else { break };
+                after = last.0;
+                for (id, rk, tok, props) in rows {
+                    let props: serde_json::Value =
+                        serde_json::from_str(&props).unwrap_or(serde_json::Value::Null);
+                    let has = if node {
+                        serde_json::from_str::<Vec<u32>>(&tok)
+                            .unwrap_or_default()
+                            .contains(&d.token_id)
+                    } else {
+                        tok.parse::<u32>().ok() == Some(d.token_id)
+                    };
+                    let Some(key) = has.then(|| claim_key(d, &props)).flatten() else {
+                        continue;
+                    };
+                    let h = claim_rk(d.id, &key);
+                    let at = &layout.shards[layout.index_of(h)];
+                    let c = conn(self, &mut conns, &at.cluster).await?;
+                    c.exec_drop(
+                        format!(
+                            "INSERT INTO {} (idx, k, owner, owner_rk, _sprig_rk) VALUES (?, ?, ?, ?, ?) \
+                             ON DUPLICATE KEY UPDATE owner = owner",
+                            at.tables.claims
+                        ),
+                        (d.id, key.clone(), id, rk, h),
+                    )
+                    .await
+                    .map_err(backend_error)?;
+                    let holder: Option<(u64, u64)> = c
+                        .exec_first(
+                            format!(
+                                "SELECT owner, owner_rk FROM {} WHERE idx = ? AND k = ?",
+                                at.tables.claims
+                            ),
+                            (d.id, key.clone()),
+                        )
+                        .await
+                        .map_err(backend_error)?;
+                    claimed += 1;
+                    let Some((o, ork)) = holder.filter(|(o, _)| *o != id) else {
+                        continue;
+                    };
+                    // Another element holds the key: a duplicate if it is
+                    // live with the same key, else an orphan to take over.
+                    let os = &layout.shards[layout.index_of(ork)];
+                    let other: Option<(String, String)> = if node {
+                        conn(self, &mut conns, &os.cluster)
+                            .await?
+                            .query_first(format!(
+                                "SELECT CAST(labels AS CHAR), props FROM {} WHERE id = {o}",
+                                os.tables.nodes
+                            ))
+                            .await
+                            .map_err(backend_error)?
+                    } else {
+                        conn(self, &mut conns, &os.cluster)
+                            .await?
+                            .query_first(format!(
+                                "SELECT CAST(type AS CHAR), props FROM {} WHERE id = {o}",
+                                os.tables.edges
+                            ))
+                            .await
+                            .map_err(backend_error)?
+                    };
+                    let live = other.is_some_and(|(t, p)| {
+                        let p: serde_json::Value =
+                            serde_json::from_str(&p).unwrap_or(serde_json::Value::Null);
+                        let has = if node {
+                            serde_json::from_str::<Vec<u32>>(&t)
+                                .unwrap_or_default()
+                                .contains(&d.token_id)
+                        } else {
+                            t.parse::<u32>().ok() == Some(d.token_id)
+                        };
+                        has && claim_key(d, &p).as_deref() == Some(key.as_slice())
+                    });
+                    if live {
+                        return Err(SprigError::backend(
+                            1062,
+                            *b"23000",
+                            format!(
+                                "{}({id}) and {}({o}) have the same key",
+                                if node { "Node" } else { "Relationship" },
+                                if node { "Node" } else { "Relationship" }
+                            ),
+                        ));
+                    }
+                    let c = conn(self, &mut conns, &at.cluster).await?;
+                    c.exec_drop(
+                        format!(
+                            "UPDATE {} SET owner = ?, owner_rk = ? WHERE idx = ? AND k = ? AND owner = ?",
+                            at.tables.claims
+                        ),
+                        (id, rk, d.id, key, o),
+                    )
+                    .await
+                    .map_err(backend_error)?;
+                }
+            }
+        }
+        tracing::info!(tenant = g.tenant.0, graph = g.graph_id, index = %d.name, claimed, "uniqueness claims back-filled");
+        Ok(())
     }
 }
 

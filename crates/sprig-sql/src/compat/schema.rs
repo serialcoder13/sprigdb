@@ -413,6 +413,19 @@ fn keywords_json() -> String {
     s
 }
 
+/// MySQL 8.4's collation names as an `IN` list (see
+/// [`collation::MYSQL84_NAMES`]).
+fn mysql_collation_list(lit: Lit<'_>) -> String {
+    let mut s = String::with_capacity(collation::MYSQL84_NAMES.len() * 24);
+    for (i, n) in collation::MYSQL84_NAMES.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&lit(n));
+    }
+    s
+}
+
 /// A table the persona answers itself, as the SQL of a derived table
 /// (without parentheses or alias); `None` when the backend's table serves.
 #[must_use]
@@ -437,8 +450,7 @@ pub fn local_view(table: &str, persona: Persona, lit: Lit<'_>) -> Option<String>
              IF(`CHARACTER_SET_NAME` = {mb4}, IF(`COLLATION_NAME` = {def}, {yes}, {empty}), \
              `IS_DEFAULT`) AS `IS_DEFAULT`, `IS_COMPILED`, `SORTLEN`, \
              IF(`COLLATION_NAME` LIKE {o900}, {nopad}, {pad}) AS `PAD_ATTRIBUTE` \
-             FROM information_schema.COLLATIONS WHERE `COLLATION_NAME` NOT LIKE {uca} \
-             AND `COLLATION_NAME` NOT LIKE {nopads}",
+             FROM information_schema.COLLATIONS WHERE `COLLATION_NAME` IN ({names})",
             mb4 = lit("utf8mb4"),
             def = lit(collation::MYSQL_DEFAULT),
             yes = lit("Yes"),
@@ -446,8 +458,7 @@ pub fn local_view(table: &str, persona: Persona, lit: Lit<'_>) -> Option<String>
             o900 = lit("%0900%"),
             nopad = lit("NO PAD"),
             pad = lit("PAD SPACE"),
-            uca = lit("%uca1400%"),
-            nopads = lit("%nopad%"),
+            names = mysql_collation_list(lit),
         )),
         ("CHARACTER_SETS", Persona::MySql84) => Some(format!(
             "SELECT `CHARACTER_SET_NAME`, IF(`CHARACTER_SET_NAME` = {}, {}, \
@@ -459,9 +470,8 @@ pub fn local_view(table: &str, persona: Persona, lit: Lit<'_>) -> Option<String>
         ("COLLATION_CHARACTER_SET_APPLICABILITY", Persona::MySql84) => Some(format!(
             "SELECT `COLLATION_NAME`, `CHARACTER_SET_NAME` FROM \
              information_schema.COLLATION_CHARACTER_SET_APPLICABILITY \
-             WHERE `COLLATION_NAME` NOT LIKE {} AND `COLLATION_NAME` NOT LIKE {}",
-            lit("%uca1400%"),
-            lit("%nopad%")
+             WHERE `COLLATION_NAME` IN ({})",
+            mysql_collation_list(lit)
         )),
         _ => None,
     }
@@ -560,6 +570,79 @@ pub fn show_index_sql(schema: &str, table: &str, filter: Option<&[u8]>, lit: Lit
         }
         None => inner.into_bytes(),
     }
+}
+
+/// MySQL 8.4's `SHOW ENGINES` rows, in its order: name, comment, and
+/// `Transactions`, `XA`, `Savepoints` (`None` where MySQL prints `NULL`).
+/// Captured from MySQL 8.4.11 on 10 November 2026.
+const MYSQL_ENGINES: &[(&str, &str, Option<[&str; 3]>)] = &[
+    ("ndbcluster", "Clustered, fault-tolerant tables", None),
+    ("MEMORY", "Hash based, stored in memory, useful for temporary tables", Some(["NO", "NO", "NO"])),
+    ("InnoDB", "Supports transactions, row-level locking, and foreign keys", Some(["YES", "YES", "YES"])),
+    ("PERFORMANCE_SCHEMA", "Performance Schema", Some(["NO", "NO", "NO"])),
+    ("MyISAM", "MyISAM storage engine", Some(["NO", "NO", "NO"])),
+    ("FEDERATED", "Federated MySQL storage engine", None),
+    ("ndbinfo", "MySQL Cluster system information storage engine", None),
+    ("MRG_MYISAM", "Collection of identical MyISAM tables", Some(["NO", "NO", "NO"])),
+    ("BLACKHOLE", "/dev/null storage engine (anything you write to it disappears)", Some(["NO", "NO", "NO"])),
+    ("CSV", "CSV storage engine", Some(["NO", "NO", "NO"])),
+    ("ARCHIVE", "Archive storage engine", Some(["NO", "NO", "NO"])),
+];
+
+/// Whether `text` is `SHOW [STORAGE] ENGINES` (MySQL takes no filter).
+#[must_use]
+pub fn is_show_engines(text: &[u8]) -> bool {
+    let words: Vec<&[u8]> = text
+        .split(|c: &u8| c.is_ascii_whitespace() || *c == b';')
+        .filter(|w| !w.is_empty())
+        .collect();
+    match words.as_slice() {
+        [show, engines] => show.eq_ignore_ascii_case(b"SHOW") && engines.eq_ignore_ascii_case(b"ENGINES"),
+        [show, storage, engines] => {
+            show.eq_ignore_ascii_case(b"SHOW")
+                && storage.eq_ignore_ascii_case(b"STORAGE")
+                && engines.eq_ignore_ascii_case(b"ENGINES")
+        }
+        _ => false,
+    }
+}
+
+/// `SHOW ENGINES` on 3306 (gaps row 48): MySQL 8.4's engines, names and
+/// comments, in its order, with `Support` from the backend's own
+/// `ENGINES` table: an engine MariaDB doesn't have reads `NO` (and `NULL`
+/// for the three capability columns, as MySQL shows a missing one), so
+/// a client never picks an engine `CREATE TABLE` would refuse.
+/// MariaDB-only engines (`Aria`, `SEQUENCE`) aren't listed.
+#[must_use]
+pub fn show_engines_sql(lit: Lit<'_>) -> Vec<u8> {
+    let null = "CAST(NULL AS CHAR)";
+    let mut rows = String::new();
+    for (i, (name, comment, caps)) in MYSQL_ENGINES.iter().enumerate() {
+        if i > 0 {
+            rows.push_str(" UNION ALL ");
+        }
+        let [t, x, s] = match caps {
+            Some(c) => c.map(|v| lit(v)),
+            None => [null.to_owned(), null.to_owned(), null.to_owned()],
+        };
+        rows.push_str(&format!(
+            "SELECT {i} AS `n`, {} AS `e`, {} AS `c`, {t} AS `t`, {x} AS `x`, {s} AS `s`",
+            lit(name),
+            lit(comment)
+        ));
+    }
+    format!(
+        "SELECT m.`e` AS `Engine`, IFNULL(b.`SUPPORT`, {no}) AS `Support`, m.`c` AS `Comment`, \
+         IF(b.`SUPPORT` IN ({yes}, {default}), m.`t`, NULL) AS `Transactions`, \
+         IF(b.`SUPPORT` IN ({yes}, {default}), m.`x`, NULL) AS `XA`, \
+         IF(b.`SUPPORT` IN ({yes}, {default}), m.`s`, NULL) AS `Savepoints` \
+         FROM ({rows}) AS m LEFT JOIN information_schema.ENGINES AS b ON b.`ENGINE` = m.`e` \
+         ORDER BY m.`n`",
+        no = lit("NO"),
+        yes = lit("YES"),
+        default = lit("DEFAULT"),
+    )
+    .into_bytes()
 }
 
 /// `SHOW INDEX` on 3306 rewritten over `STATISTICS` (see

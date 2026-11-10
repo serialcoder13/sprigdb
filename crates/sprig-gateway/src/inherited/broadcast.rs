@@ -24,7 +24,16 @@
 //!     x-sprig-origin-tenant = P, x-sprig-broadcast = the id
 //!   every 500 members: next_tenant_id and delivered saved (resumable);
 //!   paced at inherit.broadcast_rate deliveries a second
-//!   then 'delivered'; rows past inherit.broadcast_retention_hours go
+//!   a member whose delivery fails, or that still waits for an earlier
+//!   broadcast of D, gets a row in D's retry list __sprig_ibr_<D> (same
+//!   schema, saved with the progress); then 'delivered'; rows past
+//!   inherit.broadcast_retention_hours go once no retry names them
+//! retry(D):  after each fan-out pass, one gateway at a time (GET_LOCK):
+//!   per member, its rows in broadcast order, from the first one due; each
+//!   delivered (the id makes a repeat a no-op) and removed, or, on failure,
+//!   its next try put off (1 s doubling to 5 min) and the member's later
+//!   rows left waiting behind it: exactly once and in order per member; a
+//!   member deleted or out of the directory has its rows removed
 //! replay:  with inherit.broadcast_replay = on, a member's new instance gets
 //!   the broadcasts still in the log
 //! ```
@@ -113,6 +122,43 @@ pub fn ddl(schema: &str, def: DefKey) -> String {
     )
 }
 
+/// The retry list's table of definition `def` (next to the log).
+#[must_use]
+pub fn retry_table(def: DefKey) -> String {
+    format!("__sprig_ibr_{}", def.object)
+}
+
+/// The retry list's DDL: one row per (member, broadcast) not delivered yet.
+#[must_use]
+pub fn retry_ddl(schema: &str, def: DefKey) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} (
+  tenant_id  BIGINT UNSIGNED NOT NULL,
+  bid        BINARY(16) NOT NULL,
+  attempts   INT UNSIGNED NOT NULL DEFAULT 0,
+  next_ms    BIGINT UNSIGNED NOT NULL,
+  error      VARCHAR(1024) NULL,
+  PRIMARY KEY (tenant_id, bid),
+  KEY by_bid (bid)
+) ENGINE=InnoDB",
+        quote(schema),
+        quote(&retry_table(def))
+    )
+}
+
+/// First retry delay of a failed delivery; it doubles per attempt.
+const RETRY_FIRST_MS: u64 = 1_000;
+/// Longest retry delay.
+const RETRY_MAX_MS: u64 = 300_000;
+
+/// The delay before attempt `attempts + 1` of a delivery that failed
+/// `attempts` times (1 s, 2 s, 4 s, ... 5 min).
+#[must_use]
+pub fn retry_delay_ms(attempts: u32) -> u64 {
+    let shift = attempts.saturating_sub(1).min(20);
+    RETRY_FIRST_MS.saturating_mul(1 << shift).min(RETRY_MAX_MS)
+}
+
 /// `inherit-bcast/<def>`: a definition with a broadcast log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogIndex {
@@ -152,6 +198,38 @@ fn made() -> &'static Mutex<HashSet<DefKey>> {
     M.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+fn retry_made() -> &'static Mutex<HashSet<DefKey>> {
+    static M: OnceLock<Mutex<HashSet<DefKey>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// `def`'s retry list, made once per process (logs made before the list
+/// existed get it at their next fan-out).
+async fn ensure_retry(pool: &mysql_async::Pool, schema: &str, def: DefKey) -> Result<()> {
+    if retry_made()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&def)
+    {
+        return Ok(());
+    }
+    let mut c = pool
+        .get_conn()
+        .await
+        .map_err(sprig_streams::maria::map_err)?;
+    match c.query_drop(retry_ddl(schema, def)).await {
+        Ok(()) => {}
+        // The database is gone: nothing to fan out.
+        Err(mysql_async::Error::Server(e)) if e.code == 1049 => return Ok(()),
+        Err(e) => return Err(sprig_streams::maria::map_err(e)),
+    }
+    retry_made()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(def);
+    Ok(())
+}
+
 /// `def`'s log, made and listed once per process.
 async fn ensure_log(svc: &Arc<TenantServices>, def: &Definition) -> Result<(ClusterId, String)> {
     let (cluster, schema) = place(svc, def).await?;
@@ -168,6 +246,9 @@ async fn ensure_log(svc: &Arc<TenantServices>, def: &Definition) -> Result<(Clus
         .await
         .map_err(sprig_streams::maria::map_err)?;
     c.query_drop(ddl(&schema, def.key()))
+        .await
+        .map_err(sprig_streams::maria::map_err)?;
+    c.query_drop(retry_ddl(&schema, def.key()))
         .await
         .map_err(sprig_streams::maria::map_err)?;
     let store = svc.locator.dc_store();
@@ -655,6 +736,8 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
         Some(&acat.settings),
     );
     let tbl = format!("{}.{}", quote(schema), quote(&table(def_key)));
+    let rtbl = format!("{}.{}", quote(schema), quote(&retry_table(def_key)));
+    ensure_retry(&pool, schema, def_key).await?;
     let mut finished = 0;
     loop {
         let mut c = pool
@@ -718,17 +801,51 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
         let batch: Vec<TenantId> = todo.iter().take(STEP).copied().collect();
         let started = Instant::now();
         let (mut delivered, mut skipped) = (0u64, 0u64);
+        // Members still waiting for an earlier broadcast of this
+        // definition: this one waits behind it (order per member).
+        let waiting: HashSet<u64> = tx
+            .query::<u64, _>(format!("SELECT DISTINCT tenant_id FROM {rtbl}"))
+            .await
+            .map_err(sprig_streams::maria::map_err)?
+            .into_iter()
+            .collect();
+        let now = sprig_inherit::msg::store::now_ms();
+        let mut later: Vec<(u64, u32, u64, String)> = Vec::new();
         for t in &batch {
+            if waiting.contains(&t.0) {
+                later.push((t.0, 0, now, "waits for an earlier broadcast".to_owned()));
+                continue;
+            }
             match deliver(svc, &def, *t, &b, b.form.with_instance).await {
                 Ok(true) => delivered += 1,
                 Ok(false) => skipped += 1,
                 Err(e) => {
-                    skipped += 1;
                     metrics::counter!("sprig_inherit_broadcast_deliveries_total", "result" => "failed")
                         .increment(1);
-                    tracing::warn!(def = %def_key, tenant = %t, broadcast = %id_text(&b.bid), error = %e, "broadcast not delivered to a member; skipped");
+                    tracing::warn!(def = %def_key, tenant = %t, broadcast = %id_text(&b.bid), error = %e, "broadcast not delivered to a member; retried later");
+                    later.push((t.0, 1, now + retry_delay_ms(1), clip(&e.to_string())));
                 }
             }
+        }
+        for chunk in later.chunks(200) {
+            let values = vec!["(?, ?, ?, ?, ?)"; chunk.len()].join(", ");
+            let mut params: Vec<mysql_async::Value> = Vec::with_capacity(chunk.len() * 5);
+            for (t, a, next, err) in chunk {
+                params.push((*t).into());
+                params.push(b.bid.clone().into());
+                params.push((*a).into());
+                params.push((*next).into());
+                params.push(err.clone().into());
+            }
+            tx.exec_drop(
+                format!(
+                    "INSERT IGNORE INTO {rtbl} (tenant_id, bid, attempts, next_ms, error) VALUES \
+                     {values}"
+                ),
+                params,
+            )
+            .await
+            .map_err(sprig_streams::maria::map_err)?;
         }
         // Pace: inherit.broadcast_rate deliveries a second.
         let want = Duration::from_millis(batch.len() as u64 * 1000 / rate);
@@ -762,6 +879,10 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
             tracing::info!(def = %def_key, broadcast = %id_text(&b.bid), delivered = b.delivered + delivered, skipped = b.skipped + skipped, "broadcast delivered");
         }
     }
+    // Failed deliveries, from the saved retry list.
+    if let Err(e) = retry_pass(svc, &def, &pool, &tbl, &rtbl).await {
+        tracing::debug!(def = %def_key, error = %e, "broadcast retry pass");
+    }
     // Retention.
     let hours = svc.settings.get(
         &sprig_inherit::msg::settings::BROADCAST_RETENTION_HOURS,
@@ -774,11 +895,172 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
         .map_err(sprig_streams::maria::map_err)?;
     let _ = c
         .exec_drop(
-            format!("DELETE FROM {tbl} WHERE state <> 'fanning_out' AND committed_ms < ?"),
+            format!(
+                "DELETE FROM {tbl} WHERE state <> 'fanning_out' AND committed_ms < ? AND bid NOT \
+                 IN (SELECT bid FROM {rtbl})"
+            ),
             (sprig_inherit::msg::store::now_ms().saturating_sub(hours.saturating_mul(3_600_000)),),
         )
         .await;
     Ok(finished)
+}
+
+fn clip(s: &str) -> String {
+    s.chars().take(1000).collect()
+}
+
+/// Whether member `t` is gone for the retry list: no directory entry, or
+/// one being deleted, or no longer in `def`'s scope.
+async fn gone(svc: &TenantServices, def: &Definition, t: TenantId) -> Result<bool> {
+    let Some(e) = super::dir_entry(svc, t).await? else {
+        return Ok(true);
+    };
+    if matches!(e.state.as_str(), "deleting" | "deleted") {
+        return Ok(true);
+    }
+    let path = e.path_ids();
+    let anc: Vec<TenantId> = path
+        .split_last()
+        .map(|(_, a)| a.iter().map(|x| TenantId(*x)).collect())
+        .unwrap_or_default();
+    Ok(!def.scope.reaches(def.declarer, t, &anc))
+}
+
+/// One retry pass over `def`'s retry list (see the module docs), by one
+/// gateway at a time: the deliveries made.
+///
+/// # Errors
+/// The cluster's.
+async fn retry_pass(
+    svc: &Arc<TenantServices>,
+    def: &Definition,
+    pool: &mysql_async::Pool,
+    tbl: &str,
+    rtbl: &str,
+) -> Result<usize> {
+    let mut c = pool
+        .get_conn()
+        .await
+        .map_err(sprig_streams::maria::map_err)?;
+    let lock = format!("sprig_ibr_{}_{}", def.declarer.0, def.object_id);
+    let got: Option<Option<i64>> = c
+        .exec_first("SELECT GET_LOCK(?, 0)", (lock.clone(),))
+        .await
+        .map_err(sprig_streams::maria::map_err)?;
+    if got.flatten() != Some(1) {
+        return Ok(0);
+    }
+    let r = retry_locked(svc, def, &mut c, tbl, rtbl).await;
+    let _ = c.exec_drop("DO RELEASE_LOCK(?)", (lock,)).await;
+    r
+}
+
+async fn retry_locked(
+    svc: &Arc<TenantServices>,
+    def: &Definition,
+    c: &mut mysql_async::Conn,
+    tbl: &str,
+    rtbl: &str,
+) -> Result<usize> {
+    let rows: Vec<(u64, Vec<u8>, u32, u64)> = match c
+        .query(format!(
+            "SELECT tenant_id, bid, attempts, next_ms FROM {rtbl} ORDER BY tenant_id, bid \
+             LIMIT 10000"
+        ))
+        .await
+    {
+        Ok(r) => r,
+        Err(mysql_async::Error::Server(s)) if matches!(s.code, 1146 | 1049) => return Ok(0),
+        Err(e) => return Err(sprig_streams::maria::map_err(e)),
+    };
+    let mut by_member: BTreeMap<u64, Vec<(Vec<u8>, u32, u64)>> = BTreeMap::new();
+    for (t, bid, a, next) in rows {
+        by_member.entry(t).or_default().push((bid, a, next));
+    }
+    let now = sprig_inherit::msg::store::now_ms();
+    let mut n = 0;
+    for (t, list) in by_member {
+        // In broadcast order: nothing for this member until its first row
+        // is due.
+        if list.first().is_some_and(|(_, _, next)| *next > now) {
+            continue;
+        }
+        let tid = TenantId(t);
+        if gone(svc, def, tid).await? {
+            let k = c
+                .exec_iter(format!("DELETE FROM {rtbl} WHERE tenant_id = ?"), (t,))
+                .await
+                .map_err(sprig_streams::maria::map_err)?
+                .affected_rows();
+            metrics::counter!("sprig_inherit_broadcast_deliveries_total", "result" => "abandoned")
+                .increment(k);
+            tracing::info!(def = %def.key(), tenant = %tid, rows = k, "broadcast retries dropped: the member is gone or left the scope");
+            continue;
+        }
+        for (bid, attempts, _) in list {
+            let row: Option<mysql_async::Row> = c
+                .exec_first(format!("SELECT {COLS} FROM {tbl} WHERE bid = ?"), (bid.clone(),))
+                .await
+                .map_err(sprig_streams::maria::map_err)?;
+            let Some(row) = row else {
+                c.exec_drop(
+                    format!("DELETE FROM {rtbl} WHERE tenant_id = ? AND bid = ?"),
+                    (t, bid),
+                )
+                .await
+                .map_err(sprig_streams::maria::map_err)?;
+                continue;
+            };
+            let b = logged(&row);
+            match deliver(svc, def, tid, &b, b.form.with_instance).await {
+                Ok(d) => {
+                    c.exec_drop(
+                        format!("DELETE FROM {rtbl} WHERE tenant_id = ? AND bid = ?"),
+                        (t, bid.clone()),
+                    )
+                    .await
+                    .map_err(sprig_streams::maria::map_err)?;
+                    let col = if d { "delivered" } else { "skipped" };
+                    c.exec_drop(
+                        format!("UPDATE {tbl} SET {col} = {col} + 1 WHERE bid = ?"),
+                        (bid,),
+                    )
+                    .await
+                    .map_err(sprig_streams::maria::map_err)?;
+                    if d {
+                        n += 1;
+                        metrics::counter!("sprig_inherit_broadcast_deliveries_total", "result" => "retried")
+                            .increment(1);
+                    }
+                }
+                Err(e) => {
+                    let a = attempts.saturating_add(1);
+                    c.exec_drop(
+                        format!(
+                            "UPDATE {rtbl} SET attempts = ?, next_ms = ?, error = ? WHERE \
+                             tenant_id = ? AND bid = ?"
+                        ),
+                        (
+                            a,
+                            sprig_inherit::msg::store::now_ms() + retry_delay_ms(a),
+                            clip(&e.to_string()),
+                            t,
+                            bid.clone(),
+                        ),
+                    )
+                    .await
+                    .map_err(sprig_streams::maria::map_err)?;
+                    tracing::warn!(def = %def.key(), tenant = %tid, broadcast = %id_text(&bid), attempts = a, error = %e, "broadcast delivery failed again; retried later");
+                    // Later broadcasts for this member wait behind it.
+                    break;
+                }
+            }
+        }
+    }
+    if n > 0 {
+        tracing::info!(def = %def.key(), delivered = n, "broadcast deliveries retried");
+    }
+    Ok(n)
 }
 
 /// With `inherit.broadcast_replay = on` on `def`: the broadcasts still in
@@ -869,12 +1151,15 @@ pub async fn show(svc: &Arc<TenantServices>, def: &Definition) -> Result<Vec<Sho
         .get_conn()
         .await
         .map_err(sprig_streams::maria::map_err)?;
+    let _ = ensure_retry(&pool, &schema, def.key()).await;
     let rows: Vec<mysql_async::Row> = match c
         .query(format!(
-            "SELECT bid, publisher, committed_ms, form, under_tenant, state, delivered, skipped, \
-             error FROM {}.{} ORDER BY bid DESC LIMIT 1000",
-            quote(&schema),
-            quote(&table(def.key()))
+            "SELECT l.bid, l.publisher, l.committed_ms, l.form, l.under_tenant, l.state, \
+             l.delivered, l.skipped, l.error, (SELECT COUNT(*) FROM {s}.{r} r WHERE r.bid = \
+             l.bid) FROM {s}.{t} l ORDER BY l.bid DESC LIMIT 1000",
+            s = quote(&schema),
+            t = quote(&table(def.key())),
+            r = quote(&retry_table(def.key())),
         ))
         .await
     {
@@ -897,6 +1182,7 @@ pub async fn show(svc: &Arc<TenantServices>, def: &Definition) -> Result<Vec<Sho
                 n(6),
                 n(7),
                 r.get::<Option<String>, _>(8).flatten(),
+                n(9),
             ]
         })
         .collect())

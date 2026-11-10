@@ -667,12 +667,45 @@ pub async fn drain_for_drop(
     }
 }
 
-/// The `DROP DATABASE` hook: [`drain_for_drop`] over database `db`'s shard
+/// 39895 naming the `FOR EACH TENANT` definitions still active in database
+/// `db` of `st`'s tenant (at most 10 named, then a count).
+///
+/// # Errors
+/// 39895 when there is any.
+pub fn refuse_live_definitions(st: &sprig_inherit::msg::MsgState, db: &str) -> Result<()> {
+    let live = st.live_defs_in_db(db);
+    if live.is_empty() {
+        return Ok(());
+    }
+    let mut names: Vec<String> = live
+        .iter()
+        .take(10)
+        .map(|d| format!("{} {}.{}", d.kind.as_str(), d.db_name, d.name))
+        .collect();
+    if live.len() > 10 {
+        names.push(format!("and {} more", live.len() - 10));
+    }
+    Err(SprigError::new(
+        SprigCode::InheritedObjectInUse,
+        format!(
+            "ER_SPRIG_INHERITED_OBJECT_IN_USE: database '{db}' holds {} FOR EACH TENANT \
+             definition{} ({}); drop {} first (every member's instance goes with {})",
+            live.len(),
+            if live.len() == 1 { "" } else { "s" },
+            names.join(", "),
+            if live.len() == 1 { "it" } else { "them" },
+            if live.len() == 1 { "it" } else { "them" },
+        ),
+    ))
+}
+
+/// The `DROP DATABASE` hook: refused (39895) while `FOR EACH TENANT`
+/// definitions are active in `db`; then [`drain_for_drop`] over its shard
 /// schemas, waiting `inherit.outbox_drain_seconds`. Nothing to do for a
 /// database the tenant doesn't have, or whose schemas no outbox lists.
 ///
 /// # Errors
-/// 39245; the catalog's and the clusters'.
+/// 39895; 39245; the catalog's and the clusters'.
 pub async fn before_drop_database(
     svc: &Arc<TenantServices>,
     tenant: TenantId,
@@ -683,6 +716,10 @@ pub async fn before_drop_database(
     let Some(row) = cat.database(&sprig_catalog::ddl::database_key(db, lctn)) else {
         return Ok(());
     };
+    // The lead's choice on r9fet3's question 1: a declarer's database
+    // isn't dropped from under its live definitions (every member's
+    // instances would go with them, too easily by accident).
+    refuse_live_definitions(&super::state_of(&cat), &row.name)?;
     let schemas: Vec<String> = sprig_catalog::ddl::shard_schemas(tenant, row)
         .iter()
         .map(ToString::to_string)

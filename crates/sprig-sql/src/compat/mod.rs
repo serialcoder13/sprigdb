@@ -25,6 +25,7 @@ pub mod geo;
 pub mod groupby;
 pub mod intmeta;
 pub mod keywords;
+pub mod locks;
 pub mod meta;
 pub mod rowsyntax;
 pub mod schema;
