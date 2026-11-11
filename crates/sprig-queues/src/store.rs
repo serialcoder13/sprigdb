@@ -315,6 +315,13 @@ pub trait MsgStore: Send + Sync + 'static {
     /// Deletes forwarded outbox rows.
     async fn outbox_done(&self, ids: &[MsgId]) -> Result<(), StoreError>;
 
+    /// Messages stored for `queue` (ready and delivered, not yet
+    /// acknowledged), all lanes: `mq_info`'s count (R9, ST50). The
+    /// default reads lane 0 through [`MsgStore::load`].
+    async fn stored(&self, queue: u64) -> Result<u64, StoreError> {
+        Ok(self.load(queue, 0, None, 100_000).await?.len() as u64)
+    }
+
     /// The outbox rows of `ids` that are still there, in the order of
     /// `ids` (the feed-driven forwarder's batch, in commit order).
     async fn outbox_rows(&self, ids: &[MsgId]) -> Result<Vec<OutboxRow>, StoreError> {

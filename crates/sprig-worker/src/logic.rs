@@ -135,6 +135,26 @@ impl Clusters for RegistryClusters {
         }
     }
 
+    async fn open_tables(
+        &self,
+        cluster: &ClusterId,
+        tables: Arc<[String]>,
+        from: &GtidPos,
+    ) -> Result<Box<dyn TxnSource>> {
+        let a = self.access(cluster).await?;
+        let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+        match BinlogTxns::connect_tables(&a.repl, tables, from, id).await {
+            Ok(t) => Ok(Box::new(t)),
+            Err(e) => {
+                self.access
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(cluster);
+                Err(e)
+            }
+        }
+    }
+
     async fn position(&self, cluster: &ClusterId) -> Result<GtidPos> {
         let pool = self.pools.writer(cluster).await?;
         let mut c = pool.get_conn().await.map_err(|e| {

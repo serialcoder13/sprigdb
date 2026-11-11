@@ -15,6 +15,18 @@
 //!                                             any other filtered table is 39366
 //! ```
 
+#![allow(
+    clippy::similar_names,
+    clippy::many_single_char_names,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::match_same_arms,
+    clippy::assigning_clones,
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::format_push_string,
+    clippy::too_many_lines
+)] // pedantic style: names follow the chapter's pseudocode
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -1208,6 +1220,36 @@ pub async fn pause_bound_sinks(
 // ---------------------------------------------------------------------
 // Policy views (RLS round 2, decisions RL18 to RL21).
 
+/// Protected tables that get no policy view, by (tenant, object): they
+/// have invisible columns, which `SELECT *` on a view would show (RL18).
+type Viewless = std::sync::Mutex<std::collections::HashSet<(u64, u64)>>;
+
+fn viewless() -> &'static Viewless {
+    static V: std::sync::OnceLock<Viewless> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Records whether `object` of `tenant` has invisible columns.
+pub fn viewless_set(tenant: u64, object: u64, on: bool) {
+    let mut v = viewless()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if on {
+        v.insert((tenant, object));
+    } else {
+        v.remove(&(tenant, object));
+    }
+}
+
+/// Whether table `object` of `tenant` has no policy view (see
+/// [`viewless_set`]).
+pub fn is_viewless(tenant: u64, object: u64) -> bool {
+    viewless()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&(tenant, object))
+}
+
 /// `rls.backend_enforcement` at database `db`: `views`, `triggers` or
 /// `off`.
 #[must_use]
@@ -1296,7 +1338,10 @@ pub fn view_swap(
         ..Default::default()
     };
     for t in rls.tables.values() {
-        if !t.checks_deployed || !views_on(svc, cat, t.object) {
+        if !t.checks_deployed
+            || !views_on(svc, cat, t.object)
+            || is_viewless(ts.tenant.0, t.object.0)
+        {
             continue;
         }
         let Some(o) = cat.objects.get(t.object) else {

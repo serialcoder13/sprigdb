@@ -2086,7 +2086,35 @@ impl PassSession {
         }) {
             // Chapter 43 (R8 round 6): `GRAPH_TABLE` runs as text at
             // execute time (its plan depends on the graph's rows); its
-            // columns come with the result.
+            // columns come with the result. R8 round 7 (G63): with `?`,
+            // the bound values are written in at each execute.
+            if params > 0 {
+                let n = u16::try_from(params).map_err(|_| {
+                    SprigError::standard(
+                        1390,
+                        *b"HY000",
+                        "Prepared statement contains too many placeholders",
+                    )
+                })?;
+                let mut st = Stmt::deferred(sql, Vec::new());
+                st.params = n;
+                st.graph_params = true;
+                let stmt = self.stmts.insert(st);
+                metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str())
+                    .increment(1.0);
+                return Ok(ExecSummary {
+                    status: None,
+                    prepared: Some(PreparedMeta {
+                        stmt,
+                        params: (0..n)
+                            .map(|_| crate::pipeline::text_column("?", charset))
+                            .collect(),
+                        columns: Vec::new(),
+                        warnings: 0,
+                    }),
+                    db: None,
+                });
+            }
             keep = deferred(Vec::new())?;
         }
         if let Some(columns) = keep {
@@ -2190,6 +2218,9 @@ impl PassSession {
             .backend_version(BACKEND_VERSION);
         rw.ignore_space = ignore_space;
         rw.lower_case_table_names = ts.lower_case_table_names();
+        // The document engine's prepared statements (decision S26) name its
+        // own columns, as its text statements do.
+        rw.internal = ts.types.internal;
         let sessions = TenantSessions {
             table: &ts.services().sessions,
             tenant: ts.tenant,

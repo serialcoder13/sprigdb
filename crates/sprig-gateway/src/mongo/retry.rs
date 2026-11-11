@@ -196,6 +196,10 @@ impl SqlRunner for Guarded<'_> {
     fn tenant(&self) -> u64 {
         self.s.tenant()
     }
+
+    fn row_policy_binds(&self, object: u64) -> Option<bool> {
+        self.s.row_policy_binds(object)
+    }
 }
 
 fn conflict(e: &MongoError) -> bool {

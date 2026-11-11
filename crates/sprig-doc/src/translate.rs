@@ -54,6 +54,22 @@ impl SqlPred {
     }
 }
 
+impl SqlPred {
+    /// The key of a point condition (`_id = X'..'` alone), which the engine
+    /// runs as a prepared statement (decision S26).
+    #[must_use]
+    pub fn point_key(&self) -> Option<Vec<u8>> {
+        let hex = self.sql.strip_prefix("_id = X'")?.strip_suffix('\'')?;
+        if !self.exact || hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+            .collect()
+    }
+}
+
 /// Translates `p` for collection `m`.
 #[must_use]
 pub fn translate(p: &Pred, m: &CollMeta) -> SqlPred {
@@ -573,6 +589,32 @@ mod tests {
     #[allow(clippy::needless_pass_by_value)]
     fn tr(f: bson::Document, m: &CollMeta) -> SqlPred {
         translate(&parse(&f).unwrap(), m)
+    }
+
+    /// Decision S26: only a lone `_id` equality is a point; the engine's
+    /// text fallback writes the same statement.
+    #[test]
+    fn point_keys_and_bound_text() {
+        use crate::engine::{Param, inline};
+        let m = meta(&[], &[]);
+        let k = tr(doc! {"_id": 5}, &m).point_key().expect("a point");
+        assert_eq!(crate::sql::bin_lit(&k), tr(doc! {"_id": 5}, &m).sql[6..]);
+        assert!(tr(doc! {"_id": {"$gt": 5}}, &m).point_key().is_none());
+        assert!(tr(doc! {"_id": 5, "a": 1}, &m).point_key().is_none());
+        assert!(tr(doc! {"_id": {"$in": [1, 2]}}, &m).point_key().is_none());
+        let sql = inline(
+            "UPDATE `d`.`t?` SET doc = ?, _types = ? WHERE _id = ? AND note = 'what?' AND _v = ?",
+            &[
+                Param::Text("it's".into()),
+                Param::Null,
+                Param::Bin(vec![0x01, 0xab]),
+                Param::Int(7),
+            ],
+        );
+        assert_eq!(
+            sql,
+            "UPDATE `d`.`t?` SET doc = 'it''s', _types = NULL WHERE _id = X'01AB' AND note = 'what?' AND _v = 7"
+        );
     }
 
     #[test]

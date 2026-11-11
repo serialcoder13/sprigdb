@@ -58,7 +58,12 @@ fn list_text(v: &Value) -> String {
                         .map(|c| {
                             c.iter()
                                 .map(|c| {
-                                    format!("{}:{}@{}", s(&c["copy"]), s(&c["state"]), s(&c["worker"]))
+                                    format!(
+                                        "{}:{}@{}",
+                                        s(&c["copy"]),
+                                        s(&c["state"]),
+                                        s(&c["worker"])
+                                    )
                                 })
                                 .collect()
                         })

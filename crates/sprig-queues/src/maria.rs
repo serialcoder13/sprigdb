@@ -436,6 +436,21 @@ impl MsgStore for MariaStore {
         })
     }
 
+    async fn stored(&self, queue: u64) -> Result<u64, StoreError> {
+        let mut c = self.conn().await?;
+        let n: Option<u64> = c
+            .exec_first(
+                format!(
+                    "SELECT COUNT(*) FROM {} WHERE queue_id = ?",
+                    self.t("__sprig_qm")
+                ),
+                (queue,),
+            )
+            .await
+            .map_err(|e| self.fail(&e))?;
+        Ok(n.unwrap_or(0))
+    }
+
     async fn load(
         &self,
         queue: u64,

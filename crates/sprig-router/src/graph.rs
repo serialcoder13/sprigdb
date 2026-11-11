@@ -52,6 +52,38 @@ pub struct GraphCall {
     pub cypher: String,
     /// The output column names.
     pub columns: Vec<String>,
+    /// `MATCH <pattern>`, before the call's own `WHERE` (R8 round 7).
+    pub head: String,
+    /// The call's own condition, in Cypher.
+    pub cond: Option<String>,
+    /// Per column, the Cypher expression it returns.
+    pub returns: Vec<String>,
+}
+
+impl GraphCall {
+    /// The Cypher read with `extra` conditions (Cypher, from the outer
+    /// statement's filters, R8 round 7) added to its `WHERE`; the call's
+    /// own [`Self::cypher`] when there are none.
+    #[must_use]
+    pub fn cypher_with(&self, extra: &[String]) -> String {
+        if extra.is_empty() || self.returns.len() != self.columns.len() {
+            return self.cypher.clone();
+        }
+        let mut conds: Vec<String> = self.cond.iter().map(|c| format!("({c})")).collect();
+        conds.extend(extra.iter().cloned());
+        let ret: Vec<String> = self
+            .returns
+            .iter()
+            .zip(&self.columns)
+            .map(|(e, c)| format!("{e} AS `{}`", c.replace('`', "``")))
+            .collect();
+        format!(
+            "{} WHERE {} RETURN {}",
+            self.head,
+            conds.join(" AND "),
+            ret.join(", ")
+        )
+    }
 }
 
 fn syntax(m: impl Into<String>) -> SprigError {
@@ -284,6 +316,7 @@ pub fn find(sql: &str) -> Result<Vec<GraphCall>> {
             .and_then(|x| x.strip_suffix(')'))
             .ok_or_else(|| syntax("COLUMNS needs ( expr AS name, ... )"))?;
         let mut returned = Vec::new();
+        let mut returns = Vec::new();
         let mut columns = Vec::new();
         for item in split_top(cols_text) {
             let item = item.trim();
@@ -298,14 +331,17 @@ pub fn find(sql: &str) -> Result<Vec<GraphCall>> {
                 pattern_to_cypher(expr),
                 name.replace('`', "``")
             ));
+            returns.push(pattern_to_cypher(expr));
             columns.push(name);
         }
         if columns.is_empty() {
             return Err(syntax("COLUMNS needs at least one column"));
         }
-        let mut cypher = format!("MATCH {}", pattern_to_cypher(pattern.trim()));
-        if let Some(w) = cond {
-            let _ = write!(cypher, " WHERE {}", pattern_to_cypher(w.trim()));
+        let head = format!("MATCH {}", pattern_to_cypher(pattern.trim()));
+        let cond = cond.map(|w| pattern_to_cypher(w.trim()));
+        let mut cypher = head.clone();
+        if let Some(w) = &cond {
+            let _ = write!(cypher, " WHERE {w}");
         }
         let _ = write!(cypher, " RETURN {}", returned.join(", "));
         out.push(GraphCall {
@@ -314,6 +350,9 @@ pub fn find(sql: &str) -> Result<Vec<GraphCall>> {
             graph,
             cypher,
             columns,
+            head,
+            cond,
+            returns,
         });
         from = end;
     }
@@ -398,6 +437,86 @@ pub fn slots(sql: &str, nonce: u64) -> Vec<(usize, (usize, usize))> {
         }
     }
     out
+}
+
+/// The byte ranges of the `?` placeholders of `sql`, outside quotes and
+/// comments, in order.
+#[must_use]
+pub fn param_spans(sql: &str) -> Vec<(usize, usize)> {
+    let b = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            q @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\\' && q != b'`' {
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == q {
+                        if b.get(i + 1) == Some(&q) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'#' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'-' if b.get(i + 1) == Some(&b'-')
+                && b.get(i + 2).is_none_or(u8::is_ascii_whitespace) =>
+            {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'?' => out.push((i, i + 1)),
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `sql` (a statement with `GRAPH_TABLE`) with each `?` replaced by its
+/// value (R8 round 7, decision G63): `sql_lits[i]` outside the calls,
+/// `cypher_lits[i]` inside a call's pattern, condition or columns. `None`
+/// when the counts differ.
+#[must_use]
+pub fn bind_params(sql: &str, sql_lits: &[String], cypher_lits: &[String]) -> Option<String> {
+    let spans = param_spans(sql);
+    if spans.len() != sql_lits.len() || spans.len() != cypher_lits.len() {
+        return None;
+    }
+    let calls: Vec<(usize, usize)> = find(sql).ok()?.iter().map(|c| c.span).collect();
+    let mut out = String::with_capacity(sql.len() + 16 * spans.len());
+    let mut last = 0;
+    for (k, (a, b)) in spans.iter().enumerate() {
+        out.push_str(&sql[last..*a]);
+        let inside = calls.iter().any(|(s, e)| *s <= *a && *a < *e);
+        out.push_str(if inside {
+            &cypher_lits[k]
+        } else {
+            &sql_lits[k]
+        });
+        last = *b;
+    }
+    out.push_str(&sql[last..]);
+    Some(out)
 }
 
 /// One value of a graph row, as the router needs it: its SQL literal and,
@@ -491,6 +610,82 @@ pub fn rows_sql(columns: &[String], rows: &[Vec<GraphLit>]) -> String {
     s
 }
 
+/// A call's rows as a session temporary table (R8 round 7, decision
+/// G62): the `CREATE TEMPORARY TABLE … AS` statement, typed as the rows'
+/// derived table would be, and the `INSERT`s that fill it, each at most
+/// `chunk` bytes of SQL text. The table is created from one row per kind
+/// of value each column holds (the longest string, the integer with the
+/// most digits, a float, a boolean, `NULL`), which MariaDB types as it
+/// types the union of all the rows' literals.
+#[must_use]
+pub fn temp_table_sql(
+    name: &str,
+    columns: &[String],
+    rows: &[Vec<GraphLit>],
+    chunk: usize,
+) -> (String, Vec<String>) {
+    // Per column, a representative per kind: (kind, length, literal).
+    let mut reps: Vec<Vec<(u8, usize, String)>> = vec![Vec::new(); columns.len()];
+    for r in rows {
+        for (c, v) in r.iter().enumerate().take(columns.len()) {
+            let (kind, len) = match v {
+                GraphLit::Null => (0u8, 0usize),
+                GraphLit::Int(i) => (1, i.to_string().len()),
+                GraphLit::Str(s) => (2, s.chars().count()),
+                GraphLit::Other(t) if t.starts_with('\'') => (2, t.chars().count()),
+                GraphLit::Other(t) if t == "TRUE" || t == "FALSE" => (3, 1),
+                GraphLit::Other(t) => (4, t.len()),
+            };
+            match reps[c].iter_mut().find(|(k, _, _)| *k == kind) {
+                Some(slot) if slot.1 >= len => {}
+                Some(slot) => *slot = (kind, len, v.sql()),
+                None => reps[c].push((kind, len, v.sql())),
+            }
+        }
+    }
+    let n = reps.iter().map(Vec::len).max().unwrap_or(0).max(1);
+    let sample: Vec<Vec<GraphLit>> = (0..n)
+        .map(|k| {
+            reps.iter()
+                .map(|r| {
+                    r.get(k)
+                        .map_or(GraphLit::Null, |(_, _, l)| GraphLit::Other(l.clone()))
+                })
+                .collect()
+        })
+        .collect();
+    let create = format!(
+        "CREATE TEMPORARY TABLE {name} AS SELECT * FROM ({}) AS r LIMIT 0",
+        rows_sql(columns, &sample)
+    );
+    let mut inserts = Vec::new();
+    let head = format!("INSERT INTO {name} VALUES ");
+    let mut cur = String::new();
+    for r in rows {
+        let mut t = String::from("(");
+        for (k, v) in r.iter().enumerate() {
+            if k > 0 {
+                t.push_str(", ");
+            }
+            t.push_str(&v.sql());
+        }
+        t.push(')');
+        if !cur.is_empty() && cur.len() + t.len() + 2 > chunk {
+            inserts.push(std::mem::take(&mut cur));
+        }
+        if cur.is_empty() {
+            cur.push_str(&head);
+        } else {
+            cur.push_str(", ");
+        }
+        cur.push_str(&t);
+    }
+    if !cur.is_empty() {
+        inserts.push(cur);
+    }
+    (create, inserts)
+}
+
 /// Where a call's graph is: its shards (cluster, schema) and, filled by
 /// the gateway from the graph executor's `EXPLAIN`, each step's tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,12 +734,27 @@ pub struct GraphPlan {
     pub steps: Vec<GraphStep>,
     /// Graph columns joined to routing keys.
     pub keys: Vec<KeyJoin>,
+    /// Per call, the outer statement's filters on its columns, as Cypher
+    /// conditions added to its read (R8 round 7; see
+    /// `planner::graph::pushed_filters`).
+    pub filters: Vec<Vec<String>>,
     /// The outer statement planned with empty graph rows (EXPLAIN; the
     /// executed plan is made from the rows).
     pub outer_plan: Box<Plan>,
 }
 
 impl GraphPlan {
+    /// The Cypher read call `call` runs: its own, with the outer
+    /// statement's filters added.
+    #[must_use]
+    pub fn cypher(&self, call: usize) -> String {
+        let extra = self.filters.get(call).map_or(&[][..], Vec::as_slice);
+        self.calls
+            .get(call)
+            .map(|c| c.cypher_with(extra))
+            .unwrap_or_default()
+    }
+
     /// The outer statement with each placeholder replaced by its call's
     /// rows.
     #[must_use]
@@ -555,6 +765,13 @@ impl GraphPlan {
                 |r| rows_sql(&r.columns, &r.rows),
             )
         })
+    }
+
+    /// The outer statement with each placeholder replaced by `body(call)`
+    /// (the text between the derived table's parentheses).
+    #[must_use]
+    pub fn bind_with(&self, body: impl Fn(usize) -> String) -> String {
+        bind_text(&self.outer, &self.slots, body)
     }
 
     /// The outer statement with every call empty (EXPLAIN's outer plan).

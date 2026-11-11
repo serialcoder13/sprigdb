@@ -1051,6 +1051,25 @@ async fn exec(
             )
             .await
         }
+        // MongoDB's `explain` of searches (decision S25).
+        "explain" => {
+            let cmd = body.get_document("explain").map_err(|_| {
+                MongoError::new(code::FAILED_TO_PARSE, "explain needs a command document")
+            })?;
+            let verbosity = body.get_str("verbosity").unwrap_or("allPlansExecution");
+            if !matches!(
+                verbosity,
+                "queryPlanner" | "executionStats" | "allPlansExecution"
+            ) {
+                return Err(MongoError::new(
+                    code::FAILED_TO_PARSE,
+                    format!(
+                        "verbosity string must be one of {{'queryPlanner', 'executionStats', 'allPlansExecution'}}, got '{verbosity}'"
+                    ),
+                ));
+            }
+            explain(&engine, sql, cmd, db, verbosity).await
+        }
         "getMore" => {
             let id = i64_of(body, "getMore")
                 .ok_or_else(|| MongoError::new(code::TYPE_MISMATCH, "getMore needs a cursor id"))?;
@@ -1185,10 +1204,10 @@ async fn exec(
                 return open_change_stream(c, sql, body, db, &coll, st, &pipeline[1..], lsid).await;
             }
             if body.contains_key("explain") || body.get_bool("explain").unwrap_or(false) {
-                return Err(MongoError::new(
-                    code::SPRIG_DOC_FEATURE_UNSUPPORTED,
-                    "explain is not supported in this release",
-                ));
+                // `aggregate` with `explain: true`: queryPlanner, as MongoDB.
+                let mut cmd = body.clone();
+                cmd.remove("explain");
+                return explain(&engine, sql, &cmd, db, "queryPlanner").await;
             }
             let ns = Ns {
                 db: db.to_owned(),
@@ -1305,6 +1324,23 @@ async fn exec(
         other => Err(MongoError::new(
             code::COMMAND_NOT_FOUND,
             format!("no such command: '{other}'"),
+        )),
+    }
+}
+
+/// `explain` of a command (decision S25): searches only in this release.
+async fn explain(
+    engine: &sprig_doc::engine::Engine,
+    sql: &mut SqlSession,
+    cmd: &Document,
+    db: &str,
+    verbosity: &str,
+) -> Result<Document, MongoError> {
+    match engine.explain_search(sql, db, cmd, verbosity).await? {
+        Some(d) => Ok(d),
+        None => Err(MongoError::new(
+            code::SPRIG_DOC_FEATURE_UNSUPPORTED,
+            "explain is supported for $text, $search and $searchMeta in this release",
         )),
     }
 }

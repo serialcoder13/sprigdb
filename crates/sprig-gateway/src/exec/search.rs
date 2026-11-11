@@ -16,6 +16,9 @@
 //!   table over the indexed object, `SELECT <key>, score, highlights,
 //!   _shard FROM <object> WHERE <key> IN (...)`, read with the user's
 //!   privileges.
+//! - **`EXPLAIN`** of a statement with either: MariaDB's plan of the
+//!   rewritten statement, then one `SEARCH` row per search with its
+//!   `SearchScan` (`crate::search::explain`, decision S25).
 
 // Rewriting walks many short-lived names (q, t, k, s) and long statement
 // arms, as the rest of `exec` does.
@@ -677,7 +680,10 @@ impl PassSession {
             if !found {
                 return Err(SprigError::new(
                     SprigCode::SearchFieldType,
-                    format!("'{}' isn't a key-value namespace: VALUE fields need one", def.object),
+                    format!(
+                        "'{}' isn't a key-value namespace: VALUE fields need one",
+                        def.object
+                    ),
                 ));
             }
             def.table.clone_from(&def.object);
@@ -913,15 +919,26 @@ impl PassSession {
             Err(e) => return Ok(Some(self.fail(out, &e).await?)),
         };
         let wire = out.wire();
-        let rewritten = match self.rewrite_search(cx, wire, sql, &scan).await {
+        // Decision S25: `EXPLAIN` of a statement with searches describes
+        // them after MariaDB's plan.
+        let mut scans = crate::search::explain::is_explain(sql).then(Vec::new);
+        let rewritten = match self.rewrite_search(cx, wire, sql, &scan, &mut scans).await {
             Ok(None) => return Ok(None),
             Ok(Some(s)) => s,
             Err(e) => return Ok(Some(self.fail(out, &e).await?)),
         };
         let rewritten = Bytes::from(rewritten);
-        Box::pin(self.tenant_text(cx, &rewritten, attrs, more, format, out))
-            .await
-            .map(Some)
+        match scans {
+            Some(scans) if !scans.is_empty() => {
+                let mut sink = ExplainSink::new(out, scans);
+                Box::pin(self.tenant_text(cx, &rewritten, attrs, more, format, &mut sink))
+                    .await
+                    .map(Some)
+            }
+            _ => Box::pin(self.tenant_text(cx, &rewritten, attrs, more, format, out))
+                .await
+                .map(Some),
+        }
     }
 
     /// `COM_STMT_PREPARE` of a text whose `MATCH ... AGAINST` runs on a
@@ -953,7 +970,9 @@ impl PassSession {
             let indexed = scan.tables.iter().any(|t| {
                 let named = match &qual {
                     Some(q) => {
-                        t.alias.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(q))
+                        t.alias
+                            .as_deref()
+                            .is_some_and(|a| a.eq_ignore_ascii_case(q))
                             || (t.alias.is_none() && t.table.eq_ignore_ascii_case(q))
                     }
                     None => true,
@@ -1007,6 +1026,7 @@ impl PassSession {
         wire: Wire,
         sql: &str,
         scan: &sqlscan::Scan,
+        scans: &mut Option<Vec<crate::search::explain::Scan>>,
     ) -> Result<Option<String>> {
         let svc = self.search_service()?;
         let knobs = svc.knobs();
@@ -1103,9 +1123,26 @@ impl PassSession {
             } else {
                 knobs.consistency
             };
+            let started = std::time::Instant::now();
             let hits = self
-                .run_search(svc, tenant, &cat, &def, query, None, consistency)
+                .run_search(svc, tenant, &cat, &def, query.clone(), None, consistency)
                 .await?;
+            if let Some(list) = scans.as_mut() {
+                let name = tref.alias.clone().unwrap_or_else(|| tref.table.clone());
+                list.push(
+                    self.explain_scan(
+                        svc,
+                        tenant,
+                        &def,
+                        &query,
+                        consistency,
+                        name,
+                        hits.len(),
+                        started,
+                    )
+                    .await,
+                );
+            }
             let qual = match (
                 &tref.alias,
                 scan.tables.len() > 1 || m.columns.iter().any(|(q, _)| q.is_some()),
@@ -1124,7 +1161,7 @@ impl PassSession {
         }
         for s in &scan.searches {
             let rep = self
-                .search_table(cx, wire, svc, tenant, &cat, lctn, s)
+                .search_table(cx, wire, svc, tenant, &cat, lctn, s, scans.as_mut())
                 .await?;
             edits.push((s.span, rep));
         }
@@ -1166,6 +1203,7 @@ impl PassSession {
         cat: &TenantCatalog,
         lctn: bool,
         call: &sqlscan::SearchCall,
+        scans: Option<&mut Vec<crate::search::explain::Scan>>,
     ) -> Result<String> {
         let (db, name) = match call.index.split_once('.') {
             Some((d, n)) => (d.to_owned(), n.to_owned()),
@@ -1206,6 +1244,7 @@ impl PassSession {
                     .collect()
             })
             .unwrap_or_default();
+        let started = std::time::Instant::now();
         let hits = run_search(
             svc,
             tenant,
@@ -1216,6 +1255,21 @@ impl PassSession {
             consistency,
         )
         .await?;
+        if let Some(list) = scans {
+            list.push(
+                self.explain_scan(
+                    svc,
+                    tenant,
+                    &def,
+                    &query,
+                    consistency,
+                    def.object.clone(),
+                    hits.len(),
+                    started,
+                )
+                .await,
+            );
+        }
         let tgt = Target2 {
             def: Arc::clone(&def),
             qual: String::new(),
@@ -1236,6 +1290,44 @@ impl PassSession {
             hl,
             tgt.in_list(&hits)?
         ))
+    }
+
+    /// One search's `EXPLAIN` description (decision S25); the hit count
+    /// and time only when no row policy on the object binds the session
+    /// (the copy's count includes rows hidden from it, decision S24).
+    #[allow(clippy::too_many_arguments)]
+    async fn explain_scan(
+        &self,
+        svc: &Arc<SearchService>,
+        tenant: sprig_common::ids::TenantId,
+        def: &Arc<IndexDef>,
+        query: &SearchQuery,
+        consistency: Consistency,
+        table: String,
+        hits: usize,
+        started: std::time::Instant,
+    ) -> crate::search::explain::Scan {
+        let shown = !crate::search::visible::needs_visible(
+            def,
+            crate::pipeline::SessionExec::row_policy_binds(self, def.object_id),
+        );
+        let took = started.elapsed();
+        let doc = crate::search::explain::describe(
+            svc,
+            tenant,
+            def,
+            query,
+            consistency,
+            shown.then_some(hits),
+            shown.then_some(took),
+        )
+        .await;
+        crate::search::explain::Scan {
+            doc,
+            table,
+            index: def.name.clone(),
+            hits: shown.then_some(hits),
+        }
     }
 
     /// A `CASE` giving each hit's highlights as JSON, from the fields'
@@ -1413,6 +1505,7 @@ pub(crate) async fn run_search(
 
 /// A bound parameter as a SQL literal (prepared statements whose `MATCH
 /// ... AGAINST (?)` runs on a search index are run as text at execute).
+#[allow(clippy::single_match_else, clippy::explicit_iter_loop)]
 pub(super) fn param_literal(p: &sprig_proto_mysql::command::BoundParam) -> String {
     use sprig_proto_mysql::Value;
     use sprig_proto_mysql::command::ParamValue;
@@ -1448,6 +1541,107 @@ pub(super) fn param_literal(p: &sprig_proto_mysql::command::BoundParam) -> Strin
             t.second,
             t.micro
         ),
+    }
+}
+
+/// An `EXPLAIN` result with one row per search appended to its first
+/// resultset (decision S25).
+struct ExplainSink<'a> {
+    inner: &'a mut dyn ResultSink,
+    scans: Vec<crate::search::explain::Scan>,
+    columns: Vec<ColumnDef>,
+    format: RowFormat,
+    done: bool,
+}
+
+impl<'a> ExplainSink<'a> {
+    fn new(inner: &'a mut dyn ResultSink, scans: Vec<crate::search::explain::Scan>) -> Self {
+        Self {
+            inner,
+            scans,
+            columns: Vec::new(),
+            format: RowFormat::Text,
+            done: false,
+        }
+    }
+
+    async fn put(&mut self, v: Vec<Option<String>>) -> Result<()> {
+        let text: Vec<Option<&[u8]>> = v.iter().map(|x| x.as_deref().map(str::as_bytes)).collect();
+        match self.format {
+            RowFormat::Text => self.inner.row(RowValues::Text(&text)).await,
+            RowFormat::Binary => {
+                let values: Vec<sprig_proto_mysql::Value> = self
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        super::router::binary::text_value(c, text.get(i).copied().flatten())
+                    })
+                    .collect();
+                self.inner.row(RowValues::Binary(&values)).await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ResultSink for ExplainSink<'_> {
+    fn wire(&self) -> Wire {
+        self.inner.wire()
+    }
+    async fn begin_rows(&mut self, columns: &[ColumnDef], format: RowFormat) -> Result<()> {
+        if !self.done {
+            self.columns = columns.to_vec();
+            self.format = format;
+        }
+        self.inner.begin_rows(columns, format).await
+    }
+    async fn row(&mut self, values: RowValues<'_>) -> Result<()> {
+        self.inner.row(values).await
+    }
+    async fn raw_row(&mut self, payload: Bytes) -> Result<()> {
+        self.inner.raw_row(payload).await
+    }
+    async fn end_rows(&mut self, end: EndOfRows) -> Result<()> {
+        if !self.done && !self.columns.is_empty() {
+            self.done = true;
+            let names: Vec<String> = self
+                .columns
+                .iter()
+                .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+                .collect();
+            let scans = std::mem::take(&mut self.scans);
+            if names.len() == 1 {
+                self.put(vec![Some(crate::search::explain::json_row(&scans))])
+                    .await?;
+            } else {
+                for s in &scans {
+                    self.put(crate::search::explain::row_for(&names, s)).await?;
+                }
+            }
+        }
+        self.inner.end_rows(end).await
+    }
+    async fn ok(&mut self, ok: OkPacket) -> Result<()> {
+        self.inner.ok(ok).await
+    }
+    async fn error(&mut self, err: &SprigError) -> Result<()> {
+        self.inner.error(err).await
+    }
+    async fn column_list(&mut self, c: &[ColumnDef], e: EndOfRows) -> Result<()> {
+        self.inner.column_list(c, e).await
+    }
+    async fn local_infile_request(&mut self, f: &[u8]) -> Result<()> {
+        self.inner.local_infile_request(f).await
+    }
+    async fn local_infile_read(&mut self) -> Result<Bytes> {
+        self.inner.local_infile_read().await
+    }
+    async fn flush(&mut self) -> Result<()> {
+        self.inner.flush().await
+    }
+    fn finished(&self) -> bool {
+        self.inner.finished()
     }
 }
 

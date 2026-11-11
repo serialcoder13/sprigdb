@@ -284,3 +284,109 @@ fn explain_shows_the_graph_and_templates_refuse_it() {
     let p = plan_graph("SELECT 1", 3, &calls, Vec::new(), &cx(&t));
     assert!(matches!(p, Plan::Reject(_)), "{p:?}");
 }
+
+/// R8 round 7 (G61): integer filters on a call's columns in the top
+/// `SELECT`'s `WHERE` and inner joins' `ON` go into its Cypher, keeping
+/// every row that isn't a number (MariaDB converts strings to compare);
+/// strings, expressions and other blocks' filters stay in SQL.
+#[test]
+fn integer_filters_on_graph_columns_go_into_the_cypher() {
+    let sql = "SELECT g.name FROM GRAPH_TABLE (shop MATCH (c IS Person) WHERE c.age > 1 \
+               COLUMNS (c.id AS cid, c.name AS name, c.age + 1 AS older)) AS g \
+               JOIN orders o ON o.cid = g.cid AND g.cid <= 40 \
+               WHERE 5 < g.cid AND g.cid IN (6, 7, -8) AND g.name = 'x' AND g.older = 3 \
+               AND g.cid BETWEEN 1 AND 100 AND g.name IS NOT NULL AND (g.cid = 1 OR g.cid = 2)";
+    let (_, p) = graph_plan(sql, 5, Vec::new());
+    let Plan::Graph(g) = p else { panic!("{p:?}") };
+    let f = &g.filters[0];
+    assert_eq!(f.len(), 4 + 1, "{f:?}");
+    let n = |t: &str| {
+        format!("(c.id IS NOT NULL AND (NOT valueType(c.id) IN ['INTEGER', 'FLOAT'] OR {t}))")
+    };
+    assert!(f.contains(&n("c.id > 5")), "{f:?}");
+    assert!(
+        f.contains(&n("(c.id = 6 OR c.id = 7 OR c.id = -8)")),
+        "{f:?}"
+    );
+    assert!(f.contains(&n("(c.id >= 1 AND c.id <= 100)")), "{f:?}");
+    assert!(f.contains(&n("c.id <= 40")), "{f:?}");
+    assert!(f.contains(&"c.name IS NOT NULL".to_owned()), "{f:?}");
+    let cypher = g.cypher(0);
+    assert!(
+        cypher.starts_with("MATCH (c:Person) WHERE (c.age > 1) AND (c.id IS NOT NULL"),
+        "{cypher}"
+    );
+    assert!(
+        cypher.ends_with("RETURN c.id AS `cid`, c.name AS `name`, c.age + 1 AS `older`"),
+        "{cypher}"
+    );
+    // A LEFT JOIN's ON, a subquery's WHERE and a float aren't pushed.
+    let sql = "SELECT o.oid FROM orders o LEFT JOIN GRAPH_TABLE (shop MATCH (c) COLUMNS (c.id AS cid)) AS g \
+               ON g.cid = 3 WHERE o.cid IN (SELECT 1 FROM DUAL WHERE 2 > 1) AND g.cid > 1.5";
+    let (calls, p) = graph_plan(sql, 6, Vec::new());
+    let Plan::Graph(g) = p else { panic!("{p:?}") };
+    assert!(g.filters[0].is_empty(), "{:?}", g.filters);
+    assert_eq!(g.cypher(0), calls[0].cypher);
+}
+
+/// R8 round 7 (G63): a prepared statement's values go in as SQL literals
+/// outside the calls and as Cypher literals inside them.
+#[test]
+fn parameters_bind_as_sql_or_cypher_literals() {
+    let sql = "SELECT x.a, '?' FROM GRAPH_TABLE (g MATCH (p IS P) WHERE p.id < ? AND p.n = ? \
+               COLUMNS (p.id AS a)) AS x JOIN t ON t.k = x.a WHERE t.v > ? -- ?\n AND t.w = ? /* ? */";
+    assert_eq!(param_spans(sql).len(), 4);
+    let sql_l = [
+        "1".to_owned(),
+        "'s'".into(),
+        "3".into(),
+        "_utf8mb4'x'".into(),
+    ];
+    let cy_l = ["1".to_owned(), "'s\\\\'".into(), "3".into(), "'x'".into()];
+    let b = bind_params(sql, &sql_l, &cy_l).unwrap();
+    assert!(
+        b.contains("WHERE p.id < 1 AND p.n = 's\\\\' COLUMNS"),
+        "{b}"
+    );
+    assert!(
+        b.contains("t.v > 3 -- ?\n AND t.w = _utf8mb4'x' /* ? */"),
+        "{b}"
+    );
+    assert!(b.contains("SELECT x.a, '?' FROM"), "{b}");
+    assert!(bind_params(sql, &sql_l[..3], &cy_l[..3]).is_none());
+    let found = find(&b).unwrap();
+    assert_eq!(
+        found[0].cypher,
+        "MATCH (p:P) WHERE p.id < 1 AND p.n = 's\\\\' RETURN p.id AS `a`"
+    );
+}
+
+/// R8 round 7 (G62): rows past the inline limit become a temporary
+/// table typed from one representative row per kind of value.
+#[test]
+fn temp_tables_take_rows_typed_like_their_derived_table() {
+    let cols = vec!["a".to_owned(), "b".to_owned()];
+    let rows = vec![
+        vec![GraphLit::Int(5), GraphLit::Str("xy".into())],
+        vec![GraphLit::Int(-12345), GraphLit::Str("longest".into())],
+        vec![GraphLit::Null, GraphLit::Other("2.5e0".into())],
+        vec![GraphLit::Int(7), GraphLit::Str("it's".into())],
+    ];
+    let (create, inserts) = temp_table_sql("`s`.`t`", &cols, &rows, 40);
+    assert_eq!(
+        create,
+        "CREATE TEMPORARY TABLE `s`.`t` AS SELECT * FROM (SELECT -12345 AS `a`, 'longest' AS `b` \
+         UNION ALL VALUES (NULL, 2.5e0)) AS r LIMIT 0"
+    );
+    assert_eq!(
+        inserts,
+        [
+            "INSERT INTO `s`.`t` VALUES (5, 'xy')",
+            "INSERT INTO `s`.`t` VALUES (-12345, 'longest')",
+            "INSERT INTO `s`.`t` VALUES (NULL, 2.5e0)",
+            "INSERT INTO `s`.`t` VALUES (7, 'it''s')",
+        ]
+    );
+    let (_, one) = temp_table_sql("t", &cols, &rows, 1 << 20);
+    assert_eq!(one.len(), 1);
+}

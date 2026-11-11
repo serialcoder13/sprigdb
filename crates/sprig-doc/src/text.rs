@@ -142,6 +142,19 @@ pub trait TextSearch: Send + Sync + Debug {
         ns: &Ns,
         call: TextCall,
     ) -> Result<TextHits, MongoError>;
+
+    /// What a search runs on, for `explain` (decision S25): the index, its
+    /// copies and the parsed query; with `execute`, the copy's hit count
+    /// and time too, unless a row policy binds the session.
+    async fn plan(
+        &self,
+        _sql: &mut dyn SqlRunner,
+        _ns: &Ns,
+        _call: &TextCall,
+        _execute: bool,
+    ) -> Result<Document, MongoError> {
+        Err(no_search())
+    }
 }
 
 /// Whether an index key pattern is a text index's.
@@ -284,6 +297,101 @@ impl Engine {
             .hits(sql, ns, TextCall::Text(text))
             .await?;
         self.hit_docs(sql, ns, m, &h, rest).await
+    }
+
+    /// MongoDB's `explain` of a search (decision S25): `find` with
+    /// `$text`, or `aggregate` whose first stage is `$search`,
+    /// `$searchMeta` or a `$match` with `$text`. `None` for other
+    /// commands. `verbosity` other than `queryPlanner` runs the search and
+    /// reports `executionStats` (`nReturned`: documents the search stage
+    /// gives the caller, before later stages, skip and limit).
+    ///
+    /// # Errors
+    /// The search's and SQL errors.
+    pub async fn explain_search(
+        &self,
+        sql: &mut dyn SqlRunner,
+        db: &str,
+        cmd: &Document,
+        verbosity: &str,
+    ) -> Result<Option<Document>, MongoError> {
+        let Some((name, coll)) = cmd.iter().next() else {
+            return Ok(None);
+        };
+        let Bson::String(coll) = coll else {
+            return Ok(None);
+        };
+        let ns = Ns {
+            db: db.to_owned(),
+            coll: coll.clone(),
+        };
+        // (call, rest of the filter, parsed query shown, stage name)
+        let (call, rest, parsed, stage) = match name.as_str() {
+            "find" => {
+                let f = cmd.get_document("filter").cloned().unwrap_or_default();
+                let Some((text, rest)) = split_text(&f)? else {
+                    return Ok(None);
+                };
+                (TextCall::Text(text), rest, f, "TEXT_MATCH")
+            }
+            "aggregate" => {
+                let first = cmd
+                    .get_array("pipeline")
+                    .ok()
+                    .and_then(|p| p.first())
+                    .and_then(Bson::as_document)
+                    .cloned()
+                    .unwrap_or_default();
+                if let Ok(spec) = first.get_document("$search") {
+                    (TextCall::Search(spec.clone()), Document::new(), first.clone(), "SEARCH")
+                } else if let Ok(spec) = first.get_document("$searchMeta") {
+                    (TextCall::Meta(spec.clone()), Document::new(), first.clone(), "SEARCH_META")
+                } else if let Ok(m) = first.get_document("$match") {
+                    let Some((text, rest)) = split_text(m)? else {
+                        return Ok(None);
+                    };
+                    (TextCall::Text(text), rest, m.clone(), "TEXT_MATCH")
+                } else {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
+        };
+        let execute = verbosity != "queryPlanner";
+        let hook = self.text_hook()?;
+        let plan = hook.plan(sql, &ns, &call, execute).await?;
+        let mut out = doc! {
+            "explainVersion": "1",
+            "queryPlanner": {
+                "namespace": ns.to_string(),
+                "parsedQuery": parsed,
+                "winningPlan": {"stage": stage, "sprigSearch": plan},
+                "rejectedPlans": [],
+            },
+        };
+        if execute {
+            let started = std::time::Instant::now();
+            let n = match &call {
+                TextCall::Meta(_) => 1,
+                TextCall::Search(spec) => self.search_stage(sql, &ns, spec).await?.len(),
+                TextCall::Text(text) => match self.meta(sql, &ns).await? {
+                    Some(m) => self.text_docs(sql, &ns, &m, text.clone(), &rest).await?.len(),
+                    None => 0,
+                },
+            };
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            out.insert(
+                "executionStats",
+                doc! {
+                    "executionSuccess": true,
+                    "nReturned": n as i64,
+                    "executionTimeMillis": started.elapsed().as_millis() as i64,
+                },
+            );
+        }
+        out.insert("command", cmd.clone());
+        out.insert("ok", 1.0);
+        Ok(Some(out))
     }
 
     /// The `$search` stage.

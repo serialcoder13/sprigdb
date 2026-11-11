@@ -54,8 +54,8 @@ mod export;
 mod failover;
 mod gateway;
 mod graph;
-mod search;
 mod index;
+mod search;
 // Chapter 52: approvals and recommendations.
 mod logic;
 mod mover;
@@ -505,7 +505,7 @@ fn main() -> ExitCode {
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
-        | "shard" | "space" | "txn" | "sink" | "graph" | "recommendations" => true,
+        | "shard" | "space" | "txn" | "sink" | "graph" | "search" | "recommendations" => true,
         "login" | "logout" | "whoami" | "operator" | "token" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),

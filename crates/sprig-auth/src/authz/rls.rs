@@ -905,6 +905,7 @@ pub fn backend_bound(
 ///                doesn't give them (views and routines of the tenant read
 ///                T through it, with their definer's rights)
 /// ```
+#[allow(clippy::implicit_hasher, clippy::too_many_lines)] // one pass per account
 pub fn narrow(
     want: &mut super::backend::BackendState,
     cat: &TenantCatalog,

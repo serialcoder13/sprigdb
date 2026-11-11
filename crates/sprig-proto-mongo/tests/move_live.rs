@@ -80,7 +80,7 @@ fn vector(i: i32) -> Vec<f64> {
 
 async fn nearest(c: &Collection<Document>, i: i32) -> Vec<Bson> {
     let stage = doc! {"index": "vx", "path": "emb", "queryVector": vector(i),
-        "numCandidates": 50, "limit": 3};
+    "numCandidates": 50, "limit": 3};
     let got: Vec<Document> = c
         .aggregate(vec![
             doc! {"$vectorSearch": stage},
@@ -212,7 +212,10 @@ async fn mongo_databases_move_with_their_tenant() {
     let next = run(&db, &mut s, inc(2)).await;
     assert_eq!(next.get_i32("nModified").ok(), Some(1), "{next}");
     let old = db.run_command(inc(1)).session(&mut s).await;
-    assert!(old.is_err(), "an older txnNumber was accepted after the move");
+    assert!(
+        old.is_err(),
+        "an older txnNumber was accepted after the move"
+    );
 
     // New writes: plain, retryable (implicit session) and in a transaction.
     c.insert_one(doc! {"_id": 10_000, "after": true})

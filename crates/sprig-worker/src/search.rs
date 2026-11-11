@@ -29,6 +29,13 @@
 //!   streamed in 1 MiB chunks
 //! ```
 
+#![allow(
+    clippy::wrong_self_convention,
+    clippy::single_match_else,
+    clippy::blocks_in_conditions,
+    clippy::semicolon_if_nothing_returned
+)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -39,9 +46,7 @@ use async_trait::async_trait;
 use mysql_async::Pool;
 use serde_json::{Value, json};
 use sprig_api::proto::internal::search_partition_client::SearchPartitionClient;
-use sprig_api::proto::internal::search_partition_server::{
-    SearchPartition, SearchPartitionServer,
-};
+use sprig_api::proto::internal::search_partition_server::{SearchPartition, SearchPartitionServer};
 use sprig_api::proto::internal::{
     CopySegmentsRequest, SearchPartitionQueryReply, SearchPartitionQueryRequest, SegmentChunk,
 };
@@ -232,12 +237,14 @@ impl SearchRole {
         let svc = SearchPartitionServer::new(PartitionService(Arc::clone(self)))
             .max_decoding_message_size(64 << 20)
             .max_encoding_message_size(256 << 20);
-        let listener = tokio::net::TcpListener::bind(self.listen).await.map_err(|e| {
-            SprigError::new(
-                SprigCode::ConfigInvalid,
-                format!("can't bind the search service on {}: {e}", self.listen),
-            )
-        })?;
+        let listener = tokio::net::TcpListener::bind(self.listen)
+            .await
+            .map_err(|e| {
+                SprigError::new(
+                    SprigCode::ConfigInvalid,
+                    format!("can't bind the search service on {}: {e}", self.listen),
+                )
+            })?;
         tracing::info!(listen = %self.listen, addr = %self.addr, mtls = self.deps.tls.is_some(), dir = %self.dir.display(), "search role: SearchPartition listening");
         let stop = self.stop.clone();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -381,7 +388,10 @@ impl SearchRole {
                 if let Some(d) = p.parent() {
                     tokio::fs::create_dir_all(d).await.map_err(io)?;
                 }
-                file = Some((chunk.path.clone(), tokio::fs::File::create(&p).await.map_err(io)?));
+                file = Some((
+                    chunk.path.clone(),
+                    tokio::fs::File::create(&p).await.map_err(io)?,
+                ));
             }
             if let Some((_, f)) = file.as_mut() {
                 f.write_all(&chunk.data).await.map_err(io)?;
@@ -434,7 +444,12 @@ impl SearchRole {
                 let _ = std::fs::remove_dir_all(dest);
                 std::fs::rename(&incoming, dest).map_err(io)?;
                 metrics::counter!("sprig_search_seeds_total", "source" => "snapshot").increment(1);
-                tracing::info!(tenant = rec.tenant, index = rec.index, snapshot = n, "search copy restored from a snapshot");
+                tracing::info!(
+                    tenant = rec.tenant,
+                    index = rec.index,
+                    snapshot = n,
+                    "search copy restored from a snapshot"
+                );
                 return Ok(true);
             }
             let _ = std::fs::remove_dir_all(&incoming);
@@ -449,7 +464,10 @@ impl SearchRole {
         };
         let io = |e: std::io::Error| SprigError::internal(format!("search snapshot: {e}"));
         let at = now_ms();
-        let tmp = self.dir.join(".snap").join(format!("{}-{}-{at}", rec.tenant, rec.index));
+        let tmp = self
+            .dir
+            .join(".snap")
+            .join(format!("{}-{}-{at}", rec.tenant, rec.index));
         copy.snapshot_into(&tmp)?;
         let part = root.join(format!("{at}.part"));
         let _ = std::fs::remove_dir_all(&part);
@@ -541,10 +559,7 @@ struct GatewaySeeder {
     generation: u32,
 }
 
-async fn seed_call(
-    gateways: &Gateways,
-    req: &SeedRequest,
-) -> Result<Vec<SearchRecord>> {
+async fn seed_call(gateways: &Gateways, req: &SeedRequest) -> Result<Vec<SearchRecord>> {
     let body = serde_json::to_string(req)
         .map_err(|e| SprigError::internal(format!("a seed request: {e}")))?;
     let reply = gateways.seed_page(req.tenant ^ req.index, body).await?;
@@ -680,7 +695,9 @@ impl SearchPartition for PartitionService {
             .record(started.elapsed().as_secs_f64());
         let reply = serde_json::to_string(&QueryReply { answers, applied })
             .map_err(|e| Status::internal(format!("a search reply: {e}")))?;
-        Ok(Response::new(SearchPartitionQueryReply { reply_json: reply }))
+        Ok(Response::new(SearchPartitionQueryReply {
+            reply_json: reply,
+        }))
     }
 
     type CopySegmentsStream = ChunkStream;
@@ -715,7 +732,9 @@ impl SearchPartition for PartitionService {
             'files: for f in files {
                 let path = f.to_string_lossy().into_owned();
                 let Ok(mut file) = tokio::fs::File::open(tmp.join(&f)).await else {
-                    let _ = tx.send(Err(Status::internal(format!("{path} vanished")))).await;
+                    let _ = tx
+                        .send(Err(Status::internal(format!("{path} vanished"))))
+                        .await;
                     break;
                 };
                 let mut offset = 0u64;
@@ -805,7 +824,14 @@ impl SearchCopyJob {
             cancel.child_token(),
         )?;
         lock(&role.copies).insert((rec.tenant, rec.index, n), Arc::clone(&copy));
-        tracing::info!(tenant = rec.tenant, index = rec.index, copy = n, generation = rec.def.generation, from = seeded_from, "search copy started");
+        tracing::info!(
+            tenant = rec.tenant,
+            index = rec.index,
+            copy = n,
+            generation = rec.def.generation,
+            from = seeded_from,
+            "search copy started"
+        );
         Ok(Running {
             copy,
             generation: rec.def.generation,
@@ -828,7 +854,13 @@ impl SearchCopyJob {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn serve(&self, cx: &JobCtx, tenant: u64, index: u64, n: u32) -> std::result::Result<Value, String> {
+    async fn serve(
+        &self,
+        cx: &JobCtx,
+        tenant: u64,
+        index: u64,
+        n: u32,
+    ) -> std::result::Result<Value, String> {
         let role = &self.0;
         let job_id = cx.job_id.to_string();
         let mut running: Option<Running> = None;
@@ -862,7 +894,9 @@ impl SearchCopyJob {
                     if running.is_none() {
                         match self.start(&rec, n, &cx.cancel).await {
                             Ok(r) => running = Some(r),
-                            Err(e) => tracing::warn!(tenant, index, error = %e, "search copy didn't start"),
+                            Err(e) => {
+                                tracing::warn!(tenant, index, error = %e, "search copy didn't start")
+                            }
                         }
                     }
                     if let Some(r) = &running {
@@ -884,7 +918,11 @@ impl SearchCopyJob {
                                 stop(&mut running);
                                 let _ = placement::drop_index(&role.deps.dc, tenant, index).await;
                                 self.remove_files(tenant, index);
-                                tracing::info!(tenant, index, "search index or its object is gone; copy removed");
+                                tracing::info!(
+                                    tenant,
+                                    index,
+                                    "search index or its object is gone; copy removed"
+                                );
                                 return Ok(json!({"dropped": true}));
                             }
                         }
@@ -919,12 +957,21 @@ impl SearchCopyJob {
                                 .map(|c| c.copy)
                                 .min();
                             if lowest == Some(n) {
-                                let (ro, rc, c) = (Arc::clone(role), rec.clone(), Arc::clone(&r.copy));
+                                let (ro, rc, c) =
+                                    (Arc::clone(role), rec.clone(), Arc::clone(&r.copy));
                                 let keep = k.snapshot_keep;
-                                match tokio::task::spawn_blocking(move || ro.snapshot(&rc, &c, keep)).await {
-                                    Ok(Ok(Some(at))) => tracing::info!(tenant, index, at, "search snapshot written"),
+                                match tokio::task::spawn_blocking(move || {
+                                    ro.snapshot(&rc, &c, keep)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(Some(at))) => {
+                                        tracing::info!(tenant, index, at, "search snapshot written")
+                                    }
                                     Ok(Ok(None)) => {}
-                                    Ok(Err(e)) => tracing::warn!(error = %e, "search snapshot failed"),
+                                    Ok(Err(e)) => {
+                                        tracing::warn!(error = %e, "search snapshot failed")
+                                    }
                                     Err(e) => tracing::warn!(error = %e, "search snapshot failed"),
                                 }
                             }

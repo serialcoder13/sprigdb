@@ -531,7 +531,26 @@ impl PassSession {
         if let Some(text) = s.deferred.clone() {
             // Chapter 39 (R5 round 6): the bound values as literals.
             let search_text = s.deferred_params;
-            let text = if s.deferred_params {
+            let text = if s.graph_params {
+                // R8 round 7 (G63): GRAPH_TABLE with `?`.
+                let values = s.params_for_backend(params, persona)?;
+                let sql_l: Vec<String> = values.iter().map(search::param_literal).collect();
+                let cy_l = values
+                    .iter()
+                    .map(router::graph::cypher_param)
+                    .collect::<Result<Vec<String>>>()?;
+                std::str::from_utf8(&text)
+                    .ok()
+                    .and_then(|t| sprig_router::graph::bind_params(t, &sql_l, &cy_l))
+                    .map(Bytes::from)
+                    .ok_or_else(|| {
+                        SprigError::standard(
+                            1210,
+                            *b"HY000",
+                            "Incorrect arguments to EXECUTE: a GRAPH_TABLE statement's parameters",
+                        )
+                    })?
+            } else if s.deferred_params {
                 let values: Vec<String> = s
                     .params_for_backend(params, persona)?
                     .iter()
@@ -1160,6 +1179,17 @@ impl SessionExec for PassSession {
         if let Some(ts) = self.tenant.as_deref_mut() {
             ts.types.internal = on;
         }
+    }
+
+    fn row_policy_binds(&self, object: u64) -> Option<bool> {
+        // Decision S24: the session's compiled policies at its catalog.
+        let ts = self.tenant.as_deref()?;
+        let cat = ts.catalog()?;
+        let p = crate::tenant::authz::privileges(ts, cat);
+        Some(
+            p.row_policies()
+                .is_some_and(|r| r.tables.contains_key(&sprig_common::ids::ObjectId(object))),
+        )
     }
 
     fn attach_capture(&mut self, capture: crate::workload::SessionCapture) {

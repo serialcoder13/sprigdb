@@ -28,6 +28,13 @@ x-mariadb: &mariadb
   image: ${MARIADB_IMAGE:-mariadb:11.8}
   environment: &mariadb-env
     MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
+    # glibc gives each busy thread its own malloc arena; with 400 connections
+    # RSS grew ~300 MB past what MariaDB itself counted (Memory_used 562 MB,
+    # anon 868 MB on single-1, 11 Nov). Hardening round 1, HD2.
+    MALLOC_ARENA_MAX: "4"
+  # An OOM-killed node comes back by itself (galera-1's entrypoint decides
+  # bootstrap vs join; the others rejoin or resync). Hardening round 1, HD2.
+  restart: unless-stopped
   networks: [dc-a]
   ulimits:
     nofile: { soft: 65536, hard: 65536 }
@@ -83,6 +90,10 @@ services:
     <<: *mariadb
     profiles: [single, all]
     hostname: single
+    # The many-tenant tests (1,000 tenants, r9cluster's 75) run here: 2.5 GB
+    # (the lead's live value of 11 Nov). Hardening round 1, HD2.
+    mem_limit: ${MARIADB_SINGLE_MEM_LIMIT:-2560m}
+    memswap_limit: ${MARIADB_SINGLE_MEMSWAP_LIMIT:-3g}
     command: [--server-id=101, --gtid-domain-id=1]
     ports: ["127.0.0.1:13301:3306"]
     volumes:

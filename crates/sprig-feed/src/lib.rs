@@ -15,6 +15,8 @@
 //!   through the handoff records ([`ownership`]) the mover writes with
 //!   each cutover, resumable from any [`token`];
 //! - [`merge`]: the k-way merge by `(clamp, cluster, row)` across clusters;
+//! - [`shared`]: one binlog dump per cluster shared by every tenant's
+//!   tail, for consumers of internal tables (the queue forwarder);
 //! - [`subs`]: subscriptions and acknowledged positions;
 //! - [`requirements`]: the binlog settings the feed needs (`feed_source`);
 //! - [`hlc`]: stamps and clamps.
@@ -33,6 +35,7 @@ pub mod names;
 pub mod ownership;
 pub mod placement;
 pub mod requirements;
+pub mod shared;
 pub mod source;
 pub mod subs;
 pub mod tail;

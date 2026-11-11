@@ -14,7 +14,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use tantivy::Term;
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, EmptyQuery, ExistsQuery, Occur, PhraseQuery, Query,
-    RangeQuery, RegexQuery, TermQuery,
+    RangeQuery, RegexQuery, TermQuery, TermSetQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption};
 
@@ -510,6 +510,15 @@ impl<'a> Builder<'a> {
                 }
             }
             SearchQuery::Boost(q, b) => boxed(BoostQuery::new(self.build(q)?, *b)),
+            SearchQuery::Keys(keys) => {
+                if keys.is_empty() {
+                    return Ok(boxed(EmptyQuery));
+                }
+                boxed(TermSetQuery::new(
+                    keys.iter()
+                        .map(|k| Term::from_field_bytes(self.schema.key, &k.0)),
+                ))
+            }
         })
     }
 }

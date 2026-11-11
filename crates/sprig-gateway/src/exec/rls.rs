@@ -22,6 +22,18 @@
 //!   DDL, SHOW, DESCRIBE of a table, transactions → unchanged
 //! ```
 
+#![allow(
+    clippy::similar_names,
+    clippy::many_single_char_names,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::match_same_arms,
+    clippy::assigning_clones,
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::format_push_string,
+    clippy::too_many_lines
+)] // pedantic style: names follow the chapter's pseudocode
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -266,6 +278,7 @@ impl PassSession {
 
     /// Deploys `object`'s write checks on every shard of its table (or
     /// drops them when security is off) and records the version.
+    #[allow(clippy::too_many_lines)] // one step per check, in order
     pub(super) async fn deploy_checks(&mut self, object: ObjectId) -> Result<()> {
         let persona = self.persona;
         let own_cluster = self.target.cluster.clone();
@@ -323,7 +336,7 @@ impl PassSession {
         let definer_user = crate::tenant::rls::view_definer(&cat, object, user);
         let definer_account = sprig_auth::authz::backend::account(tenant, definer_user);
         let definer = format!("`{}`@`%`", definer_account.replace('`', "``"));
-        let views = crate::tenant::rls::views_on(&svc, &cat, object);
+        let mut views = crate::tenant::rls::views_on(&svc, &cat, object);
         let policies: Vec<_> = state.policies_of(object).cloned().collect();
         let tp: Vec<TriggerPolicy<'_>> = policies
             .iter()
@@ -335,6 +348,37 @@ impl PassSession {
                 check: p.check_expr.as_deref(),
             })
             .collect();
+        // Tables with invisible columns get no policy view (RL18).
+        let mut probe = super::logic_bound::CtlShards {
+            list: list.clone(),
+            conns: HashMap::new(),
+            locator: Arc::clone(&svc.locator),
+        };
+        let mut invisible = false;
+        for (schema, _) in &list {
+            let s = probe.session(schema).await?;
+            let rows = s
+                .rows(&format!(
+                    "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} \
+                     AND TABLE_NAME = {} AND EXTRA LIKE '%INVISIBLE%'",
+                    sprig_sql::rls::sql_string(schema, false),
+                    sprig_sql::rls::sql_string(&obj.name, false),
+                ))
+                .await?;
+            if rows
+                .first()
+                .and_then(|r| r.first().cloned().flatten())
+                .is_some_and(|v| v != "0")
+            {
+                invisible = true;
+                break;
+            }
+        }
+        drop(probe);
+        crate::tenant::rls::viewless_set(tenant.0, object.0, invisible);
+        if invisible {
+            views = false;
+        }
         let mut plan: Vec<(String, Vec<String>)> = Vec::new();
         for (schema, _) in &list {
             if !sec.enabled {
@@ -434,6 +478,7 @@ impl PassSession {
     ///
     /// # Errors
     /// The deployment's.
+    #[allow(clippy::too_many_lines)] // one step per check, in order
     pub(super) async fn ensure_checks(&mut self, object: ObjectId) -> Result<()> {
         let own_cluster = self.target.cluster.clone();
         let Some(ts) = self.tenant.as_deref() else {
@@ -445,14 +490,6 @@ impl PassSession {
         let Some(sec) = RlsState::of(&cat).and_then(|s| s.security(object).copied()) else {
             return Ok(());
         };
-        let key = (ts.tenant.0, object.0, cat.version, sec.changed_version);
-        if verified()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&key)
-        {
-            return Ok(());
-        }
         let (Some(obj), Some(db)) = (
             cat.objects.get(object).cloned(),
             cat.objects
@@ -470,6 +507,30 @@ impl PassSession {
         }
         .or_else(|| template.clone().map(|t| vec![(t, own_cluster.clone())]))
         .unwrap_or_default();
+        // The shard list is in the key: a split or move needn't change the
+        // catalog version, and the mover copies triggers but not views.
+        let shards_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            list.iter()
+                .map(|(s, c)| (s, c.to_string()))
+                .collect::<Vec<_>>()
+                .hash(&mut h);
+            h.finish()
+        };
+        let key = (
+            ts.tenant.0,
+            object.0,
+            cat.version ^ shards_hash,
+            sec.changed_version,
+        );
+        if verified()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&key)
+        {
+            return Ok(());
+        }
         let names = sprig_sql::rls::triggers::names(object.0);
         let views = crate::tenant::rls::views_on(ts.services(), &cat, object) && sec.enabled;
         let view = sprig_sql::rls::views::view_name(&obj.name, object.0);
@@ -491,13 +552,16 @@ impl PassSession {
                      (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {s} \
                      AND TABLE_NAME = {}), \
                      (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {s} \
-                     AND TABLE_NAME = {})",
+                     AND TABLE_NAME = {}), \
+                     (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {s} \
+                     AND TABLE_NAME = {t} AND EXTRA LIKE '%INVISIBLE%')",
                     q(&names[0]),
                     q(&names[1]),
                     q(&names[2]),
                     q(&obj.name),
                     q(&view),
                     s = q(schema),
+                    t = q(&obj.name),
                 ))
                 .await?;
             let num = |i: usize| -> u64 {
@@ -507,7 +571,12 @@ impl PassSession {
                     .unwrap_or(0)
             };
             let triggers_ok = num(0) == 3 || !sec.enabled;
-            let views_ok = !views || num(2) == num(1);
+            // A table with invisible columns (a split table's `_sprig_rk`)
+            // gets no view (RL18): `SELECT *` on a view would show them.
+            if num(3) > 0 {
+                crate::tenant::rls::viewless_set(ts.tenant.0, object.0, true);
+            }
+            let views_ok = !views || num(3) > 0 && num(2) == 0 || num(3) == 0 && num(2) == num(1);
             if !triggers_ok || !views_ok {
                 complete = false;
                 break;
@@ -534,6 +603,7 @@ impl PassSession {
     ///
     /// # Errors
     /// 39050, 39366, 39364.
+    #[allow(clippy::too_many_lines)] // one step per check, in order
     pub(super) async fn tenant_rls(
         &mut self,
         cx: &ExecCtx<'_>,
@@ -683,8 +753,8 @@ impl PassSession {
             .cloned()
             .collect();
         if !fixable.is_empty() {
-            let safe = Box::pin(self.repoint(&cat, &fixable)).await;
-            tainted.without(&safe);
+            let pointed = Box::pin(self.repoint(&cat, &fixable)).await;
+            tainted.without(&pointed);
         }
         let Some(ts) = self.tenant.as_deref_mut() else {
             return Ok(None);
@@ -839,6 +909,14 @@ impl PassSession {
                     tracing::warn!(error = %e, "row-level security policy view not verified");
                 }
             }
+            // A table found without a view since: read it directly.
+            let now = self
+                .tenant
+                .as_deref()
+                .and_then(|ts| crate::tenant::rls::view_swap(ts, &cat, &rls));
+            if let Some(bs) = self.bs.as_mut() {
+                bs.vars_mut().rls_views = now;
+            }
         }
         if needs_checks {
             let bound: Vec<ObjectId> = covered
@@ -917,6 +995,7 @@ impl PassSession {
             return safe;
         };
         let svc = Arc::clone(ts.services());
+        let tenant = ts.tenant.0;
         // Protected tables: (db, lower name) → view, or no view yet.
         let mut views: HashMap<(u32, String), String> = HashMap::new();
         let mut no_view: std::collections::HashSet<(u32, String)> =
@@ -926,7 +1005,10 @@ impl PassSession {
                 continue;
             };
             let k = (o.db_id.0, o.name.to_lowercase());
-            if sec.checks_version > 0 && crate::tenant::rls::views_on(&svc, cat, sec.object_id) {
+            if sec.checks_version > 0
+                && crate::tenant::rls::views_on(&svc, cat, sec.object_id)
+                && !crate::tenant::rls::is_viewless(tenant, sec.object_id.0)
+            {
                 views.insert(
                     k,
                     sprig_sql::rls::views::view_name(&o.name, sec.object_id.0),
@@ -945,7 +1027,6 @@ impl PassSession {
             n.hash(&mut h);
             h.finish()
         };
-        let tenant = ts.tenant.0;
         let layout = super::router::ddl_layout(ts);
         let db_of = |schema: &str| -> Option<u32> {
             let rest = schema.strip_prefix(&format!("t{tenant}_d"))?;
@@ -1002,7 +1083,7 @@ impl PassSession {
 /// names a protected table that has no policy view yet.
 fn swap_code(
     text: &str,
-    lex: &LexOptions,
+    lex: LexOptions,
     schema: &str,
     views: &HashMap<(u32, String), String>,
     no_view: &std::collections::HashSet<(u32, String)>,
@@ -1017,7 +1098,7 @@ fn swap_code(
         }
         views.get(&k).cloned()
     };
-    let new = sprig_sql::rls::views::swap(text, lex, &lookup, &std::collections::HashSet::new())?;
+    let new = sprig_sql::rls::views::swap(text, &lex, &lookup, &std::collections::HashSet::new())?;
     if missing.get() {
         return Err(unsupported(
             "stored code over a protected table without its policy view",
@@ -1070,14 +1151,14 @@ async fn repoint_one(
         no_backslash_escapes: up.contains("NO_BACKSLASH_ESCAPES"),
         ..LexOptions::mariadb()
     };
-    let new = swap_code(&text, &lex, schema, views, no_view, db_of)?;
+    let new = swap_code(&text, lex, schema, views, no_view, db_of)?;
     let Some(new) = new else {
         return Ok(());
     };
     let new = or_replace(&new).ok_or_else(|| unsupported("stored code text"))?;
     let cs = cell(cs_col).unwrap_or_else(|| "utf8mb4".into());
-    let coll = cell(coll_col);
-    let names = match coll {
+    let collation = cell(coll_col);
+    let names = match collation {
         Some(c) => format!("SET NAMES {cs} COLLATE {c}"),
         None => format!("SET NAMES {cs}"),
     };

@@ -355,10 +355,7 @@ mod tests {
         ];
         let live = |w: &str| w != "gone";
         let (ready, seeding) = query_order(&copies, 3, &live);
-        assert_eq!(
-            ready.iter().map(|c| c.copy).collect::<Vec<_>>(),
-            vec![1, 0]
-        );
+        assert_eq!(ready.iter().map(|c| c.copy).collect::<Vec<_>>(), vec![1, 0]);
         assert_eq!(seeding.iter().map(|c| c.copy).collect::<Vec<_>>(), vec![2]);
     }
 

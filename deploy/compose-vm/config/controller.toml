@@ -1,0 +1,36 @@
+# Controller and worker (the worker reads this file under SPRIGDB_NODE_ID
+# wkr-1). deploy/compose-vm; values the compose file sets through SPRIGDB_*
+# variables: node.dc, node.id, meta.deployment_id, telemetry log settings.
+
+[node]
+dc = "dc1"
+
+[meta]
+dc_seeds = ["https://etcd:2379"]
+# Empty: single-etcd mode (one etcd serves the DC and the global tier).
+global_seeds = []
+deployment_id = "sprigdb"
+
+# Mutual TLS to etcd (chapter 23). sprig-vm.sh init makes these.
+[tls]
+ca = "/run/sprig/tls/ca.pem"
+cert = "/run/sprig/tls/client.pem"
+key = "/run/sprig/tls/client-key.pem"
+
+[controller]
+# The first controller to start writes the deployment records once.
+bootstrap = true
+# Admin API (chapter 37). Not loopback, so a token is required. It is plain
+# HTTP: compose.yaml publishes it on the VM's 127.0.0.1 only.
+admin_addr = "0.0.0.0:7480"
+admin_token_file = "/run/sprig/sprig/admin-token"
+# The gateways' token for Studio's routes (decision ST12).
+gateway_token_file = "/run/sprig/sprig/gateway-token"
+internal_addr = "0.0.0.0:7481"
+internal_advertise = "controller:7481"
+workload_key_file = "/run/sprig/sprig/workload-keys"
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "json"
+bootstrap_addr = "0.0.0.0:9180"

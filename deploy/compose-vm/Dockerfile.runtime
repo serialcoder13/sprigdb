@@ -1,0 +1,18 @@
+# Runtime image of the Compose-on-VM bundle: the binaries build-image.sh
+# compiled (the build context is its out/<tag>/ directory).
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+FROM ${RUNTIME_IMAGE}
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 10001 sprigdb \
+ && useradd --system --uid 10001 --gid sprigdb --home-dir /var/lib/sprigdb --create-home sprigdb \
+ && install -d -o sprigdb -g sprigdb /etc/sprigdb /var/lib/sprigdb /var/log/sprigdb
+COPY sprigdb sprigctl /usr/bin/
+ARG SPRIGDB_VERSION=dev
+LABEL org.opencontainers.image.title="sprigdb" \
+      org.opencontainers.image.version="${SPRIGDB_VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+USER sprigdb
+WORKDIR /var/lib/sprigdb
+ENTRYPOINT ["/usr/bin/sprigdb"]

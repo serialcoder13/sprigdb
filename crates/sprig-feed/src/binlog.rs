@@ -168,6 +168,9 @@ struct Group {
 pub struct BinlogTxns {
     stream: BinlogStream,
     tenant: TenantId,
+    /// Cluster scope ([`BinlogTxns::connect_tables`]): rows of these
+    /// internal tables in every tenant's shard schemas, no statements.
+    tables: Option<Arc<[String]>>,
     pos: GtidPos,
     group: Option<Group>,
     shapes: HashMap<u64, Arc<TableShape>>,
@@ -207,6 +210,46 @@ impl BinlogTxns {
         Ok(Self {
             stream,
             tenant,
+            tables: None,
+            pos: from.clone(),
+            group: None,
+            shapes: HashMap::new(),
+            quiet_since: None,
+        })
+    }
+
+    /// Starts one dump on `src` after `from` for **every** tenant on the
+    /// cluster, keeping only rows of `tables` in tenants' shard and
+    /// reference schemas (and the applier marks). DDL and statement events
+    /// are not kept: the cluster scope serves internal consumers of
+    /// internal tables (chapter 50's per-cluster queue forwarder), which
+    /// [`crate::shared`] splits by tenant.
+    ///
+    /// # Errors
+    /// 39800 when the node lacks `from`; the reader's errors.
+    pub async fn connect_tables(
+        src: &BinlogSource,
+        tables: Arc<[String]>,
+        from: &GtidPos,
+        server_id: u32,
+    ) -> Result<Self> {
+        let mut opts = StreamOptions::new(server_id);
+        opts.annotate_rows = true;
+        let keep = Arc::clone(&tables);
+        opts.filter = Some(Arc::new(move |schema: &str, table: &str| {
+            (schema == SYS_SCHEMA && APPLY_TABLES.contains(&table))
+                || (keep.iter().any(|t| t == table)
+                    && schema
+                        .parse::<SchemaName>()
+                        .is_ok_and(|s| !matches!(s, SchemaName::Catalog { .. })))
+        }));
+        let stream = BinlogStream::connect(src, from, &opts)
+            .await
+            .map_err(history_lost)?;
+        Ok(Self {
+            stream,
+            tenant: TenantId(0),
+            tables: Some(tables),
             pos: from.clone(),
             group: None,
             shapes: HashMap::new(),
@@ -356,8 +399,8 @@ impl TxnSource for BinlogTxns {
                         }
                         StatementKind::Ddl => {
                             let tenant = self.tenant;
-                            let mine = is_tenant_schema(&db, tenant)
-                                || !schemas_in(&sql, tenant).is_empty();
+                            let mine = self.tables.is_none() && is_tenant_schema(&db, tenant)
+                                || self.tables.is_none() && !schemas_in(&sql, tenant).is_empty();
                             if mine && let Some(g) = self.group.as_mut() {
                                 g.txn.ddl = Some(RawDdl { db, sql });
                             }
@@ -366,7 +409,8 @@ impl TxnSource for BinlogTxns {
                             }
                         }
                         StatementKind::Dml => {
-                            if is_tenant_schema(&db, self.tenant)
+                            if self.tables.is_none()
+                                && is_tenant_schema(&db, self.tenant)
                                 && let Some(g) = self.group.as_mut()
                             {
                                 g.txn.statement_dml = Some(db);
@@ -503,6 +547,19 @@ impl Clusters for StaticClusters {
         let src = self.source(cluster)?;
         let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(BinlogTxns::connect(src, tenant, from, id).await?))
+    }
+
+    async fn open_tables(
+        &self,
+        cluster: &ClusterId,
+        tables: Arc<[String]>,
+        from: &GtidPos,
+    ) -> Result<Box<dyn TxnSource>> {
+        let src = self.source(cluster)?;
+        let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+        Ok(Box::new(
+            BinlogTxns::connect_tables(src, tables, from, id).await?,
+        ))
     }
 
     async fn position(&self, cluster: &ClusterId) -> Result<GtidPos> {

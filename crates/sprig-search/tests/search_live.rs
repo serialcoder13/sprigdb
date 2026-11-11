@@ -18,7 +18,12 @@
 //!
 //! Database `r5s_live` is created and dropped (unless kept).
 
-#![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    missing_docs
+)]
 
 use std::time::{Duration, Instant};
 
@@ -217,10 +222,7 @@ async fn d_worker_loss() {
     setup(&mut c).await;
     let ready = |s: &str| s.starts_with("ready on") && s.contains(',');
     let state = async |c: &mut Conn| -> String {
-        let rows: Vec<mysql_async::Row> = c
-            .query("SHOW SEARCH INDEXES FROM docs")
-            .await
-            .unwrap();
+        let rows: Vec<mysql_async::Row> = c.query("SHOW SEARCH INDEXES FROM docs").await.unwrap();
         rows.first()
             .and_then(|r| r.get::<String, _>("State"))
             .unwrap_or_default()
@@ -233,7 +235,10 @@ async fn d_worker_loss() {
             println!("worker loss: before: {s}");
             break;
         }
-        assert!(t0.elapsed() < Duration::from_secs(120), "copies not ready: {s}");
+        assert!(
+            t0.elapsed() < Duration::from_secs(120),
+            "copies not ready: {s}"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let base: i64 = c
@@ -253,9 +258,16 @@ async fn d_worker_loss() {
                 .arg(&kill)
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             killed_at = Some(Instant::now());
-            println!("worker loss: killed ({})", String::from_utf8_lossy(&out.stdout).trim());
+            println!(
+                "worker loss: killed ({})",
+                String::from_utf8_lossy(&out.stdout).trim()
+            );
         }
         c.query_drop(format!(
             "INSERT INTO docs VALUES ({i}, 'loss row token{i} alpha', {})",
@@ -281,7 +293,10 @@ async fn d_worker_loss() {
                     eprintln!("search failed: {e}");
                 }
             }
-            assert!(t.elapsed() < Duration::from_secs(10), "row {i} not found in 10 s");
+            assert!(
+                t.elapsed() < Duration::from_secs(10),
+                "row {i} not found in 10 s"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -306,7 +321,10 @@ async fn d_worker_loss() {
             );
             break;
         }
-        assert!(t1.elapsed() < Duration::from_secs(180), "the lost copy wasn't replaced: {s}");
+        assert!(
+            t1.elapsed() < Duration::from_secs(180),
+            "the lost copy wasn't replaced: {s}"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let want: Vec<i64> = c.query("SELECT id FROM docs ORDER BY id").await.unwrap();
@@ -316,6 +334,10 @@ async fn d_worker_loss() {
         )
         .await
         .unwrap();
-    println!("worker loss: table {} rows, search {} hits", want.len(), got.len());
+    println!(
+        "worker loss: table {} rows, search {} hits",
+        want.len(),
+        got.len()
+    );
     assert_eq!(want, got);
 }

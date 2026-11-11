@@ -1,0 +1,230 @@
+# SprigDB on one VM with Docker Compose (hardening round 1; chapter 27,
+# "Compose on VMs"). Production bundle: TLS on every client listener, mutual
+# TLS to etcd, secrets from files, healthchecks, memory limits, log rotation,
+# named volumes, `restart: unless-stopped`.
+#
+# This is NOT the development stack (deploy/compose/compose.yaml). Start it
+# through sprig-vm.sh, which makes the secrets and certificates first and
+# registers the cluster and listener settings after:
+#
+#   cp .env.example .env && $EDITOR .env
+#   ./sprig-vm.sh init        # secrets/ (CA, certificates, passwords, tokens)
+#   ./sprig-vm.sh up          # this file, then the first-start settings
+#
+# Ports (host side, from .env; every one is TLS):
+#   SPRIG_MYSQL_PORT    MySQL 8.4 persona           (default 3306)
+#   SPRIG_MARIADB_PORT  MariaDB persona             (default 3307)
+#   SPRIG_HTTPS_PORT    REST, gRPC (ALPN h2), Studio (default 8443)
+#   SPRIG_MONGO_PORT    MongoDB wire protocol       (default 27017)
+#   SPRIG_REDIS_PORT    Redis RESP                  (default 6379)
+#   SPRIG_BOLT_PORT     Bolt (Neo4j drivers)        (default 7687)
+#   SPRIG_KAFKA_PORT    Kafka                       (default 9092)
+#   SPRIG_AMQPS_PORT    AMQP 0-9-1 / 1.0 over TLS   (default 5671)
+# On 127.0.0.1 only (reach them over SSH):
+#   SPRIG_ADMIN_PORT    controller Admin API, bearer token (default 7480)
+#   SPRIG_METRICS_PORT  Prometheus, when the monitoring profile runs (9090)
+# Inside the network only: etcd 2379 (mTLS), MariaDB 3306 (TLS required),
+# telemetry/metrics 9180 on each SprigDB process, controller internal 7481.
+#
+# The listeners bind inside the gateway container on the same port numbers
+# they are published on (sprig-vm.sh writes listener.<name>.bind), so the
+# addresses Kafka advertises are the ones clients reach.
+
+name: ${COMPOSE_PROJECT_NAME:-sprigdb}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${SPRIG_LOG_MAX_SIZE:-50m}
+    max-file: "${SPRIG_LOG_MAX_FILES:-5}"
+
+x-sprigdb: &sprigdb
+  image: ${SPRIGDB_IMAGE:-sprigdb:dev}
+  init: true
+  restart: unless-stopped
+  logging: *logging
+  networks: [sprig]
+  ulimits:
+    nofile: { soft: 1048576, hard: 1048576 }
+  environment: &sprigdb-env
+    SPRIGDB_NODE_DC: ${SPRIG_DC:-dc1}
+    SPRIGDB_META_DEPLOYMENT_ID: ${SPRIG_DEPLOYMENT_ID:-sprigdb}
+    SPRIGDB_TELEMETRY_LOG_FORMAT: json
+    SPRIGDB_TELEMETRY_BOOTSTRAP_LOG_LEVEL: ${SPRIG_LOG_LEVEL:-info}
+  # Secrets are read as this user: sprig-vm.sh init gives it the files.
+  user: "${SPRIG_UID:-10001}:${SPRIG_GID:-10001}"
+  depends_on:
+    etcd: { condition: service_healthy }
+    mariadb-1: { condition: service_healthy }
+
+services:
+  etcd:
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.6.5}
+    restart: unless-stopped
+    logging: *logging
+    networks: [sprig]
+    mem_limit: ${ETCD_MEM_LIMIT:-512m}
+    command:
+      - etcd
+      - --name=etcd-0
+      - --data-dir=/etcd-data/data
+      - --listen-client-urls=https://0.0.0.0:2379
+      - --advertise-client-urls=https://etcd:2379
+      - --listen-peer-urls=https://0.0.0.0:2380
+      - --initial-advertise-peer-urls=https://etcd:2380
+      - --initial-cluster=etcd-0=https://etcd:2380
+      - --client-cert-auth
+      - --trusted-ca-file=/tls/ca.pem
+      - --cert-file=/tls/etcd.pem
+      - --key-file=/tls/etcd-key.pem
+      - --peer-client-cert-auth
+      - --peer-trusted-ca-file=/tls/ca.pem
+      - --peer-cert-file=/tls/etcd.pem
+      - --peer-key-file=/tls/etcd-key.pem
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=1h
+      - --quota-backend-bytes=4294967296
+    volumes:
+      - etcd-data:/etcd-data
+      - ./secrets/tls:/tls:ro
+      - ./backups:/backups
+    healthcheck:
+      test:
+        - CMD
+        - etcdctl
+        - --endpoints=https://127.0.0.1:2379
+        - --cacert=/tls/ca.pem
+        - --cert=/tls/client.pem
+        - --key=/tls/client-key.pem
+        - endpoint
+        - health
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # The default backend: one MariaDB 11.8 node (cluster 1, topology single).
+  # Add clusters with sprig-vm.sh cluster-add (RUNBOOK.md, "Adding a cluster").
+  mariadb-1:
+    image: ${MARIADB_IMAGE:-mariadb:11.8}
+    hostname: mariadb-1
+    restart: unless-stopped
+    logging: *logging
+    networks: [sprig]
+    mem_limit: ${MARIADB_MEM_LIMIT:-4g}
+    memswap_limit: ${MARIADB_MEM_LIMIT:-4g}
+    ulimits:
+      nofile: { soft: 524288, hard: 524288 }
+    environment:
+      MARIADB_ROOT_PASSWORD_FILE: /run/sprig/mariadb/root-password
+      MALLOC_ARENA_MAX: "4"
+    command:
+      - --server-id=101
+      - --gtid-domain-id=1
+      - --innodb-buffer-pool-size=${MARIADB_BUFFER_POOL:-2G}
+      - --innodb-log-file-size=${MARIADB_REDO_SIZE:-1G}
+      - --max-connections=${MARIADB_MAX_CONNECTIONS:-1000}
+    volumes:
+      - mariadb-1-data:/var/lib/mysql
+      - ./config/mariadb/10-sprig.cnf:/etc/mysql/conf.d/10-sprig.cnf:ro
+      - ./secrets/mariadb:/run/sprig/mariadb:ro
+      - ./secrets/tls:/run/sprig/tls:ro
+      - ./config/mariadb/initdb:/docker-entrypoint-initdb.d:ro
+      - ./backups:/backups
+      - ./config/mariadb/health.sh:/usr/local/bin/sprig-health.sh:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/sprig-health.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  controller:
+    <<: *sprigdb
+    command: [--config, /etc/sprigdb/controller.toml, controller]
+    mem_limit: ${CONTROLLER_MEM_LIMIT:-1g}
+    environment:
+      <<: *sprigdb-env
+      SPRIGDB_NODE_ID: ctl-1
+    volumes:
+      - ./config/controller.toml:/etc/sprigdb/controller.toml:ro
+      - ./secrets/tls:/run/sprig/tls:ro
+      - ./secrets/sprig:/run/sprig/sprig:ro
+    ports: ["127.0.0.1:${SPRIG_ADMIN_PORT:-7480}:7480"]
+    healthcheck: &ready
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9180 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  # The worker runs the mover's jobs (moves, splits, rebuilds) and the
+  # forwarders; it reads the controller's file under its own node id.
+  worker:
+    <<: *sprigdb
+    command: [--config, /etc/sprigdb/controller.toml, worker]
+    mem_limit: ${WORKER_MEM_LIMIT:-1g}
+    environment:
+      <<: *sprigdb-env
+      SPRIGDB_NODE_ID: wkr-1
+    volumes:
+      - ./config/controller.toml:/etc/sprigdb/controller.toml:ro
+      - ./secrets/tls:/run/sprig/tls:ro
+      - ./secrets/sprig:/run/sprig/sprig:ro
+      - worker-spool:/var/lib/sprigdb
+    healthcheck: *ready
+    depends_on:
+      controller: { condition: service_healthy }
+
+  gateway:
+    <<: *sprigdb
+    command: [--config, /etc/sprigdb/gateway.toml, gateway]
+    mem_limit: ${GATEWAY_MEM_LIMIT:-2g}
+    stop_grace_period: 45s   # gateway.drain_timeout_seconds (30) + margin
+    environment:
+      <<: *sprigdb-env
+      SPRIGDB_NODE_ID: gw-1
+      SPRIGDB_GATEWAY_ADVERTISE_ADDR: ${SPRIG_PUBLIC_HOST:-127.0.0.1}
+    volumes:
+      - ./config/gateway.toml:/etc/sprigdb/gateway.toml:ro
+      - ./secrets/tls:/run/sprig/tls:ro
+      - ./secrets/sprig:/run/sprig/sprig:ro
+    ports:
+      - "${SPRIG_BIND_IP:-0.0.0.0}:${SPRIG_MYSQL_PORT:-3306}:${SPRIG_MYSQL_PORT:-3306}"
+      - "${SPRIG_BIND_IP:-0.0.0.0}:${SPRIG_MARIADB_PORT:-3307}:${SPRIG_MARIADB_PORT:-3307}"
+      - "${SPRIG_BIND_IP:-0.0.0.0}:${SPRIG_HTTPS_PORT:-8443}:${SPRIG_HTTPS_PORT:-8443}"
+      - "${SPRIG_BIND_IP:-0.0.0.0}:${SPRIG_MONGO_PORT:-27017}:${SPRIG_MONGO_PORT:-27017}"
+      - "${SPRIG_BIND_IP:-0.0.0.0}:${SPRIG_REDIS_PORT:-6379}:${SPRIG_REDIS_PORT:-6379}"
+      - "${SPRIG_BIND_IP:-0.0.0.0}:${SPRIG_BOLT_PORT:-7687}:${SPRIG_BOLT_PORT:-7687}"
+      - "${SPRIG_BIND_IP:-0.0.0.0}:${SPRIG_KAFKA_PORT:-9092}:${SPRIG_KAFKA_PORT:-9092}"
+      - "${SPRIG_BIND_IP:-0.0.0.0}:${SPRIG_AMQPS_PORT:-5671}:${SPRIG_AMQPS_PORT:-5671}"
+    healthcheck: *ready
+    depends_on:
+      controller: { condition: service_healthy }
+
+  # Optional: `docker compose --profile monitoring up -d` (RUNBOOK.md,
+  # "Monitoring"). Scrapes every SprigDB process and loads deploy/alerts.
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.5.0}
+    profiles: [monitoring]
+    restart: unless-stopped
+    logging: *logging
+    networks: [sprig]
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-1g}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../alerts:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports: ["127.0.0.1:${SPRIG_METRICS_PORT:-9090}:9090"]
+
+networks:
+  sprig: {}
+
+volumes:
+  etcd-data: {}
+  mariadb-1-data: {}
+  worker-spool: {}
+  prometheus-data: {}

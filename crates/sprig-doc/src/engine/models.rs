@@ -1332,11 +1332,7 @@ impl Engine {
         let mut sides = Document::new();
         for p in &paths {
             let min_v = self.geo_sync(sql, ns, m, p).await?;
-            let st = format!(
-                "{}.{}",
-                ident(&ns.db),
-                ident(&geo::side_table(&m.table, p))
-            );
+            let st = format!("{}.{}", ident(&ns.db), ident(&geo::side_table(&m.table, p)));
             sides.insert(
                 p.clone(),
                 doc! {"t": st, "v": i64::try_from(min_v).unwrap_or(i64::MAX)},
@@ -1372,16 +1368,23 @@ impl Engine {
             return Ok(*v);
         }
         let first = |rows: super::Rows| -> u64 {
-            text(rows.first().and_then(|r| r.first()).and_then(Option::as_ref))
-                .parse::<u64>()
-                .unwrap_or(0)
+            text(
+                rows.first()
+                    .and_then(|r| r.first())
+                    .and_then(Option::as_ref),
+            )
+            .parse::<u64>()
+            .unwrap_or(0)
         };
         let now_v = first(
             sql.query(&format!("SELECT COALESCE(MAX(_v), 0) FROM {coll}"))
                 .await
                 .map_err(|e| mongo_error(&e))?,
         );
-        let marker = match sql.query(&format!("SELECT _v FROM {st} WHERE _id = ''")).await {
+        let marker = match sql
+            .query(&format!("SELECT _v FROM {st} WHERE _id = ''"))
+            .await
+        {
             Ok(r) => first(r),
             Err(e) if e.is(1146) => {
                 sql.exec(&format!(

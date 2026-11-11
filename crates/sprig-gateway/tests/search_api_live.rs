@@ -7,20 +7,26 @@
 //! ```
 //!
 //! Login `acme.app` / `sprig-dev-app`. The test makes database
-//! `r5six_api` with a table, its search index and a row-level security
+//! `r5seven_api` with a table, its search index and a row-level security
 //! policy hiding some rows from the user, then checks:
 //!
 //! - pages of 4 follow the cursor to the end: every visible matching row
 //!   once, best score first, none of the hidden ones;
 //! - a filter clause (`range` on a filter field), facets, highlights and
-//!   rows;
+//!   rows; facets count only the rows the user may see (decision S24),
+//!   and every row once the owner is no longer bound (`NO FORCE`);
 //! - errors: an unknown index (39820), a bad query (39822), a sort (39823);
 //! - gRPC (h2c on the same port) answers the first page as REST does;
 //! - a search index on a key-value namespace's JSON values.
 //!
 //! The database is dropped at the end.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    missing_docs
+)]
 
 use base64::Engine as _;
 use bytes::Bytes;
@@ -88,9 +94,9 @@ async fn search_query_over_rest_and_grpc() {
     );
     let mut c = pool.get_conn().await.unwrap();
     for s in [
-        "DROP DATABASE IF EXISTS r5six_api",
-        "CREATE DATABASE r5six_api",
-        "USE r5six_api",
+        "DROP DATABASE IF EXISTS r5seven_api",
+        "CREATE DATABASE r5seven_api",
+        "USE r5seven_api",
         "CREATE TABLE items (id INT PRIMARY KEY, name VARCHAR(200), brand VARCHAR(40), price INT)",
     ] {
         c.query_drop(s).await.unwrap();
@@ -133,7 +139,7 @@ async fn search_query_over_rest_and_grpc() {
         .await
         .unwrap();
     assert_eq!(visible.len(), 18, "the policy hides 6 rows: {visible:?}");
-    let path = "/v1/databases/r5six_api/search/items_text:query";
+    let path = "/v1/databases/r5seven_api/search/items_text:query";
 
     // Pages of 4 through the cursor.
     let mut got: Vec<i64> = Vec::new();
@@ -165,7 +171,10 @@ async fn search_query_over_rest_and_grpc() {
     }
     let mut sorted = got.clone();
     sorted.sort_unstable();
-    assert_eq!(sorted, visible, "pages: every visible row once, no hidden one");
+    assert_eq!(
+        sorted, visible,
+        "pages: every visible row once, no hidden one"
+    );
     assert!(
         scores.windows(2).all(|w| w[0] >= w[1]),
         "best first: {scores:?}"
@@ -173,7 +182,10 @@ async fn search_query_over_rest_and_grpc() {
     // "shoe shoe" rows (i % 3 == 0) rank above the others.
     let doubles = visible.iter().filter(|i| *i % 3 == 0).count();
     assert!(got[..doubles].iter().all(|i| i % 3 == 0), "{got:?}");
-    println!("Search.Query: {} hits in {pages} pages of 4, best first, 6 hidden rows left out", got.len());
+    println!(
+        "Search.Query: {} hits in {pages} pages of 4, best first, 6 hidden rows left out",
+        got.len()
+    );
 
     // Filter, facets, highlights, rows.
     let (st, v) = post(
@@ -186,19 +198,104 @@ async fn search_query_over_rest_and_grpc() {
     )
     .await;
     assert_eq!(st, 200, "{v}");
-    let want: Vec<i64> = visible.iter().copied().filter(|i| i % 3 == 0 && i * 5 <= 60).collect();
+    let want: Vec<i64> = visible
+        .iter()
+        .copied()
+        .filter(|i| i % 3 == 0 && i * 5 <= 60)
+        .collect();
     let mut f = ids(&v);
     f.sort_unstable();
     assert_eq!(f, want, "{v}");
     let h0 = &v["hits"][0];
     let hl: Value = serde_json::from_str(h0["highlights"].as_str().unwrap()).unwrap();
-    assert!(hl["name"][0]["text"].as_str().unwrap().contains("running"), "{hl}");
+    assert!(
+        hl["name"][0]["text"].as_str().unwrap().contains("running"),
+        "{hl}"
+    );
     let row: Value = serde_json::from_str(h0["row"].as_str().unwrap()).unwrap();
     assert!(row["name"].as_str().unwrap().contains("running"), "{row}");
+    // Decision S24: facets count only the rows the user may see. The
+    // matches are rows 3, 6, 9 and 12; row 12 ('hidden') is hidden by the
+    // policy, so 'hidden' must not appear and acme counts 2, zeta 1.
     let facets: Value = serde_json::from_str(v["facets"].as_str().unwrap()).unwrap();
-    assert!(facets["brands"]["buckets"].as_array().is_some_and(|b| !b.is_empty()), "{facets}");
+    let buckets = |f: &Value| -> Vec<(String, i64)> {
+        let mut b: Vec<(String, i64)> = f["brands"]["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                (
+                    x["_id"].as_str().unwrap().to_owned(),
+                    x["count"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        b.sort();
+        b
+    };
+    assert_eq!(
+        buckets(&facets),
+        vec![("acme".to_owned(), 2), ("zeta".to_owned(), 1)],
+        "facets over visible rows only: {facets}"
+    );
     assert!(!v["applied"].as_str().unwrap_or("").is_empty());
     println!("Search.Query: filter {} hits, facets {facets}", f.len());
+    // Without FORCE the owner manages the table and isn't bound: the
+    // copy's counts, which then are exact, include row 12.
+    let facet_body = json!({"query": r#"{"text": {"query": "running", "path": "name"}}"#,
+        "filter": r#"{"range": {"path": "price", "lte": 60}}"#,
+        "facets": r#"{"brands": {"type": "string", "path": "brand", "numBuckets": 5}}"#,
+        "limit": 50, "consistency": "latest"});
+    c.query_drop("ALTER TABLE items NO FORCE ROW LEVEL SECURITY")
+        .await
+        .unwrap();
+    let (st, v) = post(http, path, &facet_body).await;
+    assert_eq!(st, 200, "{v}");
+    let unbound: Value = serde_json::from_str(v["facets"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        buckets(&unbound),
+        vec![
+            ("acme".to_owned(), 2),
+            ("hidden".to_owned(), 1),
+            ("zeta".to_owned(), 1)
+        ],
+        "an unbound owner sees every row: {unbound}"
+    );
+    // Decision S25: EXPLAIN of a MATCH shows MariaDB's plan and then the
+    // search: a SEARCH row naming the index, with its hits and SearchScan.
+    let plan: Vec<mysql_async::Row> = c
+        .query("EXPLAIN SELECT id FROM items WHERE MATCH (name) AGAINST ('running')")
+        .await
+        .unwrap();
+    let search_row = plan
+        .iter()
+        .find(|r| r.get::<String, _>("select_type").as_deref() == Some("SEARCH"))
+        .expect("a SEARCH row");
+    assert_eq!(search_row.get::<String, _>("key").unwrap(), "items_text");
+    assert_eq!(search_row.get::<String, _>("type").unwrap(), "fulltext");
+    // "running" is in rows 3, 6, ..., 24: 8 rows, every one visible here.
+    assert_eq!(search_row.get::<String, _>("rows").unwrap(), "8");
+    let extra = search_row.get::<String, _>("Extra").unwrap();
+    assert!(
+        extra.starts_with("SearchScan(index r5seven_api.items_text") && extra.contains("8 hits"),
+        "{extra}"
+    );
+    assert!(plan.len() >= 2, "MariaDB's plan comes first");
+    println!("EXPLAIN: {extra}");
+    c.query_drop("ALTER TABLE items FORCE ROW LEVEL SECURITY")
+        .await
+        .unwrap();
+    // A bound user gets no EXPLAIN of the protected table (RL26).
+    let e = c
+        .query_drop("EXPLAIN SELECT id FROM items WHERE MATCH (name) AGAINST ('running')")
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("39366"), "{e}");
+    let (st, v) = post(http, path, &facet_body).await;
+    assert_eq!(st, 200, "{v}");
+    let again: Value = serde_json::from_str(v["facets"].as_str().unwrap()).unwrap();
+    assert_eq!(buckets(&again), buckets(&facets), "{again}");
+    println!("Search.Query facets: bound {facets}, unbound owner {unbound}");
 
     // Errors.
     for (body, code) in [
@@ -207,14 +304,18 @@ async fn search_query_over_rest_and_grpc() {
         (json!({"query_string": "shoe", "sort": "price"}), 39823),
     ] {
         let p = if code == 0 {
-            "/v1/databases/r5six_api/search/nope:query"
+            "/v1/databases/r5seven_api/search/nope:query"
         } else {
             path
         };
         let (st, v) = post(http, p, &body).await;
         assert!(st >= 400, "{v}");
         let text = v.to_string();
-        let want = if code == 0 { "39820".to_owned() } else { code.to_string() };
+        let want = if code == 0 {
+            "39820".to_owned()
+        } else {
+            code.to_string()
+        };
         assert!(text.contains(&want), "{want}: {text}");
     }
 
@@ -226,7 +327,7 @@ async fn search_query_over_rest_and_grpc() {
         .unwrap();
     let mut g = SearchClient::new(ch);
     let mut req = tonic::Request::new(SearchQueryRequest {
-        database: "r5six_api".into(),
+        database: "r5seven_api".into(),
         index: "items_text".into(),
         query_string: "shoe".into(),
         limit: 4,
@@ -263,7 +364,7 @@ async fn search_query_over_rest_and_grpc() {
     ] {
         let (st, v) = post(
             http,
-            "/v1/databases/r5six_api/namespaces/notes:put",
+            "/v1/databases/r5seven_api/namespaces/notes:put",
             &json!({"key": k, "text": json!({"note": note, "n": 1}).to_string()}),
         )
         .await;
@@ -271,7 +372,7 @@ async fn search_query_over_rest_and_grpc() {
     }
     let (st, v) = post(
         http,
-        "/v1/databases/r5six_api/namespaces/notes:put",
+        "/v1/databases/r5seven_api/namespaces/notes:put",
         &json!({"key": "plain", "text": "a shoe without JSON"}),
     )
     .await;
@@ -281,7 +382,7 @@ async fn search_query_over_rest_and_grpc() {
         .unwrap();
     let (st, v) = post(
         http,
-        "/v1/databases/r5six_api/search/note_text:query",
+        "/v1/databases/r5seven_api/search/note_text:query",
         &json!({"query_string": "shoe", "include_row": true, "highlight": ["note"], "consistency": "latest"}),
     )
     .await;
@@ -300,18 +401,18 @@ async fn search_query_over_rest_and_grpc() {
     // A later write is found too.
     let (st, _) = post(
         http,
-        "/v1/databases/r5six_api/namespaces/notes:put",
+        "/v1/databases/r5seven_api/namespaces/notes:put",
         &json!({"key": "s2", "text": json!({"note": "new shoe laces"}).to_string()}),
     )
     .await;
     assert_eq!(st, 200);
     let (_, v) = post(
         http,
-        "/v1/databases/r5six_api/search/note_text:query",
+        "/v1/databases/r5seven_api/search/note_text:query",
         &json!({"query_string": "laces", "consistency": "latest"}),
     )
     .await;
     assert_eq!(v["hits"].as_array().map(Vec::len), Some(1), "{v}");
     println!("Search.Query on a key-value namespace: JSON values by path, writes followed");
-    c.query_drop("DROP DATABASE r5six_api").await.unwrap();
+    c.query_drop("DROP DATABASE r5seven_api").await.unwrap();
 }

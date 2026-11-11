@@ -241,7 +241,11 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let forwarder_env = queue_forwarder::ForwarderEnv {
         dc: dc_logic.clone(),
         locator: Arc::clone(&env.locator),
-        clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
+        // R9 (r9cluster): one shared binlog dump per cluster for every
+        // tenant's outbox rows.
+        clusters: queue_forwarder::shared_reader(
+            Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>
+        ),
         peer: Arc::clone(&msg_env.gateways) as Arc<dyn sprig_sinks::peer::SinkPeer>,
     };
     // Chapter 39 (R5 round 6): the search role, when SPRIG_SEARCH_LISTEN

@@ -73,6 +73,73 @@ pub struct Done {
 /// Rows: one `Option<bytes>` per column.
 pub type Rows = Vec<Vec<Option<Vec<u8>>>>;
 
+/// A value bound to a `?` of [`SqlRunner::query_bound`] (decision S26).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Param {
+    /// SQL `NULL`.
+    Null,
+    /// An integer.
+    Int(i64),
+    /// A binary string (`_id` keys).
+    Bin(Vec<u8>),
+    /// A text string (documents as JSON, `_types`).
+    Text(String),
+}
+
+impl Param {
+    /// The value as a SQL literal.
+    #[must_use]
+    pub fn literal(&self) -> String {
+        match self {
+            Self::Null => "NULL".to_owned(),
+            Self::Int(i) => i.to_string(),
+            Self::Bin(b) => crate::sql::bin_lit(b),
+            Self::Text(t) => crate::sql::str_lit(t),
+        }
+    }
+}
+
+/// `sql` with each `?` outside quotes and backquotes replaced by its
+/// parameter's literal (the runners that send text).
+#[must_use]
+pub fn inline(sql: &str, params: &[Param]) -> String {
+    let mut out = String::with_capacity(sql.len() + 64);
+    let mut it = params.iter();
+    let mut quote: Option<char> = None;
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                out.push(c);
+                if c == '\\' && q != '`' {
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                } else if c == q {
+                    if chars.peek() == Some(&q) {
+                        out.push(q);
+                        chars.next();
+                    } else {
+                        quote = None;
+                    }
+                }
+            }
+            None => match c {
+                '\'' | '"' | '`' => {
+                    quote = Some(c);
+                    out.push(c);
+                }
+                '?' => match it.next() {
+                    Some(p) => out.push_str(&p.literal()),
+                    None => out.push('?'),
+                },
+                _ => out.push(c),
+            },
+        }
+    }
+    out
+}
+
 /// Runs SQL for the engine, in the user's session.
 #[async_trait]
 pub trait SqlRunner: Send {
@@ -88,6 +155,22 @@ pub trait SqlRunner: Send {
     /// The session's tenant name and user id, when it has a user: the
     /// definer of a search index created through it (chapter 39).
     fn principal_hint(&self) -> Option<(String, u32)> {
+        None
+    }
+    /// Runs a statement returning rows, with `?` placeholders bound to
+    /// `params` (decision S26). The gateway's sessions keep the statement
+    /// prepared and send only the values; other runners inline them.
+    async fn query_bound(&mut self, sql: &str, params: &[Param]) -> Result<Rows, SqlError> {
+        self.query(&inline(sql, params)).await
+    }
+    /// [`Self::query_bound`] for a statement returning an OK packet.
+    async fn exec_bound(&mut self, sql: &str, params: &[Param]) -> Result<Done, SqlError> {
+        self.exec(&inline(sql, params)).await
+    }
+    /// Whether row-level security policies on object `object` bind the
+    /// session (chapter 29; decision S24: search counts and facets then
+    /// cover only the rows it may see). `None`: unknown, taken as bound.
+    fn row_policy_binds(&self, _object: u64) -> Option<bool> {
         None
     }
 }
@@ -734,14 +817,34 @@ impl Engine {
         // One multi-row INSERT when every document rendered; on a
         // duplicate, row by row to attribute the error.
         if all_good && !good.is_empty() {
-            let values: Vec<String> = good.iter().map(|(s, _)| Self::row_values(s)).collect();
-            let stmt = format!(
-                "INSERT INTO {}.{} (_id, doc, _types, _v) VALUES {}",
-                ident(&ns.db),
-                ident(&m.table),
-                values.join(", ")
-            );
-            match sql.exec(&stmt).await {
+            // Decision S26: one document runs prepared.
+            let done = if let [(s, _)] = good.as_slice() {
+                let stmt = format!(
+                    "INSERT INTO {}.{} (_id, doc, _types, _v) VALUES (?, ?, ?, ?)",
+                    ident(&ns.db),
+                    ident(&m.table),
+                );
+                sql.exec_bound(
+                    &stmt,
+                    &[
+                        Param::Bin(s.id_key.clone()),
+                        Param::Text(s.doc.clone()),
+                        s.types.clone().map_or(Param::Null, Param::Text),
+                        Param::Int(i64::try_from(hlc_now()).unwrap_or(i64::MAX)),
+                    ],
+                )
+                .await
+            } else {
+                let values: Vec<String> = good.iter().map(|(s, _)| Self::row_values(s)).collect();
+                let stmt = format!(
+                    "INSERT INTO {}.{} (_id, doc, _types, _v) VALUES {}",
+                    ident(&ns.db),
+                    ident(&m.table),
+                    values.join(", ")
+                );
+                sql.exec(&stmt).await
+            };
+            match done {
                 Ok(d) => return Ok((d.affected, errors)),
                 Err(e) if e.is(1062) && good.len() > 1 => {}
                 Err(e) if e.is(1062) => {
@@ -953,7 +1056,16 @@ impl Engine {
         n: usize,
         with_v: bool,
     ) -> Result<Vec<(Vec<u8>, Document, Option<String>)>, MongoError> {
+        // Decision S26: a point read by `_id` runs prepared, with the key
+        // bound.
+        let point = after.is_none().then(|| sqlp.point_key()).flatten();
         let q = match after {
+            None if point.is_some() => format!(
+                "SELECT _id, doc, _types{} FROM {}.{} WHERE _id = ? LIMIT {n}",
+                if with_v { ", _v" } else { "" },
+                ident(&ns.db),
+                ident(table),
+            ),
             Some(k) => format!(
                 "SELECT _id, doc, _types{} FROM {}.{} WHERE ({}) AND _id {} {} ORDER BY _id{} LIMIT {n}",
                 if with_v { ", _v" } else { "" },
@@ -973,7 +1085,11 @@ impl Engine {
                 if desc { " DESC" } else { "" }
             ),
         };
-        let rows = match sql.query(&q).await {
+        let rows = match point {
+            Some(k) => sql.query_bound(&q, &[Param::Bin(k)]).await,
+            None => sql.query(&q).await,
+        };
+        let rows = match rows {
             Ok(r) => r,
             Err(e) if e.is(1146) => return Ok(Vec::new()),
             Err(e) => return Err(mongo_error(&e)),
@@ -1400,12 +1516,14 @@ impl Engine {
                 x
             } else {
                 let q = format!(
-                    "SELECT doc, _types, _v FROM {}.{} WHERE _id = {}",
+                    "SELECT doc, _types, _v FROM {}.{} WHERE _id = ?",
                     ident(&ns.db),
                     ident(&m.table),
-                    bin_lit(&key)
                 );
-                let rows = sql.query(&q).await.map_err(|e| mongo_error(&e))?;
+                let rows = sql
+                    .query_bound(&q, &[Param::Bin(key.clone())])
+                    .await
+                    .map_err(|e| mongo_error(&e))?;
                 let Some(r) = rows.first() else {
                     return Ok((false, None, None));
                 };
@@ -1439,18 +1557,44 @@ impl Engine {
             } else {
                 String::new()
             };
-            let stmt = format!(
-                "{hint}UPDATE {}.{} SET _v = {}, doc = {}, _types = {} WHERE _id = {} AND _v = {v}",
-                ident(&ns.db),
-                ident(&m.table),
-                hlc_now(),
-                str_lit(&s.doc),
-                s.types
-                    .as_deref()
-                    .map_or_else(|| "NULL".to_owned(), str_lit),
-                bin_lit(&key)
-            );
-            match sql.exec(&stmt).await {
+            // Decision S26: a plain update runs prepared; a replacement keeps
+            // its comment in the text (the change feed reads it, D21).
+            let bound = match v.parse::<i64>() {
+                Ok(old_v) if hint.is_empty() => Some(old_v),
+                _ => None,
+            };
+            let done = if let Some(old_v) = bound {
+                let stmt = format!(
+                    "UPDATE {}.{} SET _v = ?, doc = ?, _types = ? WHERE _id = ? AND _v = ?",
+                    ident(&ns.db),
+                    ident(&m.table),
+                );
+                sql.exec_bound(
+                    &stmt,
+                    &[
+                        Param::Int(i64::try_from(hlc_now()).unwrap_or(i64::MAX)),
+                        Param::Text(s.doc.clone()),
+                        s.types.clone().map_or(Param::Null, Param::Text),
+                        Param::Bin(key.clone()),
+                        Param::Int(old_v),
+                    ],
+                )
+                .await
+            } else {
+                let stmt = format!(
+                    "{hint}UPDATE {}.{} SET _v = {}, doc = {}, _types = {} WHERE _id = {} AND _v = {v}",
+                    ident(&ns.db),
+                    ident(&m.table),
+                    hlc_now(),
+                    str_lit(&s.doc),
+                    s.types
+                        .as_deref()
+                        .map_or_else(|| "NULL".to_owned(), str_lit),
+                    bin_lit(&key)
+                );
+                sql.exec(&stmt).await
+            };
+            match done {
                 Ok(d) if d.affected > 0 || d.info.contains("Rows matched: 1") => {
                     return Ok((true, Some(new), Some(old)));
                 }

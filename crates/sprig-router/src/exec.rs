@@ -2173,8 +2173,11 @@ fn graph_rows(rows: &mut ExplainRows, g: &crate::graph::GraphPlan) {
             Some(top),
             "GraphCall",
             step.map_or_else(|| c.graph.clone(), |s| s.graph.clone()),
-            c.cypher.clone(),
+            g.cypher(i),
         );
+        for f in g.filters.get(i).into_iter().flatten() {
+            rows.push(Some(call), "GraphFilter", "pushed".into(), f.clone());
+        }
         let Some(s) = step else { continue };
         for t in &s.tiers {
             rows.push(Some(call), "GraphStep", "tier".into(), t.trim().to_owned());

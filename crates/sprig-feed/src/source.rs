@@ -165,6 +165,26 @@ pub trait Clusters: Send + Sync {
         from: &GtidPos,
     ) -> Result<Box<dyn TxnSource>>;
 
+    /// One source on `cluster` for **every** tenant, keeping only rows of
+    /// the internal `tables` (no statements), starting after `from`: the
+    /// shared per-cluster reader ([`crate::shared`]) splits it by tenant.
+    ///
+    /// # Errors
+    /// 39800 when the cluster no longer has `from`; connection errors.
+    /// The default: not supported (`ER_SPRIG_INTERNAL`).
+    async fn open_tables(
+        &self,
+        cluster: &ClusterId,
+        tables: Arc<[String]>,
+        from: &GtidPos,
+    ) -> Result<Box<dyn TxnSource>> {
+        let _ = (tables, from);
+        Err(sprig_common::SprigError::new(
+            sprig_common::SprigCode::Internal,
+            format!("no cluster-wide binlog source for {cluster}"),
+        ))
+    }
+
     /// The cluster's binlog position now (`@@gtid_binlog_pos`).
     ///
     /// # Errors

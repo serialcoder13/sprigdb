@@ -9,7 +9,9 @@
 //!   the AST: the query string or the Atlas operator, AND the filter
 //!     operators as unscored filter clauses
 //!   ranked hits from a copy (on a worker or in this gateway), waited for as
-//!     consistency (or a commit token) asks; facets in the same call
+//!     consistency (or a commit token) asks; facets in the same call, or,
+//!     for a caller a row policy on the object binds, over the rows it may
+//!     see (search::visible, decision S24)
 //!   from the cursor's position: re-read the hits' rows through the session;
 //!     a hit whose row the caller can't read is skipped (fetching more, up to
 //!     search.max_window, until the page is full)
@@ -20,6 +22,13 @@
 //! its key and score; the next page starts after that key (found again by
 //! key, so writes that move hits around neither repeat nor skip the hit
 //! the cursor names).
+
+#![allow(
+    clippy::float_cmp,
+    clippy::too_many_lines,
+    clippy::format_collect,
+    clippy::nonminimal_bool
+)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,6 +48,7 @@ use tonic::{Request, Response, Status};
 use super::sql::{Caller, SqlEngine};
 use crate::mongo::sql::SqlSession;
 use crate::search::catalog as scat;
+use crate::search::visible;
 use crate::search::{Consistency, SearchService};
 
 fn s(v: &Value, k: &str) -> String {
@@ -181,6 +191,23 @@ fn facet_ops(f: &str) -> Result<Vec<(String, Op)>> {
     Ok(out)
 }
 
+/// The facet answers, by name, as `$searchMeta` shapes them.
+fn put_facets(
+    out: &mut serde_json::Map<String, Value>,
+    facets: &[(String, Op)],
+    answers: impl IntoIterator<Item = Answer>,
+) {
+    for ((fname, _), a) in facets.iter().zip(answers) {
+        if let Answer::Buckets(b) = a {
+            let buckets: Vec<Value> = b
+                .into_iter()
+                .map(|x| json!({"_id": x.value, "count": x.count}))
+                .collect();
+            out.insert(fname.clone(), json!({ "buckets": buckets }));
+        }
+    }
+}
+
 /// One re-read hit.
 struct Seen {
     key: Value,
@@ -311,7 +338,9 @@ async fn reread(
                 let value = sprig_search::copy::kv_value(&v);
                 let key = match std::str::from_utf8(&k) {
                     Ok(t) => json!({"k": t}),
-                    Err(_) => json!({"k_base64": base64::engine::general_purpose::STANDARD.encode(&k)}),
+                    Err(_) => {
+                        json!({"k_base64": base64::engine::general_purpose::STANDARD.encode(&k)})
+                    }
                 };
                 let mut t = HashMap::new();
                 for f in texts {
@@ -389,7 +418,12 @@ async fn reread(
 /// # Errors
 /// 39820-39827, 1049, 1142 and the backend's.
 #[allow(clippy::too_many_lines)]
-pub async fn call(engine: &Arc<SqlEngine>, caller: &Caller, rpc: &str, body: &Value) -> Result<Value> {
+pub async fn call(
+    engine: &Arc<SqlEngine>,
+    caller: &Caller,
+    rpc: &str,
+    body: &Value,
+) -> Result<Value> {
     if rpc != "Search.Query" {
         return Err(SprigError::new(
             SprigCode::AdminRequestInvalid,
@@ -397,7 +431,10 @@ pub async fn call(engine: &Arc<SqlEngine>, caller: &Caller, rpc: &str, body: &Va
         ));
     }
     let svc: &Arc<SearchService> = crate::search::service().ok_or_else(|| {
-        let mut e = SprigError::new(SprigCode::SearchUnavailable, "search isn't running on this gateway");
+        let mut e = SprigError::new(
+            SprigCode::SearchUnavailable,
+            "search isn't running on this gateway",
+        );
         e.retryable = true;
         e
     })?;
@@ -469,18 +506,22 @@ async fn run(
         a if a.is_empty() => None,
         a => Some(Cursor::decode(&a)?),
     };
-    let consistency = if !s(body, "commit_token").is_empty() {
-        Consistency::Latest
-    } else {
+    let consistency = if s(body, "commit_token").is_empty() {
         match s(body, "consistency") {
             c if c.is_empty() => knobs.consistency,
             c => Consistency::parse(&c)?,
         }
+    } else {
+        Consistency::Latest
     };
     let highlight: Vec<String> = body
         .get("highlight")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     let texts: Vec<&FieldDef> = highlight
         .iter()
@@ -496,13 +537,38 @@ async fn run(
         .unwrap_or(false);
     let facets = facet_ops(&s(body, "facets"))?;
     let analyzers = &scat::state(&cat).analyzers;
+    // Decision S24: for a caller a row policy on the object binds, facets
+    // count only the rows it may see (the copy's own counts include rows
+    // hidden from it).
+    let visible_only = visible::needs_visible(&def, sql.row_policy_binds(def.object_id));
+    let mut facet_out = serde_json::Map::new();
+    if visible_only && !facets.is_empty() {
+        let all = visible::all_hits(svc, tenant, &cat, &def, query.clone(), consistency).await?;
+        let seen = reread(sql, &def, &all, &[], false).await?;
+        let keys: Vec<Key> = all
+            .iter()
+            .filter(|h| seen.contains_key(&h.key))
+            .map(|h| h.key.clone())
+            .collect();
+        let ops: Vec<Op> = facets.iter().map(|(_, o)| o.clone()).collect();
+        let (answers, _) = svc
+            .query(
+                tenant,
+                &def,
+                analyzers,
+                visible::within(query.clone(), keys),
+                ops,
+                consistency,
+            )
+            .await?;
+        put_facets(&mut facet_out, &facets, answers);
+    }
     // Ranked hits, fetched deeper while hidden rows leave the page short.
     let mut k = (cursor.as_ref().map_or(0, |c| c.p + 1) + limit)
         .saturating_mul(knobs.overfetch.max(1))
         .min(knobs.max_window)
         .max(1);
-    let mut first = true;
-    let mut facet_out = serde_json::Map::new();
+    let mut first = !visible_only;
     let mut applied;
     let (page, next) = loop {
         let mut ops = vec![Op::Top {
@@ -521,15 +587,7 @@ async fn run(
             return Err(SprigError::internal("a search copy answered without hits"));
         };
         if first {
-            for ((fname, _), a) in facets.iter().zip(it) {
-                if let Answer::Buckets(b) = a {
-                    let buckets: Vec<Value> = b
-                        .into_iter()
-                        .map(|x| json!({"_id": x.value, "count": x.count}))
-                        .collect();
-                    facet_out.insert(fname.clone(), json!({ "buckets": buckets }));
-                }
-            }
+            put_facets(&mut facet_out, &facets, it);
             first = false;
         }
         let start = cursor.as_ref().map_or(0, |c| start_of(&hits, c));
@@ -701,7 +759,8 @@ mod tests {
         }
         assert!(ast(&json!({"query_string": "a", "query": "{}"})).is_err());
         assert_eq!(ast(&json!({})).unwrap(), SearchQuery::All);
-        let f = facet_ops(r#"{"b": {"type": "string", "path": "brand", "numBuckets": 3}}"#).unwrap();
+        let f =
+            facet_ops(r#"{"b": {"type": "string", "path": "brand", "numBuckets": 3}}"#).unwrap();
         assert_eq!(f.len(), 1);
     }
 }

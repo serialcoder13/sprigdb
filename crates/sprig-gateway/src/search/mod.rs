@@ -31,9 +31,11 @@
 
 pub mod catalog;
 pub mod docs;
+pub mod explain;
 pub(crate) mod remote;
 pub mod runtime;
 pub mod seed;
+pub mod visible;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -461,7 +463,10 @@ impl SearchService {
             .filter(|r| r.def.generation == def.generation)
         {
             let p = rt.phase();
-            return (p == runtime::Phase::Ready, format!("{} in this gateway", p.name()));
+            return (
+                p == runtime::Phase::Ready,
+                format!("{} in this gateway", p.name()),
+            );
         }
         if self.knobs().copies > 0 {
             return self.remote.state(tenant, def).await;

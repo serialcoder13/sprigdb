@@ -256,6 +256,10 @@ impl SessionExec for ObservedSession {
     fn set_internal(&mut self, on: bool) {
         self.inner.set_internal(on);
     }
+
+    fn row_policy_binds(&self, object: u64) -> Option<bool> {
+        self.inner.row_policy_binds(object)
+    }
 }
 
 /// A sink that notes the class of an error relayed through it (a backend

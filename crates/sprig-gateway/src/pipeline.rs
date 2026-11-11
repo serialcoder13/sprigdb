@@ -334,6 +334,15 @@ pub trait SessionExec: Send {
     /// apply; only chapter 07's reserved-name check is lifted. Executors
     /// without tenant sessions ignore it.
     fn set_internal(&mut self, _on: bool) {}
+
+    /// Whether row-level security policies on table `object` bind this
+    /// session now (chapter 29): search counts and facets are then taken
+    /// over the rows it may see only (decision S24). `None` when the
+    /// executor can't tell (no tenant session, no catalog yet): callers
+    /// treat that as bound.
+    fn row_policy_binds(&self, _object: u64) -> Option<bool> {
+        None
+    }
 }
 
 /// The client side of a response, as an executor sees it.
@@ -588,6 +597,10 @@ impl SessionExec for HookedSession {
 
     fn set_internal(&mut self, on: bool) {
         self.inner.set_internal(on);
+    }
+
+    fn row_policy_binds(&self, object: u64) -> Option<bool> {
+        self.inner.row_policy_binds(object)
     }
 }
 

@@ -263,6 +263,7 @@ impl PassSession {
     }
 
     #[allow(clippy::too_many_lines)] // one arm per call, each short
+    #[allow(clippy::many_single_char_names)]
     async fn mq_call(&mut self, cx: &mut ExecCtx<'_>, call: mq::Call) -> Result<Reply> {
         let (engine, principal, default_db) = {
             let ts = self
@@ -290,6 +291,10 @@ impl PassSession {
             MqCall::Get => (1, 4, "sprig.mq_get"),
             MqCall::Ack => (1, 1, "sprig.mq_ack"),
             MqCall::Nack => (1, 2, "sprig.mq_nack"),
+            MqCall::Info => (1, 2, "sprig.mq_info"),
+            MqCall::Browse => (1, 3, "sprig.mq_browse"),
+            MqCall::Purge => (1, 2, "sprig.mq_purge"),
+            MqCall::Republish => (2, 5, "sprig.mq_republish"),
         };
         if n < lo || n > hi {
             return Err(arg_error(name));
@@ -418,6 +423,136 @@ impl PassSession {
                         "delivery_count",
                     ],
                     rows,
+                ))
+            }
+            // R9 (r9cluster), for Studio's queue pages (ST50).
+            MqCall::Info => {
+                let v = engine
+                    .sql_vhost(principal, &vhost(1), session)
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                let i = v
+                    .info(&text(0).unwrap_or_default())
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                let n = |x: u64| Some(x.to_string().into_bytes());
+                Ok(Reply::Rows(
+                    vec!["ready", "unacked", "consumers"],
+                    vec![vec![n(i.ready), n(i.unacked), n(i.consumers)]],
+                ))
+            }
+            MqCall::Purge => {
+                let v = engine
+                    .sql_vhost(principal, &vhost(1), session)
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                let purged = v
+                    .purge(&text(0).unwrap_or_default())
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                Ok(Reply::Rows(
+                    vec!["purged"],
+                    vec![vec![Some(purged.to_string().into_bytes())]],
+                ))
+            }
+            MqCall::Browse => {
+                let v = engine
+                    .sql_vhost(principal, &vhost(2), session)
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                let max = usize::try_from(num(1, 100).clamp(1, 1000)).unwrap_or(100);
+                let ds = v
+                    .browse(&text(0).unwrap_or_default(), max)
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                let rows = ds
+                    .iter()
+                    .map(|d| {
+                        vec![
+                            Some(d.id.seq.to_string().into_bytes()),
+                            Some(mq::body_bytes(d).to_vec()),
+                            Some(mq::properties_json(d).into_bytes()),
+                            Some(d.message.routing_key.clone().into_bytes()),
+                            Some(d.message.exchange.clone().into_bytes()),
+                            Some(d.delivery_count.to_string().into_bytes()),
+                        ]
+                    })
+                    .collect();
+                Ok(Reply::Rows(
+                    vec![
+                        "seq",
+                        "body",
+                        "properties",
+                        "routing_key",
+                        "exchange",
+                        "delivery_count",
+                    ],
+                    rows,
+                ))
+            }
+            MqCall::Republish => {
+                // Moves messages: take each with a lease, publish it to
+                // the exchange (confirmed), then acknowledge it. A crash
+                // between the two leaves a copy in both places (at least
+                // once), as RabbitMQ's shovel "move messages" does.
+                let queue = text(0).unwrap_or_default();
+                let exchange = text(1).unwrap_or_default();
+                let key = text(2);
+                let max = u32::try_from(num(3, 100).clamp(1, 10_000)).unwrap_or(100);
+                let v = engine
+                    .sql_vhost(principal, &vhost(4), session)
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                let mut moved = 0u64;
+                while u64::from(max) > moved {
+                    let batch = u32::try_from((u64::from(max) - moved).min(100)).unwrap_or(100);
+                    let ds = v
+                        .get(&queue, batch, 60_000)
+                        .await
+                        .map_err(|e| sql_error(&e))?;
+                    if ds.is_empty() {
+                        break;
+                    }
+                    for (i, d) in ds.iter().enumerate() {
+                        let token = d
+                            .annotations
+                            .get("x-sprig-delivery")
+                            .and_then(|t| t.as_str().map(std::borrow::Cow::into_owned))
+                            .unwrap_or_default();
+                        let t = engine.verify_token(&token).map_err(|e| sql_error(&e))?;
+                        let rk = key.clone().unwrap_or_else(|| d.message.routing_key.clone());
+                        let m = mq::message(
+                            &exchange,
+                            &rk,
+                            mq::body_bytes(d).to_vec(),
+                            Some(&mq::properties_json(d)),
+                        )
+                        .map_err(|e| sql_error(&e))?;
+                        match v.publish_now(m, true).await {
+                            Ok(_) => {
+                                v.ack(&t);
+                                moved += 1;
+                            }
+                            Err(e) => {
+                                // This one and the rest of the batch go back.
+                                for r in &ds[i..] {
+                                    if let Some(tok) = r
+                                        .annotations
+                                        .get("x-sprig-delivery")
+                                        .and_then(|t| t.as_str().map(std::borrow::Cow::into_owned))
+                                        && let Ok(t) = engine.verify_token(&tok)
+                                    {
+                                        v.nack(&t, true);
+                                    }
+                                }
+                                return Err(sql_error(&e));
+                            }
+                        }
+                    }
+                }
+                Ok(Reply::Rows(
+                    vec!["moved"],
+                    vec![vec![Some(moved.to_string().into_bytes())]],
                 ))
             }
             MqCall::Ack | MqCall::Nack => {

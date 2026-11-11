@@ -433,7 +433,9 @@ impl SearchIndex {
         if n > max as u64 {
             return Err(SprigError::new(
                 SprigCode::SearchWindowExceeded,
-                format!("the search matched {n} rows, over search.max_window ({max})"),
+                // No count: it would include rows the caller may not see
+                // (decision S24).
+                format!("the search matched more than search.max_window ({max}) rows"),
             ));
         }
         #[allow(clippy::cast_possible_truncation)]

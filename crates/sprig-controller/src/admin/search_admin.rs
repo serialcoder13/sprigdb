@@ -69,7 +69,9 @@ impl AdminService {
     /// 39902 for an unknown tenant; 39820 for an unknown index.
     pub async fn show_search(&self, tenant: &str, index: &str) -> Result<Value> {
         let t = self.get_tenant(tenant).await?.tenant_id.0;
-        let (db, name) = index.split_once('.').map_or((None, index), |(d, n)| (Some(d), n));
+        let (db, name) = index
+            .split_once('.')
+            .map_or((None, index), |(d, n)| (Some(d), n));
         for r in self.search_records(&format!("search/indexes/{t}/")).await? {
             let def = &r["def"];
             let same_db = db.is_none_or(|d| def["db"].as_str() == Some(d));

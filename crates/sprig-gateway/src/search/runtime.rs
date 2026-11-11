@@ -58,7 +58,11 @@ impl DefinerSession {
     ///
     /// # Errors
     /// 39860 for a definer or tenant that is gone; the session table's.
-    pub(crate) async fn open(svc: &SearchService, tenant: TenantId, def: &IndexDef) -> Result<Self> {
+    pub(crate) async fn open(
+        svc: &SearchService,
+        tenant: TenantId,
+        def: &IndexDef,
+    ) -> Result<Self> {
         let principal = crate::triggers::principal_of(
             &svc.deps.login,
             tenant.0,
@@ -94,7 +98,12 @@ impl DefinerSession {
     ///
     /// # Errors
     /// 39820 when the object is gone; 39825 for other read errors.
-    pub(crate) async fn page(&mut self, def: &IndexDef, after: Option<&Key>, limit: usize) -> Result<Vec<Record>> {
+    pub(crate) async fn page(
+        &mut self,
+        def: &IndexDef,
+        after: Option<&Key>,
+        limit: usize,
+    ) -> Result<Vec<Record>> {
         let (cols, stmt) = seed_page_sql(def, after, limit)?;
         let rows = self.sql.query(&stmt).await.map_err(|e| {
             let code = e.errno.unwrap_or(0);

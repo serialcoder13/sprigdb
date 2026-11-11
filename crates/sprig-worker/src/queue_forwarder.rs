@@ -1,11 +1,22 @@
 //! `queue_forwarder` (chapter 50, "Publishing inside a database
 //! transaction", steps 7–8; chapter 42, "Inside a database transaction";
-//! R9, r9fwd): one long-running job per tenant (`spec: {"tenant": <id>}`)
-//! that forwards the tenant's transactional publishes from the change
-//! feed, in commit order across transactions.
+//! R9, r9fwd; per cluster since r9cluster): one long-running job per
+//! cluster (`spec: {"cluster": "<id>"}`) that forwards the transactional
+//! publishes of every tenant on the cluster from the change feed, in
+//! commit order across each tenant's transactions.
 //!
 //! ```text
-//! serve(tenant):
+//! serve(cluster):
+//!   every 5 s: the tenants with an active queue_forwarder subscription
+//!     whose map points at this cluster (a running tenant's placement is
+//!     read again each minute) → start a tenant task for each new one,
+//!     stop the tasks of tenants gone or moved away
+//!   every tenant task reads its feed through the worker's shared reader
+//!     (sprig_feed::shared): one binlog dump per cluster, whatever the
+//!     number of tenants, keeping only __sprig_qo and __sprig_xo rows
+//!   report progress every 2 s (tenants, rows); losing the job stops all
+//!
+//! tenant task(tenant):
 //!   start after the subscription's checkpoint (feed/checkpoints/<tenant>/
 //!     queue_forwarder), or at the tenant's position now
 //!   tail the tenant's feed (chapter 38) keeping __sprig_qo and __sprig_xo
@@ -16,7 +27,8 @@
 //!     the run (LogicPeer.SinkSql, op outbox_forward) and deletes it; the
 //!     next run is sent only after this one's destinations confirmed
 //!   acknowledge the position after the last transaction forwarded (at
-//!     most once a second, and when stopping)
+//!     most once a second after rows were forwarded, at most every 30 s
+//!     otherwise, and when stopping)
 //! ```
 //!
 //! **Exactly once.** A run's rows are deleted only after every destination
@@ -32,23 +44,27 @@
 //! failing is given up after [`RUN_GIVE_UP`] and left to the fallback, so
 //! one unreachable destination doesn't hold the tenant's other queues.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sprig_catalog::CatalogLocator;
 use sprig_common::Result;
-use sprig_common::ids::TenantId;
+use sprig_common::ids::{ClusterId, TenantId};
 use sprig_controller::catalogs::ShardMapLocator;
 use sprig_controller::dispatch::JobClass;
+use sprig_feed::PlacementView;
 use sprig_feed::names::{CatalogPools, CatalogResolver};
-use sprig_feed::subs::Subscriptions;
+use sprig_feed::shared::SharedClusters;
+use sprig_feed::subs::{Subscription, Subscriptions};
 use sprig_feed::{
     ChangeEvent, Clusters, FeedItem, MetaPlacement, Op, ResumeToken, StartAt, TailOptions,
     TenantTail,
 };
-use sprig_meta::MetaStore;
+use sprig_meta::{ListOpts, MetaStore, Record};
 use sprig_sinks::peer::{SinkPeer, SqlOp, SqlRequest, SqlResult};
 use tokio::sync::mpsc;
 
@@ -74,8 +90,9 @@ pub struct ForwarderEnv {
     pub dc: Arc<dyn MetaStore>,
     /// Tenant catalogs.
     pub locator: Arc<ShardMapLocator>,
-    /// Binlog sources.
-    pub clusters: Arc<dyn Clusters>,
+    /// Binlog sources: the worker's shared reader (one dump per cluster
+    /// for every tenant's outbox rows).
+    pub clusters: Arc<SharedClusters>,
     /// The gateways (`LogicPeer`).
     pub peer: Arc<dyn SinkPeer>,
 }
@@ -101,12 +118,211 @@ impl JobHandler for QueueForwarder {
     }
 
     async fn run(&self, cx: &JobCtx) -> std::result::Result<Value, String> {
-        let tenant = TenantId(
-            cx.spec["tenant"]
-                .as_u64()
-                .ok_or_else(|| "spec.tenant is missing".to_owned())?,
-        );
-        Forwarder::new(self.0.clone(), tenant).serve(cx).await
+        if let Some(c) = cx.spec["cluster"].as_str() {
+            let cluster = ClusterId::new(c).map_err(|e| e.to_string())?;
+            return ClusterForwarder::new(self.0.clone(), cluster)
+                .serve(cx)
+                .await;
+        }
+        if cx.spec["tenant"].is_u64() {
+            // An r9fwd job (one per tenant): the cluster's job serves the
+            // tenant now.
+            return Ok(json!({"end": "superseded"}));
+        }
+        Err("spec.cluster is missing".to_owned())
+    }
+}
+
+/// The worker's shared reader for the forwarder: one dump per cluster,
+/// rows of the two outboxes only.
+#[must_use]
+pub fn shared_reader(clusters: Arc<dyn Clusters>) -> Arc<SharedClusters> {
+    Arc::new(SharedClusters::new(clusters, &[QO, XO]))
+}
+
+/// How often the cluster job looks for tenants.
+pub const REFRESH: Duration = Duration::from_secs(5);
+/// How often a running tenant's placement is read again.
+pub const PLACEMENT_RECHECK: Duration = Duration::from_secs(60);
+/// An idle tenant's position is acknowledged at most this often.
+pub const IDLE_ACK: Duration = Duration::from_secs(30);
+
+/// The tenants of `subs` with an active forwarder subscription.
+#[must_use]
+pub fn subscribed(subs: &[Subscription]) -> HashSet<TenantId> {
+    subs.iter()
+        .filter(|s| s.kind == SUB_NAME && s.state == "active")
+        .map(|s| s.tenant)
+        .collect()
+}
+
+struct Running {
+    stop: sprig_common::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+    checked: Instant,
+}
+
+/// One cluster's forwarder: a task per tenant on one shared dump.
+struct ClusterForwarder {
+    env: ForwarderEnv,
+    cluster: ClusterId,
+    placement: MetaPlacement,
+    stats: Arc<Stats>,
+    running: HashMap<TenantId, Running>,
+}
+
+impl ClusterForwarder {
+    fn new(env: ForwarderEnv, cluster: ClusterId) -> Self {
+        let placement = MetaPlacement::new(Arc::clone(&env.dc));
+        Self {
+            env,
+            cluster,
+            placement,
+            stats: Arc::new(Stats::default()),
+            running: HashMap::new(),
+        }
+    }
+
+    async fn list_subscriptions(&self) -> Result<Vec<Subscription>> {
+        let prefix = self.env.dc.tier().key("feed/subs/")?;
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .env
+                .dc
+                .list(
+                    &prefix,
+                    ListOpts {
+                        after: after.clone(),
+                        limit: 5_000,
+                        ..ListOpts::default()
+                    },
+                )
+                .await?;
+            for kv in &page.kvs {
+                if let Ok(r) = Record::<Subscription>::decode(&kv.value) {
+                    out.push(r.body);
+                }
+            }
+            after = page.kvs.last().map(|kv| kv.key.clone());
+            if !page.more || after.is_none() {
+                return Ok(out);
+            }
+        }
+    }
+
+    /// Starts and stops tenant tasks (see the module docs).
+    async fn refresh(&mut self, cancel: &sprig_common::CancellationToken) {
+        let subs = match self.list_subscriptions().await {
+            Ok(s) => subscribed(&s),
+            Err(e) => {
+                tracing::warn!(cluster = %self.cluster, error = %e, "queue forwarder: subscriptions not read");
+                return;
+            }
+        };
+        // Finished tasks (a tenant gone) start again if still wanted.
+        self.running.retain(|_, r| !r.task.is_finished());
+        let gone: Vec<TenantId> = self
+            .running
+            .keys()
+            .filter(|t| !subs.contains(t))
+            .copied()
+            .collect();
+        for t in gone {
+            if let Some(r) = self.running.remove(&t) {
+                r.stop.cancel();
+            }
+        }
+        for t in subs {
+            let recheck = self
+                .running
+                .get(&t)
+                .is_none_or(|r| r.checked.elapsed() >= PLACEMENT_RECHECK);
+            if !recheck {
+                continue;
+            }
+            let here = match self.placement.current(t).await {
+                Ok((c, _)) => c == self.cluster,
+                Err(e) => {
+                    tracing::debug!(tenant = %t, error = %e, "queue forwarder: placement not read");
+                    continue;
+                }
+            };
+            match (here, self.running.get_mut(&t)) {
+                (true, Some(r)) => r.checked = Instant::now(),
+                (true, None) => {
+                    let stop = cancel.child_token();
+                    let mut f = Forwarder::new(self.env.clone(), t, Arc::clone(&self.stats));
+                    let s = stop.clone();
+                    let task = tokio::spawn(async move {
+                        let _ = f.serve(&s).await;
+                    });
+                    self.running.insert(
+                        t,
+                        Running {
+                            stop,
+                            task,
+                            checked: Instant::now(),
+                        },
+                    );
+                }
+                (false, Some(_)) => {
+                    // Moved away: the new cluster's job takes it.
+                    if let Some(r) = self.running.remove(&t) {
+                        r.stop.cancel();
+                    }
+                }
+                (false, None) => {}
+            }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!("sprig_queue_forwarder_tenants", "cluster" => self.cluster.to_string())
+            .set(self.running.len() as f64);
+    }
+
+    fn progress(&self) -> Value {
+        let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let hub = self.env.clusters.stats(&self.cluster);
+        json!({
+            "cluster": self.cluster.to_string(),
+            "tenants": self.running.len(),
+            "subscriptions": hub.as_ref().map_or(0, |h| h.subscriptions),
+            "dump": hub.is_some_and(|h| h.running),
+            "forwarded": n(&self.stats.forwarded),
+            "gone": n(&self.stats.gone),
+            "left": n(&self.stats.left),
+            "given_up": n(&self.stats.given_up),
+            "runs": n(&self.stats.runs),
+        })
+    }
+
+    async fn serve(&mut self, cx: &JobCtx) -> std::result::Result<Value, String> {
+        let mut last_refresh: Option<Instant> = None;
+        tracing::info!(cluster = %self.cluster, "queue forwarder for the cluster starts");
+        loop {
+            if last_refresh.is_none_or(|t| t.elapsed() >= REFRESH) {
+                self.refresh(&cx.cancel).await;
+                last_refresh = Some(Instant::now());
+            }
+            let held = cx.progress(self.progress()).await.unwrap_or(true);
+            if !held {
+                break;
+            }
+            tokio::select! {
+                () = cx.cancel.cancelled() => break,
+                () = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+        }
+        // Stop every tenant task and let it acknowledge its position.
+        let tasks: Vec<Running> = self.running.drain().map(|(_, r)| r).collect();
+        for r in &tasks {
+            r.stop.cancel();
+        }
+        for r in tasks {
+            let _ = tokio::time::timeout(Duration::from_secs(5), r.task).await;
+        }
+        Err("cancelled".to_owned())
     }
 }
 
@@ -199,30 +415,31 @@ impl CatalogPools for Catalogs {
 /// What the feed task sends: an item, or the error that ended the tail.
 type Item = std::result::Result<FeedItem, String>;
 
+/// Counters shared by a cluster job's tenant tasks.
 #[derive(Debug, Default)]
 struct Stats {
-    forwarded: u64,
-    gone: u64,
-    left: u64,
-    given_up: u64,
-    runs: u64,
+    forwarded: AtomicU64,
+    gone: AtomicU64,
+    left: AtomicU64,
+    given_up: AtomicU64,
+    runs: AtomicU64,
 }
 
 struct Forwarder {
     env: ForwarderEnv,
     tenant: TenantId,
     subs: Subscriptions,
-    stats: Stats,
+    stats: Arc<Stats>,
 }
 
 impl Forwarder {
-    fn new(env: ForwarderEnv, tenant: TenantId) -> Self {
+    fn new(env: ForwarderEnv, tenant: TenantId, stats: Arc<Stats>) -> Self {
         let subs = Subscriptions::new(Arc::clone(&env.dc));
         Self {
             env,
             tenant,
             subs,
-            stats: Stats::default(),
+            stats,
         }
     }
 
@@ -236,13 +453,16 @@ impl Forwarder {
         let mut tail = TenantTail::start(
             self.tenant,
             start,
-            Arc::clone(&self.env.clusters),
+            Arc::clone(&self.env.clusters) as Arc<dyn Clusters>,
             Arc::new(MetaPlacement::new(Arc::clone(&self.env.dc))),
             Arc::new(CatalogResolver::new(Arc::new(Catalogs(Arc::clone(
                 &self.env.locator,
             ))))),
             TailOptions {
                 keep_internal: vec![QO.to_owned(), XO.to_owned()],
+                // A thousand tenants' tails read the map: every 5 s each
+                // (a move's fence keeps the order; it is noticed later).
+                handoff_poll: Duration::from_secs(5),
                 ..TailOptions::default()
             },
         )
@@ -281,14 +501,18 @@ impl Forwarder {
     }
 
     #[allow(clippy::too_many_lines)] // the loop of the module docs
-    async fn serve(&mut self, cx: &JobCtx) -> std::result::Result<Value, String> {
+    async fn serve(
+        &mut self,
+        cancel: &sprig_common::CancellationToken,
+    ) -> std::result::Result<Value, String> {
         let mut acked: Option<ResumeToken> = None;
         let mut last_ack = Instant::now();
-        let mut last_progress = Instant::now();
+        let mut unacked_rows = false;
+        let mut dirty = false;
         let mut pending_events = 0u64;
         let mut retry = Duration::from_millis(200);
         'outer: loop {
-            if cx.cancel.is_cancelled() {
+            if cancel.is_cancelled() {
                 break;
             }
             // Gone tenants: the subscription is deleted with them.
@@ -301,13 +525,13 @@ impl Forwarder {
                 Some(t) => StartAt::After(t.clone()),
                 None => self.start_at().await,
             };
-            let stop = cx.cancel.child_token();
+            let stop = cancel.child_token();
             let mut rx = match self.open(start, stop.clone()).await {
                 Ok(rx) => rx,
                 Err(e) => {
                     tracing::warn!(tenant = %self.tenant, error = %e, "queue forwarder: feed not opened; retrying");
                     tokio::select! {
-                        () = cx.cancel.cancelled() => break,
+                        () = cancel.cancelled() => break,
                         () = tokio::time::sleep(retry) => {}
                     }
                     retry = (retry * 2).min(Duration::from_secs(5));
@@ -320,7 +544,7 @@ impl Forwarder {
             let mut open_txn: Vec<Committed> = Vec::new();
             loop {
                 let first = tokio::select! {
-                    () = cx.cancel.cancelled() => { stop.cancel(); break 'outer; }
+                    () = cancel.cancelled() => { stop.cancel(); break 'outer; }
                     i = rx.recv() => i,
                 };
                 let Some(first) = first else {
@@ -359,14 +583,24 @@ impl Forwarder {
                     }
                     next = rx.try_recv().ok();
                 }
-                if !batch.is_empty() && !self.forward(&batch, &cx.cancel).await {
+                if !batch.is_empty() {
+                    unacked_rows = true;
+                }
+                if !batch.is_empty() && !self.forward(&batch, cancel).await {
                     stop.cancel();
                     break 'outer;
                 }
                 if let Some(t) = token {
                     acked = Some(t);
+                    dirty = true;
                 }
-                if last_ack.elapsed() >= Duration::from_secs(1)
+                let due = if unacked_rows {
+                    Duration::from_secs(1)
+                } else {
+                    IDLE_ACK
+                };
+                if dirty
+                    && last_ack.elapsed() >= due
                     && let Some(t) = &acked
                 {
                     match self
@@ -374,26 +608,22 @@ impl Forwarder {
                         .ack(self.tenant, SUB_NAME, t, pending_events, now_ms())
                         .await
                     {
-                        Ok(()) => pending_events = 0,
+                        Ok(()) => {
+                            pending_events = 0;
+                            unacked_rows = false;
+                            dirty = false;
+                        }
                         Err(e) => {
                             tracing::debug!(tenant = %self.tenant, error = %e, "queue forwarder checkpoint not written");
                         }
                     }
                     last_ack = Instant::now();
                 }
-                if last_progress.elapsed() >= Duration::from_secs(2) {
-                    let held = cx.progress(self.progress()).await.unwrap_or(true);
-                    last_progress = Instant::now();
-                    if !held {
-                        stop.cancel();
-                        break 'outer;
-                    }
-                }
                 if ended {
                     stop.cancel();
                     open_txn.clear();
                     tokio::select! {
-                        () = cx.cancel.cancelled() => break 'outer,
+                        () = cancel.cancelled() => break 'outer,
                         () = tokio::time::sleep(Duration::from_millis(200)) => {}
                     }
                     continue 'outer;
@@ -407,17 +637,6 @@ impl Forwarder {
                 .await;
         }
         Err("cancelled".to_owned())
-    }
-
-    fn progress(&self) -> Value {
-        json!({
-            "tenant": self.tenant.0,
-            "forwarded": self.stats.forwarded,
-            "gone": self.stats.gone,
-            "left": self.stats.left,
-            "given_up": self.stats.given_up,
-            "runs": self.stats.runs,
-        })
     }
 
     /// Forwards `rows` run by run; `false` when cancelled.
@@ -455,10 +674,10 @@ impl Forwarder {
                 {
                     Ok(reply) => {
                         let (f, g, l) = counts(reply.results.first());
-                        self.stats.forwarded += f;
-                        self.stats.gone += g;
-                        self.stats.left += l;
-                        self.stats.runs += 1;
+                        self.stats.forwarded.fetch_add(f, Ordering::Relaxed);
+                        self.stats.gone.fetch_add(g, Ordering::Relaxed);
+                        self.stats.left.fetch_add(l, Ordering::Relaxed);
+                        self.stats.runs.fetch_add(1, Ordering::Relaxed);
                         metrics::counter!("sprig_queue_forward_feed_rows_total", "result" => "forwarded")
                             .increment(f);
                         metrics::counter!("sprig_queue_forward_feed_rows_total", "result" => "gone")
@@ -466,7 +685,9 @@ impl Forwarder {
                         break;
                     }
                     Err(e) if started.elapsed() >= RUN_GIVE_UP => {
-                        self.stats.given_up += ids.len() as u64;
+                        self.stats
+                            .given_up
+                            .fetch_add(ids.len() as u64, Ordering::Relaxed);
                         metrics::counter!("sprig_queue_forward_feed_rows_total", "result" => "given_up")
                             .increment(ids.len() as u64);
                         tracing::warn!(tenant = %self.tenant, %schema, table, rows = ids.len(), error = %e, "queue forwarder: run given up; the polling fallback forwards it");

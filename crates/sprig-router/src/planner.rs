@@ -617,13 +617,15 @@ fn first_explain(targets: &[Target]) -> R<Plan> {
 /// of `sql` is prepared as for its metadata (parameter and column
 /// definitions), with the cluster to prepare it on. Every table of the
 /// topology `sql` names moves to one shard's schema: its group's lowest
-/// shard on `cx.session_cluster`, else its group's lowest shard; a
-/// reference table stays in its own schema. A table the advisor regrouped
-/// is no longer in its database's first schema, where the unchanged text
-/// would be prepared (1146). The cluster is the one holding those shards
-/// when they are all elsewhere, else `cx.session_cluster`. `None` when
-/// `sql` names no table of the topology or the parser can't read it;
-/// executions still plan from the unchanged text.
+/// shard on the cluster it is prepared on; a reference table stays in its
+/// own schema. A table the advisor regrouped is no longer in its
+/// database's first schema, where the unchanged text would be prepared
+/// (1146). The cluster holds a shard of every table: `cx.session_cluster`
+/// when it does, else the lowest such cluster (tables on two clusters with
+/// no cluster in common were prepared on one that lacked a table, 1146,
+/// R8 round 7). `None` when `sql` names no table of the topology, no
+/// cluster holds them all, or the parser can't read it; executions still
+/// plan from the unchanged text.
 #[must_use]
 pub fn metadata_sql(sql: &str, cx: &PlanCtx<'_>) -> Option<(String, String)> {
     if !cx.topo.mentions(sql) {
@@ -631,25 +633,43 @@ pub fn metadata_sql(sql: &str, cx: &PlanCtx<'_>) -> Option<(String, String)> {
     }
     let (body, lock) = split_share_lock(sql);
     let stmt = parse(body).ok()?;
+    // One cluster must hold a shard of every table the statement names
+    // (its tables may sit on different clusters, R8 round 7): the session's
+    // when it does, else the lowest such one; none at all and the text is
+    // prepared unchanged.
+    let mut common: Option<BTreeSet<String>> = None;
+    let _ = visit_relations(&stmt, |n| {
+        if let Some((e, _)) = resolve_name(n, cx)
+            && !e.is_reference()
+        {
+            let here: BTreeSet<String> = e.group.shards.iter().map(|s| s.cluster.clone()).collect();
+            common = Some(match common.take() {
+                None => here,
+                Some(c) => c.intersection(&here).cloned().collect(),
+            });
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    let common = common?;
+    let at = if common.contains(cx.session_cluster) {
+        cx.session_cluster.to_owned()
+    } else {
+        common.iter().next()?.clone()
+    };
     let mut occ: HashMap<Loc, String> = HashMap::new();
     let mut by_name: HashMap<(String, String), String> = HashMap::new();
-    let mut clusters: BTreeSet<String> = BTreeSet::new();
     let _ = visit_relations(&stmt, |n| {
         if let Some((e, schema)) = resolve_name(n, cx)
             && !e.is_reference()
+            && let Some(s) = e
+                .group
+                .shards
+                .iter()
+                .filter(|s| s.cluster == at)
+                .min_by_key(|s| s.shard)
         {
-            let pick = |local: bool| {
-                e.group
-                    .shards
-                    .iter()
-                    .filter(|s| !local || s.cluster == cx.session_cluster)
-                    .min_by_key(|s| s.shard)
-            };
-            if let Some(s) = pick(true).or_else(|| pick(false)) {
-                occ.insert(loc_of(n), s.schema.clone());
-                by_name.insert((schema, e.name.clone()), s.schema.clone());
-                clusters.insert(s.cluster.clone());
-            }
+            occ.insert(loc_of(n), s.schema.clone());
+            by_name.insert((schema, e.name.clone()), s.schema.clone());
         }
         ControlFlow::<()>::Continue(())
     });
@@ -661,11 +681,7 @@ pub fn metadata_sql(sql: &str, cx: &PlanCtx<'_>) -> Option<(String, String)> {
     if let Some(l) = lock {
         text.push_str(l);
     }
-    let cluster = match clusters.iter().next() {
-        Some(c) if clusters.len() == 1 && !clusters.contains(cx.session_cluster) => c.clone(),
-        _ => cx.session_cluster.to_owned(),
-    };
-    Some((text, cluster))
+    Some((text, at))
 }
 
 // ---------------------------------------------------------------------------

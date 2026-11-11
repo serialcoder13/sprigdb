@@ -619,6 +619,57 @@ fn metadata_sql_names_one_shard_per_table() {
     assert!(metadata_sql("SELECT * FROM countries WHERE id = ?", &cx("c1")).is_none());
 }
 
+/// R8 round 7: tables of two groups on different clusters are prepared
+/// on a cluster holding a shard of each (the differential's prepared joins
+/// of `orders` and `products` got 1146 when the metadata text was prepared
+/// on the session's cluster, which had no `products` shard), and the text
+/// is left unchanged when no cluster holds them all.
+#[test]
+fn metadata_sql_prepares_where_every_table_has_a_shard() {
+    let f: TopologyFile = serde_json::from_str(
+        r#"{"tenants": {"a": {
+          "groups": [
+            {"id": 9, "key_class": "int", "shards": [
+              {"shard": 1, "schema": "t1_d1_g9_s1", "cluster": "c1"},
+              {"shard": 2, "schema": "t1_d1_g9_s2", "cluster": "c2"}]},
+            {"id": 8, "key_class": "int", "shards": [
+              {"shard": 1, "schema": "t1_d1_g8_s1", "cluster": "c2"},
+              {"shard": 2, "schema": "t1_d1_g8_s2", "cluster": "c2"}]},
+            {"id": 7, "key_class": "int", "shards": [
+              {"shard": 1, "schema": "t1_d1_g7_s1", "cluster": "c3"}]}],
+          "tables": [
+            {"schema": "t1_d1_g1_s1", "table": "orders", "group": 9, "key": "cid", "key_ordinal": 1},
+            {"schema": "t1_d1_g1_s1", "table": "products", "group": 8, "key": "pid", "key_ordinal": 0},
+            {"schema": "t1_d1_g1_s1", "table": "tags", "group": 7, "key": "tag", "key_ordinal": 0}]}}}"#,
+    )
+    .unwrap();
+    let t = f.tenants["a"].build().unwrap();
+    let cx = PlanCtx {
+        topo: &t,
+        default_schema: Some(DEF),
+        session_cluster: "c1",
+        max_route_values: 1024,
+        lookup_batch: 256,
+        ids: crate::planner::IdMode::default(),
+    };
+    let (sql, at) = metadata_sql(
+        "SELECT o.oid, p.pname FROM orders o JOIN products p ON p.pid > o.pid WHERE o.cid = ?",
+        &cx,
+    )
+    .unwrap();
+    assert_eq!(at, "c2");
+    assert_eq!(
+        sql,
+        "SELECT o.oid, p.pname FROM `t1_d1_g9_s2`.orders o JOIN `t1_d1_g8_s1`.products p \
+         ON p.pid > o.pid WHERE o.cid = ?"
+    );
+    // Only orders: the session's cluster, as before.
+    let (_, at) = metadata_sql("SELECT * FROM orders WHERE cid = ?", &cx).unwrap();
+    assert_eq!(at, "c1");
+    // No cluster holds both: prepared unchanged.
+    assert!(metadata_sql("SELECT * FROM products p JOIN tags t ON t.tag = p.pid", &cx).is_none());
+}
+
 /// bugfix3: 0 in a key column without `AUTO_INCREMENT` is a value, routed
 /// like any other (r2harden's tenant G got 39420 for `id = 0`).
 #[test]

@@ -341,6 +341,36 @@ impl DocSearch {
     }
 }
 
+/// The keys of `hits` whose documents the session reads (decision S24).
+async fn visible_ids(
+    sql: &mut dyn SqlRunner,
+    def: &IndexDef,
+    hits: &[Hit],
+) -> Result<Vec<sprig_search::schema::Key>, MongoError> {
+    let mut out = Vec::with_capacity(hits.len());
+    for chunk in hits.chunks(500) {
+        let keys: Vec<String> = chunk
+            .iter()
+            .map(|h| sprig_doc::sql::bin_lit(&h.key.0))
+            .collect();
+        let rows = sql
+            .query(&format!(
+                "SELECT _id FROM {}.{} WHERE _id IN ({})",
+                sprig_doc::sql::ident(&def.db),
+                sprig_doc::sql::ident(&def.table),
+                keys.join(", ")
+            ))
+            .await
+            .map_err(|e| sprig_doc::engine::mongo_error(&e))?;
+        out.extend(
+            rows.into_iter()
+                .filter_map(|r| r.into_iter().next().flatten())
+                .map(sprig_search::schema::Key),
+        );
+    }
+    Ok(out)
+}
+
 fn collect_terms(q: &SearchQuery, schema: &sprig_search::IndexSchema, out: &mut HashSet<String>) {
     match q {
         SearchQuery::Match { text, .. }
@@ -363,6 +393,33 @@ fn collect_terms(q: &SearchQuery, schema: &sprig_search::IndexSchema, out: &mut 
         SearchQuery::Boost(x, _) => collect_terms(x, schema, out),
         _ => {}
     }
+}
+
+/// A `$searchMeta` spec's query (its `facet.operator`, or its one
+/// operator, else every document) and its facets.
+fn meta_query(spec: &Document) -> Result<(SearchQuery, Option<Document>), MongoError> {
+    let (op, facets) = if let Ok(f) = spec.get_document("facet") {
+        (
+            f.get_document("operator").ok().map(to_json),
+            f.get_document("facets").ok().cloned(),
+        )
+    } else {
+        {
+            let rest: Document = spec
+                .iter()
+                .filter(|(k, _)| !matches!(k.as_str(), "index" | "count" | "consistency"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            ((!rest.is_empty()).then(|| to_json(&rest)), None)
+        }
+    };
+    let q = match op {
+        Some(o) if o.as_object().is_some_and(|m| m.len() == 1) => {
+            parse_atlas(&o).map_err(|e| mongo(&e))?
+        }
+        _ => SearchQuery::All,
+    };
+    Ok((q, facets))
 }
 
 fn index_name(spec: &Document) -> String {
@@ -542,6 +599,73 @@ impl TextSearch for DocSearch {
         Ok(out)
     }
 
+    async fn plan(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        call: &TextCall,
+        execute: bool,
+    ) -> Result<Document, MongoError> {
+        let (t, cat, _, existing) = self.indexes(tenant_of(sql)?, ns).await?;
+        let s = svc()?;
+        let (def, q, cons) = match call {
+            TextCall::Text(arg) => {
+                let Some(def) = existing.iter().find(|d| d.flavor == Flavor::MongoText) else {
+                    return Err(MongoError::new(
+                        code::INDEX_NOT_FOUND,
+                        "text index required for $text query",
+                    ));
+                };
+                let text = arg
+                    .get_str("$search")
+                    .map_err(|_| MongoError::new(code::BAD_VALUE, "$search required for $text"))?;
+                (def, parse_mongo_text(text), Consistency::Latest)
+            }
+            TextCall::Search(spec) => {
+                let name = index_name(spec);
+                let Some(def) = existing.iter().find(|d| d.name == name) else {
+                    return Ok(doc! {"index": name, "exists": false});
+                };
+                let q = parse_atlas(&to_json(spec)).map_err(|e| mongo(&e))?;
+                (def, q, consistency(spec)?)
+            }
+            TextCall::Meta(spec) => {
+                let name = index_name(spec);
+                let Some(def) = existing.iter().find(|d| d.name == name) else {
+                    return Ok(doc! {"index": name, "exists": false});
+                };
+                (def, meta_query(spec)?.0, consistency(spec)?)
+            }
+        };
+        // The copy's count includes documents hidden from a caller a row
+        // policy binds (decision S24): shown to others only.
+        let shown =
+            execute && !super::visible::needs_visible(def, sql.row_policy_binds(def.object_id));
+        let (hits, took) = if shown {
+            let started = std::time::Instant::now();
+            let (a, _) = s
+                .query(
+                    t,
+                    def,
+                    &scat::state(&cat).analyzers,
+                    q.clone(),
+                    vec![sprig_search::rpc::Op::Count],
+                    cons,
+                )
+                .await
+                .map_err(|e| mongo(&e))?;
+            let n = match a.first() {
+                Some(sprig_search::rpc::Answer::Count(n)) => usize::try_from(*n).ok(),
+                _ => None,
+            };
+            (n, Some(started.elapsed()))
+        } else {
+            (None, None)
+        };
+        let v = super::explain::describe(s, t, def, &q, cons, hits, took).await;
+        Ok(to_doc(&v))
+    }
+
     async fn hits(
         &self,
         sql: &mut dyn SqlRunner,
@@ -642,29 +766,7 @@ impl TextSearch for DocSearch {
                     });
                 };
                 let cons = consistency(&spec)?;
-                let (op, facets) = if let Ok(f) = spec.get_document("facet") {
-                    (
-                        f.get_document("operator").ok().map(to_json),
-                        f.get_document("facets").ok().cloned(),
-                    )
-                } else {
-                    {
-                        let rest: Document = spec
-                            .iter()
-                            .filter(|(k, _)| {
-                                !matches!(k.as_str(), "index" | "count" | "consistency")
-                            })
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        ((!rest.is_empty()).then(|| to_json(&rest)), None)
-                    }
-                };
-                let q = match op {
-                    Some(o) if o.as_object().is_some_and(|m| m.len() == 1) => {
-                        parse_atlas(&o).map_err(|e| mongo(&e))?
-                    }
-                    _ => SearchQuery::All,
-                };
+                let (q, facets) = meta_query(&spec)?;
                 let total = spec
                     .get_document("count")
                     .ok()
@@ -698,6 +800,18 @@ impl TextSearch for DocSearch {
                     names.push(fname.clone());
                     ops.push(sprig_search::rpc::Op::Facet { path, n, bounds });
                 }
+                // Decision S24: a caller a row policy on the collection
+                // binds gets the count and facets of the documents it may
+                // see (the copy's own include hidden ones): the same ops
+                // over the query restricted to the visible keys.
+                let q = if super::visible::needs_visible(def, sql.row_policy_binds(def.object_id)) {
+                    let all = super::visible::all_hits(s, t, &cat, def, q.clone(), cons)
+                        .await
+                        .map_err(|e| mongo(&e))?;
+                    super::visible::within(q, visible_ids(sql, def, &all).await?)
+                } else {
+                    q
+                };
                 let (answers, _) = s
                     .query(t, def, &scat::state(&cat).analyzers, q, ops, cons)
                     .await

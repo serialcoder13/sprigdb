@@ -12,6 +12,8 @@
 //!     → 39824 (copies seeding) or 39825 (no copy placed yet)
 //! ```
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -158,7 +160,12 @@ impl Remote {
     ///
     /// # Errors
     /// The store's.
-    pub(crate) async fn copies(&self, tenant: TenantId, index: u64, fresh: bool) -> Result<Vec<CopyRecord>> {
+    pub(crate) async fn copies(
+        &self,
+        tenant: TenantId,
+        index: u64,
+        fresh: bool,
+    ) -> Result<Vec<CopyRecord>> {
         let k = (tenant.0, index);
         if !fresh
             && let Some((at, v)) = lock(&self.copies).get(&k)
@@ -283,7 +290,8 @@ impl Remote {
         let Ok(copies) = self.copies(tenant, def.index_id, true).await else {
             return (false, "unknown".to_owned());
         };
-        let (ready, seeding) = placement::query_order(&copies, def.generation, &|w| live.contains(w));
+        let (ready, seeding) =
+            placement::query_order(&copies, def.generation, &|w| live.contains(w));
         let names = |v: &[CopyRecord]| {
             let mut w: Vec<&str> = v.iter().map(|c| c.worker_id.as_str()).collect();
             w.sort_unstable();

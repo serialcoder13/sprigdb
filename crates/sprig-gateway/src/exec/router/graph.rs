@@ -24,7 +24,7 @@
 use bytes::Bytes;
 use sprig_catalog::Freshness;
 use sprig_common::{Result, SprigError};
-use sprig_proto_mysql::StatusFlags;
+use sprig_proto_mysql::{StatusFlags, Value};
 use sprig_router::graph::{CallRows, GraphCall, GraphLit, GraphPlan, GraphStep, PENDING_FN};
 use sprig_router::topology::ShardLoc;
 use sprig_router::{Output, Plan, PlanCtx, StaticTopology, Topology};
@@ -73,6 +73,69 @@ fn lit(v: &sprig_graph::value::Value) -> GraphLit {
     }
 }
 
+/// A prepared statement's value as a Cypher literal, for a `?` inside a
+/// `GRAPH_TABLE` call (R8 round 7, G63): numbers as numbers, text as a
+/// quoted string, dates and times as their text; a value Cypher can't
+/// write (NaN, infinity, bytes that aren't UTF-8) is refused.
+///
+/// # Errors
+/// 1210 for such a value.
+pub(crate) fn cypher_param(p: &sprig_proto_mysql::command::BoundParam) -> Result<String> {
+    use sprig_proto_mysql::command::ParamValue;
+    let bad = |what: &str| {
+        SprigError::standard(
+            1210,
+            *b"HY000",
+            format!("Incorrect arguments to EXECUTE: {what} can't be a GRAPH_TABLE parameter"),
+        )
+    };
+    let quote = |t: &str| {
+        let mut o = String::with_capacity(t.len() + 2);
+        o.push('\'');
+        for c in t.chars() {
+            match c {
+                '\'' => o.push_str("\\'"),
+                '\\' => o.push_str("\\\\"),
+                _ => o.push(c),
+            }
+        }
+        o.push('\'');
+        o
+    };
+    let float = |f: f64| {
+        if f.is_finite() {
+            Ok(format!("{f:?}"))
+        } else {
+            Err(bad("a NaN or infinite number"))
+        }
+    };
+    let ParamValue::Value(v) = &p.value else {
+        return Ok("null".to_owned());
+    };
+    match v {
+        Value::Null => Ok("null".to_owned()),
+        Value::Int(i) => Ok(i.to_string()),
+        Value::UInt(u) => Ok(u.to_string()),
+        Value::Float(f) => float(f64::from(*f)),
+        Value::Double(f) => float(*f),
+        Value::Bytes(b) => std::str::from_utf8(b)
+            .map(quote)
+            .map_err(|_| bad("bytes that aren't UTF-8")),
+        Value::DateTime(d) => Ok(quote(&format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+            d.year, d.month, d.day, d.hour, d.minute, d.second, d.micro
+        ))),
+        Value::Time(t) => Ok(quote(&format!(
+            "{}{}:{:02}:{:02}.{:06}",
+            if t.negative { "-" } else { "" },
+            u64::from(t.days) * 24 + u64::from(t.hour),
+            t.minute,
+            t.second,
+            t.micro
+        ))),
+    }
+}
+
 /// Where call `call`'s graph is, as `Plan::Graph` shows it.
 fn step(call: usize, g: &crate::graphs::GraphRef, cypher: &str) -> GraphStep {
     let tiers = sprig_graph::parser::parse(cypher)
@@ -115,6 +178,9 @@ impl PassSession {
         map: &dyn NameMap,
         out: &mut dyn ResultSink,
     ) -> Result<Bind> {
+        if !self.router.graph_tmp.is_empty() {
+            self.graph_tmp_drop(cx).await;
+        }
         let Some(pending) = self.router.graph.clone() else {
             self.router.graph_bound = None;
             return Ok(Bind::Run(sql));
@@ -244,9 +310,29 @@ impl PassSession {
                 metrics::counter!("sprig_router_statements_total", "plan" => "graph").increment(1);
                 let mut rows = Vec::with_capacity(g.calls.len());
                 let mut bytes = 0usize;
-                for (c, db) in g.calls.iter().zip(&dbs) {
+                // R8 round 7 (G62): past the inline limit, a statement
+                // that reads no distributed table (it runs on this
+                // session's connection) takes its rows from temporary
+                // tables there instead of its text.
+                // The temporary tables' schema: the session's, else the
+                // first call's graph's database's.
+                let tmp_schema = default_schema.clone().or_else(|| {
+                    let ts = self.tenant.as_deref()?;
+                    ts.schema_of(dbs.first().map(String::as_str))
+                });
+                let local = matches!(*g.outer_plan, Plan::NotRouted)
+                    && !self.router.in_txn()
+                    && !self.legacy_txn()
+                    && tmp_schema.is_some();
+                for (i, (c, db)) in g.calls.iter().zip(&dbs).enumerate() {
+                    // The outer statement's filters on the call's columns
+                    // run in the graph (R8 round 7, G61).
+                    let cypher = g.cypher(i);
+                    if g.filters.get(i).is_some_and(|f| !f.is_empty()) {
+                        metrics::counter!("sprig_router_graph_filters_pushed_total").increment(1);
+                    }
                     let o = graphs
-                        .query_read(&cat, grants.as_deref(), &user, db, &c.graph, &c.cypher)
+                        .query_read(&cat, grants.as_deref(), &user, db, &c.graph, &cypher)
                         .await?;
                     let r: Vec<Vec<GraphLit>> =
                         o.rows.iter().map(|r| r.iter().map(lit).collect()).collect();
@@ -260,7 +346,7 @@ impl PassSession {
                             GraphLit::Other(t) => t.len() + 2,
                         })
                         .sum::<usize>();
-                    if bytes > sprig_graph::pgq::MAX_INLINE_BYTES {
+                    if bytes > sprig_graph::pgq::MAX_INLINE_BYTES && !local {
                         return Err(sprig_graph::exec::budget_error(
                             "rows",
                             format!(
@@ -274,7 +360,39 @@ impl PassSession {
                         rows: r,
                     });
                 }
-                let bound = g.bind(&rows);
+                let bound = if bytes > sprig_graph::pgq::MAX_INLINE_BYTES {
+                    let schema = tmp_schema.clone().unwrap_or_default();
+                    let mut names = Vec::with_capacity(rows.len());
+                    for (i, r) in rows.iter().enumerate() {
+                        let name = format!(
+                            "`{}`.`_sprig_graph_rows_{}_{i}`",
+                            schema.replace('`', "``"),
+                            g.nonce
+                        );
+                        let (create, inserts) = sprig_router::graph::temp_table_sql(
+                            &name,
+                            &r.columns,
+                            &r.rows,
+                            GRAPH_TMP_CHUNK,
+                        );
+                        self.router.graph_tmp.push(name.clone());
+                        self.graph_tmp_run(cx, &create).await?;
+                        for ins in &inserts {
+                            self.graph_tmp_run(cx, ins).await?;
+                        }
+                        names.push(name);
+                    }
+                    metrics::counter!("sprig_router_graph_temp_tables_total")
+                        .increment(names.len() as u64);
+                    g.bind_with(|call| {
+                        names.get(call).map_or_else(
+                            || sprig_router::graph::rows_sql(&g.calls[call].columns, &[]),
+                            |n| format!("SELECT * FROM {n}"),
+                        )
+                    })
+                } else {
+                    g.bind(&rows)
+                };
                 self.router.graph_bound = layout.is_some().then(|| Bound {
                     text: bound.clone(),
                     plan: g,
@@ -287,6 +405,32 @@ impl PassSession {
                 "a graph statement planned as {}",
                 other.kind()
             ))),
+        }
+    }
+}
+
+/// Rows per `INSERT` into a graph statement's temporary table: at most
+/// this many bytes of SQL text (R8 round 7, G62).
+const GRAPH_TMP_CHUNK: usize = 1 << 20;
+
+impl PassSession {
+    /// Runs `sql` on the session's own connection (a graph statement's
+    /// temporary table, G62).
+    async fn graph_tmp_run(&mut self, cx: &mut ExecCtx<'_>, sql: &str) -> Result<()> {
+        let bs = self.bs(cx);
+        super::backend::run_on(bs, sql, &mut sprig_router::Budget::mb(64)).await?;
+        Ok(())
+    }
+
+    /// Drops the last graph statement's temporary tables (G62).
+    async fn graph_tmp_drop(&mut self, cx: &mut ExecCtx<'_>) {
+        let names = std::mem::take(&mut self.router.graph_tmp);
+        if names.is_empty() {
+            return;
+        }
+        let sql = format!("DROP TEMPORARY TABLE IF EXISTS {}", names.join(", "));
+        if let Err(e) = self.graph_tmp_run(cx, &sql).await {
+            tracing::warn!(error = %e, "dropping a graph statement's temporary tables");
         }
     }
 }

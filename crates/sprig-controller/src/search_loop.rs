@@ -9,6 +9,10 @@
 //!     the copies of one index land on different workers when they can)
 //! each live search_copy job whose record is gone (the index was dropped) or
 //!   whose copy ≥ copies → cancelled
+//! an index with two copies on one worker while a search worker holds none of
+//!   it → one of the two cancelled (it is submitted again and lands on the
+//!   free worker, seeded from its peer): copies spread again after a worker
+//!   comes back
 //! ```
 //!
 //! A job whose worker dies is requeued by dispatch and taken by another
@@ -16,6 +20,12 @@
 //!
 //! The names match `sprig_search::placement` (the controller doesn't link
 //! the search crate).
+
+#![allow(
+    clippy::implicit_hasher,
+    clippy::type_complexity,
+    clippy::many_single_char_names
+)]
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -26,7 +36,7 @@ use serde_json::json;
 use sprig_common::Result;
 use sprig_meta::{ListOpts, Record, Versioned};
 
-use crate::dispatch::{JobClass, NewJob, cancel, list_jobs, submit};
+use crate::dispatch::{JobClass, NewJob, cancel, list_jobs, live_workers, submit};
 use crate::runtime::{LoopCx, LoopTier, MetaEvent, Outcome, Reconciler};
 
 /// The copies' job kind.
@@ -87,6 +97,39 @@ pub fn plan(
     (submits, cancels)
 }
 
+/// Copies to move: for each index with two running copies on one worker
+/// while a search worker in `workers` holds none of its copies, the
+/// higher-numbered copy's job (one per index per pass).
+#[must_use]
+pub fn crowded(
+    owned: &[(sprig_common::ids::JobId, (u64, u64, u32), String)],
+    workers: &HashSet<String>,
+) -> Vec<sprig_common::ids::JobId> {
+    let mut by_index: HashMap<(u64, u64), Vec<(u32, &str, sprig_common::ids::JobId)>> =
+        HashMap::new();
+    for (id, (t, i, n), w) in owned {
+        by_index
+            .entry((*t, *i))
+            .or_default()
+            .push((*n, w.as_str(), *id));
+    }
+    let mut out = Vec::new();
+    for v in by_index.values_mut() {
+        let holders: HashSet<&str> = v.iter().map(|x| x.1).collect();
+        if holders.len() == v.len() || !workers.iter().any(|w| !holders.contains(w.as_str())) {
+            continue;
+        }
+        v.sort_by_key(|x| std::cmp::Reverse(x.0));
+        if let Some(dup) = v
+            .iter()
+            .find(|x| v.iter().filter(|y| y.1 == x.1).count() > 1)
+        {
+            out.push(dup.2);
+        }
+    }
+    out
+}
+
 #[async_trait::async_trait]
 impl Reconciler for SearchPlacementLoop {
     type Key = SearchTick;
@@ -127,6 +170,7 @@ impl Reconciler for SearchPlacementLoop {
             }
         }
         let mut live = Vec::new();
+        let mut owned = Vec::new();
         for j in &list_jobs(cx.dc.as_ref()).await? {
             let job = j.job();
             if job.state.is_final() || job.kind != JOB_KIND {
@@ -141,6 +185,29 @@ impl Reconciler for SearchPlacementLoop {
                 continue;
             };
             live.push((job.job_id, (t, i, n)));
+            if job.state == crate::dispatch::JobState::Running
+                && let Some(o) = &job.owner
+            {
+                owned.push((job.job_id, (t, i, n), o.worker_id.clone()));
+            }
+        }
+        let workers: HashSet<String> = live_workers(cx.dc.as_ref())
+            .await?
+            .into_iter()
+            .filter(|w| {
+                w.registration
+                    .slots
+                    .get(&JobClass::Search)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            })
+            .map(|w| w.id)
+            .collect();
+        for id in crowded(&owned, &workers) {
+            if cancel(l, cx.clock.as_ref(), id).await? {
+                tracing::info!(job = %id, "search copy job cancelled to spread copies over workers");
+            }
         }
         let (submits, cancels) = plan(&wanted, &live);
         for id in cancels {
@@ -189,5 +256,21 @@ mod tests {
         assert_eq!(submits, vec![(7, 1, 1), (7, 2, 0)]);
         cancels.sort();
         assert_eq!(cancels, vec![j(2), j(3), j(4)]);
+    }
+
+    #[test]
+    fn crowded_copies_move_when_a_worker_is_free() {
+        let j = |n: u128| JobId(uuid::Uuid::from_u128(n));
+        let owned = vec![
+            (j(1), (7, 1, 0), "w1".to_owned()),
+            (j(2), (7, 1, 1), "w1".to_owned()),
+            (j(3), (7, 2, 0), "w1".to_owned()),
+            (j(4), (7, 2, 1), "w2".to_owned()),
+        ];
+        let both: HashSet<String> = ["w1".to_owned(), "w2".to_owned()].into();
+        assert_eq!(crowded(&owned, &both), vec![j(2)]);
+        // No other worker: they stay together.
+        let one: HashSet<String> = ["w1".to_owned()].into();
+        assert!(crowded(&owned, &one).is_empty());
     }
 }

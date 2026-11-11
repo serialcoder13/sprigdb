@@ -139,6 +139,40 @@ fn facets_and_window() {
     assert_eq!(e.code(), Some(SprigCode::SearchWindowExceeded));
 }
 
+/// Decision S24: counts and facets restricted to a key set (the rows a
+/// caller may see) count only those keys.
+#[test]
+fn keys_restrict_counts_and_facets() {
+    let ix = sample(2);
+    let q = parse_query_string("shoe", &["name".into()]).unwrap();
+    assert_eq!(ix.count(&q, 50).unwrap(), 4);
+    let k = |i: i64| Key::of_parts(&[KeyPart::Int(i)]);
+    // Row 2 and row 4 (both "zoom") are hidden: only 1 and 5 are visible.
+    let within = |keys: Vec<Key>| SearchQuery::Bool {
+        must: vec![q.clone()],
+        should: Vec::new(),
+        must_not: Vec::new(),
+        filter: vec![SearchQuery::Keys(keys)],
+        min_should: 0,
+    };
+    let v = within(vec![k(1), k(5), k(3)]);
+    assert_eq!(ix.count(&v, 50).unwrap(), 2, "row 3 isn't a hit");
+    let b = ix.facet(&v, "brand", 10, None, 50).unwrap();
+    let got: Vec<(String, u64)> = b
+        .iter()
+        .map(|x| (x.value.as_str().unwrap().to_owned(), x.count))
+        .collect();
+    assert_eq!(got, [("acme".to_owned(), 1), ("tiny".to_owned(), 1)]);
+    let n = ix
+        .facet(&v, "price", 10, Some(&[0.0, 50.0, 100.0, 1000.0]), 50)
+        .unwrap();
+    assert_eq!(n.iter().map(|x| x.count).collect::<Vec<_>>(), [1, 1, 0]);
+    // No visible key: nothing counted, and the round trip keeps the keys.
+    assert_eq!(ix.count(&within(Vec::new()), 50).unwrap(), 0);
+    let wire = serde_json::to_string(&v).unwrap();
+    assert_eq!(serde_json::from_str::<SearchQuery>(&wire).unwrap(), v);
+}
+
 #[test]
 fn collections_and_dynamic_text() {
     let mut d = IndexDef::from_mongo_text(

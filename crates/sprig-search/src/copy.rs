@@ -60,6 +60,7 @@ fn unavailable(msg: impl Into<String>) -> SprigError {
     e
 }
 
+#[allow(clippy::needless_pass_by_value)] // used as map_err(join_err)
 fn join_err(e: tokio::task::JoinError) -> SprigError {
     SprigError::internal(e.to_string())
 }
@@ -423,7 +424,11 @@ fn kv_string(v: &BinValue) -> bool {
 ///
 /// # Errors
 /// A key that isn't a table key.
-pub fn seed_page_sql(def: &IndexDef, after: Option<&Key>, limit: usize) -> Result<(Vec<String>, String)> {
+pub fn seed_page_sql(
+    def: &IndexDef,
+    after: Option<&Key>,
+    limit: usize,
+) -> Result<(Vec<String>, String)> {
     let q = |s: &str| sprig_common::names::quote(s);
     let table = format!("{}.{}", q(&def.db), q(&def.table));
     let cols: Vec<String> = match def.model {
@@ -485,7 +490,10 @@ pub struct SeedReply {
 
 /// The file names a hard-link snapshot leaves out (writer locks).
 fn skipped(name: &str) -> bool {
-    name.starts_with(".tantivy-") && name.ends_with(".lock")
+    name.starts_with(".tantivy-")
+        && std::path::Path::new(name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("lock"))
 }
 
 /// Hard links of every file under `src` into `dest` (same relative
@@ -668,7 +676,12 @@ impl Copy {
     ///
     /// # Errors
     /// 39824 or 39826 after `timeout`.
-    pub async fn wait_for(&self, targets: &[(ClusterId, GtidPos)], timeout: Duration) -> Result<()> {
+    #[allow(clippy::items_after_statements)] // the guard type next to its use
+    pub async fn wait_for(
+        &self,
+        targets: &[(ClusterId, GtidPos)],
+        timeout: Duration,
+    ) -> Result<()> {
         let started = Instant::now();
         self.wait_ready(timeout).await?;
         self.waiters.fetch_add(1, Ordering::SeqCst);
@@ -772,7 +785,12 @@ impl Copy {
         }
     }
 
-    async fn open_tail(&self, feed: &FeedParts, cluster: &ClusterId, pos: GtidPos) -> Result<TenantTail> {
+    async fn open_tail(
+        &self,
+        feed: &FeedParts,
+        cluster: &ClusterId,
+        pos: GtidPos,
+    ) -> Result<TenantTail> {
         TenantTail::start(
             self.tenant,
             StartAt::At {
@@ -1198,7 +1216,10 @@ mod tests {
     #[test]
     fn payload_round_trips() {
         let mut m = BTreeMap::new();
-        m.insert(ClusterId::new("dc-a-c1").unwrap(), "0-1-10".parse().unwrap());
+        m.insert(
+            ClusterId::new("dc-a-c1").unwrap(),
+            "0-1-10".parse().unwrap(),
+        );
         let s = Payload::of(&m);
         assert_eq!(Payload::parse(&s), Some(m));
         assert_eq!(Payload::parse("{\"v\":1,\"pos\":{}}"), None);

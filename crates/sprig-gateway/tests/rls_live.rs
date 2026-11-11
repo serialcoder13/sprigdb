@@ -623,11 +623,18 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
         .unwrap();
     let schemas: Vec<String> = root
         .query(format!(
-            "SELECT DISTINCT TABLE_SCHEMA FROM information_schema.TABLES WHERE TABLE_SCHEMA LIKE \
-             't{tid}\\_d%' AND TABLE_NAME = '__sprig_rls_docs'"
+            "SELECT DISTINCT v.TABLE_SCHEMA FROM information_schema.TABLES v JOIN \
+             information_schema.TABLES t ON t.TABLE_SCHEMA = v.TABLE_SCHEMA AND t.TABLE_NAME = 'docs' \
+             WHERE v.TABLE_SCHEMA LIKE 't{tid}\\_d%' AND v.TABLE_NAME = '__sprig_rls_docs'"
         ))
         .await
         .unwrap();
+    // A split table has invisible columns and no view (RL18): nothing to
+    // probe there.
+    if schemas.is_empty() && std::env::var("SPRIG_TEST_RLS_SHARDED").is_ok() {
+        eprintln!("direct probe: no policy view next to docs (a split table)");
+        return;
+    }
     ck.ok("policy views exist", !schemas.is_empty(), || "none".into());
     let account = format!("t{tid}_u{uid}");
     let pw = sprig_auth::authz::backend::BackendKey::new(secret.as_bytes())

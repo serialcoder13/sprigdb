@@ -56,6 +56,16 @@ pub enum MqCall {
     Ack,
     /// `sprig.mq_nack(token, requeue)`.
     Nack,
+    /// `sprig.mq_info(queue [, vhost])`: ready, consumers, unacked (ST50).
+    Info,
+    /// `sprig.mq_browse(queue [, max [, vhost]])`: messages, not consumed.
+    Browse,
+    /// `sprig.mq_purge(queue [, vhost])`: ready messages removed.
+    Purge,
+    /// `sprig.mq_republish(queue, exchange [, routing_key [, max [, vhost]]])`:
+    /// moves up to `max` messages (a dead-letter queue's, say) to an
+    /// exchange, with their own routing key when `routing_key` is NULL.
+    Republish,
 }
 
 /// A parsed `CALL sprig.mq_*(...)`: the call and its argument texts.
@@ -83,6 +93,10 @@ pub fn parse_call(sql: &str) -> Option<Call> {
         "mq_get" => MqCall::Get,
         "mq_ack" => MqCall::Ack,
         "mq_nack" => MqCall::Nack,
+        "mq_info" => MqCall::Info,
+        "mq_browse" => MqCall::Browse,
+        "mq_purge" => MqCall::Purge,
+        "mq_republish" => MqCall::Republish,
         _ => return None,
     };
     let inner = rest.trim().strip_prefix('(')?.strip_suffix(')')?;
@@ -250,6 +264,17 @@ pub fn properties_json(d: &Delivery) -> String {
 #[must_use]
 pub fn body_bytes(d: &Delivery) -> Bytes {
     convert::to_091(d).map(|(_, b)| b).unwrap_or_default()
+}
+
+/// `mq_info`'s answer (R9, ST50).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QueueInfo {
+    /// Ready messages.
+    pub ready: u64,
+    /// Consumers attached.
+    pub consumers: u64,
+    /// Delivered, not yet acknowledged.
+    pub unacked: u64,
 }
 
 /// What a publish inside a transaction writes in the client's
@@ -616,6 +641,115 @@ impl SqlVhost {
         Ok(out)
     }
 
+    /// The queue, checked for `perm` (refreshing the topology once when
+    /// it is missing).
+    async fn checked_queue(
+        &self,
+        queue: &str,
+        perm: Perm,
+    ) -> Result<(Arc<crate::engine::Inner>, Arc<crate::topology::QueueDef>), MqError> {
+        let e = self
+            .v
+            .engine
+            .upgrade()
+            .ok_or_else(|| MqError::new(MqCode::OwnerMoved, "engine stopped"))?;
+        let q = if let Some(q) = self.v.queue(queue) {
+            q
+        } else {
+            e.deps.catalog.refresh(&self.v.r).await?;
+            self.v.queue(queue).ok_or_else(|| {
+                MqError::not_found(format!("no queue '{queue}' in vhost '{}'", self.v.r.name))
+            })?
+        };
+        if !e
+            .deps
+            .catalog
+            .allowed(&self.cx.principal, &self.v.r, perm, "queue", queue)
+        {
+            return Err(MqError::access_refused(format!(
+                "access to queue '{queue}' in vhost '{}' refused for user '{}'",
+                self.v.r.name, self.cx.principal.user
+            )));
+        }
+        Ok((e, q))
+    }
+
+    /// `mq_info` (R9, ST50): ready messages, consumers, and messages
+    /// delivered but not yet acknowledged (stored minus ready, read a
+    /// moment apart).
+    ///
+    /// # Errors
+    /// 39250 (no queue), 39252 (refused), the store's.
+    pub async fn info(&self, queue: &str) -> Result<QueueInfo, MqError> {
+        let (e, q) = self.checked_queue(queue, Perm::Read).await?;
+        let (tx, rx) = oneshot::channel();
+        let (ready, consumers) = if self.v.slot(&q).send(Cmd::Info(tx)) {
+            tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+        let store = e.deps.catalog.store(&self.v.r).await?;
+        let stored = store
+            .stored(q.id)
+            .await
+            .map_err(|err| MqError::new(MqCode::OwnerMoved, err.to_string()))?;
+        Ok(QueueInfo {
+            ready: u64::from(ready),
+            consumers: u64::from(consumers),
+            unacked: stored.saturating_sub(u64::from(ready)),
+        })
+    }
+
+    /// `mq_purge` (R9, ST50): removes the ready messages; delivered ones
+    /// stay until settled (RabbitMQ's `queue.purge`).
+    ///
+    /// # Errors
+    /// 39250, 39252, 39261 (owner moved).
+    pub async fn purge(&self, queue: &str) -> Result<u32, MqError> {
+        self.checked_queue(queue, Perm::Read).await?;
+        self.cv.purge_queue(&self.cx, queue).await
+    }
+
+    /// `mq_browse` (R9, ST50): up to `max` stored messages of `queue`, in
+    /// delivery order, without delivering or locking them (those already
+    /// delivered and not yet acknowledged are included; a browse is a
+    /// read of the store, not of the owner's memory).
+    ///
+    /// # Errors
+    /// 39250, 39252, the store's.
+    pub async fn browse(&self, queue: &str, max: usize) -> Result<Vec<Delivery>, MqError> {
+        let (e, q) = self.checked_queue(queue, Perm::Read).await?;
+        let store = e.deps.catalog.store(&self.v.r).await?;
+        let rows = store
+            .load(q.id, 0, None, max.clamp(1, 1_000))
+            .await
+            .map_err(|err| MqError::new(MqCode::OwnerMoved, err.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|m| {
+                let id = sprig_proto_amqp::message::DeliveryId {
+                    queue: q.id,
+                    lane: m.lane,
+                    pclass: m.pclass,
+                    seq: m.seq,
+                };
+                let msg = msg::rebuild(m.fmt, m.exchange, m.routing_key, m.props, m.body).ok()?;
+                Some(Delivery {
+                    id,
+                    queue: q.name.clone(),
+                    message: Arc::new(msg),
+                    redelivered: m.delivery_count > 0,
+                    delivery_count: m.delivery_count,
+                    annotations: sprig_proto_amqp::v091::codec::FieldTable::default(),
+                })
+            })
+            .collect())
+    }
+
     /// Starts an acknowledgement inside a transaction: the owner holds the
     /// delivery.
     ///
@@ -799,6 +933,22 @@ mod tests {
         assert!(parse_call("SELECT 1").is_none());
         let c = parse_call("CALL sprig.mq_get('q', 10, 30000)").unwrap_or_else(|| unreachable!());
         assert_eq!(c.args, ["'q'", "10", "30000"]);
+    }
+
+    #[test]
+    fn parses_studio_calls() {
+        // R9 (r9cluster, ST50): queue pages' calls.
+        let p = |s: &str| parse_call(s).map(|c| (c.call, c.args.len()));
+        assert_eq!(p("CALL sprig.mq_info('q')"), Some((MqCall::Info, 1)));
+        assert_eq!(
+            p("CALL sprig.mq_browse('q', 50, 'mq')"),
+            Some((MqCall::Browse, 3))
+        );
+        assert_eq!(p("call sprig.mq_purge('q')"), Some((MqCall::Purge, 1)));
+        assert_eq!(
+            p("CALL sprig.mq_republish('dlq', 'orders', NULL, 10)"),
+            Some((MqCall::Republish, 4))
+        );
     }
 
     #[test]

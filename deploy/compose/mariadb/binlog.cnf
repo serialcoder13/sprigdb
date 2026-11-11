@@ -18,3 +18,20 @@ skip_name_resolve              = ON
 # Development only: chapter 27 also sets read_only = ON (fenced boot, the
 # agent unfences) and require_secure_transport = ON. Neither the agent nor
 # TLS exists yet, so this environment leaves both off.
+
+# --- Dev sizing (hardening round 1, HD2) -----------------------------------
+# Kept in this file because every dev node mounts it, so a plain
+# `docker start` after an OOM keeps these (SET GLOBAL values were lost).
+# Budget per node at mem_limit 1.5 GB: about 300 MB fixed (buffer pool 128M,
+# Aria 32M, key cache 16M, log buffer, Galera gcache is a file mapping) plus
+# up to ~2 MB per busy connection (400 x 2 MB = 800 MB) plus temp tables.
+# Before: MyISAM key cache and Aria page cache took 128M each by default,
+# unused here (no MyISAM tables; Aria only for on-disk temp tables).
+max_connections               = 400
+key_buffer_size               = 16M
+aria_pagecache_buffer_size    = 32M
+innodb_buffer_pool_size       = 128M
+thread_cache_size             = 64
+sort_buffer_size              = 1M
+tmp_table_size                = 32M
+max_heap_table_size           = 32M

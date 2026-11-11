@@ -36,6 +36,7 @@
 //! [per_user]
 //! secret = "file:gateway-backends.toml#backend_secret"   # its `password`
 //! tls = "skip_verify"                                    # verify (default)
+//! ca_file = "/run/sprig/tls/ca.pem"   # optional: the CA `verify` checks against
 //! ```
 
 use std::collections::HashMap;
@@ -106,6 +107,10 @@ struct PerUserSpec {
     secret: String,
     #[serde(default)]
     tls: TlsMode,
+    /// The CA `verify` checks the servers against (a private CA, as the
+    /// Compose-on-VM bundle makes); unset: the built-in roots.
+    #[serde(default)]
+    ca_file: Option<std::path::PathBuf>,
 }
 
 /// Per-user backend accounts: the key their passwords derive from, and how
@@ -116,6 +121,8 @@ pub struct PerUser {
     pub key: BackendKey,
     /// TLS checking of backend connections.
     pub tls: TlsMode,
+    /// The CA `tls = "verify"` checks against; `None`: the built-in roots.
+    pub ca_file: Option<std::path::PathBuf>,
 }
 
 impl PerUser {
@@ -126,11 +133,11 @@ impl PerUser {
         let password = self.key.password(&acct);
         BackendTarget {
             cluster,
-            credentials: SecretRef::resolved(Credential::new(
-                acct.clone(),
-                password.as_str(),
-                self.tls,
-            )),
+            credentials: SecretRef::resolved({
+                let mut c = Credential::new(acct.clone(), password.as_str(), self.tls);
+                c.ca_file.clone_from(&self.ca_file);
+                c
+            }),
             user: acct,
         }
     }
@@ -218,6 +225,9 @@ impl TenantBackends {
                 Some(PerUser {
                     key: BackendKey::new(c.password().as_bytes())?,
                     tls: p.tls,
+                    ca_file: p
+                        .ca_file
+                        .map(|f| if f.is_relative() { base.join(f) } else { f }),
                 })
             }
         };

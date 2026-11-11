@@ -54,7 +54,10 @@ async fn page(req: &SeedRequest) -> Result<Vec<sprig_search::Record>> {
     let def = scat::state(&cat).by_id(req.index).ok_or_else(|| {
         SprigError::new(
             SprigCode::SearchIndexNotFound,
-            format!("search index {} of tenant {} is gone", req.index, req.tenant),
+            format!(
+                "search index {} of tenant {} is gone",
+                req.index, req.tenant
+            ),
         )
     })?;
     if def.generation != req.generation {

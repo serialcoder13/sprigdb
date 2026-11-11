@@ -2,22 +2,29 @@
 //! transaction"; R9, r9fwd), on the DC leader, every two seconds:
 //!
 //! ```text
-//! each active feed subscription of kind `queue_forwarder` (one per tenant,
-//!   registered by a gateway when it first opens a queue store or makes a
-//!   cross-tenant outbox for the tenant) without a live `queue_forwarder`
-//!   job → submit one (spec: tenant); a job whose worker died is requeued
-//!   by dispatch, and a failed or finished one is replaced here, so each
-//!   tenant has one forwarder
+//! if any feed subscription of kind `queue_forwarder` is active (one per
+//!   tenant, registered by a gateway when it first opens a queue store or
+//!   makes a cross-tenant outbox for the tenant):
+//!   each cluster of this DC without a live `queue_forwarder` job → submit
+//!   one (spec: cluster); a job whose worker died is requeued by dispatch,
+//!   and a failed or finished one is replaced here, so each cluster has
+//!   one forwarder, which serves every subscribed tenant the cluster holds
+//!   from one binlog dump (R9 item 84, r9cluster)
 //! ```
+//!
+//! Jobs of the per-tenant shape (spec: tenant, r9fwd) end themselves on a
+//! worker of this build.
 //!
 //! The worker's job (`sprig_worker::queue_forwarder`) and the gateways
 //! (`sprig_gateway::outbox_feed`) use these names.
 
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
+use sprig_cluster::ClusterRegistry;
 use sprig_common::Result;
 use sprig_feed::subs::Subscription;
 use sprig_meta::{ListOpts, Record};
@@ -72,8 +79,8 @@ impl Reconciler for QueueForwarderLoop {
             if job.state.is_final() || job.kind != JOB_KIND {
                 continue;
             }
-            if let Some(t) = job.spec["tenant"].as_u64() {
-                live.insert(t);
+            if let Some(c) = job.spec["cluster"].as_str() {
+                live.insert(c.to_owned());
             }
         }
         let prefix = cx.dc.tier().key("feed/subs/")?;
@@ -82,38 +89,43 @@ impl Reconciler for QueueForwarderLoop {
             .list(
                 &prefix,
                 ListOpts {
-                    limit: 10_000,
+                    limit: 100_000,
                     ..ListOpts::default()
                 },
             )
             .await?;
-        for kv in &page.kvs {
-            let Ok(r) = Record::<Subscription>::decode(&kv.value) else {
-                continue;
-            };
-            let s = r.body;
-            if s.kind != SUB_NAME || s.state != "active" || live.contains(&s.tenant.0) {
+        let any = page.kvs.iter().any(|kv| {
+            Record::<Subscription>::decode(&kv.value)
+                .is_ok_and(|r| r.body.kind == SUB_NAME && r.body.state == "active")
+        });
+        if !any {
+            return Ok(Outcome::RequeueAfter(Duration::from_secs(2)));
+        }
+        let registry = ClusterRegistry::new(Arc::clone(&cx.global), Arc::clone(&cx.dc))?;
+        for c in registry.list().await? {
+            let id = c.body().cluster_id.to_string();
+            if live.contains(&id) {
                 continue;
             }
-            let id = submit(
+            let job = submit(
                 l,
                 cx.clock.as_ref(),
                 NewJob {
                     kind: JOB_KIND.into(),
-                    // The consumers' pool: one job per tenant, for as
-                    // long as it has queue or cross-tenant outboxes.
+                    // The consumers' pool: one job per cluster, for as
+                    // long as any tenant has queue or cross-tenant outboxes.
                     class: JobClass::Consumer,
                     tenant_id: None,
                     clusters: Vec::new(),
                     priority: 0,
                     cause: "queue_forwarder".into(),
                     zone: None,
-                    spec: json!({"tenant": s.tenant.0}),
+                    spec: json!({"cluster": id}),
                 },
             )
             .await?;
-            live.insert(s.tenant.0);
-            tracing::info!(tenant = %s.tenant, job = %id, "queue forwarder job submitted");
+            tracing::info!(cluster = %id, job = %job, "queue forwarder job submitted");
+            live.insert(id);
         }
         Ok(Outcome::RequeueAfter(Duration::from_secs(2)))
     }

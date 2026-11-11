@@ -1537,6 +1537,379 @@ fn prepared_r3(r: &mut Rng) -> Vec<(&'static str, Vec<Value>, Cmp)> {
     v
 }
 
+/// R8 round 7 (decision G53): derived tables of literal rows — `VALUES`,
+/// `SELECT … UNION ALL …` of constants, `FROM DUAL` — join inside each
+/// shard. A derived table with columns `i` (unique per row, for a total
+/// order), `a` (an integer near the keys), `s` (a string with case,
+/// accent and trailing-space variants), `n` (a decimal or NULL) and `cc`.
+fn lit_rows(r: &mut Rng) -> String {
+    let n = 1 + r.below(6);
+    let row = |r: &mut Rng, i: u64| {
+        let a = 1 + r.below(130) as i64;
+        let a = if a % 17 == 0 { -a } else { a };
+        let s = if r.below(8) == 0 {
+            "NULL".to_owned()
+        } else {
+            let pool = if r.below(2) == 0 { NAMES } else { NOTES };
+            lit(r.pick(pool))
+        };
+        let num = opt(r, |r| format!("{}.{:02}", r.below(300), r.below(100)));
+        let cc = lit(["us", "de", "fr", "in", "zz"][r.below(5) as usize]);
+        (i, a, s, num, cc)
+    };
+    let rows: Vec<_> = (1..=n).map(|i| row(r, i)).collect();
+    let (i, a, s, num, cc) = &rows[0];
+    let first = format!("SELECT {i} AS i, {a} AS a, {s} AS s, {num} AS n, {cc} AS cc");
+    let rest: Vec<_> = rows[1..]
+        .iter()
+        .map(|(i, a, s, num, cc)| format!("({i}, {a}, {s}, {num}, {cc})"))
+        .collect();
+    match r.below(4) {
+        // G55's form: a SELECT then one VALUES list.
+        0 if !rest.is_empty() => format!("({first} UNION ALL VALUES {})", rest.join(", ")),
+        // A UNION ALL of SELECTs (FROM DUAL now and then).
+        1 | 0 => {
+            let mut parts = vec![first];
+            for (i, a, s, num, cc) in &rows[1..] {
+                let dual = if r.below(3) == 0 { " FROM DUAL" } else { "" };
+                parts.push(format!("SELECT {i}, {a}, {s}, {num}, {cc}{dual}"));
+            }
+            format!("({})", parts.join(" UNION ALL "))
+        }
+        // UNION (distinct): duplicated rows collapse, the same on every shard.
+        2 => {
+            let mut parts = vec![first.clone(), first];
+            for (i, a, s, num, cc) in &rows[1..] {
+                parts.push(format!("SELECT {i}, {a}, {s}, {num}, {cc}"));
+            }
+            format!("({})", parts.join(" UNION "))
+        }
+        _ => format!("({first} FROM DUAL)"),
+    }
+}
+
+/// G53's corpus: literal derived tables with sharded, reference and
+/// unsharded tables (`lit_u`), in every shape the router may run inside
+/// each shard, and the shapes it must keep gathering.
+fn corpus_lit(r: &mut Rng) -> Vec<(String, Cmp)> {
+    use Cmp::{Bag, Count, Ordered};
+    let mut v: Vec<(String, Cmp)> = Vec::new();
+    for _ in 0..6 {
+        let d = lit_rows(r);
+        let d2 = lit_rows(r);
+        let x = r.below(10);
+        let c = 1 + r.below(125) as i64;
+        let lim = 1 + r.below(15);
+        let off = r.below(10);
+        let mut p = |s: String, m: Cmp| v.push((s, m));
+        // Inner joins: on the key, off the key, comma joins, strings.
+        p(
+            format!(
+                "SELECT d.i, d.a, d.s, o.oid, o.amount FROM {d} d JOIN orders o ON o.cid = d.a"
+            ),
+            Bag,
+        );
+        p(
+            format!("SELECT d.i, o.cid, o.oid FROM {d} d JOIN orders o ON o.qty = d.a % 20"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, c.cid, c.name FROM {d} d, customers c WHERE c.cid = d.a AND (c.score > {x} OR c.score IS NULL)"
+            ),
+            Bag,
+        );
+        p(
+            format!("SELECT d.i, c.cid FROM customers c JOIN {d} d ON c.name = d.s"),
+            Bag,
+        );
+        p(
+            format!("SELECT d.i, o.oid FROM orders o JOIN {d} d ON d.s = o.note WHERE o.qty > {x}"),
+            Bag,
+        );
+        p(
+            format!("SELECT d.i, t.tag, t.cnt FROM {d} d JOIN tags t ON t.tag = d.s"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, d.a, o.oid FROM {d} d JOIN orders o ON o.cid = d.a WHERE o.cid = {c}"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, d2.i, o.oid FROM {d} d JOIN {d2} d2 ON d2.a = d.a JOIN orders o ON o.cid = d.a"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, c.cid FROM {d} d CROSS JOIN customers c WHERE c.cid BETWEEN {c} AND {}",
+                c + 5
+            ),
+            Bag,
+        );
+        p(
+            format!("SELECT * FROM {d} d JOIN customers c ON c.cid = d.a"),
+            Bag,
+        );
+        // ORDER BY a literal column (collations), LIMIT and OFFSET.
+        p(
+            format!(
+                "SELECT d.s, d.i, o.cid, o.oid FROM {d} d JOIN orders o ON o.qty = d.a % 20 ORDER BY d.s, d.i, o.cid, o.oid LIMIT {lim} OFFSET {off}"
+            ),
+            Ordered,
+        );
+        p(
+            format!(
+                "SELECT d.n, d.i, c.cid FROM {d} d JOIN customers c ON c.flag = d.a % 3 ORDER BY d.n DESC, d.i, c.cid LIMIT {lim}"
+            ),
+            Ordered,
+        );
+        p(
+            format!("SELECT d.i, o.oid FROM {d} d JOIN orders o ON o.qty > d.a % 10 LIMIT {lim}"),
+            Count,
+        );
+        // Outer joins: literal rows on the null side (inside shards) and
+        // on the preserved side (must stay gathered and exact).
+        p(
+            format!("SELECT c.cid, d.i, d.s FROM customers c LEFT JOIN {d} d ON d.a = c.cid"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT o.cid, o.oid, d.i FROM orders o LEFT JOIN {d} d ON d.s = o.note ORDER BY o.cid, o.oid, d.i"
+            ),
+            Ordered,
+        );
+        p(
+            format!("SELECT d.i, o.oid FROM {d} d LEFT JOIN orders o ON o.cid = d.a"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, d.a FROM {d} d LEFT JOIN customers c ON c.cid = d.a WHERE c.cid IS NULL"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT c.cid, d.i, o.oid FROM customers c JOIN {d} d ON d.a = c.cid LEFT JOIN orders o ON o.cid = c.cid"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT c.cid, d.i, o.oid FROM customers c JOIN {d} d ON d.a % 3 = c.flag LEFT JOIN orders o ON o.cid = d.a"
+            ),
+            Bag,
+        );
+        p(
+            format!("SELECT d.i, o.oid FROM orders o RIGHT JOIN {d} d ON o.cid = d.a"),
+            Bag,
+        );
+        // Aggregates, GROUP BY, HAVING, DISTINCT.
+        p(
+            format!(
+                "SELECT COUNT(*), SUM(o.amount), MIN(d.s), MAX(d.s), AVG(d.n), SUM(d.n) FROM {d} d JOIN orders o ON o.qty = d.a % 20"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.s, COUNT(*), SUM(o.qty) FROM {d} d JOIN orders o ON o.qty >= d.a % 5 GROUP BY d.s"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.a, COUNT(*) AS k FROM {d} d JOIN orders o ON o.cid = d.a GROUP BY d.a ORDER BY k DESC, d.a"
+            ),
+            Ordered,
+        );
+        p(
+            format!(
+                "SELECT d.s, COUNT(*) FROM {d} d JOIN customers c ON c.flag = d.a % 3 GROUP BY d.s HAVING COUNT(*) > {x} ORDER BY d.s LIMIT {lim}"
+            ),
+            Ordered,
+        );
+        p(
+            format!(
+                "SELECT o.cid, COUNT(*), MAX(d.s) FROM {d} d JOIN orders o ON o.qty = d.a % 20 GROUP BY o.cid"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT COUNT(DISTINCT d.s), COUNT(*) FROM {d} d JOIN orders o ON o.qty = d.a % 20"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.cc, k.cname, COUNT(*) FROM {d} d JOIN customers c ON c.cc = d.cc JOIN countries k ON k.code = c.cc GROUP BY d.cc, k.cname"
+            ),
+            Bag,
+        );
+        p(
+            format!("SELECT MAX(d.a) FROM {d} d JOIN orders o ON o.cid = d.a WHERE o.cid > 100000"),
+            Bag,
+        );
+        p(
+            format!("SELECT DISTINCT d.s FROM {d} d JOIN orders o ON o.qty = d.a % 20"),
+            Bag,
+        );
+        p(
+            format!("SELECT DISTINCT d.s, o.cid FROM {d} d JOIN orders o ON o.qty = d.a % 20"),
+            Bag,
+        );
+        // Subqueries.
+        p(
+            format!("SELECT o.oid, o.cid FROM orders o WHERE o.cid IN (SELECT a FROM {d} d)"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT o.oid FROM orders o WHERE EXISTS (SELECT 1 FROM {d} d WHERE d.a = o.cid AND d.s IS NOT NULL)"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT c.cid FROM customers c WHERE c.name NOT IN (SELECT s FROM {d} d WHERE s IS NOT NULL) AND c.cid < 30"
+            ),
+            Bag,
+        );
+        p(
+            format!("SELECT d.i, (SELECT COUNT(*) FROM orders o WHERE o.cid = d.a) FROM {d} d"),
+            Bag,
+        );
+        p(
+            format!("SELECT (SELECT MAX(d.s) FROM {d} d), COUNT(*) FROM orders"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT x.a, COUNT(*) FROM (SELECT d.a FROM {d} d JOIN orders o ON o.cid = d.a) x GROUP BY x.a"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, o.oid, ROW_NUMBER() OVER (ORDER BY d.i, o.cid, o.oid) FROM {d} d JOIN orders o ON o.cid = d.a"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.a FROM {d} d JOIN orders o ON o.cid = d.a UNION SELECT cid FROM customers WHERE cid < 10"
+            ),
+            Bag,
+        );
+        // Reference, unsharded and other groups.
+        p(
+            format!("SELECT d.i, k.cname FROM {d} d JOIN countries k ON k.code = d.cc"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, c.cid, k.cname FROM {d} d JOIN customers c ON c.cid = d.a JOIN countries k ON k.code = c.cc"
+            ),
+            Bag,
+        );
+        p(
+            format!("SELECT d.i, u.note FROM {d} d JOIN lit_u u ON u.id = d.a"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, u.note, o.oid FROM {d} d JOIN lit_u u ON u.id = d.a JOIN orders o ON o.cid = u.id"
+            ),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, o.oid, p.pname FROM {d} d JOIN orders o ON o.cid = d.a JOIN products p ON p.pid = o.pid"
+            ),
+            Bag,
+        );
+        p(
+            format!("SELECT d.i, p.pid, p.pname FROM {d} d JOIN products p ON p.pid = d.a % 40"),
+            Bag,
+        );
+        p(
+            format!(
+                "SELECT d.i, l.iid, l.line_no FROM {d} d JOIN invoices i ON i.cid = d.a JOIN invoice_lines l ON l.iid = i.iid"
+            ),
+            Bag,
+        );
+    }
+    v
+}
+
+/// The unsharded table of [`corpus_lit`], made through the gateway.
+async fn lit_setup(sut: &mut Conn, reference: &mut Conn) {
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("DROP TABLE IF EXISTS lit_u").await.unwrap();
+        c.query_drop(
+            "CREATE TABLE lit_u (id INT NOT NULL PRIMARY KEY, note VARCHAR(20)) DEFAULT CHARSET utf8mb4",
+        )
+        .await
+        .unwrap();
+        let rows: Vec<String> = (1..=60).map(|i| format!("({i}, 'u{}')", i % 7)).collect();
+        c.query_drop(format!("INSERT INTO lit_u VALUES {}", rows.join(", ")))
+            .await
+            .unwrap();
+    }
+}
+
+/// How the gateway plans `s` (`EXPLAIN FORMAT=SPRIG`): gathered, inside
+/// shards, or neither (one place, refused).
+async fn lit_kind(sut: &mut Conn, s: &str) -> &'static str {
+    match run(sut, &format!("EXPLAIN FORMAT=SPRIG {s}")).await {
+        Outcome::Rows(_, rows) => {
+            let ops: Vec<String> = rows
+                .iter()
+                .filter_map(|r| r.get(2).cloned().flatten())
+                .collect();
+            if ops.iter().any(|o| o == "Gather") {
+                "gathered"
+            } else if ops.iter().any(|o| o == "Route" || o == "Lookup") {
+                "shards"
+            } else {
+                "other"
+            }
+        }
+        _ => "other",
+    }
+}
+
+/// Runs [`corpus_lit`] on both sides; returns a summary line.
+async fn lit_reads(
+    sut: &mut Conn,
+    reference: &mut Conn,
+    tally: &mut Tally,
+    corpus: &[(String, Cmp)],
+    label: &str,
+) -> String {
+    let mut st = R3Stats::default();
+    let before = tally.mismatches.len();
+    let mut kinds: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (s, mode) in corpus {
+        *kinds.entry(lit_kind(sut, s).await).or_default() += 1;
+        let a = run(sut, s).await;
+        let b = run(reference, s).await;
+        r3_check(tally, &mut st, s, *mode, &a, &b);
+    }
+    format!(
+        "literal rows {label}: {} statements, {} refused, {} mismatches; plans {kinds:?}",
+        st.compared,
+        st.skipped,
+        tally.mismatches.len() - before
+    )
+}
+
 /// What R3's statements did: compared, refused by reason, and how long the
 /// gateway and the reference took per statement.
 #[derive(Default)]
@@ -4478,6 +4851,18 @@ async fn differential_against_one_unsharded_mariadb() {
     }
     r3_in_txn(&mut sut, &mut reference, &mut tally, &mut r3).await;
     let r3_before_split = r3.line("before the split");
+    // R8 round 7: literal derived tables (decision G53).
+    lit_setup(&mut sut, &mut reference).await;
+    let lit_corpus = corpus_lit(&mut Rng(seed_value + 9));
+    let lit_before = lit_reads(
+        &mut sut,
+        &mut reference,
+        &mut tally,
+        &lit_corpus,
+        "before the split",
+    )
+    .await;
+    println!("{lit_before}");
     // R3 part 4: analytic reads in DataFusion.
     let analytics_line = analytics_reads(&mut sut, &mut reference, &mut tally).await;
     let (ddl_have, ddl_of_n) =
@@ -4618,6 +5003,14 @@ async fn differential_against_one_unsharded_mariadb() {
         &r3_corpus,
     )
     .await;
+    let lit_after = lit_reads(
+        &mut sut,
+        &mut reference,
+        &mut tally,
+        &lit_corpus,
+        "after the split",
+    )
+    .await;
     transactions(&e, &mut sut, &mut reference, &mut tally, &shards1).await;
     autocommit_off(&e, &mut sut, &mut reference, &mut tally, &shards1).await;
     parent_txns(&e, &mut sut, &mut reference, &mut tally, &shards1, 600).await;
@@ -4692,6 +5085,8 @@ async fn differential_against_one_unsharded_mariadb() {
     println!("{r3_before_split}");
     println!("{analytics_line}");
     println!("{}", r3_after.line("after the split"));
+    println!("{lit_before}");
+    println!("{lit_after}");
     println!("ddl: ALTER TABLE reached {ddl_have} of {ddl_of_n} shards");
     if env("SPRIG_TEST_R1_KILL").is_some() {
         println!("kill test: COMMIT failed after a killed branch: {killed}");

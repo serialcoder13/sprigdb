@@ -225,6 +225,10 @@ pub(crate) struct RouterState {
     /// R8 round 6: the bound statement's graph plan and rows, which narrow
     /// its read to the shards of the rows' keys.
     graph_bound: Option<graph::Bound>,
+    /// R8 round 7 (G62): session temporary tables holding a graph
+    /// statement's rows past the inline limit, on the session's own
+    /// connection; dropped before the next routed statement.
+    graph_tmp: Vec<String>,
 }
 
 impl std::fmt::Debug for RouterState {

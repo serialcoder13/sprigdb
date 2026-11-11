@@ -1,0 +1,9 @@
+# Build context for deploy/compose-vm/Dockerfile (repository root).
+target/
+.git/
+**/node_modules/
+studio/e2e/
+deploy/compose/.gateway-dev/
+deploy/compose/m07/.state/
+deploy/compose-vm/secrets/
+deploy/compose-vm/backups/

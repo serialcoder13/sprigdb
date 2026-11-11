@@ -869,11 +869,9 @@ pub fn side_bounds(v: &Bson) -> Option<(f64, f64, f64, f64)> {
         return Some(world);
     }
     cap.radius = cap.radius * (1.0 + 1e-9) + 1e-9;
-    let Some(((lo, hi), lngs)) = GeoOp::Within(Within::CenterSphere(
-        s2::lat_lng(cap.center),
-        cap.radius,
-    ))
-    .boxes() else {
+    let Some(((lo, hi), lngs)) =
+        GeoOp::Within(Within::CenterSphere(s2::lat_lng(cap.center), cap.radius)).boxes()
+    else {
         return Some(world);
     };
     if lngs.len() != 1 {
@@ -1027,7 +1025,10 @@ mod tests {
     fn side_bounds_hold_lines_and_polygons() {
         let line = bson::bson!({"type": "LineString", "coordinates": [[10.0, 20.0], [12.0, 21.0]]});
         let (lo, hi, w, e) = side_bounds(&line).unwrap();
-        assert!(lo <= 20.0 && hi >= 21.0 && w <= 10.0 && e >= 12.0, "{lo} {hi} {w} {e}");
+        assert!(
+            lo <= 20.0 && hi >= 21.0 && w <= 10.0 && e >= 12.0,
+            "{lo} {hi} {w} {e}"
+        );
         // A great-circle edge bulges toward the pole: the box holds it.
         let arc = bson::bson!({"type": "LineString", "coordinates": [[-60.0, 60.0], [60.0, 60.0]]});
         let (_, hi, _, _) = side_bounds(&arc).unwrap();
@@ -1037,7 +1038,8 @@ mod tests {
         assert!(lo <= -7.0 && hi >= -3.0 && w <= 98.0 && e >= 102.0);
         assert_eq!(side_bounds(&Bson::String("x".into())), None);
         // Across the antimeridian: every longitude.
-        let wrap = bson::bson!({"type": "LineString", "coordinates": [[179.0, 0.0], [-179.0, 0.0]]});
+        let wrap =
+            bson::bson!({"type": "LineString", "coordinates": [[179.0, 0.0], [-179.0, 0.0]]});
         let (_, _, w, e) = side_bounds(&wrap).unwrap();
         assert!((w, e) == (-180.0, 180.0), "{w} {e}");
     }
@@ -1079,7 +1081,10 @@ mod tests {
             doc! {"loc": {"t": "`d`.`__sprig_doc_gx_00`", "v": 77_i64}},
         );
         let after = prefilter("loc", &op, &m);
-        assert!(after.contains("FROM `d`.`__sprig_doc_gx_00` WHERE lat_hi >="), "{after}");
+        assert!(
+            after.contains("FROM `d`.`__sprig_doc_gx_00` WHERE lat_hi >="),
+            "{after}"
+        );
         assert!(after.contains("_v > 77"), "{after}");
     }
 }

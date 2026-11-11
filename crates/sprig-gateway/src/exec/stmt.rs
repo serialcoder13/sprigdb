@@ -36,6 +36,7 @@ use crate::pipeline::StmtRef;
 
 /// One prepared statement of a session.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // flags of one statement
 pub(crate) struct Stmt {
     /// The SQL text, as prepared on every backend connection.
     pub sql: Bytes,
@@ -83,6 +84,11 @@ pub(crate) struct Stmt {
     /// with placeholders (`MATCH ... AGAINST (?)` on a search index), run
     /// at each execute with the bound values as literals.
     pub deferred_params: bool,
+    /// Tenant sessions (chapter 43, R8 round 7, decision G63): `deferred`
+    /// holds a statement with `GRAPH_TABLE` and `?` placeholders, run at
+    /// each execute with the bound values written in (SQL literals
+    /// outside the calls, Cypher literals inside them).
+    pub graph_params: bool,
 }
 
 impl Stmt {
@@ -106,6 +112,7 @@ impl Stmt {
             recheck: None,
             client: None,
             deferred_params: false,
+            graph_params: false,
         }
     }
 
@@ -130,6 +137,7 @@ impl Stmt {
             recheck: None,
             client: None,
             deferred_params: false,
+            graph_params: false,
             sql,
         }
     }

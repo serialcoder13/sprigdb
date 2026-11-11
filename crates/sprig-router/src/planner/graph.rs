@@ -256,10 +256,15 @@ pub fn plan_graph(
         .collect();
     let empty = GraphPlan::bind_empty(sql, &slots, calls);
     let outer_plan = super::plan(&empty, cx);
-    let keys = parse(sql)
-        .ok()
-        .map(|stmt| key_joins(&stmt, calls, cx))
+    let parsed = parse(sql).ok();
+    let keys = parsed
+        .as_ref()
+        .map(|stmt| key_joins(stmt, calls, cx))
         .unwrap_or_default();
+    let filters = parsed.as_ref().map_or_else(
+        || vec![Vec::new(); calls.len()],
+        |stmt| pushed_filters(stmt, calls, cx),
+    );
     Plan::Graph(Box::new(GraphPlan {
         nonce,
         calls: calls.to_vec(),
@@ -267,6 +272,7 @@ pub fn plan_graph(
         slots,
         steps,
         keys,
+        filters,
         outer_plan: Box::new(outer_plan),
     }))
 }
@@ -321,6 +327,161 @@ fn key_joins(stmt: &Statement, calls: &[GraphCall], cx: &PlanCtx<'_>) -> Vec<Key
                     .map_or_else(|| entry.name.clone(), |k| format!("{}.{k}", entry.name)),
                 group: std::sync::Arc::clone(&entry.group),
             });
+        }
+    }
+    out
+}
+
+/// An integer literal (a number without a point or exponent, signed or
+/// not), as Cypher text.
+fn int_literal(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Nested(x) => int_literal(x),
+        Expr::Value(v) => match &v.value {
+            Value::Number(n, false) => n.parse::<i64>().ok().map(|i| i.to_string()),
+            _ => None,
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => int_literal(expr)
+            .filter(|t| !t.starts_with('-'))
+            .and_then(|t| format!("-{t}").parse::<i64>().ok())
+            .map(|i| i.to_string()),
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => int_literal(expr),
+        _ => None,
+    }
+}
+
+/// A Cypher expression the pushdown copies into a `WHERE`: a variable or
+/// one property of it (no function, so never an aggregate).
+fn simple_cypher(e: &str) -> bool {
+    let word = |w: &str| {
+        let mut c = w.chars();
+        c.next()
+            .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+            && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
+    };
+    match e.trim().split_once('.') {
+        Some((v, p)) => word(v) && word(p),
+        None => word(e.trim()),
+    }
+}
+
+/// Keeps every row whose value isn't a number, or that passes `test`
+/// (Cypher on the number): MariaDB compares a string or a boolean with a
+/// number after converting it (`'5' = 5` holds), and Cypher doesn't, so
+/// only numbers are decided in the graph; `NULL` never passes a SQL
+/// comparison.
+fn numeric_filter(e: &str, test: &str) -> String {
+    format!("({e} IS NOT NULL AND (NOT valueType({e}) IN ['INTEGER', 'FLOAT'] OR {test}))")
+}
+
+/// The outer statement's filters on each call's columns, as Cypher
+/// conditions (R8 round 7, decision G61): in the top `SELECT`, a conjunct
+/// of `WHERE` or of an inner join's `ON` of the forms `g.c <op> n`
+/// (`=`, `<>`, `<`, `<=`, `>`, `>=`, either side), `g.c BETWEEN n AND m`,
+/// `g.c IN (n, …)` and `g.c IS NOT NULL`, with `n` an integer and `g.c` a
+/// column returning a variable or a property. Each rejects `NULL`, so a
+/// graph row it removes could only have produced rows the statement
+/// drops too (on either side of an outer join); the statement still
+/// applies its whole `WHERE`. Strings are not pushed: MariaDB compares
+/// them under a collation (`'a' = 'A '`) and Cypher exactly.
+pub(super) fn pushed_filters(
+    stmt: &Statement,
+    calls: &[GraphCall],
+    cx: &PlanCtx<'_>,
+) -> Vec<Vec<String>> {
+    let mut out = vec![Vec::new(); calls.len()];
+    let Statement::Query(q) = stmt else {
+        return out;
+    };
+    let SetExpr::Select(select) = &*q.body else {
+        return out;
+    };
+    let Ok(b) = analyse(select, cx) else {
+        return out;
+    };
+    let column = |e: &Expr| -> Option<(usize, String)> {
+        let (j, col) = col_rel(&b.rels, e)?;
+        let call = b.rels[j].graph?;
+        let c = calls.get(call)?;
+        let k = c
+            .columns
+            .iter()
+            .position(|x| x.eq_ignore_ascii_case(&col))?;
+        let r = c.returns.get(k)?;
+        simple_cypher(r).then(|| (call, r.trim().to_owned()))
+    };
+    for c in b.where_conj.iter().chain(b.inner_on.iter()) {
+        let pushed = match c {
+            Expr::BinaryOp { left, op, right } => {
+                let flip = |op: &BinaryOperator| match op {
+                    BinaryOperator::Lt => Some(">"),
+                    BinaryOperator::LtEq => Some(">="),
+                    BinaryOperator::Gt => Some("<"),
+                    BinaryOperator::GtEq => Some("<="),
+                    BinaryOperator::Eq => Some("="),
+                    BinaryOperator::NotEq => Some("<>"),
+                    _ => None,
+                };
+                let same = |op: &BinaryOperator| match op {
+                    BinaryOperator::Lt => Some("<"),
+                    BinaryOperator::LtEq => Some("<="),
+                    BinaryOperator::Gt => Some(">"),
+                    BinaryOperator::GtEq => Some(">="),
+                    BinaryOperator::Eq => Some("="),
+                    BinaryOperator::NotEq => Some("<>"),
+                    _ => None,
+                };
+                if let (Some((call, e)), Some(n), Some(o)) =
+                    (column(left), int_literal(right), same(op))
+                {
+                    Some((call, numeric_filter(&e, &format!("{e} {o} {n}"))))
+                } else if let (Some((call, e)), Some(n), Some(o)) =
+                    (column(right), int_literal(left), flip(op))
+                {
+                    Some((call, numeric_filter(&e, &format!("{e} {o} {n}"))))
+                } else {
+                    None
+                }
+            }
+            Expr::Between {
+                expr,
+                negated: false,
+                low,
+                high,
+            } => match (column(expr), int_literal(low), int_literal(high)) {
+                (Some((call, e)), Some(lo), Some(hi)) => Some((
+                    call,
+                    numeric_filter(&e, &format!("({e} >= {lo} AND {e} <= {hi})")),
+                )),
+                _ => None,
+            },
+            Expr::InList {
+                expr,
+                list,
+                negated: false,
+            } if !list.is_empty() && list.len() <= 256 => {
+                let ns: Option<Vec<String>> = list.iter().map(int_literal).collect();
+                match (column(expr), ns) {
+                    (Some((call, e)), Some(ns)) => {
+                        let any: Vec<String> = ns.iter().map(|n| format!("{e} = {n}")).collect();
+                        Some((call, numeric_filter(&e, &format!("({})", any.join(" OR ")))))
+                    }
+                    _ => None,
+                }
+            }
+            Expr::IsNotNull(x) => column(x).map(|(call, e)| (call, format!("{e} IS NOT NULL"))),
+            _ => None,
+        };
+        if let Some((call, cond)) = pushed
+            && !out[call].contains(&cond)
+        {
+            out[call].push(cond);
         }
     }
     out

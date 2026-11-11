@@ -111,6 +111,10 @@ pub enum SearchQuery {
     },
     /// A score multiplier.
     Boost(Box<SearchQuery>, f32),
+    /// Documents whose encoded key (`_key`) is one of these: the gateway
+    /// restricts counts and facets to the rows a caller may see (decision
+    /// S24). Never parsed from a client's query.
+    Keys(Vec<crate::schema::Key>),
 }
 
 impl SearchQuery {
@@ -138,7 +142,7 @@ impl SearchQuery {
 
     fn walk_fields(&self, out: &mut Vec<String>) {
         match self {
-            Self::All => {}
+            Self::All | Self::Keys(_) => {}
             Self::Match { fields, .. }
             | Self::Phrase { fields, .. }
             | Self::Prefix { fields, .. }

@@ -951,9 +951,21 @@ mod tests {
         assert!(c.stripped.contains("KEY by_title (title)"));
         assert!(c.stripped.contains("COMMENT 'a, (b)'"));
         assert!(c.stripped.ends_with(") ENGINE=InnoDB /* , FULLTEXT (x) */"));
-        assert_eq!(create_table_fulltext("CREATE TABLE t (id INT, KEY k (id))").unwrap(), None);
-        assert_eq!(create_table_fulltext("CREATE TABLE t LIKE u").unwrap(), None);
-        assert_eq!(create_table_fulltext("SELECT 'FULLTEXT (a)'").unwrap(), None);
-        assert!(create_table_fulltext("CREATE TABLE t (a TEXT, FULLTEXT (a) WITH PARSER ngram)").is_err());
+        assert_eq!(
+            create_table_fulltext("CREATE TABLE t (id INT, KEY k (id))").unwrap(),
+            None
+        );
+        assert_eq!(
+            create_table_fulltext("CREATE TABLE t LIKE u").unwrap(),
+            None
+        );
+        assert_eq!(
+            create_table_fulltext("SELECT 'FULLTEXT (a)'").unwrap(),
+            None
+        );
+        assert!(
+            create_table_fulltext("CREATE TABLE t (a TEXT, FULLTEXT (a) WITH PARSER ngram)")
+                .is_err()
+        );
     }
 }

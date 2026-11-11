@@ -269,9 +269,12 @@ async fn graph_table_joins_sharded_tables_on_two_clusters() {
         .unwrap();
     }
     let started = Instant::now();
-    if groups(&ctl, &tenant).iter().all(|(_, _, s)| s.is_empty())
-        || groups(&ctl, &tenant).is_empty()
-    {
+    // Graph groups (`graph_<id>`) don't count: the tables need theirs.
+    let table_groups: Vec<_> = groups(&ctl, &tenant)
+        .into_iter()
+        .filter(|(n, _, _)| !n.starts_with("graph_"))
+        .collect();
+    if table_groups.iter().all(|(_, _, s)| s.is_empty()) {
         g.query_drop("SPRIG PIN orders SHARD KEY (cust)")
             .await
             .unwrap();
@@ -456,6 +459,72 @@ async fn graph_table_joins_sharded_tables_on_two_clusters() {
             compared += 1;
         }
     }
+    // R8 round 7 (G61): integer filters on graph columns go into the
+    // Cypher; every answer still equals the reference.
+    let filtered = [
+        "SELECT x.pid, x.fid, o.id FROM {G} AS x JOIN orders o ON o.cust = x.fid WHERE x.fid > 10 AND x.pid <= 40 ORDER BY x.pid, x.fid, o.id",
+        "SELECT x.pid, x.fid FROM {G} AS x WHERE x.pid IN (3, 7, 11, 59) AND x.fid <> 4 ORDER BY x.pid, x.fid",
+        "SELECT x.pid, COUNT(*) FROM {G} AS x JOIN orders o ON o.cust = x.fid AND x.fid BETWEEN 5 AND 30 GROUP BY x.pid ORDER BY x.pid",
+        "SELECT x.fid, COUNT(o.id) FROM {G} AS x LEFT JOIN orders o ON o.cust = x.fid WHERE 20 >= x.fid AND x.femail IS NOT NULL GROUP BY x.fid ORDER BY x.fid",
+        "SELECT x.pid, x.w FROM {G} AS x WHERE x.w > 2 AND x.w < 9 ORDER BY x.pid, x.fid",
+    ];
+    for q in filtered {
+        let gq = q.replace("{G}", &gt_knows("p.id >= 0"));
+        let rq = q.replace("{G}", &sql_knows("p.id >= 0"));
+        let t = Instant::now();
+        let got = rows(&mut g, &gq)
+            .await
+            .unwrap_or_else(|e| panic!("{gq}: {e}"));
+        times.push(t.elapsed());
+        let want = rows(&mut r, &rq)
+            .await
+            .unwrap_or_else(|e| panic!("reference {rq}: {e}"));
+        assert_eq!(got, want, "pushed filter:\n{gq}");
+        compared += 1;
+    }
+    let ex = rows(
+        &mut g,
+        &format!(
+            "EXPLAIN FORMAT=SPRIG {}",
+            filtered[0].replace("{G}", &gt_knows("p.id >= 0"))
+        ),
+    )
+    .await
+    .unwrap()
+    .join("\n");
+    assert!(
+        ex.contains("|GraphFilter|") && ex.contains("valueType(f.id)"),
+        "{ex}"
+    );
+    // R8 round 7 (G63): `?` in a prepared GRAPH_TABLE statement, inside
+    // the call (a Cypher value) and outside it (a SQL value).
+    let pq = format!(
+        "SELECT x.pid, x.fid, o.id FROM {} AS x JOIN orders o ON o.cust = x.fid WHERE o.id > ? ORDER BY x.pid, x.fid, o.id",
+        gt_knows("p.id < ? AND f.email <> ?")
+    );
+    let stmt = g.prep(pq.as_str()).await.expect("prepare with parameters");
+    for (lim, mail, min) in [
+        (20i64, "nobody", 0i64),
+        (45, &email(3) as &str, 40),
+        (0, "x", 0),
+    ] {
+        let got: Vec<(i64, i64, i64)> = g
+            .exec(&stmt, (lim, mail.to_owned(), min))
+            .await
+            .expect("execute with parameters");
+        let got: Vec<String> = got.iter().map(|(a, b, c)| format!("{a}|{b}|{c}")).collect();
+        let want = rows(
+            &mut r,
+            &format!(
+                "SELECT x.pid, x.fid, o.id FROM {} AS x JOIN orders o ON o.cust = x.fid WHERE o.id > {min} ORDER BY x.pid, x.fid, o.id",
+                sql_knows(&format!("p.id < {lim} AND f.email <> '{mail}'"))
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, want, "prepared with ({lim}, {mail}, {min})");
+        compared += 1;
+    }
     // A scalar aggregate over no graph rows still answers one row.
     let got = rows(
         &mut g,
@@ -522,6 +591,83 @@ async fn graph_table_joins_sharded_tables_on_two_clusters() {
     );
     if env("SPRIG_TEST_GT_KEEP").is_none() {
         r.query_drop("DROP DATABASE IF EXISTS r8six_ref")
+            .await
+            .unwrap();
+    }
+}
+
+/// R8 round 7 (decision G62): a `GRAPH_TABLE` statement that reads no
+/// distributed table takes rows past the 16 MB inline limit from session
+/// temporary tables instead of failing with 39903.
+#[tokio::test]
+async fn graph_table_rows_past_the_inline_limit() {
+    let (Some(sql), Some(baddr), Some(user), Some(pw)) = (
+        env("SPRIG_TEST_SQL_ADDR"),
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_GT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+    ) else {
+        eprintln!(
+            "skipped: SPRIG_TEST_SQL_ADDR / SPRIG_TEST_BOLT_ADDR / SPRIG_TEST_GT_USER not set"
+        );
+        return;
+    };
+    const N: i64 = 2600;
+    const LEN: usize = 7000;
+    let mut g = gateway(&sql, &user, &pw).await;
+    g.query_drop("CREATE DATABASE IF NOT EXISTS r8seven_big")
+        .await
+        .unwrap();
+    g.query_drop("DROP GRAPH IF EXISTS r8seven_big.g")
+        .await
+        .unwrap();
+    g.query_drop("CREATE GRAPH r8seven_big.g").await.unwrap();
+    let mut b = bolt(&baddr, &user, &pw).await.expect("bolt login");
+    let db = vec![("db", PackValue::str("r8seven_big.g"))];
+    let s: String = "abcdefghij".repeat(LEN / 10);
+    let started = Instant::now();
+    for lo in (1..=N).step_by(200) {
+        b.query(
+            &format!(
+                "UNWIND range({lo}, {}) AS i CREATE (:Big {{id: i, s: $s}})",
+                (lo + 199).min(N)
+            ),
+            vec![("s", PackValue::String(s.clone()))],
+            db.clone(),
+        )
+        .await
+        .expect("big nodes");
+    }
+    eprintln!("{N} nodes of {LEN} characters in {:?}", started.elapsed());
+    let q = "SELECT COUNT(*), SUM(LENGTH(x.s)), MIN(x.id), MAX(x.id) FROM GRAPH_TABLE (r8seven_big.g \
+             MATCH (n IS Big) COLUMNS (n.id AS id, n.s AS s)) AS x";
+    let t = Instant::now();
+    let got = rows(&mut g, q).await.expect("past 16 MB");
+    eprintln!(
+        "about {} MB of rows through temporary tables in {:?}",
+        (N as usize * LEN) >> 20,
+        t.elapsed()
+    );
+    assert_eq!(got, vec![format!("{N}|{}|1|{N}", N as usize * LEN)]);
+    // Ordered rows with a filter that the graph applies (G61).
+    let got = rows(
+        &mut g,
+        "SELECT x.id, LENGTH(x.s) FROM GRAPH_TABLE (r8seven_big.g MATCH (n IS Big) \
+         COLUMNS (n.id AS id, n.s AS s)) AS x WHERE x.id > 2597 ORDER BY x.id",
+    )
+    .await
+    .unwrap();
+    assert_eq!(got, ["2598|7000", "2599|7000", "2600|7000"]);
+    // The next statement on the session runs as before (the tables are
+    // dropped first), and the big statement runs again.
+    assert_eq!(rows(&mut g, "SELECT 1").await.unwrap(), ["1"]);
+    let got = rows(&mut g, q).await.expect("again");
+    assert_eq!(got.len(), 1);
+    if env("SPRIG_TEST_GT_KEEP").is_none() {
+        g.query_drop("DROP GRAPH IF EXISTS r8seven_big.g")
+            .await
+            .unwrap();
+        g.query_drop("DROP DATABASE IF EXISTS r8seven_big")
             .await
             .unwrap();
     }

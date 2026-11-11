@@ -1,0 +1,30 @@
+# Gateway. deploy/compose-vm. The client listeners' addresses, TLS modes and
+# certificate bundle are dc-scope settings in etcd, which sprig-vm.sh writes
+# on first start (chapter 04); the certificate files are re-read when they
+# change (RUNBOOK.md, "Rotating certificates").
+
+[node]
+dc = "dc1"
+
+[meta]
+dc_seeds = ["https://etcd:2379"]
+global_seeds = []
+deployment_id = "sprigdb"
+
+[tls]
+ca = "/run/sprig/tls/ca.pem"
+cert = "/run/sprig/tls/client.pem"
+key = "/run/sprig/tls/client-key.pem"
+
+[gateway]
+login_mode = "catalog"
+# The MariaDB account the gateway manages tenants' backend accounts with
+# (chapter 14, "Backend target"; chapter 29).
+backends_file = "/run/sprig/sprig/backends.toml"
+workload_key_file = "/run/sprig/sprig/workload-keys"
+controller_token_file = "/run/sprig/sprig/gateway-token"
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "json"
+bootstrap_addr = "0.0.0.0:9180"

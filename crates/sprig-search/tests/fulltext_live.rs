@@ -66,7 +66,10 @@ async fn fulltext_key_and_prepared_against() {
         .await
         .unwrap();
     assert!(keys.iter().any(|k| k == "by_title"), "{keys:?}");
-    assert!(!keys.iter().any(|k| k == "ft_title_body"), "no MariaDB FULLTEXT index: {keys:?}");
+    assert!(
+        !keys.iter().any(|k| k == "ft_title_body"),
+        "no MariaDB FULLTEXT index: {keys:?}"
+    );
     // Server-side prepared statements (mysql_async's exec prepares).
     let mut got: Vec<i32> = c
         .exec(

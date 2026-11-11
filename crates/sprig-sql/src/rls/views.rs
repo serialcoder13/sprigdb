@@ -28,6 +28,8 @@
 //!                   (x(...)), SHOW / DESCRIBE / DDL statements
 //! ```
 
+#![allow(clippy::many_single_char_names)] // token indexes: t, i, k, m, c, n
+
 use std::collections::HashSet;
 
 use sprig_common::SprigError;
@@ -89,7 +91,7 @@ pub fn unswap(text: &str) -> std::borrow::Cow<'_, str> {
         };
         let name = &after[..end];
         if name == &CTX_FUNCTION[VIEW_PREFIX.len()..] || name.contains('~') {
-            out.push_str(&rest[at..at + pat.len() + end + 1]);
+            out.push_str(&rest[at..=at + pat.len() + end]);
             rest = &after[end + 1..];
             continue;
         }
@@ -376,7 +378,7 @@ fn hints_end(t: &Toks<'_>, mut k: usize) -> usize {
 ///
 /// # Errors
 /// 39366 if the text can't be lexed or the edits collide.
-#[allow(clippy::too_many_lines)] // one pass over the tokens
+#[allow(clippy::too_many_lines, clippy::implicit_hasher)] // one pass over the tokens
 pub fn swap(
     src: &str,
     lex_opts: &LexOptions,
