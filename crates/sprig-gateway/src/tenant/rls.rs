@@ -1220,34 +1220,37 @@ pub async fn pause_bound_sinks(
 // ---------------------------------------------------------------------
 // Policy views (RLS round 2, decisions RL18 to RL21).
 
-/// Protected tables that get no policy view, by (tenant, object): they
-/// have invisible columns, which `SELECT *` on a view would show (RL18).
-type Viewless = std::sync::Mutex<std::collections::HashSet<(u64, u64)>>;
+/// Protected tables' invisible columns (lower case), by (tenant, object),
+/// as the last check of their shards found them: their policy views come
+/// in two (decision RL28), and a statement naming one of these reads the
+/// all-columns view.
+type Hidden = std::sync::Mutex<HashMap<(u64, u64), Arc<Vec<String>>>>;
 
-fn viewless() -> &'static Viewless {
-    static V: std::sync::OnceLock<Viewless> = std::sync::OnceLock::new();
-    V.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+fn hidden() -> &'static Hidden {
+    static V: std::sync::OnceLock<Hidden> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// Records whether `object` of `tenant` has invisible columns.
-pub fn viewless_set(tenant: u64, object: u64, on: bool) {
-    let mut v = viewless()
+/// Records table `object`'s invisible columns (none: forgets it).
+pub fn hidden_set(tenant: u64, object: u64, columns: Vec<String>) {
+    let mut v = hidden()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if on {
-        v.insert((tenant, object));
-    } else {
+    if columns.is_empty() {
         v.remove(&(tenant, object));
+    } else {
+        v.insert((tenant, object), Arc::new(columns));
     }
 }
 
-/// Whether table `object` of `tenant` has no policy view (see
-/// [`viewless_set`]).
-pub fn is_viewless(tenant: u64, object: u64) -> bool {
-    viewless()
+/// Table `object`'s invisible columns, if it has any (see
+/// [`hidden_set`]).
+pub fn hidden_of(tenant: u64, object: u64) -> Option<Arc<Vec<String>>> {
+    hidden()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(&(tenant, object))
+        .get(&(tenant, object))
+        .cloned()
 }
 
 /// `rls.backend_enforcement` at database `db`: `views`, `triggers` or
@@ -1338,19 +1341,26 @@ pub fn view_swap(
         ..Default::default()
     };
     for t in rls.tables.values() {
-        if !t.checks_deployed
-            || !views_on(svc, cat, t.object)
-            || is_viewless(ts.tenant.0, t.object.0)
-        {
+        if !t.checks_deployed || !views_on(svc, cat, t.object) {
             continue;
         }
         let Some(o) = cat.objects.get(t.object) else {
             continue;
         };
-        v.tables.entry(o.db_id.0).or_default().insert(
-            o.name.to_lowercase(),
-            sprig_sql::rls::views::view_name(&o.name, t.object.0),
-        );
+        let view = sprig_sql::rls::views::view_name(&o.name, t.object.0);
+        if let Some(cols) = hidden_of(ts.tenant.0, t.object.0) {
+            v.hidden.insert(
+                view.clone(),
+                (
+                    sprig_sql::rls::views::hidden_view_name(&o.name, t.object.0),
+                    cols.to_vec(),
+                ),
+            );
+        }
+        v.tables
+            .entry(o.db_id.0)
+            .or_default()
+            .insert(o.name.to_lowercase(), view);
     }
     if v.tables.is_empty() {
         return None;
@@ -1425,7 +1435,7 @@ pub async fn narrow_backend(
         let rows: Vec<(String, String)> = conn
             .exec(
                 "SELECT TABLE_NAME, DEFINER FROM information_schema.VIEWS \
-                 WHERE TABLE_SCHEMA LIKE ? AND TABLE_NAME LIKE '\\_\\_sprig\\_rls\\_%'",
+                 WHERE TABLE_SCHEMA LIKE ? AND TABLE_NAME LIKE '\\_\\_sprig\\_rls%'",
                 (like.as_str(),),
             )
             .await

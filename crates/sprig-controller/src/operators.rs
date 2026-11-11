@@ -1062,8 +1062,22 @@ impl Operators {
     /// # Errors
     /// 39312 for anything wrong; 39311 when a code is needed; 39301
     /// without the sealing key for an enrolment.
-    #[allow(clippy::too_many_lines)] // one check after another
     pub async fn login(&self, req: LoginRequest) -> Result<LoginResponse> {
+        self.login_from(req, None).await
+    }
+
+    /// `Login` from the client address `addr` (the TCP peer, or the
+    /// caller's address a gateway relayed under its service identity,
+    /// ST47), which the audit events record.
+    ///
+    /// # Errors
+    /// As [`Self::login`].
+    #[allow(clippy::too_many_lines)] // one check after another
+    pub async fn login_from(
+        &self,
+        req: LoginRequest,
+        addr: Option<&str>,
+    ) -> Result<LoginResponse> {
         let now = self.now_ms();
         let client = req.client.clone().unwrap_or_default();
         let found = self.get(&req.name).await?;
@@ -1072,7 +1086,8 @@ impl Operators {
             self.event(
                 "operator.login_failed",
                 &format!("op:{}", req.name),
-                serde_json::json!({ "operator": req.name, "why": "unknown", "client": client }),
+                serde_json::json!({ "operator": req.name, "why": "unknown", "client": client,
+                    "client_addr": addr }),
             );
             return Err(login_failed());
         };
@@ -1088,12 +1103,13 @@ impl Operators {
         };
         if let Some(why) = why {
             if why == "password" {
-                self.count_failure(&mut rec, rev, now).await?;
+                self.count_failure(&mut rec, rev, now, addr).await?;
             }
             self.event(
                 "operator.login_failed",
                 &format!("op:{}", rec.name),
-                serde_json::json!({ "operator": rec.name, "why": why, "client": client }),
+                serde_json::json!({ "operator": rec.name, "why": why, "client": client,
+                    "client_addr": addr }),
             );
             return Err(login_failed());
         }
@@ -1108,11 +1124,12 @@ impl Operators {
                 )?;
                 let step = mfa::check(&seed, code, self.clock.wall(), Some(t.last_step));
                 let Some(step) = step else {
-                    self.count_failure(&mut rec, rev, now).await?;
+                    self.count_failure(&mut rec, rev, now, addr).await?;
                     self.event(
                         "operator.login_failed",
                         &format!("op:{}", rec.name),
-                        serde_json::json!({ "operator": rec.name, "why": "code", "client": client }),
+                        serde_json::json!({ "operator": rec.name, "why": "code", "client": client,
+                            "client_addr": addr }),
                     );
                     return Err(login_failed());
                 };
@@ -1128,12 +1145,12 @@ impl Operators {
             {
                 let h = hex(&mfa::recovery_hash(code));
                 let Some(i) = rec.recovery.iter().position(|r| *r == h) else {
-                    self.count_failure(&mut rec, rev, now).await?;
+                    self.count_failure(&mut rec, rev, now, addr).await?;
                     self.event(
                         "operator.login_failed",
                         &format!("op:{}", rec.name),
                         serde_json::json!({ "operator": rec.name, "why": "recovery_code",
-                            "client": client }),
+                            "client": client, "client_addr": addr }),
                     );
                     return Err(login_failed());
                 };
@@ -1169,7 +1186,8 @@ impl Operators {
                 recovery_codes: Vec::new(),
             });
         }
-        self.finish_login(rec, rev, amr, &client, Vec::new()).await
+        self.finish_login(rec, rev, amr, &client, Vec::new(), addr)
+            .await
     }
 
     async fn count_failure(
@@ -1177,6 +1195,7 @@ impl Operators {
         rec: &mut OperatorRecord,
         rev: sprig_meta::Revision,
         now: u64,
+        addr: Option<&str>,
     ) -> Result<()> {
         let limit = self.setting(&LOCKOUT_FAILURES);
         rec.failed_logins += 1;
@@ -1186,7 +1205,8 @@ impl Operators {
             self.event(
                 "operator.locked",
                 &format!("op:{}", rec.name),
-                serde_json::json!({ "operator": rec.name, "until_ms": rec.locked_until_ms }),
+                serde_json::json!({ "operator": rec.name, "until_ms": rec.locked_until_ms,
+                    "client_addr": addr }),
             );
         }
         // A lost race only loses one count.
@@ -1201,6 +1221,7 @@ impl Operators {
         amr: Vec<String>,
         client: &str,
         recovery_codes: Vec<String>,
+        addr: Option<&str>,
     ) -> Result<LoginResponse> {
         let now = self.now_ms();
         let t = op::new_token(false)?;
@@ -1239,7 +1260,7 @@ impl Operators {
             "operator.login",
             &format!("op:{}", rec.name),
             serde_json::json!({ "operator": rec.name, "amr": amr, "key_id": tok.key_id,
-                "client": client, "expires_ms": expires }),
+                "client": client, "client_addr": addr, "expires_ms": expires }),
         );
         if rec.totp.is_some() || !self.setting(&MFA_REQUIRED) {
             self.switch(&rec.name).await?;
@@ -1259,6 +1280,18 @@ impl Operators {
     /// # Errors
     /// 39312 for a wrong ticket or code.
     pub async fn enrol(&self, req: EnrolRequest) -> Result<LoginResponse> {
+        self.enrol_from(req, None).await
+    }
+
+    /// `Enrol` from the client address `addr` (as [`Self::login_from`]).
+    ///
+    /// # Errors
+    /// As [`Self::enrol`].
+    pub async fn enrol_from(
+        &self,
+        req: EnrolRequest,
+        addr: Option<&str>,
+    ) -> Result<LoginResponse> {
         let now = self.now_ms();
         let Some((mut rec, rev)) = self.get(&req.name).await? else {
             return Err(login_failed());
@@ -1283,7 +1316,8 @@ impl Operators {
             self.event(
                 "operator.login_failed",
                 &format!("op:{}", rec.name),
-                serde_json::json!({ "operator": rec.name, "why": "enrolment_code" }),
+                serde_json::json!({ "operator": rec.name, "why": "enrolment_code",
+                    "client_addr": addr }),
             );
             return Err(login_failed());
         };
@@ -1301,8 +1335,15 @@ impl Operators {
             serde_json::json!({ "operator": rec.name, "factor": "totp" }),
         );
         let client = req.client.unwrap_or_default();
-        self.finish_login(rec, rev, vec!["pwd".into(), "otp".into()], &client, codes)
-            .await
+        self.finish_login(
+            rec,
+            rev,
+            vec!["pwd".into(), "otp".into()],
+            &client,
+            codes,
+            addr,
+        )
+        .await
     }
 
     /// `Logout`: revokes the session token used.

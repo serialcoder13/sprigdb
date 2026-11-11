@@ -65,6 +65,32 @@ fn galera_11_8_node_is_usable() {
     assert_eq!(g.osu_method, "TOI");
     assert!(g.conf_id >= 1);
     assert!(!f.is_replica());
+    // The fixture predates the state UUID: unknown, not lost.
+    assert_eq!(g.state_uuid, None);
+    assert!(!g.lost_identity());
+}
+
+#[test]
+fn galera_state_uuid_is_read() {
+    let mut r = raw("11.8-galera");
+    r.status.insert(
+        "wsrep_cluster_state_uuid".into(),
+        "00000000-0000-0000-0000-000000000000".into(),
+    );
+    let g = NodeFacts::parse(&r).galera.expect("wsrep on");
+    assert!(g.lost_identity());
+    assert!(g.usable(), "it still serves");
+
+    r.status.insert(
+        "wsrep_cluster_state_uuid".into(),
+        "f01a6c83-8353-410e-bd55-31ce16ff1426".into(),
+    );
+    let g = NodeFacts::parse(&r).galera.expect("wsrep on");
+    assert_eq!(
+        g.state_uuid.as_deref(),
+        Some("f01a6c83-8353-410e-bd55-31ce16ff1426")
+    );
+    assert!(!g.lost_identity());
 }
 
 #[test]

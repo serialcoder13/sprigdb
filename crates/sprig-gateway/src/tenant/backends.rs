@@ -126,6 +126,33 @@ pub struct PerUser {
 }
 
 impl PerUser {
+    /// The `[per_user]` table; relative paths (the secret's `file:`
+    /// reference, `ca_file`) resolve against `base`.
+    ///
+    /// # Errors
+    /// 39998 for an unknown field, a bad `tls`, or a secret that can't be
+    /// resolved.
+    pub fn from_toml(v: &toml::Value, base: &Path) -> Result<Self> {
+        let p: PerUserSpec = v
+            .clone()
+            .try_into()
+            .map_err(|e| invalid(format!("backends file, [per_user]: {e}")))?;
+        let mut r: SecretRef = p.secret.parse()?;
+        if let SecretSource::File(f) = &r.source
+            && f.is_relative()
+        {
+            r.source = SecretSource::File(base.join(f));
+        }
+        let c = r.resolve("sprig_backend_secret")?;
+        Ok(Self {
+            key: BackendKey::new(c.password().as_bytes())?,
+            tls: p.tls,
+            ca_file: p
+                .ca_file
+                .map(|f| if f.is_relative() { base.join(f) } else { f }),
+        })
+    }
+
     /// The target of `user` of `tenant` on `cluster`.
     #[must_use]
     pub fn target(&self, cluster: ClusterId, tenant: TenantId, user: UserId) -> BackendTarget {
@@ -210,26 +237,7 @@ impl TenantBackends {
         }
         let per_user = match doc.get("per_user") {
             None => None,
-            Some(v) => {
-                let p: PerUserSpec = v
-                    .clone()
-                    .try_into()
-                    .map_err(|e| invalid(format!("backends file, [per_user]: {e}")))?;
-                let mut r: SecretRef = p.secret.parse()?;
-                if let SecretSource::File(f) = &r.source
-                    && f.is_relative()
-                {
-                    r.source = SecretSource::File(base.join(f));
-                }
-                let c = r.resolve("sprig_backend_secret")?;
-                Some(PerUser {
-                    key: BackendKey::new(c.password().as_bytes())?,
-                    tls: p.tls,
-                    ca_file: p
-                        .ca_file
-                        .map(|f| if f.is_relative() { base.join(f) } else { f }),
-                })
-            }
+            Some(v) => Some(PerUser::from_toml(v, base)?),
         };
         Ok(Self {
             default,
@@ -311,3 +319,6 @@ impl BackendResolver for TenantBackends {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -638,6 +638,14 @@ impl GatewayLocator {
         self.backends.pools().retire_account(account);
     }
 
+    /// Closes the pooled backend connections of every account of
+    /// `tenant` (`t<tenant>_...`; `t3_` never matches `t30_`): the tenant
+    /// was deleted (decision bugfix-29).
+    pub fn retire_tenant(&self, tenant: TenantId) {
+        let prefix = format!("t{tenant}_");
+        self.backends.pools().retire_where(|a| a.starts_with(&prefix));
+    }
+
     /// Closes every pool (shutdown).
     pub async fn close(&self) {
         let mut pools: Vec<Pool> = self

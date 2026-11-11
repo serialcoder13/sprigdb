@@ -91,7 +91,8 @@ pub struct NodeAssessment {
     pub lag_ms: Option<u64>,
     /// Consecutive failed probes.
     pub failures: u32,
-    /// Why, when not `ok`.
+    /// Why, when not `ok`; on an `ok` Galera node, [`LOST_IDENTITY`]
+    /// when its cluster lost its state UUID.
     pub reason: Option<String>,
 }
 
@@ -193,6 +194,12 @@ fn role(facts: &NodeFacts) -> ObservedRole {
     }
 }
 
+/// The reason a Galera node whose cluster state UUID is all zeros carries
+/// (decision HD1).
+pub const LOST_IDENTITY: &str = "Galera cluster has lost its state UUID \
+     (wsrep_cluster_state_uuid is all zeros): a node that leaves can't rejoin; \
+     see RUNBOOK.md, \"Galera: a node that can't rejoin\"";
+
 /// What is wrong with a Galera node, if anything.
 fn galera_problem(g: &crate::probe::GaleraStatus) -> Option<(NodeState, String)> {
     if !g.ready || g.cluster_status != "Primary" {
@@ -254,6 +261,10 @@ pub fn assess_node(
         (Some(g), _) => {
             if let Some((state, why)) = galera_problem(g) {
                 not_ok(&mut a, state, why);
+            } else if g.lost_identity() {
+                // Still a writer (the node is `ok`), but the cluster is
+                // degraded: see `assess_cluster`.
+                a.reason = Some(LOST_IDENTITY.into());
             }
         }
         (None, ObservedRole::Replica) => {
@@ -312,7 +323,14 @@ pub fn assess_cluster(
     if probes.iter().all(|p| p.result.is_err()) {
         return (ClusterHealth::Unknown, Vec::new());
     }
-    let all_ok = nodes.iter().all(|n| n.state == NodeState::Ok);
+    // A Galera cluster that lost its state UUID still writes, but is
+    // degraded: no node can join it until it is bootstrapped again (HD1).
+    let lost_identity = probes.iter().any(|p| {
+        p.facts()
+            .and_then(|f| f.galera.as_ref())
+            .is_some_and(crate::probe::GaleraStatus::lost_identity)
+    });
+    let all_ok = !lost_identity && nodes.iter().all(|n| n.state == NodeState::Ok);
     let unanswered = probes.iter().any(|p| p.result.is_err());
     // Galera: every usable node can write. Otherwise: writable non-replicas.
     let writer_role = if topology == TopologyKind::Galera {

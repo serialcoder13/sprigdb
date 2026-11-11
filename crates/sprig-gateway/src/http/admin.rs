@@ -45,6 +45,65 @@ pub const ADMIN_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct ControllerRecord {
     /// `host:port` of the controller's Admin API.
     pub admin_addr: String,
+    /// The Admin API serves HTTPS (chapter 37, "Admin API over TLS").
+    #[serde(default)]
+    pub admin_tls: bool,
+}
+
+/// The TLS configuration every [`AdminApi`] of this process uses for a
+/// controller whose Admin API serves HTTPS: `[gateway] controller_ca_file`
+/// (else `[tls] ca`), with `[tls] cert` and `key` as the client
+/// certificate. Set once at start ([`set_controller_tls`]).
+static CONTROLLER_TLS: std::sync::OnceLock<Arc<sprig_common::https::ClientConfig>> =
+    std::sync::OnceLock::new();
+
+/// Sets the process's controller TLS configuration (see
+/// [`CONTROLLER_TLS`]); a no-op without a CA file.
+///
+/// # Errors
+/// 39998 if the files can't be read or parsed.
+pub fn set_controller_tls(
+    ca: Option<&std::path::Path>,
+    client: Option<(&std::path::Path, &std::path::Path)>,
+) -> Result<()> {
+    if let Some(ca) = ca {
+        let c = sprig_common::https::client_config(ca, client)?;
+        let _ = CONTROLLER_TLS.set(c);
+    }
+    Ok(())
+}
+
+/// The request a relayed admin call becomes: only the caller's
+/// `authorization` is carried over (whatever else the client sent,
+/// including its own `x-sprig-client-addr`, stays behind). With the
+/// client's address and this gateway's service secret, both go along so
+/// the controller can record the person's address (ST47).
+///
+/// # Errors
+/// Internal for a URI that doesn't parse.
+pub fn relay_request(
+    url: &str,
+    method: &Method,
+    authorization: Option<&str>,
+    client: Option<std::net::IpAddr>,
+    relay_secret: Option<&str>,
+    body: Bytes,
+) -> Result<Request<Full<Bytes>>> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(url)
+        .header("content-type", "application/json")
+        .header("x-sprig-forwarded", "1");
+    if let Some(a) = authorization {
+        b = b.header("authorization", a);
+    }
+    if let (Some(ip), Some(secret)) = (client, relay_secret) {
+        b = b
+            .header(sprig_common::https::CLIENT_ADDR_HEADER, ip.to_string())
+            .header(sprig_common::https::RELAY_AUTH_HEADER, secret);
+    }
+    b.body(Full::new(body))
+        .map_err(|e| SprigError::internal("admin request").with_source(e))
 }
 
 impl Versioned for ControllerRecord {
@@ -150,8 +209,9 @@ impl AdminApi {
             .await
     }
 
-    /// The Admin address of the controller to ask.
-    async fn controller(&self) -> Result<String> {
+    /// The Admin address of the controller to ask, and whether it serves
+    /// HTTPS.
+    async fn controller(&self) -> Result<(String, bool)> {
         let store = self.store.as_ref();
         let leader_key = store.tier().key("leader")?;
         if let Some(kv) = store.get(&leader_key, Consistency::Linearizable).await?
@@ -161,16 +221,15 @@ impl AdminApi {
                 .tier()
                 .key(&format!("controllers/{}", l.body.holder))?;
             if let Some(c) = store.get(&key, Consistency::Linearizable).await? {
-                return Ok(Record::<ControllerRecord>::decode(&c.value)?
-                    .body
-                    .admin_addr);
+                let r = Record::<ControllerRecord>::decode(&c.value)?.body;
+                return Ok((r.admin_addr, r.admin_tls));
             }
         }
         let prefix = store.tier().key("controllers/")?;
         let page = store.list(&prefix, ListOpts::default()).await?;
         for kv in &page.kvs {
             if let Ok(r) = Record::<ControllerRecord>::decode(&kv.value) {
-                return Ok(r.body.admin_addr);
+                return Ok((r.body.admin_addr, r.body.admin_tls));
             }
         }
         Err(unavailable(
@@ -190,22 +249,54 @@ impl AdminApi {
         authorization: Option<&str>,
         body: Bytes,
     ) -> Result<Reply> {
-        let addr = self.controller().await?;
-        let mut b = Request::builder()
-            .method(method)
-            .uri(format!("http://{addr}{path_and_query}"))
-            .header("content-type", "application/json")
-            .header("x-sprig-forwarded", "1");
-        if let Some(a) = authorization {
-            b = b.header("authorization", a);
-        }
-        let req = b
-            .body(Full::new(body))
-            .map_err(|e| SprigError::internal("admin request").with_source(e))?;
-        let resp = tokio::time::timeout(ADMIN_TIMEOUT, self.client.request(req))
+        self.forward_from(method, path_and_query, authorization, body, None)
             .await
-            .map_err(|_| unavailable(format!("the controller at {addr} didn't answer in time")))?
-            .map_err(|e| unavailable(format!("the controller at {addr} is unreachable: {e}")))?;
+    }
+
+    /// As [`Self::forward`], for a call relayed for a client at `client`:
+    /// with `[gateway] controller_token_file` configured, the controller
+    /// records `client` as the caller's address (ST47).
+    ///
+    /// # Errors
+    /// As [`Self::forward`].
+    pub async fn forward_from(
+        &self,
+        method: &Method,
+        path_and_query: &str,
+        authorization: Option<&str>,
+        body: Bytes,
+        client: Option<std::net::IpAddr>,
+    ) -> Result<Reply> {
+        let (addr, https) = self.controller().await?;
+        let scheme = if https { "https" } else { "http" };
+        let req = relay_request(
+            &format!("{scheme}://{addr}{path_and_query}"),
+            method,
+            authorization,
+            client,
+            self.internal_token.as_deref(),
+            body,
+        )?;
+        let sent = async {
+            if https {
+                let tls = CONTROLLER_TLS.get().ok_or_else(|| {
+                    unavailable(format!(
+                        "the controller at {addr} serves HTTPS: set [gateway] controller_ca_file \
+                         (or [tls] ca) to the CA that signed its certificate"
+                    ))
+                })?;
+                sprig_common::https::send(tls, req).await.map_err(|e| {
+                    unavailable(format!("the controller at {addr} is unreachable: {e}"))
+                })
+            } else {
+                self.client.request(req).await.map_err(|e| {
+                    unavailable(format!("the controller at {addr} is unreachable: {e}"))
+                })
+            }
+        };
+        let resp = tokio::time::timeout(ADMIN_TIMEOUT, sent)
+            .await
+            .map_err(|_| unavailable(format!("the controller at {addr} didn't answer in time")))??;
         let status = resp.status().as_u16();
         let body = resp
             .into_body()

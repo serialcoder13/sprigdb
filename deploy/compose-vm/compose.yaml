@@ -51,6 +51,11 @@ x-sprigdb: &sprigdb
     SPRIGDB_META_DEPLOYMENT_ID: ${SPRIG_DEPLOYMENT_ID:-sprigdb}
     SPRIGDB_TELEMETRY_LOG_FORMAT: json
     SPRIGDB_TELEMETRY_BOOTSTRAP_LOG_LEVEL: ${SPRIG_LOG_LEVEL:-info}
+    # Full-text index copies (chapter 39) and the audit spool (chapter 47)
+    # live on each role's data volume, not in the container's /tmp.
+    SPRIG_SEARCH_DIR: /var/lib/sprigdb/search
+    SPRIGDB_AUDIT_SPOOL_DIR: /var/lib/sprigdb/audit-spool
+    SPRIGDB_AUDIT_SINK_DIR: /var/lib/sprigdb/audit
   # Secrets are read as this user: sprig-vm.sh init gives it the files.
   user: "${SPRIG_UID:-10001}:${SPRIG_GID:-10001}"
   depends_on:
@@ -146,6 +151,7 @@ services:
       <<: *sprigdb-env
       SPRIGDB_NODE_ID: ctl-1
     volumes:
+      - controller-data:/var/lib/sprigdb
       - ./config/controller.toml:/etc/sprigdb/controller.toml:ro
       - ./secrets/tls:/run/sprig/tls:ro
       - ./secrets/sprig:/run/sprig/sprig:ro
@@ -170,7 +176,7 @@ services:
       - ./config/controller.toml:/etc/sprigdb/controller.toml:ro
       - ./secrets/tls:/run/sprig/tls:ro
       - ./secrets/sprig:/run/sprig/sprig:ro
-      - worker-spool:/var/lib/sprigdb
+      - worker-data:/var/lib/sprigdb
     healthcheck: *ready
     depends_on:
       controller: { condition: service_healthy }
@@ -185,6 +191,7 @@ services:
       SPRIGDB_NODE_ID: gw-1
       SPRIGDB_GATEWAY_ADVERTISE_ADDR: ${SPRIG_PUBLIC_HOST:-127.0.0.1}
     volumes:
+      - gateway-data:/var/lib/sprigdb
       - ./config/gateway.toml:/etc/sprigdb/gateway.toml:ro
       - ./secrets/tls:/run/sprig/tls:ro
       - ./secrets/sprig:/run/sprig/sprig:ro
@@ -226,5 +233,7 @@ networks:
 volumes:
   etcd-data: {}
   mariadb-1-data: {}
-  worker-spool: {}
+  controller-data: {}
+  worker-data: {}
+  gateway-data: {}
   prometheus-data: {}

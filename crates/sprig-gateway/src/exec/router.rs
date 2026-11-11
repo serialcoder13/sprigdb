@@ -2315,6 +2315,35 @@ pub(super) enum ExecRoute {
     Answered,
 }
 
+/// Chapter 29 (bugfix-25): a digest of where `cat`'s tenant's shards are
+/// (every shard schema's range epoch, every group's map version, the
+/// clusters), which every split, merge, move, re-key and regroup changes,
+/// and the clusters holding them. `None` for a tenant without sharded or
+/// reference tables.
+pub(crate) fn placement_digest(
+    svc: &TenantServices,
+    cat: &sprig_catalog::TenantCatalog,
+) -> Option<(u64, Vec<ClusterId>)> {
+    use std::hash::{Hash, Hasher};
+    let rs = services(svc);
+    let cache = rs.layouts.cache(&svc.locator.home_of(cat.tenant)).ok()?;
+    let layout = rs.layouts.get(cat, &cache)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut epochs: Vec<(&String, &u64)> = layout.epochs.iter().collect();
+    epochs.sort();
+    epochs.hash(&mut h);
+    let mut versions: Vec<(&u32, &u64)> = layout.versions.iter().collect();
+    versions.sort();
+    versions.hash(&mut h);
+    layout.clusters.hash(&mut h);
+    let clusters = layout
+        .clusters
+        .iter()
+        .filter_map(|c| ClusterId::new(c).ok())
+        .collect();
+    Some((h.finish(), clusters))
+}
+
 /// Chapter 21's view of a tenant's shards (`tenant::ddl::ShardedDdl`):
 /// for a template schema and a table, the shard schemas holding it and
 /// their clusters (a sharded table: its group's shards; a reference table:

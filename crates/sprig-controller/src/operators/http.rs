@@ -22,7 +22,7 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 use sprig_common::Result;
 
-use super::guard::AUTHN_HEADER;
+use super::guard::{AUTHN_HEADER, CLIENT_HEADER};
 use super::{Operators, Principal};
 use crate::admin::http::{query, respond, unauthenticated};
 use crate::admin::invalid;
@@ -169,13 +169,23 @@ async fn token_method(
     respond(r.await)
 }
 
-async fn login(State(ops): State<Arc<Operators>>, b: Bytes) -> Response {
-    let r = async { ops.login(body(&b)?).await };
+/// The client's address the guard established (ST47).
+fn client_addr(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(CLIENT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+}
+
+async fn login(State(ops): State<Arc<Operators>>, headers: HeaderMap, b: Bytes) -> Response {
+    let addr = client_addr(&headers);
+    let r = async { ops.login_from(body(&b)?, addr.as_deref()).await };
     respond(r.await)
 }
 
-async fn enrol(State(ops): State<Arc<Operators>>, b: Bytes) -> Response {
-    let r = async { ops.enrol(body(&b)?).await };
+async fn enrol(State(ops): State<Arc<Operators>>, headers: HeaderMap, b: Bytes) -> Response {
+    let addr = client_addr(&headers);
+    let r = async { ops.enrol_from(body(&b)?, addr.as_deref()).await };
     respond(r.await)
 }
 

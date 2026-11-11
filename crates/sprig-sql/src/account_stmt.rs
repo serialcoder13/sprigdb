@@ -260,7 +260,9 @@ pub fn parse(sql: &[u8], opts: &LexOptions) -> Option<R<AccountStmt>> {
         || p.word("FLUSH") && p.is_word(1, "PRIVILEGES")
         || p.word("RENAME") && p.is_word(1, "USER")
         || p.word("SET")
-            && (p.is_word(1, "ROLE") || p.is_word(1, "DEFAULT") && p.is_word(2, "ROLE"));
+            && (p.is_word(1, "ROLE")
+                || p.is_word(1, "DEFAULT") && p.is_word(2, "ROLE")
+                || p.is_word(1, "PASSWORD") && p.is_word(2, "FOR"));
     if !ours {
         return None;
     }
@@ -296,6 +298,34 @@ fn stmt(p: &mut P<'_>) -> R<AccountStmt> {
             if_not_exists,
             users,
             options,
+        });
+    }
+    if p.eat_words(&["SET", "PASSWORD", "FOR"]) {
+        // `SET PASSWORD FOR acct = 'pw'`: `ALTER USER acct IDENTIFIED BY
+        // 'pw'` under MySQL's own privilege rule for it (bugfix-26).
+        let user = p.user_spec()?;
+        if !p.eat_punct("=") {
+            return Err(p.err());
+        }
+        if p.word("PASSWORD") || p.word("OLD_PASSWORD") {
+            return Err(unsupported("SET PASSWORD ... = PASSWORD('...')"));
+        }
+        let password = p.string()?;
+        p.end()?;
+        return Ok(AccountStmt::AlterUser {
+            if_exists: false,
+            users: vec![UserItem {
+                user,
+                identified: Some(Identified {
+                    password: Zeroizing::new(password),
+                    plugin: None,
+                    retain_current: false,
+                }),
+            }],
+            options: UserOptions {
+                set_password: true,
+                ..UserOptions::default()
+            },
         });
     }
     if p.eat_words(&["ALTER", "USER"]) {
@@ -906,6 +936,37 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn set_password_for_another_account() {
+        match parse_ok("SET PASSWORD FOR 'bob'@'%' = 'n3w'") {
+            AccountStmt::AlterUser {
+                if_exists: false,
+                users,
+                options,
+            } => {
+                assert!(options.set_password);
+                assert_eq!(users.len(), 1);
+                assert_eq!(users[0].user, UserSpec::Named(acc("bob", "%")));
+                let pw = users[0].identified.as_ref().map(|i| i.password.to_vec());
+                assert_eq!(pw.as_deref(), Some(&b"n3w"[..]));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_ok("set password for carol = 'x'") {
+            AccountStmt::AlterUser { users, options, .. } => {
+                assert!(options.set_password);
+                assert_eq!(users[0].user, UserSpec::Named(acc("carol", "%")));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Not this parser's: the session's own password, `SET PASSWORD = ...`.
+        assert!(parse(b"SET PASSWORD = 'x'", &LexOptions::mysql84()).is_none());
+        assert!(
+            parse(b"SET PASSWORD FOR bob = PASSWORD('x')", &LexOptions::mysql84())
+                .is_some_and(|r| r.is_err())
+        );
     }
 
     #[test]

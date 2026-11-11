@@ -27,7 +27,7 @@ pub use grants::{Grant, GrantTarget, PrivilegeInfo};
 pub use parse::{
     BinlogFacts, BinlogFormat, GaleraLocalState, GaleraStatus, HeartbeatReading, NodeFacts,
     RawCapture, ReadOnly, ReplicaChannel, RoutineLimits, RowImage, RowMetadata, SemiSyncFacts,
-    ServerFacts, ServerVersion, TableCacheInfo, ThreadState, WaitPoint,
+    ServerFacts, ServerVersion, TableCacheInfo, ThreadState, WaitPoint, zero_uuid,
 };
 
 use crate::record::TopologyKind;
@@ -89,6 +89,7 @@ pub const STATUS: &[&str] = &[
     "wsrep_local_state",
     "wsrep_cluster_size",
     "wsrep_cluster_conf_id",
+    "wsrep_cluster_state_uuid",
     "wsrep_flow_control_paused",
     "opened_tables",
     "open_tables",

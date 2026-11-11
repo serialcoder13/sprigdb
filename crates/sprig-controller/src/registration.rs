@@ -29,6 +29,10 @@ pub struct ControllerRecord {
     /// agents renew their permits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_addr: Option<String>,
+    /// The Admin API serves HTTPS (`[controller] admin_tls_cert`; chapter
+    /// 37, "Admin API over TLS"): gateways relay to it with `https://`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admin_tls: bool,
 }
 
 impl Versioned for ControllerRecord {
@@ -123,6 +127,7 @@ mod tests {
             admin_addr: "127.0.0.1:7480".into(),
             version: "t".into(),
             internal_addr: None,
+            admin_tls: false,
         };
         let task = tokio::spawn(keep(
             Arc::clone(&store),

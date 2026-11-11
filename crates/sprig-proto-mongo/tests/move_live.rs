@@ -19,7 +19,8 @@
     clippy::too_many_lines,
     clippy::doc_markdown,
     clippy::cast_possible_wrap,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::many_single_char_names
 )]
 
 use std::time::Duration;

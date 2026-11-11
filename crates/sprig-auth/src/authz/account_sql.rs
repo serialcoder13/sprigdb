@@ -461,6 +461,18 @@ impl AccountCtx<'_> {
         self.admin() || self.p().tenant.has(a)
     }
 
+    /// `SET PASSWORD FOR` another account: MySQL 8.4 and MariaDB 11.8
+    /// both ask for `UPDATE` on the `mysql` schema (`check_change_password`),
+    /// which a tenant-wide `UPDATE` (`GRANT UPDATE ON *.*`, `ALL`) gives
+    /// here; refused like theirs, 1044 on database `mysql` (bugfix-26).
+    fn require_set_password(&self) -> Result<()> {
+        if self.has_tenant(Action::Update) {
+            Ok(())
+        } else {
+            Err(db_denied(self.user_name, self.user_host, "mysql"))
+        }
+    }
+
     fn require_create_user(&self) -> Result<()> {
         if self.has_tenant(Action::CreateUser) {
             Ok(())
@@ -1352,9 +1364,22 @@ async fn alter_users(
                     && options.require.is_none()
                     && options.clauses == AccountClauses::default();
                 if !own_password_only {
-                    cx.require_create_user()?;
+                    if options.set_password {
+                        cx.require_set_password()?;
+                    } else {
+                        cx.require_create_user()?;
+                    }
                 }
                 targets.push((id, acc, u));
+            }
+            // MySQL and MariaDB: `SET PASSWORD FOR` an unknown account.
+            None if options.set_password => {
+                cx.require_set_password()?;
+                return Err(SprigError::standard(
+                    1133,
+                    *b"28000",
+                    "Can't find any matching row in the user table",
+                ));
             }
             None if if_exists => notes.push(Note {
                 level: "Note",

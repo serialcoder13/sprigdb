@@ -2092,7 +2092,7 @@ impl Engine {
             match self.meta(sql, ns).await? {
                 Some(m) => {
                     let gm = self.geo_sides(sql, ns, &m, &pred).await?;
-        let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
+                    let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
                     self.scan(
                         sql,
                         ns,

@@ -238,7 +238,7 @@ pub async fn ensure_table(
         .unwrap_or_else(PoisonError::into_inner)
         .insert(key);
     // R9 (r9fwd): the tenant's feed-driven forwarder reads this table.
-    crate::outbox_feed::subscribe(svc, tenant);
+    crate::outbox_feed::subscribe(svc, tenant).await;
     Ok(())
 }
 

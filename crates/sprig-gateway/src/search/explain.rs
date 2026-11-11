@@ -14,6 +14,7 @@
 //!   single-column formats (JSON, TREE) get one row {"sprig_search_scans": [...]}
 //! ```
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -102,9 +103,9 @@ pub fn extra_text(doc: &Value) -> String {
         g("copies")
     );
     if doc.get("hits").is_some() {
-        s.push_str(&format!(", {} hits in {} ms", g("hits"), g("search_ms")));
+        let _ = write!(s, ", {} hits in {} ms", g("hits"), g("search_ms"));
     }
-    s.push_str(&format!("; query {})", g("query")));
+    let _ = write!(s, "; query {})", g("query"));
     s
 }
 

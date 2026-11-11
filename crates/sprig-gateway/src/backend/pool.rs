@@ -513,13 +513,31 @@ impl BackendPools {
     /// privileges until its next `USE`): idle ones close now, leased ones
     /// on release.
     pub fn retire_account(&self, account: &str) {
+        self.retire_where(|a| a == account);
+    }
+
+    /// [`Self::retire_account`] for every account `which` names, and
+    /// the pools of those accounts forgotten once nothing is leased from
+    /// them: a deleted tenant's accounts (decision bugfix-29), whose idle
+    /// connections would otherwise stay open until
+    /// `backend.idle_timeout_seconds`.
+    pub fn retire_where(&self, which: impl Fn(&str) -> bool) {
         let mut closed = Vec::new();
         {
             let mut g = self.shared.lock();
             let inner = &mut *g;
-            inner.retired.insert(account.to_owned(), Instant::now());
+            let now = Instant::now();
+            let accounts: std::collections::BTreeSet<String> = inner
+                .pools
+                .keys()
+                .filter(|k| which(&k.account))
+                .map(|k| k.account.clone())
+                .collect();
+            for a in accounts {
+                inner.retired.insert(a, now);
+            }
             for (key, pool) in &mut inner.pools {
-                if key.account != account {
+                if !which(&key.account) {
                     continue;
                 }
                 let node = inner.nodes.entry(key.node_key()).or_default();
@@ -531,6 +549,9 @@ impl BackendPools {
                     }
                 }
             }
+            inner
+                .pools
+                .retain(|k, p| !which(&k.account) || p.leased > 0 || p.open > 0);
         }
         self.shared.freed.notify_waiters();
         close_all(closed);

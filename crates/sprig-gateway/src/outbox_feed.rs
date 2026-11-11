@@ -24,10 +24,14 @@
 //!
 //! [`subscribe`] registers the tenant's `queue_forwarder` feed
 //! subscription the first time this gateway opens a queue store or makes
-//! a cross-tenant outbox for the tenant; the controller's loop gives each
-//! subscribed tenant one forwarder job.
+//! a cross-tenant outbox for the tenant, with the tenant's binlog position
+//! then as its first checkpoint, and the caller waits for it; the
+//! controller's loop gives each tenant's cluster a forwarder job, which
+//! starts the tenant's task within 5 s at that checkpoint. So a new
+//! tenant's first publishes are forwarded from the feed, in commit order,
+//! not by the 2 s fallback (decision 88; r9fanin).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use sprig_common::ids::{DbId, TenantId};
@@ -47,32 +51,99 @@ pub const QO: &str = "__sprig_qo";
 /// The cross-tenant outbox.
 pub const XO: &str = crate::inherited::outbox::TABLE;
 
-fn subscribed() -> &'static Mutex<HashSet<u64>> {
-    static S: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashSet::new()))
+/// How long a caller waits for the subscription before it goes on (the
+/// polling fallback forwards whatever the feed misses).
+pub const SUBSCRIBE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+type Once = Arc<tokio::sync::OnceCell<bool>>;
+
+fn subscribed() -> &'static Mutex<HashMap<u64, Once>> {
+    static S: OnceLock<Mutex<HashMap<u64, Once>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Registers `tenant`'s forwarder subscription, once per process, in the
-/// background (see the module docs).
-pub fn subscribe(svc: &TenantServices, tenant: TenantId) {
-    if !subscribed()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(tenant.0)
-    {
+/// Registers `tenant`'s forwarder subscription, once per process, and
+/// waits for it (at most [`SUBSCRIBE_WAIT`]): the callers open a queue
+/// store or make a cross-tenant outbox before the tenant's first outbox
+/// row, so the subscription, with its start position, exists before that
+/// row commits (decision 88, r9fanin). Concurrent callers wait for the
+/// same registration. A failed one is tried again by the next caller.
+pub async fn subscribe(svc: &TenantServices, tenant: TenantId) {
+    let cell = Arc::clone(
+        subscribed()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(tenant.0)
+            .or_default(),
+    );
+    if cell.initialized() {
         return;
     }
     let locator = Arc::clone(&svc.locator);
     let dc = svc.dc.clone();
-    tokio::spawn(async move {
-        if let Err(e) = register(&locator, &dc, tenant).await {
-            tracing::warn!(%tenant, error = %e, "queue forwarder subscription not registered; the polling fallback forwards");
-            subscribed()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&tenant.0);
+    let run = cell.get_or_init(|| async move {
+        match register(&locator, &dc, tenant).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(%tenant, error = %e, "queue forwarder subscription not registered; the polling fallback forwards");
+                false
+            }
         }
     });
+    let ok = match tokio::time::timeout(SUBSCRIBE_WAIT, run).await {
+        Ok(ok) => *ok,
+        Err(_) => {
+            tracing::warn!(%tenant, "queue forwarder subscription still registering; the polling fallback forwards meanwhile");
+            return;
+        }
+    };
+    if !ok {
+        let mut m = subscribed().lock().unwrap_or_else(PoisonError::into_inner);
+        if m.get(&tenant.0).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+            m.remove(&tenant.0);
+        }
+    }
+}
+
+/// The tenant's feed position now, as a progress token: where its
+/// forwarder starts when the subscription is new.
+async fn start_token(
+    locator: &crate::tenant::locator::GatewayLocator,
+    store: &Arc<dyn sprig_meta::MetaStore>,
+    tenant: TenantId,
+) -> Result<sprig_feed::ResumeToken> {
+    use mysql_async::prelude::Queryable;
+    use sprig_feed::PlacementView;
+    let placement = sprig_feed::MetaPlacement::new(Arc::clone(store));
+    let (cluster, _) = placement.current(tenant).await?;
+    let segment = placement
+        .history(tenant)
+        .await?
+        .last()
+        .map_or(0, |h| h.map_version);
+    let pool = locator.ctl_pool(&cluster).await?;
+    let unavailable = |e: mysql_async::Error| {
+        SprigError::new(
+            SprigCode::BackendUnavailable,
+            format!("read @@gtid_binlog_pos of {cluster}: {e}"),
+        )
+    };
+    let mut c = pool.get_conn().await.map_err(unavailable)?;
+    let pos: Option<String> = c
+        .query_first("SELECT @@gtid_binlog_pos")
+        .await
+        .map_err(unavailable)?;
+    drop(c);
+    let pos: sprig_binlog::GtidPos = pos.unwrap_or_default().parse()?;
+    Ok(sprig_feed::ResumeToken {
+        tenant,
+        clamp: 0,
+        cluster,
+        segment,
+        pos,
+        until: None,
+        progress: true,
+    })
 }
 
 async fn register(
@@ -87,7 +158,13 @@ async fn register(
     } else {
         TierView::over(&dc, Tier::Dc(home))
     };
-    let subs = sprig_feed::subs::Subscriptions::new(store);
+    let subs = sprig_feed::subs::Subscriptions::new(Arc::clone(&store));
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()),
+    )
+    .unwrap_or(0);
     let sub = sprig_feed::subs::Subscription {
         tenant,
         name: SUB_NAME.into(),
@@ -95,14 +172,24 @@ async fn register(
         ordering: "merged".into(),
         owner_ref: None,
         state: "active".into(),
-        created_at_ms: u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis()),
-        )
-        .unwrap_or(0),
+        created_at_ms: now,
     };
-    match subs.register(&sub).await {
+    // Registered already (another gateway, an earlier process): its job
+    // reads from its own checkpoint.
+    if subs.get(tenant, SUB_NAME).await.is_ok() {
+        return Ok(());
+    }
+    // With the position now, so the job reads the first publishes from the
+    // feed in commit order, however late it starts; without it (the
+    // cluster unreadable), from the job's start, as before.
+    let r = match start_token(locator, &store, tenant).await {
+        Ok(tok) => subs.register_at(&sub, &tok, now).await,
+        Err(e) => {
+            tracing::debug!(%tenant, error = %e, "queue forwarder start position not read; the job starts at its own start");
+            subs.register(&sub).await
+        }
+    };
+    match r {
         Ok(()) => {
             tracing::info!(%tenant, "queue forwarder subscription registered");
             Ok(())

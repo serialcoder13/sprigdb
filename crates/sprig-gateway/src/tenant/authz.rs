@@ -90,6 +90,10 @@ use super::session::TenantSession;
 /// Serializes reconciles of one tenant on one cluster.
 type Gate = Arc<tokio::sync::Mutex<()>>;
 
+/// What a reconcile was checked at: catalog version, auth version, and
+/// the shard placement's digest (`exec::router::placement_digest`).
+type Checked = (u64, u64, u64);
+
 /// A compiled set and what it was compiled at: auth and catalog
 /// versions, active roles.
 type Compiled = (u64, u64, Vec<RoleId>, Arc<dyn SessionGrants>);
@@ -112,8 +116,11 @@ fn engine_for(svc: &TenantServices, cat: &TenantCatalog) -> Option<Arc<dyn Autho
 pub struct AuthzServices {
     per_user: ArcSwapOption<PerUser>,
     applied: Mutex<HashMap<(TenantId, ClusterId), u64>>,
-    /// The snapshot versions last compared, per tenant and cluster.
-    checked: Mutex<HashMap<(TenantId, ClusterId), (u64, u64)>>,
+    /// The snapshot versions and shard placement last compared, per
+    /// tenant and cluster, and when.
+    checked: Mutex<HashMap<(TenantId, ClusterId), (Checked, std::time::Instant)>>,
+    /// Per tenant: what its clusters were last reconciled at (bugfix-25).
+    placed: Mutex<HashMap<TenantId, Checked>>,
     gates: Mutex<HashMap<(TenantId, ClusterId), Gate>>,
     migrating: Mutex<HashSet<TenantId>>,
 }
@@ -135,6 +142,14 @@ impl AuthzServices {
     /// file).
     pub fn configure(&self, per_user: Option<PerUser>) {
         self.per_user.store(per_user.map(Arc::new));
+    }
+
+    /// Forgets what was reconciled for `tenant` (it was deleted).
+    pub fn forget(&self, tenant: TenantId) {
+        lock(&self.applied).retain(|(t, _), _| *t != tenant);
+        lock(&self.checked).retain(|(t, _), _| *t != tenant);
+        lock(&self.gates).retain(|(t, _), _| *t != tenant);
+        lock(&self.placed).remove(&tenant);
     }
 
     /// Whether sessions run as per-user backend accounts.
@@ -173,6 +188,16 @@ impl AuthzServices {
     /// `cat` says (see the module docs). A no-op without per-user
     /// accounts, or when nothing changed since the last reconcile.
     ///
+    /// Table, column and routine grants name every schema holding the
+    /// object on the cluster (bugfix-25), so the shard placement is part of
+    /// what is compared: when a split, merge, move, re-key or regroup
+    /// changes it (or the snapshot's catalog or auth version moves), the
+    /// next statement of any session of the tenant here reconciles this
+    /// cluster and every other cluster of the tenant this gateway
+    /// reconciled or the layout names. Every
+    /// `auth.reconcile_interval_seconds` a cluster is compared with
+    /// MariaDB's grants again even when nothing changed (the drift sweep).
+    ///
     /// # Errors
     /// The cluster's (no `sprig_ctl` pool, a failed statement).
     pub async fn ensure(
@@ -182,14 +207,68 @@ impl AuthzServices {
         cluster: &ClusterId,
     ) -> Result<()> {
         self.migrate_if_needed(svc, cat).await;
+        if self.per_user.load().is_none() {
+            return Ok(());
+        }
+        let placement = crate::exec::router::placement_digest(svc, cat);
+        let digest = placement.as_ref().map_or(0, |p| p.0);
+        let versions = (cat.version, cat.auth_version, digest);
+        let every = Duration::from_secs(svc.settings.get(
+            &sprig_auth::authz::settings::RECONCILE_INTERVAL_SECONDS,
+            &cat.setting_ctx(&svc.dc),
+            Some(&cat.settings),
+        ));
+        let key = (cat.tenant, cluster.clone());
+        let sweep = match lock(&self.checked).get(&key) {
+            Some((v, at)) if *v == versions => {
+                if at.elapsed() < every {
+                    return Ok(());
+                }
+                true
+            }
+            _ => false,
+        };
+        self.ensure_one(svc, cat, cluster, versions, sweep).await?;
+        // The placement, the grants or the catalog moved: the tenant's
+        // other clusters follow now, so a session already using one finds
+        // the new shards' grants there (and a REVOKE reaches them).
+        let moved = lock(&self.placed).insert(cat.tenant, versions) != Some(versions);
+        if moved {
+            let mut others: Vec<ClusterId> = lock(&self.applied)
+                .keys()
+                .filter(|(t, c)| *t == cat.tenant && c != cluster)
+                .map(|(_, c)| c.clone())
+                .collect();
+            for c in placement.map(|p| p.1).unwrap_or_default() {
+                if &c != cluster && !others.contains(&c) {
+                    others.push(c);
+                }
+            }
+            for c in others {
+                if let Err(e) = self.ensure_one(svc, cat, &c, versions, false).await {
+                    tracing::warn!(tenant = %cat.tenant, cluster = %c, error = %e, "backend grants after a placement change not reconciled yet");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One cluster of [`Self::ensure`]; `sweep` compares with MariaDB even
+    /// when the wanted grants didn't change.
+    #[allow(clippy::too_many_lines)] // derive, place, narrow, apply, definers
+    async fn ensure_one(
+        &self,
+        svc: &TenantServices,
+        cat: &TenantCatalog,
+        cluster: &ClusterId,
+        versions: Checked,
+        sweep: bool,
+    ) -> Result<()> {
         let Some(per_user) = self.per_user.load_full() else {
             return Ok(());
         };
         let key = (cat.tenant, cluster.clone());
-        let versions = (cat.version, cat.auth_version);
-        if lock(&self.checked).get(&key) == Some(&versions) {
-            return Ok(());
-        }
+        let now = std::time::Instant::now;
         let Some(auth) = TenantAuth::of(cat) else {
             return Ok(());
         };
@@ -199,6 +278,17 @@ impl AuthzServices {
             return Ok(());
         };
         let mut want = engine.backend_grants(cat, auth);
+        // bugfix-25: table, column and routine grants on every schema of
+        // this cluster that holds the object.
+        let names = backend::object_names(&want);
+        if !names.is_empty() {
+            match placement_on(svc, cat.tenant, cluster, &names).await {
+                Ok(here) => want = engine.backend_grants_on(cat, auth, &here),
+                Err(e) => {
+                    tracing::warn!(tenant = %cat.tenant, %cluster, error = %e, "where the tenant's tables are wasn't read; table grants name the default schemas");
+                }
+            }
+        }
         // Chapter 29 (RLS round 2, RL18): accounts bound by a table's
         // policies read it only through its policy view.
         if let Err(e) = super::rls::narrow_backend(svc, cat, cluster, &mut want).await {
@@ -209,15 +299,15 @@ impl AuthzServices {
             want.hash(&mut h);
             h.finish()
         };
-        if lock(&self.applied).get(&key) == Some(&hash) {
-            lock(&self.checked).insert(key, versions);
+        if !sweep && lock(&self.applied).get(&key) == Some(&hash) {
+            lock(&self.checked).insert(key, (versions, now()));
             return Ok(());
         }
         let gate = Arc::clone(lock(&self.gates).entry(key.clone()).or_default());
         let _g = gate.lock().await;
         let full = match lock(&self.applied).get(&key) {
-            Some(h) if *h == hash => {
-                lock(&self.checked).insert(key, versions);
+            Some(h) if *h == hash && !sweep => {
+                lock(&self.checked).insert(key, (versions, now()));
                 return Ok(());
             }
             Some(_) => false,
@@ -260,10 +350,73 @@ impl AuthzServices {
         if rep.statements > 0 {
             tracing::info!(tenant = %cat.tenant, %cluster, statements = rep.statements, created = rep.created, dropped = rep.dropped, changed = rep.changed.len(), "backend grants reconciled");
         }
+        if sweep && rep.statements > 0 {
+            metrics::counter!("sprig_auth_drift_corrections_total", "cluster" => cluster.to_string())
+                .increment(rep.statements as u64);
+        }
         lock(&self.applied).insert(key.clone(), hash);
-        lock(&self.checked).insert(key, versions);
+        lock(&self.checked).insert(key, (versions, now()));
         Ok(())
     }
+}
+
+/// Where `tenant`'s tables, views and routines named in `names` are on
+/// `cluster`, and its schemas there (bugfix-25), read as `sprig_ctl` from
+/// `information_schema`: what MariaDB's table, column and routine grants
+/// must name.
+///
+/// # Errors
+/// The cluster's.
+async fn placement_on(
+    svc: &TenantServices,
+    tenant: TenantId,
+    cluster: &ClusterId,
+    names: &std::collections::BTreeSet<String>,
+) -> Result<backend::Placement> {
+    use mysql_async::prelude::Queryable;
+    let pool = svc.locator.ctl_pool(cluster).await?;
+    let mut conn = pool.get_conn().await.map_err(|e| {
+        SprigError::new(
+            sprig_common::SprigCode::BackendUnavailable,
+            format!("sprig_ctl on {cluster}: {e}"),
+        )
+    })?;
+    let like = format!("t{tenant}\\_d%");
+    let marks = vec!["?"; names.len()].join(", ");
+    let mut params: Vec<mysql_async::Value> = vec![like.clone().into()];
+    params.extend(names.iter().map(|n| mysql_async::Value::from(n.as_str())));
+    params.push(like.clone().into());
+    params.extend(names.iter().map(|n| mysql_async::Value::from(n.as_str())));
+    params.push(like.into());
+    let rows: Vec<(String, String, String)> = conn
+        .exec(
+            format!(
+                "SELECT 'T', TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA LIKE ? AND TABLE_NAME IN ({marks}) \
+                 UNION ALL SELECT ROUTINE_TYPE, ROUTINE_SCHEMA, ROUTINE_NAME \
+                 FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA LIKE ? \
+                 AND ROUTINE_NAME IN ({marks}) \
+                 UNION ALL SELECT 'S', SCHEMA_NAME, '' FROM information_schema.SCHEMATA \
+                 WHERE SCHEMA_NAME LIKE ?"
+            ),
+            params,
+        )
+        .await
+        .map_err(|e| {
+            SprigError::new(
+                sprig_common::SprigCode::BackendUnavailable,
+                format!("{cluster}: {e}"),
+            )
+        })?;
+    let mut here = backend::Placement::default();
+    for (kind, schema, name) in rows {
+        match kind.as_str() {
+            "T" => here.add_relation(&schema, &name),
+            "S" => here.add_schema(&schema),
+            k => here.add_routine(&schema, &name, k),
+        }
+    }
+    Ok(here)
 }
 
 /// One session's authorization state.

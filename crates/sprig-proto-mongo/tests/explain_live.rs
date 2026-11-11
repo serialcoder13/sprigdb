@@ -20,7 +20,12 @@
 //!
 //! The database is dropped at the end.
 
-#![allow(clippy::unwrap_used, clippy::too_many_lines, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    missing_docs
+)]
 
 use mongodb::Client;
 use mongodb::bson::{Document, doc};
@@ -53,14 +58,18 @@ async fn explain_of_searches() {
     ])
     .await
     .unwrap();
-    db.run_command(doc! {"createIndexes": "p", "indexes": [{"key": {"name": "text"}, "name": "name_text"}]})
-        .await
-        .unwrap();
-    db.run_command(doc! {"createSearchIndexes": "p", "indexes": [{"name": "default", "definition": {
+    db.run_command(
+        doc! {"createIndexes": "p", "indexes": [{"key": {"name": "text"}, "name": "name_text"}]},
+    )
+    .await
+    .unwrap();
+    db.run_command(
+        doc! {"createSearchIndexes": "p", "indexes": [{"name": "default", "definition": {
         "mappings": {"dynamic": false, "fields": {"name": {"type": "string"},
-            "brand": [{"type": "token"}, {"type": "stringFacet"}]}}}}]})
-        .await
-        .unwrap();
+            "brand": [{"type": "token"}, {"type": "stringFacet"}]}}}}]},
+    )
+    .await
+    .unwrap();
 
     // find with $text, executionStats.
     let r = db

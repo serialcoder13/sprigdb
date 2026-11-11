@@ -12,6 +12,21 @@
 //! cargo test -p sprig-gateway --test inherit_live -- --nocapture --test-threads 1
 //! ```
 //!
+//! The declaring tenant needs short retries and the hook port allowed, or
+//! the dead-letter steps outlast their waits (with the defaults a trigger
+//! or sink record takes 10 attempts with backoff up to a minute):
+//!
+//! ```sh
+//! sprigctl settings set logic.trigger_max_attempts 3 --scope tenant:$SYSTEM ...
+//! sprigctl settings set logic.trigger_retry_initial_ms 100 --scope tenant:$SYSTEM ...
+//! sprigctl settings set sink.record_max_attempts 3 --scope tenant:$SYSTEM ...
+//! sprigctl settings set sink.retry_initial_ms 100 --scope tenant:$SYSTEM ...
+//! sprigctl settings set sink.destination_allowlist '["127.0.0.1:<SPRIG_TEST_INHERIT_HOOK_PORT>"]' --scope tenant:$SYSTEM ...
+//! ```
+//!
+//! With `SPRIG_TEST_INHERIT_LATE=x`, each test creates its own late member
+//! (`x`, `xa`, `xs`, `xq`, `xb1`, `xb2`, `xfi`), so use a new `x` per run.
+//!
 //! Every tenant has the user `app` (password `sprig-dev-app`). Kiran's
 //! case: the system tenant declares `security.user_events FOR EACH TENANT`
 //! and two triggers on it, `sync_users` (JavaScript) and `sync_users_appb`
@@ -2421,8 +2436,10 @@ async fn amqp_fan_in_consumer() {
         let got = read_fan_in(&mut consumer, 1, 30).await;
         assert_eq!(got, vec![(ms[0].clone(), format!("{}-own", ms[0]))]);
     }
-    // A member created now: its first message reaches the consumer.
-    if let Some(late) = e.late.clone() {
+    // A member created now: its first message reaches the consumer. Each
+    // test makes its own late member (`<late>a` here), so the whole file
+    // runs with one SPRIG_TEST_INHERIT_LATE.
+    if let Some(late) = e.late.as_ref().map(|l| format!("{l}a")) {
         create_tenant(&e, &late);
         let t = Instant::now();
         publish_work(&sch, &late, 0, 10).await;
@@ -2764,7 +2781,7 @@ async fn fan_in_sink_end_to_end() {
     }
     assert_eq!(keys.len(), 3000);
     // A member created now: its records arrive from its instance's start.
-    if let Some(late) = e.late.clone() {
+    if let Some(late) = e.late.as_ref().map(|l| format!("{l}s")) {
         create_tenant(&e, &late);
         got.lock().unwrap().clear();
         let t = Instant::now();
@@ -2888,6 +2905,14 @@ async fn fan_in_sink_end_to_end() {
     )
     .await;
     println!("DEAD LETTER TO STREAM: {n} dead letter(s): {dl:?}");
+    if n != 1 {
+        // What the step saw, for the report (r9cluster's runs ended here
+        // with nothing to go on).
+        let sinks = sql(&mut sys, "SHOW SINKS FROM r9fsink").await;
+        let ev = sql(&mut sys, "SELECT COUNT(*) FROM r9fsink.ev").await;
+        let vals: Vec<String> = received(&got).into_iter().map(|(_, v, _)| v).collect();
+        println!("  sinks {sinks:?}; records in ev {ev:?}; received {vals:?}");
+    }
     assert_eq!(n, 1);
     assert_eq!(dl[0][0].as_deref(), Some("poison1"));
     wait_received(&got, |r| r.len() >= 2, 30).await;

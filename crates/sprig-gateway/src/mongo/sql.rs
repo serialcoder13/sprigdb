@@ -166,6 +166,8 @@ pub fn sql_error(e: &SprigError) -> SqlError {
 
 /// A binary protocol value as the text protocol would carry it.
 fn value_text(v: &sprig_proto_mysql::Value) -> Option<Vec<u8>> {
+    use std::fmt::Write as _;
+
     use sprig_proto_mysql::Value;
     Some(match v {
         Value::Null => return None,
@@ -177,10 +179,10 @@ fn value_text(v: &sprig_proto_mysql::Value) -> Option<Vec<u8>> {
         Value::DateTime(d) => {
             let mut t = format!("{:04}-{:02}-{:02}", d.year, d.month, d.day);
             if d.hour > 0 || d.minute > 0 || d.second > 0 || d.micro > 0 {
-                t.push_str(&format!(" {:02}:{:02}:{:02}", d.hour, d.minute, d.second));
+                let _ = write!(t, " {:02}:{:02}:{:02}", d.hour, d.minute, d.second);
             }
             if d.micro > 0 {
-                t.push_str(&format!(".{:06}", d.micro));
+                let _ = write!(t, ".{:06}", d.micro);
             }
             t.into_bytes()
         }
@@ -205,7 +207,10 @@ fn bound(p: &Param) -> sprig_proto_mysql::command::BoundParam {
         Param::Null => (ct::NULL, Value::Null),
         Param::Int(i) => (ct::LONGLONG, Value::Int(*i)),
         Param::Bin(b) => (ct::BLOB, Value::Bytes(Bytes::copy_from_slice(b))),
-        Param::Text(t) => (ct::VAR_STRING, Value::Bytes(Bytes::copy_from_slice(t.as_bytes()))),
+        Param::Text(t) => (
+            ct::VAR_STRING,
+            Value::Bytes(Bytes::copy_from_slice(t.as_bytes())),
+        ),
     };
     BoundParam {
         param_type: u16::from(t),
@@ -305,7 +310,11 @@ impl SqlSession {
     }
 
     /// Runs one request in internal mode, collecting its answer.
-    async fn request(&mut self, req: Request, what: &'static str) -> std::result::Result<(Collect, crate::pipeline::ExecSummary), SqlError> {
+    async fn request(
+        &mut self,
+        req: Request,
+        what: &'static str,
+    ) -> std::result::Result<(Collect, crate::pipeline::ExecSummary), SqlError> {
         let mut sink = Collect::default();
         self.session.begin_command(what, None);
         self.exec.set_internal(true);
@@ -328,13 +337,18 @@ impl SqlSession {
 
     /// The statement `sql` prepared in this session (prepared now when it
     /// isn't yet).
-    async fn statement(&mut self, sql: &str) -> std::result::Result<crate::pipeline::StmtRef, SqlError> {
+    async fn statement(
+        &mut self,
+        sql: &str,
+    ) -> std::result::Result<crate::pipeline::StmtRef, SqlError> {
         if let Some((_, s)) = self.prepared.iter().find(|(t, _)| t == sql) {
             return Ok(*s);
         }
         if self.prepared.len() >= MAX_PREPARED {
             let (_, old) = self.prepared.remove(0);
-            let _ = self.request(Request::CloseStmt { stmt: old }, "Close stmt").await;
+            let _ = self
+                .request(Request::CloseStmt { stmt: old }, "Close stmt")
+                .await;
         }
         let (_, summary) = self
             .request(
@@ -355,7 +369,11 @@ impl SqlSession {
     /// Runs `sql` prepared with `params` bound; an execute the statement no
     /// longer fits (1243 unknown handler, 1615 re-prepare, a table changed
     /// under it) is prepared once more and run again.
-    async fn run_bound(&mut self, sql: &str, params: &[Param]) -> std::result::Result<Collect, SqlError> {
+    async fn run_bound(
+        &mut self,
+        sql: &str,
+        params: &[Param],
+    ) -> std::result::Result<Collect, SqlError> {
         let mut again = false;
         loop {
             let stmt = self.statement(sql).await?;
@@ -378,7 +396,9 @@ impl SqlSession {
                 Err(e) if !again && matches!(e.errno, Some(1243 | 1615 | 1146 | 1054)) => {
                     again = true;
                     self.prepared.retain(|(t, _)| t != sql);
-                    let _ = self.request(Request::CloseStmt { stmt }, "Close stmt").await;
+                    let _ = self
+                        .request(Request::CloseStmt { stmt }, "Close stmt")
+                        .await;
                 }
                 Err(e) => return Err(e),
             }
@@ -464,11 +484,19 @@ impl SqlRunner for SqlSession {
         self.exec.row_policy_binds(object)
     }
 
-    async fn query_bound(&mut self, sql: &str, params: &[Param]) -> std::result::Result<Rows, SqlError> {
+    async fn query_bound(
+        &mut self,
+        sql: &str,
+        params: &[Param],
+    ) -> std::result::Result<Rows, SqlError> {
         Ok(self.run_bound(sql, params).await?.rows)
     }
 
-    async fn exec_bound(&mut self, sql: &str, params: &[Param]) -> std::result::Result<Done, SqlError> {
+    async fn exec_bound(
+        &mut self,
+        sql: &str,
+        params: &[Param],
+    ) -> std::result::Result<Done, SqlError> {
         Ok(self.run_bound(sql, params).await?.ok.unwrap_or_default())
     }
 }

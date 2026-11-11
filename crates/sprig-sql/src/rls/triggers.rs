@@ -247,33 +247,82 @@ impl TriggerSpec<'_> {
         ])
     }
 
-    /// The policy view (and the context function it reads) on
-    /// [`TriggerSpec::schema`], to run after `USE` of it: an updatable
-    /// `MERGE` view of the rows the session's `SELECT` policies show
-    /// (`super::views`). `definer` must be able to read and write the
-    /// table.
+    /// The policy views (and the context function they read) on
+    /// [`TriggerSpec::schema`], to run after `USE` of it: updatable
+    /// `MERGE` views of the rows the session's `SELECT` policies show
+    /// (`super::views`). `columns` are the table's columns there in order,
+    /// `true` for invisible ones (RL28): the first view names the visible
+    /// ones (what `SELECT *` on the table shows); a table with invisible
+    /// columns gets a second view with all of them, any other loses a stale
+    /// one. Without `columns` the first view is `SELECT *`. `definer` must
+    /// be able to read and write the table.
     ///
     /// # Errors
     /// 39364 if a stored expression can't be rendered.
-    pub fn view_statements(&self, definer: &str) -> Result<Vec<String>, SprigError> {
+    pub fn view_statements(
+        &self,
+        definer: &str,
+        columns: &[(String, bool)],
+    ) -> Result<ViewStatements, SprigError> {
         let ctx = format!("{}()", quote(super::views::CTX_FUNCTION));
         let qual = quote(self.table);
         let ok = self.combination(1, Clause::Using, &qual, &ctx)?;
-        Ok(vec![
+        let list = |all: bool| -> String {
+            let v: Vec<String> = columns
+                .iter()
+                .filter(|(_, inv)| all || !inv)
+                .map(|(c, _)| format!("{qual}.{}", quote(c)))
+                .collect();
+            if v.is_empty() {
+                "*".to_owned()
+            } else {
+                v.join(", ")
+            }
+        };
+        let view = |name: String, all: bool| {
             format!(
+                "CREATE OR REPLACE ALGORITHM = MERGE DEFINER = {definer} SQL SECURITY DEFINER \
+                 VIEW {v} AS SELECT {cols} FROM {qual} WHERE COALESCE({guard} OR {ok}, FALSE)",
+                v = quote(&name),
+                cols = list(all),
+                guard = self.guard(&ctx),
+            )
+        };
+        let mut views = vec![view(
+            super::views::view_name(self.table, self.object),
+            false,
+        )];
+        if columns.iter().any(|(_, inv)| *inv) {
+            views.push(view(
+                super::views::hidden_view_name(self.table, self.object),
+                true,
+            ));
+        } else {
+            views.push(format!(
+                "DROP VIEW IF EXISTS {}",
+                quote(&super::views::hidden_view_name(self.table, self.object))
+            ));
+        }
+        Ok(ViewStatements {
+            function: format!(
                 "CREATE OR REPLACE DEFINER = {definer} FUNCTION {f}() RETURNS LONGTEXT \
                  CHARSET utf8mb4 COLLATE utf8mb4_bin NOT DETERMINISTIC NO SQL \
                  SQL SECURITY DEFINER RETURN @{CONTEXT_VAR}",
                 f = quote(super::views::CTX_FUNCTION),
             ),
-            format!(
-                "CREATE OR REPLACE ALGORITHM = MERGE DEFINER = {definer} SQL SECURITY DEFINER \
-                 VIEW {v} AS SELECT * FROM {qual} WHERE COALESCE({guard} OR {ok}, FALSE)",
-                v = quote(&super::views::view_name(self.table, self.object)),
-                guard = self.guard(&ctx),
-            ),
-        ])
+            views,
+        })
     }
+}
+
+/// [`TriggerSpec::view_statements`]: the context function, then (after
+/// its definer may run it) the views.
+#[derive(Debug, Clone)]
+pub struct ViewStatements {
+    /// `CREATE OR REPLACE FUNCTION __sprig_rls_ctx()`.
+    pub function: String,
+    /// The policy view, then the all-columns view (or its `DROP`).
+    pub views: Vec<String>,
 }
 
 #[cfg(test)]
@@ -327,7 +376,8 @@ mod tests {
         assert!(s[0].contains("LEFT(SUBSTRING_INDEX(USER(), '@', 1), 5) <> 't42_u'"));
         assert!(s[1].contains("OLD.owner") && s[1].contains("NEW.owner"));
         assert!(s[2].contains("BEFORE DELETE") && !s[2].contains("NEW."));
-        let v = spec.view_statements("`t42_u7`@`%`").unwrap();
+        let vs = spec.view_statements("`t42_u7`@`%`", &[]).unwrap();
+        let v = [vs.function.clone(), vs.views[0].clone()];
         assert!(
             v[0].contains("FUNCTION `__sprig_rls_ctx`() RETURNS LONGTEXT"),
             "{}",
@@ -340,6 +390,28 @@ mod tests {
                 && !v[1].contains("@sprig_rls"),
             "{}",
             v[1]
+        );
+        assert_eq!(vs.views[1], "DROP VIEW IF EXISTS `__sprig_rlsh_orders`");
+        // RL28: named columns; invisible ones only in the second view.
+        let cols = [
+            ("id".to_owned(), false),
+            ("_sprig_rk".to_owned(), true),
+            ("owner".to_owned(), false),
+        ];
+        let vs = spec.view_statements("`t42_u7`@`%`", &cols).unwrap();
+        assert!(
+            vs.views[0].contains(
+                "VIEW `__sprig_rls_orders` AS SELECT `orders`.`id`, `orders`.`owner` FROM `orders` WHERE"
+            ),
+            "{}",
+            vs.views[0]
+        );
+        assert!(
+            vs.views[1].contains(
+                "VIEW `__sprig_rlsh_orders` AS SELECT `orders`.`id`, `orders`.`_sprig_rk`, `orders`.`owner` FROM `orders` WHERE"
+            ),
+            "{}",
+            vs.views[1]
         );
         assert_eq!(
             drops("s", 9)[2],

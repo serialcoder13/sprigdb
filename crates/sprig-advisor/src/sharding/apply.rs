@@ -309,6 +309,75 @@ async fn triggers(c: &mut Conn, schema: &str, table: &str) -> Result<Vec<(String
     Ok(out)
 }
 
+/// A `tables_priv` or `columns_priv` privilege as `GRANT` names it
+/// (`GRANT OPTION` never reaches tenant accounts).
+fn grant_name(p: &str) -> Option<String> {
+    let p = p.trim();
+    if p.is_empty() || p.eq_ignore_ascii_case("Grant") {
+        return None;
+    }
+    if p.eq_ignore_ascii_case("Delete versioning rows") {
+        return Some("DELETE HISTORY".to_owned());
+    }
+    Some(p.to_ascii_uppercase())
+}
+
+/// Copies `tenant`'s accounts' table and column grants on `from`.`table`
+/// to `to`.`table` (bugfix-25), as `sprig_ctl`. Failures are logged: the
+/// gateways' reconcile grants them too, a moment later.
+async fn carry_grants(c: &mut Conn, tenant: TenantId, from: &str, to: &str, table: &str) {
+    let like = format!("t{tenant}\\_%");
+    let mut stmts = Vec::new();
+    let tables: std::result::Result<Vec<(String, String, String)>, _> = c
+        .exec(
+            "SELECT User, Host, Table_priv FROM mysql.tables_priv \
+             WHERE Db = ? AND Table_name = ? AND User LIKE ?",
+            (from, table, &like),
+        )
+        .await;
+    let columns: std::result::Result<Vec<(String, String, String, String)>, _> = c
+        .exec(
+            "SELECT User, Host, Column_name, Column_priv FROM mysql.columns_priv \
+             WHERE Db = ? AND Table_name = ? AND User LIKE ?",
+            (from, table, &like),
+        )
+        .await;
+    let who = |u: &str, h: &str| format!("'{}'@'{}'", u.replace('\'', ""), h.replace('\'', ""));
+    for (u, h, privs) in tables.unwrap_or_default() {
+        let list: Vec<String> = privs.split(',').filter_map(grant_name).collect();
+        if !list.is_empty() {
+            stmts.push(format!(
+                "GRANT {} ON {}.{} TO {}",
+                list.join(", "),
+                quote(to),
+                quote(table),
+                who(&u, &h)
+            ));
+        }
+    }
+    for (u, h, col, privs) in columns.unwrap_or_default() {
+        let list: Vec<String> = privs
+            .split(',')
+            .filter_map(grant_name)
+            .map(|p| format!("{p} ({})", quote(&col)))
+            .collect();
+        if !list.is_empty() {
+            stmts.push(format!(
+                "GRANT {} ON {}.{} TO {}",
+                list.join(", "),
+                quote(to),
+                quote(table),
+                who(&u, &h)
+            ));
+        }
+    }
+    for q in stmts {
+        if let Err(e) = c.query_drop(q.as_str()).await {
+            tracing::warn!(%tenant, schema = to, table, error = %e, "a table grant didn't follow the regroup; the gateways' reconcile adds it");
+        }
+    }
+}
+
 /// Step 2: the regroup under the tenant map's hold. Returns the hold, ms.
 async fn regroup(
     c: &mut Conn,
@@ -443,6 +512,13 @@ async fn regroup(
             c.query_drop(body.as_str())
                 .await
                 .map_err(|e| db_err("re-create a trigger", &e))?;
+        }
+        // bugfix-25: MariaDB keeps table and column grants by schema and
+        // name, and the rename leaves them behind; the tenant's accounts
+        // get theirs on the new schema before writes resume (the gateways'
+        // reconcile then drops the old rows).
+        for (from, to, t) in &moves {
+            carry_grants(c, ctx.tenant, from, to, t).await;
         }
         // Gateways route the moved tables from the next catalog version:
         // publish it while writes are still held.

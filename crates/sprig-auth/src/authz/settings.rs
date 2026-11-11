@@ -173,3 +173,19 @@ mod tests {
         );
     }
 }
+
+/// `auth.reconcile_interval_seconds` (chapter 29, "Reconciler"): how
+/// often a gateway compares a tenant's backend grants on a cluster with
+/// MariaDB's even when nothing it watches changed (the drift sweep; also
+/// catches a placement change it missed).
+pub static RECONCILE_INTERVAL_SECONDS: Setting<u64> = Setting {
+    key: "auth.reconcile_interval_seconds",
+    default: 300,
+    scopes: Scopes::PROCESS,
+    hard: HardBounds::range(10, 86_400),
+    apply: Apply::Live,
+    operator_only: true,
+    owner: 29,
+    doc: "Drift sweep of backend grants per tenant and cluster, seconds",
+};
+sprig_settings::register!(RECONCILE_INTERVAL_SECONDS);

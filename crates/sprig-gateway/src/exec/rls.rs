@@ -336,7 +336,7 @@ impl PassSession {
         let definer_user = crate::tenant::rls::view_definer(&cat, object, user);
         let definer_account = sprig_auth::authz::backend::account(tenant, definer_user);
         let definer = format!("`{}`@`%`", definer_account.replace('`', "``"));
-        let mut views = crate::tenant::rls::views_on(&svc, &cat, object);
+        let views = crate::tenant::rls::views_on(&svc, &cat, object);
         let policies: Vec<_> = state.policies_of(object).cloned().collect();
         let tp: Vec<TriggerPolicy<'_>> = policies
             .iter()
@@ -348,42 +348,36 @@ impl PassSession {
                 check: p.check_expr.as_deref(),
             })
             .collect();
-        // Tables with invisible columns get no policy view (RL18).
+        // The table's columns on each shard, invisible ones marked: the
+        // views name them (RL28).
         let mut probe = super::logic_bound::CtlShards {
             list: list.clone(),
             conns: HashMap::new(),
             locator: Arc::clone(&svc.locator),
         };
-        let mut invisible = false;
+        let mut columns: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+        let mut hidden: Vec<String> = Vec::new();
         for (schema, _) in &list {
             let s = probe.session(schema).await?;
-            let rows = s
-                .rows(&format!(
-                    "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} \
-                     AND TABLE_NAME = {} AND EXTRA LIKE '%INVISIBLE%'",
-                    sprig_sql::rls::sql_string(schema, false),
-                    sprig_sql::rls::sql_string(&obj.name, false),
-                ))
-                .await?;
-            if rows
-                .first()
-                .and_then(|r| r.first().cloned().flatten())
-                .is_some_and(|v| v != "0")
-            {
-                invisible = true;
-                break;
+            let cols = table_columns(s, schema, &obj.name).await?;
+            for (c, inv) in &cols {
+                let l = c.to_lowercase();
+                if *inv && !hidden.contains(&l) {
+                    hidden.push(l);
+                }
             }
+            columns.insert(schema.clone(), cols);
         }
         drop(probe);
-        crate::tenant::rls::viewless_set(tenant.0, object.0, invisible);
-        if invisible {
-            views = false;
-        }
+        crate::tenant::rls::hidden_set(tenant.0, object.0, hidden);
         let mut plan: Vec<(String, Vec<String>)> = Vec::new();
         for (schema, _) in &list {
             if !sec.enabled {
                 let mut d = drops(schema, object.0);
                 d.push(sprig_sql::rls::views::view_drop(
+                    schema, &obj.name, object.0,
+                ));
+                d.push(sprig_sql::rls::views::hidden_view_drop(
                     schema, &obj.name, object.0,
                 ));
                 plan.push((schema.clone(), d));
@@ -409,19 +403,24 @@ impl PassSession {
             let mut stmts = spec.statements()?;
             if views {
                 // The context function, its caller's right to run it, then
-                // the view (RL18).
-                let mut v = spec.view_statements(&definer)?;
-                let view = v.pop().unwrap_or_default();
-                stmts.extend(v);
+                // the views (RL18, RL28).
+                let v = spec.view_statements(
+                    &definer,
+                    columns.get(schema).map(Vec::as_slice).unwrap_or_default(),
+                )?;
+                stmts.push(v.function);
                 stmts.push(format!(
                     "GRANT EXECUTE ON FUNCTION {}.{} TO '{}'@'%'",
                     sprig_sql::rls::quote(schema),
                     sprig_sql::rls::quote(sprig_sql::rls::views::CTX_FUNCTION),
                     definer_account
                 ));
-                stmts.push(view);
+                stmts.extend(v.views);
             } else {
                 stmts.push(sprig_sql::rls::views::view_drop(
+                    schema, &obj.name, object.0,
+                ));
+                stmts.push(sprig_sql::rls::views::hidden_view_drop(
                     schema, &obj.name, object.0,
                 ));
             }
@@ -534,6 +533,8 @@ impl PassSession {
         let names = sprig_sql::rls::triggers::names(object.0);
         let views = crate::tenant::rls::views_on(ts.services(), &cat, object) && sec.enabled;
         let view = sprig_sql::rls::views::view_name(&obj.name, object.0);
+        let hview = sprig_sql::rls::views::hidden_view_name(&obj.name, object.0);
+        let mut hidden: Vec<String> = Vec::new();
         let mut shards = super::logic_bound::CtlShards {
             list: list.clone(),
             conns: HashMap::new(),
@@ -543,46 +544,53 @@ impl PassSession {
         for (schema, _) in &list {
             let s = shards.session(schema).await?;
             let q = |x: &str| sprig_sql::rls::sql_string(x, false);
-            // The triggers, and (views) the view with the table's columns:
-            // a column added since makes the view stale.
+            // The triggers, and (views) the views' columns against the
+            // table's: a column added, dropped or renamed since makes a view
+            // stale (RL28: the first names the visible columns, the second
+            // all of them, and exists only when some are invisible).
+            let cols = |name: &str, filter: &str| {
+                format!(
+                    "(SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY ORDINAL_POSITION SEPARATOR '\\n') \
+                     FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {s} AND TABLE_NAME = {}{filter})",
+                    q(name),
+                    s = q(schema),
+                )
+            };
             let rows = s
                 .rows(&format!(
                     "SELECT (SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {s} \
-                     AND TRIGGER_NAME IN ({}, {}, {})), \
-                     (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {s} \
-                     AND TABLE_NAME = {}), \
-                     (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {s} \
-                     AND TABLE_NAME = {}), \
-                     (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {s} \
-                     AND TABLE_NAME = {t} AND EXTRA LIKE '%INVISIBLE%')",
+                     AND TRIGGER_NAME IN ({}, {}, {})), {}, {}, {}, {}, {}",
                     q(&names[0]),
                     q(&names[1]),
                     q(&names[2]),
-                    q(&obj.name),
-                    q(&view),
+                    cols(&obj.name, " AND EXTRA NOT LIKE '%INVISIBLE%'"),
+                    cols(&obj.name, ""),
+                    cols(&obj.name, " AND EXTRA LIKE '%INVISIBLE%'"),
+                    cols(&view, ""),
+                    cols(&hview, ""),
                     s = q(schema),
-                    t = q(&obj.name),
                 ))
                 .await?;
-            let num = |i: usize| -> u64 {
-                rows.first()
-                    .and_then(|r| r.get(i).cloned().flatten())
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0)
-            };
-            let triggers_ok = num(0) == 3 || !sec.enabled;
-            // A table with invisible columns (a split table's `_sprig_rk`)
-            // gets no view (RL18): `SELECT *` on a view would show them.
-            if num(3) > 0 {
-                crate::tenant::rls::viewless_set(ts.tenant.0, object.0, true);
+            let cell = |i: usize| -> Option<String> { rows.first().and_then(|r| r.get(i).cloned().flatten()) };
+            let triggers_ok = cell(0).and_then(|v| v.parse::<u64>().ok()) == Some(3) || !sec.enabled;
+            let (visible, all, invisible) = (cell(1), cell(2), cell(3));
+            for c in invisible.iter().flat_map(|v| v.split('\n')) {
+                let l = c.to_lowercase();
+                if !hidden.contains(&l) {
+                    hidden.push(l);
+                }
             }
-            let views_ok = !views || num(3) > 0 && num(2) == 0 || num(3) == 0 && num(2) == num(1);
+            let views_ok = !views
+                || visible.is_some()
+                    && cell(4) == visible
+                    && if invisible.is_some() { cell(5) == all } else { cell(5).is_none() };
             if !triggers_ok || !views_ok {
                 complete = false;
                 break;
             }
         }
         drop(shards);
+        crate::tenant::rls::hidden_set(ts.tenant.0, object.0, hidden);
         if !complete {
             tracing::info!(
                 object = object.0,
@@ -933,6 +941,17 @@ impl PassSession {
                 }
             }
         }
+        if needs_checks {
+            // The checks may have found invisible columns (RL28): the
+            // swap reads the all-columns view for statements naming them.
+            let now = self
+                .tenant
+                .as_deref()
+                .and_then(|ts| crate::tenant::rls::view_swap(ts, &cat, &rls));
+            if let Some(bs) = self.bs.as_mut() {
+                bs.vars_mut().rls_views = now;
+            }
+        }
         if needs_checks && !stale.is_empty() {
             for o in &stale {
                 if let Err(e) = Box::pin(self.deploy_checks(*o)).await {
@@ -949,6 +968,31 @@ impl PassSession {
         metrics::counter!("sprig_rls_rewrites_total", "protocol" => "mysql").increment(1);
         Ok(Some(Bytes::from(inj.sql.into_bytes())))
     }
+}
+
+/// Table `table`'s columns in `schema`, in order, `true` for invisible
+/// ones (what the policy views name, RL28).
+async fn table_columns(
+    s: &mut (dyn sprig_logic::deploy::Session + 'static),
+    schema: &str,
+    table: &str,
+) -> Result<Vec<(String, bool)>> {
+    let rows = s
+        .rows(&format!(
+            "SELECT COLUMN_NAME, EXTRA LIKE '%INVISIBLE%' FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} ORDER BY ORDINAL_POSITION",
+            sprig_sql::rls::sql_string(schema, false),
+            sprig_sql::rls::sql_string(table, false),
+        ))
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let name = r.first().cloned().flatten()?;
+            let inv = r.get(1).cloned().flatten().is_some_and(|v| v == "1");
+            Some((name, inv))
+        })
+        .collect())
 }
 
 /// Code already pointed at the policy views: (tenant, object, schema
@@ -1000,19 +1044,24 @@ impl PassSession {
         let mut views: HashMap<(u32, String), String> = HashMap::new();
         let mut no_view: std::collections::HashSet<(u32, String)> =
             std::collections::HashSet::new();
+        let mut hidden: HashMap<String, (String, Vec<String>)> = HashMap::new();
         for sec in state.rows().security.iter().filter(|x| x.enabled) {
             let Some(o) = cat.objects.get(sec.object_id) else {
                 continue;
             };
             let k = (o.db_id.0, o.name.to_lowercase());
-            if sec.checks_version > 0
-                && crate::tenant::rls::views_on(&svc, cat, sec.object_id)
-                && !crate::tenant::rls::is_viewless(tenant, sec.object_id.0)
-            {
-                views.insert(
-                    k,
-                    sprig_sql::rls::views::view_name(&o.name, sec.object_id.0),
-                );
+            if sec.checks_version > 0 && crate::tenant::rls::views_on(&svc, cat, sec.object_id) {
+                let view = sprig_sql::rls::views::view_name(&o.name, sec.object_id.0);
+                if let Some(cols) = crate::tenant::rls::hidden_of(tenant, sec.object_id.0) {
+                    hidden.insert(
+                        view.clone(),
+                        (
+                            sprig_sql::rls::views::hidden_view_name(&o.name, sec.object_id.0),
+                            cols.to_vec(),
+                        ),
+                    );
+                }
+                views.insert(k, view);
             } else {
                 no_view.insert(k);
             }
@@ -1025,6 +1074,9 @@ impl PassSession {
             let mut n: Vec<_> = no_view.iter().collect();
             n.sort();
             n.hash(&mut h);
+            let mut x: Vec<_> = hidden.iter().collect();
+            x.sort();
+            x.hash(&mut h);
             h.finish()
         };
         let layout = super::router::ddl_layout(ts);
@@ -1060,7 +1112,18 @@ impl PassSession {
             };
             let mut ok = !list.is_empty();
             for (schema, _) in &list {
-                let r = repoint_one(&mut shards, schema, c, &views, &no_view, &db_of).await;
+                let r = repoint_one(
+                    &mut shards,
+                    schema,
+                    c,
+                    &CodeViews {
+                        views: &views,
+                        hidden: &hidden,
+                        no_view: &no_view,
+                    },
+                    &db_of,
+                )
+                .await;
                 if let Err(e) = r {
                     tracing::warn!(object = c.object.0, %schema, error = %e, "stored code not pointed at the policy views: refused to bound sessions");
                     ok = false;
@@ -1079,27 +1142,55 @@ impl PassSession {
     }
 }
 
+/// The policy views stored code reads instead of protected tables.
+struct CodeViews<'a> {
+    /// (db, lower-case table) → its policy view.
+    views: &'a HashMap<(u32, String), String>,
+    /// Policy view → all-columns view and invisible columns (RL28).
+    hidden: &'a HashMap<String, (String, Vec<String>)>,
+    /// Protected tables without a view yet.
+    no_view: &'a std::collections::HashSet<(u32, String)>,
+}
+
+struct CodeLookup<'a> {
+    v: &'a CodeViews<'a>,
+    schema: &'a str,
+    db_of: &'a (dyn Fn(&str) -> Option<u32> + Sync),
+    missing: std::cell::Cell<bool>,
+}
+
+impl sprig_sql::rls::views::Lookup for CodeLookup<'_> {
+    fn view(&self, sch: Option<&str>, t: &str) -> Option<String> {
+        let db = (self.db_of)(sch.unwrap_or(self.schema))?;
+        let k = (db, t.to_lowercase());
+        if self.v.no_view.contains(&k) {
+            self.missing.set(true);
+        }
+        self.v.views.get(&k).cloned()
+    }
+
+    fn hidden(&self, view: &str) -> Option<(String, Vec<String>)> {
+        self.v.hidden.get(view).cloned()
+    }
+}
+
 /// [`sprig_sql::rls::views::swap`] of stored code in `schema`; 39366 if it
 /// names a protected table that has no policy view yet.
 fn swap_code(
     text: &str,
     lex: LexOptions,
     schema: &str,
-    views: &HashMap<(u32, String), String>,
-    no_view: &std::collections::HashSet<(u32, String)>,
+    v: &CodeViews<'_>,
     db_of: &(dyn Fn(&str) -> Option<u32> + Sync),
 ) -> Result<Option<String>> {
-    let missing = std::cell::Cell::new(false);
-    let lookup = |sch: Option<&str>, t: &str| -> Option<String> {
-        let db = db_of(sch.unwrap_or(schema))?;
-        let k = (db, t.to_lowercase());
-        if no_view.contains(&k) {
-            missing.set(true);
-        }
-        views.get(&k).cloned()
+    let lookup = CodeLookup {
+        v,
+        schema,
+        db_of,
+        missing: std::cell::Cell::new(false),
     };
     let new = sprig_sql::rls::views::swap(text, &lex, &lookup, &std::collections::HashSet::new())?;
-    if missing.get() {
+    if lookup.missing.get() {
         return Err(unsupported(
             "stored code over a protected table without its policy view",
         ));
@@ -1111,8 +1202,7 @@ async fn repoint_one(
     shards: &mut super::logic_bound::CtlShards,
     schema: &str,
     c: &crate::tenant::rls::TaintedCode,
-    views: &HashMap<(u32, String), String>,
-    no_view: &std::collections::HashSet<(u32, String)>,
+    v: &CodeViews<'_>,
     db_of: &(dyn Fn(&str) -> Option<u32> + Sync),
 ) -> Result<()> {
     let (kind, col, mode_col, cs_col, coll_col) = match c.kind {
@@ -1151,7 +1241,7 @@ async fn repoint_one(
         no_backslash_escapes: up.contains("NO_BACKSLASH_ESCAPES"),
         ..LexOptions::mariadb()
     };
-    let new = swap_code(&text, lex, schema, views, no_view, db_of)?;
+    let new = swap_code(&text, lex, schema, v, db_of)?;
     let Some(new) = new else {
         return Ok(());
     };

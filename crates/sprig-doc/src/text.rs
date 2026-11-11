@@ -308,6 +308,7 @@ impl Engine {
     ///
     /// # Errors
     /// The search's and SQL errors.
+    #[allow(clippy::similar_names)]
     pub async fn explain_search(
         &self,
         sql: &mut dyn SqlRunner,
@@ -315,10 +316,10 @@ impl Engine {
         cmd: &Document,
         verbosity: &str,
     ) -> Result<Option<Document>, MongoError> {
-        let Some((name, coll)) = cmd.iter().next() else {
+        let Some((name, target)) = cmd.iter().next() else {
             return Ok(None);
         };
-        let Bson::String(coll) = coll else {
+        let Bson::String(coll) = target else {
             return Ok(None);
         };
         let ns = Ns {
@@ -343,9 +344,19 @@ impl Engine {
                     .cloned()
                     .unwrap_or_default();
                 if let Ok(spec) = first.get_document("$search") {
-                    (TextCall::Search(spec.clone()), Document::new(), first.clone(), "SEARCH")
+                    (
+                        TextCall::Search(spec.clone()),
+                        Document::new(),
+                        first.clone(),
+                        "SEARCH",
+                    )
                 } else if let Ok(spec) = first.get_document("$searchMeta") {
-                    (TextCall::Meta(spec.clone()), Document::new(), first.clone(), "SEARCH_META")
+                    (
+                        TextCall::Meta(spec.clone()),
+                        Document::new(),
+                        first.clone(),
+                        "SEARCH_META",
+                    )
                 } else if let Ok(m) = first.get_document("$match") {
                     let Some((text, rest)) = split_text(m)? else {
                         return Ok(None);
@@ -375,7 +386,10 @@ impl Engine {
                 TextCall::Meta(_) => 1,
                 TextCall::Search(spec) => self.search_stage(sql, &ns, spec).await?.len(),
                 TextCall::Text(text) => match self.meta(sql, &ns).await? {
-                    Some(m) => self.text_docs(sql, &ns, &m, text.clone(), &rest).await?.len(),
+                    Some(m) => self
+                        .text_docs(sql, &ns, &m, text.clone(), &rest)
+                        .await?
+                        .len(),
                     None => 0,
                 },
             };

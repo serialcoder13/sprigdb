@@ -188,5 +188,27 @@ pub(crate) async fn catalog_db_ids(pool: &Pool, schema: &str) -> Result<BTreeSet
     }
 }
 
+/// Marks every database of the catalog in `schema` dropped (bugfix-27's
+/// last resort for a deleted tenant, whose catalog goes next and whose
+/// schemas are dropped by id). Returns how many rows changed.
+///
+/// # Errors
+/// 39100 when the catalog can't be written.
+pub(crate) async fn mark_databases_dropped(pool: &Pool, schema: &str) -> Result<u64> {
+    let mut conn = crate::catalogs::acquire(pool, "tenant cleanup").await?;
+    conn.query_drop(format!(
+        "UPDATE {}.`databases` SET state = 'dropped' WHERE state <> 'dropped'",
+        quote(schema)
+    ))
+    .await
+    .map_err(|e| {
+        SprigError::new(
+            SprigCode::ClusterUnavailable,
+            format!("tenant cleanup: mark {schema}.databases dropped: {e}"),
+        )
+    })?;
+    Ok(conn.affected_rows())
+}
+
 #[cfg(test)]
 mod tests;

@@ -238,7 +238,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         MariaBackend::new(Arc::new(locator.clone())).with_clock(Arc::clone(&clock)),
         Arc::new(DirectoryAllocator::new(Arc::clone(&stores.global))),
     );
-    let reconciler = CatalogReconciler::new(
+    let reconciler = Arc::new(CatalogReconciler::new(
         DdlEngine::new(versioner.clone(), Arc::clone(&clock)),
         Directory::new(Arc::clone(&stores.global)),
         Arc::new(PoolExecutors::new(locator.clone())),
@@ -249,7 +249,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     )
     .with_group_maps(Arc::new(sprig_shard::ShardMapStore::new(Arc::clone(
         &stores.dc,
-    ))));
+    )))));
     let settings_admin = Arc::new(SettingsService::new(
         settings.live.clone(),
         versioner.clone(),
@@ -537,6 +537,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Arc::clone(&clock),
         Some(settings.live.clone()),
     )?);
+    // bugfix-27: cleanup drops a deleted tenant's databases itself.
+    tenants.set_database_dropper(Arc::clone(&reconciler) as Arc<dyn tenants::DeletedDatabases>);
     let tree_loop = TreeSettings::new(tree, dc.clone(), Some(settings.live.clone()))?;
     // Chapter 24: moves between DCs and traffic windows.
     let moves = Arc::new(
@@ -687,6 +689,9 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         services.push((name.clone(), http::load_token(path)?));
     }
     let named = operators.switched().await.unwrap_or(false);
+    // Chapter 37, "Admin API over TLS": HTTPS when a certificate is set.
+    let admin_tls = http::tls_config(&cfg.controller)?;
+    let admin_https = admin_tls.is_some();
     let listener = http::bind(
         cfg.controller.admin_addr,
         if named {
@@ -737,7 +742,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         services,
         cfg.controller.admin_token_break_glass,
     ));
-    let admin = tokio::spawn(http::serve(
+    let admin = tokio::spawn(http::serve_tls(
         listener,
         http::router_guarded(svc)
             .merge(recs)
@@ -746,6 +751,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
                 guard,
                 operators::guard::layer,
             )),
+        admin_tls,
         ctx.shutdown.clone(),
     ));
     // Gateways find the leader's Admin API here (chapter 37 step 4).
@@ -754,15 +760,20 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Arc::clone(&clock),
         cfg.node.id(),
         registration::ControllerRecord {
-            admin_addr: registration::advertised(admin_addr),
+            admin_addr: cfg
+                .controller
+                .admin_advertise
+                .clone()
+                .unwrap_or_else(|| registration::advertised(admin_addr)),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             internal_addr: Some(internal_addr.clone()),
+            admin_tls: admin_https,
         },
         ctx.shutdown.clone(),
     ));
 
     ctx.health.set_ready();
-    tracing::info!(%role, %dc, admin = %admin_addr, internal = %internal_addr, "ready");
+    tracing::info!(%role, %dc, admin = %admin_addr, admin_tls = admin_https, internal = %internal_addr, "ready");
     rt.run(ctx.shutdown.clone()).await;
     ctx.health.set_draining();
     match admin.await {

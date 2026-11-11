@@ -40,6 +40,11 @@ docker run --rm --name "$name" -m "$mem" --memory-swap "$mem" \
     "${RUST_IMAGE:-rust:1.94.0-slim-bookworm}" bash -c "
         set -e
         [ -e /usr/include/google/protobuf/descriptor.proto ] || { apt-get update -qq && apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev make pkg-config >/dev/null; }
+        # The cache volume is shared between source trees mounted at the same
+        # path, and cargo judges freshness by file times: a tree whose files
+        # are older than the last build would reuse that build's crates. Forget
+        # the workspace's own crates (all named sprig*); dependencies stay cached.
+        rm -rf /target/release/.fingerprint/sprig*
         cargo build --release --locked -j $jobs -p sprigdb -p sprigctl
         install -m 0755 /target/release/sprigdb /target/release/sprigctl /out/"
 

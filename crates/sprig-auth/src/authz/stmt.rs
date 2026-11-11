@@ -89,6 +89,11 @@ pub struct UserOptions {
     /// `PASSWORD HISTORY`, `PASSWORD REUSE INTERVAL`, `PASSWORD REQUIRE
     /// CURRENT`).
     pub clauses: crate::policy::AccountClauses,
+    /// The statement was `SET PASSWORD FOR acct = '...'`: MySQL 8.4 and
+    /// MariaDB let it change another account's password with `UPDATE` on
+    /// the `mysql` schema (a tenant-wide `UPDATE` here) instead of
+    /// `CREATE USER` (bugfix-26).
+    pub set_password: bool,
 }
 
 /// What `GRANT` and `REVOKE` act on.

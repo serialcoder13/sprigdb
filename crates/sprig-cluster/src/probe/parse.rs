@@ -240,6 +240,12 @@ pub struct GaleraStatus {
     pub osu_method: String,
     /// `wsrep_sync_wait`.
     pub sync_wait: u32,
+    /// `wsrep_cluster_state_uuid`: the cluster's history. All zeros means
+    /// the cluster lost its identity (seen after every node crashed at
+    /// once, decision HD1), and no node can join it. `None` from captures
+    /// that predate the field.
+    #[serde(default)]
+    pub state_uuid: Option<String>,
 }
 
 impl GaleraStatus {
@@ -250,6 +256,21 @@ impl GaleraStatus {
             && self.cluster_status == "Primary"
             && self.local_state == GaleraLocalState::Synced
     }
+
+    /// The cluster's state UUID is all zeros (decision HD1): it still
+    /// serves, but a node that leaves can't rejoin until the cluster is
+    /// bootstrapped again with a fresh UUID.
+    #[must_use]
+    pub fn lost_identity(&self) -> bool {
+        self.state_uuid.as_deref().is_some_and(zero_uuid)
+    }
+}
+
+/// A UUID written as hex digits and dashes, every digit zero.
+#[must_use]
+pub fn zero_uuid(u: &str) -> bool {
+    let u = u.trim();
+    u.chars().any(|c| c == '0') && u.chars().all(|c| c == '0' || c == '-')
 }
 
 /// Semi-synchronous replication on one node.
@@ -616,6 +637,10 @@ fn galera(raw: &RawCapture) -> GaleraStatus {
         gtid_domain_id: raw.var("wsrep_gtid_domain_id").and_then(|s| s.parse().ok()),
         osu_method: raw.var("wsrep_osu_method").unwrap_or_default().to_owned(),
         sync_wait: num(raw.var("wsrep_sync_wait")),
+        state_uuid: raw
+            .stat("wsrep_cluster_state_uuid")
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned),
     }
 }
 

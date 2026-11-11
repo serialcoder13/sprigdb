@@ -601,6 +601,8 @@ async fn graph_table_joins_sharded_tables_on_two_clusters() {
 /// temporary tables instead of failing with 39903.
 #[tokio::test]
 async fn graph_table_rows_past_the_inline_limit() {
+    const N: i64 = 2600;
+    const LEN: i64 = 7000;
     let (Some(sql), Some(baddr), Some(user), Some(pw)) = (
         env("SPRIG_TEST_SQL_ADDR"),
         env("SPRIG_TEST_BOLT_ADDR"),
@@ -612,8 +614,6 @@ async fn graph_table_rows_past_the_inline_limit() {
         );
         return;
     };
-    const N: i64 = 2600;
-    const LEN: usize = 7000;
     let mut g = gateway(&sql, &user, &pw).await;
     g.query_drop("CREATE DATABASE IF NOT EXISTS r8seven_big")
         .await
@@ -624,7 +624,7 @@ async fn graph_table_rows_past_the_inline_limit() {
     g.query_drop("CREATE GRAPH r8seven_big.g").await.unwrap();
     let mut b = bolt(&baddr, &user, &pw).await.expect("bolt login");
     let db = vec![("db", PackValue::str("r8seven_big.g"))];
-    let s: String = "abcdefghij".repeat(LEN / 10);
+    let s: String = "abcdefghij".repeat(700);
     let started = Instant::now();
     for lo in (1..=N).step_by(200) {
         b.query(
@@ -645,10 +645,10 @@ async fn graph_table_rows_past_the_inline_limit() {
     let got = rows(&mut g, q).await.expect("past 16 MB");
     eprintln!(
         "about {} MB of rows through temporary tables in {:?}",
-        (N as usize * LEN) >> 20,
+        (N * LEN) >> 20,
         t.elapsed()
     );
-    assert_eq!(got, vec![format!("{N}|{}|1|{N}", N as usize * LEN)]);
+    assert_eq!(got, vec![format!("{N}|{}|1|{N}", N * LEN)]);
     // Ordered rows with a filter that the graph applies (G61).
     let got = rows(
         &mut g,

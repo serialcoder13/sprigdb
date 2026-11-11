@@ -239,8 +239,94 @@ impl TenantServices {
         crate::inherited::lifecycle::start_sweeper(&svc);
         // R9 (r9queue): members' failed inherited sink deploys, on a timer.
         crate::inherited::sinks::retry::start(&svc);
+        // Decision bugfix-29: a deleted tenant's pooled backend
+        // connections close as soon as its directory entry goes.
+        close_deleted_tenants(&svc);
+        close_dropped_users(&svc);
         Ok(svc)
     }
+}
+
+/// Follows the directory (`tenants/<id>`): when a tenant's entry is
+/// deleted (its cleanup finished), every pooled backend connection of its
+/// accounts on this gateway closes, and the gateway forgets what it
+/// reconciled for it (decision bugfix-29; before, each served user kept an
+/// idle connection per cluster until `backend.idle_timeout_seconds`).
+fn close_deleted_tenants(svc: &Arc<TenantServices>) {
+    use futures::StreamExt;
+    use sprig_common::ids::TenantId;
+    use sprig_meta::WatchEvent;
+    let weak = Arc::downgrade(svc);
+    let store = Arc::clone(&svc.global);
+    let Ok(prefix) = store.tier().key("tenants/") else {
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            match store.watch(&prefix, 0).await {
+                Ok(mut w) => {
+                    while let Some(ev) = w.next().await {
+                        let Ok(WatchEvent::Delete { key, .. }) = ev else {
+                            if ev.is_err() {
+                                break;
+                            }
+                            continue;
+                        };
+                        let Some(t) = key
+                            .as_str()
+                            .strip_prefix(prefix.as_str())
+                            .and_then(|r| r.parse::<u64>().ok())
+                            .map(TenantId)
+                        else {
+                            continue;
+                        };
+                        let Some(svc) = weak.upgrade() else {
+                            return;
+                        };
+                        svc.locator.retire_tenant(t);
+                        svc.authz.forget(t);
+                        tracing::info!(tenant = %t, "tenant deleted: its backend connections closed");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "directory watch for deleted tenants failed; retrying");
+                }
+            }
+            if weak.strong_count() == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+}
+
+/// Follows the auth change feed: a dropped user's pooled backend
+/// connections close on every gateway that loads the change (decision
+/// bugfix-29). The reconciling gateway also retires them when it drops the
+/// account; the others never see a grant change for it.
+fn close_dropped_users(svc: &Arc<TenantServices>) {
+    use sprig_auth::revoke::RevokeReason;
+    use tokio::sync::broadcast::error::RecvError;
+    let mut changes = svc.auth_changes.subscribe();
+    let weak = Arc::downgrade(svc);
+    tokio::spawn(async move {
+        loop {
+            let change = match changes.recv().await {
+                Ok(c) => c,
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return,
+            };
+            let Some(svc) = weak.upgrade() else {
+                return;
+            };
+            for r in &change.revoked {
+                if r.reason == RevokeReason::Dropped {
+                    svc.locator
+                        .retire_account(&sprig_auth::authz::backend::account(change.tenant, r.user_id));
+                }
+            }
+        }
+    });
 }
 
 /// Follows the auth change feed: sessions of users who were dropped or

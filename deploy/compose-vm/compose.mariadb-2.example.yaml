@@ -1,0 +1,17 @@
+# Example: a second MariaDB node on this VM as its own cluster (RUNBOOK.md,
+# "Adding a cluster"). docker compose -f compose.yaml -f compose.mariadb-2.example.yaml up -d mariadb-2
+
+services:
+  mariadb-2:
+    extends: { file: compose.yaml, service: mariadb-1 }
+    hostname: mariadb-2
+    command:
+      - --server-id=201
+      - --gtid-domain-id=2
+      - --innodb-buffer-pool-size=${MARIADB_BUFFER_POOL:-2G}
+      - --innodb-log-file-size=${MARIADB_REDO_SIZE:-1G}
+      - --max-connections=${MARIADB_MAX_CONNECTIONS:-1000}
+    volumes:
+      - mariadb-2-data:/var/lib/mysql
+volumes:
+  mariadb-2-data: {}

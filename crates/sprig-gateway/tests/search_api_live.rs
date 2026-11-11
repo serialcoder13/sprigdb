@@ -25,6 +25,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::too_many_lines,
+    clippy::many_single_char_names,
+    clippy::match_same_arms,
     missing_docs
 )]
 

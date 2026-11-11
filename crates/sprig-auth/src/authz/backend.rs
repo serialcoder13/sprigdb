@@ -10,10 +10,10 @@
 //! |---|---|
 //! | `*.*` | `` ON `t42\_d%`.* ``: every shard and reference schema of the tenant, now and later; never `t42_sprig` |
 //! | `db.*` | `` ON `t42\_d1\_%`.* ``: every group, shard and reference schema of the database, now and later, with the `*.*` actions too (MariaDB uses the most specific matching database row only) |
-//! | `db.t` | `` ON `t42_d1_g1_s1`.`t` `` per schema |
-//! | `db.t (c)` | the column, per schema |
+//! | `db.t` | `` ON `t42_d1_g4_s2`.`t` `` per schema holding `t` on the cluster: its group's shards there, a reference copy, the default group's schema (bugfix-25) |
+//! | `db.t (c)` | the column, per schema holding `t` |
 //! | `db.t` held by name (a dropped table's, `auth.grants_on_drop = keep`) | as `db.t` while a table of that name exists; before that only if it includes `CREATE` (MariaDB refuses others on a missing table), so the user can create it again |
-//! | `db.f` (routine) | `` ON FUNCTION `t42_d1_g1_s1`.`f` `` per schema |
+//! | `db.f` (routine) | `` ON FUNCTION `t42_d1_g1_s1`.`f` `` per schema holding `f` on the cluster |
 //!
 //! Every database row also carries `CREATE TEMPORARY TABLES`, for the
 //! gateway's own temporary tables (gathered and analytic reads); the
@@ -271,12 +271,127 @@ impl BackendTarget {
 /// Grants per backend account: what one side (wanted or found) holds.
 pub type BackendState = BTreeMap<String, BTreeMap<BackendTarget, ActionSet>>;
 
+/// Where the tenant's tables, views and routines are on the cluster being
+/// reconciled (bugfix-25): MariaDB has no patterns for table, column and
+/// routine grants, so each needs every schema holding the object. A
+/// regroup moves a table into its group's own schemas, and splits, merges,
+/// moves and re-keys put it in new ones; the gateway reads what the
+/// cluster holds (`information_schema`) whenever the shard maps or the
+/// catalog change, and the grants follow.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Placement {
+    schemas: BTreeSet<String>,
+    /// (database, lower-case name) → (schema, name as spelled there).
+    relations: BTreeMap<(sprig_common::ids::DbId, String), Vec<(String, String)>>,
+    /// (database, lower-case name, `FUNCTION` | `PROCEDURE`) → schemas.
+    routines: BTreeMap<(sprig_common::ids::DbId, String, &'static str), Vec<String>>,
+}
+
+impl Placement {
+    fn db_of(schema: &str) -> Option<sprig_common::ids::DbId> {
+        schema.parse::<SchemaName>().ok().and_then(|s| s.db())
+    }
+
+    /// A schema of the tenant on the cluster.
+    pub fn add_schema(&mut self, schema: &str) {
+        self.schemas.insert(schema.to_owned());
+    }
+
+    /// Table or view `name` in `schema`.
+    pub fn add_relation(&mut self, schema: &str, name: &str) {
+        if let Some(d) = Self::db_of(schema) {
+            self.schemas.insert(schema.to_owned());
+            let e = self.relations.entry((d, name.to_lowercase())).or_default();
+            if !e.iter().any(|(s, _)| s == schema) {
+                e.push((schema.to_owned(), name.to_owned()));
+            }
+        }
+    }
+
+    /// Routine `name` of `kind` (`FUNCTION` or `PROCEDURE`) in `schema`.
+    pub fn add_routine(&mut self, schema: &str, name: &str, kind: &str) {
+        let kind = if kind.eq_ignore_ascii_case("FUNCTION") {
+            "FUNCTION"
+        } else {
+            "PROCEDURE"
+        };
+        if let Some(d) = Self::db_of(schema) {
+            self.schemas.insert(schema.to_owned());
+            let e = self
+                .routines
+                .entry((d, name.to_lowercase(), kind))
+                .or_default();
+            if !e.iter().any(|s| s == schema) {
+                e.push(schema.to_owned());
+            }
+        }
+    }
+
+    /// The (schema, spelled name) pairs holding relation `name` of `db`.
+    fn relation(&self, db: sprig_common::ids::DbId, name: &str) -> Vec<(String, String)> {
+        self.relations
+            .get(&(db, name.to_lowercase()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn routine(&self, db: sprig_common::ids::DbId, name: &str, kind: &str) -> Vec<String> {
+        let kind = if kind == "FUNCTION" {
+            "FUNCTION"
+        } else {
+            "PROCEDURE"
+        };
+        self.routines
+            .get(&(db, name.to_lowercase(), kind))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// The table, column and routine names `want` grants on (not the
+/// gateway's internal tables): what [`Placement`] must find.
+#[must_use]
+pub fn object_names(want: &BackendState) -> BTreeSet<String> {
+    want.values()
+        .flat_map(BTreeMap::keys)
+        .filter_map(|t| match t {
+            BackendTarget::Table(_, n) | BackendTarget::Column(_, n, _) => Some(n.clone()),
+            BackendTarget::Routine(_, n, _) => Some(n.clone()),
+            BackendTarget::Db(_) => None,
+        })
+        .filter(|n| n != DOC_SESSIONS_TABLE && n != "__sprig_redo")
+        .collect()
+}
+
 /// The grants every live user's account should hold (see the module
 /// docs). Accounts of users without any privilege are present, empty.
+/// Table, column and routine grants name the database's default-group
+/// schemas; [`desired_on`] places them where a cluster holds them.
+#[must_use]
+pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> BackendState {
+    desired_on(cat, state, auth, None)
+}
+
+/// [`desired`] for one cluster: with `here`, each table, column and
+/// routine grant names every schema of `here` that holds the object (none
+/// when the cluster holds no copy), and a grant held by name on a missing
+/// table names the default-group schemas the cluster has.
 #[must_use]
 #[allow(clippy::too_many_lines)] // one arm per privilege level
-pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> BackendState {
+pub fn desired_on(
+    cat: &TenantCatalog,
+    state: &AuthzState,
+    auth: &TenantAuth,
+    here: Option<&Placement>,
+) -> BackendState {
     let tenant = cat.tenant;
+    let defaults = |d: &sprig_catalog::store::DatabaseRow| -> Vec<String> {
+        shard_schemas(tenant, d)
+            .into_iter()
+            .map(|s| s.to_string())
+            .filter(|s| here.is_none_or(|p| p.schemas.contains(s)))
+            .collect()
+    };
     let mut out = BackendState::new();
     let tenant_pattern = format!("t{tenant}\\_d%");
     for u in auth.users() {
@@ -372,11 +487,8 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
                                 && column.is_none()
                                 && p.actions.has(Action::Create)
                             {
-                                for s in shard_schemas(tenant, d) {
-                                    add(
-                                        BackendTarget::Table(s.to_string(), name_key.clone()),
-                                        p.actions,
-                                    );
+                                for s in defaults(d) {
+                                    add(BackendTarget::Table(s, name_key.clone()), p.actions);
                                 }
                             }
                             continue;
@@ -391,8 +503,29 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
                 if d.state != DbState::Active || o.state != ObjectState::Active {
                     continue;
                 }
-                for s in shard_schemas(tenant, d) {
-                    let schema = s.to_string();
+                // Every schema holding the object: the default group's
+                // without a placement; with one, wherever the cluster has
+                // it (its group's shards, a reference copy, a routine on
+                // every shard schema).
+                let places: Vec<(String, String)> = match (here, o.kind) {
+                    (None, _) => defaults(d)
+                        .into_iter()
+                        .map(|s| (s, o.name.clone()))
+                        .collect(),
+                    (Some(h), ObjectKind::Function | ObjectKind::Procedure) => {
+                        let kind = if o.kind == ObjectKind::Function {
+                            "FUNCTION"
+                        } else {
+                            "PROCEDURE"
+                        };
+                        h.routine(d.db_id, &o.name, kind)
+                            .into_iter()
+                            .map(|s| (s, o.name.clone()))
+                            .collect()
+                    }
+                    (Some(h), _) => h.relation(d.db_id, &o.name),
+                };
+                for (schema, spelled) in places {
                     let t = match (o.kind, column) {
                         (ObjectKind::Function, _) => {
                             BackendTarget::Routine(schema, o.name.to_lowercase(), "FUNCTION")
@@ -400,10 +533,8 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
                         (ObjectKind::Procedure, _) => {
                             BackendTarget::Routine(schema, o.name.to_lowercase(), "PROCEDURE")
                         }
-                        (_, Some(c)) => {
-                            BackendTarget::Column(schema, o.name.clone(), c.to_lowercase())
-                        }
-                        (_, None) => BackendTarget::Table(schema, o.name.clone()),
+                        (_, Some(c)) => BackendTarget::Column(schema, spelled, c.to_lowercase()),
+                        (_, None) => BackendTarget::Table(schema, spelled),
                     };
                     add(t, p.actions);
                 }
@@ -818,8 +949,11 @@ pub fn plan(
 }
 
 /// Errors a concurrent reconcile can cause, meaning "already done".
+/// 1146 and 1305: a table or routine that went between the placement
+/// read and its `GRANT` (a mover's fence renames tables, a drop races);
+/// the next placement change reconciles again.
 fn benign(e: &mysql_async::Error) -> bool {
-    matches!(e, mysql_async::Error::Server(s) if matches!(s.code, 1141 | 1147 | 1396 | 1403))
+    matches!(e, mysql_async::Error::Server(s) if matches!(s.code, 1141 | 1146 | 1147 | 1305 | 1396 | 1403))
 }
 
 /// Brings the tenant's accounts on the cluster behind `conn` (a

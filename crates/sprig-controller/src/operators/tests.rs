@@ -855,3 +855,114 @@ async fn the_layer_names_the_actor_and_drops_forged_callers() {
     assert!(v[0].get("verifier").is_none());
     server.abort();
 }
+
+#[test]
+fn a_forwarded_address_counts_only_with_a_service_identity() {
+    use super::guard::{CLIENT_ADDR_HEADER, ClientAddr, RELAY_AUTH_HEADER};
+    let e = env();
+    let g = guard(&e);
+    let peer: std::net::SocketAddr = "10.0.0.5:41000".parse().unwrap();
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(CLIENT_ADDR_HEADER, "203.0.113.7".parse().unwrap());
+    // No relay credential: the header is ignored, the peer counts.
+    assert_eq!(
+        g.client_addr(&h, Some(peer)),
+        ClientAddr {
+            addr: Some("10.0.0.5".into()),
+            via: None,
+            peer: Some("10.0.0.5".into()),
+        }
+    );
+    // A wrong one, or another credential (the bootstrap token), the same.
+    for wrong in ["nope", "boot-secret", "dc-secret", ""] {
+        let mut h2 = h.clone();
+        h2.insert(RELAY_AUTH_HEADER, wrong.parse().unwrap());
+        assert_eq!(g.client_addr(&h2, Some(peer)).addr.as_deref(), Some("10.0.0.5"), "{wrong}");
+    }
+    // The gateway's service secret: the forwarded address, via the gateway.
+    h.insert(RELAY_AUTH_HEADER, "gw-secret".parse().unwrap());
+    assert_eq!(
+        g.client_addr(&h, Some(peer)),
+        ClientAddr {
+            addr: Some("203.0.113.7".into()),
+            via: Some("gateway".into()),
+            peer: Some("10.0.0.5".into()),
+        }
+    );
+    // An IPv6 address is fine; something that isn't an address is not.
+    h.insert(CLIENT_ADDR_HEADER, "2001:db8::1".parse().unwrap());
+    assert_eq!(g.client_addr(&h, Some(peer)).addr.as_deref(), Some("2001:db8::1"));
+    h.insert(CLIENT_ADDR_HEADER, "evil, 1.2.3.4".parse().unwrap());
+    assert_eq!(g.client_addr(&h, Some(peer)).addr.as_deref(), Some("10.0.0.5"));
+    assert_eq!(g.client_addr(&h, Some(peer)).via, None);
+    // No peer known and nothing vouched: no address.
+    assert_eq!(g.client_addr(&axum::http::HeaderMap::new(), None), ClientAddr::default());
+}
+
+async fn echo_client(headers: HeaderMapT) -> axum::response::Response {
+    use super::guard::{CLIENT_ADDR_HEADER, CLIENT_HEADER, RELAY_AUTH_HEADER};
+    let h = |n: &str| headers.get(n).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    crate::admin::http::respond(Ok(json!({
+        "client": h(CLIENT_HEADER),
+        "forwarded": h(CLIENT_ADDR_HEADER),
+        "relay": h(RELAY_AUTH_HEADER),
+    })))
+}
+
+#[tokio::test]
+async fn the_layer_hands_routes_the_client_address() {
+    use super::guard::{CLIENT_ADDR_HEADER, CLIENT_HEADER, RELAY_AUTH_HEADER};
+    let e = env();
+    let g = Arc::new(guard(&e));
+    let app = Router::new()
+        .route("/admin/v1/traffic/reports", post(echo_client))
+        .route("/admin/v1/clusters", get(echo_client))
+        .layer(axum::middleware::from_fn_with_state(g, guard::layer));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let stop = sprig_common::CancellationToken::new();
+    let server = tokio::spawn(crate::admin::http::serve(l, app, stop.clone()));
+    let call = |m: &str, path: &str, extra: String| {
+        let req = format!(
+            "{m} {path} HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\n{extra}\
+             content-length: 2\r\nconnection: close\r\n\r\n{{}}"
+        );
+        async move {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).await.unwrap();
+            let status: u16 = out[9..12].parse().unwrap();
+            let body = out.split_once("\r\n\r\n").unwrap().1;
+            (status, serde_json::from_str::<Value>(body).unwrap_or(Value::Null))
+        }
+    };
+    // A client's own copies of the headers are dropped; the peer counts.
+    let forged = format!(
+        "{CLIENT_ADDR_HEADER}: 203.0.113.7\r\n{CLIENT_HEADER}: 198.51.100.1\r\n\
+         {RELAY_AUTH_HEADER}: guess\r\n"
+    );
+    let (s, v) = call("POST", "/admin/v1/traffic/reports", forged).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["client"], "127.0.0.1");
+    assert_eq!(v["forwarded"], Value::Null);
+    assert_eq!(v["relay"], Value::Null);
+    // A gateway vouching with its service secret: the person's address,
+    // and the secret goes no further.
+    let relayed = format!("{CLIENT_ADDR_HEADER}: 203.0.113.7\r\n{RELAY_AUTH_HEADER}: gw-secret\r\n");
+    let (s, v) = call("POST", "/admin/v1/traffic/reports", relayed.clone()).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["client"], "203.0.113.7");
+    assert_eq!(v["relay"], Value::Null);
+    // Authenticated routes too (the gateway's own bearer).
+    let (s, v) = call(
+        "GET",
+        "/admin/v1/clusters",
+        format!("{relayed}authorization: Bearer boot-secret\r\n"),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["client"], "203.0.113.7");
+    stop.cancel();
+    let _ = server.await;
+}

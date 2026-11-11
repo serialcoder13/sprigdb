@@ -27,6 +27,16 @@
 //! left alone:       CTE names, the caller's temporary tables, functions
 //!                   (x(...)), SHOW / DESCRIBE / DDL statements
 //! ```
+//!
+//! Views name their columns (decision RL28): `__sprig_rls_<table>` holds
+//! the columns `SELECT *` on the table shows, so invisible columns stay
+//! out of `*` and `_sprig_` columns out of every user's results. A table
+//! with invisible columns (a split table's `_sprig_rk`, the advisor's and
+//! the key-value layer's `_sprig_p_` columns, a user's own) also gets
+//! `__sprig_rlsh_<table>` with every column; a statement that names one of
+//! the invisible columns reads that one. Such a statement with a `*`
+//! select list isn't swapped (its account then gets 1142): `*` on the
+//! second view would show the invisible columns.
 
 #![allow(clippy::many_single_char_names)] // token indexes: t, i, k, m, c, n
 
@@ -39,6 +49,10 @@ use crate::lex::{self, LexOptions, TokenKind, ident_value};
 
 /// The prefix of policy views; the table's name follows.
 pub const VIEW_PREFIX: &str = "__sprig_rls_";
+
+/// The prefix of the policy views that also show a table's invisible
+/// columns (RL28); the table's name follows.
+pub const HIDDEN_PREFIX: &str = "__sprig_rlsh_";
 
 /// The function returning the session's context inside a view.
 pub const CTX_FUNCTION: &str = "__sprig_rls_ctx";
@@ -59,6 +73,19 @@ pub fn view_name(table: &str, object: u64) -> String {
     }
 }
 
+/// The policy view of table `table` (object `object`) with every column,
+/// invisible ones included (RL28): `__sprig_rlsh_<table>`, or for names
+/// over 51 characters `__sprig_rlsh_<first 39>~<object id>`.
+#[must_use]
+pub fn hidden_view_name(table: &str, object: u64) -> String {
+    if table.chars().count() < NAME_MAX {
+        format!("{HIDDEN_PREFIX}{table}")
+    } else {
+        let head: String = table.chars().take(39).collect();
+        format!("{HIDDEN_PREFIX}{head}~{object}")
+    }
+}
+
 /// `DROP VIEW IF EXISTS` for a table's view in `schema`.
 #[must_use]
 pub fn view_drop(schema: &str, table: &str, object: u64) -> String {
@@ -69,19 +96,43 @@ pub fn view_drop(schema: &str, table: &str, object: u64) -> String {
     )
 }
 
+/// `DROP VIEW IF EXISTS` for a table's all-columns view in `schema`.
+#[must_use]
+pub fn hidden_view_drop(schema: &str, table: &str, object: u64) -> String {
+    format!(
+        "DROP VIEW IF EXISTS {}.{}",
+        quote(schema),
+        quote(&hidden_view_name(table, object))
+    )
+}
+
+/// Whether `name` is a policy view's name (either kind).
+#[must_use]
+pub fn is_policy_view(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    (l.starts_with(VIEW_PREFIX) || l.starts_with(HIDDEN_PREFIX)) && l != CTX_FUNCTION
+}
+
 /// Stored-code text as written: every `` `__sprig_rls_t` AS `t` `` back to
 /// `` `t` ``, and other references to a policy view back to its table's
 /// name (`SHOW CREATE VIEW`, `PROCEDURE`, ... of code the gateway pointed
 /// at the views, RL20).
 #[must_use]
 pub fn unswap(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains("`__sprig_rls_") {
+    if !text.contains("`__sprig_rls") {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    let pat = format!("`{VIEW_PREFIX}");
-    while let Some(at) = rest.find(&pat) {
+    let pats = [format!("`{HIDDEN_PREFIX}"), format!("`{VIEW_PREFIX}")];
+    loop {
+        let Some((at, pat)) = pats
+            .iter()
+            .filter_map(|p| rest.find(p.as_str()).map(|a| (a, p)))
+            .min_by_key(|(a, _)| *a)
+        else {
+            break;
+        };
         out.push_str(&rest[..at]);
         let after = &rest[at + pat.len()..];
         let Some(end) = after.find('`') else {
@@ -90,7 +141,9 @@ pub fn unswap(text: &str) -> std::borrow::Cow<'_, str> {
             break;
         };
         let name = &after[..end];
-        if name == &CTX_FUNCTION[VIEW_PREFIX.len()..] || name.contains('~') {
+        if (pat.len() == VIEW_PREFIX.len() + 1 && name == &CTX_FUNCTION[VIEW_PREFIX.len()..])
+            || name.contains('~')
+        {
             out.push_str(&rest[at..=at + pat.len() + end]);
             rest = &after[end + 1..];
             continue;
@@ -249,6 +302,14 @@ pub trait Lookup {
     /// The policy view to read instead of table `table` (in `schema` as
     /// written, `None` when unqualified), if the reader is bound by it.
     fn view(&self, schema: Option<&str>, table: &str) -> Option<String>;
+
+    /// For a table with invisible columns: its all-columns view and the
+    /// invisible columns' lower-case names (RL28). `view` is what
+    /// [`Lookup::view`] returned.
+    fn hidden(&self, view: &str) -> Option<(String, Vec<String>)> {
+        let _ = view;
+        None
+    }
 }
 
 impl<F: Fn(Option<&str>, &str) -> Option<String>> Lookup for F {
@@ -343,6 +404,45 @@ fn has_odku(t: &Toks<'_>, from: usize) -> bool {
     false
 }
 
+/// Lower-case values of the statement's identifiers (and words): the
+/// names it could mean a column by.
+fn idents(t: &Toks<'_>) -> HashSet<String> {
+    (0..t.toks.len())
+        .filter(|i| ident(t, *i))
+        .map(|i| val(t, i).to_lowercase())
+        .collect()
+}
+
+/// Whether the statement has a `*` or `x.*` select list item (or
+/// `RETURNING *`): what a view showing invisible columns would widen.
+fn has_wildcard(t: &Toks<'_>) -> bool {
+    (0..t.toks.len()).any(|i| {
+        let star = t
+            .toks
+            .get(i)
+            .is_some_and(|k| k.bytes(t.src) == b"*" && !k.kind.is_ident_like());
+        star && i > 0
+            && (t.punct(i - 1, ".")
+                || t.punct(i - 1, ",")
+                || matches!(
+                    upper(t, i - 1).as_str(),
+                    "SELECT"
+                        | "ALL"
+                        | "DISTINCT"
+                        | "DISTINCTROW"
+                        | "HIGH_PRIORITY"
+                        | "STRAIGHT_JOIN"
+                        | "SQL_SMALL_RESULT"
+                        | "SQL_BIG_RESULT"
+                        | "SQL_BUFFER_RESULT"
+                        | "SQL_CACHE"
+                        | "SQL_NO_CACHE"
+                        | "SQL_CALC_FOUND_ROWS"
+                        | "RETURNING"
+                ))
+    })
+}
+
 /// Token index of the end of index hints starting at `k` (`USE INDEX
 /// (...)`, repeated), or `k` when there are none.
 fn hints_end(t: &Toks<'_>, mut k: usize) -> usize {
@@ -393,6 +493,22 @@ pub fn swap(
         return Ok(None);
     }
     let ctes = cte_names(&t);
+    let mut named: Option<HashSet<String>> = None;
+    let mut widened = false;
+    // RL28: the all-columns view when the statement names an invisible
+    // column of the table.
+    let mut choose = |view: String| -> String {
+        let Some((full, cols)) = lookup.hidden(&view) else {
+            return view;
+        };
+        let names = named.get_or_insert_with(|| idents(&t));
+        if cols.iter().any(|c| names.contains(c)) {
+            widened = true;
+            full
+        } else {
+            view
+        }
+    };
     let mut edits: Vec<Edit> = Vec::new();
     let mut swapped: Vec<(Option<String>, String)> = Vec::new();
     let mut stack = vec![Frame { from_list: false }];
@@ -515,6 +631,7 @@ pub fn swap(
                 && !func
                 && let Some(view) = lookup.view(schema.as_deref(), &table)
             {
+                let view = choose(view);
                 let tok = t.toks[last];
                 match pos {
                     Pos::Insert => {
@@ -572,6 +689,11 @@ pub fn swap(
     if edits.is_empty() {
         return Ok(None);
     }
+    if widened && has_wildcard(&t) {
+        return Err(super::unsupported(
+            "`*` in a statement that names an invisible column of a protected table",
+        ));
+    }
     // schema.t.col (and schema.t.*) of a swapped qualified reference: the
     // alias is `t` now.
     let qualified: HashSet<(String, String)> = swapped
@@ -615,6 +737,30 @@ pub struct ViewSwap {
     /// Lower-case names of the session's temporary tables (they shadow
     /// tables of the same name).
     pub temporary: std::collections::BTreeSet<String>,
+    /// Policy view → the table's all-columns view and its invisible
+    /// columns (lower case), for tables with invisible columns (RL28).
+    pub hidden: std::collections::BTreeMap<String, (String, Vec<String>)>,
+}
+
+struct SwapLookup<'a> {
+    swap: &'a ViewSwap,
+    default_schema: Option<&'a str>,
+}
+
+impl Lookup for SwapLookup<'_> {
+    fn view(&self, schema: Option<&str>, table: &str) -> Option<String> {
+        let s = schema.or(self.default_schema)?;
+        let db = self.swap.db_of(s)?;
+        self.swap
+            .tables
+            .get(&db)?
+            .get(&table.to_lowercase())
+            .cloned()
+    }
+
+    fn hidden(&self, view: &str) -> Option<(String, Vec<String>)> {
+        self.swap.hidden.get(view).cloned()
+    }
 }
 
 impl ViewSwap {
@@ -650,10 +796,9 @@ impl ViewSwap {
         {
             return None;
         }
-        let lookup = |schema: Option<&str>, table: &str| -> Option<String> {
-            let s = schema.or(default_schema)?;
-            let db = self.db_of(s)?;
-            self.tables.get(&db)?.get(&table.to_lowercase()).cloned()
+        let lookup = SwapLookup {
+            swap: self,
+            default_schema,
         };
         let exclude: HashSet<String> = self.temporary.iter().cloned().collect();
         swap(text, lex_opts, &lookup, &exclude)
@@ -832,6 +977,59 @@ mod tests {
     }
 
     #[test]
+    fn statements_naming_invisible_columns_read_the_all_columns_view() {
+        let mut v = ViewSwap {
+            tenant: 1,
+            ..ViewSwap::default()
+        };
+        v.tables
+            .entry(2)
+            .or_default()
+            .insert("docs".into(), view_name("docs", 7));
+        v.hidden.insert(
+            view_name("docs", 7),
+            (
+                hidden_view_name("docs", 7),
+                vec!["_sprig_rk".into(), "note".into()],
+            ),
+        );
+        let lx = LexOptions::mariadb();
+        let a = |s: &str| {
+            v.apply(s.as_bytes(), &lx, Some("t1_d2_g1_s1"))
+                .map(|b| String::from_utf8(b).unwrap())
+        };
+        // `*` reads the visible columns' view.
+        assert_eq!(
+            a("SELECT * FROM docs").as_deref(),
+            Some("SELECT * FROM `__sprig_rls_docs` AS `docs`")
+        );
+        // The router's and the user's names of invisible columns.
+        assert_eq!(
+            a("SELECT id, `_sprig_rk` FROM docs WHERE _sprig_rk > 5").as_deref(),
+            Some("SELECT id, `_sprig_rk` FROM `__sprig_rlsh_docs` AS `docs` WHERE _sprig_rk > 5")
+        );
+        assert_eq!(
+            a("SELECT d.NOTE FROM docs d").as_deref(),
+            Some("SELECT d.NOTE FROM `__sprig_rlsh_docs` d")
+        );
+        assert_eq!(
+            a("SELECT COUNT(*), a * b FROM docs WHERE note IS NULL").as_deref(),
+            Some("SELECT COUNT(*), a * b FROM `__sprig_rlsh_docs` AS `docs` WHERE note IS NULL")
+        );
+        // `*` with an invisible column isn't swapped (the account's 1142).
+        assert_eq!(a("SELECT *, note FROM docs"), None);
+        assert_eq!(a("SELECT d.*, d.note FROM docs d"), None);
+        assert_eq!(a("SELECT DISTINCT * FROM docs WHERE note = 1"), None);
+        assert_eq!(
+            hidden_view_name(&"y".repeat(60), 12),
+            format!("__sprig_rlsh_{}~12", "y".repeat(39))
+        );
+        assert!(hidden_view_name(&"y".repeat(51), 123_456_789).len() <= 64);
+        assert!(is_policy_view("__sprig_rlsh_docs") && is_policy_view("__SPRIG_RLS_docs"));
+        assert!(!is_policy_view("__sprig_rls_ctx") && !is_policy_view("docs"));
+    }
+
+    #[test]
     fn definitions_read_as_written() {
         for (swapped, orig) in [
             (
@@ -847,6 +1045,10 @@ mod tests {
                 "UPDATE `docs` SET a = 1",
             ),
             ("select `__sprig_rls_ctx`()", "select `__sprig_rls_ctx`()"),
+            (
+                "select `n` from `__sprig_rlsh_docs` `docs` join `__sprig_rls_h_x` AS `h_x`",
+                "select `n` from `docs` join `h_x`",
+            ),
             ("nothing here", "nothing here"),
         ] {
             assert_eq!(unswap(swapped), orig);

@@ -202,7 +202,8 @@ pub async fn bind(addr: SocketAddr, token: Option<&str>) -> Result<TcpListener> 
     })
 }
 
-/// Serves until `shutdown`.
+/// Serves until `shutdown`. Handlers see the client's address as
+/// `ConnectInfo<SocketAddr>` (the guard's `client_addr`, ST47).
 ///
 /// # Errors
 /// Internal if the server fails.
@@ -211,10 +212,63 @@ pub async fn serve(
     router: Router,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    axum::serve(listener, router)
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { shutdown.cancelled().await })
+    .await
+    .map_err(|e| SprigError::internal("the Admin API server failed").with_source(e))
+}
+
+/// Serves HTTPS with `tls` until `shutdown` (chapter 37, "Admin API over
+/// TLS"); plain HTTP without it, as [`serve`].
+///
+/// # Errors
+/// Internal if the server fails.
+pub async fn serve_tls(
+    listener: TcpListener,
+    router: Router,
+    tls: Option<Arc<sprig_common::https::ServerConfig>>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    use axum::serve::ListenerExt as _;
+    let Some(tls) = tls else {
+        return serve(listener, router, shutdown).await;
+    };
+    let l = sprig_common::https::TlsListener::new(listener, tls)?.tap_io(|_| {});
+    axum::serve(l, router.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await
         .map_err(|e| SprigError::internal("the Admin API server failed").with_source(e))
+}
+
+/// The Admin API's TLS configuration from `[controller]`: `None` without
+/// `admin_tls_cert`.
+///
+/// # Errors
+/// 39998 for one of `admin_tls_cert` and `admin_tls_key` without the
+/// other, `admin_tls_client_ca` without a certificate, or files that can't
+/// be read.
+pub fn tls_config(
+    c: &sprig_common::config::ControllerConfig,
+) -> Result<Option<Arc<sprig_common::https::ServerConfig>>> {
+    match (&c.admin_tls_cert, &c.admin_tls_key) {
+        (Some(cert), Some(key)) => Ok(Some(sprig_common::https::server_config(
+            cert,
+            key,
+            c.admin_tls_client_ca.as_deref(),
+        )?)),
+        (None, None) if c.admin_tls_client_ca.is_none() => Ok(None),
+        (None, None) => Err(SprigError::new(
+            SprigCode::ConfigInvalid,
+            "[controller] admin_tls_client_ca needs admin_tls_cert and admin_tls_key",
+        )),
+        _ => Err(SprigError::new(
+            SprigCode::ConfigInvalid,
+            "[controller] admin_tls_cert and admin_tls_key go together",
+        )),
+    }
 }
 
 fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response {

@@ -203,6 +203,11 @@ where
     migrator: Migrator,
     clock: Arc<dyn Clock>,
     live: Option<LiveSettings>,
+    /// The catalog reconciler's drop of a deleted tenant's databases.
+    dropper: std::sync::OnceLock<Arc<dyn DeletedDatabases>>,
+    /// When this controller first found each deleted tenant still holding
+    /// databases.
+    waiting_dbs: Mutex<HashMap<TenantId, Instant>>,
 }
 
 impl<B: SettingsBackend> std::fmt::Debug for TenantService<B>
@@ -216,6 +221,27 @@ where
     }
 }
 
+/// Drops a deleted tenant's remaining databases through the DDL path (the
+/// catalog reconciler's pass over a `deleting` tenant, chapter 08), so
+/// cleanup needn't wait for the reconciler's next interval (bugfix-27).
+#[async_trait::async_trait]
+pub trait DeletedDatabases: Send + Sync + 'static {
+    /// Resolves the tenant's stuck DDL jobs and drops every database the
+    /// catalog still lists; returns what failed, one line each.
+    ///
+    /// # Errors
+    /// When the catalog or the cluster can't be read at all.
+    async fn drop_databases(&self, tenant: TenantId) -> Result<Vec<String>>;
+}
+
+/// How long a deleted tenant's databases may resist the DDL path before
+/// cleanup marks them dropped in the catalog it is about to drop anyway
+/// (their schemas still go in step 3, by id): a stuck job, an instance
+/// database the DDL path refuses, a cluster that keeps failing
+/// (bugfix-27). The reconciler resolves stuck jobs after
+/// `catalog.stuck_state_minutes` (15), so this is longer.
+pub const DELETED_DATABASES_GRACE: Duration = Duration::from_secs(20 * 60);
+
 /// How a deleted tenant's cleanup ([`TenantService::cleanup`]) ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cleanup {
@@ -224,6 +250,9 @@ pub enum Cleanup {
     /// Waiting for this many mover jobs of the tenant to end (cancelled,
     /// or told to drop their retained copies now).
     WaitingForJobs(usize),
+    /// Waiting for this many databases of the tenant to be dropped
+    /// (bugfix-27): the loop looks again soon, dropping them again.
+    WaitingForDatabases(u64),
 }
 
 /// How soon the tenant loop looks again at a deletion waiting for its
@@ -231,6 +260,11 @@ pub enum Cleanup {
 /// retention being ended, and a blocked key would wait 30 s (longer than
 /// `deploy/compose/gateway-dev.sh down` used to wait; decision TD9).
 pub const CLEANUP_JOBS_RECHECK: Duration = Duration::from_secs(2);
+
+/// How soon the tenant loop drops a deleted tenant's remaining databases
+/// again (bugfix-27; before, a blocked key waited 30 s and the databases
+/// went only at the catalog reconciler's next pass, up to 5 minutes).
+pub const CLEANUP_DATABASES_RECHECK: Duration = Duration::from_secs(5);
 
 fn placement_unavailable(message: String) -> SprigError {
     SprigError::new(SprigCode::PlacementUnavailable, message)
@@ -284,7 +318,71 @@ where
             migrator,
             clock,
             live,
+            dropper: std::sync::OnceLock::new(),
+            waiting_dbs: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Step 2 (bugfix-27): the deleted tenant's databases go here, through
+    /// the DDL path (the catalog reconciler's pass for a `deleting`
+    /// tenant: stuck jobs resolved, every listed database dropped, inherited
+    /// instance databases included), not only when the reconciler's next
+    /// interval comes. Databases that still resist after
+    /// [`DELETED_DATABASES_GRACE`] are marked dropped in the catalog,
+    /// whose schemas step 3 drops by id anyway. Returns how many are left.
+    async fn drop_databases(&self, id: TenantId, ep: &CatalogEndpoint) -> Result<u64> {
+        let mut live = live_databases(&ep.pool, &ep.store).await?;
+        if live == 0 {
+            self.waiting_dbs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+            return Ok(0);
+        }
+        if let Some(d) = self.dropper.get() {
+            match d.drop_databases(id).await {
+                Ok(errors) => {
+                    for e in errors {
+                        tracing::warn!(tenant = %id, error = %e, "a deleted tenant's database wasn't dropped yet");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(tenant = %id, error = %e, "the deleted tenant's databases weren't dropped yet");
+                }
+            }
+            live = live_databases(&ep.pool, &ep.store).await?;
+        }
+        if live == 0 {
+            self.waiting_dbs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+            return Ok(0);
+        }
+        let since = *self
+            .waiting_dbs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(id)
+            .or_insert_with(Instant::now);
+        if since.elapsed() < DELETED_DATABASES_GRACE {
+            tracing::info!(tenant = %id, databases = live, "tenant cleanup waits for its databases to be dropped");
+            return Ok(live);
+        }
+        let n = cleanup::mark_databases_dropped(&ep.pool, ep.store.schema()).await?;
+        tracing::warn!(alert = "TenantCleanupForcedDatabases", tenant = %id, databases = n,
+            "the deleted tenant's databases resisted the DDL path; marked dropped, their schemas go by id");
+        self.waiting_dbs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        live_databases(&ep.pool, &ep.store).await
+    }
+
+    /// Lets cleanup drop a deleted tenant's databases itself (the catalog
+    /// reconciler); without it cleanup waits for the reconciler's loop.
+    pub fn set_database_dropper(&self, d: Arc<dyn DeletedDatabases>) {
+        let _ = self.dropper.set(d);
     }
 
     /// The directory.
@@ -872,6 +970,9 @@ where
             Ok(Cleanup::WaitingForJobs(n)) => {
                 tracing::info!(tenant = %id, jobs = n, "tenant cleanup waits for its mover jobs to end; the loop finishes it");
             }
+            Ok(Cleanup::WaitingForDatabases(n)) => {
+                tracing::info!(tenant = %id, databases = n, "tenant cleanup waits for its databases to be dropped; the loop finishes it");
+            }
             Err(err) => {
                 tracing::warn!(tenant = %id, error = %err, "tenant cleanup will be retried by the loop");
             }
@@ -922,12 +1023,9 @@ where
                     }
                     // Ours, unmarked (made before marks existed), or gone.
                     _ => {
-                        let live = live_databases(&ep.pool, &ep.store).await?;
+                        let live = self.drop_databases(id, &ep).await?;
                         if live > 0 {
-                            return Err(SprigError::new(
-                                SprigCode::TenantNotReady,
-                                format!("the tenant still has {live} databases; drop them first"),
-                            ));
+                            return Ok(Cleanup::WaitingForDatabases(live));
                         }
                         db_ids = cleanup::catalog_db_ids(&ep.pool, ep.store.schema()).await?;
                         catalog = Some(ep);
@@ -1211,6 +1309,9 @@ where
                 Ok(Cleanup::WaitingForJobs(n)) => {
                     tracing::info!(tenant = %key, jobs = n, "tenant cleanup waits for its mover jobs to end");
                     Ok(Outcome::RequeueAfter(CLEANUP_JOBS_RECHECK))
+                }
+                Ok(Cleanup::WaitingForDatabases(_)) => {
+                    Ok(Outcome::RequeueAfter(CLEANUP_DATABASES_RECHECK))
                 }
                 Err(err) if err.code() == Some(SprigCode::TenantNotReady) => {
                     tracing::warn!(tenant = %key, error = %err, "tenant cleanup waits");

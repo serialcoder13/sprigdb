@@ -228,6 +228,19 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         .map(peer::PeerTls::from_config)
         .transpose()?;
     let peers = Arc::new(peer::Peers::new(Arc::clone(&stores.dc), peer_tls.clone()));
+    // Chapter 37, "Admin API over TLS": how this gateway checks a
+    // controller whose Admin API serves HTTPS.
+    http::admin::set_controller_tls(
+        ctx.config
+            .gateway
+            .controller_ca_file
+            .as_deref()
+            .or_else(|| ctx.config.tls.as_ref().map(|t| t.ca.as_path())),
+        ctx.config
+            .tls
+            .as_ref()
+            .map(|t| (t.cert.as_path(), t.key.as_path())),
+    )?;
 
     // Logins (chapter 14) and, for catalog logins, the tenant services
     // (chapters 07 and 08).

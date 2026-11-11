@@ -1000,17 +1000,7 @@ impl crate::source::FanInOpener for EnvFanIn {
         let (log_schema, partitions, created_ms) =
             instance_stream(&mpool, &mschema, t, m.stream).await?;
         let shard = self.env.shard_pool(t).await?;
-        // LATEST means from the sink's creation (not from the task's first
-        // start, which comes a moment later).
-        let start = if created_ms > self.sink_created_ms {
-            crate::model::StartAt::Earliest
-        } else if self.start == crate::model::StartAt::Latest && self.sink_created_ms > 0 {
-            crate::model::StartAt::Timestamp {
-                ms: i64::try_from(self.sink_created_ms).unwrap_or(i64::MAX),
-            }
-        } else {
-            self.start
-        };
+        let start = instance_start(self.start, created_ms, self.sink_created_ms);
         crate::source::StreamSource::open_instance(
             shard,
             self.cat_pool.clone(),
@@ -1025,6 +1015,36 @@ impl crate::source::FanInOpener for EnvFanIn {
         )
         .await
         .map(|s| Box::new(s) as Box<dyn crate::runtime::SourceReader>)
+    }
+}
+
+/// A fan-in sink's creation time as its sources compare it: milliseconds
+/// for stream instances, whole seconds for change topics (`changes`).
+#[must_use]
+pub fn fan_in_created_ms(created_ms: Option<i64>, changes: bool) -> u64 {
+    let ms = u64::try_from(created_ms.unwrap_or(0)).unwrap_or(0);
+    if changes { ms / 1000 * 1000 } else { ms }
+}
+
+/// Where a fan-in sink starts reading a member's stream instance made at
+/// `instance_created_ms`, for a sink made at `sink_created_ms` (both in
+/// milliseconds). An instance made after the sink is read from its start;
+/// `LATEST` means from the sink's creation (not from the task's first
+/// start, which comes a moment later).
+#[must_use]
+pub fn instance_start(
+    start: crate::model::StartAt,
+    instance_created_ms: u64,
+    sink_created_ms: u64,
+) -> crate::model::StartAt {
+    if instance_created_ms > sink_created_ms {
+        crate::model::StartAt::Earliest
+    } else if start == crate::model::StartAt::Latest && sink_created_ms > 0 {
+        crate::model::StartAt::Timestamp {
+            ms: i64::try_from(sink_created_ms).unwrap_or(i64::MAX),
+        }
+    } else {
+        start
     }
 }
 
@@ -1178,9 +1198,14 @@ async fn run_fan_in_task(
     let db = script_db(env.as_ref(), tenant, &def, &opts).await?;
     let target = build_target_with(&ctx, db).await?;
     let refresh = Duration::from_secs(opts.u64("fanin_refresh_seconds", 30)?.max(1));
-    // Whole seconds: change topics' records carry their commit time in
-    // seconds, so a record committed in the sink's creation second counts.
-    let sink_created_ms = u64::try_from(created.unwrap_or(0)).unwrap_or(0) / 1000 * 1000;
+    // Stream instances compare in milliseconds (their records and their
+    // creation carry ms): whole seconds made an instance created earlier in
+    // the sink's creation second look newer than the sink, and it was read
+    // from its start (r9fanin). Change topics' records carry their commit
+    // time in whole seconds, so a record committed in the sink's creation
+    // second counts there.
+    let sink_created_ms = fan_in_created_ms(created, false);
+    let sink_created_s_ms = fan_in_created_ms(created, true);
     let source = match &def.source {
         SourceSpec::FanIn {
             def_tenant,
@@ -1245,7 +1270,7 @@ async fn run_fan_in_task(
                 group: def.group(),
                 start: def.start_at,
                 sink,
-                sink_created_ms,
+                sink_created_ms: sink_created_s_ms,
             }))
             .await?
         }
@@ -1626,5 +1651,32 @@ mod tests {
         assert!(task_partitions(4, 4, 1).is_empty());
         assert_eq!(unquote("\"[\\\"a\\\"]\""), "[\"a\"]");
         assert_eq!(unquote("12"), "12");
+    }
+
+    /// r9fanin: a member's instance made earlier in the second the fan-in
+    /// sink was made in is read from the sink's creation under `LATEST`,
+    /// not from its start (whole seconds made it look newer than the sink,
+    /// and `fan_in_sink_end_to_end` got 5 records from before the sink).
+    #[test]
+    fn instance_made_in_the_sinks_second_starts_at_the_sink() {
+        use crate::model::StartAt;
+        let sink = fan_in_created_ms(Some(1_794_000_000_900), false);
+        assert_eq!(
+            instance_start(StartAt::Latest, 1_794_000_000_300, sink),
+            StartAt::Timestamp {
+                ms: 1_794_000_000_900
+            }
+        );
+        // An instance made after the sink: from its start.
+        assert_eq!(
+            instance_start(StartAt::Latest, 1_794_000_000_950, sink),
+            StartAt::Earliest
+        );
+        assert_eq!(
+            instance_start(StartAt::Earliest, 1_794_000_000_300, sink),
+            StartAt::Earliest
+        );
+        // Change topics keep whole seconds.
+        assert_eq!(fan_in_created_ms(Some(1_794_000_000_900), true), 1_794_000_000_000);
     }
 }

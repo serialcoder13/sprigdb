@@ -219,6 +219,12 @@ pub struct GatewayConfig {
     /// operator mode answers 503.
     #[serde(default)]
     pub operator_token_file: Option<PathBuf>,
+    /// Chapter 37, "Admin API over TLS": the CA (PEM) a controller's
+    /// HTTPS Admin API is checked against when the gateway relays to it.
+    /// Unset: `[tls] ca`. The gateway presents `[tls] cert` and `key` as
+    /// its client certificate when the controller asks for one.
+    #[serde(default)]
+    pub controller_ca_file: Option<PathBuf>,
 }
 
 /// `[gateway] login_mode`.
@@ -337,6 +343,24 @@ pub struct ControllerConfig {
     /// and every call made with it is audited as `breakglass.admin_token`.
     #[serde(default)]
     pub admin_token_break_glass: bool,
+    /// The address gateways and `sprigctl` reach `admin_addr` at, when it
+    /// differs from the bound one (a published port on another VM).
+    /// Published in the controller's registration. Unset: the bound
+    /// address (an unspecified IP becomes the hostname).
+    #[serde(default)]
+    pub admin_advertise: Option<String>,
+    /// Chapter 37, "Admin API over TLS": the certificate chain (PEM) the
+    /// Admin API serves HTTPS with, with `admin_tls_key`. Unset: plain
+    /// HTTP, as before.
+    #[serde(default)]
+    pub admin_tls_cert: Option<PathBuf>,
+    /// The private key (PEM) of `admin_tls_cert`.
+    #[serde(default)]
+    pub admin_tls_key: Option<PathBuf>,
+    /// With `admin_tls_cert`: a CA (PEM) whose client certificates the
+    /// Admin API then requires (mutual TLS). Unset: no client certificate.
+    #[serde(default)]
+    pub admin_tls_client_ca: Option<PathBuf>,
 }
 
 impl Default for ControllerConfig {
@@ -360,6 +384,10 @@ impl Default for ControllerConfig {
             smtp_client_key_file: None,
             service_token_files: std::collections::BTreeMap::new(),
             admin_token_break_glass: false,
+            admin_advertise: None,
+            admin_tls_cert: None,
+            admin_tls_key: None,
+            admin_tls_client_ca: None,
         }
     }
 }

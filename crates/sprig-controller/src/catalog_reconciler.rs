@@ -545,7 +545,12 @@ where
             .await?
             .is_some_and(|e| e.body().state == TenantState::Deleting)
         {
-            let held = held_databases(&snap);
+            // Only a live job holds a database here (bugfix-27): an object
+            // left `creating` or naming a job that no longer exists (an
+            // inherited instance whose creation a crash or the deletion
+            // cut short) would otherwise hold its database, and the
+            // tenant's deletion, for ever.
+            let held = intent_databases(&snap);
             for db in snap
                 .databases
                 .iter()
@@ -949,7 +954,8 @@ fn sql_object(kind: ObjectKind) -> bool {
 }
 
 /// Databases with a job in flight: their own, or one of their objects'.
-fn held_databases(snap: &Snapshot) -> BTreeSet<DbId> {
+/// The databases a DDL job of `snap` works in.
+fn intent_databases(snap: &Snapshot) -> BTreeSet<DbId> {
     let mut held = BTreeSet::new();
     for i in DdlIntent::all(&snap.settings) {
         if let Some(db) = i.database() {
@@ -959,6 +965,11 @@ fn held_databases(snap: &Snapshot) -> BTreeSet<DbId> {
             held.extend(moves.iter().map(|m| m.db));
         }
     }
+    held
+}
+
+fn held_databases(snap: &Snapshot) -> BTreeSet<DbId> {
+    let mut held = intent_databases(snap);
     for o in &snap.objects {
         if o.pending_job_id.is_some() || o.state == ObjectState::Creating {
             held.insert(o.db_id);
@@ -1052,8 +1063,61 @@ where
         {
             return Ok(Outcome::RequeueAfter(cfg.interval.saturating_sub(s)));
         }
-        self.pass(*key).await?;
+        let report = self.pass(*key).await?;
+        for e in &report.errors {
+            tracing::warn!(tenant = %key, error = %e, "catalog reconciler step failed; retried next pass");
+        }
         Ok(Outcome::RequeueAfter(cfg.interval))
+    }
+}
+
+/// The loop over a reconciler shared with tenant cleanup (bugfix-27).
+#[async_trait::async_trait]
+impl<B: DdlBackend> Reconciler for Arc<CatalogReconciler<B>>
+where
+    B::Tx: DdlTx,
+{
+    type Key = TenantId;
+
+    fn name(&self) -> &'static str {
+        <CatalogReconciler<B> as Reconciler>::name(self)
+    }
+
+    fn tier(&self) -> LoopTier {
+        <CatalogReconciler<B> as Reconciler>::tier(self)
+    }
+
+    fn watches(&self) -> Vec<crate::runtime::WatchSpec> {
+        <CatalogReconciler<B> as Reconciler>::watches(self)
+    }
+
+    fn keys_for(&self, ev: &MetaEvent) -> Vec<TenantId> {
+        <CatalogReconciler<B> as Reconciler>::keys_for(self, ev)
+    }
+
+    async fn all_keys(&self, cx: &LoopCx) -> Result<Vec<TenantId>> {
+        <CatalogReconciler<B> as Reconciler>::all_keys(self, cx).await
+    }
+
+    async fn reconcile(&self, cx: &LoopCx, key: &TenantId) -> Result<Outcome> {
+        <CatalogReconciler<B> as Reconciler>::reconcile(self, cx, key).await
+    }
+
+    fn workers(&self) -> usize {
+        <CatalogReconciler<B> as Reconciler>::workers(self)
+    }
+}
+
+/// Tenant cleanup drops a deleted tenant's databases with the same pass
+/// (bugfix-27): for a `deleting` tenant [`CatalogReconciler::pass`]
+/// resolves stuck jobs and drops every listed database, nothing else.
+#[async_trait::async_trait]
+impl<B: DdlBackend> crate::tenants::DeletedDatabases for CatalogReconciler<B>
+where
+    B::Tx: DdlTx,
+{
+    async fn drop_databases(&self, tenant: TenantId) -> Result<Vec<String>> {
+        Ok(self.pass(tenant).await?.errors)
     }
 }
 

@@ -28,7 +28,12 @@ set +a
 dc=${SPRIG_DC:-dc1}
 public_host=${SPRIG_PUBLIC_HOST:-127.0.0.1}
 cluster_name=${SPRIG_CLUSTER_NAME:-$dc-main}
-dc_compose() { docker compose --project-directory "$here" -f "$here/compose.yaml" "$@"; }
+# COMPOSE_FILE in .env (compose.yaml plus, say, compose.mariadb-2.yaml) is
+# honoured; otherwise compose.yaml alone.
+dc_compose() {
+    if [[ -n ${COMPOSE_FILE:-} ]]; then docker compose --project-directory "$here" "$@"
+    else docker compose --project-directory "$here" -f "$here/compose.yaml" "$@"; fi
+}
 say() { echo "sprig-vm: $*"; }
 die() { echo "sprig-vm: $*" >&2; exit 1; }
 # sprigctl in the controller container. Before named operators take over it

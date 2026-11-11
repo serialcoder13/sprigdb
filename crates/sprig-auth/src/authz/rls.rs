@@ -846,6 +846,19 @@ pub fn policy_view(table: &str, object: ObjectId) -> String {
     }
 }
 
+/// The policy view of table `table` with every column, invisible ones too
+/// (`sprig_sql::rls::views::hidden_view_name`, decision RL28): tables with
+/// invisible columns have it next to [`policy_view`].
+#[must_use]
+pub fn policy_view_hidden(table: &str, object: ObjectId) -> String {
+    if table.chars().count() < 52 {
+        format!("__sprig_rlsh_{table}")
+    } else {
+        let head: String = table.chars().take(39).collect();
+        format!("__sprig_rlsh_{head}~{}", object.0)
+    }
+}
+
 fn relation_of(cat: &TenantCatalog, db_key: &str, name_key: &str) -> Option<(DbId, ObjectId)> {
     use sprig_catalog::store::{DbState, Namespace, ObjectState};
     let d = cat
@@ -1046,12 +1059,20 @@ pub fn narrow(
                         continue;
                     }
                     let vkey = BackendTarget::Table(schema.clone(), pview.clone());
+                    // RL28: the all-columns view of a table with invisible
+                    // columns gets the same rights.
+                    let hview = policy_view_hidden(&spelled_name, *object);
+                    let hkey = has(&hview).then(|| BackendTarget::Table(schema.clone(), hview.clone()));
                     if binds.iter().any(|(o, _)| o == object) {
                         let refs = ActionSet::of(&[Action::References]);
                         let e = grants.entry(tkey.clone()).or_default();
                         *e = e.minus(select).union(refs);
                         let v = grants.entry(vkey).or_default();
                         *v = v.union(held);
+                        if let Some(h) = &hkey {
+                            let v = grants.entry(h.clone()).or_default();
+                            *v = v.union(held);
+                        }
                         // Column SELECT grants move to the view's columns.
                         let cols: Vec<(BackendTarget, ActionSet)> = grants
                             .iter()
@@ -1066,6 +1087,11 @@ pub fn narrow(
                                 let vc = BackendTarget::Column(s.clone(), pview.clone(), c.clone());
                                 let e = grants.entry(vc).or_default();
                                 *e = e.union(select);
+                                if hkey.is_some() {
+                                    let hc = BackendTarget::Column(s.clone(), hview.clone(), c.clone());
+                                    let e = grants.entry(hc).or_default();
+                                    *e = e.union(select);
+                                }
                             }
                             grants.insert(k, a.minus(select));
                         }
@@ -1075,6 +1101,10 @@ pub fn narrow(
                         if !need.is_empty() {
                             let v = grants.entry(vkey).or_default();
                             *v = v.union(need);
+                            if let Some(h) = hkey {
+                                let v = grants.entry(h).or_default();
+                                *v = v.union(need);
+                            }
                         }
                     }
                 }
@@ -1329,6 +1359,7 @@ mod tests {
             (s.clone(), "__sprig_redo".to_owned()),
             (s.clone(), CTX_FUNCTION.to_owned()),
             ("t42_d1_g7_s1".to_owned(), "other".to_owned()),
+            (s.clone(), "__sprig_rlsh_Docs".to_owned()),
         ];
         narrow(&mut want, &cat, &bound, &physical, &std::collections::HashSet::new());
         let sel = ActionSet::of(&[Action::Select]);
@@ -1340,6 +1371,8 @@ mod tests {
         assert_eq!(db_row_for(u1, &s), Some(all.minus(sel)));
         assert_eq!(u1.get(&t(&s, "Docs")).copied(), Some(refs));
         assert_eq!(u1.get(&t(&s, "__sprig_rls_Docs")).copied(), Some(all));
+        // RL28: the all-columns view (a table with invisible columns) too.
+        assert_eq!(u1.get(&t(&s, "__sprig_rlsh_Docs")).copied(), Some(all));
         assert_eq!(u1.get(&t(&s, "notes")).copied(), Some(sel));
         assert_eq!(u1.get(&t(&s, "__sprig_redo")).copied(), Some(sel));
         assert_eq!(u1.get(&t("t42_d1_g7_s1", "other")).copied(), Some(sel));
@@ -1356,6 +1389,7 @@ mod tests {
             Some(all.minus(sel).union(refs))
         );
         assert_eq!(u3.get(&t(&s, "__sprig_rls_Docs")).copied(), Some(all));
+        assert_eq!(u3.get(&t(&s, "__sprig_rlsh_Docs")).copied(), Some(all));
         assert_eq!(u3.get(&t(&s, "notes")).copied(), Some(all));
         // Without the view (not deployed yet), nothing changes.
         let mut want2 = BackendState::new();

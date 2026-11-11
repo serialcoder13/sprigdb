@@ -161,6 +161,59 @@ impl Subscriptions {
         }
     }
 
+    /// Registers a subscription with its first checkpoint, `token` (R9,
+    /// r9fanin): a consumer that starts later reads from `token`, not from
+    /// its own start. A subscription made before its first event commits
+    /// then misses none of them.
+    ///
+    /// # Errors
+    /// As [`Self::register`]; 39801 for another tenant's token.
+    pub async fn register_at(
+        &self,
+        sub: &Subscription,
+        token: &ResumeToken,
+        now_ms: u64,
+    ) -> Result<()> {
+        token.check_tenant(sub.tenant)?;
+        self.check_residency(sub.tenant).await?;
+        let key = self.sub_key(sub.tenant, &sub.name)?;
+        let cp = Checkpoint {
+            token: token.to_hex(),
+            cluster: token.cluster.to_string(),
+            gtid_pos: token.pos.to_string(),
+            clamp_hlc: token.clamp,
+            acked_events: 0,
+            updated_at_ms: now_ms,
+        };
+        let r = self
+            .store
+            .txn(Txn {
+                when: vec![Cmp::Missing(key.clone())],
+                then: vec![
+                    Op::Put {
+                        key,
+                        value: Record::new(sub.clone()).encode()?,
+                        lease: None,
+                    },
+                    Op::Put {
+                        key: self.cp_key(sub.tenant, &sub.name)?,
+                        value: Record::new(cp).encode()?,
+                        lease: None,
+                    },
+                ],
+                otherwise: Vec::new(),
+            })
+            .await?;
+        if r.succeeded {
+            Ok(())
+        } else {
+            Err(SprigError::new(
+                SprigCode::FeedSubscriptionExists,
+                format!("subscription {} exists", sub.name),
+            ))
+        }
+    }
+
     /// A subscription.
     ///
     /// # Errors
@@ -403,5 +456,58 @@ mod tests {
         subs.drop_subscription(t, "search:1:a").await.unwrap();
         assert!(subs.get(t, "search:1:a").await.is_err());
         assert!(subs.ack(t, "search:1:a", &tok, 1, 13).await.is_err());
+    }
+
+    /// r9fanin: a subscription registered with its start position has that
+    /// checkpoint at once (before, a consumer started "now", after the
+    /// first events); a second registration changes nothing.
+    #[tokio::test]
+    async fn register_at_writes_the_first_checkpoint() {
+        let store: Arc<dyn MetaStore> =
+            Arc::new(MemStore::new(Tier::Dc(DcId::new("dc-a").unwrap())));
+        let subs = Subscriptions::new(store);
+        let t = TenantId(9);
+        let sub = Subscription {
+            tenant: t,
+            name: "queue_forwarder".into(),
+            kind: "queue_forwarder".into(),
+            ordering: "merged".into(),
+            owner_ref: None,
+            state: "active".into(),
+            created_at_ms: 1,
+        };
+        let tok = ResumeToken {
+            tenant: t,
+            clamp: 0,
+            cluster: ClusterId::new("dc-a-c1").unwrap(),
+            segment: 0,
+            pos: "0-1-42".parse().unwrap(),
+            until: None,
+            progress: true,
+        };
+        subs.register_at(&sub, &tok, 7).await.unwrap();
+        let cp = subs.checkpoint(t, "queue_forwarder").await.unwrap().unwrap();
+        assert_eq!(cp.resume_token().unwrap(), tok);
+        assert_eq!(cp.acked_events, 0);
+        let later = ResumeToken {
+            pos: "0-1-99".parse().unwrap(),
+            ..tok.clone()
+        };
+        let e = subs.register_at(&sub, &later, 8).await.unwrap_err();
+        assert!(matches!(
+            e.kind,
+            sprig_common::ErrorKind::Sprig(SprigCode::FeedSubscriptionExists)
+        ));
+        let cp = subs.checkpoint(t, "queue_forwarder").await.unwrap().unwrap();
+        assert_eq!(cp.resume_token().unwrap(), tok);
+        let other = ResumeToken {
+            tenant: TenantId(8),
+            ..tok.clone()
+        };
+        let sub8 = Subscription {
+            tenant: TenantId(9),
+            ..sub.clone()
+        };
+        assert!(subs.register_at(&sub8, &other, 9).await.is_err());
     }
 }

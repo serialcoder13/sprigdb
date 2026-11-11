@@ -176,6 +176,56 @@ fn galera_node_states() {
 }
 
 #[test]
+fn galera_without_a_state_uuid_is_degraded() {
+    // A captured UUID that isn't zero: healthy.
+    let mut probes = galera();
+    for p in &mut probes {
+        facts_mut(p).galera.as_mut().unwrap().state_uuid =
+            Some("f01a6c83-8353-410e-bd55-31ce16ff1426".into());
+    }
+    let r = observe(TopologyKind::Galera, &probes);
+    assert_eq!(r.health, ClusterHealth::Healthy);
+    assert!(r.nodes.iter().all(|n| n.reason.is_none()));
+
+    // All zeros (HD1): every node still writes, the cluster is degraded,
+    // and each node says why.
+    for p in &mut probes {
+        facts_mut(p).galera.as_mut().unwrap().state_uuid =
+            Some("00000000-0000-0000-0000-000000000000".into());
+    }
+    let r = observe(TopologyKind::Galera, &probes);
+    assert_eq!(r.health, ClusterHealth::Degraded);
+    assert_eq!(r.writers.len(), 3);
+    assert!(r.nodes.iter().all(|n| n.state == NodeState::Ok));
+    assert!(
+        r.nodes
+            .iter()
+            .all(|n| n.reason.as_deref() == Some(LOST_IDENTITY))
+    );
+
+    // A node that is also donor keeps its own reason; the cluster stays degraded.
+    facts_mut(&mut probes[1])
+        .galera
+        .as_mut()
+        .unwrap()
+        .local_state = GaleraLocalState::DonorDesynced;
+    let r = observe(TopologyKind::Galera, &probes);
+    assert_eq!(state_of(&r, "n2"), NodeState::Desynced);
+    assert_eq!(r.health, ClusterHealth::Degraded);
+}
+
+#[test]
+fn zero_uuid_spelling() {
+    use crate::probe::zero_uuid;
+    assert!(zero_uuid("00000000-0000-0000-0000-000000000000"));
+    assert!(zero_uuid(" 00000000-0000-0000-0000-000000000000\n"));
+    assert!(!zero_uuid("f01a6c83-8353-410e-bd55-31ce16ff1426"));
+    assert!(!zero_uuid("00000000-0000-0000-0000-000000000001"));
+    assert!(!zero_uuid(""));
+    assert!(!zero_uuid("----"));
+}
+
+#[test]
 fn display_matches_the_record() {
     for (h, s) in [
         (ClusterHealth::Healthy, "\"healthy\""),

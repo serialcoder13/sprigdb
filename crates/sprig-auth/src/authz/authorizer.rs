@@ -258,6 +258,20 @@ pub trait Authorizer: Send + Sync + std::fmt::Debug {
     /// "Backend accounts and grants"), which the reconciler applies.
     fn backend_grants(&self, cat: &TenantCatalog, auth: &TenantAuth) -> BackendState;
 
+    /// [`Self::backend_grants`] for one cluster, whose tables, views and
+    /// routines are where `here` says (bugfix-25): table, column and
+    /// routine grants name every schema holding the object there. An
+    /// engine that doesn't place them answers [`Self::backend_grants`].
+    fn backend_grants_on(
+        &self,
+        cat: &TenantCatalog,
+        auth: &TenantAuth,
+        here: &backend::Placement,
+    ) -> BackendState {
+        let _ = here;
+        self.backend_grants(cat, auth)
+    }
+
     /// Runs an account statement.
     ///
     /// # Errors
@@ -500,6 +514,15 @@ impl Authorizer for MysqlGrants {
 
     fn backend_grants(&self, cat: &TenantCatalog, auth: &TenantAuth) -> BackendState {
         backend::desired(cat, state_of(cat), auth)
+    }
+
+    fn backend_grants_on(
+        &self,
+        cat: &TenantCatalog,
+        auth: &TenantAuth,
+        here: &backend::Placement,
+    ) -> BackendState {
+        backend::desired_on(cat, state_of(cat), auth, Some(here))
     }
 
     async fn account_statement(&self, cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome> {
@@ -1178,6 +1201,90 @@ mod tests {
                 ),
             ],
             "one pattern row for the database (no per-schema rows)"
+        );
+    }
+
+    #[test]
+    fn table_column_and_routine_grants_follow_the_placement() {
+        use crate::authz::backend::{BackendTarget, Placement};
+        let auth = TenantAuth::build(
+            vec![crate::cache::tests::row(APP.0, "app", "%", 1)],
+            &[],
+            Vec::new(),
+        );
+        let acct = backend::account(TenantId(42), APP);
+        let object = |o: u64| PrivTarget::Object {
+            db: DbId(1),
+            object: ObjectId(o),
+        };
+        let cat = catalog(
+            shop_objects(),
+            vec![
+                grant(object(10), &[Action::Select, Action::Insert]),
+                grant(
+                    PrivTarget::Column {
+                        db: DbId(1),
+                        object: ObjectId(10),
+                        column: "note".into(),
+                    },
+                    &[Action::Update],
+                ),
+                grant(object(11), &[Action::Execute]),
+            ],
+        );
+        let default = backend::desired(&cat, state_of(&cat), &auth);
+        let home = default
+            .get(&acct)
+            .unwrap()
+            .keys()
+            .find_map(|t| match t {
+                BackendTarget::Table(s, n) if n == "orders" => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a default-schema grant");
+        // `orders` regrouped and split into two shards here; `p` stays.
+        let mut here = Placement::default();
+        here.add_schema(&home);
+        here.add_relation("t42_d1_g4_s2", "orders");
+        here.add_relation("t42_d1_g4_s3", "orders");
+        here.add_routine(&home, "p", "PROCEDURE");
+        let want = MysqlGrants.backend_grants_on(&cat, &auth, &here);
+        let mine = want.get(&acct).unwrap();
+        let tables: Vec<&String> = mine
+            .keys()
+            .filter_map(|t| match t {
+                BackendTarget::Table(s, n) if n == "orders" => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables, vec!["t42_d1_g4_s2", "t42_d1_g4_s3"]);
+        assert!(mine.contains_key(&BackendTarget::Column(
+            "t42_d1_g4_s3".into(),
+            "orders".into(),
+            "note".into()
+        )));
+        assert!(mine.contains_key(&BackendTarget::Routine(
+            home.clone(),
+            "p".into(),
+            "PROCEDURE"
+        )));
+        // The redo marker follows the writable table's schemas.
+        assert!(mine.contains_key(&BackendTarget::Table(
+            "t42_d1_g4_s2".into(),
+            "__sprig_redo".into()
+        )));
+        // A cluster holding none of them: no table or routine grants.
+        let none = MysqlGrants.backend_grants_on(&cat, &auth, &Placement::default());
+        assert!(
+            none.get(&acct)
+                .unwrap()
+                .keys()
+                .all(|t| matches!(t, BackendTarget::Db(_))),
+            "{none:?}"
+        );
+        assert_eq!(
+            backend::object_names(&default),
+            ["orders".to_owned(), "p".to_owned()].into_iter().collect()
         );
     }
 

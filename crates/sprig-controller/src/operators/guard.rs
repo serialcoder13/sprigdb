@@ -23,11 +23,22 @@
 //!
 //! The guard hands the routes the caller in the `x-sprig-authn` header
 //! (JSON of [`Principal`]), after removing any copy the request brought.
+//!
+//! **The client's address (ST47).** Every audit line the guard writes,
+//! and the sign-in events, name the client's address. It is the TCP peer,
+//! unless the request carries `x-sprig-client-addr` (the address a gateway
+//! saw) together with `x-sprig-relay-auth` holding the secret of a
+//! configured service identity (`gateway_token_file` or
+//! `service_token_files`): only then is the forwarded address believed,
+//! and the audit records `via` = that identity. Otherwise the header is
+//! ignored. The guard removes both headers and hands the routes the result
+//! in `x-sprig-client`.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -41,6 +52,28 @@ use crate::admin::http::{error_response, unauthenticated};
 
 /// The header that carries the guard's [`Principal`] to the routes.
 pub const AUTHN_HEADER: &str = "x-sprig-authn";
+
+/// A relaying gateway's header: the address its client connected from.
+pub const CLIENT_ADDR_HEADER: &str = sprig_common::https::CLIENT_ADDR_HEADER;
+
+/// A relaying gateway's header: its service identity's secret, without
+/// which [`CLIENT_ADDR_HEADER`] is ignored.
+pub const RELAY_AUTH_HEADER: &str = sprig_common::https::RELAY_AUTH_HEADER;
+
+/// The header that carries the client's address the guard established to
+/// the routes (sign-in calls record it).
+pub const CLIENT_HEADER: &str = "x-sprig-client";
+
+/// Where a call came from (see the module notes).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientAddr {
+    /// The client's IP address: forwarded and vouched for, else the peer.
+    pub addr: Option<String>,
+    /// The service identity that vouched for a forwarded address.
+    pub via: Option<String>,
+    /// The TCP peer (the gateway, for a relayed call).
+    pub peer: Option<String>,
+}
 
 /// The largest request body the guard reads.
 const MAX_BODY: usize = 16 * 1024 * 1024;
@@ -109,6 +142,41 @@ impl Guard {
             dc_token,
             services,
             break_glass,
+        }
+    }
+
+    /// Where a request came from: the address in [`CLIENT_ADDR_HEADER`]
+    /// when [`RELAY_AUTH_HEADER`] holds a configured service identity's
+    /// secret and the address parses, else the TCP `peer`.
+    #[must_use]
+    pub fn client_addr(&self, headers: &HeaderMap, peer: Option<SocketAddr>) -> ClientAddr {
+        let peer_ip = peer.map(|p| p.ip().to_string());
+        let relay = headers
+            .get(RELAY_AUTH_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let vouched = relay.and_then(|r| {
+            self.services
+                .iter()
+                .find(|(_, secret)| same(r, secret))
+                .map(|(name, _)| name.clone())
+        });
+        let forwarded = headers
+            .get(CLIENT_ADDR_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok());
+        match (vouched, forwarded) {
+            (Some(via), Some(ip)) => ClientAddr {
+                addr: Some(ip.to_string()),
+                via: Some(via),
+                peer: peer_ip,
+            },
+            _ => ClientAddr {
+                addr: peer_ip.clone(),
+                via: None,
+                peer: peer_ip,
+            },
         }
     }
 
@@ -310,6 +378,19 @@ fn public(method: &Method, path: &str) -> bool {
 pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Response {
     let (mut parts, body) = req.into_parts();
     parts.headers.remove(AUTHN_HEADER);
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0);
+    let client = g.client_addr(&parts.headers, peer);
+    parts.headers.remove(CLIENT_ADDR_HEADER);
+    parts.headers.remove(RELAY_AUTH_HEADER);
+    parts.headers.remove(CLIENT_HEADER);
+    if let Some(a) = &client.addr
+        && let Ok(v) = HeaderValue::from_str(a)
+    {
+        parts.headers.insert(CLIENT_HEADER, v);
+    }
     let method = parts.method.clone();
     let path = parts.uri.path().to_owned();
     if !path.starts_with("/admin/v1/") || public(&method, &path) {
@@ -340,7 +421,7 @@ pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Res
     };
     if let Err(e) = g.authorize(&p, &method, &path, parts.uri.query(), json.as_ref()) {
         if write {
-            record(&g, &p, &method, &path, 403, json.as_ref(), "admin.denied");
+            record(&g, &p, &client, &method, &path, 403, json.as_ref(), "admin.denied");
         }
         return error_response(&e);
     }
@@ -379,6 +460,7 @@ pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Res
         record(
             &g,
             &p,
+            &client,
             &method,
             &path,
             status,
@@ -388,14 +470,16 @@ pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Res
     }
     if write {
         let event = format!("admin.{}", op::area_of(&path).replace('-', "_"));
-        record(&g, &p, &method, &path, status, json.as_ref(), &event);
+        record(&g, &p, &client, &method, &path, status, json.as_ref(), &event);
     }
     resp
 }
 
+#[allow(clippy::too_many_arguments)] // one audit line's fields
 fn record(
     g: &Guard,
     p: &Principal,
+    client: &ClientAddr,
     method: &Method,
     path: &str,
     status: u16,
@@ -416,8 +500,11 @@ fn record(
         "status": status,
         "reason": reason,
         "dc": g.ops.dc(),
+        "client_addr": client.addr,
+        "via": client.via,
     });
     tracing::info!(target: "sprig_audit", event, actor = %p.audit_name(), method = %method,
-        path, status, reason, "admin call");
+        path, status, reason, client_addr = client.addr.as_deref().unwrap_or(""),
+        via = client.via.as_deref().unwrap_or(""), "admin call");
     audit::record(AuditStream::Platform, event, fields);
 }

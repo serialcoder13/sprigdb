@@ -9,7 +9,8 @@
 //! - [`time`]: the [`time::Clock`] every component reads time through;
 //! - [`telemetry`]: tracing setup, metrics and health endpoints;
 //! - [`names`]: physical MariaDB schema, account and internal names (chapter 07);
-//! - [`audit`]: the audit spool, shipper and sinks (chapter 47).
+//! - [`audit`]: the audit spool, shipper and sinks (chapter 47);
+//! - [`https`]: the Admin API over TLS (chapter 37).
 //!
 //! Not here yet: `certwatch` (chapter 23 step 9).
 
@@ -17,6 +18,7 @@ pub mod audit;
 pub mod config;
 pub mod cpu;
 pub mod error;
+pub mod https;
 pub mod ids;
 pub mod names;
 pub mod net;
