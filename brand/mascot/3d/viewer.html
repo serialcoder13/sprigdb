@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sprig Mascot Viewer</title>
+<!-- Serve this folder over http (browsers block loading a .glb from file://):
+       cd brand/mascot/3d && python3 -m http.server 8000
+     then open http://localhost:8000/viewer.html -->
+<script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+<style>
+  :root { --bg: #12313A; --fg: #E6F4F2; --accent: #00BFA6; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px system-ui, sans-serif;
+         display: flex; flex-direction: column; height: 100vh; }
+  model-viewer { flex: 1; width: 100%; background: var(--bg); }
+  nav { display: flex; gap: 8px; padding: 12px 16px; flex-wrap: wrap; }
+  button { background: transparent; color: var(--fg); border: 1px solid var(--accent); border-radius: 6px;
+           padding: 6px 14px; cursor: pointer; font: inherit; }
+  button[aria-pressed="true"] { background: var(--accent); color: #062a26; }
+</style>
+</head>
+<body>
+<model-viewer id="mv" src="sprig-mascot.glb" camera-controls autoplay animation-name="idle"
+              shadow-intensity="0.6" exposure="1.1" camera-orbit="-15deg 80deg auto"></model-viewer>
+<nav id="nav"></nav>
+<script>
+  const mv = document.getElementById('mv');
+  const nav = document.getElementById('nav');
+  mv.addEventListener('load', () => {
+    for (const name of mv.availableAnimations) {
+      const b = document.createElement('button');
+      b.textContent = name;
+      b.setAttribute('aria-pressed', String(name === mv.animationName));
+      b.onclick = () => {
+        mv.animationName = name;
+        mv.play();
+        nav.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+      };
+      nav.appendChild(b);
+    }
+  });
+</script>
+</body>
+</html>
